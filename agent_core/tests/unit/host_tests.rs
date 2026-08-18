@@ -709,7 +709,7 @@ fn core_init_lifecycle_topic_is_structured_and_ui_neutral() {
         model: "qwen-plus".to_string(),
     };
 
-    let event = core_initialized_topic_event("session_a", &profile, "markdown", 100_000, 50, 6, 2);
+    let event = core_initialized_topic_event("session_a", &profile, "json", 100_000, 50, 6, 2);
 
     assert_eq!(event.session_id, "session_a");
     assert_eq!(event.topic.name, CORE_TOPIC_LIFECYCLE);
@@ -724,7 +724,7 @@ fn core_init_lifecycle_topic_is_structured_and_ui_neutral() {
             event: CoreLifecycleEvent::Initialized,
             version: env!("CARGO_PKG_VERSION").to_string(),
             profile,
-            response_protocol: "markdown".to_string(),
+            response_protocol: "json".to_string(),
             max_llm_input_tokens: 100_000,
             max_rounds: 50,
             tool_count: 6,
@@ -754,7 +754,7 @@ fn core_init_lifecycle_topic_is_structured_and_ui_neutral() {
                 "profile": {
                     "model": "qwen-plus",
                 },
-                "response_protocol": "markdown",
+                "response_protocol": "json",
                 "max_llm_input_tokens": 100000,
                 "max_rounds": 50,
                 "capabilities": {
@@ -816,7 +816,7 @@ fn core_lifecycle_topic_round_trips_worker_identity_workspace_and_context() {
     let event = core_initialized_topic_event_with_worker(
         "session_child",
         &profile,
-        "markdown",
+        "json",
         100_000,
         50,
         6,

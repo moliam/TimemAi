@@ -7633,7 +7633,6 @@ impl WorkerTemplate {
         }
         if let Some(value) = env_overrides.get("TIMEM_RESPONSE_PROTOCOL") {
             settings.config.response_protocol = match value.trim().to_ascii_lowercase().as_str() {
-                "markdown" => ResponseProtocolKind::Markdown,
                 "json" => ResponseProtocolKind::Json,
                 "xml" => ResponseProtocolKind::Xml,
                 _ => return Err("invalid_session_response_protocol".to_string()),

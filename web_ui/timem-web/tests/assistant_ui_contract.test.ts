@@ -40,6 +40,18 @@ describe("per-message worker role selection", () => {
   });
 });
 
+describe("user message selection copying", () => {
+  it("normalizes trailing DOM line breaks only for a selection contained in one user message", () => {
+    expect(source).toContain('onCopy={(event) => {');
+    expect(source).toContain("event.currentTarget.contains(selection.anchorNode)");
+    expect(source).toContain("event.currentTarget.contains(selection.focusNode)");
+    expect(source).toContain("normalizeCopiedUserMessageText(selection.toString())");
+    expect(source).toContain('event.clipboardData.setData("text/plain", copiedText);');
+    expect(source).toContain("event.preventDefault();");
+    expect(viewModelSource).toContain('return text.replace(/(?:\\r?\\n)+$/, "");');
+  });
+});
+
 describe("assistant-ui thread integration", () => {
   it("keeps a visible boot state before the React bundle mounts", () => {
     expect(html).toContain('<div id="root">');
@@ -1284,7 +1296,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('case "TIMEM_API_PROTOCOL":');
     expect(source).toContain('return ["openai-compatible", "openai-responses", "anthropic"];');
     expect(source).toContain('case "TIMEM_RESPONSE_PROTOCOL":');
-    expect(source).toContain('return ["xml", "json", "markdown"];');
+    expect(source).toContain('return ["xml", "json"];');
+    expect(source).not.toContain('<option value="markdown">markdown</option>');
     expect(source).toContain('case "TIMEM_MAX_ROUNDS":');
     expect(source).toContain('return ["50", "200", "500", "unlimited"];');
     expect(source).toContain("options ? <select value={value}");

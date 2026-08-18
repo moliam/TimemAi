@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 OUT_DIR="${TIMEM_EXPANDED_PROMPT_DIR:-target/static-prompt-expanded}"
-OUT_MARKDOWN="$OUT_DIR/markdown.md"
 OUT_JSON="$OUT_DIR/json.md"
 OUT_XML="$OUT_DIR/xml.md"
 TMP_DIR="$(mktemp -d)"
@@ -25,7 +24,6 @@ validate_one() {
   local out="$2"
   shift 2
   local required=(
-    "[BEGIN SYSTEM PROMPT]"
     '#### `run_bash`'
     '#### `memmgr`'
     "**Usage**"
@@ -61,43 +59,36 @@ validate_one() {
   done
 }
 
-TMP_MARKDOWN="$TMP_DIR/markdown.md"
 TMP_JSON="$TMP_DIR/json.md"
 TMP_XML="$TMP_DIR/xml.md"
-render_one markdown "$TMP_MARKDOWN"
 render_one json "$TMP_JSON"
 render_one xml "$TMP_XML"
 
-validate_one markdown "$TMP_MARKDOWN" \
-  '"run_bash":' \
-  '"cmd":' \
-  "Markdown response sections." \
-  "The top-level response is Markdown, not JSON." \
-  '`## Status`' \
-  '`## Working_Still_Action`'
 validate_one json "$TMP_JSON" \
+  "[BEGIN SYSTEM PROMPT]" \
+  "[END SYSTEM PROMPT]" \
   '"run_bash":' \
   '"cmd":'
 validate_one xml "$TMP_XML" \
+  "<Timem System Prompt>" \
+  "</Timem System Prompt>" \
   "# System Response Protocol" \
   'Return one XML `<response>` root.' \
   '`<response>`' \
   '`<final_answer>`' \
   '<actions>' \
   '<parallel>' \
-  '<run_bash timeout_ms="5000">' \
+  '<run_bash name="inspect current directory" timeout_ms="5000">' \
   '<cmd>pwd</cmd>'
 
 if [ "${1:-}" = "--check" ]; then
   echo "static_prompt_expansion: ok"
 else
   mkdir -p "$OUT_DIR"
-  cp "$TMP_MARKDOWN" "$OUT_MARKDOWN"
   cp "$TMP_JSON" "$OUT_JSON"
   cp "$TMP_XML" "$OUT_XML"
   trap - EXIT
   cleanup
-  echo "generated $OUT_MARKDOWN"
   echo "generated $OUT_JSON"
   echo "generated $OUT_XML"
 fi

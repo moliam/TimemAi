@@ -1,5 +1,6 @@
 use super::{
-    ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope, ResponseProtocolSuite,
+    ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope, PromptBoundarySpec,
+    ResponseProtocolSuite, XML_PROMPT_BOUNDARIES,
 };
 use crate::capability::CapabilityRegistry;
 use serde_json::{Map, Number, Value};
@@ -16,8 +17,14 @@ impl ResponseProtocolSuite for XmlSuiteV1 {
     fn name(&self) -> &str {
         "xml_v1"
     }
+    fn prompt_boundaries(&self) -> &'static PromptBoundarySpec {
+        &XML_PROMPT_BOUNDARIES
+    }
     fn lang_format(&self) -> &str {
         "XML"
+    }
+    fn action_result_heading(&self) -> Option<&str> {
+        None
     }
     fn response_shape_hint(&self) -> &str {
         "one-root label <response>...</response>"

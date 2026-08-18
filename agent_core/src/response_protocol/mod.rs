@@ -1,14 +1,89 @@
 pub mod json_suite;
-pub mod markdown_suite;
 pub mod xml_suite;
 
 use serde_json::Value;
 
 use crate::capability::CapabilityRegistry;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptDeltaBoundary {
+    Bracketed,
+    XmlElement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptBoundarySpec {
+    pub static_begin: &'static str,
+    pub static_end: &'static str,
+    pub delta_boundary: PromptDeltaBoundary,
+}
+
+pub const BRACKETED_PROMPT_BOUNDARIES: PromptBoundarySpec = PromptBoundarySpec {
+    static_begin: "[BEGIN SYSTEM PROMPT]",
+    static_end: "[END SYSTEM PROMPT]",
+    delta_boundary: PromptDeltaBoundary::Bracketed,
+};
+
+pub const XML_PROMPT_BOUNDARIES: PromptBoundarySpec = PromptBoundarySpec {
+    static_begin: "<Timem System Prompt>",
+    static_end: "</Timem System Prompt>",
+    delta_boundary: PromptDeltaBoundary::XmlElement,
+};
+
+pub const KNOWN_PROMPT_BOUNDARIES: &[PromptBoundarySpec] =
+    &[BRACKETED_PROMPT_BOUNDARIES, XML_PROMPT_BOUNDARIES];
+
+impl PromptBoundarySpec {
+    pub fn wrap_static_prompt(self, prompt: &str) -> String {
+        format!("{}\n{}\n{}", self.static_begin, prompt, self.static_end)
+    }
+
+    pub fn render_delta_open(self, delta_id: &str, time_ms: i64) -> String {
+        match self.delta_boundary {
+            PromptDeltaBoundary::Bracketed => {
+                format!("[BEGIN DELTA]\ndelta_id: {delta_id}\ntime: {time_ms}\n")
+            }
+            PromptDeltaBoundary::XmlElement => {
+                format!("<prompt_delta id=\"{delta_id}\" time_ms=\"{time_ms}\">\n")
+            }
+        }
+    }
+
+    pub fn delta_close(self) -> &'static str {
+        match self.delta_boundary {
+            PromptDeltaBoundary::Bracketed => "[END DELTA]",
+            PromptDeltaBoundary::XmlElement => "</prompt_delta>",
+        }
+    }
+
+    pub fn delta_start_marker(self) -> &'static str {
+        match self.delta_boundary {
+            PromptDeltaBoundary::Bracketed => "[BEGIN DELTA]",
+            PromptDeltaBoundary::XmlElement => "<prompt_delta ",
+        }
+    }
+
+    pub fn parse_delta_id(self, segment: &str) -> Option<String> {
+        match self.delta_boundary {
+            PromptDeltaBoundary::Bracketed => segment.lines().find_map(|line| {
+                line.strip_prefix("delta_id:")
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            }),
+            PromptDeltaBoundary::XmlElement => {
+                let first_line = segment.lines().next().unwrap_or_default();
+                let rest = first_line.strip_prefix(self.delta_start_marker())?;
+                let rest = rest.split_once("id=\"")?.1;
+                let (id, _) = rest.split_once('"')?;
+                (!id.is_empty()).then(|| id.to_string())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ResponseProtocolKind {
-    Markdown,
     Json,
     #[default]
     Xml,
@@ -18,7 +93,6 @@ impl ResponseProtocolKind {
     pub fn from_name(name: &str) -> Self {
         match name.trim().to_ascii_lowercase().as_str() {
             "" => Self::default(),
-            "markdown" | "md" | "markdown_v1" => Self::Markdown,
             "json" | "json_v1" | "response_v1" => Self::Json,
             "xml" | "xml_v1" => Self::Xml,
             _ => Self::default(),
@@ -27,7 +101,6 @@ impl ResponseProtocolKind {
 
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Markdown => "markdown",
             Self::Json => "json",
             Self::Xml => "xml",
         }
@@ -35,7 +108,6 @@ impl ResponseProtocolKind {
 
     pub fn lang_format(&self) -> &'static str {
         match self {
-            Self::Markdown => "Markdown",
             Self::Json => "JSON",
             Self::Xml => "XML",
         }
@@ -43,7 +115,6 @@ impl ResponseProtocolKind {
 
     pub fn suite(&self) -> &'static dyn ResponseProtocolSuite {
         match self {
-            Self::Markdown => &markdown_suite::MarkdownSuiteV1,
             Self::Json => &json_suite::JsonSuiteV1,
             Self::Xml => &xml_suite::XmlSuiteV1,
         }
@@ -334,7 +405,9 @@ pub struct ParsedContextCompact {
 /// Trait for response protocol implementations.
 pub trait ResponseProtocolSuite {
     fn name(&self) -> &str;
+    fn prompt_boundaries(&self) -> &'static PromptBoundarySpec;
     fn lang_format(&self) -> &str;
+    fn action_result_heading(&self) -> Option<&str>;
     fn response_shape_hint(&self) -> &str;
     fn protocol_schema(&self) -> &str;
     fn protocol_examples(&self) -> &str;

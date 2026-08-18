@@ -385,7 +385,7 @@ fn model_input_overflow_does_not_delete_older_action_history() {
 
 #[test]
 fn action_result_pid_extracts_timeout_pid_for_action_topic_metadata() {
-    let result = "Action result: run_bash\npid=49189, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.\nCommand: sleep 18";
+    let result = "Action result: run_bash\npid=49189, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.";
     assert_eq!(super::action_result_pid(result), Some(49189));
 }
 

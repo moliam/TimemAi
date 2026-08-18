@@ -167,11 +167,14 @@ def xml_action(payload, free_talk):
     if len(payload) != 1:
         raise ValueError("XML action fixture requires exactly one tool")
     tool, arguments = next(iter(payload.items()))
+    action_name = escape(f"run fake {tool} action")
+    action_body = xml_element(tool, arguments)
+    action_body = action_body.replace(f"<{tool}>", f'<{tool} name="{action_name}">', 1)
     return (
         "<response>"
         f"<free_talk>{free_talk}</free_talk>"
         "<actions>"
-        + xml_element(tool, arguments)
+        + action_body
         + "</actions>"
         "</response>"
     )
@@ -283,12 +286,12 @@ def self_test():
     assert extract_prompt({"messages": [{"content": "hello"}]}) == "hello"
     assert extract_prompt({"instructions": "system", "input": "user"}) == "system\nuser"
     stress = tty_stress_scenario_response()
-    assert "<actions>" in stress and "<run_bash>" in stress
+    assert "<actions>" in stress and '<run_bash name="run fake run_bash action">' in stress
     assert "STRESS_ACTION_DONE" in stress
     assert "<working_still_action>" not in stress
     assert "<action_json>" not in stress
     source = toolgen_scenario_response("TOOLGEN_E2E_SOURCE")
-    assert "<run_bash>" in source and "TOOLGEN_E2E_SOURCE_DONE" in source
+    assert '<run_bash name="' in source and "TOOLGEN_E2E_SOURCE_DONE" in source
     completed = toolgen_scenario_response(
         "Action result: run_bash\noutput: TOOLGEN_E2E_SOURCE_DONE"
     )
@@ -299,11 +302,11 @@ def self_test():
         "/tmp/toolgen-fixture-draft\n"
     )
     draft = toolgen_scenario_response(toolgen_prompt)
-    assert "<run_bash>" in draft and "TOOLGEN_E2E_DRAFT_READY" in draft
+    assert '<run_bash name="' in draft and "TOOLGEN_E2E_DRAFT_READY" in draft
     publish = toolgen_scenario_response(
         toolgen_prompt + "\nAction result: run_bash\noutput: TOOLGEN_E2E_DRAFT_READY"
     )
-    assert "<toolgen>" in publish and "<op>publish</op>" in publish
+    assert '<toolgen name="' in publish and "<op>publish</op>" in publish
     finished = toolgen_scenario_response(
         toolgen_prompt + "\nAction result: toolgen\nop: publish\nstatus: ready"
     )

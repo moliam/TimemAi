@@ -18,8 +18,6 @@ const TOOLGEN_XML_COMPLETION: &str =
     include_str!("../../resources/protocol/xml/toolgen_retrospect.md");
 const TOOLGEN_JSON_COMPLETION: &str =
     include_str!("../../resources/protocol/json/toolgen_retrospect.md");
-const TOOLGEN_MARKDOWN_COMPLETION: &str =
-    include_str!("../../resources/protocol/markdown/toolgen_retrospect.md");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolGenRequest {
@@ -1477,7 +1475,6 @@ fn toolgen_completion_instruction(protocol: ResponseProtocolKind) -> &'static st
     match protocol {
         ResponseProtocolKind::Xml => TOOLGEN_XML_COMPLETION,
         ResponseProtocolKind::Json => TOOLGEN_JSON_COMPLETION,
-        ResponseProtocolKind::Markdown => TOOLGEN_MARKDOWN_COMPLETION,
     }
 }
 

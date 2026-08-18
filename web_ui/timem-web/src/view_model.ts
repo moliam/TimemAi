@@ -14,6 +14,10 @@ export function trimMessages<T>(messages: T[]) {
   return messages.length > MAX_RENDERED_MESSAGES ? messages.slice(-MAX_RENDERED_MESSAGES) : messages;
 }
 
+export function normalizeCopiedUserMessageText(text: string): string {
+  return text.replace(/(?:\r?\n)+$/, "");
+}
+
 export function trimTurnEvents<T>(events: T[]) {
   return events.length > MAX_CLIENT_TURN_EVENTS ? events.slice(-MAX_CLIENT_TURN_EVENTS) : events;
 }

@@ -418,8 +418,6 @@ protocol prompt prose.
 - `resources/system_prompt/system_prompt.md`: Markdown static prompt shell.
   It is the stable model-visible outer contract and contains placeholders for
   protocol and capability injection.
-- `resources/protocol/markdown/`: Markdown response protocol prompt
-  injection and schema summary.
 - `resources/protocol/json/`: JSON response protocol prompt injection, schema
   summary.
 - `resources/protocol/xml/`: XML response protocol prompt injection, schema
@@ -487,7 +485,6 @@ resources/protocol/<suite>/
 
 agent_core/src/response_protocol/
 ├─ mod.rs                        protocol-independent ParsedEnvelope/ParsedAction
-├─ markdown_suite.rs             Markdown response parser and repair policy
 ├─ json_suite.rs                 JSON response parser and repair policy
 └─ xml_suite.rs                  XML response parser and repair policy
 ```
@@ -514,8 +511,8 @@ only when preceded by one `<finish_confirm>` whose content starts with the
 protocol's exact confirmation prefix.
 
 The selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL` or
-`--response-protocol`. The default is `xml`; `markdown` and `json` remain
-available. All suites must produce the same internal `ParsedEnvelope` semantics
+`--response-protocol`. The default is `xml`; `json` is also available. Both
+suites must produce the same internal `ParsedEnvelope` semantics
 for the same user-visible capability: status/final answer, free_talk retention,
 actions, and `context_compact`.
 
@@ -523,16 +520,6 @@ The prompt must not tell the model that multiple suites exist. It should only
 show the currently selected response protocol. This keeps model service-facing text
 small and avoids making runtime implementation choices part of the user's task.
 
-Markdown protocol recovery is intentionally bounded:
-
-- If the model emits a natural-language preface before a valid Markdown
-  protocol section, the parser may recover from the first recognized protocol
-  heading such as `## Status`, `## Free_talk`, `## Final_Answer`,
-  `## Working_Still_Action`, or `## Context Compact`.
-- A standalone fenced `action` block is treated as working protocol output.
-- Ordinary Markdown headings such as `## Notes` are not protocol. They remain a
-  plain final answer unless they contain JSON/action-looking syntax that should
-  trigger repair.
 - Malformed action blocks are never downgraded to a final answer. They produce
   a protocol repair slice so the model can correct the response.
 
@@ -948,25 +935,19 @@ Delta blocks make the rendered boundary explicit:
 Prompt rendering uses explicit segments:
 
 ```text
-[BEGIN SYSTEM PROMPT]
-static prompt
-[END SYSTEM PROMPT]
+JSON suite: [BEGIN SYSTEM PROMPT] ... [END SYSTEM PROMPT]
+            [BEGIN DELTA] ... [END DELTA]
 
-[BEGIN DELTA]
-delta_id: pd_1
-time: 1782200000000
-
-## USER
-...
-[END DELTA]
+XML suite:  <Timem System Prompt> ... </Timem System Prompt>
+            <prompt_delta id="pd_1" time_ms="1782200000000"> ... </prompt_delta>
 ```
 
 Important invariants:
 
 - `prompt_0` is static global guidance only. It must not contain user input,
   runtime time, session context, API keys, or model-service-specific secrets.
-- Dynamic context belongs in logical prompt deltas that render as
-  `[BEGIN DELTA]` blocks.
+- Dynamic context belongs in logical prompt deltas rendered with the active
+  response suite's boundary markers.
 - Every rendered dynamic delta has `delta_id` so runtime shrink review can refer
   to exact logical deltas.
 - Valid model-visible role blocks are `## USER`, the current assistant/session-worker
@@ -1054,7 +1035,7 @@ Limitations:
 
 The model does not call Rust functions directly. It sends one response in the
 currently selected response protocol. `TIMEM_RESPONSE_PROTOCOL` selects the
-model response protocol (`xml` by default; `markdown` and `json` optional). This
+model response protocol (`xml` by default; `json` optional). This
 is separate from `TIMEM_API_PROTOCOL`, which selects model HTTP payload shape.
 
 Each response parses into the same runtime envelope: optional `status`, optional
@@ -1078,7 +1059,7 @@ stateDiagram-v2
     [*] --> ModelResponse
     ModelResponse --> Final: completion branch + final_answer
     ModelResponse --> ValidateActions: working/default + working_still_action
-    ValidateActions --> Repair: invalid JSON or invalid action shape
+    ValidateActions --> Repair: invalid response or action shape
     Repair --> ModelResponse: one repair prompt_delta
     ValidateActions --> ExecuteActions: valid action protocol
     ExecuteActions --> AppendResults: bounded results
@@ -1090,16 +1071,14 @@ stateDiagram-v2
 
 Each protocol directory owns its model-facing protocol and examples:
 
-- [`resources/protocol/markdown/response_protocol.md`](../resources/protocol/markdown/response_protocol.md)
 - [`resources/protocol/json/response_protocol.md`](../resources/protocol/json/response_protocol.md)
 - [`resources/protocol/xml/response_protocol.md`](../resources/protocol/xml/response_protocol.md)
 
 Keep protocol examples short; the runtime parser and capability registry are
 the authoritative executable boundary.
 
-In the JSON protocol, the envelope has this shape. In the Markdown protocol,
-the same fields are represented as sections. In the XML protocol, the same
-fields are represented as tags under one `<response>` root. XML actions use the
+In the JSON protocol, the envelope has this shape. In the XML protocol, the
+same fields are represented as tags under one `<response>` root. XML actions use the
 exact capability id as the tool element name; direct children are sequential and
 tools inside one `<parallel>` group execute concurrently.
 

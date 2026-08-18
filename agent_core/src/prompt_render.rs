@@ -189,25 +189,16 @@ pub(crate) fn render_static_prompt(
         protocol_suite.response_schema_summary(),
     );
 
-    if protocol_suite.lang_format().eq_ignore_ascii_case("XML") {
-        format!(
-            "<Timem System Prompt>\n{}\n</Timem System Prompt>",
-            static_prompt
-        )
-    } else {
-        format!(
-            "[BEGIN SYSTEM PROMPT]\n{}\n[END SYSTEM PROMPT]",
-            static_prompt
-        )
-    }
+    protocol_suite
+        .prompt_boundaries()
+        .wrap_static_prompt(&static_prompt)
 }
 
 pub(crate) fn render_prompt_with_rendered_static(
     rendered_static_prompt: &str,
     deltas: &[PromptDelta],
     assistant_heading: &str,
-    response_shape_hint: &str,
-    protocol_lang: &str,
+    protocol_suite: &dyn ResponseProtocolSuite,
 ) -> String {
     let mut out = rendered_static_prompt.to_string();
 
@@ -217,19 +208,8 @@ pub(crate) fn render_prompt_with_rendered_static(
             continue;
         }
         out.push('\n');
-        let xml_delta = protocol_lang.eq_ignore_ascii_case("XML");
-        if xml_delta {
-            out.push_str(&format!(
-                "<prompt_delta id=\"{}\" time_ms=\"{}\">\n",
-                delta.delta_id, delta.time_ms
-            ));
-        } else {
-            out.push_str("[BEGIN DELTA]\n");
-            out.push_str(&format!(
-                "delta_id: {}\ntime: {}\n",
-                delta.delta_id, delta.time_ms
-            ));
-        }
+        let boundaries = protocol_suite.prompt_boundaries();
+        out.push_str(&boundaries.render_delta_open(&delta.delta_id, delta.time_ms));
         let mut last_role = None;
         let mut last_was_action_result = false;
         for slice in slices {
@@ -241,9 +221,12 @@ pub(crate) fn render_prompt_with_rendered_static(
                 last_was_action_result = false;
             }
             let is_action_result = is_action_result_prompt_type(&slice.prompt_type);
-            if is_action_result && !last_was_action_result && !xml_delta {
-                out.push('\n');
-                out.push_str("The following are results of the actions generated in response:\n");
+            if is_action_result && !last_was_action_result {
+                if let Some(heading) = protocol_suite.action_result_heading() {
+                    out.push('\n');
+                    out.push_str(heading);
+                    out.push('\n');
+                }
             }
             out.push('\n');
             if is_action_result {
@@ -254,16 +237,13 @@ pub(crate) fn render_prompt_with_rendered_static(
             out.push('\n');
             last_was_action_result = is_action_result;
         }
-        if xml_delta {
-            out.push_str("\n</prompt_delta>");
-        } else {
-            out.push_str("\n[END DELTA]");
-        }
+        out.push('\n');
+        out.push_str(boundaries.delta_close());
     }
 
     out.push_str("\n\n");
     out.push_str(&formatted_response_trailer(
-        response_shape_hint,
+        protocol_suite.response_shape_hint(),
         assistant_heading,
     ));
     out

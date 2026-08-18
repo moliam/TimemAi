@@ -1,6 +1,5 @@
 use super::*;
 use crate::response_protocol::json_suite::JsonSuiteV1;
-use crate::response_protocol::markdown_suite::MarkdownSuiteV1;
 use crate::response_protocol::xml_suite::XmlSuiteV1;
 
 #[test]
@@ -46,7 +45,7 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
         "{{RESPONSE_PROTOCOL_SECTION}}
 {{TOOL_CATALOG}}",
         &CapabilityRegistry::builtin(),
-        &MarkdownSuiteV1,
+        &JsonSuiteV1,
         "TIMEM_ASSISTANT",
         "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
@@ -54,8 +53,7 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
         &rendered_static,
         &[delta],
         "TIMEM_ASSISTANT",
-        "one Markdown response with one state branch",
-        "Markdown",
+        &JsonSuiteV1,
     );
     assert!(rendered.contains("Response Protocol"));
     assert!(rendered.contains("memmgr"));
@@ -90,16 +88,16 @@ fn xml_protocol_wraps_static_prompt_with_timem_system_prompt_boundary() {
     assert!(!rendered.contains("[BEGIN SYSTEM PROMPT]"));
     assert!(!rendered.contains("[END SYSTEM PROMPT]"));
 
-    let markdown = render_static_prompt(
+    let json = render_static_prompt(
         "STATIC",
         &CapabilityRegistry::builtin(),
-        &MarkdownSuiteV1,
+        &JsonSuiteV1,
         "TIMEM_ASSISTANT",
         "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );
-    assert!(markdown.starts_with("[BEGIN SYSTEM PROMPT]\n"));
-    assert!(markdown.ends_with("\n[END SYSTEM PROMPT]"));
-    assert!(!markdown.contains("<Timem System Prompt>"));
+    assert!(json.starts_with("[BEGIN SYSTEM PROMPT]\n"));
+    assert!(json.ends_with("\n[END SYSTEM PROMPT]"));
+    assert!(!json.contains("<Timem System Prompt>"));
 }
 
 #[test]
@@ -123,8 +121,7 @@ fn xml_protocol_uses_xml_style_prompt_delta_boundaries() {
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
         &[delta],
         "TIMEM_ASSISTANT",
-        "one-root label <response>...</response>",
-        "XML",
+        &XmlSuiteV1,
     );
 
     assert!(rendered.contains("<prompt_delta id=\"pd_xml_14\" time_ms=\"123\">"));
@@ -225,8 +222,7 @@ fn prompt_renderer_defensively_truncates_legacy_action_result_slices() {
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
         &[delta],
         "Ai7",
-        "",
-        "Markdown",
+        &JsonSuiteV1,
     );
     assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
 }
@@ -256,7 +252,7 @@ fn formatted_response_trailer_is_protocol_neutral_and_does_not_repeat_the_shape(
         "Please continue the work and respond as protocol requires in user's language:"
     );
     assert_eq!(
-        formatted_response_trailer("one Markdown response with one state branch", "Ai7"),
+        formatted_response_trailer("one JSON object {...}", "Ai7"),
         "Please continue the work and respond as protocol requires in user's language:"
     );
 }
@@ -272,13 +268,6 @@ fn formatted_response_trailer_parser_ignores_unrecognized_trailing_text() {
 #[test]
 fn prompt_renderer_replaces_current_protocol_language() {
     let template = "Return {{CURRENT_PROTOCOL_LANG}}\n{{RESPONSE_PROTOCOL_SECTION}}";
-    let markdown = render_static_prompt(
-        template,
-        &CapabilityRegistry::builtin(),
-        &MarkdownSuiteV1,
-        "Ai7",
-        "startup",
-    );
     let json = render_static_prompt(
         template,
         &CapabilityRegistry::builtin(),
@@ -294,10 +283,8 @@ fn prompt_renderer_replaces_current_protocol_language() {
         "startup",
     );
 
-    assert!(markdown.contains("Return Markdown"));
     assert!(json.contains("Return JSON"));
     assert!(xml.contains("Return XML"));
-    assert!(!markdown.contains("{{CURRENT_PROTOCOL_LANG}}"));
     assert!(!json.contains("{{CURRENT_PROTOCOL_LANG}}"));
     assert!(!xml.contains("{{CURRENT_PROTOCOL_LANG}}"));
 }
@@ -333,7 +320,7 @@ fn prompt_renderer_replaces_assistant_id() {
     let rendered = render_static_prompt(
         "YOUR ID is: {{ASSSISTANT_ID}}\n## ASSSISTANT_ID",
         &CapabilityRegistry::builtin(),
-        &MarkdownSuiteV1,
+        &JsonSuiteV1,
         "Ai7",
         "startup",
     );
@@ -348,7 +335,7 @@ fn prompt_renderer_replaces_startup_stamp() {
     let rendered = render_static_prompt(
         "## TIMESTAMP\n{{STARTUP_STAMP}}",
         &CapabilityRegistry::builtin(),
-        &MarkdownSuiteV1,
+        &JsonSuiteV1,
         "Ai7",
         "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
     );

@@ -9,7 +9,7 @@ fn config(api_protocol: ApiProtocol) -> ModelServiceConfig {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         api_protocol,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: crate::OpenAiCompatibleOptions::default(),
     }
 }
@@ -184,19 +184,6 @@ fn structured_output_strategy_is_response_and_api_protocol_specific() {
         plan_structured_output(&aliyun),
         StructuredOutputHint::JsonObject
     );
-
-    aliyun.response_protocol = ResponseProtocolKind::Markdown;
-    assert_eq!(plan_structured_output(&aliyun), StructuredOutputHint::None);
-    let markdown_body = build_model_request(
-        &aliyun,
-        &[ModelPromptBlock {
-            role: ModelPromptRole::System,
-            text: "The top-level response is Markdown, not JSON.".to_string(),
-            cache: ModelCacheControl::None,
-        }],
-        plan_structured_output(&aliyun),
-    );
-    assert!(markdown_body.get("response_format").is_none());
 
     aliyun.response_protocol = ResponseProtocolKind::Xml;
     assert_eq!(plan_structured_output(&aliyun), StructuredOutputHint::None);

@@ -55,7 +55,7 @@ When the active response protocol is XML, a delta uses an XML-style boundary:
 
 <prompt_delta id="pd_1" time_ms="123">
 
-When the active response protocol is Markdown or JSON, it uses:
+When the active response protocol is JSON, it uses:
 
 [BEGIN DELTA]
 delta_id: pd_1
@@ -78,7 +78,7 @@ For XML protocol, the delta ends with:
 
 </prompt_delta>
 
-For Markdown or JSON protocol, it ends with:
+For JSON protocol, it ends with:
 
 [END DELTA]
 

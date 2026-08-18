@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activeModelRetryStatus, activityFromTopic, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnTimelinePlacement, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
+import { activeModelRetryStatus, activityFromTopic, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnTimelinePlacement, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -62,6 +62,21 @@ const actionEvent = (
     state: { name: "running" },
     payload: { action: "run_bash", input, event: lifecycle, status, ...(actionId ? { action_id: actionId } : {}) },
   },
+});
+
+describe("user message clipboard normalization", () => {
+  it("removes only trailing line breaks added by DOM selection serialization", () => {
+    expect(normalizeCopiedUserMessageText("hello\n\n\n")).toBe("hello");
+    expect(normalizeCopiedUserMessageText("第一行\n\n第二行\n\n")).toBe("第一行\n\n第二行");
+    expect(normalizeCopiedUserMessageText("first\r\nsecond\r\n\r\n")).toBe("first\r\nsecond");
+  });
+
+  it("preserves internal line breaks, trailing spaces, and text without trailing line breaks", () => {
+    expect(normalizeCopiedUserMessageText("hello   ")).toBe("hello   ");
+    expect(normalizeCopiedUserMessageText("first\n\nsecond")).toBe("first\n\nsecond");
+    expect(normalizeCopiedUserMessageText("")).toBe("");
+    expect(normalizeCopiedUserMessageText("\n\r\n")).toBe("");
+  });
 });
 
 describe("web topic view model", () => {

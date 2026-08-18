@@ -87,6 +87,51 @@ fn normal_bash_reports_status_and_output() {
 }
 
 #[test]
+fn run_bash_action_results_do_not_repeat_command_text() {
+    let command = "printf unique_command_marker";
+    let completed = BashCommandOutput {
+        command: command.to_string(),
+        status: Some(0),
+        signal: None,
+        output: "unique_command_marker".to_string(),
+        error: None,
+        tail_out: false,
+    }
+    .to_action_result("run_bash");
+
+    assert!(!completed.contains("Command:"), "{completed}");
+    assert_eq!(completed.matches(command).count(), 0, "{completed}");
+    assert!(completed.contains("unique_command_marker"), "{completed}");
+
+    let failed = BashCommandOutput {
+        command: "false unique_failure_command".to_string(),
+        status: Some(1),
+        signal: None,
+        output: "<no output>".to_string(),
+        error: None,
+        tail_out: false,
+    }
+    .to_action_result("run_bash");
+    assert!(!failed.contains("Command:"), "{failed}");
+    assert!(!failed.contains("false unique_failure_command"), "{failed}");
+
+    let timed_out = BashCommandOutput {
+        command: "sleep 123 unique_timeout_command".to_string(),
+        status: None,
+        signal: None,
+        output: String::new(),
+        error: Some("timeout_still_running:12345".to_string()),
+        tail_out: false,
+    }
+    .to_action_result("run_bash");
+    assert!(!timed_out.contains("Command:"), "{timed_out}");
+    assert!(
+        !timed_out.contains("sleep 123 unique_timeout_command"),
+        "{timed_out}"
+    );
+}
+
+#[test]
 fn normal_bash_keeps_thirty_two_kibibytes_worth_of_characters_and_reports_truncated_word_count() {
     assert_eq!(MAX_BASH_OUTPUT_CHARS, 32 * 1024);
     let boundary = compact_text(&"x".repeat(MAX_BASH_OUTPUT_CHARS), MAX_BASH_OUTPUT_CHARS);

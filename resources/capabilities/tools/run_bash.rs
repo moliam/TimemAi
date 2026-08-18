@@ -295,8 +295,8 @@ impl FileShellJobStore {
             };
         let _ = self.append(&record);
         ActionOutcome::background_running(format!(
-            "Action result: run_bash\npid={}, now keeps running in background\nCommand: {}",
-            record.pid, clean
+            "Action result: run_bash\npid={}, now keeps running in background",
+            record.pid
         ))
     }
 
@@ -1364,7 +1364,7 @@ pub(crate) fn execute_polling_bash_outcome_with_tail(
 
 #[allow(clippy::too_many_arguments)]
 fn polling_result(
-    command: &str,
+    _command: &str,
     state: &str,
     attempts: u64,
     elapsed: Duration,
@@ -1380,8 +1380,7 @@ fn polling_result(
         _ => "The polling command stopped.",
     };
     let mut out = format!(
-        "Action result: run_bash\n{state_sentence}\nCommand: {}\nPolling state: {}\nAttempts: {}\nElapsed: {} ms\nSuccess condition: exit code 0",
-        command,
+        "Action result: run_bash\n{state_sentence}\nPolling state: {}\nAttempts: {}\nElapsed: {} ms\nSuccess condition: exit code 0",
         state,
         attempts,
         elapsed.as_millis()
@@ -1510,8 +1509,8 @@ impl BashCommandOutput {
             if let Some(details) = error.strip_prefix("long_running_still_running:") {
                 let (pid, elapsed_ms) = details.split_once(':').unwrap_or((details, "unknown"));
                 let mut out = format!(
-                    "Action result: {}\nLONG_RUNNING_COMMAND_STATUS:\nCommand: {}\nPID: {}\nElapsed: {} ms\nStatus: still running\nThe command has not finished. Continue the task by deciding whether to wait, inspect, terminate, or take another appropriate action. Do not ask the user merely because this command is still running.",
-                    action_name, self.command, pid, elapsed_ms
+                    "Action result: {}\nLONG_RUNNING_COMMAND_STATUS:\nPID: {}\nElapsed: {} ms\nStatus: still running\nThe command has not finished. Continue the task by deciding whether to wait, inspect, terminate, or take another appropriate action. Do not ask the user merely because this command is still running.",
+                    action_name, pid, elapsed_ms
                 );
                 if !self.output.trim().is_empty() {
                     out.push_str("\nPartial output:\n");
@@ -1521,8 +1520,8 @@ impl BashCommandOutput {
             }
             if let Some(pid) = error.strip_prefix("timeout_still_running:") {
                 let mut out = format!(
-                    "Action result: {}\npid={}, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.\nCommand: {}",
-                    action_name, pid, self.command
+                    "Action result: {}\npid={}, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.",
+                    action_name, pid
                 );
                 if !self.output.trim().is_empty() {
                     out.push_str("\nPartial output:\n");
@@ -1531,25 +1530,22 @@ impl BashCommandOutput {
                 return out;
             }
             return format!(
-                "Action result: {}\nCommand: {}\n{}",
+                "Action result: {}\n{}",
                 action_name,
-                self.command,
                 bash_runtime_error_message(error)
             );
         }
         if let Some(signal) = self.signal {
             return format!(
-                "Action result: {}\nThe command terminated because of a process signal.\nCommand: {}\nSignal: {}\nOutput:\n{}",
+                "Action result: {}\nThe command terminated because of a process signal.\nSignal: {}\nOutput:\n{}",
                 action_name,
-                self.command,
                 signal,
                 compact_text_with_tail(&self.output, MAX_BASH_OUTPUT_CHARS, self.tail_out)
             );
         }
         format!(
-            "Action result: {}\nThe command finished.\nCommand: {}\nExit code: {}\nOutput:\n{}",
+            "Action result: {}\nThe command finished.\nExit code: {}\nOutput:\n{}",
             action_name,
-            self.command,
             self.status.unwrap_or(-1),
             compact_text_with_tail(&self.output, MAX_BASH_OUTPUT_CHARS, self.tail_out)
         )
@@ -1683,16 +1679,8 @@ fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
     None
 }
 
-fn bash_action_not_executed(command: Option<&str>, reason: &str) -> String {
-    let mut out = String::from("Action result: run_bash\nThe command was not executed.\n");
-    if let Some(command) = command.map(str::trim).filter(|command| !command.is_empty()) {
-        out.push_str("Command: ");
-        out.push_str(command);
-        out.push('\n');
-    }
-    out.push_str("Reason: ");
-    out.push_str(reason);
-    out
+fn bash_action_not_executed(_command: Option<&str>, reason: &str) -> String {
+    format!("Action result: run_bash\nThe command was not executed.\nReason: {reason}")
 }
 
 fn bash_validation_message(reason: &str) -> &'static str {

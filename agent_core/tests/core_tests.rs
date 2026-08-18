@@ -519,6 +519,58 @@ fn xml_action_results_preserve_names_for_sequential_and_parallel_actions() {
 }
 
 #[test]
+fn xml_parallel_run_bash_results_use_action_names_without_repeating_commands() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("xml_parallel_named_bash_results"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Xml);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("run two named commands", None);
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: r#"<response>
+  <actions>
+    <parallel>
+      <run_bash name="output first concurrent marker" timeout_ms="5000"><cmd>printf FIRST_XML_MARKER</cmd></run_bash>
+      <run_bash name="output second concurrent marker" timeout_ms="5000"><cmd>printf SECOND_XML_MARKER</cmd></run_bash>
+    </parallel>
+  </actions>
+</response>"#
+            .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected XML parallel bash results, got {other:?}"),
+    };
+
+    let first_tag = r#"<action_result><run_bash name="output first concurrent marker">"#;
+    let second_tag = r#"<action_result><run_bash name="output second concurrent marker">"#;
+    let first = prompt.find(first_tag).expect("first named result");
+    let second = prompt.find(second_tag).expect("second named result");
+
+    assert!(
+        first < second,
+        "parallel results must retain declared order"
+    );
+    let action_results = &prompt[first..];
+    assert!(action_results.contains("FIRST_XML_MARKER"), "{prompt}");
+    assert!(action_results.contains("SECOND_XML_MARKER"), "{prompt}");
+    assert!(!action_results.contains("Command:"), "{prompt}");
+    assert!(
+        !action_results.contains("printf FIRST_XML_MARKER"),
+        "{prompt}"
+    );
+    assert!(
+        !action_results.contains("printf SECOND_XML_MARKER"),
+        "{prompt}"
+    );
+}
+
+#[test]
 fn xml_denied_approval_result_preserves_action_name() {
     let mut core = AgentCore::new(
         "STATIC",
@@ -852,7 +904,7 @@ fn output_expansion_resolution_is_core_owned() {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
-        response_protocol: agent_core::ResponseProtocolKind::Markdown,
+        response_protocol: agent_core::ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
 
@@ -893,7 +945,7 @@ fn output_expansion_decline_returns_core_stop_summary() {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
-        response_protocol: agent_core::ResponseProtocolKind::Markdown,
+        response_protocol: agent_core::ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let usage = UsageStats {
@@ -938,7 +990,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
-        response_protocol: agent_core::ResponseProtocolKind::Markdown,
+        response_protocol: agent_core::ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut bash = BashApprovalMode::Ask;
@@ -1013,7 +1065,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 3_000,
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
-        response_protocol: agent_core::ResponseProtocolKind::Markdown,
+        response_protocol: agent_core::ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
 
@@ -1684,7 +1736,7 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
         profile("qwen-plus"),
         tmp_dir("response_context_compact"),
     );
-    core.set_response_protocol(ResponseProtocolKind::Markdown);
+    core.set_response_protocol(ResponseProtocolKind::Json);
     let prompt = match core.begin_turn("OLD_DYNAMIC_CONTEXT_TO_COMPACT", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
@@ -1694,7 +1746,8 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            "## Free_talk\n整理旧上下文。\n\n## Context Compact\ndiscard: {delta_id}\nsummary:\n旧任务已经完成，只保留 compact 后的测试摘要。"
+            r#"{{"free_talk":"整理旧上下文。","context_compact":{{"discard":[{}],"summary":"旧任务已经完成，只保留 compact 后的测试摘要。"}}}}"#,
+            serde_json::to_string(&delta_id).unwrap()
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -1722,7 +1775,7 @@ fn response_context_compact_does_not_append_redundant_mcp_summary() {
         profile("qwen-plus"),
         tmp_dir("response_context_compact_mcp"),
     );
-    core.set_response_protocol(ResponseProtocolKind::Markdown);
+    core.set_response_protocol(ResponseProtocolKind::Json);
     core.configure_mcp(
         CapabilityRegistry::builtin(),
         McpRuntime::default(),
@@ -1745,7 +1798,8 @@ fn response_context_compact_does_not_append_redundant_mcp_summary() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            "## Free_talk\n整理旧上下文。\n\n## Context Compact\ndiscard: {delta_id}\nsummary:\n保留当前任务状态。"
+            r#"{{"free_talk":"整理旧上下文。","context_compact":{{"discard":[{}],"summary":"保留当前任务状态。"}}}}"#,
+            serde_json::to_string(&delta_id).unwrap()
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -2683,10 +2737,10 @@ fn final_answer_without_finished_status_requests_protocol_repair() {
         profile("qwen-plus"),
         tmp_dir("final_answer_without_status"),
     );
-    core.set_response_protocol(ResponseProtocolKind::Markdown);
+    core.set_response_protocol(ResponseProtocolKind::Json);
     let _ = core.begin_turn("总结", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored("## Final_Answer\n这是最终结论。"),
+        content: scored(r#"{"final_answer":"这是最终结论。"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2698,10 +2752,10 @@ fn final_answer_without_finished_status_requests_protocol_repair() {
     assert!(prompt.contains("## SYSTEM"));
     assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("final_answer_requires_status_finished"));
-    assert!(prompt.contains("没有明确完成状态"));
-    assert!(prompt.contains("请写 `## Status` 为 `finished`"));
-    assert!(prompt.contains("并写 `## Final_Answer`"));
-    assert!(prompt.contains("## Final_Answer\n这是最终结论。"));
+    assert!(prompt.contains("status"));
+    assert!(prompt.contains("ALL_FINISHED"));
+    assert!(prompt.contains("final_answer"));
+    assert!(prompt.contains(r#"{"final_answer":"这是最终结论。"}"#));
     assert_eq!(core.current_stats().repair_calls, 1);
 }
 
@@ -2712,10 +2766,10 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
         profile("qwen-plus"),
         tmp_dir("finished_without_final_answer"),
     );
-    core.set_response_protocol(ResponseProtocolKind::Markdown);
+    core.set_response_protocol(ResponseProtocolKind::Json);
     let _ = core.begin_turn("总结", None);
     let step = core.apply_model_response(LlmResponse {
-        content: scored("## Status\nfinished"),
+        content: scored(r#"{"status":"ALL_FINISHED"}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -2727,9 +2781,9 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
     assert!(prompt.contains("## SYSTEM"));
     assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("final_answer_required_when_status_finished"));
-    assert!(prompt.contains("缺少 `## Final_Answer`"));
-    assert!(prompt.contains("同时提供 `## Status` 和 `## Final_Answer`"));
-    assert!(prompt.contains("## Status\nfinished"));
+    assert!(prompt.contains("final_answer"));
+    assert!(prompt.contains("ALL_FINISHED"));
+    assert!(prompt.contains(r#"{"status":"ALL_FINISHED"}"#));
 }
 
 #[test]
@@ -3036,7 +3090,7 @@ fn malformed_action_like_response_still_gets_protocol_error_after_repair() {
 #[test]
 fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("truncated_repair"));
-    core.set_response_protocol(ResponseProtocolKind::Markdown);
+    core.set_response_protocol(ResponseProtocolKind::Json);
     let _ = core.begin_turn("写一个很长的报告", None);
     let step = core.apply_model_response(LlmResponse {
         content: "{\"free_talk\":\"partial".to_string(),
@@ -3053,7 +3107,7 @@ fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
     assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("truncated_model_output"));
     assert!(prompt.contains("max output token"));
-    assert!(prompt.contains("Markdown response protocol"));
+    assert!(prompt.contains("Return exactly one valid JSON object"));
     assert!(prompt.contains(r#"{"#));
 }
 
@@ -5430,7 +5484,7 @@ fn running_job_list_is_injected_when_compact_references_running_job_delta() {
         profile("qwen-plus"),
         tmp_dir("bash_running_list_on_compact"),
     );
-    core.set_response_protocol(ResponseProtocolKind::Markdown);
+    core.set_response_protocol(ResponseProtocolKind::Json);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     match core.begin_turn("start a background task", None) {
         CoreStep::NeedModel { .. } => {}
@@ -5439,7 +5493,7 @@ fn running_job_list_is_injected_when_compact_references_running_job_delta() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            "## Free_talk\n启动后台任务。\n\n## Working_Still_Action\n```action\n{\"run_bash\":{\"cmd\":\"sleep 5; printf late\",\"background\":true}}\n```",
+            r#"{"free_talk":"启动后台任务。","working_still_action":{"run_bash":{"cmd":"sleep 5; printf late","background":true}}}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5462,7 +5516,8 @@ fn running_job_list_is_injected_when_compact_references_running_job_delta() {
 
     let step = core.apply_model_response(LlmResponse {
         content: scored(format!(
-            "## Free_talk\n压缩旧上下文。\n\n## Context Compact\ndiscard: {running_delta_id}\nsummary:\n后台任务仍在运行，需要保留运行状态。"
+            r#"{{"free_talk":"压缩旧上下文。","context_compact":{{"discard":[{}],"summary":"后台任务仍在运行，需要保留运行状态。"}}}}"#,
+            serde_json::to_string(&running_delta_id).unwrap()
         )),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -5911,7 +5966,8 @@ fn run_bash_allows_low_risk_system_identity_commands() {
     };
     assert!(prompt.contains("Action result: run_bash"));
     assert!(!prompt.contains("intent: Read system identity."));
-    assert!(prompt.contains("Command: uname -s"));
+    assert!(!prompt.contains("Command: uname -s"));
+    assert!(!prompt.contains("Command:"));
     assert!(prompt.contains("Exit code: 0"));
     assert!(!prompt.contains("approval_status: approved_by_user"));
 }
@@ -6396,32 +6452,20 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
         profile("qwen-plus"),
         tmp_dir("response_schema_prompt_injection"),
     );
-    core.set_response_protocol(ResponseProtocolKind::Markdown);
+    core.set_response_protocol(ResponseProtocolKind::Json);
     let prompt = match core.begin_turn("hello", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
     };
 
     assert!(!prompt.contains("\"$id\""));
-    assert!(prompt.contains("Markdown response sections."));
-    assert!(prompt.find("`## Status`").unwrap() < prompt.find("`## Free_talk`").unwrap());
-    assert!(!prompt.contains("`## Progress`"));
-    assert!(prompt.contains("`## Context Compact`"));
-    assert!(prompt.contains("`discard:`"));
-    assert!(!prompt.contains("`slice_ids`"));
-    assert!(!prompt.contains("\"context_compact?\""));
-    assert!(!prompt.contains("object or array<object>"));
-    assert!(!prompt.contains("`## Thought`"));
-    assert!(!prompt.contains(
-        "\"durable\": \"boolean; optional. Default false. Set true only when this reasoning draft"
-    ));
-    assert!(!prompt.contains("`intent`"));
-    assert!(prompt.contains("The top-level response is Markdown, not JSON."));
-    assert!(prompt.contains("the individual action blocks"));
-    assert!(prompt.contains("inside `## Working_Still_Action` use JSON objects."));
-    assert!(!prompt.contains("`## Thought`"));
-    assert!(prompt.contains("`## Working_Still_Action`"));
-    assert!(!prompt.contains("\"json_schema_summary\": \"stale\""));
+    assert!(prompt.contains("JSON response fields"));
+    assert!(prompt.contains("\"final_answer?\""));
+    assert!(prompt.contains("\"free_talk?\""));
+    assert!(prompt.contains("\"working_still_action?\""));
+    assert!(prompt.contains("\"context_compact?\""));
+    assert!(prompt.contains("Include discard and/or offload prompt delta ids plus summary"));
+    assert!(prompt.contains("ALL_FINISHED"));
 }
 
 #[test]
@@ -6507,7 +6551,7 @@ fn rendered_static_prompt_preserves_source_rule_order() {
 
     assert!(
         role_pos < style_pos && style_pos < memory_pos,
-        "Markdown static prompt should keep source section order"
+        "static prompt should keep source section order"
     );
 }
 
@@ -6526,22 +6570,6 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(default_prompt.contains("# System Response Protocol"));
     assert!(default_prompt.contains("protocol-compliant response in XML format"));
     assert!(!default_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
-
-    let mut markdown_core = test_core(
-        template,
-        profile("qwen-plus"),
-        tmp_dir("response_protocol_markdown"),
-    );
-    markdown_core.set_response_protocol(ResponseProtocolKind::Markdown);
-    let markdown_prompt = match markdown_core.begin_turn("hello", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("expected NeedModel, got {other:?}"),
-    };
-    assert!(markdown_prompt.contains("The top-level response is Markdown, not JSON."));
-    assert!(markdown_prompt.contains("protocol-compliant response in Markdown format"));
-    assert!(markdown_prompt.contains("## Working_Still_Action"));
-    assert!(!markdown_prompt.contains("All your output things MUST BE enclosed"));
-    assert!(!markdown_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 
     let mut json_core = test_core(
         template,
@@ -6880,34 +6908,6 @@ fn rendered_static_prompt_examples_avoid_task_like_action_instructions() {
             "static prompt example still contains task-like action text: {leaked_example_task}"
         );
     }
-}
-
-#[test]
-fn rendered_markdown_protocol_examples_do_not_sit_below_protocol_sections() {
-    let mut core = test_core(
-        include_str!("../../resources/system_prompt/system_prompt.md"),
-        profile("qwen-plus"),
-        tmp_dir("static_prompt_example_heading_levels"),
-    );
-    core.set_response_protocol(ResponseProtocolKind::Markdown);
-    let prompt = match core.begin_turn("请只回答 ok", None) {
-        CoreStep::NeedModel { prompt, .. } => prompt,
-        other => panic!("expected NeedModel, got {other:?}"),
-    };
-
-    assert!(prompt.contains("## -------- Example: receive a new input and need actions --------"));
-    assert!(prompt
-        .contains("## -------- Example:  receive a user task, plan, and start doing --------"));
-    assert!(prompt
-        .contains("## -------- Example: finish one of user's tasks, compact context --------"));
-    assert!(
-        !prompt.contains("### Example:"),
-        "example headings must not be lower-level than protocol headings"
-    );
-    assert!(
-        !prompt.contains("\n## Example:"),
-        "example headings should have visual separators to avoid ambiguity with protocol sections"
-    );
 }
 
 #[test]
