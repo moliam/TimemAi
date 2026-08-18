@@ -50,7 +50,7 @@ pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, 
 enum VisiblePromptRole {
     User,
     You,
-    System,
+    Runtime,
 }
 
 impl VisiblePromptRole {
@@ -58,7 +58,7 @@ impl VisiblePromptRole {
         match self {
             VisiblePromptRole::User => "USER".to_string(),
             VisiblePromptRole::You => assistant_heading.to_string(),
-            VisiblePromptRole::System => "SYSTEM".to_string(),
+            VisiblePromptRole::Runtime => "RUNTIME".to_string(),
         }
     }
 }
@@ -68,9 +68,9 @@ fn visible_role(prompt_type: &str) -> VisiblePromptRole {
         "user_question" | "user_supplement" => VisiblePromptRole::User,
         "llm_response" | "llm_free_talk" => VisiblePromptRole::You,
         "result_of_llm_action" | "response_repair" | "context_compacted" => {
-            VisiblePromptRole::System
+            VisiblePromptRole::Runtime
         }
-        _ => VisiblePromptRole::System,
+        _ => VisiblePromptRole::Runtime,
     }
 }
 

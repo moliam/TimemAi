@@ -583,7 +583,7 @@ fn session_turn_injects_reasoning_reminder_after_configured_rounds() {
             .count(),
         1
     );
-    assert!(model.prompts[reminder_prompt_index].contains("## SYSTEM"));
+    assert!(model.prompts[reminder_prompt_index].contains("## RUNTIME"));
 }
 
 #[test]
@@ -624,7 +624,7 @@ fn session_turn_injects_due_focus_reminder_before_the_next_model_request() {
 
     assert_eq!(outcome.text, "提醒后完成。");
     assert_eq!(model.inner.prompts.len(), 2);
-    assert!(model.inner.prompts[1].contains("## SYSTEM"));
+    assert!(model.inner.prompts[1].contains("## RUNTIME"));
     let focus_tips = crate::ReminderTipsConfig::default().schedules[0]
         .tips
         .clone();

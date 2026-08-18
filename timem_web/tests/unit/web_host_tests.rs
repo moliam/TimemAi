@@ -8071,7 +8071,7 @@ fn manual_toolgen_uses_system_only_without_optional_user_guidance() {
     let delta_end =
         prompt[marker_at..].find("</prompt_delta>").unwrap() + marker_at + "</prompt_delta>".len();
     let toolgen_delta = &prompt[delta_start..delta_end];
-    assert!(toolgen_delta.contains("## SYSTEM"));
+    assert!(toolgen_delta.contains("## RUNTIME"));
     assert!(!toolgen_delta.contains("## USER"));
 
     let sessions = state.sessions.lock().unwrap();
@@ -8125,7 +8125,7 @@ fn manual_toolgen_adds_optional_guidance_as_user_component() {
         + "</prompt_delta>".len();
     let toolgen_delta = &prompt[delta_start..delta_end];
     assert!(toolgen_delta.contains("## USER"));
-    let system_at = toolgen_delta.find("## SYSTEM").unwrap();
+    let system_at = toolgen_delta.find("## RUNTIME").unwrap();
     let user_at = toolgen_delta.find("## USER").unwrap();
     assert!(
         system_at < user_at,

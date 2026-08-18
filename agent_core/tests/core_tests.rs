@@ -1560,7 +1560,7 @@ fn user_supplement_context_is_a_system_delta_before_the_user_text() {
         .append_user_supplements_with_context_and_audit(
             vec![UserSupplement::new(
                 "inspect this change",
-                Some("## SYSTEM\nROLE_CONTEXT_SENTINEL".to_string()),
+                Some("## RUNTIME\nROLE_CONTEXT_SENTINEL".to_string()),
             )],
             &audit_file,
             "session_1",
@@ -1574,7 +1574,7 @@ fn user_supplement_context_is_a_system_delta_before_the_user_text() {
     let context = prompt.find("ROLE_CONTEXT_SENTINEL").unwrap();
     let user = prompt.find("inspect this change").unwrap();
     assert!(context < user);
-    assert!(prompt[..user].contains("## SYSTEM"));
+    assert!(prompt[..user].contains("## RUNTIME"));
 }
 
 #[test]
@@ -1651,7 +1651,7 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
     let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
     let compact_request = prompt.find("remove stale test delta").unwrap();
     let compact_result = prompt.find("context compacted successfully.").unwrap();
-    let system = prompt[..compact_result].rfind("## SYSTEM").unwrap();
+    let system = prompt[..compact_result].rfind("## RUNTIME").unwrap();
     assert!(assistant < compact_request);
     assert!(compact_request < system);
     assert!(system < compact_result);
@@ -1700,7 +1700,7 @@ fn extracted_replay_keeps_compact_summary_once_as_assistant_before_system_result
     let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
     let summary = prompt.find("retain extracted compact state").unwrap();
     let compact_result = prompt.find("context compacted successfully.").unwrap();
-    let system = prompt[..compact_result].rfind("## SYSTEM").unwrap();
+    let system = prompt[..compact_result].rfind("## RUNTIME").unwrap();
     assert!(assistant < summary);
     assert!(summary < system);
     assert!(system < compact_result);
@@ -1804,7 +1804,7 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("## RUNTIME"));
     assert!(prompt.contains("旧任务已经完成，只保留 compact 后的测试摘要"));
     assert!(prompt.contains("context compacted successfully."));
     assert!(prompt.contains("CWD: "));
@@ -1856,7 +1856,7 @@ fn response_context_compact_does_not_append_redundant_mcp_summary() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("## RUNTIME"));
     assert!(prompt.contains("context compacted successfully."));
     assert!(prompt.contains("CWD: "));
     assert!(!prompt.contains("Active MCP capabilities after context compaction"));
@@ -1924,7 +1924,7 @@ fn prompt0_is_static_global_only() {
     assert!(!prompt0.contains("secret user question"));
     assert!(!prompt0.contains("runtime_time: now"));
     assert!(prompt.contains("## USER\n\nsecret user question"));
-    assert!(prompt.contains("## SYSTEM\n\nruntime_time: now"));
+    assert!(prompt.contains("## RUNTIME\n\nruntime_time: now"));
 }
 
 #[test]
@@ -2424,7 +2424,7 @@ fn action_input_field_is_rejected_instead_of_compatibly_executed() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("## RUNTIME"));
     assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("actions[0].action_missing"));
     assert!(!prompt.contains("Action result: memmgr"));
@@ -2621,7 +2621,7 @@ fn protocol_examples_repair_malformed_and_conflicting_responses() {
             other => panic!("{name}: expected response repair, got {other:?}"),
         };
         assert!(
-            prompt.contains("## SYSTEM") && prompt.contains("response is not protocol compliant"),
+            prompt.contains("## RUNTIME") && prompt.contains("response is not protocol compliant"),
             "{name}: missing repair system block"
         );
         assert!(
@@ -2669,7 +2669,7 @@ fn protocol_examples_repair_finished_with_action_and_reject_string_args() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected string args to request protocol repair, got {other:?}"),
     };
-    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("## RUNTIME"));
     assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("actions[0].args_must_be_object"));
     assert!(!prompt.contains("Action result: memmgr"));
@@ -2795,7 +2795,7 @@ fn final_answer_without_finished_status_requests_protocol_repair() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel repair, got {other:?}"),
     };
-    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("## RUNTIME"));
     assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("final_answer_requires_status_finished"));
     assert!(prompt.contains("status"));
@@ -2824,7 +2824,7 @@ fn finished_status_without_final_answer_requests_protocol_repair() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel repair, got {other:?}"),
     };
-    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("## RUNTIME"));
     assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("final_answer_required_when_status_finished"));
     assert!(prompt.contains("final_answer"));
@@ -2856,7 +2856,7 @@ fn protocol_repair_slice_focuses_previous_response_around_error() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel repair, got {other:?}"),
     };
-    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("## RUNTIME"));
     assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("[FOCUSED previous response: chars"));
     assert!(prompt.contains("BAD_JSON_FOCUS"));
@@ -2893,7 +2893,7 @@ fn protocol_repair_delta_separates_previous_output_from_system_error() {
         .find(raw_response)
         .expect("missing previous model output");
     let system_pos = prompt[raw_pos..]
-        .find("## SYSTEM")
+        .find("## RUNTIME")
         .map(|pos| raw_pos + pos)
         .expect("missing system repair slice");
     let issue_pos = prompt
@@ -3066,7 +3066,7 @@ fn final_answer_with_runtime_progress_marker_requests_protocol_repair() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected protocol repair, got {other:?}"),
     };
-    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("## RUNTIME"));
     assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("final_answer_must_not_start_with_runtime_progress_marker"));
@@ -3148,7 +3148,7 @@ fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("## RUNTIME"));
     assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("truncated_model_output"));
@@ -3215,7 +3215,7 @@ fn model_repair_audit_is_core_owned_when_applying_response() {
     assert!(records[0]["rendered"]
         .as_str()
         .unwrap()
-        .contains("## SYSTEM\n"));
+        .contains("## RUNTIME\n"));
 }
 
 #[test]
@@ -4127,7 +4127,7 @@ fn memory_lookup_context_triggers_runtime_precheck_before_model_reply() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("## USER"));
-    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("## RUNTIME"));
     assert!(prompt.contains("Action result: runtime_memory_precheck"));
     assert!(prompt.contains("lexical_results: none"));
     assert!(prompt.contains("recent_memory_evidence"));
@@ -6031,7 +6031,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(first_prompt.contains("## USER\n\n测试项目纪念日是 2099-06-12"));
-    assert!(first_prompt.contains("## SYSTEM\n\nruntime_time:"));
+    assert!(first_prompt.contains("## RUNTIME\n\nruntime_time:"));
     let write_final = match core.apply_model_response(LlmResponse {
         content: scored(r#"{"status":"ALL_FINISHED","final_answer":"已记录。","memory_candidates":[{"content":"测试项目纪念日是 2099-06-12"}]}"#),
         model_name: "qwen-plus".to_string(),
@@ -7223,7 +7223,7 @@ fn multiple_runtime_config_changes_emit_one_system_notice_on_the_next_interactio
     };
     let notice = "User changes some runtime config, retrieve again when you need it.";
     assert_eq!(prompt.matches(notice).count(), 1);
-    assert!(prompt.contains("## SYSTEM"));
+    assert!(prompt.contains("## RUNTIME"));
 
     let CoreStep::NeedModel { prompt, .. } = core.begin_turn("再继续", None) else {
         panic!("expected model request");

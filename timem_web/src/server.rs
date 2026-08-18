@@ -6371,7 +6371,7 @@ fn uploaded_files_context(attachments: &[WebAttachment]) -> Option<String> {
         return None;
     }
     Some(format!(
-        "## SYSTEM\nFiles explicitly uploaded by the user for this session:\n{}",
+        "## RUNTIME\nFiles explicitly uploaded by the user for this session:\n{}",
         attachments
             .iter()
             .map(|file| format!("- {} ({})", file.name, file.path))

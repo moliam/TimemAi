@@ -60,7 +60,7 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
     assert!(rendered.contains("hello"));
     assert!(rendered.contains("[BEGIN DELTA]"));
     assert!(rendered.contains("## USER"));
-    assert!(rendered.contains("## SYSTEM"));
+    assert!(rendered.contains("## RUNTIME"));
     assert!(!rendered.contains("## ACTIONS"));
     assert!(rendered.contains("The following are results of the actions generated in response:"));
     assert!(rendered.contains("Action result: run_bash"));

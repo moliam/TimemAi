@@ -391,7 +391,7 @@ fn worker_role_display_name(name: &str) -> String {
 
 fn worker_role_full_instruction(name: &str, description: &str) -> String {
     format!(
-        "## SYSTEM\nUser involves the worker role ‘{}’ for this round input's related task. When you work for this task, comply this worker's methodology: {}",
+        "## RUNTIME\nUser involves the worker role ‘{}’ for this round input's related task. When you work for this task, comply this worker's methodology: {}",
         worker_role_display_name(name),
         description
     )
@@ -399,7 +399,7 @@ fn worker_role_full_instruction(name: &str, description: &str) -> String {
 
 fn worker_role_reference_instruction(name: &str) -> String {
     format!(
-        "## SYSTEM\nUser involves the worker role ‘{}’ for this round input's related task (also used in the above). Refer to this role's description above for working methodology.",
+        "## RUNTIME\nUser involves the worker role ‘{}’ for this round input's related task (also used in the above). Refer to this role's description above for working methodology.",
         worker_role_display_name(name)
     )
 }
@@ -5594,8 +5594,8 @@ fn prompt_type_role_for_scratch(prompt_type: &str) -> &'static str {
     match prompt_type {
         "user_question" | "user_supplement" => "USER",
         "llm_response" | "llm_free_talk" => "ASSISTANT",
-        "result_of_llm_action" => "SYSTEM",
-        _ => "SYSTEM",
+        "result_of_llm_action" => "RUNTIME",
+        _ => "RUNTIME",
     }
 }
 
