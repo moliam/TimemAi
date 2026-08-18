@@ -750,6 +750,27 @@ expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(1
     expect(styles).toContain("min-height: 20px");
   });
 
+  it("uses dnd-kit sortable motion for queued-message reordering", () => {
+    expect(source).toContain('from "@dnd-kit/core"');
+    expect(source).toContain('from "@dnd-kit/sortable"');
+    expect(source).toContain("<DndContext");
+    expect(source).toContain("<SortableContext");
+    expect(source).toContain("<DragOverlay");
+    expect(source).toContain("onDragOver={previewQueuedMessageDrag}");
+    expect(source).toContain("queuedMessageOverId");
+    expect(source).toContain("draggedQueuedMessagePosition");
+    expect(source).toContain("verticalListSortingStrategy");
+    expect(source).toContain("sortableKeyboardCoordinates");
+    expect(source).toContain("useSortable");
+    expect(source).toContain("CSS.Transform.toString");
+    expect(source).not.toContain("draggable=");
+    expect(source).not.toContain("dataTransfer");
+    expect(styles).toContain(".queued-message.dragging");
+    expect(styles).toContain(".queued-message-overlay");
+    expect(styles).toContain("will-change: transform");
+    expect(styles).toContain("@media (prefers-reduced-motion: reduce)");
+  });
+
   it("does not expose internal model transport bookkeeping or duplicate activity labels", () => {
     expect(source).toContain('kind !== "model_request" && kind !== "model_response" && kind !== "model_retry"');
     expect(source).not.toContain("Model completed a response");
@@ -1454,9 +1475,10 @@ expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(1
     expect(source).toContain('queuePanelCollapsed ? `${displayQueuedMessages.length} 条消息`');
     expect(source).toContain('className="queued-message-panel-toggle"');
     expect(source).toContain('title={queuePanelCollapsed ? "展开待发送队列" : "折叠待发送队列为一行"}');
-    expect(source).toContain('{!queuePanelCollapsed && <div id={`queued-message-items-${activeSession.session_id}`}');
-    expect(source).toContain('className="queued-message-drag" draggable={!editing && !claimed && displayQueuedMessages.length > 1}');
-    expect(source).toContain("reorderQueuedMessages(current[activeSessionId] ?? [], draggedQueueMessageId, targetId, queuedMessageClaimsRef.current, activeSessionId)");
+    expect(source).toContain("{!queuePanelCollapsed && <DndContext");
+    expect(source).toContain('className="queued-message-drag" disabled={dragDisabled}');
+    expect(source).toContain("const finishQueuedMessageDrag = ({ active, over }: DragEndEvent)");
+    expect(source).toContain("reorderQueuedMessages(");
     expect(styles).toContain(".queued-message-list.collapsed .queued-message-items { max-height: 224px; overflow: hidden; }");
     expect(styles).toContain(".queued-message-list.expanded .queued-message-items { max-height: min(50vh, 420px); overflow-y: auto;");
     expect(styles).toContain(".queued-message-list.summary-only { gap: 0; padding-block: 7px; }");

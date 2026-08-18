@@ -73,8 +73,9 @@ describe("queued messages", () => {
     expect(messages.slice(0, COLLAPSED_QUEUE_LIMIT).map(({ id }) => id)).toEqual(["a", "b", "c", "d"]);
   });
 
-  it("moves a dragged message to the target position without mutation", () => {
+  it("moves a dragged message to the sortable target position without mutation", () => {
     expect(reorderQueuedMessages(messages, "d", "b").map(({ id }) => id)).toEqual(["a", "d", "b", "c", "e"]);
+    expect(reorderQueuedMessages(messages, "b", "d").map(({ id }) => id)).toEqual(["a", "c", "d", "b", "e"]);
     expect(messages.map(({ id }) => id)).toEqual(["a", "b", "c", "d", "e"]);
   });
 
