@@ -1485,7 +1485,13 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).not.toContain("Ask Timem anything about this workspace");
     expect(source).toContain('activeSession?.state === "working" ? "Queue message" : "Send message"');
     expect(source).toContain('className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`}');
-    expect(source).toContain('"自动续发已暂停，手动发送仍可用"');
+    expect(source).toContain('"自动续发已暂停"');
+ expect(source).not.toContain("手动发送仍可用");
+ expect(source).toContain("const sendAsNewTurn = !!queuedMessagesPause;");
+ expect(source).toContain('sendAsNewTurn ? "作为新消息开始任务" : "立即发送为当前任务的补充"');
+ expect(source).toContain("messageRoleIds, sendAsNewTurn)");
+ expect(source).toContain("forceNewTurn = false");
+ expect(viewModelSource).toContain('!forceNewTurn && (forceSupplement || session.state === "working")');
     expect(source).toContain('onClick={resumeQueuedMessages}>继续发送</button>');
     expect(source).toContain('className="queued-message-supplement"');
     expect(source).toContain('claimed ? "发送中…" : message.deliveryError ? "重试" : "立即"');
@@ -1549,7 +1555,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain("unclaimedQueuedMessages(queuedMessages, queuedMessageClaims, activeSessionId)");
     expect(source).toContain("displayQueuedMessages.length > 0");
     expect(source).toContain("removeQueuedMessage(current[activeSession.session_id] ?? [], message.id, queuedMessageClaimsRef.current");
-    expect(source).toContain('disabled={claimed || (!message.deliveryError && activeSession.state !== "working")');
+    expect(source).toContain('disabled={claimed || (!message.deliveryError && !sendAsNewTurn && activeSession.state !== "working")');
     expect(source).toContain('aria-busy={claimed || undefined}');
     expect(source).toContain('claimed ? "发送中…" : message.deliveryError ? "重试" : "立即"');
     expect(styles).toContain(".queued-message.sending");

@@ -168,6 +168,29 @@ describe("web topic view model", () => {
  });
  });
 
+ it("forces a paused queued message to start a new turn even while the session is working", () => {
+ const current = { ...session("session_1"), state: "working" };
+ expect(composerSendDecision(
+ current,
+ " start this as a separate task ",
+ false,
+ false,
+ ["attachment_1"],
+ false,
+ true,
+ )).toEqual({
+ kind: "send",
+ text: "start this as a separate task",
+ clearDraftOnSuccess: true,
+ command: {
+ type: "turn_submit",
+ session_id: "session_1",
+ text: "start this as a separate task",
+ attachment_ids: ["attachment_1"],
+ },
+ });
+ });
+
  it("keeps rapid repeated sends during a working turn as separate supplements", () => {
     const current = { ...session("session_1"), state: "working" };
     const decisions = ["first correction", "second correction", "third correction"].map((text) => composerSendDecision(current, text, false));
