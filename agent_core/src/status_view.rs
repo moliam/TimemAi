@@ -1,4 +1,4 @@
-use crate::{notification::CoreMemoryActivity, UsageStats};
+use crate::{notification::CoreMemoryActivity, UsageStats, DEFAULT_MODEL_SYSTEM_ERROR_RETRIES};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +89,9 @@ pub fn runtime_retry_status_view(
     RuntimeRetryStatusView {
         remaining_secs: remaining_ms.div_ceil(1000) as u64,
         attempt: retry.attempt.unwrap_or(1),
-        max_attempts: retry.max_attempts.unwrap_or(5),
+        max_attempts: retry
+            .max_attempts
+            .unwrap_or(DEFAULT_MODEL_SYSTEM_ERROR_RETRIES),
         error: retry
             .error
             .as_deref()

@@ -343,7 +343,7 @@ struct SupplementAtTerminalRepairUi {
 impl TurnUi for SupplementAtTerminalRepairUi {
     fn on_model_response(&mut self, _round: u32, _usage: &UsageStats, _content: &str) {
         self.responses += 1;
-        if self.responses == 6 {
+        if self.responses == crate::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1 {
             self.pending
                 .push("补充：这条内容不能复活已经失败的 turn".to_string());
         }
@@ -675,7 +675,7 @@ fn session_turn_retries_transient_model_api_errors_and_reports_status() {
     assert_eq!(model.prompts.len(), 3);
     assert_eq!(ui.retries.len(), 2);
     assert_eq!(ui.retries[0].0, 1);
-    assert_eq!(ui.retries[0].1, 5);
+    assert_eq!(ui.retries[0].1, crate::DEFAULT_MODEL_SYSTEM_ERROR_RETRIES);
     assert_eq!(ui.retries[0].2, Duration::ZERO);
     assert!(ui.retries[0].3.contains("model_http_500"));
     let events = read_audit_events(&audit);
@@ -727,7 +727,10 @@ fn session_turn_repairs_empty_model_content() {
         .collect::<Vec<_>>();
     assert_eq!(repair_topics.len(), 1);
     assert_eq!(repair_topics[0].attempt, 1);
-    assert_eq!(repair_topics[0].max_attempts, 5);
+    assert_eq!(
+        repair_topics[0].max_attempts,
+        crate::MAX_PROTOCOL_REPAIR_ATTEMPTS
+    );
     assert_eq!(outcome.repair_issue, None);
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "model_retry"), 0);
@@ -1144,7 +1147,7 @@ fn session_turn_never_accepts_a_recovered_final_answer_after_retry_exhaustion() 
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Xml;
     let mut ui = RetryRecordingUi::default();
-    let mut model = ReplayModel::new((0..6).map(|attempt| {
+    let mut model = ReplayModel::new((0..=crate::MAX_PROTOCOL_REPAIR_ATTEMPTS).map(|attempt| {
         Ok(llm(
             format!(
                 "preface<response><final_answer>must not finish {attempt}</final_answer></response>"
@@ -1179,10 +1182,19 @@ fn session_turn_never_accepts_a_recovered_final_answer_after_retry_exhaustion() 
         outcome.stop_reason,
         Some(TurnStopReason::ProtocolRepairFailed)
     );
-    assert_eq!(outcome.stats.repair_calls, 5);
-    assert_eq!(model.prompts.len(), 6);
+    assert_eq!(
+        outcome.stats.repair_calls,
+        crate::MAX_PROTOCOL_REPAIR_ATTEMPTS
+    );
+    assert_eq!(
+        model.prompts.len(),
+        (crate::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1) as usize
+    );
     let events = read_audit_events(&audit);
-    assert_eq!(audit_event_count(&events, "model_repair_request"), 5);
+    assert_eq!(
+        audit_event_count(&events, "model_repair_request"),
+        crate::MAX_PROTOCOL_REPAIR_ATTEMPTS as usize
+    );
     assert_eq!(
         audit_event(&events, "turn_final").unwrap()["assistant_output"],
         ""
@@ -1410,9 +1422,15 @@ fn session_turn_emits_repair_topic_for_each_protocol_repair_attempt() {
         .collect::<Vec<_>>();
     assert_eq!(repair_topics.len(), 2);
     assert_eq!(repair_topics[0].attempt, 1);
-    assert_eq!(repair_topics[0].max_attempts, 5);
+    assert_eq!(
+        repair_topics[0].max_attempts,
+        crate::MAX_PROTOCOL_REPAIR_ATTEMPTS
+    );
     assert_eq!(repair_topics[1].attempt, 2);
-    assert_eq!(repair_topics[1].max_attempts, 5);
+    assert_eq!(
+        repair_topics[1].max_attempts,
+        crate::MAX_PROTOCOL_REPAIR_ATTEMPTS
+    );
     assert!(repair_topics
         .iter()
         .all(|topic| topic.issue == "invalid_json"));
@@ -3089,7 +3107,7 @@ fn session_turn_protocol_repair_failure_is_structured() {
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
     let mut ui = NoopTurnUi;
-    let mut model = ReplayModel::new((0..6).map(|idx| {
+    let mut model = ReplayModel::new((0..=crate::MAX_PROTOCOL_REPAIR_ATTEMPTS).map(|idx| {
         Ok(llm(
             format!("{{not valid json repair attempt {idx}"),
             5_000 + idx as u32,
@@ -3128,7 +3146,10 @@ fn session_turn_protocol_repair_failure_is_structured() {
         })
     );
     let events = read_audit_events(&audit);
-    assert_eq!(audit_event_count(&events, "model_repair_request"), 5);
+    assert_eq!(
+        audit_event_count(&events, "model_repair_request"),
+        crate::MAX_PROTOCOL_REPAIR_ATTEMPTS as usize
+    );
     let final_event = audit_event(&events, "turn_final").unwrap();
     assert_eq!(final_event["assistant_output"], "");
     assert_eq!(final_event["repair_issue"], "invalid_json");
@@ -3155,7 +3176,7 @@ fn session_turn_terminal_protocol_failure_does_not_consume_or_revive_late_supple
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
     let mut ui = SupplementAtTerminalRepairUi::default();
-    let mut model = ReplayModel::new((0..6).map(|idx| {
+    let mut model = ReplayModel::new((0..=crate::MAX_PROTOCOL_REPAIR_ATTEMPTS).map(|idx| {
         Ok(llm(
             format!("{{not valid json repair attempt {idx}"),
             5_000 + idx as u32,
@@ -3183,7 +3204,10 @@ fn session_turn_terminal_protocol_failure_does_not_consume_or_revive_late_supple
         outcome.stop_reason,
         Some(TurnStopReason::ProtocolRepairFailed)
     );
-    assert_eq!(model.prompts.len(), 6);
+    assert_eq!(
+        model.prompts.len(),
+        (crate::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1) as usize
+    );
     assert_eq!(ui.pending, ["补充：这条内容不能复活已经失败的 turn"]);
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "user_supplement"), 0);

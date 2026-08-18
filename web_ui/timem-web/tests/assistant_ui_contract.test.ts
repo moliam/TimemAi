@@ -861,6 +861,7 @@ expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(1
     expect(source).toContain("onRolesConsumed(session.session_id, submission.roleIds)");
     expect(source).toContain("sent = !!reliableStorageScope\n        && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);");
     expect(source).toMatch(/if \(sent\) \{[\s\S]*?updateQueuedMessages\(\(\) => nextQueues\);[\s\S]*?\}/);
+    expect(source).toContain("shouldDirectManualMessage(activeSession.state, existingQueue.length, !!queuedMessagesPause)");
     expect(source).not.toMatch(/if \(sent\) \{[\s\S]*?resumeQueuedMessages\(\);[\s\S]*?\}/);
     expect(source).toContain("sessionIds={sessions.map((session) => session.session_id)}");
     expect(source).toContain("pruneSessionDrafts(current, sessionIds)");
@@ -1506,6 +1507,7 @@ expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(1
   it("releases a stuck send affordance only from the authoritative turn completion", () => {
     expect(source).toContain('const completedKey = `${event.session_id}:${event.turn_id ?? ""}`;');
     expect(source).toContain("setCompletedTurnKey(completedKey);");
+    expect(source).toContain("if (shouldPauseQueuedMessages(stopReason))");
     expect(source).not.toContain('if (event.turn.state !== "working") setCompletedTurnKey');
     expect(source).toContain('completedTurnKey.startsWith(`${activeSessionId}:`)');
     expect(source).toContain('releaseSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId)');

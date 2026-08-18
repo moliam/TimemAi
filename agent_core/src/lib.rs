@@ -547,7 +547,7 @@ const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;
 pub const UNLIMITED_ROUND_BUDGET: u32 = u32::MAX;
 const DEFAULT_ROUND_BUDGET: u32 = UNLIMITED_ROUND_BUDGET;
 const MAX_CONFIGURED_ROUND_BUDGET: u32 = 10_000;
-const MAX_PROTOCOL_REPAIR_ATTEMPTS: u32 = 5;
+pub const MAX_PROTOCOL_REPAIR_ATTEMPTS: u32 = 20;
 const RUNTIME_CONFIG_CHANGED_NOTICE: &str =
     "User changes some runtime config, retrieve again when you need it.";
 const MEM_GUARD_WAIT_STEP: Duration = Duration::from_millis(25);

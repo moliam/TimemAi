@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-pub const DEFAULT_MODEL_SYSTEM_ERROR_RETRIES: u32 = 5;
+pub const DEFAULT_MODEL_SYSTEM_ERROR_RETRIES: u32 = 100;
 
 #[cfg(not(test))]
 pub const DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY: Duration = Duration::from_secs(10);

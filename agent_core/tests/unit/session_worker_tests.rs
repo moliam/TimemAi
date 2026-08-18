@@ -388,7 +388,7 @@ impl ModelClient for TerminalRepairModel {
         *calls += 1;
         let call = *calls;
         Ok(LlmResponse {
-            content: if call <= 6 {
+            content: if call <= crate::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1 {
                 format!("{{invalid repair response {call}")
             } else {
                 r#"{"status":"ALL_FINISHED","final_answer":"must not revive"}"#.to_string()
@@ -542,7 +542,7 @@ fn session_worker_does_not_revive_terminal_repair_failure_with_late_supplement()
         {
             CoreSessionWorkerEvent::ModelResponse { .. } => {
                 responses += 1;
-                if responses == 6 {
+                if responses == crate::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1 {
                     handle.add_user_supplement("补充不能复活硬停止");
                 }
             }
@@ -561,7 +561,10 @@ fn session_worker_does_not_revive_terminal_repair_failure_with_late_supplement()
         outcome.stop_reason,
         Some(crate::TurnStopReason::ProtocolRepairFailed)
     );
-    assert_eq!(*calls.lock().unwrap(), 6);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        crate::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1
+    );
     assert_eq!(
         unconsumed_supplements,
         vec!["补充不能复活硬停止".to_string()],
@@ -1189,8 +1192,14 @@ fn failed_manual_toolgen_has_bounded_protocol_repair_and_does_not_replace_source
     assert!(outcome
         .toolgen_retrospect
         .contains("did not publish a verified tool"));
-    assert_eq!(*child_calls.lock().unwrap(), 6);
-    assert_eq!(outcome.stats.repair_calls, 5);
+    assert_eq!(
+        *child_calls.lock().unwrap(),
+        crate::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1
+    );
+    assert_eq!(
+        outcome.stats.repair_calls,
+        crate::MAX_PROTOCOL_REPAIR_ATTEMPTS
+    );
     assert_eq!(terminal_phase.as_deref(), Some("failed"));
     assert!(terminal_error
         .as_deref()
