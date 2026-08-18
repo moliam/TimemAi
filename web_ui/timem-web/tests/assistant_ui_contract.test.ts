@@ -1269,9 +1269,14 @@ expect(styles).toContain(".worker-role-editor.editing textarea { height: clamp(1
     expect(styles).toContain(".runtime-options input, .runtime-options select, .session-modal input, .session-modal select");
   });
 
-  it("renders context compaction outside chat messages with a reduced-motion fallback", () => {
+  it("renders context compaction as a compact status pill with a reduced-motion fallback", () => {
     expect(source).toContain("<ContextCompactNotice");
+    expect(source).toContain('<Gauge size={13}/>');
     expect(styles).toContain(".context-compact-notice");
+    expect(styles).toContain("width: fit-content");
+    expect(styles).toContain("grid-template-columns: 22px auto 72px");
+    expect(styles).toContain("border-radius: 999px");
+    expect(styles).toContain(".compact-meter { position: relative; width: 72px; height: 3px;");
     expect(styles).toContain("prefers-reduced-motion: reduce");
   });
 
