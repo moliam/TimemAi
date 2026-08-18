@@ -45,6 +45,7 @@ describe("production wire delivery contract", () => {
   it.each([
     { type: "command_ack", command_id: "cmd-a", status: "committed" },
     { type: "host_error", message: "query_failed" },
+    { type: "runtime_notice", session_id: "session-a", level: "warning", title: "Runtime warning", message: "persist_failed" },
     { type: "history_page", session_id: "session-a", records: [], has_more: false },
     { type: "session_api_key_revealed", session_id: "session-a", api_key: "secret" },
     { type: "mcp_server_secrets_revealed", server_id: "mcp-a", values: {} },

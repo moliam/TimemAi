@@ -227,6 +227,7 @@ export type WireEvent =
   | { type: "turn_started"; session_id: string; context_id: string; worker_id: string; turn: WebTurn }
   | { type: "turn_updated"; session_id: string; turn: WebTurn }
   | { type: "host_error"; message: string }
+  | { type: "runtime_notice"; session_id: string; level: "notice" | "warning" | "error" | string; title: string; message: string }
   | { type: "host_config_updated"; key: string; value: string; session_env_defaults: Record<string, string> }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
   | { type: "attachment_removed"; session_id: string; attachment_id: string }

@@ -104,6 +104,10 @@ impl EventJournal {
     }
 
     pub fn append(&mut self, event: Value) -> Result<JournalEvent, String> {
+        // A failed write can leave bytes after the last acknowledged record.
+        // The in-memory byte count is advanced only after write + sync succeeds,
+        // so trim only that unacknowledged suffix without rereading the journal.
+        self.discard_unacknowledged_tail()?;
         if self.needs_compaction() {
             self.compact_to_last(RETAINED_JOURNAL_EVENTS)?;
         }
@@ -125,9 +129,19 @@ impl EventJournal {
         let mut file = options
             .open(&self.path)
             .map_err(|error| format!("event_journal_open_failed:{error}"))?;
-        file.write_all(&encoded)
-            .and_then(|_| file.sync_data())
-            .map_err(|error| format!("event_journal_write_failed:{error}"))?;
+        let original_len = file
+            .metadata()
+            .map_err(|error| format!("event_journal_metadata_failed:{error}"))?
+            .len();
+        if let Err(error) = file.write_all(&encoded).and_then(|_| file.sync_data()) {
+            let rollback = file.set_len(original_len).and_then(|_| file.sync_data());
+            return Err(match rollback {
+                Ok(()) => format!("event_journal_write_failed:{error}"),
+                Err(rollback_error) => format!(
+                    "event_journal_write_failed:{error};event_journal_rollback_failed:{rollback_error}"
+                ),
+            });
+        }
         self.first_seq.get_or_insert(entry.event_seq);
         self.entry_count = self.entry_count.saturating_add(1);
         self.bytes = self.bytes.saturating_add(encoded.len() as u64);
@@ -136,6 +150,33 @@ impl EventJournal {
             .checked_add(1)
             .ok_or_else(|| "event_journal_sequence_exhausted".to_string())?;
         Ok(entry)
+    }
+
+    fn discard_unacknowledged_tail(&self) -> Result<(), String> {
+        let actual_len = match std::fs::metadata(&self.path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && self.bytes == 0 => {
+                return Ok(());
+            }
+            Err(error) => return Err(format!("event_journal_metadata_failed:{error}")),
+        };
+        if actual_len < self.bytes {
+            return Err(format!(
+                "event_journal_truncated:{}:{}",
+                actual_len, self.bytes
+            ));
+        }
+        if actual_len == self.bytes {
+            return Ok(());
+        }
+
+        let file = OpenOptions::new()
+            .write(true)
+            .open(&self.path)
+            .map_err(|error| format!("event_journal_open_failed:{error}"))?;
+        file.set_len(self.bytes)
+            .and_then(|_| file.sync_data())
+            .map_err(|error| format!("event_journal_repair_failed:{error}"))
     }
 
     pub fn replay_after(&self, cursor: u64) -> Result<Vec<JournalEvent>, String> {

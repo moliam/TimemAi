@@ -10,7 +10,7 @@ import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole } from "./protocol";
 import { canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, wheelDeltaPixels } from "./scroll";
-import { activeModelRetryStatus, activityFromTopic, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
+import { activeModelRetryStatus, activityFromTopic, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
 import { safeMarkdownUrl } from "./markdown_security";
 import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
@@ -25,7 +25,6 @@ import { clipboardImageFiles } from "./clipboard_images";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
-const MAX_ACTIVITY_ITEMS = 300;
 const STORED_HISTORY_PAGE_SIZE = 200;
 const TOKEN_STORAGE_KEY = "timem-web-access-token";
 const EMPTY_CHAT_MESSAGES: ChatMessage[] = [];
@@ -95,7 +94,6 @@ function TimemApp() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
   const [selectedRoleIds, setSelectedRoleIds] = useState<Record<string, string[]>>({});
-  const [activities, setActivities] = useState<Activity[]>([]);
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [connected, setConnected] = useState(false);
   const [snapshotReady, setSnapshotReady] = useState(false);
@@ -188,19 +186,15 @@ function TimemApp() {
   sessionsRef.current = sessions;
   const activeMessages = activeSession?.messages ?? EMPTY_CHAT_MESSAGES;
   const pushActivity = useCallback((activity: Activity) => {
-    setActivities((current) => {
-      const existingIndex = current.findIndex((candidate) =>
-        candidate.sessionId === activity.sessionId &&
-        candidate.tone === activity.tone &&
-        candidate.title === activity.title &&
-        candidate.detail === activity.detail
-      );
-      const withoutExisting = existingIndex >= 0
-        ? current.filter((_, index) => index !== existingIndex)
-        : current;
-      const merged = existingIndex >= 0 ? { ...activity, id: current[existingIndex].id } : activity;
-      return [merged, ...withoutExisting].slice(0, MAX_ACTIVITY_ITEMS);
-    });
+    const requestedSessionId = activity.sessionId === "system"
+      ? activeSessionIdRef.current
+      : activity.sessionId;
+    if (!requestedSessionId) return;
+    setSessions((current) => current.map((session) => (
+      session.session_id === requestedSessionId
+        ? appendActivityToCurrentTurn(session, { ...activity, sessionId: requestedSessionId })
+        : session
+    )));
   }, []);
   const reportUiError = useCallback((title: string, detail: string, sessionId = activeSessionIdRef.current || "system") => {
     pushActivity({ id: clientId(), sessionId, tone: "error", title, detail, createdAt: Date.now() });
@@ -580,7 +574,6 @@ function TimemApp() {
         return next;
       });
       setDecisions((current) => current.filter((decision) => decision.event.session_id !== event.session_id));
-      setActivities((current) => current.filter((activity) => activity.sessionId !== event.session_id));
       setSessions((current) => {
         const remaining = current.filter((session) => session.session_id !== event.session_id);
         setActiveSessionId((activeId) => resolveActiveSessionId(activeId, remaining));
@@ -659,8 +652,25 @@ function TimemApp() {
     }
     if (event.type === "host_error") {
       clearAllPendingCommands();
-      const activity: Activity = { id: clientId(), sessionId: "system", tone: "error", title: "Runtime error", detail: event.message, createdAt: Date.now() };
-      pushActivity(activity);
+      pushActivity({
+        id: clientId(),
+        sessionId: activeSessionIdRef.current || "system",
+        tone: "error",
+        title: "Runtime error",
+        detail: event.message,
+        createdAt: Date.now(),
+      });
+      return;
+    }
+    if (event.type === "runtime_notice") {
+      pushActivity({
+        id: clientId(),
+        sessionId: event.session_id,
+        tone: event.level === "error" ? "error" : event.level === "notice" ? "notice" : "warning",
+        title: event.title,
+        detail: event.message,
+        createdAt: Date.now(),
+      });
       return;
     }
     if (event.type === "host_config_updated") {
@@ -756,11 +766,6 @@ function TimemApp() {
     }
     if (event.type === "worker_activity") {
       const kind = String(event.event.kind ?? "worker_event");
-      if (kind !== "model_request" && kind !== "model_response" && kind !== "model_retry") {
-        const detail = Object.entries(event.event).filter(([key]) => !["kind", "session_id", "context_id", "worker_id"].includes(key)).map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`).join("\n");
-        const activity: Activity = { id: clientId(), sessionId: event.session_id, tone: kind.includes("error") ? "error" : kind.includes("retry") ? "warning" : "notice", title: kind.replaceAll("_", " "), detail, createdAt: Date.now() };
-        pushActivity(activity);
-      }
       const turnEvent: WebTurnEvent = { event_id: event.turn_event_id ?? clientId(), source: "worker_activity", payload: event.event, created_at_ms: Date.now() };
       const workerState = kind === "model_request"
         ? "working"
@@ -799,8 +804,6 @@ function TimemApp() {
     }
     if (event.type !== "core_topic") return;
     const topic = event.event;
-    const activity = activityFromTopic(topic);
-    if (activity) setActivities((current) => [activity, ...current.filter((item) => !(activity.kind === "toolgen" && item.kind === "toolgen" && item.sessionId === activity.sessionId))].slice(0, MAX_ACTIVITY_ITEMS));
     setSessions((current) => current.map((session) => applyCoreTopicToSession(
       appendTurnEvent(session, event.turn_id, { event_id: event.turn_event_id ?? clientId(), source: "core_topic", payload: topic as unknown as Record<string, unknown>, created_at_ms: Date.now() }),
       topic,
@@ -1029,12 +1032,6 @@ function TimemApp() {
   });
 
   const sessionDecisions = decisions.filter((decision) => decision.event.session_id === activeSession?.session_id);
-  const visibleErrors = activities.filter((activity) => activity.tone === "error" && (activity.sessionId === activeSession?.session_id || activity.sessionId === "system"));
-  const visibleError = visibleErrors[0];
-  const visibleErrorText = visibleError ? `${visibleError.title}${visibleError.detail ? ` · ${visibleError.detail}` : ""}` : "";
-  const visibleErrorCount = visibleErrors.length;
-  const hiddenErrorCount = Math.max(0, visibleErrorCount - 1);
-  const dismissErrorLabel = visibleError ? `Dismiss ${visibleError.title}` : "Dismiss error";
   const runtimeDisconnected = runtimeEverConnected && !connected;
   const runtimeUnavailable = runtimeDisconnected && reconnectAttempt >= 3;
   const runtimeDisconnectedTitle = runtimeUnavailable ? "Runtime unavailable" : "Connection lost";
@@ -1129,14 +1126,7 @@ function TimemApp() {
           <strong>{runtimeDisconnectedTitle}</strong>
           <span>{runtimeDisconnectedDetail}</span>
         </div>}
-        {visibleError && <div className="host-error-banner" role="alert">
-          <span className="host-error-text" title={visibleErrorText}><strong>{visibleError.title}</strong>{visibleError.detail && <span className="host-error-detail"> · {visibleError.detail}</span>}{hiddenErrorCount > 0 && <em>{hiddenErrorCount} more hidden error{hiddenErrorCount === 1 ? "" : "s"}</em>}</span>
-          <div className="host-error-actions">
-            {hiddenErrorCount > 0 && <button type="button" className="host-error-dismiss-all" title="Dismiss all visible errors" aria-label="Dismiss all visible errors" onClick={() => setActivities((current) => current.filter((activity) => activity.tone !== "error" || (activity.sessionId !== activeSession?.session_id && activity.sessionId !== "system")))}>Dismiss all</button>}
-            <button type="button" className="icon-button" title={dismissErrorLabel} aria-label={dismissErrorLabel} onClick={() => setActivities((current) => current.filter((activity) => activity.id !== visibleError.id))}><X size={15}/></button>
-          </div>
-        </div>}
-        {showRuntime && <RuntimePanel panelRef={runtimePanelRef} server={server} session={activeSession} pendingKeys={new Set(activeSession ? Array.from(pendingRuntimeKeys).filter((key) => key.startsWith(`${activeSession.session_id}:`)).map((key) => key.slice(activeSession.session_id.length + 1)) : [])} credentialPending={!!activeSession && (pendingSessionCredentialIds.has(activeSession.session_id) || pendingSessionCredentialIds.has(`reveal:${activeSession.session_id}`))} onApiKeyUpdate={(apiKey) => {
+                {showRuntime && <RuntimePanel panelRef={runtimePanelRef} server={server} session={activeSession} pendingKeys={new Set(activeSession ? Array.from(pendingRuntimeKeys).filter((key) => key.startsWith(`${activeSession.session_id}:`)).map((key) => key.slice(activeSession.session_id.length + 1)) : [])} credentialPending={!!activeSession && (pendingSessionCredentialIds.has(activeSession.session_id) || pendingSessionCredentialIds.has(`reveal:${activeSession.session_id}`))} onApiKeyUpdate={(apiKey) => {
           if (!activeSession || !addPendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, activeSession.session_id)) return;
           pendingSessionApiKeyValuesRef.current.set(activeSession.session_id, apiKey);
           if (!sendCommand({ type: "session_api_key_update", session_id: activeSession.session_id, api_key: apiKey })) {
@@ -2615,6 +2605,10 @@ function humanizeToolStatus(status: string) {
 }
 
 function activityFromTurnEvent(event: WebTurnEvent, sessionId: string): Activity | null {
+ if (event.source === "ui_activity") {
+  const activity = event.payload as unknown as Activity;
+  return { ...activity, id: event.event_id, sessionId, createdAt: event.created_at_ms };
+ }
  if (event.source === "core_topic") {
  const activity = activityFromTopic(event.payload as unknown as import("./protocol").CoreTopicEvent);
  return activity ? {

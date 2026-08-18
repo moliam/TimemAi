@@ -592,6 +592,17 @@ function messagesFromHistoryRecords(records: ChatHistoryRecord[]): ChatMessage[]
     }));
 }
 
+export function appendActivityToCurrentTurn(session: Session, activity: Activity): Session {
+  const turnId = session.active_turn_id ?? session.turns.at(-1)?.turn_id;
+  if (!turnId) return session;
+  return appendTurnEvent(session, turnId, {
+    event_id: activity.id,
+    source: "ui_activity",
+    payload: { ...activity, sessionId: session.session_id },
+    created_at_ms: activity.createdAt,
+  });
+}
+
 export function appendTurnEvent(session: Session, turnId: string | null | undefined, event: WebTurnEvent): Session {
   if (!turnId) return session;
   if (!turnEventBelongsToSession(session, event)) return session;
