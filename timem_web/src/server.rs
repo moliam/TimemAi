@@ -1,3 +1,4 @@
+use crate::debug_session::DebugStore;
 use crate::event_journal::{EventJournal, JournalInstanceInfo};
 use crate::worker_roles::{
     load_roles, normalize_role_fields, roles_path_for_history, save_roles, WorkerRole,
@@ -97,6 +98,7 @@ struct AppState {
     command_lanes: Arc<Mutex<HashMap<String, Arc<TicketCommandLane>>>>,
     command_global_barrier: Arc<RwLock<()>>,
     mem_epoch: Arc<RwLock<u64>>,
+    debug: Option<Arc<DebugStore>>,
 }
 
 #[derive(Debug, Default)]
@@ -478,6 +480,8 @@ struct WebSession {
     ordinal: u32,
     state: String,
     current_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    debug_dir: Option<String>,
     max_llm_input_tokens: u32,
     tools: Vec<ToolSummary>,
     mcp_server_ids: Vec<String>,
@@ -1101,7 +1105,7 @@ pub async fn run_from_env() -> Result<(), String> {
     {
         Ok(EventJournalOpenOutcome::Owned(journal)) => journal,
         Ok(EventJournalOpenOutcome::Existing(info)) => {
-            return resume_existing_web_instance(&launch, &info);
+            return Err(existing_web_instance_error(&info));
         }
         Err(error) => {
             return Err(friendly_journal_error(
@@ -1112,6 +1116,13 @@ pub async fn run_from_env() -> Result<(), String> {
         }
     };
     let mem = Arc::new(Mutex::new(initial_mem));
+    let debug = if launch.debug {
+        let store = Arc::new(DebugStore::create()?);
+        println!("Timem Web debug directory: {}", store.root().display());
+        Some(store)
+    } else {
+        None
+    };
     let state = AppState {
         token: token.clone(),
         public_access: launch.public_access,
@@ -1125,6 +1136,7 @@ pub async fn run_from_env() -> Result<(), String> {
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
+        debug,
     };
     let cleanup_guard = WebRuntimeCleanupGuard::new(&state);
 
@@ -1370,6 +1382,12 @@ fn shutdown_web_runtime(state: &AppState) -> Result<(), String> {
 
     FileShellJobStore::new(&memory_dir).terminate_owned_running();
     FileToolJobStore::new(&memory_dir).terminate_owned_running();
+
+    if let Some(debug) = state.debug.as_ref() {
+        if let Err(error) = debug.cleanup() {
+            first_error.get_or_insert(error);
+        }
+    }
 
     match first_error {
         Some(error) => Err(error),
@@ -1837,47 +1855,27 @@ fn valid_instance_health_response(response: &[u8], expected_port: u16) -> bool {
         })
 }
 
-fn resume_existing_web_instance(
-    launch: &WebLaunchOptions,
-    info: &JournalInstanceInfo,
-) -> Result<(), String> {
-    println!("A healthy Timem Web instance is already running for this workspace.");
-    println!("  PID:  {}", info.pid);
+fn existing_web_instance_error(info: &JournalInstanceInfo) -> String {
+    let mut message = String::from(
+        "Another Timem Web instance is already running for this workspace. \
+Timem Web instances are never reused; each launch must own its own process and runtime state.",
+    );
+    message.push_str(&format!("\n\n  PID:  {}", info.pid));
     if let Some(port) = info.port {
-        println!("  Port: {port}");
+        message.push_str(&format!("\n  Port: {port}"));
     }
     if let Some(url) = info.browser_url.as_deref() {
-        println!("  URL:  {url}");
+        message.push_str(&format!("\n  URL:  {url}"));
     }
-    println!();
-    println!("To stop the existing instance:");
+    message.push_str("\n\nStop the existing instance, then run this command again:");
     #[cfg(unix)]
-    println!("  kill -TERM {}", info.pid);
+    message.push_str(&format!("\n  kill -TERM {}", info.pid));
     #[cfg(windows)]
-    println!("  taskkill /PID {} /T", info.pid);
-
-    if launch.open_browser {
-        if let Some(url) = info.browser_url.as_deref() {
-            if should_auto_open_browser() {
-                match open_browser(url) {
-                    Ok(()) => {
-                        println!();
-                        println!("Reopened the existing authenticated Timem Web page.");
-                    }
-                    Err(error) => {
-                        eprintln!();
-                        eprintln!("Could not reopen the browser automatically: {error}");
-                        eprintln!("Open the URL above manually.");
-                    }
-                }
-            } else {
-                println!();
-                println!("Open the URL above to continue using the existing instance.");
-            }
-        }
-    }
-
-    Ok(())
+    message.push_str(&format!("\n  taskkill /PID {} /T", info.pid));
+    message.push_str(
+        "\n\nTo run another instance concurrently, select a different --space or --data-dir.",
+    );
+    message
 }
 
 fn friendly_journal_error(error: String, data_dir: &std::path::Path, space: &str) -> String {
@@ -3788,6 +3786,12 @@ fn create_session(
                 ordinal,
                 state: "ready".to_string(),
                 current_dir: current_dir.display().to_string(),
+                debug_dir: state
+                    .debug
+                    .as_ref()
+                    .map(|debug| debug.session_dir(&session_id))
+                    .transpose()?
+                    .map(|path| path.display().to_string()),
                 max_llm_input_tokens,
                 tools: tool_repo.list()?,
                 mcp_server_ids,
@@ -4033,6 +4037,12 @@ fn restore_stored_session(
                 }
                 .to_string(),
                 current_dir: current_dir.display().to_string(),
+                debug_dir: state
+                    .debug
+                    .as_ref()
+                    .map(|debug| debug.session_dir(&stored.session_id))
+                    .transpose()?
+                    .map(|path| path.display().to_string()),
                 max_llm_input_tokens,
                 tools: tool_repo.list()?,
                 mcp_server_ids: stored.mcp_server_ids.clone(),
@@ -6807,6 +6817,40 @@ fn handle_scoped_worker_event(
         }
         CoreSessionWorkerEvent::Topics(events) => {
             for event in events {
+                if event.topic.name == "core.protocol_repair" {
+                    if let Some(issue) = event.payload.get("issue").and_then(Value::as_str) {
+                        if let Some(debug) = state.debug.as_ref() {
+                            if let Err(error) = debug.record_repair(session_id, issue) {
+                                eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
+                            }
+                        }
+                    }
+                }
+                if event.topic.name == "core.action"
+                    && event.payload.get("event").and_then(Value::as_str) == Some("finish")
+                {
+                    if let Some(debug) = state.debug.as_ref() {
+                        let cpu_time = if event
+                            .payload
+                            .get("cpu_time_available")
+                            .and_then(Value::as_bool)
+                            == Some(true)
+                        {
+                            event
+                                .payload
+                                .get("cpu_time_ns")
+                                .and_then(Value::as_u64)
+                                .map(Duration::from_nanos)
+                        } else {
+                            None
+                        };
+                        if let Err(error) = debug.record_action_cpu(session_id, cpu_time) {
+                            eprintln!(
+                                "[timem_web_debug_error] session_id={session_id:?} reason={error}"
+                            );
+                        }
+                    }
+                }
                 let toolgen_scoped = event.payload.get("runtime_phase").and_then(Value::as_str)
                     == Some("toolgen")
                     || event.topic.name == CORE_TOPIC_TOOLGEN;
@@ -6972,7 +7016,12 @@ fn handle_scoped_worker_event(
                 );
             }
         }
-        CoreSessionWorkerEvent::ModelRequest { round } => {
+        CoreSessionWorkerEvent::ModelRequest { round, prompt } => {
+            if let Some(debug) = state.debug.as_ref() {
+                if let Err(error) = debug.record_prompt(session_id, round, &prompt) {
+                    eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
+                }
+            }
             set_worker_state(state, session_id, worker_id, "working");
             emit_worker_activity(
                 state,
@@ -6982,11 +7031,31 @@ fn handle_scoped_worker_event(
                 json!({ "kind": "model_request", "round": round }),
             );
         }
+        CoreSessionWorkerEvent::ModelRequestCompleted { latency } => {
+            if let Some(debug) = state.debug.as_ref() {
+                if let Err(error) = debug.record_llm_latency(session_id, latency) {
+                    eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
+                }
+            }
+        }
+        CoreSessionWorkerEvent::ModelResponseParsed { tool_count } => {
+            if let Some(debug) = state.debug.as_ref() {
+                if let Err(error) = debug.record_tools_per_response(session_id, tool_count) {
+                    eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
+                }
+            }
+        }
         CoreSessionWorkerEvent::ModelResponse {
             round,
             usage,
+            content,
             runtime_phase,
         } => {
+            if let Some(debug) = state.debug.as_ref() {
+                if let Err(error) = debug.record_llm_response(session_id, round, &content) {
+                    eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
+                }
+            }
             emit_worker_activity(
                 state,
                 session_id,
@@ -7924,6 +7993,7 @@ struct WebLaunchOptions {
     max_llm_output_tokens: Option<u32>,
     bash_approval: Option<String>,
     work_instructions: Option<String>,
+    debug: bool,
     open_browser: bool,
 }
 
@@ -7945,6 +8015,7 @@ impl Default for WebLaunchOptions {
             max_llm_output_tokens: None,
             bash_approval: None,
             work_instructions: None,
+            debug: false,
             open_browser: true,
         }
     }
@@ -7990,6 +8061,10 @@ impl WebLaunchOptions {
                 "--data-dir" => string(&mut options.data_dir)?,
                 "--bash-approval" => string(&mut options.bash_approval)?,
                 "--work-instructions" => string(&mut options.work_instructions)?,
+                "--debug" => {
+                    options.debug = true;
+                    index += 1;
+                }
                 "--no-open" => {
                     options.open_browser = false;
                     index += 1;

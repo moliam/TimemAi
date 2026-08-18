@@ -89,8 +89,8 @@ button:disabled { cursor: not-allowed; }
 .turn-persistent-toolgen { margin-top: 12px; }
 .turn-final-delivery > .message-label { color: #79cbb9; }
 .turn-final-delivery > .message-content { color: #e6edf4; font-size: var(--content-size); line-height: 1.68; }
-.turn-final-toolbar { display: flex; justify-content: flex-end; min-height: 24px; margin-bottom: 2px; }
-.final-copy { display: inline-flex; align-items: center; gap: 5px; border: 0; border-radius: 5px; padding: 4px 7px; background: rgba(255,255,255,.02); color: #7f929c; font-size: 11px; font-weight: 650; }
+.final-answer-actions { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; }
+.final-copy { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border: 0; border-radius: 5px; padding: 0; background: transparent; color: #7f929c; }
 .final-copy:hover { background: #18252d; color: #d6e6eb; }
 .final-copy.copy-success, .code-block figcaption button.copy-success { color: #76cfb8; }
 .final-copy.copy-failed, .code-block figcaption button.copy-failed { color: #e6aa87; }
@@ -834,8 +834,7 @@ button:disabled { cursor: not-allowed; }
 .turn-final-delivery { margin-top: 20px; }
 .turn-final-delivery > .message-label { color: #b4b4b4; font-size: 11px; }
 .turn-final-delivery > .message-content { color: #ececec; }
-.turn-final-toolbar { min-height: 20px; margin-bottom: 0; }
-.final-copy { color: #777; font-size: 10px; }
+.final-copy { color: #777; }
 .final-copy:hover { background: #2a2a2a; color: #ddd; }
 .completion-card { gap: 0 7px; margin-top: 13px; padding: 0; border: 0; border-radius: 0; background: transparent; color: #737373; font-size: 10px; overflow-wrap: anywhere; }
 .completion-card span { min-width: 0; padding: 0; border: 0; white-space: normal; }
@@ -949,7 +948,7 @@ button:disabled { cursor: not-allowed; }
 
 @media (max-width: 520px) {
   .composer-actions { align-items: flex-start; gap: 8px; justify-content: space-between; }
-  .composer-actions > span { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .composer-paths { min-width: 0; flex: 1 1 auto; }
   .composer-buttons { width: 100%; flex-wrap: wrap; justify-content: flex-end; }
   .stop-button { padding-inline: 8px; }
   .attachment-strip { align-items: stretch; }
@@ -1112,7 +1111,6 @@ button:disabled { cursor: not-allowed; }
 .turn-interaction { margin-bottom: 30px; }
 .turn-user-frame { width: fit-content; max-width: min(86%, 680px); margin: 0 0 11px auto; }
 .turn-user-content { position: relative; }
-.turn-user-content::after { content: ""; position: absolute; z-index: 2; inset: 0 0 0 auto; width: 1.5px; border-radius: 0 18px 18px 0; background: rgb(109 122 130 / 60%); pointer-events: none; }
 .turn-assistant-frame { position: relative; overflow: visible; padding-left: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
 .turn-assistant-frame.working { animation: none; }
 .turn-assistant-heading { position: relative; z-index: 2; min-height: 28px; padding: 0 0 0 10px; border-bottom: 0; }
@@ -1133,7 +1131,6 @@ button:disabled { cursor: not-allowed; }
 .composer-actions > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 :root[data-theme="light"] .turn-assistant-frame,
 :root[data-theme="light"] .turn-assistant-frame.working { border: 0; border-radius: 0; background: transparent; box-shadow: none; }
-:root[data-theme="light"] .turn-user-content::after { background: rgb(145 160 168 / 60%); }
 :root[data-theme="light"] .turn-work-panel { background: #fafbfb; }
 :root[data-theme="light"] .turn-assistant-heading { border-bottom: 0; }
 @media (max-width: 720px) {
@@ -1180,9 +1177,11 @@ button:disabled { cursor: not-allowed; }
 .completion-card { line-height: 1.55; }
 .composer-wrap { isolation: isolate; }
 .composer textarea { resize: none; overflow-y: auto; }
-.composer-cwd-inline { min-width: 0; display: inline-flex; align-items: center; gap: 5px; overflow: hidden; color: #8c9ba3; font-family: var(--ui-font); font-size: 11px; font-weight: 450; letter-spacing: 0; }
+.composer-paths { min-width: 0; flex: 1 1 auto; display: grid; gap: 2px; overflow: hidden; } .composer-cwd-inline { min-width: 0; display: inline-flex; align-items: center; gap: 5px; overflow: hidden; color: #8c9ba3; font-family: var(--ui-font); font-size: 11px; font-weight: 450; letter-spacing: 0; }
 .composer-cwd-inline b { flex: none; color: #71828a; font-size: 10px; font-weight: 650; letter-spacing: .03em; }
-.composer-cwd-inline span { min-width: 0; overflow: hidden; color: #9cabb2; text-overflow: ellipsis; white-space: nowrap; }
+.composer-cwd-inline span { min-width: 0; overflow: hidden; color: #9cabb2; text-overflow: ellipsis; white-space: nowrap; font-family: "SFMono-Regular", Consolas, monospace; }
+.composer-debug-inline { align-items: flex-start; overflow: visible; }
+.composer-debug-inline span { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; user-select: text; }
 .path-tail { direction: rtl; text-align: left; unicode-bidi: plaintext; }
 :root[data-theme="light"] .composer-cwd-inline { color: #6f8189; }
 :root[data-theme="light"] .composer-cwd-inline b { color: #84939a; }
@@ -1558,8 +1557,6 @@ body {
 .turn-entry-roles > b { border: 1px solid #456c60; border-radius: 999px; padding: 2px 7px; background: #1b2925; color: #b8d9cf; font-weight: 650; }
 :root[data-theme="light"] .turn-entry-roles { color: #416d60; }
 :root[data-theme="light"] .turn-entry-roles > b { border-color: #7eaa9d; background: #eaf4f0; color: #416d60; }
-.turn-final-toolbar { gap: 5px; }
-.assistant-message-delete span { line-height: 1; }
 .chat-message-delete-dialog { width: min(500px, 100%); }
 .chat-message-delete-dialog > p { color: #b9c5cb; line-height: 1.55; }
 .chat-message-delete-preview { max-height: 130px; overflow: auto; margin: 14px 0; padding: 10px 12px; border: 1px solid #343434; border-radius: 8px; background: #202020; color: #c7c7c7; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
@@ -1655,4 +1652,16 @@ body {
 @media (max-width: 720px) {
   .turn-assistant-heading { flex-wrap: wrap; }
   .model-retry-detail { width: min(360px, calc(100vw - 36px)); }
+}
+
+.final-answer-actions .assistant-message-delete {
+  min-width: 24px;
+  min-height: 24px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 5px;
+}
+.completion-card > .final-answer-actions {
+  flex: none;
 }

@@ -2287,7 +2287,7 @@ const toggleQueuedMessages = () => {
  }}
  />
           {selectedRoles.length > 0 && activeSession && <div className="composer-role" title={selectedRoles.map((role) => `${role.name}: ${role.description}`).join("\n")}><BriefcaseBusiness size={14}/><span>本条将使用 <strong>{selectedRoles.map((role) => role.name).join("、")}</strong></span><button type="button" title="Clear roles for this message" aria-label="Clear selected roles" onClick={() => onRolesConsumed(activeSession.session_id)}><X size={13}/></button></div>}
-          <div className="composer-actions"><span className="composer-cwd-inline" title={activeSession?.current_dir}>{activeSession && <><b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span></>}</span><span id={composerHintId} className="sr-only" role="status" aria-live="polite">{composerHint}</span><div className="composer-buttons"><button className={`attach-button ${uploadingAttachment ? "uploading" : ""}`} type="button" title={attachTitle} aria-label={attachLabel} disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onClick={() => fileInput.current?.click()}>{uploadingAttachment ? <LoaderCircle size={17}/> : <Paperclip size={17}/>}</button><input ref={fileInput} className="file-input" type="file" disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className={`send-button ${submittingDraft ? "sending" : ""}`} type="submit" title={effectiveSendLabel} aria-label={effectiveSendLabel} disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}>{submittingDraft ? <LoaderCircle size={17}/> : <Send size={17}/>}</button>{activeSession?.state === "working" && <button className={`stop-button ${isCancelling ? "sending" : ""}`} type="button" title={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} aria-label={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} disabled={isCancelling || sessionInteractionLocked} onClick={() => void cancelActiveSessionTurn()}>{isCancelling ? <LoaderCircle size={17}/> : <CircleStop size={17}/>} {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
+          <div className="composer-actions"><div className="composer-paths">{activeSession && <span className="composer-cwd-inline" title={activeSession.current_dir}><b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span></span>}{activeSession?.debug_dir && <span className="composer-cwd-inline composer-debug-inline" title={activeSession.debug_dir}><b>DEBUG:</b><span>{activeSession.debug_dir}</span></span>}</div><span id={composerHintId} className="sr-only" role="status" aria-live="polite">{composerHint}</span><div className="composer-buttons"><button className={`attach-button ${uploadingAttachment ? "uploading" : ""}`} type="button" title={attachTitle} aria-label={attachLabel} disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onClick={() => fileInput.current?.click()}>{uploadingAttachment ? <LoaderCircle size={17}/> : <Paperclip size={17}/>}</button><input ref={fileInput} className="file-input" type="file" disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className={`send-button ${submittingDraft ? "sending" : ""}`} type="submit" title={effectiveSendLabel} aria-label={effectiveSendLabel} disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}>{submittingDraft ? <LoaderCircle size={17}/> : <Send size={17}/>}</button>{activeSession?.state === "working" && <button className={`stop-button ${isCancelling ? "sending" : ""}`} type="button" title={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} aria-label={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} disabled={isCancelling || sessionInteractionLocked} onClick={() => void cancelActiveSessionTurn()}>{isCancelling ? <LoaderCircle size={17}/> : <CircleStop size={17}/>} {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
         </form>
       </ThreadPrimitive.ViewportFooter>
     </ThreadPrimitive.Viewport>
@@ -2495,10 +2495,15 @@ function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked,
     copied: "Answer copied",
     failed: "Copy answer failed",
   });
+  const answerActions = <div className="final-answer-actions">
+    <button type="button" className={`final-copy ${copyClass}`} title={copyLabel} aria-label={copyLabel} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={13}/> : <Copy size={13}/>}</button>
+    {onDelete && <button type="button" className="chat-message-delete assistant-message-delete" title="Delete this answer from the conversation and raw chat log" aria-label="Delete assistant answer" onClick={onDelete}><Trash2 size={13}/></button>}
+  </div>;
   return <section className="turn-final-delivery">
-    <div className="turn-final-toolbar"><button type="button" className={`final-copy ${copyClass}`} title={copyLabel} aria-label={copyLabel} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={13}/> : <Copy size={13}/>}<span aria-live="polite">{copyLabel}</span></button>{onDelete && <button type="button" className="chat-message-delete assistant-message-delete" title="Delete this answer from the conversation and raw chat log" aria-label="Delete assistant answer" onClick={onDelete}><Trash2 size={13}/><span>Delete</span></button>}</div>
     <div className="message-content"><MarkdownContent text={text}/></div>
-    {completion && <CompletionCard completion={completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen}/>}
+    {completion
+      ? <CompletionCard completion={completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen} answerActions={answerActions}/>
+      : answerActions}
   </section>;
 }
 
@@ -2678,7 +2683,7 @@ function CodeBlock({ children }: React.ComponentPropsWithoutRef<"pre">) {
     failed: `Copy ${codeCopySubject} failed`,
   });
   return <figure className="code-block">
-    <figcaption><span title={language}>{language}</span><button type="button" className={copyClass} onClick={() => void copy()} title={copyLabel} aria-label={copyLabel}>{copyState === "copied" ? <CheckCheck size={14}/> : <Copy size={14}/>}<span aria-live="polite">{copyLabel}</span></button></figcaption>
+    <figcaption><span title={language}>{language}</span><button type="button" className={copyClass} onClick={() => void copy()} title={copyLabel} aria-label={copyLabel}>{copyState === "copied" ? <CheckCheck size={14}/> : <Copy size={14}/>}</button></figcaption>
     <pre>{children}</pre>
   </figure>;
 }
@@ -2859,7 +2864,7 @@ function fencedCode(language: string, code: string) {
   return `${fence}${language}\n${code}\n${fence}`;
 }
 
-function CompletionCard({ completion, toolGenPending = false, toolGenBlocked = false, onToolGen }: { completion: NonNullable<ChatMessage["completion"]>; toolGenPending?: boolean; toolGenBlocked?: boolean; onToolGen?: () => void }) {
+function CompletionCard({ completion, toolGenPending = false, toolGenBlocked = false, onToolGen, answerActions }: { completion: NonNullable<ChatMessage["completion"]>; toolGenPending?: boolean; toolGenBlocked?: boolean; onToolGen?: () => void; answerActions?: React.ReactNode }) {
   const stats = completion.stats ?? {};
   const cancelled = completion.stop_reason?.toLowerCase() === "cancelledbyuser";
   const toolGenLabel = toolGenPending ? "Starting ToolGen" : toolGenBlocked ? "ToolGen busy" : "ToolGen";
@@ -2881,6 +2886,7 @@ function CompletionCard({ completion, toolGenPending = false, toolGenBlocked = f
     {!cancelled && isNotableStopReason(completion.stop_reason) && <span className="completion-status"><b>Status</b> {completion.stop_reason}</span>}
     {completion.repair_issue && <span className="completion-status warning"><b>Last repair</b> {completion.repair_issue}</span>}
     {onToolGen && !cancelled && <button className={`completion-toolgen ${toolGenPending ? "sending" : ""}`} type="button" title={toolGenTitle} aria-label={toolGenTitle} aria-busy={toolGenPending || undefined} disabled={toolGenPending || toolGenBlocked} onClick={onToolGen}>{toolGenPending ? <LoaderCircle size={12}/> : <Wrench size={12}/>}<span aria-live="polite">{toolGenLabel}</span></button>}
+    {answerActions}
   </div>;
 }
 

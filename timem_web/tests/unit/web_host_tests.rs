@@ -4824,6 +4824,7 @@ fn routing_test_state() -> AppState {
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
+        debug: None,
     }
 }
 
@@ -4841,6 +4842,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         ordinal,
         state: "ready".to_string(),
         current_dir: "/work".to_string(),
+        debug_dir: None,
         max_llm_input_tokens: 10_000,
         tools: Vec::new(),
         mcp_server_ids: Vec::new(),
@@ -5131,7 +5133,10 @@ fn barrier_synchronized_sessions_keep_request_action_final_and_completion_scoped
                 handle_worker_event(
                     &state,
                     &session_id,
-                    CoreSessionWorkerEvent::ModelRequest { round: 1 },
+                    CoreSessionWorkerEvent::ModelRequest {
+                        round: 1,
+                        prompt: String::new(),
+                    },
                 );
                 after_request.wait();
                 let action = CoreTopicEvent::new(
@@ -5239,14 +5244,20 @@ fn one_session_aggregates_primary_and_subworker_state_without_cross_finishing() 
         session_id,
         &primary_context_id,
         &primary_worker_id,
-        CoreSessionWorkerEvent::ModelRequest { round: 1 },
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+        },
     );
     handle_scoped_worker_event(
         &state,
         session_id,
         &sub_context_id,
         &sub_worker_id,
-        CoreSessionWorkerEvent::ModelRequest { round: 1 },
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+        },
     );
     handle_scoped_worker_event(
         &state,
@@ -5326,7 +5337,10 @@ fn primary_turn_finish_clears_stale_working_workers_and_session_spinner() {
         session_id,
         &primary_context_id,
         &primary_worker_id,
-        CoreSessionWorkerEvent::ModelRequest { round: 1 },
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+        },
     );
     handle_scoped_worker_event(
         &state,
@@ -5405,7 +5419,10 @@ fn stopped_primary_turn_removes_its_stale_reported_working_count() {
         session_id,
         &primary_context_id,
         &primary_worker_id,
-        CoreSessionWorkerEvent::ModelRequest { round: 1 },
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+        },
     );
     handle_scoped_worker_event(
         &state,
@@ -5482,7 +5499,10 @@ fn stopped_primary_turn_preserves_a_reported_active_subworker() {
         session_id,
         &primary_context_id,
         &primary_worker_id,
-        CoreSessionWorkerEvent::ModelRequest { round: 1 },
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+        },
     );
     handle_scoped_worker_event(
         &state,
@@ -5578,7 +5598,10 @@ fn primary_turn_finish_preserves_explicitly_reported_active_subworker() {
         session_id,
         &primary_context_id,
         &primary_worker_id,
-        CoreSessionWorkerEvent::ModelRequest { round: 1 },
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+        },
     );
     handle_scoped_worker_event(
         &state,
@@ -5653,7 +5676,10 @@ fn primary_turn_finish_ignores_other_sessions_global_worker_count() {
         session_id,
         &primary_context_id,
         &primary_worker_id,
-        CoreSessionWorkerEvent::ModelRequest { round: 1 },
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+        },
     );
     handle_scoped_worker_event(
         &state,
@@ -6716,6 +6742,7 @@ fn live_model_usage_is_retained_in_the_active_turn_and_correct_session() {
         "session_a",
         CoreSessionWorkerEvent::ModelResponse {
             round: 2,
+            content: String::new(),
             runtime_phase: None,
             usage: UsageStats {
                 prompt_tokens: 8_200,
@@ -6730,6 +6757,7 @@ fn live_model_usage_is_retained_in_the_active_turn_and_correct_session() {
         "session_a",
         CoreSessionWorkerEvent::ModelResponse {
             round: 3,
+            content: String::new(),
             runtime_phase: Some("toolgen".to_string()),
             usage: UsageStats {
                 prompt_tokens: 3_100,
@@ -8665,7 +8693,7 @@ fn friendly_journal_error_replaces_in_use_with_actionable_message() {
 }
 
 #[test]
-fn existing_instance_recovery_reports_pid_url_and_stop_command() {
+fn existing_instance_is_rejected_with_pid_url_and_stop_command() {
     let path = std::env::temp_dir().join(unique_web_id("existing_instance_recovery"));
     let mut journal = EventJournal::open(&path).unwrap();
     journal
@@ -8680,12 +8708,17 @@ fn existing_instance_recovery_reports_pid_url_and_stop_command() {
         })
         .unwrap();
 
-    let options = WebLaunchOptions {
-        open_browser: false,
-        ..WebLaunchOptions::default()
-    };
     let info = EventJournal::read_instance_info(&path).unwrap();
-    assert!(resume_existing_web_instance(&options, &info).is_ok());
+    let error = existing_web_instance_error(&info);
+    assert!(error.contains("never reused"));
+    assert!(error.contains("PID:  4242"));
+    assert!(error.contains("http://127.0.0.1:18080/?token=existing-token"));
+    assert!(error.contains("--space"));
+    assert!(error.contains("--data-dir"));
+    #[cfg(unix)]
+    assert!(error.contains("kill -TERM 4242"));
+    #[cfg(windows)]
+    assert!(error.contains("taskkill /PID 4242 /T"));
 
     #[cfg(unix)]
     {
@@ -8709,7 +8742,7 @@ fn existing_instance_recovery_reports_pid_url_and_stop_command() {
 }
 
 #[tokio::test]
-async fn healthy_existing_instance_is_reused_without_taking_its_journal() {
+async fn healthy_existing_instance_is_detected_without_taking_its_journal() {
     let path = std::env::temp_dir().join(unique_web_id("healthy_existing_instance"));
     let mut owner = EventJournal::open(&path).unwrap();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();

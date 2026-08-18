@@ -75,6 +75,7 @@ export type Session = {
   ordinal: number;
   state: "ready" | "working" | "error" | "stopped" | string;
   current_dir: string;
+  debug_dir?: string | null;
   max_llm_input_tokens: number;
   tools: ToolSummary[];
   mcp_server_ids: string[];
