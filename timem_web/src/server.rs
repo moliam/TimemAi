@@ -709,6 +709,12 @@ enum WireEvent {
     HostError {
         message: String,
     },
+    RuntimeNotice {
+        session_id: String,
+        level: String,
+        title: String,
+        message: String,
+    },
     CommandAck {
         command_id: String,
         status: CommandAckStatus,
@@ -2613,7 +2619,10 @@ fn publish_core_semantic(state: &AppState, session_id: &str, event: WireEvent) {
             }
         }
         eprintln!("[timem_web_semantic_publish_error] session_id={session_id:?} reason={error}");
-        let _ = state.events.send(WireEvent::HostError {
+        let _ = state.events.send(WireEvent::RuntimeNotice {
+            session_id: session_id.to_string(),
+            level: "warning".to_string(),
+            title: "Runtime persistence warning".to_string(),
             message: format!("semantic_event_persist_failed:{error}"),
         });
     }

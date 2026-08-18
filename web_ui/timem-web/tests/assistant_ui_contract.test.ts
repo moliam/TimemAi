@@ -761,7 +761,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
       'kind === "model_request" || kind === "model_response" || kind === "model_retry"',
     );
     expect(source).toContain(
-      'kind !== "model_request" && kind !== "model_response" && kind !== "model_retry"',
+      'kind === "model_request" || kind === "model_response" || kind === "model_retry"',
     );
     expect(viewModelSource).toContain('case "core.model.repair":');
     expect(styles).toContain(".model-retry-status");
@@ -794,7 +794,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
   });
 
   it("does not expose internal model transport bookkeeping or duplicate activity labels", () => {
-    expect(source).toContain('kind !== "model_request" && kind !== "model_response" && kind !== "model_retry"');
+    expect(source).toContain('if (kind === "model_request" || kind === "model_response" || kind === "model_retry") return null;');
+    expect(source).not.toContain('setActivities((current) => [activity');
     expect(source).not.toContain("Model completed a response");
     expect(source).not.toContain("LIVE ACTIVITY");
     expect(source).not.toContain("Working view");
@@ -1637,10 +1638,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
 
   it("surfaces failed user operations instead of silently restoring local pending state", () => {
     expect(source).toContain("const pushActivity = useCallback");
-    expect(source).toContain("candidate.sessionId === activity.sessionId");
-    expect(source).toContain("candidate.title === activity.title");
-    expect(source).toContain("candidate.detail === activity.detail");
-    expect(source).toContain("const withoutExisting = existingIndex >= 0");
+    expect(source).toContain('activity.sessionId === "system"');
+    expect(source).toContain("appendActivityToCurrentTurn(session, { ...activity, sessionId: requestedSessionId })");
     expect(source).toContain("const reportUiError = useCallback");
     expect(source).toContain("pushActivity({ id: clientId(), sessionId, tone: \"error\", title, detail, createdAt: Date.now() });");
     expect([...source.matchAll(/pushActivity\(activity\);/g)].length).toBeGreaterThanOrEqual(10);
@@ -1665,10 +1664,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain("Reconnect to Timem Web before switching the mem directory.");
     expect(source).toContain("ToolGen start failed");
     expect(source).toContain("Reconnect to Timem Web before generating a reusable tool.");
-    const ordinaryActivityAppend = [...source.matchAll(/setActivities\(\(current\) => \[activity,/g)].map((match) => source.slice(Math.max(0, match.index - 80), match.index + 120));
-    expect(ordinaryActivityAppend).toEqual([
-      expect.stringContaining("activity.kind === \"toolgen\""),
-    ]);
+    expect(source).not.toContain("setActivities((current)");
+    expect(source).toContain('event.source === "ui_activity"');
   });
 
   it("groups each task into user input, bounded process, and separate final delivery", () => {
@@ -1866,36 +1863,16 @@ it("uses an explicit session-created event and session-scoped inline decisions",
     expect(styles).toContain('grid-template-columns: repeat(3, minmax(0, 1fr))');
   });
 
-  it("shows host and session errors directly without an Activity panel", () => {
-    expect(source).toContain("const visibleErrors = activities.filter");
-    expect(source).toContain("const visibleErrorText = visibleError ? `${visibleError.title}${visibleError.detail ? ` · ${visibleError.detail}` : \"\"}` : \"\";");
-    expect(source).toContain("const visibleErrorCount = visibleErrors.length;");
-    expect(source).toContain("const hiddenErrorCount = Math.max(0, visibleErrorCount - 1)");
-    expect(source).toContain('const dismissErrorLabel = visibleError ? `Dismiss ${visibleError.title}` : "Dismiss error";');
-    expect(source).toContain('className="host-error-banner" role="alert"');
-    expect(source).toContain('className="host-error-text" title={visibleErrorText}');
-    expect(source).toContain('className="host-error-detail"');
-    expect(source).toContain("more hidden error");
-    expect(source).toContain('title={dismissErrorLabel}');
-    expect(source).toContain('aria-label={dismissErrorLabel}');
-    expect(source).toContain('className="host-error-actions"');
-    expect(source).not.toContain('className="host-error-details"');
-    expect(source).not.toContain("errorDetailsLabel");
-    expect(source).toContain('className="host-error-dismiss-all"');
-    expect(source).toContain('aria-label="Dismiss all visible errors"');
-    expect(source).toContain('activity.tone !== "error" || (activity.sessionId !== activeSession?.session_id && activity.sessionId !== "system")');
-    expect(styles).toContain(".host-error-banner");
-    expect(styles).toContain(".host-error-text { flex: 1 1 auto;");
-    expect(styles).toContain("-webkit-line-clamp: 2;");
-    expect(styles).toContain(".host-error-detail");
-    expect(styles).toContain(".host-error-banner em");
-    expect(styles).toContain(".host-error-actions");
-    expect(styles).toContain(".host-error-actions { flex: none; display: inline-flex; align-items: center; justify-content: flex-end; flex-wrap: wrap;");
-    expect(styles).toContain(".host-error-actions .icon-button { flex: none; }");
-    expect(styles).toContain(".host-error-dismiss-all");
-    expect(styles).toContain(':root[data-theme="light"] .host-error-banner em');
-    expect(styles).toContain(':root[data-theme="light"] .host-error-dismiss-all');
-    expect(styles).toContain("@media (max-width: 720px) { .host-error-banner, .runtime-disconnect-banner { align-items: flex-start; flex-wrap: wrap;");
-    expect(styles).toContain(".host-error-actions { width: 100%; justify-content: flex-end;");
+  it("keeps only global runtime availability in a banner and puts other errors in the task work stream", () => {
+    expect(source).toContain('className="runtime-disconnect-banner" role="alert"');
+    expect(source).toContain('const runtimeDisconnectedTitle = runtimeUnavailable ? "Runtime unavailable" : "Connection lost";');
+    expect(source).not.toContain('className="host-error-banner"');
+    expect(source).not.toContain("const visibleErrors = activities.filter");
+    expect(source).toContain('event.source === "ui_activity"');
+    expect(source).toContain("appendActivityToCurrentTurn");
+    expect(source).toContain('if (event.type === "runtime_notice")');
+    expect(protocolSource).toContain('type: "runtime_notice"');
+    expect(styles).toContain(".runtime-disconnect-banner");
+    expect(styles).not.toContain(".host-error-banner");
   });
 });

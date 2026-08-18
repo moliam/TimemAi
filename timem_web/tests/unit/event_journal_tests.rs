@@ -172,6 +172,36 @@ fn partial_last_write_does_not_hide_the_prior_durable_prefix() {
 }
 
 #[test]
+fn append_repairs_an_incomplete_tail_without_restarting_the_host() {
+    let path = journal_path("live_partial_tail");
+    let mut journal = EventJournal::open(&path).unwrap();
+    journal.append(json!({"type":"durable"})).unwrap();
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(journal.path())
+        .unwrap();
+    file.write_all(br#"{"event_seq":2,"event":{"type":"partial"}"#)
+        .unwrap();
+    file.sync_data().unwrap();
+    drop(file);
+
+    let appended = journal.append(json!({"type":"after_live_repair"})).unwrap();
+    assert_eq!(appended.event_seq, 2);
+    assert_eq!(
+        journal
+            .replay_after(0)
+            .unwrap()
+            .iter()
+            .map(|entry| (entry.event_seq, entry.event["type"].as_str().unwrap()))
+            .collect::<Vec<_>>(),
+        vec![(1, "durable"), (2, "after_live_repair")]
+    );
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn complete_json_without_newline_is_preserved_and_separated_before_append() {
     let path = journal_path("missing_newline");
     std::fs::write(&path, br#"{"event_seq":1,"event":{"type":"durable"}}"#).unwrap();
