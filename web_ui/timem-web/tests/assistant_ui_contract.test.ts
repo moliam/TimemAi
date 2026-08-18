@@ -1026,7 +1026,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('activity.toolgen_phase === "published"');
     expect(source).toContain("const scrollItems = useMemo(() => visibleItems.filter");
     expect(source).toContain('className="turn-persistent-toolgen" aria-label="ToolGen result"');
-    expect(source).toContain("scrollItems.map(({ event, activity }, index)");
+    expect(source).toContain("scrollItems.map((item, index)");
     expect(styles).toContain(".turn-persistent-toolgen");
     expect(source).toContain('title="Scroll to latest work update"');
     expect(source).toContain('aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`}');
@@ -1676,11 +1676,23 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('className={`turn-assistant-frame ${turn.state} ${showWorkStream ? "" : "collapsed-work"}`}');
     expect(source).toContain('sessionId={activeSession?.session_id ?? ""}');
     expect(source).toContain('function TurnInteraction({ sessionId, turn, decisions');
-    expect(source).toContain('<ActivityView key={event.event_id} activity={activity}/>');
+    expect(source).toContain('<ActivityView key={item.key} activity={activity}/>');
     expect(source).not.toContain("function TurnEventView(");
     expect(source).toContain('className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleItems.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`}');
     expect(source).toContain('className="turn-final-delivery"');
-    expect(source).toContain('const lifecycleItems = useMemo(() => lifecycleEvents.map((event) => ({'); expect(source).toContain('const processActivities = useMemo(() => lifecycleItems'); expect(source).toContain("id: event.event_id,"); expect(source).toContain("createdAt: event.created_at_ms,"); expect(source).not.toContain("scrollEventActivities");
+    expect(source).toContain('const supplementItems = useMemo(() => turn.user_entries');
+ expect(source).toContain('entry.kind === "supplement"');
+ expect(source).toContain('kind: "user_supplement" as const');
+ expect(source).toContain('title: "[用户补充]"');
+ expect(source).toContain('const timelineItems = useMemo(() => [...lifecycleItems, ...supplementItems]');
+ expect(source).toContain('left.createdAt - right.createdAt');
+ expect(source).toContain('turn.events.length + supplementItems.length + decisions.length');
+ expect(source).toContain('activity.kind === "user_supplement"');
+ expect(source).toContain('<span className="activity-mark" aria-hidden="true">💡</span>');
+ expect(source).toContain('<div className="user-supplement-line"><strong>{activity.title}</strong>');
+ expect(styles).toContain(".turn-work-item.user-supplement");
+ expect(styles).toContain(".user-supplement-line strong");
+ expect(source).toContain('const lifecycleItems = useMemo(() => lifecycleEvents.map((event) => ({'); expect(source).toContain('const processActivities = useMemo(() => timelineItems'); expect(source).toContain("id: event.event_id,"); expect(source).toContain("createdAt: event.created_at_ms,"); expect(source).not.toContain("scrollEventActivities");
     expect(source).toContain('const hasOnlyFreeTalk = hasOnlyFreeTalkActivity(processActivities, decisions.length);');
     expect(source).toContain('hasOnlyFreeTalkActivity, manualToolGenCommand');
     expect(source).toContain('const interruptedByUser = turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";');
@@ -1728,7 +1740,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
 
   it("coalesces tool lifecycles and renders tools as compact subordinate rows", () => {
   expect(source).toContain("coalesceActionLifecycle(turn.events)");
-  expect(source).toContain('<ToolActivityGroup key={`tool-activity-group-${event.event_id}`} summary={summary}/>');
+  expect(source).toContain('<ToolActivityGroup key={`tool-activity-group-${item.key}`} summary={summary}/>');
   expect(source).toContain("summarizeConsecutiveToolActivities(");
   expect(source).toContain('className={`tool-activity-group ${summary.status}`}');
   expect(source).toContain('className="tool-activity-group-counts"');
