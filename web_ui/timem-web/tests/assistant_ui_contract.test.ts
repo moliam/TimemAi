@@ -1499,7 +1499,11 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('aria-expanded={queueExpanded}');
     expect(source).toContain('queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`');
     expect(source).toContain("const [collapsedQueuePanelSessionIds, setCollapsedQueuePanelSessionIds]");
-    expect(source).toContain('queuePanelCollapsed ? `${displayQueuedMessages.length} 条消息`');
+    expect(source).toContain("const firstQueuedMessage = displayQueuedMessages[0];");
+    expect(source).toContain('className={`queued-message-summary ${firstQueuedMessage?.deliveryError ? "delivery-error" : ""}`}');
+    expect(source).toContain("<p>{firstQueuedMessage?.text}</p>");
+    expect(source).toContain('className="queued-message-summary-attachments"');
+    expect(source).toContain('className="queued-message-summary-count">{displayQueuedMessages.length} 条</small>');
     expect(source).toContain('className="queued-message-panel-toggle"');
     expect(source).toContain('title={queuePanelCollapsed ? "展开待发送队列" : "折叠待发送队列为一行"}');
     expect(source).toContain("{!queuePanelCollapsed && <DndContext");
@@ -1513,6 +1517,10 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(styles).toContain(".queued-message-toggle, .queued-message-panel-toggle");
     expect(styles).toContain(".queued-message-list.summary-only > header { min-height: 26px; padding-bottom: 0; }");
     expect(styles).toContain(".queued-message-list > header small { min-width: 0; overflow: hidden;");
+    expect(styles).toContain(".queued-message-summary { min-width: 0; flex: 1 1 auto;");
+    expect(styles).toContain(".queued-message-summary p { min-width: 0; flex: 1 1 auto;");
+    expect(styles).toContain(".queued-message-summary-count { padding-left: 6px; border-left: 1px solid");
+    expect(styles).toContain(':root[data-theme="light"] .queued-message-summary p');
     expect(styles).toContain("@media (max-width: 520px) {\n  .queued-message-list > header { gap: 5px; }");
   });
 
