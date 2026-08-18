@@ -723,7 +723,7 @@ fn take_shell_resume_notice(
             history_path: session_store.history_path_for_session(session_id),
             current_dir: current_dir.to_path_buf(),
         }
-        .render(),
+        .render(ResponseProtocolKind::default().suite().prompt_boundaries()),
     )
 }
 

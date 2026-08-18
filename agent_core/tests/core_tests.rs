@@ -3211,7 +3211,7 @@ fn model_repair_audit_is_core_owned_when_applying_response() {
     assert!(records[0]["rendered"]
         .as_str()
         .unwrap()
-        .contains("## assistant:\n"));
+        .contains("## ASSISTANT:\n"));
     assert!(records[0]["rendered"]
         .as_str()
         .unwrap()

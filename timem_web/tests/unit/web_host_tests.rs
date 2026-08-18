@@ -6878,9 +6878,12 @@ fn active_turn_supplement_consumes_pending_attachments_into_the_same_turn() {
     assert!(state.sessions.lock().unwrap()[&session_id]
         .attachments
         .is_empty());
-    assert!(uploaded_files_context(&updated.user_entries[1].attachments)
-        .unwrap()
-        .contains("extra-context.md (/tmp/timem-web/extra-context.md)"));
+    assert!(uploaded_files_context(
+        &updated.user_entries[1].attachments,
+        &agent_core::response_protocol::XML_PROMPT_BOUNDARIES
+    )
+    .unwrap()
+    .contains("extra-context.md (/tmp/timem-web/extra-context.md)"));
 }
 
 #[test]
