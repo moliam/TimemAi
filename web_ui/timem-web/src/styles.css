@@ -1618,3 +1618,24 @@ body {
 :root[data-theme="light"] .runtime-restart-divider > span:last-child { background: linear-gradient(90deg, #c5d0d4, transparent); }
 :root[data-theme="light"] .runtime-restart-divider strong { color: #52636a; }
 :root[data-theme="light"] .runtime-restart-divider time { color: #7a898f; }
+
+
+/* Transient model recovery belongs to the active working header, not the thought stream. */
+.model-retry-status { position: relative; flex: none; margin-left: auto; color: #b7a16e; font-size: 10px; line-height: 1; }
+.model-retry-status summary { display: inline-flex; align-items: center; gap: 4px; border: 1px solid #665a3b; border-radius: 999px; min-height: 20px; padding: 2px 7px 2px 5px; background: #302b20; color: #dbc17d; font-weight: 700; cursor: pointer; list-style: none; user-select: none; }
+.model-retry-status summary::-webkit-details-marker { display: none; }
+.model-retry-status summary svg { transition: transform .16s ease; }
+.model-retry-status[open] summary svg { transform: rotate(90deg); }
+.model-retry-status summary small { color: #9f9068; font-size: 9px; font-variant-numeric: tabular-nums; }
+.model-retry-status.reconnecting summary { border-color: #466079; background: #202b36; color: #8fc5ed; }
+.model-retry-status.reconnecting summary small { color: #789bb5; }
+.model-retry-detail { position: absolute; z-index: 8; top: calc(100% + 7px); right: 0; width: min(420px, calc(100vw - 48px)); max-height: 240px; overflow: auto; border: 1px solid #4a4a4a; border-radius: 8px; padding: 10px 12px; background: #242424; box-shadow: 0 12px 30px #0008; color: #d0d0d0; font-size: 11px; line-height: 1.5; }
+.model-retry-detail p { margin: 0 0 8px; overflow-wrap: anywhere; }
+.model-retry-detail p:last-child { margin-bottom: 0; }
+:root[data-theme="light"] .model-retry-status summary { border-color: #b8a26d; background: #fff8e7; color: #806321; }
+:root[data-theme="light"] .model-retry-status.reconnecting summary { border-color: #8eb1ca; background: #edf7fd; color: #286a9b; }
+:root[data-theme="light"] .model-retry-detail { border-color: #cdd6da; background: #fff; color: #42545c; box-shadow: 0 10px 28px #58707b26; }
+@media (max-width: 720px) {
+  .turn-assistant-heading { flex-wrap: wrap; }
+  .model-retry-detail { width: min(360px, calc(100vw - 36px)); }
+}

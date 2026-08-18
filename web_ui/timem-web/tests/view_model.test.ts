@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnTimelinePlacement, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
+import { activeModelRetryStatus, activityFromTopic, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnTimelinePlacement, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -93,13 +93,11 @@ describe("web topic view model", () => {
   it("defaults completed work to collapsed only when its process contains free talk alone", () => {
     const freeTalk = activityFromTopic(topic("core.model.response", { free_talk: "Simple reasoning." }));
     const action = activityFromTopic(topic("core.action", { action: "run_bash", status: "completed", input: { cmd: "pwd" } }));
-    const repair = activityFromTopic(topic("core.model.repair", { attempt: 1, max_attempts: 5, issue: "invalid_xml" }));
 
     expect(freeTalk).toMatchObject({ tone: "thinking", kind: "free_talk", detail: "Simple reasoning." });
     expect(hasOnlyFreeTalkActivity(freeTalk ? [freeTalk] : [], 0)).toBe(true);
     expect(hasOnlyFreeTalkActivity([], 0)).toBe(false);
     expect(hasOnlyFreeTalkActivity([freeTalk, action].filter((activity): activity is NonNullable<typeof activity> => activity !== null), 0)).toBe(false);
-    expect(hasOnlyFreeTalkActivity(repair ? [repair] : [], 0)).toBe(false);
     expect(hasOnlyFreeTalkActivity(freeTalk ? [freeTalk] : [], 1)).toBe(false);
   });
 
@@ -120,10 +118,12 @@ describe("web topic view model", () => {
       code: "bash tool.sh --self-test",
       code_language: "bash",
     });
-    expect(activityFromTopic(topic("core.model.repair", { runtime_phase: "toolgen", attempt: 1, max_attempts: 5, issue: "invalid_xml" }))).toMatchObject({
-      tone: "warning",
-      title: "⚠️ 模型回复偏离协议，重试 (1/5)",
-    });
+    expect(activityFromTopic(topic("core.model.repair", {
+      runtime_phase: "toolgen",
+      attempt: 1,
+      max_attempts: 5,
+      issue: "invalid_xml",
+    }))).toBeNull();
   });
 
   it("submits a new user turn when the active session is ready", () => {
@@ -1045,15 +1045,101 @@ describe("web topic view model", () => {
     expect(sessionContextUsage(restored)?.prompt_tokens).toBe(4_200);
   });
 
-  it("uses the current protocol repair limit for legacy events without a maximum", () => {
-    const activity = activityFromTopic(topic("core.model.repair", {
+  it("keeps model recovery out of the thought stream and exposes the active header status", () => {
+    expect(activityFromTopic(topic("core.model.repair", {
       attempt: 1,
       issue: "missing_response_root",
-    }));
-    expect(activity?.title).toBe("⚠️ 模型回复偏离协议，重试 (第 1 次)");
+    }))).toBeNull();
+
+    const retrying = turn("repairing", "working");
+    retrying.events = [{
+      event_id: "repair",
+      source: "core_topic",
+      created_at_ms: 2,
+      payload: topic("core.model.repair", {
+        attempt: 2,
+        max_attempts: 20,
+        issue: "missing_response_root",
+      }) as unknown as Record<string, unknown>,
+    }];
+
+    expect(activeModelRetryStatus(retrying)).toMatchObject({
+      kind: "retrying",
+      label: "retrying",
+      progress: "2/20",
+    });
+    expect(activeModelRetryStatus(retrying)?.detail)
+      .toContain("回复缺少必需的 response 根节点");
+
+    const reconnecting = turn("reconnecting", "working");
+    reconnecting.events = [{
+      event_id: "retry",
+      source: "worker_activity",
+      created_at_ms: 2,
+      payload: {
+        kind: "model_retry",
+        attempt: 3,
+        max_attempts: 100,
+        delay_ms: 10_000,
+        error: "model_http_503: upstream unavailable",
+      },
+    }];
+
+    expect(activeModelRetryStatus(reconnecting)).toMatchObject({
+      kind: "reconnecting",
+      label: "reconnecting",
+      progress: "3/100",
+    });
+    expect(activeModelRetryStatus(reconnecting)?.detail)
+      .toContain("model_http_503");
+
+    const changingFailure = turn("changing-failure", "working");
+    changingFailure.events = [
+      retrying.events[0],
+      reconnecting.events[0],
+    ];
+    expect(activeModelRetryStatus(changingFailure)?.kind).toBe("reconnecting");
+
+    changingFailure.events.push({
+      ...retrying.events[0],
+      event_id: "later-repair",
+      created_at_ms: 4,
+    });
+    expect(activeModelRetryStatus(changingFailure)?.kind).toBe("retrying");
   });
 
-  it("renders response repair as a visible warning with a natural explanation", () => { const activity = activityFromTopic(topic("core.model.repair", { attempt: 2, max_attempts: 5, issue: "missing_response_root", reason: "The required response root is missing." })); expect(activity).toMatchObject({ tone: "warning", title: "⚠️ 模型回复偏离协议，重试 (2/5)", detail: "回复缺少必需的 response 根节点，因此正在重新请求。" }); expect(activity?.detail).not.toContain("missing_response_root"); }); it("hides the recovered-final-answer issue code in legacy repair events", () => { const activity = activityFromTopic(topic("core.model.repair", { attempt: 1, max_attempts: 5, issue: "xml_recovered_final_answer_requires_retry" })); expect(activity).toMatchObject({ tone: "warning", detail: "回复根节点外包含了额外内容。系统虽然识别出了最终回答，但无法将它安全地视为完整响应，因此正在重新请求。" }); expect(activity?.detail).not.toContain("xml_recovered_final_answer_requires_retry"); }); it("renders model free talk verbatim without an invented completion label", () => {
+  it("clears the temporary recovery status after recovery or turn completion", () => {
+    const recovered = turn("recovered", "working");
+    recovered.events = [
+      {
+        event_id: "retry",
+        source: "worker_activity",
+        created_at_ms: 2,
+        payload: {
+          kind: "model_retry",
+          attempt: 1,
+          max_attempts: 100,
+          error: "model_timeout",
+        },
+      },
+      {
+        event_id: "response",
+        source: "worker_activity",
+        created_at_ms: 3,
+        payload: { kind: "model_response" },
+      },
+    ];
+    expect(activeModelRetryStatus(recovered)).toBeNull();
+
+    const completed = {
+      ...recovered,
+      state: "finished",
+      events: [recovered.events[0]],
+    };
+    expect(activeModelRetryStatus(completed)).toBeNull();
+  });
+
+  it("renders model free talk verbatim without an invented completion label", () => {
     const activity = activityFromTopic(topic("core.model.response", {
       status: "finished",
       free_talk: "User sent a simple greeting. No tools needed.",
