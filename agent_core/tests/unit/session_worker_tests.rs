@@ -635,12 +635,14 @@ impl ModelClient for ToolGenWorkflowModel {
     ) -> Result<LlmResponse, String> {
         let (phase, content) = if prompt.contains("Follow the ToolGen repository standard") {
             assert!(prompt.contains("[TOOL_GEN_TASK]"));
-            assert!(prompt.contains("Action result: self_tool"));
+            assert!(
+                prompt.contains(r#"<action_result><self_tool name="inspect runtime parameters">"#)
+            );
             assert!(prompt.contains("## ID0"));
             assert!(!prompt.contains("ID0_TOOLGEN"));
             assert!(!prompt.contains("Referenced completed turn id:"));
             assert!(!prompt.contains("Completed task result:"));
-            if prompt.contains("Action result: toolgen\nop: publish\nstatus: ready") {
+            if prompt.contains(r#"<action_result><toolgen name="publish validated tool draft">"#) {
                 (
                     "toolgen_finish",
                     confirmed_xml_response("<response><toolgen_retrospect>Created reusable-line-counter; runtime validation returned status: ready.</toolgen_retrospect><final_answer>ToolGen review complete.</final_answer></response>"),
@@ -676,10 +678,11 @@ impl ModelClient for ToolGenWorkflowModel {
                 .unwrap();
                 (
                     "toolgen_publish",
-                    format!("<response><free_talk>Writing and validating the reusable line counter.</free_talk><actions><toolgen op=\"publish\"><draft_path>{draft}</draft_path></toolgen></actions></response>"),
+                    format!("<response><free_talk>Writing and validating the reusable line counter.</free_talk><actions><toolgen name=\"publish validated tool draft\" op=\"publish\"><draft_path>{draft}</draft_path></toolgen></actions></response>"),
                 )
             }
-        } else if prompt.contains("Action result: self_tool") {
+        } else if prompt.contains(r#"<action_result><self_tool name="inspect runtime parameters">"#)
+        {
             (
                 "main_finish",
                 confirmed_xml_response(
@@ -689,7 +692,7 @@ impl ModelClient for ToolGenWorkflowModel {
         } else {
             (
                 "main_action",
-                "<response><actions><self_tool type=\"params\"/></actions></response>".to_string(),
+                "<response><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></response>".to_string(),
             )
         };
         let prompt_tokens = if phase.starts_with("toolgen") {
@@ -953,8 +956,9 @@ impl ModelClient for LongToolGenWorkflowModel {
             *calls
         };
         let content = if call <= 11 {
-            format!("<response><free_talk>ToolGen round {call}.</free_talk><actions><self_tool type=\"params\"/></actions></response>")
-        } else if prompt.contains("Action result: toolgen\nop: publish\nstatus: ready") {
+            format!("<response><free_talk>ToolGen round {call}.</free_talk><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></response>")
+        } else if prompt.contains(r#"<action_result><toolgen name="publish validated tool draft">"#)
+        {
             confirmed_xml_response("<response><toolgen_retrospect>Created long-running-tool after normal runtime validation.</toolgen_retrospect><final_answer>Extended ToolGen workflow completed.</final_answer></response>")
         } else {
             let marker = "Write the new tool files only in this temporary staging directory:\n";
@@ -985,7 +989,7 @@ impl ModelClient for LongToolGenWorkflowModel {
                 .to_string(),
             )
             .unwrap();
-            format!("<response><free_talk>Publishing after {call} normal model calls.</free_talk><actions><toolgen op=\"publish\"><draft_path>{draft}</draft_path></toolgen></actions></response>")
+            format!("<response><free_talk>Publishing after {call} normal model calls.</free_talk><actions><toolgen name=\"publish validated tool draft\" op=\"publish\"><draft_path>{draft}</draft_path></toolgen></actions></response>")
         };
         Ok(LlmResponse {
             content,
@@ -1110,10 +1114,11 @@ impl ModelClient for FailingToolGenModel {
         let content = if prompt.contains("Follow the ToolGen repository standard") {
             *self.child_calls.lock().unwrap() += 1;
             "not xml".to_string()
-        } else if prompt.contains("Action result: self_tool") {
+        } else if prompt.contains(r#"<action_result><self_tool name="inspect runtime parameters">"#)
+        {
             confirmed_xml_response("<response><final_answer>Main task survives ToolGen failure.</final_answer></response>")
         } else {
-            "<response><actions><self_tool type=\"params\"/></actions></response>".to_string()
+            "<response><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></response>".to_string()
         };
         Ok(LlmResponse {
             content,

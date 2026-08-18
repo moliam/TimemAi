@@ -96,9 +96,7 @@ fn build_next_prompt_orders_pending_components_without_role_merging() {
     );
 
     let prompt = core.build_next_prompt();
-    let system_first = prompt
-        .find("## SYSTEM\n\nThe following are results of the actions generated in response:")
-        .unwrap();
+    let system_first = prompt.find("## SYSTEM\n\nAction result: run_bash").unwrap();
     let action_result = prompt.find("Action result: run_bash").unwrap();
     let user = prompt.find("## USER\n\nnew input").unwrap();
     let system_second = prompt.find("## SYSTEM\n\nfound something new").unwrap();

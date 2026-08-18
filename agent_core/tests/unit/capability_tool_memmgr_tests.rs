@@ -57,6 +57,7 @@ fn raw_chat_search_status_is_independent_of_result_text() {
 
     let action = ParsedAction {
         action: "memmgr".to_string(),
+        name: None,
         raw_input: json!({
             "type": "raw_chat",
             "op": "search",

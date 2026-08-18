@@ -44,6 +44,7 @@ fn publish_action_returns_ready_only_after_runtime_self_test() {
     .unwrap();
     let action = ParsedAction {
         action: "toolgen".to_string(),
+        name: None,
         raw_input: json!({"op":"publish", "draft_path":draft}),
     };
     let ActionExecution::Completed(outcome) = execute_action(&mut core, &action) else {
@@ -76,6 +77,7 @@ fn publish_action_uses_structured_approval_before_executing_self_test() {
     let draft = core.tool_repo().create_draft().unwrap();
     let action = ParsedAction {
         action: "toolgen".into(),
+        name: None,
         raw_input: json!({"op":"publish", "draft_path":draft}),
     };
     let ActionExecution::NeedsApproval(pending) = execute_action(&mut core, &action) else {

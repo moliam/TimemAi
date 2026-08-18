@@ -1109,6 +1109,7 @@ pub(crate) fn execute_run_bash_with_tail(
                 cwd: cwd.to_path_buf(),
                 tail_out,
             },
+            action_name: None,
             continuation: None,
         });
     }

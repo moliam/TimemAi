@@ -689,6 +689,8 @@ fn parse_xml_action_groups(
     Ok(groups)
 }
 
+const MAX_XML_ACTION_NAME_CHARS: usize = 160;
+
 fn parse_xml_tool_action(
     element: &XmlActionElement,
     label: &str,
@@ -700,8 +702,16 @@ fn parse_xml_tool_action(
     if !element.text.trim().is_empty() {
         return Err(format!("{label}.tool_text_not_allowed"));
     }
+    let action_name = element
+        .attributes
+        .get("name")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let mut input = Map::new();
     for (name, raw) in &element.attributes {
+        if name == "name" {
+            continue;
+        }
         let schema = capabilities.tool_input_property_schema(&element.name, name);
         input.insert(
             name.clone(),
@@ -719,7 +729,15 @@ fn parse_xml_tool_action(
         element.name.clone(),
         Value::Object(input),
     )]));
-    super::parse_action_object(&action_value, label, capabilities)
+    let mut action = super::parse_action_object(&action_value, label, capabilities)?;
+    let Some(action_name) = action_name else {
+        return Err(format!("{label}.name_required"));
+    };
+    if action_name.chars().count() > MAX_XML_ACTION_NAME_CHARS {
+        return Err(format!("{label}.name_too_long"));
+    }
+    action.name = Some(action_name);
+    Ok(action)
 }
 
 fn xml_element_value(
@@ -1384,6 +1402,12 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
             || issue.contains(".xml_element_limit_exceeded") =>
         {
             "The XML action tree exceeds the runtime safety limit. Flatten unnecessary nesting or split the work across model rounds."
+        }
+        issue if issue.ends_with(".name_required") => {
+            "Every XML tool action needs a non-empty, short, descriptive name attribute, for example <run_bash name=\"check git status\">...</run_bash>. The name is protocol metadata and is not passed to the tool."
+        }
+        issue if issue.ends_with(".name_too_long") => {
+            "The XML action name is too long. Shorten it to at most 160 characters while keeping it descriptive; the name is protocol metadata and is not passed to the tool."
         }
         issue if issue.contains(".tool_text_not_allowed") => {
             "A tool element cannot contain bare text. Put each tool argument in an attribute or named child element."

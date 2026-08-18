@@ -114,7 +114,7 @@ fn runtime_finish_confirmation_prefix_matches_the_prompt_contract() {
 #[test]
 fn finish_confirmation_can_reconsider_and_continue_with_actions() {
     let raw = format!(
-        "<response><finish_confirm>{FINISH_CONFIRM_PREFIX} More evidence is needed.</finish_confirm><actions><run_bash><cmd>pwd</cmd></run_bash></actions></response>"
+        "<response><finish_confirm>{FINISH_CONFIRM_PREFIX} More evidence is needed.</finish_confirm><actions><run_bash name=\"inspect cwd\"><cmd>pwd</cmd></run_bash></actions></response>"
     );
     let env = parse_xml_envelope(&raw, &caps());
 
@@ -205,7 +205,7 @@ fn missing_response_boundaries_are_not_synthesized() {
 #[test]
 fn recovery_remains_allowed_for_non_terminal_actions() {
     let env = parse_xml_envelope(
-        "preface<response><actions><run_bash><cmd>printf safe</cmd></run_bash></actions></response>trailing",
+        r#"preface<response><actions><run_bash name="run safe command"><cmd>printf safe</cmd></run_bash></actions></response>trailing"#,
         &caps(),
     );
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
@@ -234,10 +234,10 @@ fn parses_xml_native_actions_with_sequential_and_parallel_groups() {
         r#"<response>
   <free_talk>Inspect, then test.</free_talk>
   <actions>
-    <run_bash timeout_ms="5000"><cmd>pwd</cmd></run_bash>
+    <run_bash name="inspect cwd" timeout_ms="5000"><cmd>pwd</cmd></run_bash>
     <parallel>
-      <run_bash timeout_ms="6000"><cmd>git status --short</cmd></run_bash>
-      <run_bash background="true"><cmd><![CDATA[printf '%s\n' '<ready>' > result.txt]]></cmd></run_bash>
+      <run_bash name="check status" timeout_ms="6000"><cmd>git status --short</cmd></run_bash>
+      <run_bash name="write readiness marker" background="true"><cmd><![CDATA[printf '%s\n' '<ready>' > result.txt]]></cmd></run_bash>
     </parallel>
   </actions>
 </response>"#,
@@ -255,11 +255,76 @@ fn parses_xml_native_actions_with_sequential_and_parallel_groups() {
         crate::ActionGroupOrder::Parallel
     );
     assert_eq!(env.action_groups[1].actions.len(), 2);
+    assert_eq!(env.next_actions[0].name.as_deref(), Some("inspect cwd"));
+    assert_eq!(env.next_actions[1].name.as_deref(), Some("check status"));
     assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
+    assert!(env.next_actions[0].raw_input.get("name").is_none());
     assert_eq!(env.next_actions[0].input_i64("timeout_ms"), Some(5000));
     assert_eq!(env.next_actions[1].input_i64("timeout_ms"), Some(6000));
     assert!(env.next_actions[2].input_bool("background"));
     assert!(env.next_actions[2].input_raw_str("cmd").contains("<ready>"));
+}
+
+#[test]
+fn xml_native_actions_require_non_empty_descriptive_names() {
+    for raw in [
+        r#"<response><actions><run_bash><cmd>pwd</cmd></run_bash></actions></response>"#,
+        r#"<response><actions><run_bash name="   "><cmd>pwd</cmd></run_bash></actions></response>"#,
+    ] {
+        let env = parse_xml_envelope(raw, &caps());
+        assert!(
+            env.repair_issue
+                .as_deref()
+                .is_some_and(|issue| issue.ends_with(".name_required")),
+            "{:?}",
+            env.repair_issue
+        );
+        assert!(env.next_actions.is_empty());
+    }
+
+    let env = parse_xml_envelope(
+        r#"<response><actions><run_bash name="inspect cwd"><cmd>pwd</cmd></run_bash></actions></response>"#,
+        &caps(),
+    );
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.next_actions[0].name.as_deref(), Some("inspect cwd"));
+    assert!(env.next_actions[0].raw_input.get("name").is_none());
+}
+
+#[test]
+fn xml_action_names_have_a_bounded_character_length() {
+    let allowed_name = "界".repeat(160);
+    let allowed = parse_xml_envelope(
+        &format!(
+            r#"<response><actions><run_bash name="{allowed_name}"><cmd>pwd</cmd></run_bash></actions></response>"#
+        ),
+        &caps(),
+    );
+    assert_eq!(allowed.repair_issue, None);
+    assert_eq!(
+        allowed.next_actions[0].name.as_deref(),
+        Some(allowed_name.as_str())
+    );
+
+    let oversized_name = "界".repeat(161);
+    let oversized = parse_xml_envelope(
+        &format!(
+            r#"<response><actions><run_bash name="{oversized_name}"><cmd>pwd</cmd></run_bash></actions></response>"#
+        ),
+        &caps(),
+    );
+    assert!(
+        oversized
+            .repair_issue
+            .as_deref()
+            .is_some_and(|issue| issue.ends_with(".name_too_long")),
+        "{:?}",
+        oversized.repair_issue
+    );
+    assert!(
+        xml_repair_instruction(oversized.repair_issue.as_deref().unwrap())
+            .contains("at most 160 characters")
+    );
 }
 
 #[test]
@@ -268,8 +333,8 @@ fn recovers_one_missing_final_tool_close_before_parallel_close() {
         r#"<response>
   <actions>
     <parallel>
-      <run_bash timeout_ms="5000"><cmd>pwd</cmd></run_bash>
-      <run_bash timeout_ms="5000"><cmd><![CDATA[git status --short]]></cmd>
+      <run_bash name="inspect cwd" timeout_ms="5000"><cmd>pwd</cmd></run_bash>
+      <run_bash name="check git status" timeout_ms="5000"><cmd><![CDATA[git status --short]]></cmd>
     </parallel>
   </actions>
 </response>"#,
@@ -345,7 +410,7 @@ fn xml_native_actions_convert_schema_typed_arrays_objects_and_mcp_tool_names() {
     };
     let capabilities = caps().with_mcp_tools(&[tool]).expect("MCP capability");
     let env = parse_xml_envelope(
-        r#"<response><actions><mcp.demo.batch>
+        r#"<response><actions><mcp.demo.batch name="batch demo files">
           <files><item>README.md</item><item>package.json</item></files>
           <options strict="true"><limit>20</limit></options>
         </mcp.demo.batch></actions></response>"#,
@@ -404,7 +469,7 @@ fn xml_native_values_cover_nullable_large_integer_additional_properties_and_lite
     };
     let capabilities = caps().with_mcp_tools(&[tool]).expect("MCP capability");
     let env = parse_xml_envelope(
-        r#"<response><actions><mcp.types.probe count="18446744073709551615" ratio="1.25" choice="7">
+        r#"<response><actions><mcp.types.probe name="probe XML value conversion" count="18446744073709551615" ratio="1.25" choice="7">
           <nothing/>
           <tuple><item>9</item><item>false</item></tuple>
           <metadata><alpha>1</alpha><beta>2</beta></metadata>
@@ -556,7 +621,7 @@ fn outer_text_is_discarded_when_a_non_final_response_root_is_extracted() {
         r#"prefix prose <actions><run_bash><cmd>must not execute</cmd></run_bash></actions>
 <response>
   <free_talk>inside thought</free_talk>
-  <actions><run_bash><cmd>printf safe</cmd></run_bash></actions>
+  <actions><run_bash name="run selected safe command"><cmd>printf safe</cmd></run_bash></actions>
 </response>
 trailing prose <run_bash><cmd>also must not execute</cmd></run_bash>"#,
         &caps(),
@@ -569,7 +634,7 @@ trailing prose <run_bash><cmd>also must not execute</cmd></run_bash>"#,
     assert_eq!(
         env.accepted_response.as_deref(),
         Some(
-            "<response>\n  <free_talk>inside thought</free_talk>\n  <actions><run_bash><cmd>printf safe</cmd></run_bash></actions>\n</response>"
+            "<response>\n  <free_talk>inside thought</free_talk>\n  <actions><run_bash name=\"run selected safe command\"><cmd>printf safe</cmd></run_bash></actions>\n</response>"
         )
     );
     assert!(!env.thought.contains("must not execute"));
@@ -584,7 +649,7 @@ fn multiple_response_roots_select_the_largest_complete_root() {
 noise
 <response>
   <free_talk>use the larger complete response</free_talk>
-  <actions><run_bash><cmd>printf selected</cmd></run_bash></actions>
+  <actions><run_bash name="run selected command"><cmd>printf selected</cmd></run_bash></actions>
 </response>
 after"#,
         &caps(),
@@ -602,8 +667,7 @@ after"#,
 #[test]
 fn equal_sized_response_roots_keep_the_first_complete_root() {
     let env = parse_xml_envelope(
-        "<response><actions><run_bash><cmd>printf first</cmd></run_bash></actions></response>\
-         <response><actions><run_bash><cmd>printf later</cmd></run_bash></actions></response>",
+        r#"<response><actions><run_bash name="run first command"><cmd>printf first</cmd></run_bash></actions></response><response><actions><run_bash name="run later command"><cmd>printf later</cmd></run_bash></actions></response>"#,
         &caps(),
     );
 
