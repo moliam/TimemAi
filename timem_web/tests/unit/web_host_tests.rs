@@ -1638,6 +1638,35 @@ async fn disconnect_after_acceptance_does_not_abort_queued_commands() {
 }
 
 #[tokio::test]
+async fn ordered_browser_command_worker_continues_after_one_handler_panics() {
+    let (command_tx, command_rx) = tokio_mpsc::channel(2);
+    let (result_tx, mut result_rx) = tokio_mpsc::unbounded_channel();
+    let worker = tokio::spawn(run_ordered_blocking_queue(
+        command_rx,
+        result_tx,
+        |value: usize| {
+            if value == 1 {
+                panic!("simulated browser command panic");
+            }
+            Ok(value)
+        },
+    ));
+
+    command_tx.send(1).await.unwrap();
+    command_tx.send(2).await.unwrap();
+
+    let first = result_rx.recv().await.unwrap().unwrap_err();
+    assert!(
+        first.starts_with("browser_command_worker_failed:"),
+        "{first}"
+    );
+    assert_eq!(result_rx.recv().await.unwrap().unwrap(), 2);
+
+    drop(command_tx);
+    worker.await.unwrap();
+}
+
+#[tokio::test]
 async fn command_results_from_different_sockets_may_reorder_but_keep_their_ids() {
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let (slow_tx, slow_rx) = tokio_mpsc::channel(1);
