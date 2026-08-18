@@ -19,6 +19,8 @@ pub struct ToolJobRecord {
     pub id: String,
     pub created_at_ms: i64,
     pub pid: u32,
+    #[serde(default)]
+    pub owner_id: Option<String>,
     pub action: String,
     pub command_path: String,
     pub payload_file: String,
@@ -98,6 +100,7 @@ impl FileToolJobStore {
             id: id.clone(),
             created_at_ms: now_ms(),
             pid: child.id(),
+            owner_id: Some(crate::runtime_process_owner_id().to_string()),
             action: action.to_string(),
             command_path: path.to_string_lossy().to_string(),
             payload_file: payload_file.to_string_lossy().to_string(),
@@ -173,6 +176,30 @@ impl FileToolJobStore {
         }
     }
 
+    /// Terminates background command jobs launched by this process.
+    ///
+    /// The process-unique owner identity prevents a restarted Host from
+    /// signalling historical records even if an operating-system PID is reused.
+    pub fn terminate_owned_running(&self) -> usize {
+        let owner_id = crate::runtime_process_owner_id();
+        let records = self
+            .guard
+            .with_read(|| self.records_unlocked())
+            .unwrap_or_default();
+        let mut terminated = 0;
+        for record in records {
+            if record.owner_id.as_deref() != Some(owner_id)
+                || completed_status(&record.status_file).is_some()
+            {
+                continue;
+            }
+            terminate_process(record.pid);
+            let _ = fs::write(&record.status_file, "cancelled");
+            terminated += 1;
+        }
+        terminated
+    }
+
     pub fn cancel(&self, job_id: &str) -> String {
         self.cancel_outcome(job_id).text
     }
@@ -243,18 +270,29 @@ impl FileToolJobStore {
     }
 
     fn find_unlocked(&self, job_id: &str) -> Option<ToolJobRecord> {
-        let file = OpenOptions::new().read(true).open(&self.index_file).ok()?;
-        let mut found = None;
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
-            let Ok(record) = serde_json::from_str::<ToolJobRecord>(&line) else {
-                continue;
-            };
-            if record.id == job_id {
-                found = Some(record);
-            }
-        }
-        found
+        self.records_unlocked()
+            .into_iter()
+            .rev()
+            .find(|record| record.id == job_id)
     }
+
+    fn records_unlocked(&self) -> Vec<ToolJobRecord> {
+        let Ok(file) = OpenOptions::new().read(true).open(&self.index_file) else {
+            return Vec::new();
+        };
+        BufReader::new(file)
+            .lines()
+            .map_while(Result::ok)
+            .filter_map(|line| serde_json::from_str::<ToolJobRecord>(&line).ok())
+            .collect()
+    }
+}
+
+fn completed_status(path: impl AsRef<Path>) -> Option<String> {
+    fs::read_to_string(path)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
 }
 
 fn unique_job_id(prefix: &str) -> String {
@@ -281,12 +319,23 @@ fn terminate_process(pid: u32) {
     }
     #[cfg(not(unix))]
     {
-        let _ = Command::new("/bin/kill")
+        let status = Command::new("/bin/kill")
             .arg("-TERM")
             .arg(pid.to_string())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+        if status.as_ref().is_ok_and(|status| status.success()) {
+            thread::sleep(Duration::from_millis(100));
+            if process_running(pid) {
+                let _ = Command::new("/bin/kill")
+                    .arg("-KILL")
+                    .arg(pid.to_string())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
     }
 }
 
@@ -299,9 +348,45 @@ fn terminate_process_unix(pid: u32) {
     }
     if pgid == pid && pgid != unsafe { libc::getpgrp() } {
         signal_process_group(pgid, libc::SIGTERM);
+        thread::sleep(Duration::from_millis(100));
+        if process_group_running(pgid as u32) {
+            signal_process_group(pgid, libc::SIGKILL);
+        }
         return;
     }
     signal_process(pid, libc::SIGTERM);
+    thread::sleep(Duration::from_millis(100));
+    if process_running(pid as u32) {
+        signal_process(pid, libc::SIGKILL);
+    }
+}
+
+fn process_running(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        return result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    }
+    #[cfg(not(unix))]
+    {
+        Command::new("/bin/kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .ok()
+            .is_some_and(|status| status.success())
+    }
+}
+
+#[cfg(unix)]
+fn process_group_running(group_leader_pid: u32) -> bool {
+    if group_leader_pid as libc::pid_t == unsafe { libc::getpgrp() } {
+        return false;
+    }
+    let result = unsafe { libc::kill(-(group_leader_pid as libc::pid_t), 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(unix)]

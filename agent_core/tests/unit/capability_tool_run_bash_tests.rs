@@ -810,6 +810,48 @@ fn process_running_treats_zombie_as_not_running() {
     let _ = child.wait();
 }
 
+#[test]
+fn shutdown_terminates_only_shell_jobs_owned_by_this_process() {
+    let dir = tmp_memory_dir("owned_shutdown");
+    let store = FileShellJobStore::new(&dir);
+    let _ = store.spawn_background("sleep 30", &dir, "session_owned", "turn_a");
+
+    assert_eq!(store.terminate_owned_running(), 1);
+    assert!(store.running_for_session("session_owned").is_empty());
+    assert_eq!(store.terminate_owned_running(), 0);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn shutdown_ignores_shell_job_record_owned_by_another_process() {
+    let dir = tmp_memory_dir("foreign_shutdown");
+    let store = FileShellJobStore::new(&dir);
+    let status_file = dir.join("foreign.status");
+    let record = ShellJobRecord {
+        id: "foreign-job".to_string(),
+        created_at_ms: now_ms(),
+        kind: "background".to_string(),
+        session_id: "foreign-session".to_string(),
+        turn_id: "foreign-turn".to_string(),
+        pid: std::process::id(),
+        owner_id: Some("foreign-runtime-owner".to_string()),
+        command: "foreign".to_string(),
+        cwd: dir.display().to_string(),
+        output_file: dir.join("foreign.out").display().to_string(),
+        status_file: status_file.display().to_string(),
+        tail_out: false,
+    };
+    store.append(&record).unwrap();
+
+    assert_eq!(store.terminate_owned_running(), 0);
+    assert!(!status_file.exists());
+    assert_eq!(unsafe { libc::kill(libc::getpid(), 0) }, 0);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[cfg(unix)]
 #[test]
 fn terminate_process_ignores_missing_pid_without_signalling_broadly() {

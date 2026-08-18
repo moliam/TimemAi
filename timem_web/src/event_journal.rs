@@ -197,6 +197,8 @@ impl EventJournal {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct JournalInstanceInfo {
     pub pid: u32,
+    #[serde(default)]
+    pub launch_parent_pid: Option<u32>,
     pub port: Option<u16>,
     pub token: Option<String>,
     pub browser_url: Option<String>,
@@ -208,6 +210,7 @@ impl JournalInstanceInfo {
     pub fn starting() -> Self {
         Self {
             pid: std::process::id(),
+            launch_parent_pid: current_launch_parent_pid(),
             port: None,
             token: None,
             browser_url: None,
@@ -217,6 +220,19 @@ impl JournalInstanceInfo {
                 .unwrap_or_default()
                 .as_millis(),
         }
+    }
+}
+
+fn current_launch_parent_pid() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        u32::try_from(unsafe { libc::getppid() })
+            .ok()
+            .filter(|pid| *pid > 1)
+    }
+    #[cfg(not(unix))]
+    {
+        None
     }
 }
 

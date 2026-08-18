@@ -5823,8 +5823,45 @@ fn web_runtime_shutdown_stops_all_session_workers() {
     )
     .unwrap();
 
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    let tool_dir = memory_dir.join("shutdown-tool");
+    std::fs::create_dir_all(&tool_dir).unwrap();
+    let script = tool_dir.join("sleep.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\npython3 -c 'import time; time.sleep(30)'\n",
+    )
+    .unwrap();
+    let tool_jobs = FileToolJobStore::new(&memory_dir);
+    let started = tool_jobs.spawn("shutdown_sleep", &script, &serde_json::json!({"args": {}}));
+    let job_id = started
+        .lines()
+        .find_map(|line| line.strip_prefix("job_id: "))
+        .unwrap();
+    let shell_jobs = FileShellJobStore::new(&memory_dir);
+    shell_jobs.spawn_background("sleep 30", &tool_dir, "shutdown-session", "shutdown-turn");
+
     assert_eq!(state.manager.lock().unwrap().worker_count(), 2);
     shutdown_web_runtime(&state).unwrap();
+    assert_eq!(state.manager.lock().unwrap().worker_count(), 0);
+    assert!(tool_jobs.status(job_id, 0).contains("state: cancelled"));
+    assert!(shell_jobs
+        .running_for_session("shutdown-session")
+        .is_empty());
+}
+
+#[test]
+fn web_runtime_cleanup_guard_runs_cleanup_once_on_scope_exit() {
+    let state = routing_test_state();
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    let shell_jobs = FileShellJobStore::new(&memory_dir);
+    shell_jobs.spawn_background("sleep 30", &memory_dir, "guard-session", "guard-turn");
+
+    {
+        let _guard = WebRuntimeCleanupGuard::new(&state);
+    }
+
+    assert!(shell_jobs.running_for_session("guard-session").is_empty());
     assert_eq!(state.manager.lock().unwrap().worker_count(), 0);
 }
 
@@ -8610,6 +8647,7 @@ fn existing_instance_recovery_reports_pid_url_and_stop_command() {
     journal
         .publish_instance_info(&JournalInstanceInfo {
             pid: 4242,
+            launch_parent_pid: None,
             port: Some(18080),
             token: Some("existing-token".to_string()),
             browser_url: Some("http://127.0.0.1:18080/?token=existing-token".to_string()),
@@ -8622,7 +8660,8 @@ fn existing_instance_recovery_reports_pid_url_and_stop_command() {
         open_browser: false,
         ..WebLaunchOptions::default()
     };
-    assert!(resume_existing_web_instance(&options, &path).is_ok());
+    let info = EventJournal::read_instance_info(&path).unwrap();
+    assert!(resume_existing_web_instance(&options, &info).is_ok());
 
     #[cfg(unix)]
     {
@@ -8638,6 +8677,178 @@ fn existing_instance_recovery_reports_pid_url_and_stop_command() {
     }
 
     drop(journal);
+    let _ = std::fs::remove_file(path.with_file_name(format!(
+        "{}.lock",
+        path.file_name().unwrap().to_string_lossy()
+    )));
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn healthy_existing_instance_is_reused_without_taking_its_journal() {
+    let path = std::env::temp_dir().join(unique_web_id("healthy_existing_instance"));
+    let mut owner = EventJournal::open(&path).unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    owner
+        .publish_instance_info(&JournalInstanceInfo {
+            pid: 4242,
+            launch_parent_pid: Some(std::process::id()),
+            port: Some(port),
+            token: Some("healthy-token".to_string()),
+            browser_url: Some(format!("http://127.0.0.1:{port}/?token=healthy-token")),
+            public_access: false,
+            started_at_ms: 123,
+        })
+        .unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 1024];
+        let size = socket.read(&mut request).await.unwrap();
+        assert!(String::from_utf8_lossy(&request[..size])
+            .starts_with("GET /api/health?token=healthy-token "));
+        let body = format!(r#"{{"ok":true,"port":{port}}}"#);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let outcome = open_event_journal_after_handoff(
+        &path,
+        Duration::from_secs(1),
+        Duration::from_millis(10),
+        Duration::from_millis(250),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        EventJournalOpenOutcome::Existing(ref info) if info.pid == 4242
+    ));
+    server.await.unwrap();
+    assert_eq!(
+        EventJournal::open(&path).unwrap_err(),
+        "event_journal_in_use"
+    );
+
+    drop(owner);
+    remove_web_journal_files(&path);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn healthy_host_with_dead_launcher_is_not_reused_during_shutdown_handoff() {
+    let path = std::env::temp_dir().join(unique_web_id("dead_launcher_handoff"));
+    let mut owner = EventJournal::open(&path).unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    owner
+        .publish_instance_info(&JournalInstanceInfo {
+            pid: 4242,
+            launch_parent_pid: Some(i32::MAX as u32),
+            port: Some(port),
+            token: Some("dying-token".to_string()),
+            browser_url: Some(format!("http://127.0.0.1:{port}/?token=dying-token")),
+            public_access: false,
+            started_at_ms: 123,
+        })
+        .unwrap();
+
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let accepted_for_server = Arc::clone(&accepted);
+    let server = tokio::spawn(async move {
+        if let Ok(Ok((_socket, _))) = timeout(Duration::from_millis(200), listener.accept()).await {
+            accepted_for_server.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let release = tokio::spawn(async move {
+        sleep(Duration::from_millis(80)).await;
+        drop(owner);
+    });
+
+    let outcome = open_event_journal_after_handoff(
+        &path,
+        Duration::from_secs(1),
+        Duration::from_millis(10),
+        Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
+
+    let EventJournalOpenOutcome::Owned(new_owner) = outcome else {
+        panic!("a Host whose launcher exited must not be reused");
+    };
+    release.await.unwrap();
+    server.await.unwrap();
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        0,
+        "launcher death must be checked before probing the dying Host"
+    );
+
+    drop(new_owner);
+    remove_web_journal_files(&path);
+}
+
+#[tokio::test]
+async fn startup_waits_for_exiting_instance_then_takes_over_its_journal() {
+    let path = std::env::temp_dir().join(unique_web_id("journal_handoff"));
+    let owner = EventJournal::open(&path).unwrap();
+
+    let release = tokio::spawn(async move {
+        sleep(Duration::from_millis(80)).await;
+        drop(owner);
+    });
+    let outcome = open_event_journal_after_handoff(
+        &path,
+        Duration::from_secs(1),
+        Duration::from_millis(10),
+        Duration::from_millis(20),
+    )
+    .await
+    .unwrap();
+
+    let EventJournalOpenOutcome::Owned(new_owner) = outcome else {
+        panic!("an inaccessible exiting instance must not be reported as reusable");
+    };
+    release.await.unwrap();
+    assert_eq!(
+        EventJournal::open(&path).unwrap_err(),
+        "event_journal_in_use"
+    );
+    drop(new_owner);
+    remove_web_journal_files(&path);
+}
+
+#[tokio::test]
+async fn inaccessible_instance_that_keeps_the_lock_fails_clearly() {
+    let path = std::env::temp_dir().join(unique_web_id("inaccessible_instance"));
+    let owner = EventJournal::open(&path).unwrap();
+
+    let error = match open_event_journal_after_handoff(
+        &path,
+        Duration::from_millis(80),
+        Duration::from_millis(10),
+        Duration::from_millis(10),
+    )
+    .await
+    {
+        Ok(_) => panic!("an inaccessible lock owner must not be treated as recovered"),
+        Err(error) => error,
+    };
+    assert!(error.contains("still holding this workspace lock"));
+    assert!(error.contains("not reachable"));
+    assert!(!error.contains("event_journal_in_use"));
+
+    drop(owner);
+    remove_web_journal_files(&path);
+}
+
+fn remove_web_journal_files(path: &Path) {
     let _ = std::fs::remove_file(path.with_file_name(format!(
         "{}.lock",
         path.file_name().unwrap().to_string_lossy()

@@ -162,30 +162,31 @@ kill -KILL "$launcher_pid"
 wait "$launcher_pid" >/dev/null 2>&1 || true
 launcher_pid=""
 
-for _ in $(seq 1 100); do
-  if ! kill -0 "$host_pid" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 0.05
-done
-if kill -0 "$host_pid" >/dev/null 2>&1; then
-  echo "timem-web survived after its launcher shell was killed" >&2
-  sed -n '1,160p' "$launcher_log" >&2
-  exit 1
-fi
-host_pid=""
-
-if curl --silent --connect-timeout 1 --max-time 2   "http://127.0.0.1:$first_port/api/health?token=$launcher_token"   >/dev/null 2>&1; then
-  echo "timem-web port remained reachable after launcher shell exit" >&2
-  exit 1
-fi
-
-# Immediate same-space/same-port restart proves that no hidden Host process or
-# stale ownership lock remains after the launcher disappears.
+# Start the replacement immediately, while the old Host may still be inside
+# its 250 ms parent-exit detection and graceful-cleanup window. The replacement
+# must wait for ownership handoff instead of falsely reusing a dying instance.
+old_host_pid="$host_pid"
 restart_log="$test_root/launcher-restart.log"
 "$binary" --no-open --port "$first_port"   --data-dir "$test_root/data" --space launcher-crash >"$restart_log" 2>&1 &
 host_pid=$!
 restart_url="$(wait_for_url "$restart_log")"
+
+for _ in $(seq 1 100); do
+  if ! kill -0 "$old_host_pid" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.05
+done
+if kill -0 "$old_host_pid" >/dev/null 2>&1; then
+  echo "the old timem-web Host survived after its launcher shell was killed" >&2
+  sed -n '1,160p' "$launcher_log" >&2
+  exit 1
+fi
+
+if [ "$host_pid" = "$old_host_pid" ]; then
+  echo "the immediate restart did not create a fresh timem-web process" >&2
+  exit 1
+fi
 curl "${curl_common[@]}" "$restart_url" >"$test_root/launcher-restarted.html"
 grep -q '<div id="root">' "$test_root/launcher-restarted.html"
 stop_host

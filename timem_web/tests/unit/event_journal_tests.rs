@@ -84,6 +84,7 @@ fn instance_lock_publishes_recovery_metadata_for_a_second_launch() {
     let mut journal = EventJournal::open(&path).unwrap();
     let info = JournalInstanceInfo {
         pid: 42,
+        launch_parent_pid: None,
         port: Some(18080),
         token: Some("private-token".to_string()),
         browser_url: Some("http://127.0.0.1:18080/?token=private-token".to_string()),

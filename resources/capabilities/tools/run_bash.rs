@@ -41,6 +41,8 @@ pub struct ShellJobRecord {
     #[serde(default)]
     pub turn_id: String,
     pub pid: u32,
+    #[serde(default)]
+    pub owner_id: Option<String>,
     pub command: String,
     #[serde(default)]
     pub cwd: String,
@@ -340,6 +342,7 @@ impl FileShellJobStore {
             session_id: session_id.trim().to_string(),
             turn_id: turn_id.trim().to_string(),
             pid,
+            owner_id: Some(crate::runtime_process_owner_id().to_string()),
             command: clean.to_string(),
             cwd: cwd.to_string_lossy().to_string(),
             output_file: output_file.to_string_lossy().to_string(),
@@ -456,6 +459,28 @@ impl FileShellJobStore {
             }
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// Terminates unfinished shell jobs launched by this process.
+    ///
+    /// Historical records without the current process-unique owner identity
+    /// are ignored, including records from a process whose PID was later reused.
+    pub fn terminate_owned_running(&self) -> usize {
+        let owner_id = crate::runtime_process_owner_id();
+        let records = self
+            .guard
+            .with_read(|| self.records_unlocked())
+            .unwrap_or_default();
+        let mut terminated = 0;
+        for record in records {
+            if record.owner_id.as_deref() != Some(owner_id) || self.record_finished(&record) {
+                continue;
+            }
+            terminate_process(record.pid);
+            write_status_if_empty(Path::new(&record.status_file), "cancelled");
+            terminated += 1;
+        }
+        terminated
     }
 
     pub fn cancel_unfinished_for_session(&self, session_id: &str) -> Vec<String> {

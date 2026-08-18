@@ -19,7 +19,10 @@ use agent_core::{
     SessionToolRepo, ToolDetail, ToolGenRequest, ToolSummary, TopicReply, WorkInstructionLoadMode,
     CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
-use agent_core::{capability::CapabilityRegistry, self_tool::SelfToolPaths};
+use agent_core::{
+    capability::CapabilityRegistry, self_tool::SelfToolPaths, shell_exec::FileShellJobStore,
+    tool_jobs::FileToolJobStore,
+};
 use axum::{
     extract::DefaultBodyLimit,
     extract::{
@@ -48,9 +51,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
-    net::TcpListener,
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
     sync::{broadcast, mpsc as tokio_mpsc},
-    time::sleep,
+    time::{sleep, timeout, Instant},
 };
 
 include!(concat!(env!("OUT_DIR"), "/embedded_web_assets.rs"));
@@ -73,6 +77,10 @@ const COMMAND_DEDUP_CAPACITY: usize = 4_096;
 const MAX_COMMAND_DEDUP_RESULT_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_ID_BYTES: usize = 256;
 const WORK_INSTRUCTION_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
+const INSTANCE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(3);
+const INSTANCE_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const INSTANCE_HEALTH_TIMEOUT: Duration = Duration::from_millis(250);
+const MAX_INSTANCE_HEALTH_RESPONSE_BYTES: u64 = 16 * 1024;
 static NEXT_WEB_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
@@ -1077,10 +1085,17 @@ pub async fn run_from_env() -> Result<(), String> {
     let initial_mem = WebMemState::new(template.data_dir.clone(), template.initial_space.clone())?;
     let command_dedup = load_command_dedup_resilient(&command_dedup_path(&initial_mem))?;
     let journal_path = event_journal_path(&initial_mem);
-    let event_journal = match EventJournal::open(&journal_path) {
-        Ok(journal) => journal,
-        Err(error) if error == "event_journal_in_use" => {
-            return resume_existing_web_instance(&launch, &journal_path);
+    let event_journal = match open_event_journal_after_handoff(
+        &journal_path,
+        INSTANCE_HANDOFF_TIMEOUT,
+        INSTANCE_HANDOFF_POLL_INTERVAL,
+        INSTANCE_HEALTH_TIMEOUT,
+    )
+    .await
+    {
+        Ok(EventJournalOpenOutcome::Owned(journal)) => journal,
+        Ok(EventJournalOpenOutcome::Existing(info)) => {
+            return resume_existing_web_instance(&launch, &info);
         }
         Err(error) => {
             return Err(friendly_journal_error(
@@ -1105,6 +1120,7 @@ pub async fn run_from_env() -> Result<(), String> {
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
     };
+    let cleanup_guard = WebRuntimeCleanupGuard::new(&state);
 
     let restored_sessions =
         restore_stored_sessions_after_runtime_restart(&state).map_err(|error| {
@@ -1134,7 +1150,14 @@ pub async fn run_from_env() -> Result<(), String> {
         .then(|| public_access_url(launch.public_host.as_deref(), port, &token))
         .flatten();
     let browser_url = public_url.as_deref().unwrap_or(&local_url).to_string();
-    publish_running_instance_info(&state, port, &token, &browser_url, launch.public_access)?;
+    publish_running_instance_info(
+        &state,
+        port,
+        &token,
+        &browser_url,
+        launch.public_access,
+        launch_parent,
+    )?;
     if launch.public_access {
         if let Some(public_url) = public_url.as_deref() {
             println!("Timem Web is ready at {public_url}");
@@ -1173,10 +1196,8 @@ pub async fn run_from_env() -> Result<(), String> {
         .with_graceful_shutdown(shutdown_signal(launch_parent))
         .await
         .map_err(|error| error.to_string());
-    let shutdown_result = shutdown_web_runtime(&state);
     serve_result?;
-    shutdown_result?;
-    Ok(())
+    cleanup_guard.cleanup()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1190,6 +1211,17 @@ impl LaunchParent {
         Self {
             #[cfg(unix)]
             pid: unsafe { libc::getppid() },
+        }
+    }
+
+    fn pid_u32(self) -> Option<u32> {
+        #[cfg(unix)]
+        {
+            u32::try_from(self.pid).ok().filter(|pid| *pid > 1)
+        }
+        #[cfg(not(unix))]
+        {
+            None
         }
     }
 }
@@ -1245,7 +1277,7 @@ async fn wait_for_launch_parent_exit(initial_parent_pid: libc::pid_t) {
         let current_parent_pid = unsafe { libc::getppid() };
         if launch_parent_has_exited(initial_parent_pid, current_parent_pid) {
             eprintln!(
-                "Timem Web launcher process {initial_parent_pid} exited; shutting down the Web runtime."
+                "Timem Web launcher process {initial_parent_pid} exited; shutting down the entire Agent runtime."
             );
             return;
         }
@@ -1269,15 +1301,74 @@ async fn recv_optional_signal(stream: &mut Option<tokio::signal::unix::Signal>) 
     }
 }
 
+struct WebRuntimeCleanupGuard {
+    state: AppState,
+    cleaned: bool,
+}
+
+impl WebRuntimeCleanupGuard {
+    fn new(state: &AppState) -> Self {
+        Self {
+            state: state.clone(),
+            cleaned: false,
+        }
+    }
+
+    fn cleanup(mut self) -> Result<(), String> {
+        let result = shutdown_web_runtime(&self.state);
+        self.cleaned = true;
+        result
+    }
+}
+
+impl Drop for WebRuntimeCleanupGuard {
+    fn drop(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        if let Err(error) = shutdown_web_runtime(&self.state) {
+            eprintln!("[timem_web_cleanup_error] {error}");
+        }
+        self.cleaned = true;
+    }
+}
+
 fn shutdown_web_runtime(state: &AppState) -> Result<(), String> {
-    let manager = {
-        let mut manager = state
-            .manager
-            .lock()
-            .map_err(|_| "worker_manager_poisoned".to_string())?;
-        std::mem::take(&mut *manager)
+    let mut first_error = None;
+
+    match state.manager.lock() {
+        Ok(mut manager) => {
+            let manager = std::mem::take(&mut *manager);
+            if let Err(error) = manager.shutdown_all_detached() {
+                first_error.get_or_insert(error);
+            }
+        }
+        Err(_) => {
+            first_error.get_or_insert_with(|| "worker_manager_poisoned".to_string());
+        }
+    }
+
+    let fallback_memory_dir =
+        RuntimeDataLayout::new(&state.template.data_dir, &state.template.initial_space)
+            .memory_dir();
+    let memory_dir = match state.mem.lock() {
+        Ok(mem) => {
+            mem.mcp_runtime.disconnect_all();
+            mem.layout.memory_dir()
+        }
+        Err(_) => {
+            first_error.get_or_insert_with(|| "mem_state_poisoned".to_string());
+            fallback_memory_dir
+        }
     };
-    manager.shutdown_all_detached()
+
+    FileShellJobStore::new(&memory_dir).terminate_owned_running();
+    FileToolJobStore::new(&memory_dir).terminate_owned_running();
+
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 fn build_router(state: AppState, port: u16) -> Router {
@@ -1612,6 +1703,7 @@ fn publish_running_instance_info(
     token: &str,
     browser_url: &str,
     public_access: bool,
+    launch_parent: LaunchParent,
 ) -> Result<(), String> {
     let mut journal = state
         .event_journal
@@ -1619,6 +1711,7 @@ fn publish_running_instance_info(
         .map_err(|_| "event_journal_poisoned".to_string())?;
     journal.publish_instance_info(&JournalInstanceInfo {
         pid: std::process::id(),
+        launch_parent_pid: launch_parent.pid_u32(),
         port: Some(port),
         token: Some(token.to_string()),
         browser_url: Some(browser_url.to_string()),
@@ -1627,18 +1720,122 @@ fn publish_running_instance_info(
     })
 }
 
-fn resume_existing_web_instance(
-    launch: &WebLaunchOptions,
+enum EventJournalOpenOutcome {
+    Owned(EventJournal),
+    Existing(JournalInstanceInfo),
+}
+
+async fn open_event_journal_after_handoff(
     journal_path: &Path,
-) -> Result<(), String> {
-    let Some(info) = EventJournal::read_instance_info(journal_path) else {
-        return Err(
-            "Timem Web is already running for this workspace, but the older instance did not publish recovery information. Stop the existing timem-web process and retry."
-                .to_string(),
-        );
+    handoff_timeout: Duration,
+    poll_interval: Duration,
+    health_timeout: Duration,
+) -> Result<EventJournalOpenOutcome, String> {
+    let deadline = Instant::now() + handoff_timeout;
+    let mut last_info = None;
+
+    loop {
+        match EventJournal::open(journal_path) {
+            Ok(journal) => return Ok(EventJournalOpenOutcome::Owned(journal)),
+            Err(error) if error == "event_journal_in_use" => {}
+            Err(error) => return Err(error),
+        }
+
+        if let Some(info) = EventJournal::read_instance_info(journal_path) {
+            let launcher_alive = existing_instance_launcher_is_alive(&info);
+            if launcher_alive && existing_web_instance_is_healthy(&info, health_timeout).await {
+                return Ok(EventJournalOpenOutcome::Existing(info));
+            }
+            last_info = Some(info);
+        }
+
+        if Instant::now() >= deadline {
+            let owner = last_info
+                .as_ref()
+                .map(|info| format!(" PID {} still owns the workspace lock.", info.pid))
+                .unwrap_or_default();
+            return Err(format!(
+                "The previous Timem Web instance is still holding this workspace lock but is not reachable.{owner} Wait briefly and retry; Timem will take over automatically as soon as that process exits."
+            ));
+        }
+
+        sleep(poll_interval.min(deadline.saturating_duration_since(Instant::now()))).await;
+    }
+}
+
+fn existing_instance_launcher_is_alive(info: &JournalInstanceInfo) -> bool {
+    let Some(parent_pid) = info.launch_parent_pid else {
+        // Backward-compatible metadata cannot distinguish launcher state.
+        return true;
+    };
+    process_id_is_alive(parent_pid)
+}
+
+#[cfg(unix)]
+fn process_id_is_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if pid <= 1 {
+        return false;
+    }
+    let result = unsafe { libc::kill(pid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn process_id_is_alive(_pid: u32) -> bool {
+    true
+}
+
+async fn existing_web_instance_is_healthy(
+    info: &JournalInstanceInfo,
+    health_timeout: Duration,
+) -> bool {
+    let (Some(port), Some(token)) = (info.port, info.token.as_deref()) else {
+        return false;
     };
 
-    println!("A Timem Web instance is already running for this workspace.");
+    timeout(health_timeout, async {
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await?;
+        let request = format!(
+            "GET /api/health?token={token} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await?;
+        let mut response = Vec::new();
+        stream
+            .take(MAX_INSTANCE_HEALTH_RESPONSE_BYTES)
+            .read_to_end(&mut response)
+            .await?;
+        Ok::<_, std::io::Error>(response)
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .is_some_and(|response| valid_instance_health_response(&response, port))
+}
+
+fn valid_instance_health_response(response: &[u8], expected_port: u16) -> bool {
+    let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return false;
+    };
+    let headers = &response[..header_end];
+    if !headers.starts_with(b"HTTP/1.1 200 ") && !headers.starts_with(b"HTTP/1.0 200 ") {
+        return false;
+    }
+    serde_json::from_slice::<Value>(&response[header_end + 4..])
+        .ok()
+        .is_some_and(|body| {
+            body.get("ok").and_then(Value::as_bool) == Some(true)
+                && body.get("port").and_then(Value::as_u64) == Some(u64::from(expected_port))
+        })
+}
+
+fn resume_existing_web_instance(
+    launch: &WebLaunchOptions,
+    info: &JournalInstanceInfo,
+) -> Result<(), String> {
+    println!("A healthy Timem Web instance is already running for this workspace.");
     println!("  PID:  {}", info.pid);
     if let Some(port) = info.port {
         println!("  Port: {port}");
@@ -1671,11 +1868,6 @@ fn resume_existing_web_instance(
                 println!();
                 println!("Open the URL above to continue using the existing instance.");
             }
-        } else {
-            println!();
-            println!(
-                "The existing instance is still starting or predates recovery metadata. Use the stop command above if it remains inaccessible."
-            );
         }
     }
 
