@@ -18,7 +18,7 @@ import { commandSessionId, isModelSubmissionCommand, ModelServiceIssue, modelDis
 import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens } from "./token_format";
 import { summarizeConsecutiveToolActivities, ToolActivitySummary } from "./activity_groups";
-import { applyQueuedMessagesAck, claimQueuedMessage, clearQueuedMessagesPause, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, loadQueuedMessagesPause, QueuedMessage, queuedMessageKey, QueuedMessagesPauseSource, QueuedMessagesPauseState, queuedMessagesPauseStorageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, saveQueuedMessagesPause, selectQueuedDispatches, shouldDirectManualMessage, shouldPauseQueuedMessages, stopQueuedAutoSend, unclaimedQueuedMessages } from "./queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearQueuedMessagesPause, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, loadQueuedMessagesPause, QueuedMessage, queuedMessageKey, QueuedMessagesPauseSource, QueuedMessagesPauseState, queuedMessagesPauseSessionId, queuedMessagesPauseStorageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, saveQueuedMessagesPause, selectQueuedDispatches, shouldDirectManualMessage, shouldPauseQueuedMessages, stopQueuedAutoSend, unclaimedQueuedMessages } from "./queued_messages";
 import { acceptOutboxCommand, addCommandToOutbox, commandMayPersist, commandNeedsReliableDelivery, CommandOutboxItem, commandOutboxStorageKey, finishOutboxCommand, loadCommandOutbox, reliableStorageScope, removeCommandOutboxItem, saveCommandOutboxItem } from "./command_outbox";
 import { classifyEventSequence, loadEventCursor, resolveHelloEventCursor, saveEventCursor } from "./event_cursor";
 import { enablesSemanticDelivery, shouldReduceTopLevelWireEvent } from "./wire_delivery";
@@ -152,7 +152,7 @@ function TimemApp() {
   const [pendingUploadFiles, setPendingUploadFiles] = useState<Record<string, { name: string; bytes: number }>>({});
   const [pendingMemSwitch, setPendingMemSwitch] = useState(false);
   const [completedTurnKey, setCompletedTurnKey] = useState("");
-  const [queuePauseRequest, setQueuePauseRequest] = useState<{ key: string; reason: string; source: QueuedMessagesPauseSource } | null>(null);
+  const [queuePauseRequest, setQueuePauseRequest] = useState<{ key: string; sessionId?: string; reason: string; source: QueuedMessagesPauseSource } | null>(null);
   const [commandAcks, setCommandAcks] = useState<Record<string, Extract<WireEvent, { type: "command_ack" }>>>({});
   const [modelServiceIssues, setModelServiceIssues] = useState<Record<string, ModelServiceIssue>>({});
   const consumeCommandAcks = useCallback((commandIds: ReadonlySet<string>) => {
@@ -881,6 +881,7 @@ function TimemApp() {
         setModelServiceIssues((current) => ({ ...current, [event.session_id]: issue }));
         setQueuePauseRequest({
           key: `model-error:${event.session_id}:${event.turn_event_id ?? clientId()}`,
+          sessionId: event.session_id,
           reason: issue.detail,
           source: "error",
         });
@@ -899,7 +900,7 @@ function TimemApp() {
       setCompletedTurnKey(completedKey);
       const stopReason = event.outcome.completion?.stop_reason;
       if (shouldPauseQueuedMessages(stopReason)) {
-        setQueuePauseRequest({ key: completedKey, reason: stopReason, source: "error" });
+        setQueuePauseRequest({ key: completedKey, sessionId: event.session_id, reason: stopReason, source: "error" });
       }
       return;
     }
@@ -1765,7 +1766,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
   activeSession: Session | undefined;
   sessions: Session[];
   completedTurnKey: string;
-  queuePauseRequest: { key: string; reason: string; source: QueuedMessagesPauseSource } | null;
+  queuePauseRequest: { key: string; sessionId?: string; reason: string; source: QueuedMessagesPauseSource } | null;
   commandAcks: Record<string, Extract<WireEvent, { type: "command_ack" }>>;
   onConsumeCommandAcks: (commandIds: ReadonlySet<string>) => void;
   reliableStorageScope: string;
@@ -1816,8 +1817,8 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
   const queuedDispatchSessionIdsRef = useRef<Set<string>>(new Set());
   const queuedMessageClaimsRef = useRef<Set<string>>(new Set());
   const [queuedMessageClaims, setQueuedMessageClaims] = useState<Set<string>>(() => new Set());
- const [queuedMessagesPause, setQueuedMessagesPause] = useState<QueuedMessagesPauseState | null>(null);
- const queuedMessagesPauseRef = useRef<QueuedMessagesPauseState | null>(null);
+ const [queuedMessagesPauseBySession, setQueuedMessagesPauseBySession] = useState<Record<string, QueuedMessagesPauseState>>({});
+ const queuedMessagesPauseBySessionRef = useRef<Record<string, QueuedMessagesPauseState>>({});
  const processedQueuePauseRequestKeyRef = useRef("");
   const submittingDraftSessionIdsRef = useRef<Set<string>>(new Set());
   const submittingDraftStartedAtRef = useRef<Map<string, number>>(new Map());
@@ -1841,20 +1842,26 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
  setDraggedQueueMessageId(undefined);
  setQueuedMessageOverId(undefined);
  }, []);
- const pauseQueuedMessages = useCallback((reason: string, source: QueuedMessagesPauseSource) => {
- const current = queuedMessagesPauseRef.current;
+ const pauseQueuedMessages = useCallback((sessionId: string, reason: string, source: QueuedMessagesPauseSource) => {
+ const current = queuedMessagesPauseBySessionRef.current[sessionId] ?? null;
  const pause = stopQueuedAutoSend(current, reason, source, Date.now());
  if (pause === current) return false;
- if (reliableStorageScope && !saveQueuedMessagesPause(window.localStorage, reliableStorageScope, pause)) return false;
- queuedMessagesPauseRef.current = pause;
- releaseAllQueuedDispatches();
- setQueuedMessagesPause(pause);
+ if (reliableStorageScope && !saveQueuedMessagesPause(window.localStorage, reliableStorageScope, sessionId, pause)) return false;
+ const next = { ...queuedMessagesPauseBySessionRef.current, [sessionId]: pause };
+ queuedMessagesPauseBySessionRef.current = next;
+ queuedDispatchSessionIdsRef.current.delete(sessionId);
+ if (releaseSessionQueuedMessageClaims(queuedMessageClaimsRef.current, sessionId) > 0) {
+ setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+ }
+ setQueuedMessagesPauseBySession(next);
  return true;
- }, [releaseAllQueuedDispatches, reliableStorageScope]);
- const resumeQueuedMessages = useCallback(() => {
- if (reliableStorageScope && !clearQueuedMessagesPause(window.localStorage, reliableStorageScope)) return false;
- queuedMessagesPauseRef.current = null;
- setQueuedMessagesPause(null);
+ }, [reliableStorageScope]);
+ const resumeQueuedMessages = useCallback((sessionId: string) => {
+ if (reliableStorageScope && !clearQueuedMessagesPause(window.localStorage, reliableStorageScope, sessionId)) return false;
+ const next = { ...queuedMessagesPauseBySessionRef.current };
+ delete next[sessionId];
+ queuedMessagesPauseBySessionRef.current = next;
+ setQueuedMessagesPauseBySession(next);
  return true;
  }, [reliableStorageScope]);
   const turns = activeSession?.turns ?? [];
@@ -1866,6 +1873,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
     [activeSession?.messages, turns],
   );
   const activeSessionId = activeSession?.session_id;
+  const queuedMessagesPause = activeSessionId ? queuedMessagesPauseBySession[activeSessionId] ?? null : null;
   const draft = draftForSession(draftsBySession, activeSessionId);
   const queuedMessages = activeSessionId ? queuedMessagesBySession[activeSessionId] ?? [] : [];
   const displayQueuedMessages = activeSessionId
@@ -1917,6 +1925,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
   const latestTurn = turns.at(-1);
   const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${latestTurn?.events.length ?? 0}:${latestTurn?.user_entries.length ?? 0}:${latestTurn?.final_answer?.length ?? 0}:${latestTurn?.completion ? 1 : 0}`;
   const liveSessionKey = sessionIds.join("\u0000");
+  const liveSessionIds = useMemo(() => new Set(sessionIds), [liveSessionKey]);
   const welcomeTitle = activeSession ? "Ready when you are." : "Create a session to start.";
   const welcomeText = activeSession ? "Ask Timem to investigate, write, or work with you." : "Use New session to choose a workspace and runtime profile.";
 
@@ -1951,22 +1960,35 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
  useEffect(() => {
  if (!reliableStorageScope) return;
  const restored = loadQueuedMessages(window.localStorage, reliableStorageScope);
- const restoredPause = loadQueuedMessagesPause(window.localStorage, reliableStorageScope);
+ const restoredPauses = Object.fromEntries(sessionIds.flatMap((sessionId) => {
+ const pause = loadQueuedMessagesPause(window.localStorage, reliableStorageScope, sessionId);
+ return pause ? [[sessionId, pause] as const] : [];
+ }));
  queuedMessagesBySessionRef.current = restored;
  releaseAllQueuedDispatches();
  setQueuedMessagesBySession(restored);
- queuedMessagesPauseRef.current = restoredPause;
- setQueuedMessagesPause(restoredPause);
- }, [releaseAllQueuedDispatches, reliableStorageScope]);
+ queuedMessagesPauseBySessionRef.current = restoredPauses;
+ setQueuedMessagesPauseBySession(restoredPauses);
+ }, [liveSessionKey, releaseAllQueuedDispatches, reliableStorageScope]);
 
  useEffect(() => {
  const syncCrossTabQueues = (event: StorageEvent) => {
  if (!reliableStorageScope || !event.key) return;
- if (event.key === queuedMessagesPauseStorageKey(reliableStorageScope)) {
- const restoredPause = loadQueuedMessagesPause(window.localStorage, reliableStorageScope);
- if (restoredPause) releaseAllQueuedDispatches();
- queuedMessagesPauseRef.current = restoredPause;
- setQueuedMessagesPause(restoredPause);
+ const pauseSessionId = queuedMessagesPauseSessionId(reliableStorageScope, event.key);
+ if (pauseSessionId && liveSessionIds.has(pauseSessionId)) {
+ const restoredPause = loadQueuedMessagesPause(window.localStorage, reliableStorageScope, pauseSessionId);
+ const next = { ...queuedMessagesPauseBySessionRef.current };
+ if (restoredPause) {
+ next[pauseSessionId] = restoredPause;
+ queuedDispatchSessionIdsRef.current.delete(pauseSessionId);
+ if (releaseSessionQueuedMessageClaims(queuedMessageClaimsRef.current, pauseSessionId) > 0) {
+ setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+ }
+ } else {
+ delete next[pauseSessionId];
+ }
+ queuedMessagesPauseBySessionRef.current = next;
+ setQueuedMessagesPauseBySession(next);
  return;
  }
  if (!event.key.startsWith(`${queuedMessagesStorageKey(reliableStorageScope)}:`)) return;
@@ -1985,29 +2007,32 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
  };
  window.addEventListener("storage", syncCrossTabQueues);
  return () => window.removeEventListener("storage", syncCrossTabQueues);
- }, [releaseAllQueuedDispatches, reliableStorageScope]);
+ }, [liveSessionIds, reliableStorageScope]);
 
   useEffect(() => {
     if (sessionIds.length === 0) return;
     setDraftsBySession((current) => pruneSessionDrafts(current, sessionIds));
-    updateQueuedMessages((current) => Object.fromEntries(Object.entries(current).filter(([sessionId]) => sessionIds.includes(sessionId))));
-    setExpandedQueueSessionIds((current) => new Set(Array.from(current).filter((sessionId) => sessionIds.includes(sessionId))));
-    setCollapsedQueuePanelSessionIds((current) => new Set(Array.from(current).filter((sessionId) => sessionIds.includes(sessionId))));
-    setEditingQueuedMessage((current) => current && sessionIds.includes(current.sessionId) ? current : undefined);
+    updateQueuedMessages((current) => Object.fromEntries(Object.entries(current).filter(([sessionId]) => liveSessionIds.has(sessionId))));
+    setExpandedQueueSessionIds((current) => new Set(Array.from(current).filter((sessionId) => liveSessionIds.has(sessionId))));
+    setCollapsedQueuePanelSessionIds((current) => new Set(Array.from(current).filter((sessionId) => liveSessionIds.has(sessionId))));
+    const retainedPauses = Object.fromEntries(Object.entries(queuedMessagesPauseBySessionRef.current).filter(([sessionId]) => liveSessionIds.has(sessionId)));
+    queuedMessagesPauseBySessionRef.current = retainedPauses;
+    setQueuedMessagesPauseBySession(retainedPauses);
+    setEditingQueuedMessage((current) => current && liveSessionIds.has(current.sessionId) ? current : undefined);
     for (const sessionId of Array.from(queuedDispatchSessionIdsRef.current)) {
-      if (!sessionIds.includes(sessionId)) queuedDispatchSessionIdsRef.current.delete(sessionId);
+      if (!liveSessionIds.has(sessionId)) queuedDispatchSessionIdsRef.current.delete(sessionId);
     }
     for (const key of Array.from(queuedMessageClaimsRef.current)) {
-      if (!sessionIds.some((sessionId) => key.startsWith(`${sessionId}\u0000`))) queuedMessageClaimsRef.current.delete(key);
+      if (!liveSessionIds.has(key.slice(0, key.indexOf("\u0000")))) queuedMessageClaimsRef.current.delete(key);
     }
     setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
     for (const sessionId of Array.from(directSubmissionsRef.current.keys())) {
-      if (!sessionIds.includes(sessionId)) directSubmissionsRef.current.delete(sessionId);
+      if (!liveSessionIds.has(sessionId)) directSubmissionsRef.current.delete(sessionId);
     }
     if (pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds)) {
       setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
     }
-  }, [liveSessionKey, updateQueuedMessages]);
+  }, [liveSessionIds, updateQueuedMessages]);
 
   useEffect(() => {
     let nextQueues = queuedMessagesBySessionRef.current;
@@ -2073,7 +2098,10 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
     for (const sessionId of rejectedSessionIds) queuedDispatchSessionIdsRef.current.delete(sessionId);
     if (rejectedSessionIds.size > 0 || rejectedDirectDrafts.size > 0) {
       const rejectedAck = Object.values(commandAcks).find((ack) => ack.status === "rejected");
-      pauseQueuedMessages(rejectedAck?.error || "发送请求被运行时拒绝，请检查模型或网络配置后重试", "error");
+      const reason = rejectedAck?.error || "发送请求被运行时拒绝，请检查模型或网络配置后重试";
+      for (const sessionId of new Set([...rejectedSessionIds, ...rejectedDirectDrafts.keys()])) {
+        pauseQueuedMessages(sessionId, reason, "error");
+      }
     }
     onConsumeCommandAcks(appliedCommandIds);
   }, [commandAcks, onConsumeCommandAcks, pauseQueuedMessages, reliableStorageScope]);
@@ -2081,18 +2109,18 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
   useEffect(() => {
  const pendingPauseRequest = queuePauseRequest
  && processedQueuePauseRequestKeyRef.current !== queuePauseRequest.key;
- if (sessionInteractionLocked || queuedMessagesPause || pendingPauseRequest) return;
+ if (sessionInteractionLocked || pendingPauseRequest) return;
     for (const session of sessions) {
       if (session.state === "working") {
         queuedDispatchSessionIdsRef.current.delete(session.session_id);
       }
     }
-    const dispatches = selectQueuedDispatches(sessions, queuedMessagesBySessionRef.current, queuedDispatchSessionIdsRef.current, editingQueuedMessage?.sessionId);
+    const dispatches = selectQueuedDispatches(sessions, queuedMessagesBySessionRef.current, queuedDispatchSessionIdsRef.current, editingQueuedMessage?.sessionId, new Set(Object.keys(queuedMessagesPauseBySessionRef.current)));
     for (const { sessionId, message: next } of dispatches) {
       if (!claimQueuedMessage(queuedMessageClaimsRef.current, sessionId, queuedMessagesBySessionRef.current[sessionId] ?? [], next.id)) continue;
       queuedDispatchSessionIdsRef.current.add(sessionId);
       if (!onSendForSession(sessionId, next.text, next.id, next.attachmentIds, false, next.roleIds ?? (next.roleId ? [next.roleId] : []))) {
-        pauseQueuedMessages("消息未能安全提交，请检查浏览器存储或网络连接后重试", "error");
+        pauseQueuedMessages(sessionId, "消息未能安全提交，请检查浏览器存储或网络连接后重试", "error");
         queuedDispatchSessionIdsRef.current.delete(sessionId);
         releaseQueuedMessageClaim(queuedMessageClaimsRef.current, sessionId, next.id);
         updateQueuedMessages((current) => ({
@@ -2104,13 +2132,14 @@ function TimemThread({ activeSession, sessions, completedTurnKey, queuePauseRequ
       }
     }
     setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
- }, [editingQueuedMessage?.sessionId, onSendForSession, pauseQueuedMessages, queuePauseRequest, queuedMessagesBySession, queuedMessagesPause, sessionInteractionLocked, sessions, updateQueuedMessages]);
+ }, [editingQueuedMessage?.sessionId, onSendForSession, pauseQueuedMessages, queuePauseRequest, queuedMessagesBySession, queuedMessagesPauseBySession, sessionInteractionLocked, sessions, updateQueuedMessages]);
 
  useEffect(() => {
  if (!queuePauseRequest || processedQueuePauseRequestKeyRef.current === queuePauseRequest.key) return;
  processedQueuePauseRequestKeyRef.current = queuePauseRequest.key;
- pauseQueuedMessages(queuePauseRequest.reason, queuePauseRequest.source);
- }, [pauseQueuedMessages, queuePauseRequest]);
+ const targetSessionIds = queuePauseRequest.sessionId ? [queuePauseRequest.sessionId] : sessionIds;
+ for (const sessionId of targetSessionIds) pauseQueuedMessages(sessionId, queuePauseRequest.reason, queuePauseRequest.source);
+ }, [liveSessionKey, pauseQueuedMessages, queuePauseRequest]);
 
   useEffect(() => {
     if (!completedTurnKey) return;
@@ -2336,7 +2365,7 @@ const toggleQueuedMessages = () => {
   };
 
  const cancelActiveSessionTurn = async () => {
- pauseQueuedMessages("用户停止了当前任务", "user");
+ if (activeSessionId) pauseQueuedMessages(activeSessionId, "用户停止了当前任务", "user");
  setEditingQueuedMessage(undefined);
  await onCancel();
  };
@@ -2377,7 +2406,7 @@ const toggleQueuedMessages = () => {
       />
       <ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">
         <ThreadPrimitive.ScrollToBottom asChild><button type="button" className="scroll-to-bottom" title="Scroll to latest message" aria-label="Scroll to latest message"><ArrowDown size={16} aria-hidden="true"/></button></ThreadPrimitive.ScrollToBottom>
-        {!!activeSession && displayQueuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`} aria-label={`${displayQueuedMessages.length} queued message${displayQueuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span>{queuePanelCollapsed ? <div className={`queued-message-summary ${firstQueuedMessage?.deliveryError ? "delivery-error" : ""}`} title={firstQueuedMessage?.deliveryError || firstQueuedMessage?.text}><p>{firstQueuedMessage?.text}</p>{firstQueuedMessage && firstQueuedMessage.attachmentIds.length > 0 && <small className="queued-message-summary-attachments"><Paperclip size={10}/>{firstQueuedMessage.attachmentIds.length}</small>}<small className="queued-message-summary-count">{displayQueuedMessages.length} 条</small></div> : <small title={queuedMessagesPause?.reason}>{queuedMessagesPause ? `自动发送已停止${queuedMessagesPause.reason ? `：${queuedMessagesPause.reason}` : ""}` : "上一条完成后自动发送"}</small>}<div className="queued-message-header-actions"><label className="queued-auto-send-control"><span>自动发送</span><button type="button" role="switch" className="queued-auto-send-switch" aria-checked={!queuedMessagesPause} aria-label={queuedMessagesPause ? "开启自动发送" : "停止自动发送"} title={queuedMessagesPause ? "开启自动发送" : "停止自动发送"} onClick={() => { if (queuedMessagesPause) resumeQueuedMessages(); else pauseQueuedMessages("用户关闭了自动发送", "user"); }}><span className="queued-auto-send-thumb"/></button></label>{!queuePanelCollapsed && hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${displayQueuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}<button type="button" className="queued-message-panel-toggle" aria-expanded={!queuePanelCollapsed} aria-controls={`queued-message-items-${activeSession.session_id}`} title={queuePanelCollapsed ? "展开待发送队列" : "折叠待发送队列为一行"} onClick={toggleQueuedMessagePanel}>{queuePanelCollapsed ? <ChevronDown size={14}/> : <ChevronUp size={14}/>}<span>{queuePanelCollapsed ? "展开" : "折叠"}</span></button></div></header>{!queuePanelCollapsed && <DndContext
+        {!!activeSession && displayQueuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`} aria-label={`${displayQueuedMessages.length} queued message${displayQueuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span>{queuePanelCollapsed ? <div className={`queued-message-summary ${firstQueuedMessage?.deliveryError ? "delivery-error" : ""}`} title={firstQueuedMessage?.deliveryError || firstQueuedMessage?.text}><p>{firstQueuedMessage?.text}</p>{firstQueuedMessage && firstQueuedMessage.attachmentIds.length > 0 && <small className="queued-message-summary-attachments"><Paperclip size={10}/>{firstQueuedMessage.attachmentIds.length}</small>}<small className="queued-message-summary-count">{displayQueuedMessages.length} 条</small></div> : <small title={queuedMessagesPause?.reason}>{queuedMessagesPause ? `自动发送已停止${queuedMessagesPause.reason ? `：${queuedMessagesPause.reason}` : ""}` : "上一条完成后自动发送"}</small>}<div className="queued-message-header-actions"><label className="queued-auto-send-control"><span>自动发送</span><button type="button" role="switch" className="queued-auto-send-switch" aria-checked={!queuedMessagesPause} aria-label={queuedMessagesPause ? "开启自动发送" : "停止自动发送"} title={queuedMessagesPause ? "开启自动发送" : "停止自动发送"} onClick={() => { if (!activeSessionId) return; if (queuedMessagesPause) resumeQueuedMessages(activeSessionId); else pauseQueuedMessages(activeSessionId, "用户关闭了自动发送", "user"); }}><span className="queued-auto-send-thumb"/></button></label>{!queuePanelCollapsed && hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${displayQueuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}<button type="button" className="queued-message-panel-toggle" aria-expanded={!queuePanelCollapsed} aria-controls={`queued-message-items-${activeSession.session_id}`} title={queuePanelCollapsed ? "展开待发送队列" : "折叠待发送队列为一行"} onClick={toggleQueuedMessagePanel}>{queuePanelCollapsed ? <ChevronDown size={14}/> : <ChevronUp size={14}/>}<span>{queuePanelCollapsed ? "展开" : "折叠"}</span></button></div></header>{!queuePanelCollapsed && <DndContext
           sensors={queueDragSensors}
           collisionDetection={closestCenter}
           onDragStart={({ active }) => {
