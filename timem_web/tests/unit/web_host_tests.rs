@@ -8135,7 +8135,8 @@ fn manual_toolgen_uses_system_only_without_optional_user_guidance() {
     assert!(!prompt.contains("Completed task:"));
     assert!(!prompt.contains("Completed task result:"));
     assert!(!prompt.contains("Observed action evidence:"));
-    assert!(prompt.contains(r#"<ASSISTANT id="ToolGen test">"#));
+    assert!(prompt.contains("<ASSISTANT>"));
+    assert!(!prompt.contains("<ASSISTANT id="));
     assert!(!prompt.contains("ToolGen test_TOOLGEN"));
     let marker = "[TOOL_GEN_TASK] Please extract the reusable function";
     let marker_at = prompt.find(marker).unwrap();

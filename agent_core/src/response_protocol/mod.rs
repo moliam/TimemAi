@@ -51,14 +51,6 @@ pub const XML_PROMPT_BOUNDARIES: PromptBoundarySpec = PromptBoundarySpec {
 pub const KNOWN_PROMPT_BOUNDARIES: &[PromptBoundarySpec] =
     &[BRACKETED_PROMPT_BOUNDARIES, XML_PROMPT_BOUNDARIES];
 
-fn escape_xml_attribute(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
-
 impl PromptBoundarySpec {
     pub fn wrap_static_prompt(self, prompt: &str) -> String {
         format!("{}\n{}\n{}", self.static_begin, prompt, self.static_end)
@@ -85,28 +77,14 @@ impl PromptBoundarySpec {
             PromptRoleBoundary::MarkdownHeading => {
                 format!("## {}", assistant_id.unwrap_or(role))
             }
-            PromptRoleBoundary::XmlElement => match assistant_id {
-                Some(id) => format!(
-                    "<{} id=\"{}\">",
-                    self.assistant_role,
-                    escape_xml_attribute(id)
-                ),
-                None => format!("<{role}>"),
-            },
+            PromptRoleBoundary::XmlElement => format!("<{role}>"),
         }
     }
 
-    pub fn render_role_close(self, role: &str, assistant_id: Option<&str>) -> Option<String> {
+    pub fn render_role_close(self, role: &str, _assistant_id: Option<&str>) -> Option<String> {
         match self.role_boundary {
             PromptRoleBoundary::MarkdownHeading => None,
-            PromptRoleBoundary::XmlElement => Some(format!(
-                "</{}>",
-                if assistant_id.is_some() {
-                    self.assistant_role
-                } else {
-                    role
-                }
-            )),
+            PromptRoleBoundary::XmlElement => Some(format!("</{role}>")),
         }
     }
 
