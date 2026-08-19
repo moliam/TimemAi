@@ -74,7 +74,7 @@ impl VisiblePromptRole {
 fn visible_role(prompt_type: &str) -> VisiblePromptRole {
     match prompt_type {
         "user_question" | "user_supplement" => VisiblePromptRole::User,
-        "llm_response" | "llm_free_talk" => VisiblePromptRole::You,
+        "llm_response" | "llm_response_raw_xml" | "llm_free_talk" => VisiblePromptRole::You,
         "result_of_llm_action" | "response_repair" | "context_compacted" => {
             VisiblePromptRole::Runtime
         }
@@ -84,6 +84,10 @@ fn visible_role(prompt_type: &str) -> VisiblePromptRole {
 
 fn is_action_result_prompt_type(prompt_type: &str) -> bool {
     prompt_type == "result_of_llm_action"
+}
+
+fn is_raw_xml_assistant_response(prompt_type: &str, boundaries: &PromptBoundarySpec) -> bool {
+    boundaries.uses_xml_role_elements() && prompt_type == "llm_response_raw_xml"
 }
 
 fn escape_xml_text(text: &str) -> String {
@@ -583,7 +587,31 @@ pub(crate) fn render_prompt_with_rendered_static(
         out.push_str(&boundaries.render_delta_open(&delta.delta_id, delta.time_ms));
         let mut last_role: Option<VisiblePromptRole> = None;
         let mut last_was_action_result = false;
+        let mut last_was_raw_xml = false;
         for slice in slices {
+            if is_raw_xml_assistant_response(&slice.prompt_type, boundaries) {
+                if let Some(previous_role) = last_role.take() {
+                    if let Some(close) = boundaries.render_role_close(
+                        previous_role.label(boundaries),
+                        previous_role.assistant_id(assistant_heading),
+                    ) {
+                        out.push_str(&close);
+                        out.push('\n');
+                    }
+                }
+                if !last_was_raw_xml {
+                    out.push('\n');
+                }
+                out.push_str(&slice.text);
+                last_was_raw_xml = true;
+                last_was_action_result = false;
+                continue;
+            }
+
+            if last_was_raw_xml {
+                out.push('\n');
+                last_was_raw_xml = false;
+            }
             let role = visible_role(&slice.prompt_type);
             if last_role != Some(role) {
                 if let Some(previous_role) = last_role {
@@ -622,6 +650,9 @@ pub(crate) fn render_prompt_with_rendered_static(
             }
             out.push('\n');
             last_was_action_result = is_action_result;
+        }
+        if last_was_raw_xml {
+            out.push('\n');
         }
         if let Some(role) = last_role {
             if let Some(close) = boundaries

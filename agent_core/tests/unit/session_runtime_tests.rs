@@ -1037,7 +1037,7 @@ fn session_turn_xml_replays_only_the_extracted_response_root() {
         Ok(llm(
             r#"<free_talk>search memory</free_talk>
 <response>
- <actions><memmgr name="search raw chat fixture" type="raw_chat" op="search" limit="1"><search_text>fixture</search_text></memmgr></actions>
+  <actions><memmgr name="search raw chat fixture" type="raw_chat" op="search" limit="1"><search_text>fixture</search_text></memmgr></actions>
 </response>
 discard-after"#,
             1_000,
@@ -1070,12 +1070,12 @@ discard-after"#,
     assert_eq!(outcome.stats.repair_calls, 0);
     assert_eq!(outcome.stats.tool_calls, 1);
     assert_eq!(model.prompts.len(), 2);
-    assert!(model.prompts[1].contains(r#"<ASSISTANT id="TIMEM_ASSISTANT">"#));
-    assert!(model.prompts[1].contains("&lt;response&gt;"));
+    assert!(!model.prompts[1].contains(r#"<ASSISTANT id=""#));
     assert!(model.prompts[1].contains(
-        r#"&lt;memmgr name="search raw chat fixture" type="raw_chat" op="search" limit="1"&gt;"#
+        "<response>\n  <actions><memmgr name=\"search raw chat fixture\" type=\"raw_chat\" op=\"search\" limit=\"1\"><search_text>fixture</search_text></memmgr></actions>\n</response>"
     ));
-    assert!(!model.prompts[1].contains("&lt;free_talk&gt;search memory&lt;/free_talk&gt;"));
+    assert!(!model.prompts[1].contains("&lt;response&gt;"));
+    assert!(!model.prompts[1].contains("<free_talk>search memory</free_talk>"));
     assert!(!model.prompts[1].contains("discard-after"));
     assert!(model.prompts[1].contains(r#"<memmgr_result task=""#));
     assert!(!model.prompts[1].contains("ERROR: The previous XML response had content outside"));
@@ -2641,12 +2641,13 @@ fn session_turn_defaults_to_raw_assistant_output_replay() {
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Xml;
     let mut ui = NoopTurnUi;
-
     let raw_first_response = r#"<response>
-<free_talk>raw planning note</free_talk>
-<final_answer>visible answer</final_answer>
+  <free_talk>raw planning note</free_talk>
+  <final_answer>visible answer</final_answer>
 </response>"#;
-    let mut first_model = ReplayModel::new([Ok(llm(raw_first_response, 4_000, false))]);
+    let first_response = llm(raw_first_response, 4_000, false);
+    let accepted_first_response = first_response.content.clone();
+    let mut first_model = ReplayModel::new([Ok(first_response)]);
     let first = run_session_turn_with_model_client(
         &mut core,
         &mut config,
@@ -2687,14 +2688,10 @@ fn session_turn_defaults_to_raw_assistant_output_replay() {
     assert_eq!(second.text, "second answer");
 
     let prompt = &second_model.prompts[0];
-    let assistant = prompt.find(r#"<ASSISTANT id="Ai4">"#).unwrap();
-    let raw = prompt
-        .find("&lt;free_talk&gt;raw planning note&lt;/free_talk&gt;")
-        .unwrap();
-    assert!(prompt.contains("&lt;finish_confirm&gt;"));
-    assert!(prompt.contains("&lt;final_answer&gt;visible answer&lt;/final_answer&gt;"));
+    let raw = prompt.find(&accepted_first_response).unwrap();
+    assert!(!prompt.contains(r#"<ASSISTANT id="Ai4">"#));
+    assert!(!prompt.contains("&lt;response&gt;"));
     let user = prompt.find("second user input").unwrap();
-    assert!(assistant < raw);
     assert!(raw < user);
     assert!(!prompt.contains("Final Answer:\nvisible answer"));
     assert!(!prompt.contains("All previous pending open tasks are completed."));
