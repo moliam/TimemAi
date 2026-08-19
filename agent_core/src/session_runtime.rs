@@ -259,38 +259,43 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     }
                     continue;
                 }
-                let active_elapsed = start.elapsed().saturating_sub(user_wait_this_turn);
-                let time_reminders = reminders.take_due_time(active_elapsed);
-                if !time_reminders.is_empty() {
-                    for reminder in time_reminders {
-                        core.submit_prompt_component(
-                            PromptComponentRole::system(),
-                            "turn_time_reminder",
-                            reminder,
-                            "turn_runtime",
-                        );
+                // Reminders guide an already-running model turn. Never inject one
+                // before the first model request, even when runtime preparation
+                // has already crossed a time boundary.
+                if rounds > 0 {
+                    let active_elapsed = start.elapsed().saturating_sub(user_wait_this_turn);
+                    let time_reminders = reminders.take_due_time(active_elapsed);
+                    if !time_reminders.is_empty() {
+                        for reminder in time_reminders {
+                            core.submit_prompt_component(
+                                PromptComponentRole::system(),
+                                "turn_time_reminder",
+                                reminder,
+                                "turn_runtime",
+                            );
+                        }
+                        step = CoreStep::NeedModel {
+                            prompt: core.build_next_prompt(),
+                            rounds_remaining: core.remaining_rounds(),
+                        };
+                        continue;
                     }
-                    step = CoreStep::NeedModel {
-                        prompt: core.build_next_prompt(),
-                        rounds_remaining: core.remaining_rounds(),
-                    };
-                    continue;
-                }
-                let round_reminders = reminders.take_due_rounds(rounds);
-                if !round_reminders.is_empty() {
-                    for reminder in round_reminders {
-                        core.submit_prompt_component(
-                            PromptComponentRole::system(),
-                            "turn_round_reminder",
-                            reminder,
-                            "turn_runtime",
-                        );
+                    let round_reminders = reminders.take_due_rounds(rounds);
+                    if !round_reminders.is_empty() {
+                        for reminder in round_reminders {
+                            core.submit_prompt_component(
+                                PromptComponentRole::system(),
+                                "turn_round_reminder",
+                                reminder,
+                                "turn_runtime",
+                            );
+                        }
+                        step = CoreStep::NeedModel {
+                            prompt: core.build_next_prompt(),
+                            rounds_remaining: core.remaining_rounds(),
+                        };
+                        continue;
                     }
-                    step = CoreStep::NeedModel {
-                        prompt: core.build_next_prompt(),
-                        rounds_remaining: core.remaining_rounds(),
-                    };
-                    continue;
                 }
                 rounds += 1;
                 ui.on_model_request(rounds, prompt);

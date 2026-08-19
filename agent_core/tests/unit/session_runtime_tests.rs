@@ -212,6 +212,21 @@ struct PollingReplayModel {
     inner: ReplayModel,
 }
 
+struct DelayBeforeFirstModelUi {
+    delay: Duration,
+    delayed: bool,
+}
+
+impl TurnUi for DelayBeforeFirstModelUi {
+    fn drain_user_supplements(&mut self) -> Vec<String> {
+        if !self.delayed {
+            self.delayed = true;
+            thread::sleep(self.delay);
+        }
+        Vec::new()
+    }
+}
+
 struct CancelAfterDelayUi {
     started: Instant,
     delay: Duration,
@@ -584,6 +599,50 @@ fn session_turn_injects_reasoning_reminder_after_configured_rounds() {
         1
     );
     assert!(model.prompts[reminder_prompt_index].contains("## RUNTIME"));
+}
+
+#[test]
+fn session_turn_does_not_inject_focus_reminder_before_first_model_request() {
+    let dir = tmp_dir("turn_focus_reminder_skips_initial_request");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+    let mut model = ReplayModel::new([Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"首轮完成。"}"#,
+        1_000,
+        false,
+    ))]);
+    let mut ui = DelayBeforeFirstModelUi {
+        delay: Duration::from_millis(150),
+        delayed: false,
+    };
+
+    let outcome = run_session_turn_with_model_client_and_focus_interval(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "直接回答",
+            session: "initial_focus_session",
+            audit_file: &audit,
+            runtime: "test_runtime",
+            run_bash_target: "test_target",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+        Duration::from_millis(100),
+    );
+
+    assert_eq!(outcome.text, "首轮完成。");
+    assert_eq!(model.prompts.len(), 1);
+    let focus_tips = crate::ReminderTipsConfig::default().schedules[0]
+        .tips
+        .clone();
+    assert!(focus_tips
+        .iter()
+        .all(|reminder| !model.prompts[0].contains(reminder)));
 }
 
 #[test]
