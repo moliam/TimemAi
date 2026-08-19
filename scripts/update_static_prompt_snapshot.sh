@@ -72,16 +72,14 @@ validate_one json "$TMP_JSON" \
 validate_one xml "$TMP_XML" \
   "<Timem System Prompt>" \
   "</Timem System Prompt>" \
-  "# System Response Protocol" \
-  'Return exactly one XML `<ASSISTANT>` root' \
+  "# ASSISTANT Response Protocol" \
+  'ONE VALID XML `<ASSISTANT>` ROOT' \
   '`<ASSISTANT>`' \
   '`<final_answer>`' \
   '<actions>' \
   '<parallel>' \
-  '<run_bash name="inspect repository status" timeout_ms="5000">' \
-  '<cmd>git status --short</cmd>' \
-  '<output_id_a1b2c3>' \
-  '</output_id_a1b2c3>'
+  '<run_bash name="check git status" timeout_ms="5000">' \
+  '<cmd>git status</cmd>'
 
 if [ "${1:-}" = "--check" ]; then
   echo "static_prompt_expansion: ok"

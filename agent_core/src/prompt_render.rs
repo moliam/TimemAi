@@ -512,7 +512,17 @@ fn render_prompt_delta_example(
             VisiblePromptRole::User,
             "new user input, or user supplement entered while the current turn was already in\nprogress.",
         ),
-        (VisiblePromptRole::You, "your response in this round"),
+        (
+            VisiblePromptRole::You,
+            match boundaries.role_boundary {
+                crate::response_protocol::PromptRoleBoundary::XmlElement => {
+                    "this whole xml-root is your response"
+                }
+                crate::response_protocol::PromptRoleBoundary::MarkdownHeading => {
+                    "your response in this round"
+                }
+            },
+        ),
         (
             VisiblePromptRole::Runtime,
             "Timem Runtime's feedback, tips, etc.\nRUNTIME's 'TIPS' will occasionally show up. They are the philosophy you should really seriously respect.",

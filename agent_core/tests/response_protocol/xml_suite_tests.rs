@@ -94,7 +94,7 @@ fn final_answer_requires_a_valid_finish_confirmation() {
     assert!(wrong_prefix.continue_work);
 
     let previous_prefix = parse_xml_envelope(
-        "<ASSISTANT><finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? If not, i should continue action.</finish_confirm><final_answer>must not escape</final_answer></ASSISTANT>",
+        "<ASSISTANT><finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action.</finish_confirm><final_answer>must not escape</final_answer></ASSISTANT>",
         &caps(),
     );
     assert_eq!(

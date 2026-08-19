@@ -2603,13 +2603,13 @@ fn session_turn_preserves_cache_plan_with_xml_response_protocol() {
 
     assert_eq!(outcome.text, "没有找到相关 scratch。");
     assert_eq!(model.prompts.len(), 2);
-    assert!(model.prompts[0].contains("# System Response Protocol"));
-    assert!(model.prompts[1].contains("# System Response Protocol"));
+    assert!(model.prompts[0].contains("# ASSISTANT Response Protocol"));
+    assert!(model.prompts[1].contains("# ASSISTANT Response Protocol"));
 
     let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
     assert!(second_parts
         .static_prompt
-        .contains("# System Response Protocol"));
+        .contains("# ASSISTANT Response Protocol"));
     assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
     assert!(second_parts
         .new_delta
@@ -2982,7 +2982,7 @@ fn cancelled_turn_injects_one_runtime_note_before_next_user_and_runtime_context(
     );
     assert_eq!(cancelled.stop_reason, Some(TurnStopReason::CancelledByUser));
 
-    let completed_response = r#"<ASSISTANT><finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. Complete.</finish_confirm><final_answer>done</final_answer></ASSISTANT>"#;
+    let completed_response = r#"<ASSISTANT><finish_confirm>Now let me think seriously twice before I announce stop. Review user's task list. Is my delivery consistent with user's demand? Complete.</finish_confirm><final_answer>done</final_answer></ASSISTANT>"#;
     let mut model = ReplayModel::new([
         Ok(llm(completed_response, 1_000, false)),
         Ok(llm(completed_response, 1_100, false)),
@@ -3092,7 +3092,7 @@ fn model_error_does_not_inject_user_interruption_note_on_next_turn() {
     );
     assert_eq!(failed.stop_reason, Some(TurnStopReason::ModelError));
 
-    let completed_response = r#"<ASSISTANT><finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. Complete.</finish_confirm><final_answer>done</final_answer></ASSISTANT>"#;
+    let completed_response = r#"<ASSISTANT><finish_confirm>Now let me think seriously twice before I announce stop. Review user's task list. Is my delivery consistent with user's demand? Complete.</finish_confirm><final_answer>done</final_answer></ASSISTANT>"#;
     let mut succeeding_model = ReplayModel::new([Ok(llm(completed_response, 1_000, false))]);
     let completed = run_session_turn_with_model_client(
         &mut core,

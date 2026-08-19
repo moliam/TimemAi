@@ -10,9 +10,8 @@ from xml.sax.saxutils import escape
 
 
 FINISH_CONFIRM_PREFIX = (
-    "Now let me think seriously twice before I stop. Do I really complete all user's "
-    "valid tasks or need to stop now? Is my dilivery consistent with user's content? "
-    "If not, i should continue action."
+    "Now let me think seriously twice before I announce stop. Review user's task "
+    "list. Is my delivery consistent with user's demand?"
 )
 
 
