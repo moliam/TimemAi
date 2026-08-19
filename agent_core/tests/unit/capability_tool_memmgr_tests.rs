@@ -75,5 +75,37 @@ fn raw_chat_search_status_is_independent_of_result_text() {
     );
     assert!(outcome.text.contains("error: example"), "{}", outcome.text);
     assert!(outcome.text.contains("cancelled"), "{}", outcome.text);
+    let evidence = outcome.memmgr_result.expect("memmgr evidence");
+    assert_eq!(evidence.memory_type, "raw_chat");
+    assert_eq!(evidence.op, "search");
+    assert_eq!(evidence.error_type, None);
+    assert!(evidence.content.contains("STATUS-PAYLOAD-42"));
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn unsupported_memmgr_operation_has_structured_invalid_input_evidence() {
+    use crate::CoreProfile;
+    use serde_json::json;
+
+    let root = std::env::temp_dir().join(format!("timem_memmgr_invalid_{}", std::process::id()));
+    let mut core = AgentCore::new(
+        "prompt",
+        CoreProfile {
+            model: "test".to_string(),
+        },
+        &root,
+    );
+    let action = ParsedAction {
+        action: "memmgr".to_string(),
+        name: None,
+        raw_input: json!({"type": "durable", "op": "unsupported"}),
+    };
+
+    let outcome = execute_outcome(&mut core, &action);
+    let evidence = outcome.memmgr_result.expect("memmgr error evidence");
+    assert_eq!(evidence.memory_type, "durable");
+    assert_eq!(evidence.op, "unsupported");
+    assert_eq!(evidence.error_type.as_deref(), Some("InvalidInput"));
+    let _ = std::fs::remove_dir_all(root);
 }

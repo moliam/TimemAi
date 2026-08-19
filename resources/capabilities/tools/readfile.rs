@@ -1,5 +1,5 @@
 use crate::response_protocol::ParsedAction;
-use crate::{ActionOutcome, AgentCore};
+use crate::{ActionOutcome, AgentCore, ReadfileResultEvidence};
 use encoding_rs::{Encoding, UTF_8};
 use serde_json::Value;
 use std::fs::{self, File, OpenOptions};
@@ -120,6 +120,56 @@ impl ReadfileError {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadfileSuccess {
+    text: String,
+    evidence: ReadfileResultEvidence,
+}
+
+fn readfile_error_type(code: &str) -> &'static str {
+    match code {
+        "path_not_found" => "NotFound",
+        "permission_denied" => "PermissionDenied",
+        "not_regular_file" => "NotRegularFile",
+        "scan_limit_exceeded" => "LimitExceeded",
+        "invalid_text_encoding"
+        | "unsupported_encoding"
+        | "encoding_bom_mismatch"
+        | "byte_selector_splits_bom"
+        | "byte_selector_splits_character" => "InvalidEncoding",
+        "binary_file" => "BinaryFile",
+        "start_line_not_found"
+        | "start_byte_not_found"
+        | "start_match_not_found"
+        | "end_byte_not_found"
+        | "end_match_not_found" => "SelectorNotFound",
+        "open_failed" | "metadata_failed" | "read_failed" => "IoError",
+        "builtin_action_panicked" => "InternalError",
+        _ => "InvalidInput",
+    }
+}
+
+fn readfile_error_evidence(
+    path: impl Into<String>,
+    error_type: impl Into<String>,
+    content: impl Into<String>,
+) -> ReadfileResultEvidence {
+    ReadfileResultEvidence {
+        path: path.into(),
+        matcher: None,
+        start_line: None,
+        end_line: None,
+        total_lines: None,
+        encoding: None,
+        file_bytes: None,
+        content_bytes: None,
+        limited: None,
+        tail_out: None,
+        content: content.into(),
+        error_type: Some(error_type.into()),
+    }
+}
+
 pub(crate) fn execute_action_outcome(core: &AgentCore, action: &ParsedAction) -> ActionOutcome {
     execute_with_timeout_outcome(
         core.current_prompt_cwd(),
@@ -144,14 +194,32 @@ pub(crate) fn execute_with_timeout_outcome(
 
     match receiver.recv_timeout(timeout) {
         Ok(outcome) => outcome,
-        Err(mpsc::RecvTimeoutError::Timeout) => ActionOutcome::timeout(format!(
-            "Action result: readfile\nstatus: error\npath: {}\nerror: timeout\nmessage: The readfile operation exceeded its execution timeout.",
-            quote(&path)
-        )),
-        Err(mpsc::RecvTimeoutError::Disconnected) => ActionOutcome::failed(format!(
-            "Action result: readfile\nstatus: error\npath: {}\nerror: builtin_action_panicked\nmessage: The readfile worker failed internally. Timem isolated the failure and remains available.",
-            quote(&path)
-        )),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let message = "The readfile operation exceeded its execution timeout.";
+            ActionOutcome::timeout(format!(
+                "Action result: readfile\nstatus: error\npath: {}\nerror: timeout\nmessage: {}",
+                quote(&path),
+                quote(message)
+            ))
+            .with_readfile_result(ReadfileResultEvidence {
+                error_type: None,
+                ..readfile_error_evidence(path, "", message)
+            })
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let message =
+                "The readfile worker failed internally. Timem isolated the failure and remains available.";
+            ActionOutcome::failed(format!(
+                "Action result: readfile\nstatus: error\npath: {}\nerror: builtin_action_panicked\nmessage: {}",
+                quote(&path),
+                quote(message)
+            ))
+            .with_readfile_result(readfile_error_evidence(
+                path,
+                "InternalError",
+                message,
+            ))
+        }
     }
 }
 
@@ -161,12 +229,17 @@ pub fn execute(cwd: &Path, input: &Value) -> String {
 
 pub(crate) fn execute_outcome(cwd: &Path, input: &Value) -> ActionOutcome {
     match execute_inner(cwd, input) {
-        Ok(result) => ActionOutcome::completed(result),
-        Err(error) => ActionOutcome::failed(error_result(input_path(input), &error)),
+        Ok(result) => ActionOutcome::completed(result.text).with_readfile_result(result.evidence),
+        Err(error) => {
+            let path = input_path(input).unwrap_or("<unknown>");
+            let error_type = readfile_error_type(error.code);
+            ActionOutcome::failed(error_result(input_path(input), &error))
+                .with_readfile_result(readfile_error_evidence(path, error_type, error.message))
+        }
     }
 }
 
-fn execute_inner(cwd: &Path, input: &Value) -> Result<String, ReadfileError> {
+fn execute_inner(cwd: &Path, input: &Value) -> Result<ReadfileSuccess, ReadfileError> {
     let object = input.as_object().ok_or_else(|| {
         ReadfileError::new("invalid_input", "The readfile input must be an object.")
     })?;
@@ -325,7 +398,7 @@ fn execute_inner(cwd: &Path, input: &Value) -> Result<String, ReadfileError> {
         })
         .unwrap_or_else(|| format!("{}, line [{}, {}]:", file_name, start_line, end_line));
 
-    Ok(format!(
+    let result_text = format!(
         "Action result: readfile\nstatus: ok\npath: {}\nencoding: {}\nfile_bytes: {}\nstart_utf8_byte: {}\nend_utf8_byte_exclusive: {}\ncontent_bytes: {}\nlimited: {}\ntail_out: {}\n{}\ncontent:\n{}",
         quote(&canonical_path),
         encoding.name(),
@@ -337,7 +410,29 @@ fn execute_inner(cwd: &Path, input: &Value) -> Result<String, ReadfileError> {
         tail_out,
         output_heading,
         rendered_content
-    ))
+    );
+    let total_lines = if text.is_empty() {
+        0
+    } else {
+        selected_end_line(text, 0, text.len())
+    };
+    Ok(ReadfileSuccess {
+        text: result_text,
+        evidence: ReadfileResultEvidence {
+            path: canonical_path.into_owned(),
+            matcher: matcher_expression(starter.as_ref(), ender.as_ref()),
+            start_line: Some(start_line),
+            end_line: Some(end_line),
+            total_lines: Some(total_lines),
+            encoding: Some(encoding.name().to_string()),
+            file_bytes: Some(raw.len() as u64),
+            content_bytes: Some(content.len()),
+            limited: Some(limited),
+            tail_out: Some(tail_out),
+            content: rendered_content,
+            error_type: None,
+        },
+    })
 }
 
 fn parse_tail_out(value: Option<&Value>) -> Result<bool, ReadfileError> {

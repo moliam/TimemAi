@@ -26,13 +26,66 @@ The `name` attribute is protocol metadata used to associate an action with its
 result. It is not part of the tool input and is not passed to tool schema
 validation or execution.
 
-For XML protocol turns, ordinary tools return a generic action-result envelope
-with the same action name:
-`<action_result><readfile name="read source"><output_id_a1b2c3>...</output_id_a1b2c3></readfile></action_result>`.
+For XML protocol turns, tools without a dedicated result format return a
+generic action-result envelope with the same action name:
+`<action_result><toolgen name="generate tool"><output_id_a1b2c3>...</output_id_a1b2c3></toolgen></action_result>`.
 Runtime derives this generic `HASH` from the original return content and its
 generation time; it is exactly six lowercase hexadecimal digits.
 
-`run_bash` uses a dedicated result instead:
+`run_bash`, `readfile`, `memmgr`, and `self_tool` use dedicated results.
+All dedicated `status` attributes are lifecycle-only: `finished`, `timeout`,
+or `running`. A finished lifecycle does not imply business success. Execution
+errors use a structured `error_type` when available; runtime does not derive
+metadata from result text.
+
+`readfile` exposes file metadata directly from its execution result:
+
+```xml
+<readfile_result task="read matched notes" path="/tmp/notes.txt" matcher="START ... END" lines="2-4" total_lines="5" encoding="UTF-8" file_bytes="30" content_bytes="16" truncated="false" tail_out="false" status="finished">
+<<<CONTENT_7f3b
+START
+middle
+END
+CONTENT_7f3b
+</readfile_result>
+```
+
+A completed read failure still has lifecycle status `finished`:
+
+```xml
+<readfile_result task="read missing file" path="missing.txt" status="finished" error_type="NotFound">
+<<<ERROR_b901
+path_not_found
+ERROR_b901
+</readfile_result>
+```
+
+`memmgr` records its memory surface and operation, while `self_tool` records
+its requested type and includes `cwd` after a successful directory change:
+
+```xml
+<memmgr_result task="update memory" type="durable" op="update" status="finished" error_type="MemoryConflict">
+<<<ERROR_90af
+memory_conflict
+ERROR_90af
+</memmgr_result>
+
+<self_tool_result task="change workspace" type="cwd" cwd="/tmp/project" status="finished">
+<<<CONTENT_21ce
+CWD changed to /tmp/project
+CONTENT_21ce
+</self_tool_result>
+```
+
+Dedicated `readfile`, `memmgr`, and `self_tool` bodies use a four-digit dynamic
+`CONTENT_ID` or `ERROR_ID` boundary. Runtime hashes the task, structured
+metadata, original body, and generation time, and avoids IDs whose markers
+already occur in the body. The body is opaque evidence and may contain
+Markdown or XML-looking text. If prompt-budget truncation is required, runtime
+truncates only the body and preserves the opening marker, closing marker, and
+root element.
+
+`run_bash` uses its stream-aware dedicated result:
 
 ```xml
 <bash_result task="check git status" status="finished" exit_code="0">

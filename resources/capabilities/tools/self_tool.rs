@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::response_protocol::ParsedAction;
-use crate::ActionOutcome;
 use crate::AgentCore;
+use crate::{ActionOutcome, ActionStatus, SelfToolResultEvidence};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelfToolPaths {
@@ -61,22 +61,75 @@ impl SelfToolState {
 }
 
 pub(crate) fn execute_action_outcome(core: &mut AgentCore, action: &ParsedAction) -> ActionOutcome {
-    match action.input_lower("type").as_str() {
-        "path" => ActionOutcome::completed(execute_path_action(core)),
+    let self_type = action.input_lower("type");
+    let mut evidence_cwd = None;
+    let (outcome, evidence_content) = match self_type.as_str() {
+        "path" => {
+            let content = execute_path_action(core);
+            (
+                ActionOutcome::completed(format!(
+                    "Action result: self_tool\ntype: path\n{content}"
+                )),
+                content,
+            )
+        }
         "cwd" => match core.change_prompt_cwd(action.input_raw_str("new_path")) {
-            Ok(path) => ActionOutcome::completed(format!(
-                "Action result: self_tool\ntype: cwd\nCWD changed to {}",
-                path.display()
-            )),
-            Err(error) => ActionOutcome::failed(format!(
-                "Action result: self_tool\ntype: cwd\nerror: {error}"
-            )),
+            Ok(path) => {
+                evidence_cwd = Some(path.display().to_string());
+                let content = format!("CWD changed to {}", path.display());
+                (
+                    ActionOutcome::completed(format!(
+                        "Action result: self_tool\ntype: cwd\n{content}"
+                    )),
+                    content,
+                )
+            }
+            Err(error) => {
+                let content = error.to_string();
+                (
+                    ActionOutcome::failed(format!(
+                        "Action result: self_tool\ntype: cwd\nerror: {content}"
+                    )),
+                    content,
+                )
+            }
         },
-        "params" => ActionOutcome::completed(execute_params_action(core)),
-        self_type => ActionOutcome::failed(format!(
-            "Action result: self_tool\ntype: {self_type}\nerror: unsupported_type"
-        )),
-    }
+        "params" => {
+            let content = execute_params_action(core);
+            (
+                ActionOutcome::completed(format!(
+                    "Action result: self_tool\ntype: params\n{content}"
+                )),
+                content,
+            )
+        }
+        _ => {
+            let content = "unsupported_type".to_string();
+            (
+                ActionOutcome::failed(format!(
+                    "Action result: self_tool\ntype: {self_type}\nerror: {content}"
+                )),
+                content,
+            )
+        }
+    };
+    let error_type = match outcome.status {
+        ActionStatus::Failed | ActionStatus::Cancelled => Some(
+            if matches!(self_type.as_str(), "path" | "cwd" | "params") {
+                "InvalidPath"
+            } else {
+                "InvalidInput"
+            }
+            .to_string(),
+        ),
+        _ => None,
+    };
+    outcome.with_self_tool_result(SelfToolResultEvidence {
+        self_type,
+        cwd: evidence_cwd,
+        content: evidence_content,
+        error_type,
+    })
 }
 
 fn execute_path_action(core: &AgentCore) -> String {
@@ -100,7 +153,7 @@ fn execute_path_action(core: &AgentCore) -> String {
     let tool_repo_dir = core.tool_repo().root();
     let capabilities_dir = env_path_param(&core.self_tool.env, "TIMEM_CAPABILITIES_DIR");
     format!(
-        "Action result: self_tool\ntype: path\ncwd: {}\nprocess_cwd: {}\nexecutable: {}\nconfig_root: {}\nreminder_tips_file: {}\ncapabilities_dir: {}\ndata_root: {}\nworkspace_config_file: {}\nspace_dir: {}\nmemory_dir: {}\nmemory_file: {}\nscratch_file: {}\nsessions_dir: {}\nsession_index_file: {}\ntool_repo_dir: {}\naudit_dir: {}\napi_audit_file: {}\naction_audit_file: {}",
+        "cwd: {}\nprocess_cwd: {}\nexecutable: {}\nconfig_root: {}\nreminder_tips_file: {}\ncapabilities_dir: {}\ndata_root: {}\nworkspace_config_file: {}\nspace_dir: {}\nmemory_dir: {}\nmemory_file: {}\nscratch_file: {}\nsessions_dir: {}\nsession_index_file: {}\ntool_repo_dir: {}\naudit_dir: {}\napi_audit_file: {}\naction_audit_file: {}",
         core.current_prompt_cwd().display(),
         core.self_tool.process.current_dir.display(),
         core.self_tool.process.executable.display(),
@@ -125,7 +178,7 @@ fn execute_path_action(core: &AgentCore) -> String {
 fn execute_params_action(core: &AgentCore) -> String {
     let safe_env = &core.self_tool.env;
     format!(
-        "Action result: self_tool\ntype: params\nname: {}\nversion: {}\npid: {}\nmodel: {}\nassistant_name: {}\napi_protocol: {}\nresponse_protocol: {}\nbase_url: {}\napi_key_configured: {}\ntimeout_secs: {}\nmax_llm_input_tokens: {}\nmax_llm_output_tokens: {}\nmax_steps: {}\nbash_approval: {}\nwork_instructions: {}\nenable_thinking: {}\nreasoning_effort: {}\nstream: {}\nopenai_cache_mode: {}\ncapability_tools: {}\ncapability_skills: {}\nnote: Only known runtime parameters are returned. Credentials and arbitrary environment variables are excluded.",
+        "name: {}\nversion: {}\npid: {}\nmodel: {}\nassistant_name: {}\napi_protocol: {}\nresponse_protocol: {}\nbase_url: {}\napi_key_configured: {}\ntimeout_secs: {}\nmax_llm_input_tokens: {}\nmax_llm_output_tokens: {}\nmax_steps: {}\nbash_approval: {}\nwork_instructions: {}\nenable_thinking: {}\nreasoning_effort: {}\nstream: {}\nopenai_cache_mode: {}\ncapability_tools: {}\ncapability_skills: {}\nnote: Only known runtime parameters are returned. Credentials and arbitrary environment variables are excluded.",
         core.self_tool.about.name,
         core.self_tool.about.version,
         core.self_tool.process.pid,

@@ -1193,7 +1193,22 @@ ordinary tool output bodies are enclosed by matching
 when the result enters prompt context from the original return content and
 generation time, rendering exactly six lowercase hexadecimal digits.
 
-`run_bash` is rendered separately as `<bash_result task="..." status="...">`.
+`run_bash`, `readfile`, `memmgr`, and `self_tool` have dedicated XML results.
+`readfile_result` carries path, selected line/matcher data, encoding, byte
+counts, and truncation metadata supplied by the execution layer.
+`memmgr_result` carries the memory surface and operation, while
+`self_tool_result` carries its requested type and the resulting cwd when
+available. Their bodies use collision-safe four-digit `CONTENT_HASH` or
+`ERROR_HASH` boundaries. Prompt-budget truncation applies only inside the
+boundary so the marker pair and root element remain complete.
+
+All dedicated result statuses are lifecycle-only: `finished`, `timeout`, or
+`running`. A finished lifecycle does not mean the operation succeeded;
+execution failures carry a structured `error_type` when available. Runtime
+does not infer status or metadata from the body text. XML attributes are
+escaped, while boundary-delimited bodies remain opaque evidence.
+
+`run_bash` is rendered as `<bash_result task="..." status="...">`.
 The execution layer retains stdout and stderr independently instead of
 reconstructing them from merged display text. A result with one non-empty
 stream uses an opaque `<<<OUTPUT_HASH ... OUTPUT_HASH` block. When both streams

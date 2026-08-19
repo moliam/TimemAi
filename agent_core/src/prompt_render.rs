@@ -1,7 +1,10 @@
 use crate::capability::CapabilityRegistry;
 use crate::prompt_spec;
 use crate::response_protocol::{PromptBoundarySpec, ResponseProtocolSuite};
-use crate::{ActionStatus, BashResultEvidence, PromptDelta, PromptSlice};
+use crate::{
+    ActionStatus, BashResultEvidence, MemmgrResultEvidence, PromptDelta, PromptSlice,
+    ReadfileResultEvidence, SelfToolResultEvidence,
+};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 pub(crate) const RESPONSE_TRAILER: &str =
@@ -176,7 +179,7 @@ fn bash_boundary_id(task: &str, stdout: &str, stderr: &str, output_time_ms: i64)
     unreachable!("the finite Bash output cannot contain every possible salted boundary")
 }
 
-fn bash_lifecycle_status(status: ActionStatus) -> &'static str {
+fn action_lifecycle_status(status: ActionStatus) -> &'static str {
     match status {
         ActionStatus::Timeout => "timeout",
         ActionStatus::BackgroundRunning => "running",
@@ -217,7 +220,7 @@ pub(crate) fn render_xml_bash_result(
         .filter(|name| !name.is_empty())
         .unwrap_or("run_bash");
     let escaped_task = escape_xml_attribute(task);
-    let status = bash_lifecycle_status(status);
+    let status = action_lifecycle_status(status);
     let exit_code = evidence
         .exit_code
         .map(|code| format!(" exit_code=\"{code}\""))
@@ -278,6 +281,170 @@ pub(crate) fn render_xml_bash_result(
     let body_budget = MAX_ACTION_RESULT_PROMPT_BYTES.saturating_sub(fixed);
     let content = truncate_raw_text_for_budget(content.trim_end(), body_budget);
     format!("{prefix}{open}{content}{close}{suffix}")
+}
+
+fn specialized_boundary_id(
+    kind: &str,
+    task: &str,
+    metadata: &str,
+    content: &str,
+    output_time_ms: i64,
+) -> String {
+    for salt in 0_u32..=u32::MAX {
+        let mut hasher = DefaultHasher::new();
+        kind.hash(&mut hasher);
+        task.hash(&mut hasher);
+        metadata.hash(&mut hasher);
+        content.hash(&mut hasher);
+        output_time_ms.hash(&mut hasher);
+        salt.hash(&mut hasher);
+        let id = format!("{:04x}", hasher.finish() & 0xffff);
+        if !content.contains(&format!("CONTENT_{id}")) && !content.contains(&format!("ERROR_{id}"))
+        {
+            return id;
+        }
+    }
+    unreachable!("finite tool output cannot contain every possible salted boundary")
+}
+
+fn append_xml_attribute(attributes: &mut String, name: &str, value: &str) {
+    attributes.push(' ');
+    attributes.push_str(name);
+    attributes.push_str("=\"");
+    attributes.push_str(&escape_xml_attribute(value));
+    attributes.push('"');
+}
+
+fn render_xml_specialized_result(
+    root: &str,
+    task: &str,
+    status: ActionStatus,
+    mut attributes: String,
+    content: &str,
+    error_type: Option<&str>,
+    output_time_ms: i64,
+) -> String {
+    append_xml_attribute(&mut attributes, "status", action_lifecycle_status(status));
+    if let Some(error_type) = error_type {
+        append_xml_attribute(&mut attributes, "error_type", error_type);
+    }
+
+    let escaped_task = escape_xml_attribute(task);
+    let prefix = format!("<{root} task=\"{escaped_task}\"{attributes}>\n");
+    let suffix = format!("\n</{root}>");
+    let id = specialized_boundary_id(root, task, &attributes, content, output_time_ms);
+    let label = if error_type.is_some()
+        || matches!(
+            status,
+            ActionStatus::Failed | ActionStatus::Timeout | ActionStatus::Cancelled
+        ) {
+        "ERROR"
+    } else {
+        "CONTENT"
+    };
+    let open = format!("<<<{label}_{id}\n");
+    let close = format!("\n{label}_{id}");
+    let fixed = prefix.len() + suffix.len() + open.len() + close.len();
+    let body_budget = MAX_ACTION_RESULT_PROMPT_BYTES.saturating_sub(fixed);
+    let content = truncate_raw_text_for_budget(content.trim_end(), body_budget);
+    format!("{prefix}{open}{content}{close}{suffix}")
+}
+
+pub(crate) fn render_xml_readfile_result(
+    action_name: Option<&str>,
+    status: ActionStatus,
+    evidence: &ReadfileResultEvidence,
+    output_time_ms: i64,
+) -> String {
+    let task = action_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("readfile");
+    let mut attributes = String::new();
+    append_xml_attribute(&mut attributes, "path", &evidence.path);
+    if let Some(matcher) = evidence.matcher.as_deref() {
+        append_xml_attribute(&mut attributes, "matcher", matcher);
+    }
+    if let (Some(start), Some(end)) = (evidence.start_line, evidence.end_line) {
+        append_xml_attribute(&mut attributes, "lines", &format!("{start}-{end}"));
+    }
+    if let Some(total_lines) = evidence.total_lines {
+        append_xml_attribute(&mut attributes, "total_lines", &total_lines.to_string());
+    }
+    if let Some(encoding) = evidence.encoding.as_deref() {
+        append_xml_attribute(&mut attributes, "encoding", encoding);
+    }
+    if let Some(file_bytes) = evidence.file_bytes {
+        append_xml_attribute(&mut attributes, "file_bytes", &file_bytes.to_string());
+    }
+    if let Some(content_bytes) = evidence.content_bytes {
+        append_xml_attribute(&mut attributes, "content_bytes", &content_bytes.to_string());
+    }
+    if let Some(limited) = evidence.limited {
+        append_xml_attribute(&mut attributes, "truncated", &limited.to_string());
+    }
+    if let Some(tail_out) = evidence.tail_out {
+        append_xml_attribute(&mut attributes, "tail_out", &tail_out.to_string());
+    }
+    render_xml_specialized_result(
+        "readfile_result",
+        task,
+        status,
+        attributes,
+        &evidence.content,
+        evidence.error_type.as_deref(),
+        output_time_ms,
+    )
+}
+
+pub(crate) fn render_xml_memmgr_result(
+    action_name: Option<&str>,
+    status: ActionStatus,
+    evidence: &MemmgrResultEvidence,
+    output_time_ms: i64,
+) -> String {
+    let task = action_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("memmgr");
+    let mut attributes = String::new();
+    append_xml_attribute(&mut attributes, "type", &evidence.memory_type);
+    append_xml_attribute(&mut attributes, "op", &evidence.op);
+    render_xml_specialized_result(
+        "memmgr_result",
+        task,
+        status,
+        attributes,
+        &evidence.content,
+        evidence.error_type.as_deref(),
+        output_time_ms,
+    )
+}
+
+pub(crate) fn render_xml_self_tool_result(
+    action_name: Option<&str>,
+    status: ActionStatus,
+    evidence: &SelfToolResultEvidence,
+    output_time_ms: i64,
+) -> String {
+    let task = action_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("self_tool");
+    let mut attributes = String::new();
+    append_xml_attribute(&mut attributes, "type", &evidence.self_type);
+    if let Some(cwd) = evidence.cwd.as_deref() {
+        append_xml_attribute(&mut attributes, "cwd", cwd);
+    }
+    render_xml_specialized_result(
+        "self_tool_result",
+        task,
+        status,
+        attributes,
+        &evidence.content,
+        evidence.error_type.as_deref(),
+        output_time_ms,
+    )
 }
 
 pub(crate) fn render_xml_action_result(

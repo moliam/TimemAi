@@ -469,7 +469,9 @@ fn extracted_fields_replay_keeps_the_complete_accepted_xml_response() {
     assert!(prompt.contains("## Session Assistant"));
     assert!(prompt.contains(response));
     assert_eq!(prompt.matches("<response>").count(), 1);
-    assert!(prompt.contains(r#"<action_result><self_tool name="inspect runtime parameters">"#));
+    assert!(prompt.contains(
+        r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#
+    ));
     assert!(!prompt.contains("The following are results of the actions generated in response:"));
     assert!(!prompt.contains("newly initiated actions"));
 }
@@ -504,51 +506,35 @@ fn xml_action_results_preserve_names_for_sequential_and_parallel_actions() {
     };
 
     assert!(
-        prompt.contains(r#"<action_result><self_tool name="inspect runtime paths">"#),
+        prompt.contains(
+            r#"<self_tool_result task="inspect runtime paths" type="path" status="finished">"#
+        ),
         "{prompt}"
     );
     assert!(
-        prompt.contains(r#"<action_result><self_tool name="inspect runtime parameters">"#),
+        prompt.contains(r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#),
         "{prompt}"
     );
     assert!(
-        prompt.contains(r#"<action_result><self_tool name="inspect current directory">"#),
+        prompt.contains(r#"<self_tool_result task="inspect current directory" type="cwd" cwd=""#),
         "{prompt}"
     );
-    let opening_tags = prompt
-        .match_indices("<output_id_")
-        .filter_map(|(start, _)| {
-            let tag = &prompt[start + 1..];
-            let end = tag.find('>')?;
-            Some(tag[..end].to_string())
-        })
-        .collect::<Vec<_>>();
     assert_eq!(
-        opening_tags.len(),
+        prompt.matches("<self_tool_result ").count(),
         3,
-        "every sequential/parallel action must have one output envelope: {prompt}"
+        "every sequential/parallel self_tool action must have one specialized result: {prompt}"
     );
-    for output_tag in &opening_tags {
-        let hash = output_tag
-            .strip_prefix("output_id_")
-            .expect("output envelope must use the output_id_ prefix");
-        assert_eq!(hash.len(), 6, "output ID must contain six hex digits");
-        assert!(
-            hash.bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-            "output ID must use lowercase hexadecimal digits: {output_tag}"
-        );
-        assert_eq!(
-            prompt.matches(&format!("<{output_tag}>")).count(),
-            1,
-            "output envelope must have one opening tag: {prompt}"
-        );
-        assert_eq!(
-            prompt.matches(&format!("</{output_tag}>")).count(),
-            1,
-            "output envelope must have one matching closing tag: {prompt}"
-        );
-    }
+    assert_eq!(
+        prompt.matches("<<<CONTENT_").count(),
+        3,
+        "every successful self_tool result must have one content boundary: {prompt}"
+    );
+    assert_eq!(
+        prompt.matches("</self_tool_result>").count(),
+        3,
+        "every specialized result must have a closing root tag: {prompt}"
+    );
+    assert!(!prompt.contains("<output_id_"));
     assert_eq!(
         core.build_next_prompt(),
         prompt,
@@ -592,13 +578,13 @@ fn xml_readfile_result_reports_file_name_matcher_and_line_range_before_content()
     };
 
     assert!(
-        prompt.contains(r#"<action_result><readfile name="read matched notes">"#),
+        prompt.contains(r#"<readfile_result task="read matched notes" path=""#),
         "{prompt}"
     );
     assert!(
-        prompt.contains(
-            "notes.txt, matcher 'START ... END' line is [2, 4]:\ncontent:\nSTART\nmiddle\nEND",
-        ),
+        prompt.contains(r#"matcher="START ... END" lines="2-4" total_lines="5""#)
+            && prompt.contains("<<<CONTENT_")
+            && prompt.contains("START\nmiddle\nEND"),
         "{prompt}"
     );
 }
@@ -3615,7 +3601,7 @@ fn xml_memmgr_durable_sql_lists_recent_records_without_repair() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!prompt.contains("response is not protocol compliant"));
-    assert!(prompt.contains(r#"<action_result><memmgr name="list recent durable memories">"#));
+    assert!(prompt.contains(r#"<memmgr_result task="list recent durable memories" type="durable" op="sql" status="finished">"#));
     assert!(prompt.contains("第二条 durable 记录"));
     assert!(prompt.contains("第一条 durable 记录"));
 }
