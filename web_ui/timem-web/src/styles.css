@@ -1202,7 +1202,7 @@ button:disabled { cursor: not-allowed; }
 .queued-message-header-actions { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; margin-left: auto; }
 .queued-auto-send-control { display: inline-flex; align-items: center; gap: 5px; color: #aeb8bd; font-size: 10px; font-weight: 600; white-space: nowrap; }
 .queued-auto-send-switch { position: relative; width: 32px; height: 18px; min-height: 18px; flex: none; border: 1px solid #59646a; border-radius: 999px; padding: 0; background: #444b4e; transition: border-color .16s ease, background .16s ease; }
-.queued-auto-send-switch[aria-checked="true"] { border-color: #4b8a76; background: #39715f; }
+.queued-auto-send-switch[aria-checked="true"] { border-color: #2563eb; background: #3b82f6; }
 .queued-auto-send-thumb { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #dce5e8; box-shadow: 0 1px 2px #0006; transition: transform .16s ease; pointer-events: none; }
 .queued-auto-send-switch[aria-checked="true"] .queued-auto-send-thumb { transform: translateX(14px); background: #fff; }
 .queued-auto-send-switch:hover { border-color: #8ea3ad; }
@@ -1262,7 +1262,7 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .queued-message-summary-count { border-color: #d4dde0; }
 :root[data-theme="light"] .queued-auto-send-control { color: #5f727b; }
 :root[data-theme="light"] .queued-auto-send-switch { border-color: #aebcc2; background: #cad2d5; }
-:root[data-theme="light"] .queued-auto-send-switch[aria-checked="true"] { border-color: #5c9a85; background: #63a68f; }
+:root[data-theme="light"] .queued-auto-send-switch[aria-checked="true"] { border-color: #2563eb; background: #3b82f6; }
 :root[data-theme="light"] .queued-message-toggle,
 :root[data-theme="light"] .queued-message-panel-toggle { color: #647a84; }
 :root[data-theme="light"] .queued-message-toggle:hover,
@@ -1722,3 +1722,4 @@ body {
   .model-config-banner { align-items: flex-start; flex-wrap: wrap; margin: 9px 17px 0; }
   .model-config-banner button { margin-left: 24px; }
 }
+
