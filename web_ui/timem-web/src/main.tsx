@@ -29,6 +29,11 @@ import "highlight.js/styles/github-dark.css";
 const STORED_HISTORY_PAGE_SIZE = 200;
 const TOKEN_STORAGE_KEY = "timem-web-access-token";
 const EMPTY_CHAT_MESSAGES: ChatMessage[] = [];
+const SESSION_API_KEY_SAVE_TIMEOUT_MS = 20_000;
+type PendingSessionApiKeyCommand = {
+  sessionId: string;
+  timeoutId: number;
+};
 type ChatMessageDeleteCandidate = {
   sessionId: string;
   turnId: string;
@@ -167,6 +172,8 @@ function TimemApp() {
   const pendingRuntimeKeysRef = useRef<Set<string>>(new Set());
   const pendingSessionCredentialIdsRef = useRef<Set<string>>(new Set());
   const pendingSessionApiKeyValuesRef = useRef<Map<string, string>>(new Map());
+  const pendingSessionApiKeyCommandsRef = useRef<Map<string, PendingSessionApiKeyCommand>>(new Map());
+  const pendingSessionApiKeyCommandIdsRef = useRef<Map<string, string>>(new Map());
   const pendingMcpKeysRef = useRef<Set<string>>(new Set());
   const pendingHistorySessionIdsRef = useRef<Set<string>>(new Set());
   const pendingUploadSessionIdsRef = useRef<Set<string>>(new Set());
@@ -392,6 +399,37 @@ function TimemApp() {
     });
   }, []);
 
+  const finishPendingSessionApiKeyCommand = useCallback((sessionId: string, commandId?: string, committed = false) => {
+    const activeCommandId = pendingSessionApiKeyCommandIdsRef.current.get(sessionId);
+    if (commandId && activeCommandId !== commandId) return false;
+    if (activeCommandId) {
+      const pending = pendingSessionApiKeyCommandsRef.current.get(activeCommandId);
+      if (pending) window.clearTimeout(pending.timeoutId);
+      pendingSessionApiKeyCommandsRef.current.delete(activeCommandId);
+      pendingSessionApiKeyCommandIdsRef.current.delete(sessionId);
+      commandOutboxRef.current = finishOutboxCommand(commandOutboxRef.current, activeCommandId);
+      removeCommandOutboxItem(window.localStorage, commandOutboxScopeRef.current, activeCommandId);
+    }
+    const savedApiKey = pendingSessionApiKeyValuesRef.current.get(sessionId);
+    pendingSessionApiKeyValuesRef.current.delete(sessionId);
+    removePendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, sessionId);
+    if (committed && savedApiKey !== undefined) {
+      setRevealedSessionApiKeys((current) => updateRevealedSessionApiKeys(current, sessionId, savedApiKey));
+      setSessions((current) => current.map((session) => session.session_id === sessionId && session.runtime_profile
+        ? { ...session, runtime_profile: { ...session.runtime_profile, api_key_configured: savedApiKey.length > 0 } }
+        : session));
+    }
+    return true;
+  }, [removePendingKey]);
+
+  const cancelAllPendingSessionApiKeyCommands = useCallback((detail?: string) => {
+    const sessionIds = Array.from(pendingSessionApiKeyCommandIdsRef.current.keys());
+    for (const sessionId of sessionIds) {
+      finishPendingSessionApiKeyCommand(sessionId);
+      if (detail) reportUiError("API key update interrupted", detail, sessionId);
+    }
+  }, [finishPendingSessionApiKeyCommand, reportUiError]);
+
   const clearAllPendingCommands = useCallback(() => {
     creatingSessionRef.current = false;
     cancellingSessionIds.current.clear();
@@ -401,8 +439,13 @@ function TimemApp() {
     pendingDeleteSessionIdsRef.current.clear();
     pendingDeleteMessageKeysRef.current.clear();
     pendingRuntimeKeysRef.current.clear();
+    for (const pending of pendingSessionApiKeyCommandsRef.current.values()) {
+      window.clearTimeout(pending.timeoutId);
+    }
     pendingSessionCredentialIdsRef.current.clear();
     pendingSessionApiKeyValuesRef.current.clear();
+    pendingSessionApiKeyCommandsRef.current.clear();
+    pendingSessionApiKeyCommandIdsRef.current.clear();
     pendingMcpKeysRef.current.clear();
     pendingHistorySessionIdsRef.current.clear();
     pendingUploadSessionIdsRef.current.clear();
@@ -522,11 +565,27 @@ function TimemApp() {
         if (accepted && commandMayPersist(accepted.command)) saveCommandOutboxItem(window.localStorage, commandOutboxScopeRef.current, accepted);
       } else {
         const completed = commandOutboxRef.current.find((item) => item.commandId === event.command_id);
+        const pendingCredential = pendingSessionApiKeyCommandsRef.current.get(event.command_id);
         commandOutboxRef.current = finishOutboxCommand(commandOutboxRef.current, event.command_id);
         removeCommandOutboxItem(window.localStorage, commandOutboxScopeRef.current, event.command_id);
+        if (pendingCredential) {
+          finishPendingSessionApiKeyCommand(
+            pendingCredential.sessionId,
+            event.command_id,
+            event.status === "committed",
+          );
+        }
         if (event.status === "rejected") {
-          const sessionId = commandSessionId(completed?.command) ?? (activeSessionIdRef.current || "system");
-          if (isModelSubmissionCommand(completed?.command)) {
+          const sessionId = pendingCredential?.sessionId
+            ?? commandSessionId(completed?.command)
+            ?? (activeSessionIdRef.current || "system");
+          if (pendingCredential) {
+            reportUiError(
+              "API key update rejected",
+              event.error || "The runtime rejected this Session credential. Check the value and try again.",
+              sessionId,
+            );
+          } else if (isModelSubmissionCommand(completed?.command)) {
             const issue = modelServiceIssue(event.error || "The runtime rejected this model request.");
             if (sessionId !== "system") {
               setModelServiceIssues((current) => ({ ...current, [sessionId]: issue }));
@@ -632,16 +691,13 @@ function TimemApp() {
       return;
     }
     if (event.type === "session_runtime_updated") {
-      removePendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, event.session_id);
+      finishPendingSessionApiKeyCommand(event.session_id, undefined, true);
       setModelServiceIssues((current) => {
         if (!(event.session_id in current)) return current;
         const next = { ...current };
         delete next[event.session_id];
         return next;
       });
-      const savedApiKey = pendingSessionApiKeyValuesRef.current.get(event.session_id);
-      pendingSessionApiKeyValuesRef.current.delete(event.session_id);
-      setRevealedSessionApiKeys((current) => updateRevealedSessionApiKeys(current, event.session_id, savedApiKey));
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? { ...session, runtime_profile: event.runtime_profile }
         : session));
@@ -871,7 +927,7 @@ function TimemApp() {
         setActiveSessionId((current) => current || sessionId);
       }
     }
-  }, [applySnapshot, clearAllPendingCommands, pushActivity, removePendingKey, reportUiError]);
+  }, [applySnapshot, clearAllPendingCommands, finishPendingSessionApiKeyCommand, pushActivity, removePendingKey, reportUiError]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -937,10 +993,13 @@ function TimemApp() {
       };
       ws.onclose = () => {
         if (socket.current === ws) socket.current = null;
+        if (stopped) return;
         setConnected(false);
         setSnapshotReady(false);
-        if (!stopped) {
-          const nextAttempt = retryAttempt + 1;
+        cancelAllPendingSessionApiKeyCommands(
+          "The runtime connection closed before the credential update completed. Your input was kept; reconnect and try again.",
+        );
+        const nextAttempt = retryAttempt + 1;
           retryAttempt = nextAttempt;
           setReconnectAttempt(nextAttempt);
           if (hasConnectedOnce) {
@@ -961,9 +1020,8 @@ function TimemApp() {
               createdAt: Date.now(),
             });
           }
-          const delay = Math.min(10_000, 500 * 2 ** Math.min(nextAttempt - 1, 5));
-          retryTimer = window.setTimeout(connect, delay);
-        }
+        const delay = Math.min(10_000, 500 * 2 ** Math.min(nextAttempt - 1, 5));
+        retryTimer = window.setTimeout(connect, delay);
       };
       ws.onerror = () => setConnected(false);
       ws.onmessage = (message) => {
@@ -975,10 +1033,11 @@ function TimemApp() {
       stopped = true;
       inboundEvents.dispose();
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      cancelAllPendingSessionApiKeyCommands();
       socket.current?.close();
       socket.current = null;
     };
-  }, [pushActivity, receive]);
+  }, [cancelAllPendingSessionApiKeyCommands, pushActivity, receive]);
 
   const sendTextForSession = useCallback((sessionId: string, text: string, commandId?: string, attachmentIds?: readonly string[], forceSupplement = false, roleIds: readonly string[] = [], forceNewTurn = false): boolean => {
     const targetSession = sessionsRef.current.find((session) => session.session_id === sessionId);
@@ -1187,12 +1246,32 @@ function TimemApp() {
           <button type="button" onClick={() => { setShowAppearance(false); setShowMcp(false); setShowToolRepo(false); setShowRuntime(true); }}>Open Runtime settings</button>
         </div>}
                 {showRuntime && <RuntimePanel panelRef={runtimePanelRef} server={server} session={activeSession} pendingKeys={new Set(activeSession ? Array.from(pendingRuntimeKeys).filter((key) => key.startsWith(`${activeSession.session_id}:`)).map((key) => key.slice(activeSession.session_id.length + 1)) : [])} credentialPending={!!activeSession && (pendingSessionCredentialIds.has(activeSession.session_id) || pendingSessionCredentialIds.has(`reveal:${activeSession.session_id}`))} onApiKeyUpdate={(apiKey) => {
-          if (!activeSession || !addPendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, activeSession.session_id)) return;
-          pendingSessionApiKeyValuesRef.current.set(activeSession.session_id, apiKey);
-          if (!sendCommand({ type: "session_api_key_update", session_id: activeSession.session_id, api_key: apiKey })) {
-            pendingSessionApiKeyValuesRef.current.delete(activeSession.session_id);
-            removePendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, activeSession.session_id);
-            reportUiError("API key update failed", "Reconnect to Timem Web before saving this Session credential.", activeSession.session_id);
+          if (!activeSession) return;
+          if (!connected || !snapshotReady) {
+            reportUiError(
+              "API key update unavailable",
+              "Wait for Timem Web to reconnect before saving this Session credential.",
+              activeSession.session_id,
+            );
+            return;
+          }
+          if (!addPendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, activeSession.session_id)) return;
+          const sessionId = activeSession.session_id;
+          const commandId = clientId("credential");
+          pendingSessionApiKeyValuesRef.current.set(sessionId, apiKey);
+          const timeoutId = window.setTimeout(() => {
+            if (!finishPendingSessionApiKeyCommand(sessionId, commandId)) return;
+            reportUiError(
+              "API key update timed out",
+              "The runtime did not confirm the credential update. Your input was kept; check the connection and try again.",
+              sessionId,
+            );
+          }, SESSION_API_KEY_SAVE_TIMEOUT_MS);
+          pendingSessionApiKeyCommandsRef.current.set(commandId, { sessionId, timeoutId });
+          pendingSessionApiKeyCommandIdsRef.current.set(sessionId, commandId);
+          if (!sendCommand({ type: "session_api_key_update", session_id: sessionId, api_key: apiKey }, commandId)) {
+            finishPendingSessionApiKeyCommand(sessionId, commandId);
+            reportUiError("API key update failed", "Reconnect to Timem Web before saving this Session credential.", sessionId);
           }
         }} revealedApiKey={activeSession ? revealedSessionApiKeys[activeSession.session_id] : undefined} onApiKeyReveal={() => {
           if (!activeSession) return;
@@ -3020,7 +3099,6 @@ function RuntimePanel({ panelRef, server, session, pendingKeys, credentialPendin
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const autoRevealSessionRef = useRef("");
-  const previousCredentialPending = useRef(credentialPending);
   const keyConfigured = session?.runtime_profile?.api_key_configured ?? false;
   const sessionWorking = session?.state === "working";
   const runtimeOptions = useMemo(
@@ -3039,13 +3117,6 @@ function RuntimePanel({ panelRef, server, session, pendingKeys, credentialPendin
     setApiKeyDraft(revealedApiKey);
     setShowApiKey(false);
   }, [revealedApiKey]);
-  useEffect(() => {
-    if (previousCredentialPending.current && !credentialPending && revealedApiKey === undefined) {
-      setApiKeyDraft("");
-      setShowApiKey(false);
-    }
-    previousCredentialPending.current = credentialPending;
-  }, [credentialPending, revealedApiKey]);
   useEffect(() => {
     const sessionId = session?.session_id;
     if (!shouldAutoRevealSessionApiKey({ sessionId, configured: keyConfigured, revealedApiKey, pending: credentialPending, requestedSessionId: autoRevealSessionRef.current })) return;
