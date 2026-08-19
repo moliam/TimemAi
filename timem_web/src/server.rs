@@ -18,7 +18,8 @@ use agent_core::{
     CoreSessionWorkerManager, CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest,
     ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout,
     SessionToolRepo, ToolDetail, ToolGenRequest, ToolSummary, TopicReply, WorkInstructionLoadMode,
-    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
+    CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, self_tool::SelfToolPaths, shell_exec::FileShellJobStore,
@@ -6279,7 +6280,7 @@ fn chat_history_kind_for_source(source: &str, payload: &Value) -> ChatHistoryEve
         if topic_name == "core.action" {
             return ChatHistoryEventKind::Action;
         }
-        if topic_name == "core.protocol_repair" {
+        if topic_name == CORE_TOPIC_MODEL_REPAIR {
             return ChatHistoryEventKind::Repair;
         }
         if topic_name == "core.context_compact" {
@@ -6860,7 +6861,7 @@ fn handle_scoped_worker_event(
         }
         CoreSessionWorkerEvent::Topics(events) => {
             for event in events {
-                if event.topic.name == "core.protocol_repair" {
+                if event.topic.name == CORE_TOPIC_MODEL_REPAIR {
                     if let Some(issue) = event.payload.get("issue").and_then(Value::as_str) {
                         if let Some(debug) = state.debug.as_ref() {
                             if let Err(error) = debug.record_repair(session_id, issue) {

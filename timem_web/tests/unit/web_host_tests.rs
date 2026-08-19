@@ -4,7 +4,7 @@ use agent_core::session_store::read_all_history_records;
 use agent_core::{
     core_initialized_topic_event, CoreProfile, CoreSessionState, CoreSessionWorkerWorkspace,
     CoreTopic, CoreTopicEvent, LlmResponse, TurnOutcome, UsageStats, CORE_TOPIC_ACTION,
-    CORE_TOPIC_MODEL_RESPONSE,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE,
 };
 use std::sync::atomic::AtomicUsize;
 use std::sync::Condvar;
@@ -6603,6 +6603,75 @@ fn mismatched_core_topic_is_not_forwarded_or_written_to_another_agent() {
         event,
         WireEvent::WorkerActivity { session_id, event, .. }
             if session_id == "session_a" && event["kind"] == "topic_scope_mismatch"
+    )));
+}
+
+#[test]
+fn model_repair_topic_updates_debug_statistics_and_persists_repair_history() {
+    let mut state = routing_test_state();
+    let debug = Arc::new(DebugStore::create().unwrap());
+    let debug_root = debug.root().to_path_buf();
+    state.debug = Some(debug);
+
+    let session_id = "session_a";
+    let turn = start_web_turn(&state, session_id, "repair malformed XML").unwrap();
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(
+                CORE_TOPIC_MODEL_REPAIR,
+                json!({ "name": CORE_TOPIC_MODEL_REPAIR }),
+            ),
+            CoreSessionState::WaitingModel,
+            json!({
+                "issue": "xml_response_root_missing",
+                "reason": "required response root missing",
+                "attempt": 1,
+                "max_attempts": 3,
+            }),
+        )]),
+    );
+
+    let statistics =
+        std::fs::read_to_string(debug_root.join(session_id).join("statistics.md")).unwrap();
+    let markdown_row = |name: &str, count: &str| {
+        statistics.lines().any(|line| {
+            let cells = line
+                .split('|')
+                .map(str::trim)
+                .filter(|cell| !cell.is_empty())
+                .collect::<Vec<_>>();
+            cells.first() == Some(&name) && cells.get(1) == Some(&count)
+        })
+    };
+    assert!(markdown_row("Protocol repairs", "1"), "{statistics}");
+    assert!(
+        markdown_row("missing_or_invalid_response_root", "1"),
+        "{statistics}"
+    );
+
+    let records = read_all_history_records(
+        &current_session_store(&state)
+            .unwrap()
+            .history_path_for_session(session_id),
+    )
+    .unwrap();
+    assert!(records.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Event {
+            turn_id,
+            kind: ChatHistoryEventKind::Repair,
+            extra,
+            ..
+        } if turn_id == &turn.turn_id
+            && extra
+                .get("payload")
+                .and_then(|payload| payload.get("topic"))
+                .and_then(|topic| topic.get("name"))
+                .and_then(Value::as_str)
+                == Some(CORE_TOPIC_MODEL_REPAIR)
     )));
 }
 

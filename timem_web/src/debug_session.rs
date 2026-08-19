@@ -573,10 +573,10 @@ fn normalize_repair_category(issue: &str) -> String {
     let lower = issue.trim().to_ascii_lowercase();
     if lower.contains("truncated") || lower.contains("empty") {
         "empty_or_truncated_response"
-    } else if lower.contains("xml") || lower.contains("close_tag") {
-        "invalid_xml"
     } else if lower.contains("response_root") || lower.contains("root") {
         "missing_or_invalid_response_root"
+    } else if lower.contains("xml") || lower.contains("close_tag") {
+        "invalid_xml"
     } else if lower.contains("parallel") {
         "invalid_parallel"
     } else if lower.contains("action") || lower.contains("tool") {
