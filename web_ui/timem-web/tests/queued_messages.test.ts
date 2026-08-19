@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, shouldPauseQueuedMessages, unclaimedQueuedMessages } from "../src/queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, shouldPauseQueuedMessages, stopQueuedAutoSend, unclaimedQueuedMessages } from "../src/queued_messages";
 
 const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => ({
   id,
@@ -30,6 +30,31 @@ describe("queued messages", () => {
     expect(shouldPauseQueuedMessages("ProtocolRepairFailed")).toBe(true);
     expect(shouldPauseQueuedMessages("")).toBe(false);
     expect(shouldPauseQueuedMessages(undefined)).toBe(false);
+  });
+
+  it("only degrades automatic sending from enabled to disabled", () => {
+    const stoppedByError = stopQueuedAutoSend(null, "model unavailable", "error", 100);
+    expect(stoppedByError).toEqual({
+      paused: true,
+      source: "error",
+      reason: "model unavailable",
+      stoppedAtMs: 100,
+    });
+
+    const stoppedByUser = stopQueuedAutoSend(null, "user disabled automatic sending", "user", 200);
+    expect(stopQueuedAutoSend(stoppedByUser, "runtime disconnected", "error", 300)).toBe(stoppedByUser);
+    expect(stoppedByUser).toEqual({
+      paused: true,
+      source: "user",
+      reason: "user disabled automatic sending",
+      stoppedAtMs: 200,
+    });
+  });
+
+  it("never turns automatic sending back on while handling a system event", () => {
+    const stopped = stopQueuedAutoSend(null, "network failure", "error", 1);
+    expect(stopQueuedAutoSend(stopped, "model failure", "error", 2)).toBe(stopped);
+    expect(stopQueuedAutoSend(stopped, "later successful lifecycle event", "error", 3)).toBe(stopped);
   });
 
   it("hides claimed messages without removing them from the durable queue", () => {
@@ -297,12 +322,14 @@ describe("queued messages", () => {
  expect(saveQueuedMessages(storage, "scope-a", { session_a: messages.slice(0, 2) })).toBe(true);
  expect(saveQueuedMessagesPause(storage, "scope-a", {
  paused: true,
- reason: "CancelledByUser",
+ source: "user",
+ reason: "用户关闭了自动发送",
  stoppedAtMs: 123,
  })).toBe(true);
  expect(loadQueuedMessagesPause(storage, "scope-a")).toEqual({
  paused: true,
- reason: "CancelledByUser",
+ source: "user",
+ reason: "用户关闭了自动发送",
  stoppedAtMs: 123,
  });
  expect(loadQueuedMessagesPause(storage, "scope-b")).toBeNull();
@@ -323,6 +350,7 @@ describe("queued messages", () => {
  JSON.stringify({ paused: true, stoppedAtMs: "now" }),
  JSON.stringify({ paused: true, stoppedAtMs: -1 }),
  JSON.stringify({ paused: true, stoppedAtMs: 1, reason: 42 }),
+ JSON.stringify({ paused: true, stoppedAtMs: 1, source: "system" }),
  ]) {
  values.set(key, malformed);
  expect(loadQueuedMessagesPause(storage, "scope-a")).toBeNull();

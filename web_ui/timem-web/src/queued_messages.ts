@@ -20,11 +20,23 @@ export function queuedMessagesStorageKey(scope: string, messageId?: string) {
   return messageId === undefined ? base : `${base}:${encodeURIComponent(messageId)}`;
 }
 
+export type QueuedMessagesPauseSource = "user" | "error";
+
 export type QueuedMessagesPauseState = {
  paused: true;
+ source?: QueuedMessagesPauseSource;
  reason?: string;
  stoppedAtMs: number;
 };
+
+export function stopQueuedAutoSend(
+ current: QueuedMessagesPauseState | null,
+ reason: string,
+ source: QueuedMessagesPauseSource,
+ stoppedAtMs: number,
+): QueuedMessagesPauseState {
+ return current ?? { paused: true, source, reason, stoppedAtMs };
+}
 
 export function queuedMessagesPauseStorageKey(scope: string) {
  return `${queuedMessagesStorageKey(scope)}-pause`;
@@ -44,10 +56,12 @@ export function loadQueuedMessagesPause(
  || !Number.isFinite(value.stoppedAtMs)
  || value.stoppedAtMs < 0
  || (value.reason !== undefined && typeof value.reason !== "string")
+ || (value.source !== undefined && value.source !== "user" && value.source !== "error")
  ) return null;
  return {
  paused: true,
  stoppedAtMs: value.stoppedAtMs,
+ ...(value.source === undefined ? {} : { source: value.source }),
  ...(value.reason === undefined ? {} : { reason: value.reason }),
  };
  } catch {
