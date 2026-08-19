@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseSessionId, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, shouldPauseQueuedMessages, stopQueuedAutoSend, unclaimedQueuedMessages } from "../src/queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseSessionId, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, stopQueuedAutoSend, unclaimedQueuedMessages } from "../src/queued_messages";
 
 const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => ({
   id,
@@ -22,39 +22,25 @@ describe("queued messages", () => {
     expect(shouldDirectManualMessage("working", 0, false)).toBe(false);
   });
 
-  it("pauses automatic queue dispatch after every abnormal turn stop", () => {
-    expect(shouldPauseQueuedMessages("CancelledByUser")).toBe(true);
-    expect(shouldPauseQueuedMessages("ModelError")).toBe(true);
-    expect(shouldPauseQueuedMessages("OutputLimitStoppedByUser")).toBe(true);
-    expect(shouldPauseQueuedMessages("RoundLimitReached")).toBe(true);
-    expect(shouldPauseQueuedMessages("ProtocolRepairFailed")).toBe(true);
-    expect(shouldPauseQueuedMessages("")).toBe(false);
-    expect(shouldPauseQueuedMessages(undefined)).toBe(false);
-  });
-
-  it("only degrades automatic sending from enabled to disabled", () => {
-    const stoppedByError = stopQueuedAutoSend(null, "model unavailable", "error", 100);
-    expect(stoppedByError).toEqual({
-      paused: true,
-      source: "error",
-      reason: "model unavailable",
-      stoppedAtMs: 100,
-    });
-
-    const stoppedByUser = stopQueuedAutoSend(null, "user disabled automatic sending", "user", 200);
-    expect(stopQueuedAutoSend(stoppedByUser, "runtime disconnected", "error", 300)).toBe(stoppedByUser);
+  it("changes automatic sending only from an explicit user switch action", () => {
+    const stoppedByUser = stopQueuedAutoSend(
+      null,
+      "user disabled automatic sending",
+      "user",
+      200,
+    );
     expect(stoppedByUser).toEqual({
       paused: true,
       source: "user",
       reason: "user disabled automatic sending",
       stoppedAtMs: 200,
     });
-  });
-
-  it("never turns automatic sending back on while handling a system event", () => {
-    const stopped = stopQueuedAutoSend(null, "network failure", "error", 1);
-    expect(stopQueuedAutoSend(stopped, "model failure", "error", 2)).toBe(stopped);
-    expect(stopQueuedAutoSend(stopped, "later successful lifecycle event", "error", 3)).toBe(stopped);
+    expect(stopQueuedAutoSend(
+      stoppedByUser,
+      "duplicate user action",
+      "user",
+      300,
+    )).toBe(stoppedByUser);
   });
 
   it("hides claimed messages without removing them from the durable queue", () => {
@@ -247,6 +233,17 @@ describe("queued messages", () => {
     expect(reorderQueuedMessages(original, "c", "a", claims, "session_a")).toEqual(original);
   });
 
+  it("does not dispatch from ready state without a successful completion grant", () => {
+    const queues = {
+      session_a: [{ id: "a1", text: "A next", createdAtMs: 1 }],
+    };
+    expect(selectQueuedDispatches(
+      [{ session_id: "session_a", state: "ready" }],
+      queues,
+      new Set(),
+    )).toEqual([]);
+  });
+
   it("routes background auto-dispatch by owning session rather than active UI session", () => {
     const sessions = [
       { session_id: "session_a", state: "ready" },
@@ -258,7 +255,14 @@ describe("queued messages", () => {
       session_b: [{ id: "b1", text: "B next", createdAtMs: 2 }],
       session_c: [{ id: "c1", text: "C retry", createdAtMs: 3, deliveryError: "rejected" }],
     };
-    expect(selectQueuedDispatches(sessions, queues, new Set(), "session_b")).toEqual([
+    expect(selectQueuedDispatches(
+      sessions,
+      queues,
+      new Set(),
+      "session_b",
+      new Set(),
+      new Set(["session_a"]),
+    )).toEqual([
       { sessionId: "session_a", message: queues.session_a[0] },
     ]);
   });
@@ -268,7 +272,14 @@ describe("queued messages", () => {
     const dispatching = new Set(["session_a"]);
     expect(selectQueuedDispatches([{ session_id: "session_a", state: "ready" }], queues, dispatching)).toEqual([]);
     expect(selectQueuedDispatches([{ session_id: "session_a", state: "working" }], queues, new Set())).toEqual([]);
-    expect(selectQueuedDispatches([{ session_id: "session_a", state: "ready" }], queues, new Set())).toEqual([
+    expect(selectQueuedDispatches(
+      [{ session_id: "session_a", state: "ready" }],
+      queues,
+      new Set(),
+      undefined,
+      new Set(),
+      new Set(["session_a"]),
+    )).toEqual([
       { sessionId: "session_a", message: queues.session_a[0] },
     ]);
   });
@@ -290,7 +301,14 @@ describe("queued messages", () => {
     // A finishes while B is still working. Neither B nor C's rejected item can
     // prevent A from becoming independently dispatchable.
     sessions = sessions.map((session) => session.session_id === "session_a" ? { ...session, state: "ready" } : session);
-    expect(selectQueuedDispatches(sessions, queues, dispatching)).toEqual([
+    expect(selectQueuedDispatches(
+      sessions,
+      queues,
+      dispatching,
+      undefined,
+      new Set(),
+      new Set(["session_a"]),
+    )).toEqual([
       { sessionId: "session_a", message: queues.session_a[0] },
     ]);
     dispatching.add("session_a");
@@ -298,7 +316,14 @@ describe("queued messages", () => {
     // B finishing remains independently dispatchable while A awaits its
     // authoritative working transition/terminal lifecycle event.
     sessions = sessions.map((session) => session.session_id === "session_b" ? { ...session, state: "ready" } : session);
-    expect(selectQueuedDispatches(sessions, queues, dispatching)).toEqual([
+    expect(selectQueuedDispatches(
+      sessions,
+      queues,
+      dispatching,
+      undefined,
+      new Set(),
+      new Set(["session_b"]),
+    )).toEqual([
       { sessionId: "session_b", message: queues.session_b[0] },
     ]);
     dispatching.add("session_b");
@@ -355,6 +380,7 @@ describe("queued messages", () => {
  new Set(),
  undefined,
  new Set(["session_a"]),
+ new Set(["session_a", "session_b"]),
  )).toEqual([
  { sessionId: "session_b", message: queues.session_b[0] },
  ]);
@@ -380,6 +406,7 @@ describe("queued messages", () => {
  JSON.stringify({ paused: true, stoppedAtMs: -1 }),
  JSON.stringify({ paused: true, stoppedAtMs: 1, reason: 42 }),
  JSON.stringify({ paused: true, stoppedAtMs: 1, source: "system" }),
+ JSON.stringify({ paused: true, stoppedAtMs: 1, source: "error" }),
  ]) {
  values.set(key, malformed);
  expect(loadQueuedMessagesPause(storage, "scope-a", "session_a")).toBeNull();

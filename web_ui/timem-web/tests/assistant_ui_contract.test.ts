@@ -20,7 +20,7 @@ describe("Agent Core live-state delivery", () => {
 
   it("does not infer completion from pending, restored, or other turn updates", () => {
     expect(source).not.toContain('event.turn.state !== "working"');
-    expect(source).toMatch(/if \(event\.type === "turn_finished"\)[\s\S]*?setCompletedTurnKey/);
+    expect(source).toMatch(/if \(event\.type === "turn_finished"\)[\s\S]*?setCompletedTurnsBySession/);
   });
 });
 
@@ -905,7 +905,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('cancellingSessionIds.current.delete(event.session_id);');
     expect(source).toContain('{isCancelling ? "Stopping…" : "Stop"}');
     expect(source).toContain("const cancelActiveSessionTurn = async () =>");
-    expect(source).toContain('pauseQueuedMessages(activeSessionId, "用户停止了当前任务", "user")');
+    expect(source).toContain("queuedAutoContinueSessionIdsRef.current.delete(activeSessionId)");
+    expect(source).not.toContain('pauseQueuedMessages(activeSessionId, "用户停止了当前任务", "user")');
     expect(source).not.toContain("clearSessionQueuedMessages(previous, activeSessionId)");
     expect(source).toContain("releaseSessionQueuedMessageClaims(queuedMessageClaimsRef.current, sessionId)");
     expect(source).toContain("onClick={() => void cancelActiveSessionTurn()}");
@@ -1554,12 +1555,17 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('activeSession?.state === "working" ? "Queue message" : "Send message"');
     expect(source).toContain('className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`}');
     expect(source).toContain("自动发送已停止");
+    expect(source).toContain("上一条正常完成后自动发送");
     expect(source).toContain('role="switch"');
     expect(source).toContain('className="queued-auto-send-switch"');
     expect(source).toContain("aria-checked={!queuedMessagesPause}");
     expect(source).toContain('aria-label={queuedMessagesPause ? "开启自动发送" : "停止自动发送"}');
     expect(source).toContain('if (queuedMessagesPause) resumeQueuedMessages(activeSessionId); else pauseQueuedMessages(activeSessionId, "用户关闭了自动发送", "user");');
     expect(source).toContain("const queuedMessagesPauseBySessionRef = useRef<Record<string, QueuedMessagesPauseState>>({});");
+    expect(source).not.toContain('source: "error"');
+    expect(source).not.toContain("runtime-disconnected:");
+    expect(source).toContain("queuedAutoContinueSessionIdsRef");
+
     expect(source).toContain("const pause = stopQueuedAutoSend(current, reason, source, Date.now());");
     expect(source).toContain("const queuedMessagesPause = activeSessionId ? queuedMessagesPauseBySession[activeSessionId] ?? null : null;");
     expect(source).toContain("new Set(Object.keys(queuedMessagesPauseBySessionRef.current))");
@@ -1567,7 +1573,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain("liveSessionIds.has(pauseSessionId)");
     expect(source).toContain("delete next[sessionId];");
     expect(source).not.toContain("手动发送仍可用");
-    expect(source).toContain("const sendAsNewTurn = !!queuedMessagesPause;");
+    expect(source).toContain('const sendAsNewTurn = activeSession.state !== "working";');
     expect(source).toContain('sendAsNewTurn ? "作为新消息开始任务" : "立即发送为当前任务的补充"');
     expect(source).toContain("messageRoleIds, sendAsNewTurn)");
     expect(source).toContain("forceNewTurn = false");
@@ -1639,7 +1645,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain("unclaimedQueuedMessages(queuedMessages, queuedMessageClaims, activeSessionId)");
     expect(source).toContain("displayQueuedMessages.length > 0");
     expect(source).toContain("removeQueuedMessage(current[activeSession.session_id] ?? [], message.id, queuedMessageClaimsRef.current");
-    expect(source).toContain('disabled={claimed || (!message.deliveryError && !sendAsNewTurn && activeSession.state !== "working")');
+    expect(source).toContain('disabled={claimed || sessionInteractionLocked || isCancelling}');
     expect(source).toContain('aria-busy={claimed || undefined}');
     expect(source).toContain('claimed ? "发送中…" : message.deliveryError ? "重试" : "立即"');
     expect(styles).toContain(".queued-message.sending");
@@ -1649,7 +1655,14 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('className="queued-message-edit"');
     expect(source).toContain('className="queued-message-editor" autoFocus');
     expect(source).toContain("message.id === edit.id ? { ...message, text, deliveryError: undefined } : message");
-    expect(source).toContain('selectQueuedDispatches(sessions, queuedMessagesBySessionRef.current, queuedDispatchSessionIdsRef.current, editingQueuedMessage?.sessionId, new Set(Object.keys(queuedMessagesPauseBySessionRef.current)))');
+    expect(source).toContain("queuedAutoContinueSessionIdsRef.current,");
+    expect(source).toContain("processedCompletedTurnKeysRef");
+    expect(source).toContain("successful: !event.outcome.completion?.stop_reason");
+    expect(source).toContain("for (const [sessionId, completion] of Object.entries(completedTurnsBySession))");
+    expect(source).toContain("processedCompletedTurnKeysRef.current.get(sessionId) === completion.key");
+    expect(source).toContain("if (draftLocksChanged) setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current))");
+
+    expect(source).toContain("queuedAutoContinueSessionIdsRef.current.delete(sessionId);");
     expect(source).toContain(">保存</button>");
     expect(source).toContain('className="queued-message-edit-cancel"');
     expect(source).toContain(">取消</button>");
@@ -1674,12 +1687,17 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
   });
 
   it("releases a stuck send affordance only from the authoritative turn completion", () => {
-    expect(source).toContain('const completedKey = `${event.session_id}:${event.turn_id ?? ""}`;');
-    expect(source).toContain("setCompletedTurnKey(completedKey);");
-    expect(source).toContain("if (shouldPauseQueuedMessages(stopReason))");
-    expect(source).not.toContain('if (event.turn.state !== "working") setCompletedTurnKey');
-    expect(source).toContain('completedTurnKey.startsWith(`${activeSessionId}:`)');
-    expect(source).toContain('releaseSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId)');
+    expect(source).toContain("const completedKey = event.turn_id");
+    expect(source).toContain('`${event.session_id}:${event.turn_id}`');
+    expect(source).toContain('clientId(`turn-finished-${event.session_id}`)');
+    expect(source).toContain("setCompletedTurnsBySession((current) => ({");
+    expect(source).toContain("successful: !event.outcome.completion?.stop_reason");
+    expect(source).not.toContain("shouldPauseQueuedMessages");
+    expect(source).not.toContain("setQueuePauseRequest");
+    expect(source).not.toContain('if (event.turn.state !== "working") setCompletedTurn');
+    expect(source).toContain("releaseSessionDraftSubmission(submittingDraftSessionIdsRef, sessionId)");
+    expect(source).toContain("submittingDraftStartedAtRef.current.delete(sessionId)");
+    expect(source).not.toContain("completedTurnsBySession[activeSessionId]");
     expect(source).toContain('applyQueuedMessagesAck(nextQueues, ack.command_id, ack.status, ack.error, clientId("queued"))');
     expect(source).toContain('releaseQueuedMessageClaim(queuedMessageClaimsRef.current, sessionId, commandId);');
   });
