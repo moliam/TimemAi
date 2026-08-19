@@ -20,7 +20,7 @@ export function queuedMessagesStorageKey(scope: string, messageId?: string) {
   return messageId === undefined ? base : `${base}:${encodeURIComponent(messageId)}`;
 }
 
-export type QueuedMessagesPauseSource = "user" | "error";
+export type QueuedMessagesPauseSource = "user";
 
 export type QueuedMessagesPauseState = {
  paused: true;
@@ -69,7 +69,7 @@ export function loadQueuedMessagesPause(
  || !Number.isFinite(value.stoppedAtMs)
  || value.stoppedAtMs < 0
  || (value.reason !== undefined && typeof value.reason !== "string")
- || (value.source !== undefined && value.source !== "user" && value.source !== "error")
+ || (value.source !== undefined && value.source !== "user")
  ) return null;
  return {
  paused: true,
@@ -211,10 +211,6 @@ export function shouldDirectManualMessage(
  return sessionState === "ready" && queuedMessageCount === 0 && !paused;
 }
 
-export function shouldPauseQueuedMessages(stopReason: unknown): stopReason is string {
- return typeof stopReason === "string" && stopReason.trim().length > 0;
-}
-
 export type QueuedMessageClaims = Set<string>;
 
 export function queuedMessageKey(sessionId: string, messageId: string) {
@@ -307,9 +303,16 @@ export function selectQueuedDispatches(
   dispatchingSessionIds: ReadonlySet<string>,
   editingSessionId?: string,
   pausedSessionIds: ReadonlySet<string> = new Set(),
+  autoContinueSessionIds: ReadonlySet<string> = new Set(),
 ) {
   return sessions.flatMap((session) => {
-    if (session.state === "working" || dispatchingSessionIds.has(session.session_id) || editingSessionId === session.session_id || pausedSessionIds.has(session.session_id)) return [];
+    if (
+      session.state === "working"
+      || dispatchingSessionIds.has(session.session_id)
+      || editingSessionId === session.session_id
+      || pausedSessionIds.has(session.session_id)
+      || !autoContinueSessionIds.has(session.session_id)
+    ) return [];
     const message = queues[session.session_id]?.[0];
     return message && !message.deliveryError ? [{ sessionId: session.session_id, message }] : [];
   });
