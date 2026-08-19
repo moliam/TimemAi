@@ -131,26 +131,54 @@ fn xml_protocol_uses_xml_style_prompt_delta_boundaries() {
 }
 
 #[test]
-fn xml_action_result_preserves_name_and_escapes_xml() {
+fn xml_action_result_preserves_name_escapes_xml_and_wraps_output_with_stable_id() {
     let rendered = render_xml_action_result(
         "run_bash",
         Some(r#" check <diff> & "status" "#),
         "output <ready> & done",
+        123,
     );
+    let expected_id = action_output_id("output <ready> & done", 123);
     assert_eq!(
         rendered,
-        "<action_result><run_bash name=\"check &lt;diff&gt; &amp; &quot;status&quot;\">output &lt;ready&gt; &amp; done</run_bash></action_result>"
+        format!(
+            "<action_result><run_bash name=\"check &lt;diff&gt; &amp; &quot;status&quot;\"><output_id_{expected_id}>output &lt;ready&gt; &amp; done</output_id_{expected_id}></run_bash></action_result>"
+        )
     );
 
-    let fallback = render_xml_action_result("readfile", None, "ok");
+    let repeated = render_xml_action_result(
+        "run_bash",
+        Some(r#" check <diff> & "status" "#),
+        "output <ready> & done",
+        123,
+    );
+    assert_eq!(repeated, rendered);
+
+    let changed_time = render_xml_action_result("run_bash", None, "output <ready> & done", 124);
+    assert!(!changed_time.contains(&format!("output_id_{expected_id}")));
+
+    let changed_output = render_xml_action_result("run_bash", None, "different", 123);
+    assert!(!changed_output.contains(&format!("output_id_{expected_id}")));
+
+    let whitespace_variant =
+        render_xml_action_result("run_bash", None, " output <ready> & done ", 123);
+    assert!(
+        !whitespace_variant.contains(&format!("output_id_{expected_id}")),
+        "the hash must use the original output bytes, even though display whitespace is trimmed"
+    );
+
+    let fallback = render_xml_action_result("readfile", None, "ok", 456);
+    let fallback_id = action_output_id("ok", 456);
     assert_eq!(
         fallback,
-        "<action_result><readfile name=\"readfile\">ok</readfile></action_result>"
+        format!(
+            "<action_result><readfile name=\"readfile\"><output_id_{fallback_id}>ok</output_id_{fallback_id}></readfile></action_result>"
+        )
     );
 }
 
 #[test]
-fn oversized_xml_action_result_is_truncated_before_wrapping() {
+fn oversized_xml_action_result_is_truncated_inside_output_id_envelope() {
     let result = format!(
         "{}界 <tag> & tail words",
         "&".repeat(MAX_ACTION_RESULT_PROMPT_BYTES)
@@ -159,20 +187,24 @@ fn oversized_xml_action_result_is_truncated_before_wrapping() {
         "run_bash",
         Some(r#"inspect <large> & "escaped" output"#),
         &result,
+        789,
     );
+    let output_id = action_output_id(&result, 789);
 
     assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
-    assert!(rendered.starts_with(
-        r#"<action_result><run_bash name="inspect &lt;large&gt; &amp; &quot;escaped&quot; output">"#
-    ));
-    assert!(rendered.ends_with("</run_bash></action_result>"));
+    assert!(rendered.starts_with(&format!(
+        r#"<action_result><run_bash name="inspect &lt;large&gt; &amp; &quot;escaped&quot; output"><output_id_{output_id}>"#
+    )));
+    assert!(rendered.ends_with(&format!(
+        "</output_id_{output_id}></run_bash></action_result>"
+    )));
     assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
     assert!(!rendered.contains("<tag>"));
     assert!(!rendered.contains(" & tail"));
     assert_eq!(
         truncate_action_result_for_prompt(&rendered),
         rendered,
-        "generic action-result truncation must not cut the XML wrapper"
+        "generic action-result truncation must not cut the XML/output-ID wrapper"
     );
 }
 

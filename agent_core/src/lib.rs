@@ -3609,7 +3609,12 @@ impl AgentCore {
 
     fn format_action_result(&self, action: &ParsedAction, result: &str) -> String {
         if self.response_protocol == ResponseProtocolKind::Xml {
-            prompt_render::render_xml_action_result(&action.action, action.name.as_deref(), result)
+            prompt_render::render_xml_action_result(
+                &action.action,
+                action.name.as_deref(),
+                result,
+                now_ms(),
+            )
         } else {
             result.to_string()
         }

@@ -1187,8 +1187,13 @@ produce a protocol repair slice instead of being bridged to an old tool.
 ### Action Result Prompt Component
 
 After an action runs, `agent_core` appends the action result into the current
-runtime increment's prompt delta as a `## RUNTIME` block. That runtime evidence is
-the only action-result evidence the model may claim it has seen.
+runtime increment's prompt delta as a `## RUNTIME` block. For XML prompts, each
+tool output body is enclosed by a matching
+`<output_id_HASH>...</output_id_HASH>` pair. Runtime derives `HASH` when the
+result enters prompt context from the original output content and generation
+time, so later prompt re-rendering preserves the same evidence boundary. That
+runtime evidence is the only action-result evidence the model may claim it has
+seen.
 
 Example:
 
