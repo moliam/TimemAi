@@ -149,7 +149,7 @@ fn normal_bash_keeps_thirty_two_kibibytes_worth_of_characters_and_reports_trunca
     }
     .to_action_result("run_bash");
 
-    let rendered_output = result.split_once("Output:\n").unwrap().1;
+    let rendered_output = result.split_once("Return:\n").unwrap().1;
     assert_eq!(
         rendered_output,
         format!(
@@ -1173,8 +1173,8 @@ fn foreground_run_bash_tail_out_retains_final_summary() {
     assert_eq!(outcome.status, ActionStatus::Completed);
     let rendered_output = outcome
         .text
-        .split_once("Output:\n")
-        .expect("finished result should contain an output section")
+        .split_once("Return:\n")
+        .expect("finished result should contain a return section")
         .1;
     assert!(
         rendered_output.contains("truncated before"),
