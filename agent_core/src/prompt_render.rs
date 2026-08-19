@@ -2,6 +2,7 @@ use crate::capability::CapabilityRegistry;
 use crate::prompt_spec;
 use crate::response_protocol::{PromptBoundarySpec, ResponseProtocolSuite};
 use crate::{PromptDelta, PromptSlice};
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 pub(crate) const RESPONSE_TRAILER: &str =
     "Please continue the work and respond as protocol requires in user's language:";
@@ -143,22 +144,33 @@ fn truncate_xml_result_text_for_budget(text: &str, budget: usize) -> String {
     }
 }
 
+fn action_output_id(output: &str, time_ms: i64) -> String {
+    let mut hasher = DefaultHasher::new();
+    output.hash(&mut hasher);
+    time_ms.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 pub(crate) fn render_xml_action_result(
     action: &str,
     action_name: Option<&str>,
     result: &str,
+    output_time_ms: i64,
 ) -> String {
     let display_name = action_name
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .unwrap_or(action);
     let escaped_name = escape_xml_attribute(display_name);
-    let prefix = format!("<action_result><{action} name=\"{escaped_name}\">");
-    let suffix = format!("</{action}></action_result>");
+    let output = result.trim();
+    let output_id = action_output_id(result, output_time_ms);
+    let output_tag = format!("output_id_{output_id}");
+    let prefix = format!("<action_result><{action} name=\"{escaped_name}\"><{output_tag}>");
+    let suffix = format!("</{output_tag}></{action}></action_result>");
     let body_budget = MAX_ACTION_RESULT_PROMPT_BYTES
         .saturating_sub(prefix.len())
         .saturating_sub(suffix.len());
-    let escaped_result = truncate_xml_result_text_for_budget(result.trim(), body_budget);
+    let escaped_result = truncate_xml_result_text_for_budget(output, body_budget);
     format!("{prefix}{escaped_result}{suffix}")
 }
 

@@ -515,6 +515,36 @@ fn xml_action_results_preserve_names_for_sequential_and_parallel_actions() {
         prompt.contains(r#"<action_result><self_tool name="inspect current directory">"#),
         "{prompt}"
     );
+    let opening_tags = prompt
+        .match_indices("<output_id_")
+        .filter_map(|(start, _)| {
+            let tag = &prompt[start + 1..];
+            let end = tag.find('>')?;
+            Some(tag[..end].to_string())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        opening_tags.len(),
+        3,
+        "every sequential/parallel action must have one output envelope: {prompt}"
+    );
+    for output_tag in &opening_tags {
+        assert_eq!(
+            prompt.matches(&format!("<{output_tag}>")).count(),
+            1,
+            "output envelope must have one opening tag: {prompt}"
+        );
+        assert_eq!(
+            prompt.matches(&format!("</{output_tag}>")).count(),
+            1,
+            "output envelope must have one matching closing tag: {prompt}"
+        );
+    }
+    assert_eq!(
+        core.build_next_prompt(),
+        prompt,
+        "re-rendering unchanged context must preserve output IDs"
+    );
     assert!(!prompt.contains("The following are results of the actions generated in response:"));
 }
 

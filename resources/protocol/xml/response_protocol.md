@@ -28,7 +28,7 @@ validation or execution.
 
 For XML protocol turns, the runtime returns each tool result with the same
 action name:
-`<action_result><run_bash name="check git diff">...</run_bash></action_result>`.
+`<action_result><run_bash name="check git diff"><output_id_HASH>...</output_id_HASH></run_bash></action_result>`, where runtime derives `HASH` from the original output content and its generation time.
 
 Note: inside xml label, if strings containing such as `<`, `>`,
 or `&`, should use `<![CDATA[...]]>` to wrap it.
