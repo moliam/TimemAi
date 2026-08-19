@@ -131,11 +131,26 @@ def segment_prompt_type(segment: str) -> str | None:
     explicit = segment_field(segment, "prompt_type")
     if explicit:
         return explicit
-    if "\n## TIMEM_ASSISTANT\n" in segment or segment.startswith("## TIMEM_ASSISTANT\n"):
+    if (
+        "\n## TIMEM_ASSISTANT\n" in segment
+        or segment.startswith("## TIMEM_ASSISTANT\n")
+        or "\n<ASSISTANT " in segment
+        or segment.startswith("<ASSISTANT ")
+    ):
         return "llm_response"
-    if "\n## USER\n" in segment or segment.startswith("## USER\n"):
+    if (
+        "\n## USER\n" in segment
+        or segment.startswith("## USER\n")
+        or "\n<USER>" in segment
+        or segment.startswith("<USER>")
+    ):
         return "user_question"
-    if "\n## ACTIONS\n" in segment or segment.startswith("## ACTIONS\n"):
+    if (
+        "\n## ACTIONS\n" in segment
+        or segment.startswith("## ACTIONS\n")
+        or "\n<RUNTIME>" in segment
+        or segment.startswith("<RUNTIME>")
+    ):
         return "result_of_llm_action"
     if "\n## SYSTEM\n" in segment or segment.startswith("## SYSTEM\n"):
         return "system"

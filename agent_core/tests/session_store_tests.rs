@@ -678,8 +678,10 @@ fn resume_notice_references_history_format_without_web_specific_language() {
         history_path: PathBuf::from("/tmp/session/raw_chat_history.jsonl"),
         current_dir: PathBuf::from("/work/project"),
     };
-    let rendered = notice.render(&agent_core::response_protocol::XML_PROMPT_BOUNDARIES);
-    assert!(rendered.starts_with("## RUNTIME"));
+    let rendered = notice.render();
+    assert!(rendered.starts_with("Runtime just restarted."));
+    assert!(!rendered.contains("## RUNTIME"));
+    assert!(!rendered.contains("<RUNTIME>"));
     assert!(rendered.contains(
         "Runtime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them."
     ));

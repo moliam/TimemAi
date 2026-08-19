@@ -58,12 +58,16 @@ enum VisiblePromptRole {
 }
 
 impl VisiblePromptRole {
-    fn heading(self, assistant_heading: &str, spec: &PromptBoundarySpec) -> String {
+    fn label(self, spec: &PromptBoundarySpec) -> &str {
         match self {
-            VisiblePromptRole::User => spec.user_role.to_string(),
-            VisiblePromptRole::You => assistant_heading.to_string(),
-            VisiblePromptRole::Runtime => spec.runtime_role.to_string(),
+            VisiblePromptRole::User => spec.user_role,
+            VisiblePromptRole::You => spec.assistant_role,
+            VisiblePromptRole::Runtime => spec.runtime_role,
         }
+    }
+
+    fn assistant_id(self, assistant_heading: &str) -> Option<&str> {
+        (self == VisiblePromptRole::You).then_some(assistant_heading)
     }
 }
 
@@ -480,22 +484,44 @@ pub(crate) fn render_xml_action_result(
     format!("{prefix}{escaped_result}{suffix}")
 }
 
-fn render_prompt_delta_example(boundaries: crate::response_protocol::PromptBoundarySpec) -> String {
+fn render_prompt_delta_example(
+    boundaries: crate::response_protocol::PromptBoundarySpec,
+    assistant_heading: &str,
+) -> String {
     let mut example = boundaries.render_delta_open("pd_1", 123);
-    example.push_str(&format!(
-        "\n`pd_1` is the runtime-generated identity. It is a simple globally increasing sequence: pd_1, pd_2, ...\n\n\
-{}\n\
-new user input, or user supplement entered while the current turn was already in\n\
-progress.\n\n\
-## {{{{ASSSISTANT_ID}}}}\n\
-your response in this round\n\n\
-{}\n\
-Timem Runtime's feedback, tips, etc.\n\
-{}'s 'TIPS' will occasionally show up. They are the philosophy you should really seriously respect.\n\n",
-        boundaries.user_heading_line(),
-        boundaries.runtime_heading_line(),
-        boundaries.runtime_role,
-    ));
+    let roles = [
+        (
+            VisiblePromptRole::User,
+            "new user input, or user supplement entered while the current turn was already in\nprogress.",
+        ),
+        (VisiblePromptRole::You, "your response in this round"),
+        (
+            VisiblePromptRole::Runtime,
+            "Timem Runtime's feedback, tips, etc.\nRUNTIME's 'TIPS' will occasionally show up. They are the philosophy you should really seriously respect.",
+        ),
+    ];
+
+    example.push_str(
+        "\n`pd_1` is the runtime-generated identity. It is a simple globally increasing sequence: pd_1, pd_2, ...\n",
+    );
+    for (role, body) in roles {
+        example.push('\n');
+        example.push_str(&boundaries.render_role_open(
+            role.label(&boundaries),
+            role.assistant_id(assistant_heading),
+        ));
+        example.push('\n');
+        example.push_str(body);
+        if let Some(close) = boundaries.render_role_close(
+            role.label(&boundaries),
+            role.assistant_id(assistant_heading),
+        ) {
+            example.push('\n');
+            example.push_str(&close);
+        }
+        example.push('\n');
+    }
+    example.push('\n');
     example.push_str(boundaries.delta_close());
     example
 }
@@ -516,7 +542,10 @@ pub(crate) fn render_static_prompt(
         with_protocol.replace("{{CURRENT_PROTOCOL_LANG}}", protocol_suite.lang_format());
     let with_protocol = with_protocol.replace(
         "{{PROMPT_DELTA_EXAMPLE}}",
-        &render_prompt_delta_example(*protocol_suite.prompt_boundaries()),
+        &render_prompt_delta_example(
+            *protocol_suite.prompt_boundaries(),
+            assistant_heading.trim(),
+        ),
     );
     let assistant_heading = assistant_heading.trim();
     let with_protocol = with_protocol.replace("{{ASSSISTANT_ID}}", assistant_heading);
@@ -552,16 +581,26 @@ pub(crate) fn render_prompt_with_rendered_static(
         out.push('\n');
         let boundaries = protocol_suite.prompt_boundaries();
         out.push_str(&boundaries.render_delta_open(&delta.delta_id, delta.time_ms));
-        let mut last_role = None;
+        let mut last_role: Option<VisiblePromptRole> = None;
         let mut last_was_action_result = false;
         for slice in slices {
             let role = visible_role(&slice.prompt_type);
             if last_role != Some(role) {
+                if let Some(previous_role) = last_role {
+                    if let Some(close) = boundaries.render_role_close(
+                        previous_role.label(boundaries),
+                        previous_role.assistant_id(assistant_heading),
+                    ) {
+                        out.push_str(&close);
+                        out.push('\n');
+                    }
+                }
                 out.push('\n');
-                out.push_str(&format!(
-                    "## {}\n",
-                    role.heading(assistant_heading, boundaries)
+                out.push_str(&boundaries.render_role_open(
+                    role.label(boundaries),
+                    role.assistant_id(assistant_heading),
                 ));
+                out.push('\n');
                 last_role = Some(role);
                 last_was_action_result = false;
             }
@@ -576,11 +615,21 @@ pub(crate) fn render_prompt_with_rendered_static(
             out.push('\n');
             if is_action_result {
                 out.push_str(truncate_action_result_for_prompt(&slice.text).trim());
+            } else if boundaries.uses_xml_role_elements() {
+                out.push_str(&escape_xml_text(slice.text.trim()));
             } else {
                 out.push_str(slice.text.trim());
             }
             out.push('\n');
             last_was_action_result = is_action_result;
+        }
+        if let Some(role) = last_role {
+            if let Some(close) = boundaries
+                .render_role_close(role.label(boundaries), role.assistant_id(assistant_heading))
+            {
+                out.push_str(&close);
+                out.push('\n');
+            }
         }
         out.push('\n');
         out.push_str(boundaries.delta_close());

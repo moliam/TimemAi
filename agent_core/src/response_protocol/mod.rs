@@ -12,10 +12,17 @@ pub enum PromptDeltaBoundary {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptRoleBoundary {
+    MarkdownHeading,
+    XmlElement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromptBoundarySpec {
     pub static_begin: &'static str,
     pub static_end: &'static str,
     pub delta_boundary: PromptDeltaBoundary,
+    pub role_boundary: PromptRoleBoundary,
     pub user_role: &'static str,
     pub runtime_role: &'static str,
     pub assistant_role: &'static str,
@@ -25,6 +32,7 @@ pub const BRACKETED_PROMPT_BOUNDARIES: PromptBoundarySpec = PromptBoundarySpec {
     static_begin: "[BEGIN SYSTEM PROMPT]",
     static_end: "[END SYSTEM PROMPT]",
     delta_boundary: PromptDeltaBoundary::Bracketed,
+    role_boundary: PromptRoleBoundary::MarkdownHeading,
     user_role: "USER",
     runtime_role: "RUNTIME",
     assistant_role: "ASSISTANT",
@@ -34,6 +42,7 @@ pub const XML_PROMPT_BOUNDARIES: PromptBoundarySpec = PromptBoundarySpec {
     static_begin: "<Timem System Prompt>",
     static_end: "</Timem System Prompt>",
     delta_boundary: PromptDeltaBoundary::XmlElement,
+    role_boundary: PromptRoleBoundary::XmlElement,
     user_role: "USER",
     runtime_role: "RUNTIME",
     assistant_role: "ASSISTANT",
@@ -41,6 +50,14 @@ pub const XML_PROMPT_BOUNDARIES: PromptBoundarySpec = PromptBoundarySpec {
 
 pub const KNOWN_PROMPT_BOUNDARIES: &[PromptBoundarySpec] =
     &[BRACKETED_PROMPT_BOUNDARIES, XML_PROMPT_BOUNDARIES];
+
+fn escape_xml_attribute(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
 
 impl PromptBoundarySpec {
     pub fn wrap_static_prompt(self, prompt: &str) -> String {
@@ -57,6 +74,40 @@ impl PromptBoundarySpec {
 
     pub fn assistant_heading_line(&self, id: &str) -> String {
         format!("## {}", id)
+    }
+
+    pub fn uses_xml_role_elements(self) -> bool {
+        self.role_boundary == PromptRoleBoundary::XmlElement
+    }
+
+    pub fn render_role_open(self, role: &str, assistant_id: Option<&str>) -> String {
+        match self.role_boundary {
+            PromptRoleBoundary::MarkdownHeading => {
+                format!("## {}", assistant_id.unwrap_or(role))
+            }
+            PromptRoleBoundary::XmlElement => match assistant_id {
+                Some(id) => format!(
+                    "<{} id=\"{}\">",
+                    self.assistant_role,
+                    escape_xml_attribute(id)
+                ),
+                None => format!("<{role}>"),
+            },
+        }
+    }
+
+    pub fn render_role_close(self, role: &str, assistant_id: Option<&str>) -> Option<String> {
+        match self.role_boundary {
+            PromptRoleBoundary::MarkdownHeading => None,
+            PromptRoleBoundary::XmlElement => Some(format!(
+                "</{}>",
+                if assistant_id.is_some() {
+                    self.assistant_role
+                } else {
+                    role
+                }
+            )),
+        }
     }
 
     pub fn render_delta_open(self, delta_id: &str, time_ms: i64) -> String {

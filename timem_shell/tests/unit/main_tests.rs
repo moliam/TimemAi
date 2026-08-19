@@ -2055,6 +2055,8 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
         "Runtime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them."
     ));
     assert!(!notice.contains("This session was restored"));
+    assert!(!notice.contains("## RUNTIME"));
+    assert!(!notice.contains("<RUNTIME>"));
     assert!(notice.contains("raw_chat_history.jsonl"));
     assert!(notice.contains("format: JSONL, one record per line."));
     assert!(notice.contains(&format!("Current cwd: {}", workspace.display())));

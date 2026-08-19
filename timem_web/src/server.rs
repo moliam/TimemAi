@@ -6370,7 +6370,7 @@ fn session_context_with_roles(
                 history_path: current_session_store(state)?.history_path_for_session(session_id),
                 current_dir: PathBuf::from(&current_dir),
             }
-            .render(spec),
+            .render(),
         )
     } else {
         None
