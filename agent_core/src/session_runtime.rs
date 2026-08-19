@@ -558,6 +558,9 @@ fn run_session_turn_with_model_client_and_reminder_override(
     };
     outcome =
         outcome.with_running_jobs(core.refresh_running_shell_jobs_for_session(request.session));
+    if outcome.stop_reason == Some(TurnStopReason::CancelledByUser) {
+        core.mark_user_interrupted_work();
+    }
     if let Some(profiler) = profiler {
         profiler.record_turn(elapsed, model_wait_this_turn);
     }

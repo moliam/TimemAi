@@ -2953,6 +2953,174 @@ fn session_turn_can_cancel_before_model_call_without_network() {
 }
 
 #[test]
+fn cancelled_turn_injects_one_runtime_note_before_next_user_and_runtime_context() {
+    let dir = tmp_dir("cancel_next_prompt_note");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(
+        include_str!("../../../resources/system_prompt/system_prompt.md"),
+        test_profile(),
+        &dir,
+    );
+    core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
+
+    let mut cancel_ui = CancelImmediately;
+    let cancelled = run_session_turn(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "old interrupted work",
+            session: "interrupt_order_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some("old runtime context"),
+        },
+        &mut cancel_ui,
+        None,
+    );
+    assert_eq!(cancelled.stop_reason, Some(TurnStopReason::CancelledByUser));
+
+    let completed_response = r#"<ASSISTANT><finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. Complete.</finish_confirm><final_answer>done</final_answer></ASSISTANT>"#;
+    let mut model = ReplayModel::new([
+        Ok(llm(completed_response, 1_000, false)),
+        Ok(llm(completed_response, 1_100, false)),
+    ]);
+    let mut ui = NoopTurnUi;
+    let completed = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "new user intent",
+            session: "interrupt_order_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some("new runtime information"),
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+    assert_eq!(completed.stop_reason, None);
+    assert_eq!(model.prompts.len(), 1);
+
+    let prompt = &model.prompts[0];
+    let old_user = prompt.find("old interrupted work").unwrap();
+    let note_text = "NOTE: User interrupted the above work. Continue it based on the user's new input's intent. If not sure, ask the user.";
+    let note = prompt.find(note_text).unwrap();
+    let new_user = prompt.find("new user intent").unwrap();
+    let new_runtime = prompt.find("new runtime information").unwrap();
+
+    assert!(old_user < note, "{prompt}");
+    assert!(note < new_user, "{prompt}");
+    assert!(new_user < new_runtime, "{prompt}");
+    assert_eq!(prompt.matches(note_text).count(), 1);
+    assert!(!prompt.contains("<ASSISTANT id="));
+
+    let note_delta_start = prompt[..note].rfind("<prompt_delta ").unwrap();
+    let note_delta_end = prompt[note..].find("</prompt_delta>").unwrap() + note;
+    let note_delta = &prompt[note_delta_start..note_delta_end];
+    assert!(note_delta.contains("<RUNTIME>"));
+
+    let user_delta_start = prompt[..new_user].rfind("<prompt_delta ").unwrap();
+    assert_eq!(
+        note_delta_start, user_delta_start,
+        "the interruption note and next user input should preserve direct chronology"
+    );
+
+    let third = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "third user intent",
+            session: "interrupt_order_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some("third runtime information"),
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+    assert_eq!(third.stop_reason, None);
+    assert_eq!(model.prompts.len(), 2);
+    let third_prompt = &model.prompts[1];
+    assert!(third_prompt.contains("third user intent"));
+    assert!(third_prompt.contains("third runtime information"));
+    assert_eq!(
+        third_prompt.matches(note_text).count(),
+        1,
+        "the historical interruption note must not be injected again"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn model_error_does_not_inject_user_interruption_note_on_next_turn() {
+    let dir = tmp_dir("model_error_no_interruption_note");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(
+        include_str!("../../../resources/system_prompt/system_prompt.md"),
+        test_profile(),
+        &dir,
+    );
+    core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
+    let mut ui = NoopTurnUi;
+
+    let mut failing_model =
+        ReplayModel::new([Err("model_http_400: model name is invalid".to_string())]);
+    let failed = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "work before model error",
+            session: "model_error_note_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut failing_model,
+    );
+    assert_eq!(failed.stop_reason, Some(TurnStopReason::ModelError));
+
+    let completed_response = r#"<ASSISTANT><finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. Complete.</finish_confirm><final_answer>done</final_answer></ASSISTANT>"#;
+    let mut succeeding_model = ReplayModel::new([Ok(llm(completed_response, 1_000, false))]);
+    let completed = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "work after model error",
+            session: "model_error_note_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: Some("runtime after model error"),
+        },
+        &mut ui,
+        None,
+        &mut succeeding_model,
+    );
+    assert_eq!(completed.stop_reason, None);
+    assert_eq!(succeeding_model.prompts.len(), 1);
+    let prompt = &succeeding_model.prompts[0];
+    assert!(prompt.contains("work after model error"));
+    assert!(!prompt.contains(
+        "NOTE: User interrupted the above work. Continue it based on the user's new input's intent."
+    ));
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn session_turn_accepts_a_protocol_compliant_repair() {
     let dir = tmp_dir("plain_text_repair_fallback");
     let audit = dir.join("audit.json");
