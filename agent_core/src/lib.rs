@@ -763,10 +763,45 @@ pub(crate) struct BashResultEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReadfileResultEvidence {
+    pub path: String,
+    pub matcher: Option<String>,
+    pub start_line: Option<u64>,
+    pub end_line: Option<u64>,
+    pub total_lines: Option<u64>,
+    pub encoding: Option<String>,
+    pub file_bytes: Option<u64>,
+    pub content_bytes: Option<usize>,
+    pub limited: Option<bool>,
+    pub tail_out: Option<bool>,
+    pub content: String,
+    pub error_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MemmgrResultEvidence {
+    pub memory_type: String,
+    pub op: String,
+    pub content: String,
+    pub error_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SelfToolResultEvidence {
+    pub self_type: String,
+    pub cwd: Option<String>,
+    pub content: String,
+    pub error_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActionOutcome {
     pub status: ActionStatus,
     pub text: String,
     pub bash_result: Option<BashResultEvidence>,
+    pub readfile_result: Option<ReadfileResultEvidence>,
+    pub memmgr_result: Option<MemmgrResultEvidence>,
+    pub self_tool_result: Option<SelfToolResultEvidence>,
 }
 
 impl ActionOutcome {
@@ -775,11 +810,32 @@ impl ActionOutcome {
             status,
             text: text.into(),
             bash_result: None,
+            readfile_result: None,
+            memmgr_result: None,
+            self_tool_result: None,
         }
     }
 
     pub(crate) fn with_bash_result(mut self, bash_result: BashResultEvidence) -> Self {
         self.bash_result = Some(bash_result);
+        self
+    }
+
+    pub(crate) fn with_readfile_result(mut self, readfile_result: ReadfileResultEvidence) -> Self {
+        self.readfile_result = Some(readfile_result);
+        self
+    }
+
+    pub(crate) fn with_memmgr_result(mut self, memmgr_result: MemmgrResultEvidence) -> Self {
+        self.memmgr_result = Some(memmgr_result);
+        self
+    }
+
+    pub(crate) fn with_self_tool_result(
+        mut self,
+        self_tool_result: SelfToolResultEvidence,
+    ) -> Self {
+        self.self_tool_result = Some(self_tool_result);
         self
     }
 
@@ -3624,13 +3680,44 @@ impl AgentCore {
 
     fn format_action_outcome(&self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
         if self.response_protocol == ResponseProtocolKind::Xml {
+            let output_time_ms = now_ms();
             if action.action == "run_bash" {
                 if let Some(bash_result) = outcome.bash_result.as_ref() {
                     return prompt_render::render_xml_bash_result(
                         action.name.as_deref(),
                         outcome.status,
                         bash_result,
-                        now_ms(),
+                        output_time_ms,
+                    );
+                }
+            }
+            if action.action == "readfile" {
+                if let Some(readfile_result) = outcome.readfile_result.as_ref() {
+                    return prompt_render::render_xml_readfile_result(
+                        action.name.as_deref(),
+                        outcome.status,
+                        readfile_result,
+                        output_time_ms,
+                    );
+                }
+            }
+            if action.action == "memmgr" {
+                if let Some(memmgr_result) = outcome.memmgr_result.as_ref() {
+                    return prompt_render::render_xml_memmgr_result(
+                        action.name.as_deref(),
+                        outcome.status,
+                        memmgr_result,
+                        output_time_ms,
+                    );
+                }
+            }
+            if action.action == "self_tool" {
+                if let Some(self_tool_result) = outcome.self_tool_result.as_ref() {
+                    return prompt_render::render_xml_self_tool_result(
+                        action.name.as_deref(),
+                        outcome.status,
+                        self_tool_result,
+                        output_time_ms,
                     );
                 }
             }
@@ -3728,9 +3815,31 @@ impl AgentCore {
                 )
             }))
             .unwrap_or_else(|_| {
-                ActionOutcome::failed(
-                    "Action result: readfile\nerror: builtin_action_panicked\nmessage: The tool failed internally. Timem isolated the failure and remains available.",
-                )
+                let path = action_for_thread
+                    .raw_input
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<unknown>")
+                    .to_string();
+                let message =
+                    "The tool failed internally. Timem isolated the failure and remains available.";
+                ActionOutcome::failed(format!(
+                    "Action result: readfile\nerror: builtin_action_panicked\nmessage: {message}"
+                ))
+                .with_readfile_result(ReadfileResultEvidence {
+                    path,
+                    matcher: None,
+                    start_line: None,
+                    end_line: None,
+                    total_lines: None,
+                    encoding: None,
+                    file_bytes: None,
+                    content_bytes: None,
+                    limited: None,
+                    tail_out: None,
+                    content: message.to_string(),
+                    error_type: Some("InternalError".to_string()),
+                })
             });
             (idx, action, outcome, elapsed_thread_cpu(cpu_start))
         })

@@ -58,6 +58,17 @@ fn successful_read_status_is_independent_of_payload_words() {
         "{}",
         outcome.text
     );
+    let evidence = outcome.readfile_result.expect("readfile evidence");
+    assert_eq!(
+        evidence.path,
+        fs::canonicalize(dir.path().join("status-words.txt"))
+            .unwrap()
+            .display()
+            .to_string()
+    );
+    assert_eq!(evidence.content, payload);
+    assert_eq!(evidence.error_type, None);
+    assert_eq!(evidence.limited, Some(false));
 }
 
 #[test]
@@ -77,6 +88,10 @@ fn blocked_read_has_structured_timeout_status() {
 
     assert_eq!(outcome.status, crate::ActionStatus::Timeout);
     assert!(outcome.text.contains("error: timeout"), "{}", outcome.text);
+    let evidence = outcome.readfile_result.expect("timeout readfile evidence");
+    assert_eq!(evidence.path, "slow.txt");
+    assert_eq!(evidence.error_type, None);
+    assert!(evidence.content.contains("timeout"));
 
     thread::sleep(std::time::Duration::from_millis(120));
     drop(probe);

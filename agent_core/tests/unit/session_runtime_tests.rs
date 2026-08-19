@@ -1077,7 +1077,7 @@ discard-after"#,
     ));
     assert!(!model.prompts[1].contains("<free_talk>search memory</free_talk>"));
     assert!(!model.prompts[1].contains("discard-after"));
-    assert!(model.prompts[1].contains(r#"<action_result><memmgr name=""#));
+    assert!(model.prompts[1].contains(r#"<memmgr_result task=""#));
     assert!(!model.prompts[1].contains("ERROR: The previous XML response had content outside"));
     assert!(!model.prompts[1].contains("begin exactly with <response>"));
 
@@ -2424,7 +2424,7 @@ fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
     assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
     assert!(second_parts
         .new_delta
-        .contains(r#"<action_result><memmgr name="search recent scratch notes">"#));
+        .contains(r#"<memmgr_result task="search recent scratch notes" type="scratch" op="search" status="finished">"#));
     assert!(second_parts.new_delta.contains("查询 scratch 后继续。"));
     let second_blocks = crate::plan_incremental_cache(second_parts);
     assert_eq!(second_blocks.len(), 3);
@@ -2554,7 +2554,7 @@ fn session_turn_preserves_cache_plan_with_xml_response_protocol() {
     assert!(second_parts.old_deltas.contains("帮我看看最近 scratch"));
     assert!(second_parts
         .new_delta
-        .contains(r#"<action_result><memmgr name="search recent scratch notes">"#));
+        .contains(r#"<memmgr_result task="search recent scratch notes" type="scratch" op="search" status="finished">"#));
     let second_blocks = crate::plan_incremental_cache(second_parts);
     assert_eq!(second_blocks.len(), 3);
     assert_eq!(second_blocks[0].cache, crate::CacheControl::Ephemeral);

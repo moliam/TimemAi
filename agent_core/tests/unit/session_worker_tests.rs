@@ -650,7 +650,7 @@ impl ModelClient for ToolGenWorkflowModel {
         let (phase, content) = if prompt.contains("Follow the ToolGen repository standard") {
             assert!(prompt.contains("[TOOL_GEN_TASK]"));
             assert!(
-                prompt.contains(r#"<action_result><self_tool name="inspect runtime parameters">"#)
+                prompt.contains(r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#)
             );
             assert!(prompt.contains("## ID0"));
             assert!(!prompt.contains("ID0_TOOLGEN"));
@@ -695,7 +695,7 @@ impl ModelClient for ToolGenWorkflowModel {
                     format!("<response><free_talk>Writing and validating the reusable line counter.</free_talk><actions><toolgen name=\"publish validated tool draft\" op=\"publish\"><draft_path>{draft}</draft_path></toolgen></actions></response>"),
                 )
             }
-        } else if prompt.contains(r#"<action_result><self_tool name="inspect runtime parameters">"#)
+        } else if prompt.contains(r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#)
         {
             (
                 "main_finish",
@@ -1121,7 +1121,7 @@ impl ModelClient for FailingToolGenModel {
         let content = if prompt.contains("Follow the ToolGen repository standard") {
             *self.child_calls.lock().unwrap() += 1;
             "not xml".to_string()
-        } else if prompt.contains(r#"<action_result><self_tool name="inspect runtime parameters">"#)
+        } else if prompt.contains(r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#)
         {
             confirmed_xml_response("<response><final_answer>Main task survives ToolGen failure.</final_answer></response>")
         } else {

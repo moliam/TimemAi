@@ -133,7 +133,7 @@ fn xml_protocol_uses_xml_style_prompt_delta_boundaries() {
 #[test]
 fn xml_action_result_preserves_name_escapes_xml_and_wraps_output_with_stable_id() {
     let rendered = render_xml_action_result(
-        "readfile",
+        "toolgen",
         Some(r#" check <diff> & "status" "#),
         "output <ready> & done",
         123,
@@ -149,37 +149,37 @@ fn xml_action_result_preserves_name_escapes_xml_and_wraps_output_with_stable_id(
     assert_eq!(
         rendered,
         format!(
-            "<action_result><readfile name=\"check &lt;diff&gt; &amp; &quot;status&quot;\"><output_id_{expected_id}>output &lt;ready&gt; &amp; done</output_id_{expected_id}></readfile></action_result>"
+            "<action_result><toolgen name=\"check &lt;diff&gt; &amp; &quot;status&quot;\"><output_id_{expected_id}>output &lt;ready&gt; &amp; done</output_id_{expected_id}></toolgen></action_result>"
         )
     );
 
     let repeated = render_xml_action_result(
-        "readfile",
+        "toolgen",
         Some(r#" check <diff> & "status" "#),
         "output <ready> & done",
         123,
     );
     assert_eq!(repeated, rendered);
 
-    let changed_time = render_xml_action_result("readfile", None, "output <ready> & done", 124);
+    let changed_time = render_xml_action_result("toolgen", None, "output <ready> & done", 124);
     assert!(!changed_time.contains(&format!("output_id_{expected_id}")));
 
-    let changed_output = render_xml_action_result("readfile", None, "different", 123);
+    let changed_output = render_xml_action_result("toolgen", None, "different", 123);
     assert!(!changed_output.contains(&format!("output_id_{expected_id}")));
 
     let whitespace_variant =
-        render_xml_action_result("readfile", None, " output <ready> & done ", 123);
+        render_xml_action_result("toolgen", None, " output <ready> & done ", 123);
     assert!(
         !whitespace_variant.contains(&format!("output_id_{expected_id}")),
         "the hash must use the original output bytes, even though display whitespace is trimmed"
     );
 
-    let fallback = render_xml_action_result("readfile", None, "ok", 456);
+    let fallback = render_xml_action_result("toolgen", None, "ok", 456);
     let fallback_id = action_output_id("ok", 456);
     assert_eq!(
         fallback,
         format!(
-            "<action_result><readfile name=\"readfile\"><output_id_{fallback_id}>ok</output_id_{fallback_id}></readfile></action_result>"
+            "<action_result><toolgen name=\"toolgen\"><output_id_{fallback_id}>ok</output_id_{fallback_id}></toolgen></action_result>"
         )
     );
 }
@@ -526,13 +526,183 @@ fn xml_bash_result_escapes_error_type_without_changing_finished_lifecycle() {
 }
 
 #[test]
+fn xml_readfile_result_renders_structured_metadata_and_opaque_unicode_content() {
+    let evidence = ReadfileResultEvidence {
+        path: r#"/tmp/<notes>&".txt"#.to_string(),
+        matcher: Some(r#"START <tag> ... END & "done""#.to_string()),
+        start_line: Some(2),
+        end_line: Some(4),
+        total_lines: Some(5),
+        encoding: Some("UTF-8".to_string()),
+        file_bytes: Some(30),
+        content_bytes: Some(16),
+        limited: Some(false),
+        tail_out: Some(true),
+        content: "START\n中🙂\nEND <raw>".to_string(),
+        error_type: None,
+    };
+    let rendered = render_xml_readfile_result(
+        Some(r#" read <source> & "notes" "#),
+        ActionStatus::Completed,
+        &evidence,
+        101,
+    );
+
+    assert!(rendered.starts_with(
+        r#"<readfile_result task="read &lt;source&gt; &amp; &quot;notes&quot;" path="/tmp/&lt;notes&gt;&amp;&quot;.txt" matcher="START &lt;tag&gt; ... END &amp; &quot;done&quot;" lines="2-4" total_lines="5" encoding="UTF-8" file_bytes="30" content_bytes="16" truncated="false" tail_out="true" status="finished">"#
+    ));
+    assert!(rendered.contains("START\n中🙂\nEND <raw>"));
+    assert!(rendered.contains("<<<CONTENT_"));
+    assert!(rendered.ends_with("</readfile_result>"));
+    assert!(!rendered.contains("<action_result>"));
+}
+
+#[test]
+fn xml_specialized_results_use_lifecycle_status_and_structured_error_markers() {
+    let failed = render_xml_readfile_result(
+        Some("missing file"),
+        ActionStatus::Failed,
+        &ReadfileResultEvidence {
+            path: "missing.txt".to_string(),
+            matcher: None,
+            start_line: None,
+            end_line: None,
+            total_lines: None,
+            encoding: None,
+            file_bytes: None,
+            content_bytes: None,
+            limited: None,
+            tail_out: None,
+            content: "path_not_found".to_string(),
+            error_type: Some(r#"Not<Found>&"'"#.to_string()),
+        },
+        102,
+    );
+    assert!(failed.starts_with(
+        r#"<readfile_result task="missing file" path="missing.txt" status="finished" error_type="Not&lt;Found&gt;&amp;&quot;&apos;">"#
+    ));
+    assert!(failed.contains("<<<ERROR_"));
+    assert!(!failed.contains(r#"status="error""#));
+
+    let timeout = render_xml_readfile_result(
+        Some("slow file"),
+        ActionStatus::Timeout,
+        &ReadfileResultEvidence {
+            path: "slow.txt".to_string(),
+            matcher: None,
+            start_line: None,
+            end_line: None,
+            total_lines: None,
+            encoding: None,
+            file_bytes: None,
+            content_bytes: None,
+            limited: None,
+            tail_out: None,
+            content: "read timed out".to_string(),
+            error_type: None,
+        },
+        103,
+    );
+    assert!(timeout
+        .starts_with(r#"<readfile_result task="slow file" path="slow.txt" status="timeout">"#));
+    assert!(timeout.contains("<<<ERROR_"));
+
+    let running = render_xml_self_tool_result(
+        Some("inspect runtime"),
+        ActionStatus::BackgroundRunning,
+        &SelfToolResultEvidence {
+            self_type: "params".to_string(),
+            cwd: None,
+            content: "still collecting".to_string(),
+            error_type: None,
+        },
+        104,
+    );
+    assert!(running.starts_with(
+        r#"<self_tool_result task="inspect runtime" type="params" status="running">"#
+    ));
+    assert!(running.contains("<<<CONTENT_"));
+}
+
+#[test]
+fn xml_memmgr_and_self_tool_results_escape_attributes_and_preserve_body() {
+    let memmgr = render_xml_memmgr_result(
+        Some(r#" remember <item> & "version" "#),
+        ActionStatus::Failed,
+        &MemmgrResultEvidence {
+            memory_type: r#"durable<&""#.to_string(),
+            op: "update>'".to_string(),
+            content: "memory_conflict id=<raw>".to_string(),
+            error_type: Some("MemoryConflict".to_string()),
+        },
+        105,
+    );
+    assert!(memmgr.starts_with(
+        r#"<memmgr_result task="remember &lt;item&gt; &amp; &quot;version&quot;" type="durable&lt;&amp;&quot;" op="update&gt;&apos;" status="finished" error_type="MemoryConflict">"#
+    ));
+    assert!(memmgr.contains("memory_conflict id=<raw>"));
+    assert!(memmgr.contains("<<<ERROR_"));
+    assert!(memmgr.ends_with("</memmgr_result>"));
+
+    let self_tool = render_xml_self_tool_result(
+        Some("change cwd"),
+        ActionStatus::Completed,
+        &SelfToolResultEvidence {
+            self_type: r#"cwd<&""#.to_string(),
+            cwd: Some(r#"/tmp/<work>&"dir""#.to_string()),
+            content: "CWD changed to /tmp/<work>".to_string(),
+            error_type: None,
+        },
+        106,
+    );
+    assert!(self_tool.starts_with(
+        r#"<self_tool_result task="change cwd" type="cwd&lt;&amp;&quot;" cwd="/tmp/&lt;work&gt;&amp;&quot;dir&quot;" status="finished">"#
+    ));
+    assert!(self_tool.contains("<<<CONTENT_"));
+    assert!(self_tool.ends_with("</self_tool_result>"));
+}
+
+#[test]
+fn xml_specialized_result_boundary_avoids_collisions_and_keeps_large_wrapper_complete() {
+    let seed = specialized_boundary_id(
+        "memmgr_result",
+        "search",
+        r#" type="raw_chat" op="search" status="finished""#,
+        "seed",
+        107,
+    );
+    let content = format!(
+        "payload CONTENT_{seed} ERROR_{seed}\n{}界 tail",
+        "x".repeat(MAX_ACTION_RESULT_PROMPT_BYTES)
+    );
+    let evidence = MemmgrResultEvidence {
+        memory_type: "raw_chat".to_string(),
+        op: "search".to_string(),
+        content,
+        error_type: None,
+    };
+    let rendered =
+        render_xml_memmgr_result(Some("search"), ActionStatus::Completed, &evidence, 107);
+
+    assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
+    assert!(rendered.is_char_boundary(rendered.len()));
+    assert!(rendered.starts_with(
+        r#"<memmgr_result task="search" type="raw_chat" op="search" status="finished">"#
+    ));
+    assert!(rendered.contains("<<<CONTENT_"));
+    assert!(!rendered.contains(&format!("<<<CONTENT_{seed}\n")));
+    assert!(rendered.ends_with("</memmgr_result>"));
+    assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
+}
+
+#[test]
 fn oversized_xml_action_result_is_truncated_inside_output_id_envelope() {
     let result = format!(
         "{}界 <tag> & tail words",
         "&".repeat(MAX_ACTION_RESULT_PROMPT_BYTES)
     );
     let rendered = render_xml_action_result(
-        "readfile",
+        "toolgen",
         Some(r#"inspect <large> & "escaped" output"#),
         &result,
         789,
@@ -541,10 +711,10 @@ fn oversized_xml_action_result_is_truncated_inside_output_id_envelope() {
 
     assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
     assert!(rendered.starts_with(&format!(
-        r#"<action_result><readfile name="inspect &lt;large&gt; &amp; &quot;escaped&quot; output"><output_id_{output_id}>"#
+        r#"<action_result><toolgen name="inspect &lt;large&gt; &amp; &quot;escaped&quot; output"><output_id_{output_id}>"#
     )));
     assert!(rendered.ends_with(&format!(
-        "</output_id_{output_id}></readfile></action_result>"
+        "</output_id_{output_id}></toolgen></action_result>"
     )));
     assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
     assert!(!rendered.contains("<tag>"));

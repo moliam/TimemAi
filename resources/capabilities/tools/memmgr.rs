@@ -1,8 +1,29 @@
 use crate::response_protocol::ParsedAction;
 use crate::{
     compact_text, format_scratch_read_result, format_scratch_write_result,
-    scratch_label_for_display, ActionOutcome, AgentCore,
+    scratch_label_for_display, ActionOutcome, AgentCore, MemmgrResultEvidence,
 };
+
+fn memmgr_evidence_content(text: &str, memory_type: &str, op: &str) -> String {
+    let prefix = format!("Action result: memmgr\ntype: {memory_type}\nop: {op}\n");
+    text.strip_prefix(&prefix).unwrap_or(text).to_string()
+}
+
+fn durable_update_error_type(error: &str) -> &'static str {
+    if error.starts_with("memory_conflict ") {
+        "MemoryConflict"
+    } else if error.starts_with("missing_expected_version ") {
+        "MissingExpectedVersion"
+    } else {
+        match error {
+            "id_not_found" => "NotFound",
+            "content_required"
+            | "id_required"
+            | "operation_must_be_insert_update_upsert_or_delete" => "InvalidInput",
+            _ => "StorageError",
+        }
+    }
+}
 
 pub fn normalize_scratch_kind(scratch_type: &str) -> String {
     match scratch_type.trim() {
@@ -26,7 +47,8 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
     let before_ms = action.input_i64("before_ms");
     let expected_version = action.input_u64("expected_version");
 
-    match (mem_type.as_str(), op.as_str()) {
+    let mut evidence_error_type = None;
+    let outcome = match (mem_type.as_str(), op.as_str()) {
         ("durable", "schema") => {
             core.current_stats.mem_reads += 1;
             ActionOutcome::completed(core.memory.schema_text(&core.chat_history))
@@ -70,10 +92,13 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                         mem_type, sql, lines
                     ))
                 }
-                Err(err) => ActionOutcome::failed(format!(
-                    "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nerror: {}",
-                    mem_type, sql, err
-                )),
+                Err(err) => {
+                    evidence_error_type = Some("StorageError".to_string());
+                    ActionOutcome::failed(format!(
+                        "Action result: memmgr\ntype: {}\nop: sql\nsql: {}\nerror: {}",
+                        mem_type, sql, err
+                    ))
+                }
             }
         }
         ("durable", "insert" | "update" | "upsert" | "delete") => {
@@ -82,10 +107,13 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                     core.current_stats.mem_writes += 1;
                     ActionOutcome::completed(result)
                 }
-                Err(err) => ActionOutcome::failed(format!(
-                    "Action result: memmgr\ntype: durable\nop: {}\nerror: {}",
-                    op, err
-                )),
+                Err(err) => {
+                    evidence_error_type = Some(durable_update_error_type(&err).to_string());
+                    ActionOutcome::failed(format!(
+                        "Action result: memmgr\ntype: durable\nop: {}\nerror: {}",
+                        op, err
+                    ))
+                }
             }
         }
         ("raw_chat", "search") => {
@@ -95,10 +123,18 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
             {
                 Ok(rows) => rows,
                 Err(err) => {
-                    return ActionOutcome::failed(format!(
+                    let text = format!(
                         "Action result: memmgr\ntype: raw_chat\nop: search\nerror: {}",
                         err
-                    ));
+                    );
+                    return ActionOutcome::failed(text.clone()).with_memmgr_result(
+                        MemmgrResultEvidence {
+                            memory_type: mem_type,
+                            op,
+                            content: memmgr_evidence_content(&text, "raw_chat", "search"),
+                            error_type: Some("StorageError".to_string()),
+                        },
+                    );
                 }
             };
             let delta_rows = core.query_prompt_slices(&search_text, limit, after_ms, before_ms);
@@ -161,10 +197,13 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                     "Action result: memmgr\ntype: raw_chat\nop: delete\nid: {}\nsearch_text: {}\ndeleted_count: {}",
                     id, search_text, deleted
                 )),
-                Err(err) => ActionOutcome::failed(format!(
-                    "Action result: memmgr\ntype: raw_chat\nop: delete\nerror: {}",
-                    err
-                )),
+                Err(err) => {
+                    evidence_error_type = Some("StorageError".to_string());
+                    ActionOutcome::failed(format!(
+                        "Action result: memmgr\ntype: raw_chat\nop: delete\nerror: {}",
+                        err
+                    ))
+                }
             }
         }
         ("scratch", "write") => {
@@ -174,10 +213,13 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                 .write_record(&scratch_type, &label, &content, &[], &[])
             {
                 Ok(record) => ActionOutcome::completed(format_scratch_write_result(&record)),
-                Err(err) => ActionOutcome::failed(format!(
-                    "Action result: memmgr\ntype: scratch\nop: write\nerror: {}",
-                    err
-                )),
+                Err(err) => {
+                    evidence_error_type = Some("StorageError".to_string());
+                    ActionOutcome::failed(format!(
+                        "Action result: memmgr\ntype: scratch\nop: write\nerror: {}",
+                        err
+                    ))
+                }
             }
         }
         ("scratch", "read") => match core.scratch.read(&id) {
@@ -186,10 +228,13 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                 "Action result: memmgr\ntype: scratch\nop: read\nid: {}\nfound: false",
                 id
             )),
-            Err(err) => ActionOutcome::failed(format!(
-                "Action result: memmgr\ntype: scratch\nop: read\nerror: {}",
-                err
-            )),
+            Err(err) => {
+                evidence_error_type = Some("StorageError".to_string());
+                ActionOutcome::failed(format!(
+                    "Action result: memmgr\ntype: scratch\nop: read\nerror: {}",
+                    err
+                ))
+            }
         },
         ("scratch", "search") => match core.scratch.query(&search_text, limit) {
             Ok(rows) if rows.is_empty() => ActionOutcome::completed(format!(
@@ -216,10 +261,13 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                         search_text, lines
                     ))
             }
-            Err(err) => ActionOutcome::failed(format!(
-                "Action result: memmgr\ntype: scratch\nop: search\nerror: {}",
-                err
-            )),
+            Err(err) => {
+                evidence_error_type = Some("StorageError".to_string());
+                ActionOutcome::failed(format!(
+                    "Action result: memmgr\ntype: scratch\nop: search\nerror: {}",
+                    err
+                ))
+            }
         },
         ("scratch", "delete") => match core.scratch.delete(&id) {
             Ok(true) => ActionOutcome::completed(format!(
@@ -230,16 +278,30 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                 "Action result: memmgr\ntype: scratch\nop: delete\nid: {}\ndeleted: false",
                 id
             )),
-            Err(err) => ActionOutcome::failed(format!(
-                "Action result: memmgr\ntype: scratch\nop: delete\nerror: {}",
-                err
-            )),
+            Err(err) => {
+                evidence_error_type = Some("StorageError".to_string());
+                ActionOutcome::failed(format!(
+                    "Action result: memmgr\ntype: scratch\nop: delete\nerror: {}",
+                    err
+                ))
+            }
         },
-        _ => ActionOutcome::failed(format!(
-            "Action result: memmgr\ntype: {}\nop: {}\nerror: unsupported_type_or_op",
-            mem_type, op
-        )),
-    }
+        _ => {
+            evidence_error_type = Some("InvalidInput".to_string());
+            ActionOutcome::failed(format!(
+                "Action result: memmgr\ntype: {}\nop: {}\nerror: unsupported_type_or_op",
+                mem_type, op
+            ))
+        }
+    };
+
+    let evidence_content = memmgr_evidence_content(&outcome.text, &mem_type, &op);
+    outcome.with_memmgr_result(MemmgrResultEvidence {
+        memory_type: mem_type,
+        op,
+        content: evidence_content,
+        error_type: evidence_error_type,
+    })
 }
 
 #[cfg(test)]
