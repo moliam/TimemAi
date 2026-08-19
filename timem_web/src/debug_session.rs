@@ -279,7 +279,7 @@ fn render_llm_response_dump(
     }
 
     for response in responses {
-        out.push_str("\n");
+        out.push('\n');
         out.push_str("============================================================\n");
         out.push_str(&format!("response_sequence: {}\n", response.sequence));
         out.push_str(&format!("round: {}\n", response.round));
@@ -565,7 +565,7 @@ fn bar(count: u64, max: u64) -> String {
     if count == 0 || max == 0 {
         return String::new();
     }
-    let width = ((count as usize * BAR_WIDTH) + max as usize - 1) / max as usize;
+    let width = (count as usize * BAR_WIDTH).div_ceil(max as usize);
     "█".repeat(width.max(1))
 }
 
@@ -723,9 +723,11 @@ mod tests {
 
     #[test]
     fn markdown_tables_are_aligned() {
-        let mut stats = SessionDebug::default();
-        stats.started_at_ms = 1;
-        stats.updated_at_ms = 2;
+        let mut stats = SessionDebug {
+            started_at_ms: 1,
+            updated_at_ms: 2,
+            ..SessionDebug::default()
+        };
         stats.tools_per_response[0] = 1;
         let markdown = render_statistics_markdown("session_1", &stats);
         assert!(markdown.contains("| Started"));
@@ -768,17 +770,17 @@ mod tests {
         };
         assert!(markdown.lines().any(|line| {
             let row = cells(line);
-            row.get(0).map(String::as_str) == Some("10+")
+            row.first().map(String::as_str) == Some("10+")
                 && row.get(1).map(String::as_str) == Some("0")
         }));
         assert!(markdown.lines().any(|line| {
             let row = cells(line);
-            row.get(0).map(String::as_str) == Some("30s+")
+            row.first().map(String::as_str) == Some("30s+")
                 && row.get(1).map(String::as_str) == Some("0")
         }));
         assert!(markdown.lines().any(|line| {
             let row = cells(line);
-            row.get(0).map(String::as_str) == Some("1s+")
+            row.first().map(String::as_str) == Some("1s+")
                 && row.get(1).map(String::as_str) == Some("0")
         }));
     }
