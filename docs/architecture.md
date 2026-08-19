@@ -1201,8 +1201,11 @@ are non-empty, `<stdout>` and `<stderr>` contain `OUT_HASH` and `ERR_HASH`
 blocks sharing one four-digit lowercase hexadecimal hash. The hash derives
 from task, original stdout, original stderr, generation time, and collision
 salt; runtime rejects a candidate whose marker already appears in either
-stream. Known exit code, Unix signal, and still-running pid are attributes.
-Bounded truncation occurs inside stream boundaries and preserves all closing
+stream. The `status` attribute is lifecycle-only: `finished`, `timeout`, or
+`running`. Known exit code, Unix signal, still-running pid, and Runtime
+`error_type` are separate attributes; Runtime does not encode process or
+business success as the lifecycle status. Bounded truncation occurs inside
+stream boundaries and preserves all closing
 markers and XML result tags. Background and timeout job records write stdout
 and stderr to separate files; historical merged records are treated as stdout
 without guessing old stderr boundaries. JSON, audit, and host-facing output

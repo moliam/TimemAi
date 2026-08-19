@@ -283,19 +283,24 @@ impl FileShellJobStore {
     ) -> ActionOutcome {
         let clean = command.trim();
         if clean.is_empty() {
-            return ActionOutcome::failed(bash_action_not_executed(
-                None,
-                "The background command was not started because no shell command was provided.",
-            ));
+            let reason =
+                "The background command was not started because no shell command was provided.";
+            return bash_finished_error_outcome(
+                bash_action_not_executed(None, reason),
+                "InvalidInput",
+                reason,
+            );
         }
         let record =
             match self.spawn_record(clean, cwd, "background", session_id, turn_id, tail_out) {
                 Ok(record) => record,
                 Err(_) => {
-                    return ActionOutcome::failed(bash_action_not_executed(
-                        Some(clean),
-                        "The background command could not be started by the local shell.",
-                    ));
+                    let reason = "The background command could not be started by the local shell.";
+                    return bash_finished_error_outcome(
+                        bash_action_not_executed(Some(clean), reason),
+                        "SpawnFailed",
+                        reason,
+                    );
                 }
             };
         let _ = self.append(&record);
@@ -309,6 +314,7 @@ impl FileShellJobStore {
             exit_code: None,
             signal: None,
             pid: Some(record.pid),
+            error_type: None,
         })
     }
 
@@ -980,10 +986,12 @@ pub(crate) fn execute_run_bash_action(
 ) -> ActionExecution {
     let loop_command = action.input_str("loop_cmd");
     if !loop_command.is_empty() && !action.input_str("cmd").is_empty() {
-        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
-            None,
-            "The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.",
-        )));
+        let reason = "The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(None, reason),
+            "InvalidInput",
+            reason,
+        ));
     }
     let is_regular_command = loop_command.is_empty();
     let command_to_run = if is_regular_command {
@@ -1069,52 +1077,70 @@ pub(crate) fn execute_run_bash_with_tail(
 ) -> ActionExecution {
     let command_to_run = command.trim();
     if command_to_run.is_empty() {
-        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
-            None,
-            "The command was not executed because no shell command was provided.",
-        )));
+        let reason = "The command was not executed because no shell command was provided.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(None, reason),
+            "InvalidInput",
+            reason,
+        ));
     }
     if let Err(reason) = validate_bash_request(command_to_run) {
-        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
-            Some(command_to_run),
-            bash_validation_message(&reason),
-        )));
+        let message = bash_validation_message(&reason);
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), message),
+            "InvalidInput",
+            message,
+        ));
     }
     if !background && is_regular_command && timeout_ms <= 0 {
-        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
-            Some(command_to_run),
-            "timeout_ms must be a positive integer. Choose a wait budget that matches the command.",
-        )));
+        let reason =
+            "timeout_ms must be a positive integer. Choose a wait budget that matches the command.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), reason),
+            "InvalidInput",
+            reason,
+        ));
     }
     if !background && !is_regular_command && timeout_ms <= 0 {
-        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
-            Some(command_to_run),
-            "loop_timeout_ms must be a positive integer. Choose a total polling wait budget that matches the external state you are waiting for.",
-        )));
+        let reason = "loop_timeout_ms must be a positive integer. Choose a total polling wait budget that matches the external state you are waiting for.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), reason),
+            "InvalidInput",
+            reason,
+        ));
     }
     if !background && is_regular_command && contains_long_normal_sleep(command_to_run) {
-        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
-            Some(command_to_run),
-            "The command contains a long sleep in normal mode. Use loop_cmd with interval_ms to poll external status, or background=true for long local work that should continue across turns.",
-        )));
+        let reason = "The command contains a long sleep in normal mode. Use loop_cmd with interval_ms to poll external status, or background=true for long local work that should continue across turns.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), reason),
+            "InvalidInput",
+            reason,
+        ));
     }
     if background && interval_ms.is_some() {
-        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
-            Some(command_to_run),
-            "Polling mode and background mode cannot be combined. Use loop_cmd with interval_ms for polling, or background=true for a persistent background command.",
-        )));
+        let reason = "Polling mode and background mode cannot be combined. Use loop_cmd with interval_ms for polling, or background=true for a persistent background command.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), reason),
+            "InvalidInput",
+            reason,
+        ));
     }
     if interval_ms.is_some() && is_regular_command {
-        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
-            Some(command_to_run),
-            "interval_ms is only valid with loop_cmd. Move the check command to loop_cmd, or remove interval_ms for a normal command.",
-        )));
+        let reason = "interval_ms is only valid with loop_cmd. Move the check command to loop_cmd, or remove interval_ms for a normal command.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), reason),
+            "InvalidInput",
+            reason,
+        ));
     }
     if interval_ms.is_none() && !is_regular_command {
-        return ActionExecution::Completed(ActionOutcome::failed(bash_action_not_executed(
-            Some(command_to_run),
-            "loop_cmd needs interval_ms so the runtime knows how often to check the condition.",
-        )));
+        let reason =
+            "loop_cmd needs interval_ms so the runtime knows how often to check the condition.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), reason),
+            "InvalidInput",
+            reason,
+        ));
     }
     if approval_mode == BashApprovalMode::Ask {
         return ActionExecution::NeedsApproval(PendingApproval {
@@ -1222,10 +1248,12 @@ pub(crate) fn execute_approved_bash_with_tail(
 ) -> ActionOutcome {
     let clean = command.trim();
     if let Err(reason) = validate_bash_request(clean) {
-        let mut outcome = ActionOutcome::failed(bash_action_not_executed(
-            Some(clean),
-            bash_validation_message(&reason),
-        ));
+        let message = bash_validation_message(&reason);
+        let mut outcome = bash_finished_error_outcome(
+            bash_action_not_executed(Some(clean), message),
+            "InvalidInput",
+            message,
+        );
         outcome.text.push_str(&format!(
             "\napproval_id: {}\napproval_status: approved_by_user",
             request.approval_id
@@ -1463,6 +1491,11 @@ fn polling_result(
         exit_code: last_status,
         signal: last_signal,
         pid: None,
+        error_type: match state {
+            "cancelled" => Some("Cancelled".to_string()),
+            "not_executed" => Some("InvalidInput".to_string()),
+            _ => None,
+        },
     })
 }
 
@@ -1568,6 +1601,11 @@ impl BashCommandOutput {
             exit_code: self.status,
             signal: self.signal,
             pid,
+            error_type: self
+                .error
+                .as_deref()
+                .and_then(bash_error_type)
+                .map(str::to_string),
         })
     }
 
@@ -1742,6 +1780,36 @@ fn combined_shell_output(stdout: &str, stderr: &str) -> String {
     } else {
         combined
     }
+}
+
+fn bash_error_type(error: &str) -> Option<&'static str> {
+    match error {
+        "cancelled" | "cancelled_by_user" => Some("Cancelled"),
+        "invalid_timeout" => Some("InvalidInput"),
+        "command_failed" => Some("SpawnFailed"),
+        _ if error.starts_with("timeout_still_running:")
+            || error.starts_with("long_running_still_running:") =>
+        {
+            None
+        }
+        "timeout" => None,
+        _ => Some("InternalError"),
+    }
+}
+
+fn bash_finished_error_outcome(
+    text: String,
+    error_type: &'static str,
+    error_message: impl Into<String>,
+) -> ActionOutcome {
+    ActionOutcome::failed(text).with_bash_result(BashResultEvidence {
+        stdout: String::new(),
+        stderr: error_message.into(),
+        exit_code: None,
+        signal: None,
+        pid: None,
+        error_type: Some(error_type.to_string()),
+    })
 }
 
 fn bash_running_pid(error: &str) -> Option<u32> {

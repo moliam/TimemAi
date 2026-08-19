@@ -176,15 +176,11 @@ fn bash_boundary_id(task: &str, stdout: &str, stderr: &str, output_time_ms: i64)
     unreachable!("the finite Bash output cannot contain every possible salted boundary")
 }
 
-fn bash_status(status: ActionStatus, evidence: &BashResultEvidence) -> &'static str {
+fn bash_lifecycle_status(status: ActionStatus) -> &'static str {
     match status {
-        ActionStatus::Completed if evidence.exit_code == Some(0) && evidence.signal.is_none() => {
-            "success"
-        }
         ActionStatus::Timeout => "timeout",
-        ActionStatus::Cancelled => "cancelled",
         ActionStatus::BackgroundRunning => "running",
-        _ => "error",
+        _ => "finished",
     }
 }
 
@@ -221,7 +217,7 @@ pub(crate) fn render_xml_bash_result(
         .filter(|name| !name.is_empty())
         .unwrap_or("run_bash");
     let escaped_task = escape_xml_attribute(task);
-    let status = bash_status(status, evidence);
+    let status = bash_lifecycle_status(status);
     let exit_code = evidence
         .exit_code
         .map(|code| format!(" exit_code=\"{code}\""))
@@ -234,8 +230,14 @@ pub(crate) fn render_xml_bash_result(
         .pid
         .map(|pid| format!(" pid=\"{pid}\""))
         .unwrap_or_default();
+    let error_type = evidence
+        .error_type
+        .as_deref()
+        .map(escape_xml_attribute)
+        .map(|error_type| format!(" error_type=\"{error_type}\""))
+        .unwrap_or_default();
     let prefix = format!(
-        "<bash_result task=\"{escaped_task}\" status=\"{status}\"{exit_code}{signal}{pid}>\n"
+        "<bash_result task=\"{escaped_task}\" status=\"{status}\"{exit_code}{signal}{pid}{error_type}>\n"
     );
     let suffix = "\n</bash_result>";
     let id = bash_boundary_id(task, &evidence.stdout, &evidence.stderr, output_time_ms);
