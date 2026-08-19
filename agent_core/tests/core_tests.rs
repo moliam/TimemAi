@@ -1415,10 +1415,11 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     assert_eq!(delta_ids, vec!["pd_1", "pd_2"]);
     assert_eq!(prompt.matches("<prompt_delta ").count(), 2);
     assert_eq!(prompt.matches("</prompt_delta>").count(), 2);
-    assert!(prompt.contains(r#"<ASSISTANT id="TIMEM_ASSISTANT">"#));
+    assert!(!prompt.contains(r#"<ASSISTANT id="TIMEM_ASSISTANT">"#));
     assert!(prompt.contains("先分析"));
-    assert!(prompt.contains("&lt;free_talk&gt;先分析&lt;/free_talk&gt;&lt;finish_confirm&gt;"));
-    assert!(prompt.contains("&lt;/finish_confirm&gt;&lt;final_answer&gt;结论&lt;/final_answer&gt;"));
+    assert!(prompt.contains("<response><free_talk>先分析</free_talk><finish_confirm>"));
+    assert!(prompt.contains("</finish_confirm><final_answer>结论</final_answer></response>"));
+    assert!(!prompt.contains("&lt;response&gt;"));
     assert!(!prompt.contains("All previous pending open tasks are completed."));
 }
 
