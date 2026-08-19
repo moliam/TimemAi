@@ -1,13 +1,12 @@
 use crate::{
     append_audit_event, is_model_input_too_large_error, model_input_overflow_recovery_audit_event,
     model_retry_audit_event, model_retry_decision, normalize_user_supplements_with_context,
-    turn_supporting_context, ActionRuntime, AgentCore, CoreStep, CoreTopicEvent,
-    HostDecisionRequest, HttpModelClient, LlmResponse, LongRunningCommandDecision,
-    LongRunningCommandStatus, ModelCallOutcome, ModelServiceConfig, ModelSystemRetryPolicy,
-    OutputExpansionRequest, OutputExpansionResolution, PromptComponentRole,
-    RoundLimitDecisionRequest, RoundLimitResolution, RuntimeProfiler, StoppedTurn,
-    SupportingContextInput, TurnInput, TurnOutcome, TurnStopReason, TurnStopSummary, TurnUi,
-    UsageStats, UserSupplement,
+    ActionRuntime, AgentCore, CoreStep, CoreTopicEvent, HostDecisionRequest, HttpModelClient,
+    LlmResponse, LongRunningCommandDecision, LongRunningCommandStatus, ModelCallOutcome,
+    ModelServiceConfig, ModelSystemRetryPolicy, OutputExpansionRequest, OutputExpansionResolution,
+    PromptComponentRole, RoundLimitDecisionRequest, RoundLimitResolution, RuntimeProfiler,
+    StoppedTurn, TurnInput, TurnOutcome, TurnStopReason, TurnStopSummary, TurnUi, UsageStats,
+    UserSupplement,
 };
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -218,15 +217,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
     core.record_turn_start_audit(request.audit_file, request.session, &turn_id, request.input);
     let start = Instant::now();
     let mut user_wait_this_turn = Duration::ZERO;
-    let context = turn_supporting_context(
-        SupportingContextInput {
-            model: &config.model,
-            runtime: request.runtime,
-            run_bash_target: request.run_bash_target,
-        },
-        request.additional_context,
-    );
-    let mut step = core.begin_turn(request.input, Some(&context));
+    let additional_context = request
+        .additional_context
+        .map(str::trim)
+        .filter(|context| !context.is_empty());
+    let mut step = core.begin_turn(request.input, additional_context);
     let mut rounds = 0u32;
     let mut model_wait_this_turn = Duration::ZERO;
     let mut latest_usage: Option<UsageStats> = None;

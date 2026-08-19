@@ -12,14 +12,13 @@ use agent_core::session_store::{
 use agent_core::{
     apply_runtime_config_value, combine_additional_contexts, default_data_root,
     load_workspace_dirs_from_path, model_service_config_from_sources_allow_missing_api_key,
-    runtime_config_menu_report, runtime_info_context, validate_api_key,
-    work_instruction_load_report, work_instruction_load_request,
-    work_instruction_mode_from_sources, AgentCore, BashApprovalMode, CoreSessionWorkerEvent,
-    CoreSessionWorkerManager, CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest,
-    ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout,
-    SessionToolRepo, ToolDetail, ToolGenRequest, ToolSummary, TopicReply, WorkInstructionLoadMode,
-    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_TOOLGEN,
-    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    runtime_config_menu_report, validate_api_key, work_instruction_load_report,
+    work_instruction_load_request, work_instruction_mode_from_sources, AgentCore, BashApprovalMode,
+    CoreSessionWorkerEvent, CoreSessionWorkerManager, CoreSessionWorkerWorkspace, HostDecision,
+    HostDecisionRequest, ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind,
+    RuntimeDataLayout, SessionToolRepo, ToolDetail, ToolGenRequest, ToolSummary, TopicReply,
+    WorkInstructionLoadMode, CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
+    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, self_tool::SelfToolPaths, shell_exec::FileShellJobStore,
@@ -6364,7 +6363,6 @@ fn session_context_with_roles(
         .response_protocol
         .suite()
         .prompt_boundaries();
-    let runtime = runtime_info_context(&["host: local_web", "transport: websocket"]);
     let resume_notice = if session.resume_notice_pending {
         Some(
             SessionResumeNotice {
@@ -6397,7 +6395,6 @@ fn session_context_with_roles(
     let uploaded_files = uploaded_files_context(attachments, spec);
     let worker_roles = worker_roles_context(worker_roles);
     Ok(combine_additional_contexts([
-        runtime.as_deref(),
         resume_notice.as_deref(),
         instructions.as_deref(),
         uploaded_files.as_deref(),

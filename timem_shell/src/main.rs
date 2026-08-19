@@ -14,7 +14,6 @@ use reedline::{
 use serde_json::json;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::CStr;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -34,7 +33,7 @@ use timem_shell::{
     model_service_config_from_env, observation_events_from_core_topic_events,
     observation_panel_width_for_terminal, parse_cli_args, render_final_response_at,
     render_prof_report_data, render_shell_status_bar, render_thinking_view_at,
-    render_turn_outcome_text, run_session_turn, runtime_active_elapsed_secs, runtime_info_context,
+    render_turn_outcome_text, run_session_turn, runtime_active_elapsed_secs,
     runtime_profile_report, shell_status_message_from_core_topic, stale_context_decision_request,
     topic_event_status_hint, work_instruction_load_report, work_instruction_load_request,
     work_instruction_load_topic_event, work_instruction_mode_from_sources, workspace_config_file,
@@ -174,7 +173,6 @@ fn main() {
         }
     }
     core.configure_runtime_from_host(&config, bash_approval_mode);
-    let session_runtime_info = runtime_info_context(&shell_runtime_info_entries(&core));
     let _ = core.change_prompt_cwd(session_work_dir.to_string_lossy());
     let (mut work_instruction_context, work_instruction_notice) = match work_instruction_mode {
         WorkInstructionLoadMode::Silent => load_work_instructions_for_shell(&session_work_dir),
@@ -200,7 +198,6 @@ fn main() {
             &mut resume_notice_pending,
         );
         let context = combine_additional_contexts([
-            session_runtime_info.as_deref(),
             resume_notice.as_deref(),
             work_instruction_context.as_deref(),
             options.supporting_context.as_deref(),
@@ -440,7 +437,6 @@ fn main() {
             &mut resume_notice_pending,
         );
         let turn_additional_context = combine_additional_contexts([
-            session_runtime_info.as_deref(),
             resume_notice.as_deref(),
             turn_work_instruction_context.as_deref(),
             workspace_ctx.as_deref(),
@@ -504,47 +500,6 @@ fn main() {
 
 fn consume_turn_cancel_request() -> bool {
     TURN_CANCEL_REQUESTED.swap(false, Ordering::SeqCst)
-}
-
-fn shell_runtime_info_entries(core: &AgentCore) -> Vec<String> {
-    let ui = if std::env::var("ITERM_SESSION_ID").is_ok() {
-        "iterm2"
-    } else {
-        "shell"
-    };
-    let mut entries = vec![
-        format!("ui: {ui}"),
-        format!("os: {}", host_os_type()),
-        format!("arch: {}", std::env::consts::ARCH),
-        format!("os_version: {}", host_os_version()),
-    ];
-    if core.capability_contains_tool("run_bash") {
-        entries.push("run_bash: available; executes on user_local_machine".to_string());
-    }
-    entries
-}
-
-fn host_os_type() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        "unknown"
-    }
-}
-
-fn host_os_version() -> String {
-    let mut uts = unsafe { std::mem::zeroed::<libc::utsname>() };
-    if unsafe { libc::uname(&mut uts) } != 0 {
-        return "unknown".to_string();
-    }
-    unsafe { CStr::from_ptr(uts.release.as_ptr()) }
-        .to_string_lossy()
-        .trim()
-        .to_string()
 }
 
 fn absolute_path(path: PathBuf) -> PathBuf {

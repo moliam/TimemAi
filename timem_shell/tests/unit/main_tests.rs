@@ -19,17 +19,16 @@ use super::{
     render_work_instructions_load_choices, render_work_instructions_load_prompt,
     render_workspace_command_report, render_workspace_delete_choices, render_workspace_menu,
     rendered_terminal_rows, resolve_paste_markers, resolve_work_instruction_context_for_turn,
-    runtime_help_text, sanitize_user_input, shell_runtime_info_entries,
-    shell_session_effective_env, shell_session_env_values, shell_session_profile,
-    shell_session_work_dir, startup_control_hint, strip_ansi, strip_paste_markers,
-    submitted_input_rows, take_shell_resume_notice, thinking_supplement_terminal_mode,
-    timem_reedline_keybindings, utf8_expected_len, work_instruction_shell_load_result,
-    workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
-    ConfigRow, ConfigTableItem, CoreTopicEvent, HostDecision, HostDecisionRequest, MenuKey,
-    PasteRecord, PasteRecoveryChoice, PasteRecoveryKey, PasteRecoverySummary, QueuedInputDrain,
-    SharedPasteRecords, SharedPrefillInput, ThinkingStatus, TimemEditMode, TimemPasteHighlighter,
-    TimemReedlinePrompt, TurnUi, ANSI_HIGHLIGHT, PASTE_END_MARKER, PASTE_START_MARKER,
-    STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+    runtime_help_text, sanitize_user_input, shell_session_effective_env, shell_session_env_values,
+    shell_session_profile, shell_session_work_dir, startup_control_hint, strip_ansi,
+    strip_paste_markers, submitted_input_rows, take_shell_resume_notice,
+    thinking_supplement_terminal_mode, timem_reedline_keybindings, utf8_expected_len,
+    work_instruction_shell_load_result, workspace_menu_line_count, wrapped_terminal_rows,
+    ApprovalChoice, ApprovalKey, ConfigField, ConfigRow, ConfigTableItem, CoreTopicEvent,
+    HostDecision, HostDecisionRequest, MenuKey, PasteRecord, PasteRecoveryChoice, PasteRecoveryKey,
+    PasteRecoverySummary, QueuedInputDrain, SharedPasteRecords, SharedPrefillInput, ThinkingStatus,
+    TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt, TurnUi, ANSI_HIGHLIGHT,
+    PASTE_END_MARKER, PASTE_START_MARKER, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1970,32 +1969,6 @@ fn rendered_terminal_rows_counts_soft_wrapped_status_lines() {
             .map(|line| wrapped_terminal_rows(display_width(line), 40))
             .sum::<usize>()
     );
-}
-
-#[test]
-fn shell_runtime_info_is_host_supplied_and_has_no_cwd() {
-    let core = AgentCore::new(
-        STATIC_PROMPT,
-        CoreProfile {
-            model: "qwen-plus".into(),
-        },
-        std::env::temp_dir().join(format!("timem_shell_runtime_info_{}", epoch_millis())),
-    );
-    let entries = shell_runtime_info_entries(&core);
-    let joined = entries.join("\n");
-
-    assert!(joined.contains("ui:"));
-    assert!(
-        joined.contains("os: macos")
-            || joined.contains("os: linux")
-            || joined.contains("os: windows")
-            || joined.contains("os: unknown")
-    );
-    assert!(joined.contains("arch: "));
-    assert!(joined.contains("os_version: "));
-    assert!(joined.contains("run_bash: available"));
-    assert!(!joined.contains("cwd:"));
-    assert!(!joined.contains("/Users/"));
 }
 
 #[test]

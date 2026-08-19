@@ -2426,9 +2426,10 @@ fn pending_upload_moves_into_the_submitted_user_entry_and_is_not_reinjected() {
             .unwrap()
             .contains("upload_1_notes.md")
     );
-    assert!(!session_context(&state, session_id, &[])
-        .unwrap()
-        .unwrap()
+    let empty_context = session_context(&state, session_id, &[]).unwrap();
+    assert!(!empty_context
+        .as_deref()
+        .unwrap_or("")
         .contains("upload_1_notes.md"));
 
     rollback_web_turn(&state, session_id, &turn.turn_id, vec![attachment.clone()]);
@@ -8655,8 +8656,10 @@ async fn ask_mode_decline_continues_the_turn_without_loading_work_instructions()
         .pending_work_instruction_turn
         .is_none());
     drop(sessions);
-    let context = session_context(&state, &session_id, &[]).unwrap().unwrap();
-    assert!(context.contains("host: local_web"));
+    let context = session_context(&state, &session_id, &[]).unwrap();
+    let context = context.as_deref().unwrap_or("");
+    assert!(!context.contains("host: local_web"));
+    assert!(!context.contains("transport: websocket"));
     assert!(!context.contains("MUST_NOT_REACH_MODEL"));
 }
 
@@ -8760,9 +8763,10 @@ fn toolrepo_detail_rename_and_future_prompt_hint_share_the_published_state() {
     assert!(context.contains(repo.root().to_string_lossy().as_ref()));
     assert!(context.contains("semantic names"));
     assert!(context.contains("run the script's --help"));
-    assert!(!session_context(&state, "session_b", &[])
-        .unwrap()
-        .unwrap()
+    let other_context = session_context(&state, "session_b", &[]).unwrap();
+    assert!(!other_context
+        .as_deref()
+        .unwrap_or("")
         .contains("Previously accumulated reusable scripts"));
 }
 
