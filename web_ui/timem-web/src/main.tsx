@@ -14,6 +14,7 @@ import { activeModelRetryStatus, activityFromTopic, appendActivityToCurrentTurn,
 import { safeMarkdownUrl } from "./markdown_security";
 import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
+import { commandSessionId, isModelSubmissionCommand, ModelServiceIssue, modelDisplayName, modelServiceIssue, sessionModelConfigurationIssue } from "./model_service_ui";
 import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens } from "./token_format";
 import { summarizeConsecutiveToolActivities, ToolActivitySummary } from "./activity_groups";
@@ -148,6 +149,7 @@ function TimemApp() {
   const [completedTurnKey, setCompletedTurnKey] = useState("");
   const [queuePauseRequest, setQueuePauseRequest] = useState<{ key: string; reason: string } | null>(null);
   const [commandAcks, setCommandAcks] = useState<Record<string, Extract<WireEvent, { type: "command_ack" }>>>({});
+  const [modelServiceIssues, setModelServiceIssues] = useState<Record<string, ModelServiceIssue>>({});
   const consumeCommandAcks = useCallback((commandIds: ReadonlySet<string>) => {
     setCommandAcks((current) => Object.fromEntries(Object.entries(current).filter(([commandId]) => !commandIds.has(commandId))));
   }, []);
@@ -519,10 +521,20 @@ function TimemApp() {
         const accepted = commandOutboxRef.current.find((item) => item.commandId === event.command_id);
         if (accepted && commandMayPersist(accepted.command)) saveCommandOutboxItem(window.localStorage, commandOutboxScopeRef.current, accepted);
       } else {
+        const completed = commandOutboxRef.current.find((item) => item.commandId === event.command_id);
         commandOutboxRef.current = finishOutboxCommand(commandOutboxRef.current, event.command_id);
         removeCommandOutboxItem(window.localStorage, commandOutboxScopeRef.current, event.command_id);
         if (event.status === "rejected") {
-          reportUiError("Command rejected", event.error || "The runtime rejected this command.");
+          const sessionId = commandSessionId(completed?.command) ?? (activeSessionIdRef.current || "system");
+          if (isModelSubmissionCommand(completed?.command)) {
+            const issue = modelServiceIssue(event.error || "The runtime rejected this model request.");
+            if (sessionId !== "system") {
+              setModelServiceIssues((current) => ({ ...current, [sessionId]: issue }));
+            }
+            reportUiError(issue.title, issue.detail, sessionId);
+          } else {
+            reportUiError("Command rejected", event.error || "The runtime rejected this command.", sessionId);
+          }
         }
       }
       return;
@@ -545,6 +557,7 @@ function TimemApp() {
         setCommandAcks({});
       }
       clearAllPendingCommands();
+      setModelServiceIssues({});
       setDecisions(decisionsFromSessions(event.snapshot.sessions));
       applySnapshot(event.snapshot);
       setSnapshotReady(true);
@@ -566,6 +579,12 @@ function TimemApp() {
     }
     if (event.type === "session_deleted") {
       removePendingKey(pendingDeleteSessionIdsRef, setPendingDeleteSessionIds, event.session_id);
+      setModelServiceIssues((current) => {
+        if (!(event.session_id in current)) return current;
+        const next = { ...current };
+        delete next[event.session_id];
+        return next;
+      });
       setDeleteSessionCandidate((current) => current?.session_id === event.session_id ? null : current);
       toolCountBySessionRef.current.delete(event.session_id);
       setExpandedSessionIds((current) => {
@@ -614,6 +633,12 @@ function TimemApp() {
     }
     if (event.type === "session_runtime_updated") {
       removePendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, event.session_id);
+      setModelServiceIssues((current) => {
+        if (!(event.session_id in current)) return current;
+        const next = { ...current };
+        delete next[event.session_id];
+        return next;
+      });
       const savedApiKey = pendingSessionApiKeyValuesRef.current.get(event.session_id);
       pendingSessionApiKeyValuesRef.current.delete(event.session_id);
       setRevealedSessionApiKeys((current) => updateRevealedSessionApiKeys(current, event.session_id, savedApiKey));
@@ -624,6 +649,12 @@ function TimemApp() {
     }
     if (event.type === "session_runtime_config_updated") {
       removePendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, `${event.session_id}:${event.key}`);
+      setModelServiceIssues((current) => {
+        if (!(event.session_id in current)) return current;
+        const next = { ...current };
+        delete next[event.session_id];
+        return next;
+      });
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? { ...session, runtime_profile: event.runtime_profile, max_llm_input_tokens: event.runtime_profile.max_llm_input_tokens }
         : session));
@@ -782,7 +813,16 @@ function TimemApp() {
         return workerState ? updateSessionWorkerState(withEvent, event.worker_id, workerState) : withEvent;
       }));
       if (kind === "model_request") {
+        setModelServiceIssues((current) => {
+          if (!(event.session_id in current)) return current;
+          const next = { ...current };
+          delete next[event.session_id];
+          return next;
+        });
         setDecisions((current) => clearDecisionsForWorker(current, event.session_id, event.worker_id));
+      } else if (kind === "model_error") {
+        const issue = modelServiceIssue(event.event.error);
+        setModelServiceIssues((current) => ({ ...current, [event.session_id]: issue }));
       }
       return;
     }
@@ -1044,7 +1084,10 @@ function TimemApp() {
   const connectionLabel = runtimeConnectionLabel(connected, snapshotReady, runtimeEverConnected, reconnectAttempt);
   const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem directory";
   const newSessionLabel = runtimeLocked ? "Session controls are temporarily locked" : "New session";
-  const headerModelLabel = activeSession?.runtime_profile?.model ?? "";
+  const headerModelLabel = modelDisplayName(activeSession);
+  const activeModelServiceIssue = activeSession
+    ? modelServiceIssues[activeSession.session_id] ?? sessionModelConfigurationIssue(activeSession)
+    : null;
   const appearanceLabel = showAppearance ? "Close appearance settings" : "Open appearance settings";
   const runtimeLabel = showRuntime ? "Close runtime information" : "Open runtime information";
   const activeToolCount = activeSession?.tools.length ?? 0;
@@ -1080,7 +1123,7 @@ function TimemApp() {
                 if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); }
               }}
             />: <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.current_dir} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
-              {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span><span className="session-sub"><span className="session-detail session-cwd" title={session.current_dir}><FolderOpen size={11} aria-hidden="true"/><span className="path-tail">{workspacePathLabel(session.current_dir)}</span></span>{renamingSession ? <span className="session-detail session-pending">Saving name...</span> : session.runtime_profile && <span className="session-detail session-profile" title={session.runtime_profile.model}><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{session.runtime_profile.model}</span></span>}</span></span><span className="sr-only">Session state: {session.state}</span>
+              {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span><span className="session-sub"><span className="session-detail session-cwd" title={session.current_dir}><FolderOpen size={11} aria-hidden="true"/><span className="path-tail">{workspacePathLabel(session.current_dir)}</span></span>{renamingSession ? <span className="session-detail session-pending">Saving name...</span> : <span className="session-detail session-profile" title={modelDisplayName(session)}><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{modelDisplayName(session)}</span></span>}</span></span><span className="sr-only">Session state: {session.state}</span>
             </button>}
             <button type="button" className={`session-delete ${deletingSession ? "deleting" : ""}`} title={`Delete ${session.display_name}`} aria-label={`Delete ${session.display_name}`} disabled={runtimeLocked || deletingSession} onClick={() => { setDeleteSessionCandidate(session); closeMobileSidebar(false); }}>{deletingSession ? <LoaderCircle size={14}/> : <Trash2 size={14}/>}</button>
           </div>{expandedSessionIds.has(session.session_id) && <div className="worker-list" aria-label={`Workers for ${session.display_name}: ${session.workers.length} worker${session.workers.length === 1 ? "" : "s"}`}>{[...session.workers].sort((left, right) => left.ordinal - right.ordinal).map((worker) => <div className="worker-row" key={worker.worker_id} title={`${worker.worker_id} · ${worker.context_id}`}><span className={`worker-state-dot ${worker.state}`} aria-hidden="true"/><span className="worker-name">{worker.display_name || `ID${worker.ordinal}`}</span><span className="worker-state">{worker.state}</span></div>)}</div>}</div>;
@@ -1125,6 +1168,11 @@ function TimemApp() {
         {runtimeDisconnected && <div className="runtime-disconnect-banner" role="alert">
           <strong>{runtimeDisconnectedTitle}</strong>
           <span>{runtimeDisconnectedDetail}</span>
+        </div>}
+        {activeModelServiceIssue && <div className="model-config-banner" role="alert">
+          <KeyRound size={15} aria-hidden="true"/>
+          <span><strong>{activeModelServiceIssue.title}.</strong> {activeModelServiceIssue.detail}</span>
+          <button type="button" onClick={() => { setShowAppearance(false); setShowMcp(false); setShowToolRepo(false); setShowRuntime(true); }}>Open Runtime settings</button>
         </div>}
                 {showRuntime && <RuntimePanel panelRef={runtimePanelRef} server={server} session={activeSession} pendingKeys={new Set(activeSession ? Array.from(pendingRuntimeKeys).filter((key) => key.startsWith(`${activeSession.session_id}:`)).map((key) => key.slice(activeSession.session_id.length + 1)) : [])} credentialPending={!!activeSession && (pendingSessionCredentialIds.has(activeSession.session_id) || pendingSessionCredentialIds.has(`reveal:${activeSession.session_id}`))} onApiKeyUpdate={(apiKey) => {
           if (!activeSession || !addPendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, activeSession.session_id)) return;
@@ -2634,6 +2682,10 @@ function activityFromTurnEvent(event: WebTurnEvent, sessionId: string): Activity
  if (event.source !== "worker_activity") return null;
   const kind = String(event.payload.kind ?? "worker_event");
   if (kind === "model_request" || kind === "model_response" || kind === "model_retry") return null;
+  if (kind === "model_error") {
+    const issue = modelServiceIssue(event.payload.error);
+    return { id: event.event_id, sessionId, tone: "error", title: issue.title, detail: issue.detail, createdAt: event.created_at_ms };
+  }
   const detail = Object.entries(event.payload)
     .filter(([key]) => !["kind", "session_id", "context_id", "worker_id"].includes(key))
     .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
