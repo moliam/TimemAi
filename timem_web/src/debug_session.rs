@@ -804,8 +804,10 @@ mod tests {
         store
             .record_prompt("session_test", 1, "first\nprompt")
             .expect("write first prompt");
+        let xml_prompt =
+            "second\n\n<prompt_delta id=\"pd_2\" time_ms=\"2\">\n<response><free_talk>validated XML</free_talk></response>\n</prompt_delta>";
         store
-            .record_prompt("session_test", 2, "second\n\nprompt")
+            .record_prompt("session_test", 2, xml_prompt)
             .expect("replace prompt");
 
         let dump =
@@ -814,7 +816,9 @@ mod tests {
         assert!(dump.contains("round: 2"));
         assert!(dump.contains("generated_at: "));
         assert!(!dump.contains("generated_at_ms:"));
-        assert!(dump.contains("second\n\nprompt"));
+        assert!(dump.contains(xml_prompt));
+        assert!(dump.contains("<response><free_talk>validated XML</free_talk></response>"));
+        assert!(!dump.contains("&lt;response&gt;"));
         assert!(!dump.contains("first\nprompt"));
         assert!(session_dir.join("statistics.md").is_file());
         assert!(session_dir.join("llm_response.dump").is_file());

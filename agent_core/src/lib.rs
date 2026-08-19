@@ -312,7 +312,7 @@ fn normalize_assistant_speaker_name(name: &str) -> String {
 fn role_for_prompt_type(prompt_type: &str, assistant_speaker_name: &str) -> PromptComponentRole {
     match prompt_type {
         "user_question" | "user_supplement" => PromptComponentRole::user(),
-        "llm_response" | "llm_free_talk" => {
+        "llm_response" | "llm_response_raw_xml" | "llm_free_talk" => {
             PromptComponentRole::assistant(assistant_speaker_name.to_string())
         }
         _ => PromptComponentRole::system(),
@@ -3236,14 +3236,20 @@ impl AgentCore {
     ) -> Vec<(String, String)> {
         match self.assistant_replay_mode {
             AssistantReplayMode::RawOutput => {
-                let replay = parsed
-                    .and_then(|parsed| parsed.accepted_response.as_deref())
-                    .unwrap_or(raw_response)
-                    .trim();
+                let accepted_response =
+                    parsed.and_then(|parsed| parsed.accepted_response.as_deref());
+                let replay = accepted_response.unwrap_or(raw_response).trim();
                 if replay.is_empty() {
                     Vec::new()
                 } else {
-                    vec![("llm_response".to_string(), replay.to_string())]
+                    let prompt_type = if accepted_response.is_some()
+                        && self.response_protocol == ResponseProtocolKind::Xml
+                    {
+                        "llm_response_raw_xml"
+                    } else {
+                        "llm_response"
+                    };
+                    vec![(prompt_type.to_string(), replay.to_string())]
                 }
             }
             AssistantReplayMode::ExtractedFields => {
@@ -3252,7 +3258,12 @@ impl AgentCore {
                 {
                     let replay = accepted_response.trim();
                     if !replay.is_empty() {
-                        return vec![("llm_response".to_string(), replay.to_string())];
+                        let prompt_type = if self.response_protocol == ResponseProtocolKind::Xml {
+                            "llm_response_raw_xml"
+                        } else {
+                            "llm_response"
+                        };
+                        return vec![(prompt_type.to_string(), replay.to_string())];
                     }
                 }
 
@@ -5764,7 +5775,7 @@ fn prompt_type_role_for_scratch(
 ) -> &'static str {
     match prompt_type {
         "user_question" | "user_supplement" => spec.user_role,
-        "llm_response" | "llm_free_talk" => spec.assistant_role,
+        "llm_response" | "llm_response_raw_xml" | "llm_free_talk" => spec.assistant_role,
         "result_of_llm_action" => spec.runtime_role,
         _ => spec.runtime_role,
     }

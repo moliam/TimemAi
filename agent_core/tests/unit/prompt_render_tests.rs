@@ -193,6 +193,99 @@ fn xml_dynamic_roles_are_elements_and_untrusted_text_cannot_inject_boundaries() 
 }
 
 #[test]
+fn validated_xml_model_response_is_replayed_without_wrapper_or_entity_escaping() {
+    let response = "<response>\n  <free_talk>直接回放</free_talk>\n  <actions><self_tool name=\"inspect paths\" type=\"path\"/></actions>\n</response>";
+    let split = response
+        .char_indices()
+        .map(|(index, _)| index)
+        .find(|index| *index >= response.len() / 2)
+        .expect("response should have a UTF-8-safe split point");
+    let delta = PromptDelta {
+        delta_id: "pd_xml_raw_replay".to_string(),
+        time_ms: 126,
+        hidden_slice_ids: Vec::new(),
+        slices: vec![
+            PromptSlice {
+                delta_id: "pd_xml_raw_replay".to_string(),
+                slice_id: "ps_xml_raw_replay_s001".to_string(),
+                component_id: "pc_raw".to_string(),
+                prompt_type: "llm_response_raw_xml".to_string(),
+                time_ms: 126,
+                text: response[..split].to_string(),
+                slice_index: 1,
+                slice_count: 3,
+            },
+            PromptSlice {
+                delta_id: "pd_xml_raw_replay".to_string(),
+                slice_id: "ps_xml_raw_replay_s002".to_string(),
+                component_id: "pc_raw".to_string(),
+                prompt_type: "llm_response_raw_xml".to_string(),
+                time_ms: 126,
+                text: response[split..].to_string(),
+                slice_index: 2,
+                slice_count: 3,
+            },
+            PromptSlice {
+                delta_id: "pd_xml_raw_replay".to_string(),
+                slice_id: "ps_xml_raw_replay_s003".to_string(),
+                component_id: "pc_result".to_string(),
+                prompt_type: "result_of_llm_action".to_string(),
+                time_ms: 126,
+                text: "<action_result><self_tool name=\"inspect paths\">ok</self_tool></action_result>"
+                    .to_string(),
+                slice_index: 3,
+                slice_count: 3,
+            },
+        ],
+    };
+
+    let rendered = render_prompt_with_rendered_static(
+        "<Timem System Prompt>\nSTATIC\n</Timem System Prompt>",
+        &[delta],
+        "ASSISTANT_of_Session0",
+        &XmlSuiteV1,
+    );
+
+    assert!(rendered.contains(response));
+    assert!(!rendered.contains(r#"<ASSISTANT id="ASSISTANT_of_Session0">"#));
+    assert!(!rendered.contains("&lt;response&gt;"));
+    assert!(rendered.contains(
+        "<RUNTIME>\n\n<action_result><self_tool name=\"inspect paths\">ok</self_tool></action_result>\n</RUNTIME>"
+    ));
+}
+
+#[test]
+fn unvalidated_xml_shaped_llm_response_remains_wrapped_and_escaped() {
+    let delta = PromptDelta {
+        delta_id: "pd_xml_unvalidated".to_string(),
+        time_ms: 127,
+        hidden_slice_ids: Vec::new(),
+        slices: vec![PromptSlice {
+            delta_id: "pd_xml_unvalidated".to_string(),
+            slice_id: "ps_xml_unvalidated_s001".to_string(),
+            component_id: String::new(),
+            prompt_type: "llm_response".to_string(),
+            time_ms: 127,
+            text: "<response><actions>malformed</actions></response>".to_string(),
+            slice_index: 1,
+            slice_count: 1,
+        }],
+    };
+
+    let rendered = render_prompt_with_rendered_static(
+        "<Timem System Prompt>\nSTATIC\n</Timem System Prompt>",
+        &[delta],
+        "ASSISTANT_of_Session0",
+        &XmlSuiteV1,
+    );
+
+    assert!(rendered.contains(r#"<ASSISTANT id="ASSISTANT_of_Session0">"#));
+    assert!(rendered
+        .contains("&lt;response&gt;&lt;actions&gt;malformed&lt;/actions&gt;&lt;/response&gt;"));
+    assert!(!rendered.contains("<response><actions>malformed</actions></response>"));
+}
+
+#[test]
 fn json_dynamic_roles_and_text_remain_heading_based_and_unescaped() {
     let delta = PromptDelta {
         delta_id: "pd_json_roles".to_string(),

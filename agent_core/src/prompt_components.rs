@@ -30,6 +30,7 @@ impl PromptComponentRole {
             },
             PromptComponentRole::Assistant { .. } => match kind {
                 "free_talk" => "llm_free_talk".to_string(),
+                "llm_response_raw_xml" => "llm_response_raw_xml".to_string(),
                 _ => "llm_response".to_string(),
             },
             PromptComponentRole::System => match kind {
