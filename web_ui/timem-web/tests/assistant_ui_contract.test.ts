@@ -1429,6 +1429,14 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(styles).toContain(".table-scroll:focus-visible");
     expect(styles).toContain(':root[data-theme="light"] .table-scroll');
     expect(styles).toContain('.code-block figcaption');
+    expect(styles).toContain(".markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 { margin: 1.1em 0 .4em;");
+    expect(styles).toContain(".markdown-body p, .markdown-body ul, .markdown-body ol { margin: .48em 0; }");
+    expect(styles).toContain(".markdown-body li + li { margin-top: .2em; }");
+    expect(styles).toContain(".markdown-body blockquote { margin: .68em 0; padding: .15em .75em;");
+    expect(styles).toContain(".table-scroll { width: 100%; margin: 11px 0;");
+    expect(styles).toContain(".code-block { overflow: hidden; margin: .68em 0;");
+    expect(styles).toContain(".code-block figcaption { min-width: 0; height: 26px;");
+    expect(styles).toContain("border-radius: 0; padding: 10px 11px; background: #0d141b;");
     expect(styles).toContain(".code-block figcaption > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
     expect(styles).toContain(".code-block figcaption button { flex: none;");
     expect(styles).toContain(':root[data-theme="light"] .code-block { border-color: #cfddda; background: #f3f7f6; }');
