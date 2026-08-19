@@ -353,6 +353,7 @@ pub struct CoreTopicEvent {
 
 pub const CORE_TOPIC_MODEL_RESPONSE: &str = "core.model.response";
 pub const CORE_TOPIC_MODEL_REPAIR: &str = "core.model.repair";
+pub const CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP: &str = "core.runtime_root_repair_help";
 pub const CORE_TOPIC_ACTION: &str = "core.action";
 pub const CORE_TOPIC_CONTEXT_COMPACT: &str = "core.context.compact";
 pub const CORE_TOPIC_TOOLGEN: &str = "core.toolgen";
@@ -825,6 +826,22 @@ impl CoreTopicEvent {
             error: self.payload["error"].as_str().map(str::to_string),
         })
     }
+}
+
+pub fn runtime_root_repair_help_topic_event(session_id: impl Into<String>) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
+            json!({
+                "name": CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "count": 1,
+        }),
+    )
 }
 
 pub fn model_repair_topic_event(

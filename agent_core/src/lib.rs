@@ -95,19 +95,20 @@ pub use host::{
     context_compact_topic_event, core_initialized_topic_event,
     core_initialized_topic_event_with_worker, normalize_user_supplements,
     normalize_user_supplements_with_context, resolve_topic_reply,
-    session_worker_default_display_name, toolgen_topic_event, topic_event_status_hint,
-    work_instruction_load_topic_event, CoreActionTopic, CoreContextCompactTopic,
-    CoreDynamicContextSummary, CoreGlobalWorkerStatus, CoreHostDecisionRequestTopic,
-    CoreLifecycleEvent, CoreLifecycleTopic, CoreModelRepairTopic, CoreModelResponseTopic,
-    CoreSessionState, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic,
-    CoreTopicEvent, CoreTopicEventSink, CoreTopicStatusHint, CoreWorkInstructionLoadTopic,
-    HostDecision, HostDecisionDefault, HostDecisionRequest, LongRunningCommandContinueRequest,
-    NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution, RoundLimitDecisionRequest,
-    RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
-    TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION,
-    CORE_TOPIC_CONTEXT_COMPACT, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
-    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
-    CORE_TOPIC_ROUND_LIMIT_REQUEST, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN,
+    runtime_root_repair_help_topic_event, session_worker_default_display_name, toolgen_topic_event,
+    topic_event_status_hint, work_instruction_load_topic_event, CoreActionTopic,
+    CoreContextCompactTopic, CoreDynamicContextSummary, CoreGlobalWorkerStatus,
+    CoreHostDecisionRequestTopic, CoreLifecycleEvent, CoreLifecycleTopic, CoreModelRepairTopic,
+    CoreModelResponseTopic, CoreSessionState, CoreSessionWorkerIdentity,
+    CoreSessionWorkerWorkspace, CoreTopic, CoreTopicEvent, CoreTopicEventSink, CoreTopicStatusHint,
+    CoreWorkInstructionLoadTopic, HostDecision, HostDecisionDefault, HostDecisionRequest,
+    LongRunningCommandContinueRequest, NoopTurnUi, OutputExpansionRequest,
+    OutputExpansionResolution, RoundLimitDecisionRequest, RoundLimitResolution, StoppedTurn,
+    TopicReply, TopicReplyError, TurnInput, TurnOutcome, TurnStopDetail, TurnStopReason,
+    TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPACT,
+    CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MODEL_REPAIR,
+    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
+    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN,
     CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
 };
@@ -2150,6 +2151,11 @@ impl AgentCore {
                 .map(|group| group.actions.len())
                 .sum();
             runtime.on_model_response_parsed(tool_count);
+            if parsed.recovered_issue.as_deref() == Some("runtime_root_repair_help") {
+                runtime.on_core_topic_events(&[host::runtime_root_repair_help_topic_event(
+                    self.current_session_id(),
+                )]);
+            }
         }
         if let Some(issue) = parsed.repair_issue.clone() {
             if self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {

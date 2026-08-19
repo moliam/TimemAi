@@ -176,29 +176,74 @@ fn extracted_final_answer_requires_an_unmodified_retry() {
 }
 
 #[test]
-fn missing_response_boundaries_are_not_synthesized() {
+fn missing_response_boundaries_are_synthesized_when_the_xml_edges_are_complete() {
+    let action =
+        r#"<actions><run_bash name="run safe command"><cmd>printf safe</cmd></run_bash></actions>"#;
     for raw in [
-        "<final_answer>done</final_answer>",
-        "<ASSISTANT><final_answer>done</final_answer>",
-        "<final_answer>done</final_answer></ASSISTANT>",
-        "preface<ASSISTANT><final_answer>done</final_answer>",
-        "<ASSISTANT><actions><run_bash><cmd>true</cmd></run_bash></actions>",
-        "<actions><run_bash><cmd>true</cmd></run_bash></actions></ASSISTANT>",
+        action.to_string(),
+        format!("<ASSISTANT>{action}"),
+        format!("{action}</ASSISTANT>"),
+        format!("\n  {action}\n  "),
+    ] {
+        let env = parse_xml_envelope(&raw, &caps());
+        assert!(
+            env.repair_issue.is_none(),
+            "raw={raw}: {:?}",
+            env.repair_issue
+        );
+        assert_eq!(
+            env.recovered_issue.as_deref(),
+            Some("runtime_root_repair_help"),
+            "raw={raw}"
+        );
+        assert_eq!(env.next_actions.len(), 1, "raw={raw}");
+        assert_eq!(env.next_actions[0].input_str("cmd"), "printf safe");
+        assert_eq!(
+            env.accepted_response.as_deref(),
+            Some(
+                "<ASSISTANT><actions><run_bash name=\"run safe command\"><cmd>printf safe</cmd></run_bash></actions></ASSISTANT>"
+            ),
+            "raw={raw}"
+        );
+    }
+}
+
+#[test]
+fn synthesized_response_root_can_accept_a_confirmed_final_answer() {
+    let raw = format!(
+        "<finish_confirm>{FINISH_CONFIRM_PREFIX} Complete.</finish_confirm><final_answer>done</final_answer>"
+    );
+    let env = parse_xml_envelope(&raw, &caps());
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.final_answer, "done");
+    assert!(!env.continue_work);
+    assert_eq!(
+        env.accepted_response.as_deref(),
+        Some(
+            format!(
+                "<ASSISTANT><finish_confirm>{FINISH_CONFIRM_PREFIX} Complete.</finish_confirm><final_answer>done</final_answer></ASSISTANT>"
+            )
+            .as_str()
+        )
+    );
+}
+
+#[test]
+fn failed_response_root_synthesis_falls_back_to_the_original_error_flow() {
+    for raw in [
+        "plain text",
+        "<actions><run_bash name=\"broken\"><cmd>true</actions>",
+        "<ASSISTANT><actions><run_bash name=\"broken\"><cmd>true</actions>",
+        "<actions><run_bash name=\"broken\"><cmd>true</actions></ASSISTANT>",
     ] {
         let env = parse_xml_envelope(raw, &caps());
-        assert!(
-            env.repair_issue.is_some(),
-            "missing response boundary must be a protocol deviation: raw={raw}"
-        );
-        assert_ne!(
-            env.repair_issue.as_deref(),
-            Some("xml_recovered_final_answer_requires_retry"),
-            "incomplete roots are not extracted complete roots: raw={raw}"
-        );
+        assert!(env.repair_issue.is_some(), "raw={raw}");
+        assert!(env.recovered_issue.is_none(), "raw={raw}");
+        assert!(env.accepted_response.is_none(), "raw={raw}");
         assert!(env.final_answer.is_empty(), "raw={raw}");
         assert!(env.next_actions.is_empty(), "raw={raw}");
         assert!(env.action_groups.is_empty(), "raw={raw}");
-        assert!(env.accepted_response.is_none(), "raw={raw}");
     }
 }
 

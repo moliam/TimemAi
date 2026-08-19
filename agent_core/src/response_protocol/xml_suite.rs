@@ -72,16 +72,28 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     if looks_like_external_tool_call_protocol(protocol_text) {
         return malformed_xml_response("external_tool_call_protocol");
     }
-    let protocol_text = protocol_text.to_string();
-    let Some(response) = parse_response_fields(&protocol_text) else {
-        if protocol_text.is_empty() {
+    let original_protocol_text = protocol_text.to_string();
+    let response = if let Some(response) = parse_response_fields(&original_protocol_text) {
+        response
+    } else {
+        if original_protocol_text.is_empty() {
             return malformed_xml_response("empty_response");
         }
-        if protocol_text.starts_with('<') {
-            return malformed_xml_response(classify_xml_root_issue(&protocol_text));
+
+        if let Some(candidate) = repair_missing_response_root(&original_protocol_text) {
+            let mut repaired = parse_xml_envelope(&candidate, capabilities);
+            if repaired.repair_issue.is_none() {
+                repaired.recovered_issue = Some("runtime_root_repair_help".to_string());
+                return repaired;
+            }
+        }
+
+        if original_protocol_text.starts_with('<') {
+            return malformed_xml_response(classify_xml_root_issue(&original_protocol_text));
         }
         return malformed_xml_response("xml_response_root_missing");
     };
+    let protocol_text = original_protocol_text;
 
     let response_was_recovered = root_was_extracted;
     let mut repair_issue = response.flow_issue.clone();
@@ -152,8 +164,36 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         // Do not turn successfully discarded outer noise into a new prompt
         // error; genuine structural failures still use `repair_issue` below.
         runtime_note: None,
+        recovered_issue: None,
         repair_issue,
     }
+}
+
+fn repair_missing_response_root(text: &str) -> Option<String> {
+    let text = text.trim();
+    if !text.starts_with('<') || !text.ends_with('>') {
+        return None;
+    }
+
+    let needs_open = !text.starts_with("<ASSISTANT>");
+    let needs_close = !text.ends_with("</ASSISTANT>");
+    if !needs_open && !needs_close {
+        return None;
+    }
+
+    let mut repaired = String::with_capacity(
+        text.len()
+            + usize::from(needs_open) * "<ASSISTANT>".len()
+            + usize::from(needs_close) * "</ASSISTANT>".len(),
+    );
+    if needs_open {
+        repaired.push_str("<ASSISTANT>");
+    }
+    repaired.push_str(text);
+    if needs_close {
+        repaired.push_str("</ASSISTANT>");
+    }
+    Some(repaired)
 }
 
 fn split_outer_response_text(text: &str) -> (bool, &str) {
@@ -531,6 +571,7 @@ fn malformed_xml_response(issue: &str) -> ParsedEnvelope {
         memory_candidates: vec![],
         accepted_response: None,
         runtime_note: None,
+        recovered_issue: None,
         repair_issue: Some(issue.to_string()),
     }
 }

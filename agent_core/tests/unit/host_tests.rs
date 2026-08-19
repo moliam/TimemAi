@@ -656,6 +656,22 @@ fn core_notifications_can_be_published_as_topic_events() {
 }
 
 #[test]
+fn runtime_root_repair_help_topic_is_nonblocking_and_separate_from_model_repair() {
+    let event = runtime_root_repair_help_topic_event("session_a");
+
+    assert_eq!(event.topic.name, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP);
+    assert_eq!(
+        event.topic.attributes["name"],
+        CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP
+    );
+    assert_eq!(event.state, CoreSessionState::Running);
+    assert_eq!(event.payload["count"], 1);
+    assert!(event.as_model_repair().is_none());
+    assert!(!event.expects_reply());
+    assert!(!event.is_blocking_request());
+}
+
+#[test]
 fn model_repair_topic_round_trips_protocol_issue_and_attempt() {
     let event = model_repair_topic_event(
         "session_a",

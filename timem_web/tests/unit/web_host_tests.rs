@@ -6633,6 +6633,13 @@ fn model_repair_topic_updates_debug_statistics_and_persists_repair_history() {
             }),
         )]),
     );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::Topics(vec![agent_core::runtime_root_repair_help_topic_event(
+            session_id,
+        )]),
+    );
 
     let statistics =
         std::fs::read_to_string(debug_root.join(session_id).join("statistics.md")).unwrap();
@@ -6649,6 +6656,10 @@ fn model_repair_topic_updates_debug_statistics_and_persists_repair_history() {
     assert!(markdown_row("Protocol repairs", "1"), "{statistics}");
     assert!(
         markdown_row("missing_or_invalid_response_root", "1"),
+        "{statistics}"
+    );
+    assert!(
+        markdown_row("runtime_root_repair_help", "1"),
         "{statistics}"
     );
 
