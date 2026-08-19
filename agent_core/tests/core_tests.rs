@@ -992,28 +992,20 @@ fn assistant_name_is_not_explained_in_static_prompt_and_action_results_remain_cl
 }
 
 #[test]
-fn runtime_info_is_dynamic_context_not_static_prompt() {
+fn explicit_supporting_context_is_dynamic_context_not_static_prompt() {
     let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
         profile("qwen-plus"),
-        tmp_dir("runtime_info_dynamic_context"),
+        tmp_dir("explicit_dynamic_context"),
     );
-    let runtime_info = agent_core::runtime_info_context(&[
-        "ui: shell",
-        "run_bash: available; executes on user_local_machine",
-    ])
-    .unwrap();
 
-    let prompt = match core.begin_turn("你好", Some(&runtime_info)) {
+    let prompt = match core.begin_turn("你好", Some("explicit host supporting context")) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(prompt.contains("runtime_info:\n- ui: shell"));
-    assert!(prompt.contains("- run_bash: available; executes on user_local_machine"));
+    assert!(prompt.contains("explicit host supporting context"));
     assert!(!prompt.contains("{{RT_ENV}}"));
-    assert!(!prompt.contains("Runtime info:"));
-    assert!(!prompt.contains("cwd:"));
 }
 
 #[test]

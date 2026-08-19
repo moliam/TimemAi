@@ -2864,7 +2864,7 @@ fn session_turn_defaults_to_raw_assistant_output_replay() {
 }
 
 #[test]
-fn session_turn_uses_host_supplied_runtime_context() {
+fn session_turn_does_not_inject_host_runtime_metadata() {
     let dir = tmp_dir("host_runtime_context");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
@@ -2886,7 +2886,7 @@ fn session_turn_uses_host_supplied_runtime_context() {
             audit_file: &audit,
             runtime: "timem_ios_host",
             run_bash_target: "not_available",
-            additional_context: None,
+            additional_context: Some("explicit supporting context"),
         },
         &mut ui,
         None,
@@ -2895,9 +2895,10 @@ fn session_turn_uses_host_supplied_runtime_context() {
 
     assert_eq!(outcome.text, "host context ok");
     assert_eq!(model.prompts.len(), 1);
-    assert!(model.prompts[0].contains("runtime: timem_ios_host"));
-    assert!(model.prompts[0].contains("run_bash_target: not_available"));
-    assert!(!model.prompts[0].contains("runtime: timem_native_shell"));
+    assert!(model.prompts[0].contains("explicit supporting context"));
+    assert!(!model.prompts[0].contains("runtime: timem_ios_host"));
+    assert!(!model.prompts[0].contains("run_bash_target: not_available"));
+    assert!(!model.prompts[0].contains("runtime_time:"));
     let _ = std::fs::remove_dir_all(dir);
 }
 

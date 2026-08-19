@@ -155,10 +155,7 @@ pub use retry_policy::{
     ModelCallOutcome, ModelRetryDecision, ModelSystemRetryPolicy,
     DEFAULT_MODEL_SYSTEM_ERROR_RETRIES, DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
 };
-pub use runtime_context::{
-    format_supporting_context, local_time_label, runtime_info_context, runtime_time_context,
-    supporting_context, turn_supporting_context, LocalTimeParts, SupportingContextInput,
-};
+pub use runtime_context::{local_time_label, runtime_time_context, LocalTimeParts};
 use self_tool::{SelfToolAbout, SelfToolPaths, SelfToolProcess, SelfToolState};
 pub use session_runtime::{
     cancelled_turn_result, run_session_turn, run_session_turn_with_model_client, ModelClient,
