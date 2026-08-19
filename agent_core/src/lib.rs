@@ -759,6 +759,7 @@ pub(crate) struct BashResultEvidence {
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
     pub pid: Option<u32>,
+    pub error_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

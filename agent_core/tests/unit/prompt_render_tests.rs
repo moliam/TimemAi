@@ -193,6 +193,7 @@ fn xml_bash_result_uses_single_dynamic_output_block_for_one_stream() {
         exit_code: Some(0),
         signal: None,
         pid: None,
+        error_type: None,
     };
     let rendered = render_xml_bash_result(
         Some(r#" check <tree> & "status" "#),
@@ -212,7 +213,7 @@ fn xml_bash_result_uses_single_dynamic_output_block_for_one_stream() {
         .bytes()
         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
     assert!(rendered.starts_with(
-        r#"<bash_result task="check &lt;tree&gt; &amp; &quot;status&quot;" status="success" exit_code="0">"#
+        r#"<bash_result task="check &lt;tree&gt; &amp; &quot;status&quot;" status="finished" exit_code="0">"#
     ));
     assert!(rendered.contains(&format!("<<<OUTPUT_{id}\n")));
     assert!(rendered.contains("src/<App>.tsx"));
@@ -237,6 +238,7 @@ fn xml_bash_result_handles_empty_and_stderr_only_streams() {
         exit_code: Some(0),
         signal: None,
         pid: None,
+        error_type: None,
     };
     let empty = render_xml_bash_result(
         Some("empty command"),
@@ -248,7 +250,7 @@ fn xml_bash_result_handles_empty_and_stderr_only_streams() {
     assert_eq!(
         empty,
         format!(
-            "<bash_result task=\"empty command\" status=\"success\" exit_code=\"0\">\n<<<OUTPUT_{empty_id}\n\nOUTPUT_{empty_id}\n</bash_result>"
+            "<bash_result task=\"empty command\" status=\"finished\" exit_code=\"0\">\n<<<OUTPUT_{empty_id}\n\nOUTPUT_{empty_id}\n</bash_result>"
         )
     );
 
@@ -258,6 +260,7 @@ fn xml_bash_result_handles_empty_and_stderr_only_streams() {
         exit_code: Some(2),
         signal: None,
         pid: None,
+        error_type: None,
     };
     let stderr_only = render_xml_bash_result(
         Some("stderr only"),
@@ -266,9 +269,8 @@ fn xml_bash_result_handles_empty_and_stderr_only_streams() {
         11,
     );
     let stderr_id = bash_boundary_id("stderr only", "", &stderr_evidence.stderr, 11);
-    assert!(
-        stderr_only.starts_with(r#"<bash_result task="stderr only" status="error" exit_code="2">"#)
-    );
+    assert!(stderr_only
+        .starts_with(r#"<bash_result task="stderr only" status="finished" exit_code="2">"#));
     assert!(stderr_only.contains(&format!(
         "<<<OUTPUT_{stderr_id}\nfatal <message>\nOUTPUT_{stderr_id}"
     )));
@@ -283,6 +285,7 @@ fn xml_bash_result_preserves_unicode_and_trims_only_trailing_stream_whitespace()
         exit_code: Some(0),
         signal: None,
         pid: None,
+        error_type: None,
     };
     let rendered = render_xml_bash_result(Some("unicode"), ActionStatus::Completed, &evidence, 12);
     let id = bash_boundary_id("unicode", &evidence.stdout, "", 12);
@@ -300,14 +303,14 @@ fn xml_bash_result_uses_shared_dynamic_id_for_stdout_and_stderr() {
         exit_code: Some(1),
         signal: None,
         pid: None,
+        error_type: None,
     };
     let rendered =
         render_xml_bash_result(Some("build and test"), ActionStatus::Failed, &evidence, 456);
     let id = bash_boundary_id("build and test", &evidence.stdout, &evidence.stderr, 456);
 
-    assert!(
-        rendered.starts_with(r#"<bash_result task="build and test" status="error" exit_code="1">"#)
-    );
+    assert!(rendered
+        .starts_with(r#"<bash_result task="build and test" status="finished" exit_code="1">"#));
     assert!(rendered.contains(&format!(
         "<stdout>\n<<<OUT_{id}\ncompiled\nOUT_{id}\n</stdout>"
     )));
@@ -335,6 +338,7 @@ fn xml_bash_result_boundary_changes_for_time_content_task_and_marker_collision()
             exit_code: Some(0),
             signal: None,
             pid: None,
+            error_type: None,
         },
         100,
     );
@@ -361,6 +365,7 @@ fn xml_bash_result_avoids_output_out_and_err_marker_collisions_in_either_stream(
                 exit_code: Some(1),
                 signal: None,
                 pid: None,
+                error_type: None,
             },
             77,
         );
@@ -378,6 +383,7 @@ fn xml_bash_result_single_stream_budget_boundary_stays_complete() {
         exit_code: Some(0),
         signal: None,
         pid: None,
+        error_type: None,
     };
     let rendered = render_xml_bash_result(
         Some("large unicode"),
@@ -390,7 +396,7 @@ fn xml_bash_result_single_stream_budget_boundary_stays_complete() {
     assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
     assert!(rendered.is_char_boundary(rendered.len()));
     assert!(rendered
-        .starts_with(r#"<bash_result task="large unicode" status="success" exit_code="0">"#));
+        .starts_with(r#"<bash_result task="large unicode" status="finished" exit_code="0">"#));
     assert!(rendered.contains(&format!("<<<OUTPUT_{id}\n")));
     assert!(rendered.ends_with(&format!("OUTPUT_{id}\n</bash_result>")));
     assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
@@ -410,6 +416,7 @@ fn oversized_xml_bash_result_keeps_stream_tags_and_markers_complete() {
         exit_code: Some(1),
         signal: None,
         pid: None,
+        error_type: None,
     };
     let rendered =
         render_xml_bash_result(Some("large build"), ActionStatus::Failed, &evidence, 789);
@@ -417,7 +424,7 @@ fn oversized_xml_bash_result_keeps_stream_tags_and_markers_complete() {
 
     assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
     assert!(
-        rendered.starts_with(r#"<bash_result task="large build" status="error" exit_code="1">"#)
+        rendered.starts_with(r#"<bash_result task="large build" status="finished" exit_code="1">"#)
     );
     assert!(rendered.contains(&format!("<stdout>\n<<<OUT_{id}\n")));
     assert!(rendered.contains(&format!("\nOUT_{id}\n</stdout>")));
@@ -438,6 +445,7 @@ fn xml_bash_result_renders_running_timeout_cancelled_and_signal_metadata() {
             exit_code: None,
             signal: None,
             pid: Some(4321),
+            error_type: None,
         },
         1,
     );
@@ -453,6 +461,7 @@ fn xml_bash_result_renders_running_timeout_cancelled_and_signal_metadata() {
             exit_code: None,
             signal: None,
             pid: Some(9876),
+            error_type: None,
         },
         2,
     );
@@ -467,10 +476,13 @@ fn xml_bash_result_renders_running_timeout_cancelled_and_signal_metadata() {
             exit_code: None,
             signal: None,
             pid: None,
+            error_type: Some("Cancelled".to_string()),
         },
         3,
     );
-    assert!(cancelled.starts_with(r#"<bash_result task="cancel command" status="cancelled">"#));
+    assert!(cancelled.starts_with(
+        r#"<bash_result task="cancel command" status="finished" error_type="Cancelled">"#
+    ));
 
     let signal = render_xml_bash_result(
         Some("crash command"),
@@ -481,10 +493,36 @@ fn xml_bash_result_renders_running_timeout_cancelled_and_signal_metadata() {
             exit_code: None,
             signal: Some(11),
             pid: None,
+            error_type: None,
         },
         4,
     );
-    assert!(signal.starts_with(r#"<bash_result task="crash command" status="error" signal="11">"#));
+    assert!(
+        signal.starts_with(r#"<bash_result task="crash command" status="finished" signal="11">"#)
+    );
+}
+
+#[test]
+fn xml_bash_result_escapes_error_type_without_changing_finished_lifecycle() {
+    let rendered = render_xml_bash_result(
+        Some("invalid input"),
+        ActionStatus::Failed,
+        &BashResultEvidence {
+            stdout: String::new(),
+            stderr: "not executed".to_string(),
+            exit_code: None,
+            signal: None,
+            pid: None,
+            error_type: Some(r#"Invalid<&"'"#.to_string()),
+        },
+        5,
+    );
+
+    assert!(rendered.starts_with(
+        r#"<bash_result task="invalid input" status="finished" error_type="Invalid&lt;&amp;&quot;&apos;">"#
+    ));
+    assert!(!rendered.contains(r#"status="error""#));
+    assert!(!rendered.contains(r#"status="cancelled""#));
 }
 
 #[test]

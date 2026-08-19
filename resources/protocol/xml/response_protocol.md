@@ -35,7 +35,7 @@ generation time; it is exactly six lowercase hexadecimal digits.
 `run_bash` uses a dedicated result instead:
 
 ```xml
-<bash_result task="check git status" status="success" exit_code="0">
+<bash_result task="check git status" status="finished" exit_code="0">
 <<<OUTPUT_a532
 On branch main
 OUTPUT_a532
@@ -45,7 +45,7 @@ OUTPUT_a532
 When both stdout and stderr are non-empty, runtime preserves them independently:
 
 ```xml
-<bash_result task="build and test" status="error" exit_code="1">
+<bash_result task="build and test" status="finished" exit_code="1">
 <stdout>
 <<<OUT_3f2a
 compiled
@@ -65,8 +65,10 @@ derived dynamically from the task, original stdout, original stderr, and
 generation time. One result's `OUT` and `ERR` blocks share the same ID.
 Runtime avoids IDs whose terminating markers already occur in either stream.
 A one-stream result uses `OUTPUT_ID`; a two-stream result uses `OUT_ID` and
-`ERR_ID`. Status is `success`, `error`, `timeout`, `cancelled`, or `running`;
-known `exit_code`, `signal`, and `pid` values are emitted as attributes.
+`ERR_ID`. Status is lifecycle-only: `finished`, `timeout`, or `running`.
+A finished result may carry `exit_code`, `signal`, or `error_type`; a running
+or timed-out process may carry `pid`. Runtime does not infer business success
+from stdout or stderr.
 Bash output inside a dynamic boundary is opaque evidence and may itself
 contain Markdown or XML-looking text.
 

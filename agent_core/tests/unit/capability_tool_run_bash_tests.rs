@@ -111,6 +111,96 @@ fn foreground_bash_preserves_stdout_and_stderr_independently() {
     assert_eq!(evidence.stdout, "stdout-value");
     assert_eq!(evidence.stderr, "stderr-value");
     assert_eq!(evidence.exit_code, Some(7));
+    assert_eq!(evidence.signal, None);
+    assert_eq!(evidence.pid, None);
+    assert_eq!(evidence.error_type, None);
+}
+
+#[test]
+fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
+    let nonzero = BashCommandOutput {
+        command: "exit 7".to_string(),
+        status: Some(7),
+        signal: None,
+        stdout: String::new(),
+        stderr: "diagnostic".to_string(),
+        output: "stderr: diagnostic".to_string(),
+        error: None,
+        tail_out: false,
+    }
+    .to_action_outcome("run_bash");
+    assert_eq!(nonzero.status, ActionStatus::Failed);
+    let evidence = nonzero.bash_result.expect("nonzero Bash evidence");
+    assert_eq!(evidence.exit_code, Some(7));
+    assert_eq!(evidence.signal, None);
+    assert_eq!(evidence.error_type, None);
+
+    let signalled = BashCommandOutput {
+        command: "kill -SEGV $$".to_string(),
+        status: None,
+        signal: Some(11),
+        stdout: String::new(),
+        stderr: String::new(),
+        output: "<no output>".to_string(),
+        error: None,
+        tail_out: false,
+    }
+    .to_action_outcome("run_bash");
+    assert_eq!(signalled.status, ActionStatus::Failed);
+    let evidence = signalled.bash_result.expect("signal Bash evidence");
+    assert_eq!(evidence.exit_code, None);
+    assert_eq!(evidence.signal, Some(11));
+    assert_eq!(evidence.error_type, None);
+
+    let cancelled = bash_error("cancel", "cancelled").to_action_outcome("run_bash");
+    assert_eq!(cancelled.status, ActionStatus::Cancelled);
+    let evidence = cancelled.bash_result.expect("cancelled Bash evidence");
+    assert_eq!(evidence.error_type.as_deref(), Some("Cancelled"));
+    assert_eq!(evidence.pid, None);
+
+    let invalid = bash_error("true", "invalid_timeout").to_action_outcome("run_bash");
+    assert_eq!(invalid.status, ActionStatus::Failed);
+    let evidence = invalid.bash_result.expect("invalid input Bash evidence");
+    assert_eq!(evidence.error_type.as_deref(), Some("InvalidInput"));
+
+    let spawn_failed = bash_error("true", "command_failed").to_action_outcome("run_bash");
+    assert_eq!(spawn_failed.status, ActionStatus::Failed);
+    let evidence = spawn_failed
+        .bash_result
+        .expect("spawn failure Bash evidence");
+    assert_eq!(evidence.error_type.as_deref(), Some("SpawnFailed"));
+
+    let timeout = BashCommandOutput {
+        command: "sleep 10".to_string(),
+        status: None,
+        signal: None,
+        stdout: "partial".to_string(),
+        stderr: String::new(),
+        output: "partial".to_string(),
+        error: Some("timeout_still_running:4321".to_string()),
+        tail_out: false,
+    }
+    .to_action_outcome("run_bash");
+    assert_eq!(timeout.status, ActionStatus::Timeout);
+    let evidence = timeout.bash_result.expect("timeout Bash evidence");
+    assert_eq!(evidence.pid, Some(4321));
+    assert_eq!(evidence.error_type, None);
+
+    let running = BashCommandOutput {
+        command: "build".to_string(),
+        status: None,
+        signal: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        output: String::new(),
+        error: Some("long_running_still_running:9876:5000".to_string()),
+        tail_out: false,
+    }
+    .to_action_outcome("run_bash");
+    assert_eq!(running.status, ActionStatus::BackgroundRunning);
+    let evidence = running.bash_result.expect("running Bash evidence");
+    assert_eq!(evidence.pid, Some(9876));
+    assert_eq!(evidence.error_type, None);
 }
 
 #[test]
@@ -435,6 +525,13 @@ fn normal_run_bash_rejects_long_sleep_commands() {
                 outcome.text
             );
             assert!(outcome.text.contains("interval_ms"));
+            let evidence = outcome
+                .bash_result
+                .expect("rejected run_bash must retain structured evidence");
+            assert_eq!(evidence.error_type.as_deref(), Some("InvalidInput"));
+            assert_eq!(evidence.exit_code, None);
+            assert_eq!(evidence.signal, None);
+            assert_eq!(evidence.pid, None);
         }
         ActionExecution::NeedsApproval(_) => {
             panic!("long sleep should be rejected before approval")
@@ -536,6 +633,11 @@ fn run_bash_poll_mode_can_be_cancelled_during_wait() {
         "{}",
         outcome.text
     );
+    let evidence = outcome
+        .bash_result
+        .expect("cancelled polling must retain structured evidence");
+    assert_eq!(evidence.error_type.as_deref(), Some("Cancelled"));
+    assert_eq!(evidence.pid, None);
 }
 
 #[test]

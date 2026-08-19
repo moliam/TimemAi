@@ -633,9 +633,9 @@ fn xml_parallel_run_bash_results_use_action_names_without_repeating_commands() {
     };
 
     let first_tag =
-        r#"<bash_result task="output first concurrent marker" status="success" exit_code="0">"#;
+        r#"<bash_result task="output first concurrent marker" status="finished" exit_code="0">"#;
     let second_tag =
-        r#"<bash_result task="output second concurrent marker" status="success" exit_code="0">"#;
+        r#"<bash_result task="output second concurrent marker" status="finished" exit_code="0">"#;
     let first = prompt.find(first_tag).expect("first named result");
     let second = prompt.find(second_tag).expect("second named result");
 
