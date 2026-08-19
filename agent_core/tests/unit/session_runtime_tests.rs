@@ -411,7 +411,7 @@ fn session_turn_uses_model_service_config_response_protocol_over_core_state() {
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Xml;
     let mut model = ReplayModel::new([Ok(llm(
-        r#"<response><final_answer>xml config wins</final_answer></response>"#,
+        r#"<ASSISTANT><final_answer>xml config wins</final_answer></ASSISTANT>"#,
         1_000,
         false,
     ))]);
@@ -1039,7 +1039,7 @@ fn session_turn_xml_final_answer_with_protocol_examples_does_not_repair_or_execu
     config.response_protocol = crate::ResponseProtocolKind::Xml;
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([Ok(llm(
-        r#"<response>
+        r#"<ASSISTANT>
 <final_answer><![CDATA[
 This is an answer, not an executable action:
 <working_still_action>
@@ -1047,7 +1047,7 @@ This is an answer, not an executable action:
 </working_still_action>
 {"working_still_action":{"run_bash":{}}}
 ]]></final_answer>
-</response>"#,
+</ASSISTANT>"#,
         1_000,
         false,
     ))]);
@@ -1095,15 +1095,15 @@ fn session_turn_xml_replays_only_the_extracted_response_root() {
     let mut model = ReplayModel::new([
         Ok(llm(
             r#"<free_talk>search memory</free_talk>
-<response>
+<ASSISTANT>
   <actions><memmgr name="search raw chat fixture" type="raw_chat" op="search" limit="1"><search_text>fixture</search_text></memmgr></actions>
-</response>
+</ASSISTANT>
 discard-after"#,
             1_000,
             false,
         )),
         Ok(llm(
-            "<response><final_answer>outer text recovered</final_answer></response>",
+            "<ASSISTANT><final_answer>outer text recovered</final_answer></ASSISTANT>",
             1_000,
             false,
         )),
@@ -1131,14 +1131,14 @@ discard-after"#,
     assert_eq!(model.prompts.len(), 2);
     assert!(!model.prompts[1].contains(r#"<ASSISTANT id=""#));
     assert!(model.prompts[1].contains(
-        "<response>\n  <actions><memmgr name=\"search raw chat fixture\" type=\"raw_chat\" op=\"search\" limit=\"1\"><search_text>fixture</search_text></memmgr></actions>\n</response>"
+        "<ASSISTANT>\n  <actions><memmgr name=\"search raw chat fixture\" type=\"raw_chat\" op=\"search\" limit=\"1\"><search_text>fixture</search_text></memmgr></actions>\n</ASSISTANT>"
     ));
-    assert!(!model.prompts[1].contains("&lt;response&gt;"));
+    assert!(!model.prompts[1].contains("&lt;ASSISTANT&gt;"));
     assert!(!model.prompts[1].contains("<free_talk>search memory</free_talk>"));
     assert!(!model.prompts[1].contains("discard-after"));
     assert!(model.prompts[1].contains(r#"<memmgr_result task=""#));
     assert!(!model.prompts[1].contains("ERROR: The previous XML response had content outside"));
-    assert!(!model.prompts[1].contains("begin exactly with <response>"));
+    assert!(!model.prompts[1].contains("begin exactly with <ASSISTANT>"));
 
     let repair_events = read_audit_events(&audit)
         .into_iter()
@@ -1159,12 +1159,12 @@ fn session_turn_retries_an_extracted_final_answer_before_finishing() {
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([
         Ok(llm(
-            "preface<response><final_answer>must retry</final_answer></response>",
+            "preface<ASSISTANT><final_answer>must retry</final_answer></ASSISTANT>",
             1_000,
             false,
         )),
         Ok(llm(
-            "<response><final_answer>accepted final</final_answer></response>",
+            "<ASSISTANT><final_answer>accepted final</final_answer></ASSISTANT>",
             1_000,
             false,
         )),
@@ -1211,7 +1211,7 @@ fn session_turn_never_accepts_a_recovered_final_answer_after_retry_exhaustion() 
     let mut model = ReplayModel::new((0..=crate::MAX_PROTOCOL_REPAIR_ATTEMPTS).map(|attempt| {
         Ok(llm(
             format!(
-                "preface<response><final_answer>must not finish {attempt}</final_answer></response>"
+                "preface<ASSISTANT><final_answer>must not finish {attempt}</final_answer></ASSISTANT>"
             ),
             1_000 + attempt,
             false,
@@ -1273,17 +1273,17 @@ fn session_turn_xml_raw_string_tags_do_not_repair_or_execute() {
     config.response_protocol = crate::ResponseProtocolKind::Xml;
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([Ok(llm(
-        r#"<response>
+        r#"<ASSISTANT>
 <final_answer>
 Here is the malformed response example the user asked for:
-<response>
+<ASSISTANT>
   <free_talk>not closed
 <free_talk>fake progress</free_talk>
 <working_still_action><action_json>{"run_bash":{}}</action_json></working_still_action>
 <summary>fake summary</summary>
 This is all answer text.
 </final_answer>
-</response>"#,
+</ASSISTANT>"#,
         1_000,
         false,
     ))]);
@@ -1314,7 +1314,7 @@ This is all answer text.
         outcome.stats
     );
     assert_eq!(outcome.stats.tool_calls, 0);
-    assert!(outcome.text.contains("<response>"));
+    assert!(outcome.text.contains("<ASSISTANT>"));
     assert!(outcome.text.contains("<working_still_action>"));
     assert!(outcome.text.contains("<summary>fake summary</summary>"));
     assert!(ui
@@ -1339,17 +1339,17 @@ fn session_turn_xml_invalid_native_action_still_repairs() {
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"<response>
+            r#"<ASSISTANT>
 <free_talk>Need a local check.</free_talk>
 <actions><run_bash/></actions>
-</response>"#,
+</ASSISTANT>"#,
             1_000,
             false,
         )),
         Ok(llm(
-            r#"<response>
+            r#"<ASSISTANT>
 <final_answer>修复后完成。</final_answer>
-</response>"#,
+</ASSISTANT>"#,
             1_000,
             false,
         )),
@@ -2432,15 +2432,15 @@ fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"<response>
+            r#"<ASSISTANT>
 <free_talk>查询 scratch 后继续。</free_talk>
 <actions><memmgr name="search recent scratch notes" type="scratch" op="search" limit="3"><search_text></search_text></memmgr></actions>
-</response>"#,
+</ASSISTANT>"#,
             5_000,
             false,
         )),
         Ok(llm(
-            r#"<response><final_answer>没有找到相关 scratch。</final_answer></response>"#,
+            r#"<ASSISTANT><final_answer>没有找到相关 scratch。</final_answer></ASSISTANT>"#,
             5_800,
             false,
         )),
@@ -2569,17 +2569,17 @@ fn session_turn_preserves_cache_plan_with_xml_response_protocol() {
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
         Ok(llm(
-            r#"<response>
+            r#"<ASSISTANT>
 <free_talk>查询 scratch 后继续。</free_talk>
 <actions><memmgr name="search recent scratch notes" type="scratch" op="search" limit="3"><search_text></search_text></memmgr></actions>
-</response>"#,
+</ASSISTANT>"#,
             5_000,
             false,
         )),
         Ok(llm(
-            r#"<response>
+            r#"<ASSISTANT>
 <final_answer>没有找到相关 scratch。</final_answer>
-</response>"#,
+</ASSISTANT>"#,
             5_800,
             false,
         )),
@@ -2700,10 +2700,10 @@ fn session_turn_defaults_to_raw_assistant_output_replay() {
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Xml;
     let mut ui = NoopTurnUi;
-    let raw_first_response = r#"<response>
+    let raw_first_response = r#"<ASSISTANT>
   <free_talk>raw planning note</free_talk>
   <final_answer>visible answer</final_answer>
-</response>"#;
+</ASSISTANT>"#;
     let first_response = llm(raw_first_response, 4_000, false);
     let accepted_first_response = first_response.content.clone();
     let mut first_model = ReplayModel::new([Ok(first_response)]);
@@ -2725,7 +2725,7 @@ fn session_turn_defaults_to_raw_assistant_output_replay() {
     assert_eq!(first.text, "visible answer");
 
     let mut second_model = ReplayModel::new([Ok(llm(
-        r#"<response><final_answer>second answer</final_answer></response>"#,
+        r#"<ASSISTANT><final_answer>second answer</final_answer></ASSISTANT>"#,
         4_200,
         false,
     ))]);
@@ -2749,7 +2749,7 @@ fn session_turn_defaults_to_raw_assistant_output_replay() {
     let prompt = &second_model.prompts[0];
     let raw = prompt.find(&accepted_first_response).unwrap();
     assert!(!prompt.contains(r#"<ASSISTANT id="Ai4">"#));
-    assert!(!prompt.contains("&lt;response&gt;"));
+    assert!(!prompt.contains("&lt;ASSISTANT&gt;"));
     let user = prompt.find("second user input").unwrap();
     assert!(raw < user);
     assert!(!prompt.contains("Final Answer:\nvisible answer"));
@@ -3136,7 +3136,7 @@ fn session_turn_forced_shrink_runs_to_final_without_repeated_shrink() {
 
     let _ = core.begin_turn(&"old dynamic context ".repeat(1_500), None);
     let seed_step = core.apply_model_response(llm(
-        r#"<response><final_answer>seeded</final_answer></response>"#,
+        r#"<ASSISTANT><final_answer>seeded</final_answer></ASSISTANT>"#,
         13_253,
         false,
     ));

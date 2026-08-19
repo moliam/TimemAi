@@ -498,7 +498,7 @@ with the resource text and generated expanded prompt output from
 
 The XML suite uses a protocol-specific tag scanner rather than a general XML
 tree parser. It recognizes only the small response vocabulary under the single
-`<response>` root. Once it enters a raw text field (`free_talk`,
+`<ASSISTANT>` root. Once it enters a raw text field (`free_talk`,
 `final_answer`, or compact `summary`), it extracts that field as text and does
 not scan its contents for nested protocol tags. This prevents XML/JSON/Markdown
 examples inside user-visible text from being re-parsed as runtime actions.
@@ -1079,7 +1079,7 @@ Keep protocol examples short; the runtime parser and capability registry are
 the authoritative executable boundary.
 
 In the JSON protocol, the envelope has this shape. In the XML protocol, the
-same fields are represented as tags under one `<response>` root. XML actions use the
+same fields are represented as tags under one `<ASSISTANT>` root. XML actions use the
 exact capability id as the tool element name; direct children are sequential and
 tools inside one `<parallel>` group execute concurrently.
 
@@ -1286,7 +1286,7 @@ the concrete protocol error:
 <ASSSISTANT_ID>'s previous response is not protocol compliant.
 error: invalid_xml_response_root
 
-The response must begin with '<response>', end with '</response>', and contain one XML state branch such as '<actions>...</actions>'.
+The response must begin with '<ASSISTANT>', end with '</ASSISTANT>', and contain one XML state branch such as '<actions>...</actions>'.
 ```
 
 Repair is retried a bounded number of times for one model response failure. Each

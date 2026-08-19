@@ -154,7 +154,7 @@ fn xml_dynamic_roles_are_elements_and_untrusted_text_cannot_inject_boundaries() 
                 component_id: String::new(),
                 prompt_type: "llm_response".to_string(),
                 time_ms: 124,
-                text: "<response>& replay</response>".to_string(),
+                text: "<ASSISTANT>& replay</ASSISTANT>".to_string(),
                 slice_index: 2,
                 slice_count: 3,
             },
@@ -184,7 +184,7 @@ fn xml_dynamic_roles_are_elements_and_untrusted_text_cannot_inject_boundaries() 
     )));
     assert!(rendered
         .contains(r#"<ASSISTANT id="ASSISTANT_of_研发 &quot;A&amp;B&quot; &lt;session&gt;">"#));
-    assert!(rendered.contains("&lt;response&gt;&amp; replay&lt;/response&gt;"));
+    assert!(rendered.contains("&lt;ASSISTANT&gt;&amp; replay&lt;/ASSISTANT&gt;"));
     assert!(rendered.contains("<RUNTIME>\n\nrepair &lt;/prompt_delta&gt; &amp; retry\n</RUNTIME>"));
     assert_eq!(rendered.matches("<prompt_delta ").count(), 1);
     assert_eq!(rendered.matches("</prompt_delta>").count(), 1);
@@ -194,7 +194,7 @@ fn xml_dynamic_roles_are_elements_and_untrusted_text_cannot_inject_boundaries() 
 
 #[test]
 fn validated_xml_model_response_is_replayed_without_wrapper_or_entity_escaping() {
-    let response = "<response>\n  <free_talk>直接回放</free_talk>\n  <actions><self_tool name=\"inspect paths\" type=\"path\"/></actions>\n</response>";
+    let response = "<ASSISTANT>\n  <free_talk>直接回放</free_talk>\n  <actions><self_tool name=\"inspect paths\" type=\"path\"/></actions>\n</ASSISTANT>";
     let split = response
         .char_indices()
         .map(|(index, _)| index)
@@ -248,7 +248,7 @@ fn validated_xml_model_response_is_replayed_without_wrapper_or_entity_escaping()
 
     assert!(rendered.contains(response));
     assert!(!rendered.contains(r#"<ASSISTANT id="ASSISTANT_of_Session0">"#));
-    assert!(!rendered.contains("&lt;response&gt;"));
+    assert!(!rendered.contains("&lt;ASSISTANT&gt;"));
     assert!(rendered.contains(
         "<RUNTIME>\n\n<action_result><self_tool name=\"inspect paths\">ok</self_tool></action_result>\n</RUNTIME>"
     ));
@@ -266,7 +266,7 @@ fn unvalidated_xml_shaped_llm_response_remains_wrapped_and_escaped() {
             component_id: String::new(),
             prompt_type: "llm_response".to_string(),
             time_ms: 127,
-            text: "<response><actions>malformed</actions></response>".to_string(),
+            text: "<ASSISTANT><actions>malformed</actions></ASSISTANT>".to_string(),
             slice_index: 1,
             slice_count: 1,
         }],
@@ -281,8 +281,8 @@ fn unvalidated_xml_shaped_llm_response_remains_wrapped_and_escaped() {
 
     assert!(rendered.contains(r#"<ASSISTANT id="ASSISTANT_of_Session0">"#));
     assert!(rendered
-        .contains("&lt;response&gt;&lt;actions&gt;malformed&lt;/actions&gt;&lt;/response&gt;"));
-    assert!(!rendered.contains("<response><actions>malformed</actions></response>"));
+        .contains("&lt;ASSISTANT&gt;&lt;actions&gt;malformed&lt;/actions&gt;&lt;/ASSISTANT&gt;"));
+    assert!(!rendered.contains("<ASSISTANT><actions>malformed</actions></ASSISTANT>"));
 }
 
 #[test]
@@ -1016,7 +1016,7 @@ fn prompt_renderer_defensively_truncates_legacy_action_result_slices() {
 fn formatted_response_trailer_parser_extracts_heading_free_trailer() {
     let prompt = format!(
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n\n{}",
-        formatted_response_trailer("one-root label <response>...</response>", "Ai7")
+        formatted_response_trailer("one-root label <ASSISTANT>...</ASSISTANT>", "Ai7")
     );
     let (prefix, trailer) = split_formatted_response_trailer(&prompt);
     assert_eq!(prefix, "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]");
@@ -1029,7 +1029,7 @@ fn formatted_response_trailer_parser_extracts_heading_free_trailer() {
 #[test]
 fn formatted_response_trailer_is_protocol_neutral_and_does_not_repeat_the_shape() {
     assert_eq!(
-        formatted_response_trailer("one-root label <response>...</response>", "Ai7"),
+        formatted_response_trailer("one-root label <ASSISTANT>...</ASSISTANT>", "Ai7"),
         "Please continue the work and respond as protocol requires in user's language:"
     );
     assert_eq!(

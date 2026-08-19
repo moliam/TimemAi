@@ -476,15 +476,15 @@ fn openai_compatible_sse_collects_content_and_usage_without_exposing_reasoning()
     let config = config(ApiProtocol::OpenAiCompatible);
     let body = concat!(
         "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"private plan\"},\"finish_reason\":null}]}\n\n",
-        "data: {\"choices\":[{\"delta\":{\"content\":\"<response>\"},\"finish_reason\":null}]}\n\n",
-        "data: {\"choices\":[{\"delta\":{\"content\":\"ok</response>\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"<ASSISTANT>\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok</ASSISTANT>\"},\"finish_reason\":\"stop\"}]}\n\n",
         "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":16,\"completion_tokens\":7,\"total_tokens\":23,\"completion_tokens_details\":{\"reasoning_tokens\":5}}}\n\n",
         "data: [DONE]\n",
     );
 
     let interpreted = interpret_model_http_response(&config, 200, body, "");
     let response = interpreted.result.unwrap();
-    assert_eq!(response.content, "<response>ok</response>");
+    assert_eq!(response.content, "<ASSISTANT>ok</ASSISTANT>");
     assert_eq!(response.usage.prompt_tokens, 16);
     assert_eq!(response.usage.completion_tokens, 7);
     assert_eq!(interpreted.raw_json["stream_metadata"]["event_count"], 4);

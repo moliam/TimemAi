@@ -461,10 +461,10 @@ fn extracted_fields_replay_keeps_the_complete_accepted_xml_response() {
     core.set_assistant_replay_mode(AssistantReplayMode::ExtractedFields);
     core.set_assistant_speaker_name("Session Assistant");
     let _ = core.begin_turn("inspect runtime", None);
-    let response = r#"<response>
+    let response = r#"<ASSISTANT>
   <free_talk>Inspecting the runtime.</free_talk>
   <actions><self_tool name="inspect runtime parameters" type="params"/></actions>
-</response>"#;
+</ASSISTANT>"#;
     let step = core.apply_model_response(LlmResponse {
         content: response.to_string(),
         model_name: "qwen-plus".to_string(),
@@ -479,8 +479,8 @@ fn extracted_fields_replay_keeps_the_complete_accepted_xml_response() {
     let replay_delta = xml_prompt_delta_containing(&prompt, response);
     assert!(replay_delta.contains(response));
     assert!(!replay_delta.contains(r#"<ASSISTANT id="Session Assistant">"#));
-    assert_eq!(replay_delta.matches("<response>").count(), 1);
-    assert_eq!(replay_delta.matches("&lt;response&gt;").count(), 0);
+    assert_eq!(replay_delta.matches("<ASSISTANT>").count(), 1);
+    assert_eq!(replay_delta.matches("&lt;ASSISTANT&gt;").count(), 0);
     assert!(prompt.contains(
         r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#
     ));
@@ -499,7 +499,7 @@ fn xml_action_results_preserve_names_for_sequential_and_parallel_actions() {
     let _ = core.begin_turn("inspect runtime", None);
 
     let prompt = match core.apply_model_response(LlmResponse {
-        content: r#"<response>
+        content: r#"<ASSISTANT>
   <actions>
     <self_tool name="inspect runtime paths" type="path"/>
     <parallel>
@@ -507,7 +507,7 @@ fn xml_action_results_preserve_names_for_sequential_and_parallel_actions() {
       <self_tool name="inspect current directory" type="cwd" new_path="."/>
     </parallel>
   </actions>
-</response>"#
+</ASSISTANT>"#
             .to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -571,7 +571,7 @@ fn xml_readfile_result_reports_file_name_matcher_and_line_range_before_content()
     let _ = core.begin_turn("read a matched file range", None);
 
     let prompt = match core.apply_model_response(LlmResponse {
-        content: r#"<response>
+        content: r#"<ASSISTANT>
   <actions>
     <readfile name="read matched notes">
       <path>notes.txt</path>
@@ -579,7 +579,7 @@ fn xml_readfile_result_reports_file_name_matcher_and_line_range_before_content()
       <ender><match>END</match></ender>
     </readfile>
   </actions>
-</response>"#
+</ASSISTANT>"#
             .to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -613,11 +613,11 @@ fn xml_timeout_still_running_uses_orthogonal_lifecycle_evidence() {
     let _ = core.begin_turn("run a task past the wait timeout", None);
 
     let prompt = match core.apply_model_response(LlmResponse {
-        content: r#"<response>
+        content: r#"<ASSISTANT>
   <actions>
     <run_bash name="wait briefly for managed task" timeout_ms="100"><cmd>sleep 10; printf late</cmd></run_bash>
   </actions>
-</response>"#
+</ASSISTANT>"#
             .to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -658,7 +658,7 @@ fn xml_timeout_still_running_uses_orthogonal_lifecycle_evidence() {
         .to_string();
 
     let cleanup = format!(
-        r#"<response><actions><run_bash name="stop managed task" timeout_ms="1000"><cmd>kill {pid}</cmd></run_bash></actions></response>"#
+        r#"<ASSISTANT><actions><run_bash name="stop managed task" timeout_ms="1000"><cmd>kill {pid}</cmd></run_bash></actions></ASSISTANT>"#
     );
     let cleanup_prompt = match core.apply_model_response(LlmResponse {
         content: cleanup,
@@ -688,14 +688,14 @@ fn xml_parallel_run_bash_results_use_action_names_without_repeating_commands() {
     let _ = core.begin_turn("run two named commands", None);
 
     let prompt = match core.apply_model_response(LlmResponse {
-        content: r#"<response>
+        content: r#"<ASSISTANT>
   <actions>
     <parallel>
       <run_bash name="output first concurrent marker" timeout_ms="5000"><cmd>printf FIRST_XML_MARKER</cmd></run_bash>
       <run_bash name="output second concurrent marker" timeout_ms="5000"><cmd>printf SECOND_XML_MARKER</cmd></run_bash>
     </parallel>
   </actions>
-</response>"#
+</ASSISTANT>"#
             .to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -766,7 +766,7 @@ fn xml_denied_approval_result_preserves_action_name() {
     let _ = core.begin_turn("remove a missing file", None);
 
     let request = match core.apply_model_response(LlmResponse {
-        content: r#"<response><actions><run_bash name="remove missing file"><cmd>rm missing_named_file</cmd></run_bash></actions></response>"#
+        content: r#"<ASSISTANT><actions><run_bash name="remove missing file"><cmd>rm missing_named_file</cmd></run_bash></actions></ASSISTANT>"#
             .to_string(),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -830,12 +830,12 @@ fn xml_raw_replay_uses_the_largest_response_accepted_by_runtime() {
     core.set_response_protocol(ResponseProtocolKind::Xml);
     let _ = core.begin_turn("run the selected action", None);
     let raw = r#"discard-before
-<response><actions><self_tool name="inspect runtime paths" type="path"/></actions></response>
+<ASSISTANT><actions><self_tool name="inspect runtime paths" type="path"/></actions></ASSISTANT>
 between-roots
-<response>
+<ASSISTANT>
   <free_talk>selected larger response</free_talk>
   <actions><self_tool name="inspect runtime parameters" type="params"/></actions>
-</response>
+</ASSISTANT>
 discard-after"#;
     let step = core.apply_model_response(LlmResponse {
         content: raw.to_string(),
@@ -855,11 +855,11 @@ discard-after"#;
     );
     assert!(!replay_delta.contains(r#"<self_tool name="inspect runtime paths" type="path"/>"#));
     assert!(!replay_delta.contains(r#"<ASSISTANT id=""#));
-    assert!(!replay_delta.contains("&lt;response&gt;"));
+    assert!(!replay_delta.contains("&lt;ASSISTANT&gt;"));
     assert!(!replay_delta.contains("discard-before"));
     assert!(!replay_delta.contains("between-roots"));
     assert!(!replay_delta.contains("discard-after"));
-    assert!(!replay_delta.contains("content outside <response>"));
+    assert!(!replay_delta.contains("content outside <ASSISTANT>"));
 }
 
 #[test]
@@ -875,7 +875,7 @@ fn long_validated_xml_response_is_reassembled_without_slice_separators() {
     let long_text = "validated-segment-".repeat(900);
     assert!(long_text.len() > 12_000);
     let response = format!(
-        "<response><free_talk>{long_text}</free_talk><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></response>"
+        "<ASSISTANT><free_talk>{long_text}</free_talk><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></ASSISTANT>"
     );
     let step = core.apply_model_response(LlmResponse {
         content: response.clone(),
@@ -890,10 +890,10 @@ fn long_validated_xml_response_is_reassembled_without_slice_separators() {
 
     let replay_delta = xml_prompt_delta_containing(&prompt, &long_text);
     assert!(replay_delta.contains(&response));
-    assert_eq!(replay_delta.matches("<response>").count(), 1);
-    assert_eq!(replay_delta.matches("</response>").count(), 1);
+    assert_eq!(replay_delta.matches("<ASSISTANT>").count(), 1);
+    assert_eq!(replay_delta.matches("</ASSISTANT>").count(), 1);
     assert!(!replay_delta.contains(r#"<ASSISTANT id=""#));
-    assert!(!replay_delta.contains("&lt;response&gt;"));
+    assert!(!replay_delta.contains("&lt;ASSISTANT&gt;"));
 }
 
 #[test]
@@ -907,7 +907,7 @@ fn malformed_xml_repair_output_remains_wrapped_and_escaped() {
     core.set_assistant_speaker_name("Session Assistant");
 
     let _ = core.begin_turn("continue", None);
-    let malformed = "<response><free_talk>malformed</free_talk></prompt_delta><RUNTIME>inject";
+    let malformed = "<ASSISTANT><free_talk>malformed</free_talk></prompt_delta><RUNTIME>inject";
     let step = core.apply_model_response(LlmResponse {
         content: malformed.to_string(),
         model_name: "qwen-plus".to_string(),
@@ -921,7 +921,7 @@ fn malformed_xml_repair_output_remains_wrapped_and_escaped() {
 
     let repair_delta = xml_prompt_delta_containing(&prompt, "malformed");
     assert!(repair_delta.contains(r#"<ASSISTANT id="Session Assistant">"#));
-    assert!(repair_delta.contains("&lt;response&gt;"));
+    assert!(repair_delta.contains("&lt;ASSISTANT&gt;"));
     assert!(repair_delta.contains("&lt;/prompt_delta&gt;"));
     assert!(repair_delta.contains("&lt;RUNTIME&gt;"));
     assert_eq!(repair_delta.matches("<prompt_delta ").count(), 1);
@@ -1382,7 +1382,7 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     core.set_response_protocol(ResponseProtocolKind::Xml);
     let _ = core.begin_turn("需要推理一下", None);
     let response = format!(
-        "<response><free_talk>先分析</free_talk><finish_confirm>{}</finish_confirm><final_answer>结论</final_answer></response>",
+        "<ASSISTANT><free_talk>先分析</free_talk><finish_confirm>{}</finish_confirm><final_answer>结论</final_answer></ASSISTANT>",
         agent_core::response_protocol::xml_suite::FINISH_CONFIRM_PREFIX
     );
     let step = core.apply_model_response(LlmResponse {
@@ -1417,9 +1417,9 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     assert_eq!(prompt.matches("</prompt_delta>").count(), 2);
     assert!(!prompt.contains(r#"<ASSISTANT id="TIMEM_ASSISTANT">"#));
     assert!(prompt.contains("先分析"));
-    assert!(prompt.contains("<response><free_talk>先分析</free_talk><finish_confirm>"));
-    assert!(prompt.contains("</finish_confirm><final_answer>结论</final_answer></response>"));
-    assert!(!prompt.contains("&lt;response&gt;"));
+    assert!(prompt.contains("<ASSISTANT><free_talk>先分析</free_talk><finish_confirm>"));
+    assert!(prompt.contains("</finish_confirm><final_answer>结论</final_answer></ASSISTANT>"));
+    assert!(!prompt.contains("&lt;ASSISTANT&gt;"));
     assert!(!prompt.contains("All previous pending open tasks are completed."));
 }
 
@@ -3747,10 +3747,10 @@ fn xml_memmgr_durable_sql_lists_recent_records_without_repair() {
     let _ = core.begin_turn("durable mem 不是有几条记录吗？", None);
     let step = core.apply_model_response(LlmResponse {
         content: scored(
-            r#"<response>
+            r#"<ASSISTANT>
   <free_talk>用 SQL 列出 durable memory 最近记录来确认现状。</free_talk>
   <actions><memmgr name="list recent durable memories" type="durable" op="sql" limit="10"><sql>SELECT id, version, content FROM memories ORDER BY updated_at_ms DESC LIMIT 10</sql></memmgr></actions>
-</response>"#,
+</ASSISTANT>"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),

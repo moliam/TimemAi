@@ -132,7 +132,7 @@ fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
     let prompt = format!(
             "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\ndelta1\n[END DELTA]\n\n{}",
             crate::prompt_render::formatted_response_trailer(
-                "one-root label <response>...</response>",
+                "one-root label <ASSISTANT>...</ASSISTANT>",
                 "Ai3",
             )
         );

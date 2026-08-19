@@ -192,7 +192,7 @@ fn action_related_audit_event_builders_are_structured() {
         "t",
         Some("invalid_json"),
         "Ai1",
-        "<response>bad</response>\n[BEGIN DELTA]",
+        "<ASSISTANT>bad</ASSISTANT>\n[BEGIN DELTA]",
         "Ai1's previous response is not protocol compliant.\nerror: invalid_json",
         "m",
         &UsageStats::zero(),
@@ -206,7 +206,7 @@ fn action_related_audit_event_builders_are_structured() {
     assert!(repair_output["rendered"]
         .as_str()
         .unwrap()
-        .contains("## ASSISTANT:\n<response>bad</response>"));
+        .contains("## ASSISTANT:\n<ASSISTANT>bad</ASSISTANT>"));
     assert!(repair_output["rendered"]
         .as_str()
         .unwrap()

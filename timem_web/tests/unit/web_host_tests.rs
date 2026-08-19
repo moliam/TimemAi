@@ -15,7 +15,7 @@ const TEST_PORT: u16 = 12345;
 
 fn confirmed_xml_response(body: &str) -> String {
     format!(
-        "<response><finish_confirm>{} verified</finish_confirm>{body}</response>",
+        "<ASSISTANT><finish_confirm>{} verified</finish_confirm>{body}</ASSISTANT>",
         agent_core::response_protocol::xml_suite::FINISH_CONFIRM_PREFIX
     )
 }
@@ -7680,7 +7680,7 @@ impl ModelClient for ToolGenPublishModel {
     ) -> Result<LlmResponse, String> {
         self.calls += 1;
         let content = if self.calls == 1 {
-            "<response><free_talk>Checking the reusable workflow.</free_talk><actions><run_bash name=\"check reusable workflow\" timeout_ms=\"5000\"><cmd>printf toolgen-host-check</cmd></run_bash></actions></response>".to_string()
+            "<ASSISTANT><free_talk>Checking the reusable workflow.</free_talk><actions><run_bash name=\"check reusable workflow\" timeout_ms=\"5000\"><cmd>printf toolgen-host-check</cmd></run_bash></actions></ASSISTANT>".to_string()
         } else if prompt.contains(r#"<action_result><toolgen name="publish verified draft">"#) {
             confirmed_xml_response("<toolgen_retrospect>Published host-tool after runtime validation.</toolgen_retrospect><final_answer>ToolGen host workflow completed.</final_answer>")
         } else {
@@ -7713,7 +7713,7 @@ impl ModelClient for ToolGenPublishModel {
             )
             .unwrap();
             format!(
-                "<response><free_talk>Publishing the verified draft.</free_talk><actions><toolgen name=\"publish verified draft\" op=\"publish\"><draft_path>{}</draft_path></toolgen></actions></response>",
+                "<ASSISTANT><free_talk>Publishing the verified draft.</free_talk><actions><toolgen name=\"publish verified draft\" op=\"publish\"><draft_path>{}</draft_path></toolgen></actions></ASSISTANT>",
                 draft
             )
         };
@@ -7746,7 +7746,7 @@ impl ModelClient for InspectPathModel {
     ) -> Result<LlmResponse, String> {
         self.round += 1;
         let content = if self.round == 1 {
-            "<response><actions><self_tool name=\"inspect runtime paths\" type=\"path\"/></actions></response>".to_string()
+            "<ASSISTANT><actions><self_tool name=\"inspect runtime paths\" type=\"path\"/></actions></ASSISTANT>".to_string()
         } else {
             confirmed_xml_response("<final_answer>paths inspected</final_answer>")
         };
