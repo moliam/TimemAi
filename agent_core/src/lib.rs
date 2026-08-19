@@ -824,7 +824,7 @@ fn thread_cpu_time() -> Option<Duration> {
         if result != 0 || value.tv_sec < 0 || value.tv_nsec < 0 {
             return None;
         }
-        return Some(Duration::new(value.tv_sec as u64, value.tv_nsec as u32));
+        Some(Duration::new(value.tv_sec as u64, value.tv_nsec as u32))
     }
     #[cfg(not(unix))]
     {
