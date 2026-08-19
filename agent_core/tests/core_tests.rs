@@ -6880,6 +6880,26 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains("## Response examples"));
     assert!(xml_prompt.contains(r#"<prompt_delta id="pd_1" time_ms="123">"#));
     assert!(xml_prompt.contains("</prompt_delta>"));
+    assert!(xml_prompt
+        .contains("Under the XML protocol, each `<prompt_delta>` is the outer dynamic container"));
+    let example_start = xml_prompt
+        .find(r#"<prompt_delta id="pd_1" time_ms="123">"#)
+        .expect("XML delta example should render");
+    let example_end = xml_prompt[example_start..]
+        .find("</prompt_delta>")
+        .map(|offset| example_start + offset + "</prompt_delta>".len())
+        .expect("XML delta example should close");
+    let example = &xml_prompt[example_start..example_end];
+    let user = example
+        .find("<USER>")
+        .expect("USER entry should be in delta");
+    let assistant = example
+        .find("<ASSISTANT")
+        .expect("ASSISTANT entry should be in delta");
+    let runtime = example
+        .find("<RUNTIME>")
+        .expect("RUNTIME entry should be in delta");
+    assert!(user < assistant && assistant < runtime);
     assert!(!xml_prompt.contains("[BEGIN DELTA]"));
     assert!(!xml_prompt.contains("[END DELTA]"));
     assert!(!xml_prompt.contains("delta_id: pd_1"));

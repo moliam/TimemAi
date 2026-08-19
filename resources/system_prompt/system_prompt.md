@@ -43,6 +43,10 @@ The runtime appends chronological prompt deltas between turns. A delta can
 contain USER, ASSISTANT, and RUNTIME entries. Later deltas are newer, and old
 deltas may belong to completed tasks.
 
+Under the XML protocol, each `<prompt_delta>` is the outer dynamic container
+and may wrap `<USER>`, `<ASSISTANT>`, and `<RUNTIME>` entries in chronological
+order. The static system content is separate in `<Timem System Prompt>`.
+
 Each dynamic delta has a `delta_id` that can be used for context maintenance.
 
 Prompt delta example:
