@@ -1187,16 +1187,28 @@ produce a protocol repair slice instead of being bridged to an old tool.
 ### Action Result Prompt Component
 
 After an action runs, `agent_core` appends the action result into the current
-runtime increment's prompt delta as a `## RUNTIME` block. For XML prompts, each
-tool output body is enclosed by a matching
-`<output_id_HASH>...</output_id_HASH>` pair. Runtime derives `HASH` when the
-result enters prompt context from the original return content and generation
-time, rendering exactly six lowercase hexadecimal digits. Completed and
-signal-terminated `run_bash` results label command content as `Return:` and
-long-running intermediate content as `Partial return:` rather than using
-`Output:`, so both remain distinct from the output-ID envelope. Later prompt
-re-rendering preserves the same evidence boundary. That
-runtime evidence is the only action-result evidence the model may claim it has
+runtime increment's prompt delta as a `## RUNTIME` block. For XML prompts,
+ordinary tool output bodies are enclosed by matching
+`<output_id_HASH>...</output_id_HASH>` pairs. Runtime derives the generic hash
+when the result enters prompt context from the original return content and
+generation time, rendering exactly six lowercase hexadecimal digits.
+
+`run_bash` is rendered separately as `<bash_result task="..." status="...">`.
+The execution layer retains stdout and stderr independently instead of
+reconstructing them from merged display text. A result with one non-empty
+stream uses an opaque `<<<OUTPUT_HASH ... OUTPUT_HASH` block. When both streams
+are non-empty, `<stdout>` and `<stderr>` contain `OUT_HASH` and `ERR_HASH`
+blocks sharing one four-digit lowercase hexadecimal hash. The hash derives
+from task, original stdout, original stderr, generation time, and collision
+salt; runtime rejects a candidate whose marker already appears in either
+stream. Known exit code, Unix signal, and still-running pid are attributes.
+Bounded truncation occurs inside stream boundaries and preserves all closing
+markers and XML result tags. Background and timeout job records write stdout
+and stderr to separate files; historical merged records are treated as stdout
+without guessing old stderr boundaries. JSON, audit, and host-facing output
+retain the existing readable text rendering. Later prompt re-rendering
+preserves the committed evidence boundary. That runtime evidence is the only
+action-result evidence the model may claim it has
 seen.
 
 Example:

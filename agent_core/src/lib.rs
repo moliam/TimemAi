@@ -753,9 +753,19 @@ impl ActionStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BashResultEvidence {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub pid: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ActionOutcome {
     pub status: ActionStatus,
     pub text: String,
+    pub bash_result: Option<BashResultEvidence>,
 }
 
 impl ActionOutcome {
@@ -763,7 +773,13 @@ impl ActionOutcome {
         Self {
             status,
             text: text.into(),
+            bash_result: None,
         }
+    }
+
+    pub(crate) fn with_bash_result(mut self, bash_result: BashResultEvidence) -> Self {
+        self.bash_result = Some(bash_result);
+        self
     }
 
     pub(crate) fn completed(text: impl Into<String>) -> Self {
@@ -2707,7 +2723,7 @@ impl AgentCore {
             match self.execute_action(action.clone(), runtime) {
                 ActionExecution::Completed(outcome) => {
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(self.format_action_result(&action, &outcome.text));
+                        *slot = Some(self.format_action_outcome(&action, &outcome));
                     }
                 }
                 ActionExecution::NeedsApproval(pending) => {
@@ -2780,10 +2796,8 @@ impl AgentCore {
             }
             match self.execute_action(action.clone(), runtime) {
                 ActionExecution::Completed(outcome) => {
-                    completed_results.push((
-                        next_index,
-                        self.format_action_result(&action, &outcome.text),
-                    ));
+                    completed_results
+                        .push((next_index, self.format_action_outcome(&action, &outcome)));
                 }
                 ActionExecution::NeedsApproval(next_pending) => {
                     let pending = Self::pending_approval_with_parallel_continuation(
@@ -3607,17 +3621,31 @@ impl AgentCore {
         rows
     }
 
-    fn format_action_result(&self, action: &ParsedAction, result: &str) -> String {
+    fn format_action_outcome(&self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
         if self.response_protocol == ResponseProtocolKind::Xml {
+            if action.action == "run_bash" {
+                if let Some(bash_result) = outcome.bash_result.as_ref() {
+                    return prompt_render::render_xml_bash_result(
+                        action.name.as_deref(),
+                        outcome.status,
+                        bash_result,
+                        now_ms(),
+                    );
+                }
+            }
             prompt_render::render_xml_action_result(
                 &action.action,
                 action.name.as_deref(),
-                result,
+                &outcome.text,
                 now_ms(),
             )
         } else {
-            result.to_string()
+            outcome.text.clone()
         }
+    }
+
+    fn format_action_result(&self, action: &ParsedAction, result: &str) -> String {
+        self.format_action_outcome(action, &ActionOutcome::completed(result))
     }
 
     fn format_pending_action_result(&self, pending: &PendingApproval, result: &str) -> String {
@@ -3650,7 +3678,7 @@ impl AgentCore {
             for action in group.actions {
                 match self.execute_action(action.clone(), runtime) {
                     ActionExecution::Completed(outcome) => {
-                        result_lines.push(self.format_action_result(&action, &outcome.text));
+                        result_lines.push(self.format_action_outcome(&action, &outcome));
                     }
                     ActionExecution::NeedsApproval(pending) => {
                         return Err((result_lines, pending));
@@ -3856,7 +3884,7 @@ impl AgentCore {
                     self.record_action_audit(&action, outcome.status.as_str(), Some(&outcome.text));
                     self.emit_action_finish_topic(&action, &outcome, cpu_time, runtime);
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(self.format_action_result(&action, &outcome.text));
+                        *slot = Some(self.format_action_outcome(&action, &outcome));
                     }
                 }
                 Err(_) => {
@@ -3899,7 +3927,7 @@ impl AgentCore {
                     self.record_pending_approval_audit(&pending, true, &outcome.text);
                     self.emit_action_finish_topic(&action, &outcome, cpu_time, runtime);
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(self.format_action_result(&action, &outcome.text));
+                        *slot = Some(self.format_action_outcome(&action, &outcome));
                     }
                 }
                 Err(_) => {
@@ -3960,7 +3988,7 @@ impl AgentCore {
             }
             match self.execute_action(action.clone(), runtime) {
                 ActionExecution::Completed(outcome) => {
-                    results[idx] = Some(self.format_action_result(&action, &outcome.text));
+                    results[idx] = Some(self.format_action_outcome(&action, &outcome));
                 }
                 ActionExecution::NeedsApproval(pending) => {
                     self.collect_parallel_action_handles(

@@ -87,12 +87,127 @@ fn normal_bash_reports_status_and_output() {
 }
 
 #[test]
+fn foreground_bash_preserves_stdout_and_stderr_independently() {
+    let mut runtime = NeverCancelRuntime;
+    let result = execute_one_bash_structured(
+        "printf 'stdout-value'; printf 'stderr-value' >&2; exit 7",
+        Path::new("."),
+        1000,
+        &mut runtime,
+    );
+
+    assert_eq!(result.status, Some(7));
+    assert_eq!(result.stdout, "stdout-value");
+    assert_eq!(result.stderr, "stderr-value");
+    assert!(result.output.contains("stdout-value"), "{}", result.output);
+    assert!(
+        result.output.contains("stderr: stderr-value"),
+        "{}",
+        result.output
+    );
+
+    let outcome = result.to_action_outcome("run_bash");
+    let evidence = outcome.bash_result.expect("structured Bash evidence");
+    assert_eq!(evidence.stdout, "stdout-value");
+    assert_eq!(evidence.stderr, "stderr-value");
+    assert_eq!(evidence.exit_code, Some(7));
+}
+
+#[test]
+fn foreground_bash_preserves_stderr_only_and_empty_streams() {
+    let mut runtime = NeverCancelRuntime;
+    let stderr_only = execute_one_bash_structured(
+        "printf 'stderr-only' >&2; exit 9",
+        Path::new("."),
+        1000,
+        &mut runtime,
+    );
+    assert_eq!(stderr_only.status, Some(9));
+    assert_eq!(stderr_only.stdout, "");
+    assert_eq!(stderr_only.stderr, "stderr-only");
+    assert_eq!(stderr_only.output, "stderr: stderr-only");
+
+    let empty = execute_one_bash_structured("exit 0", Path::new("."), 1000, &mut runtime);
+    assert_eq!(empty.status, Some(0));
+    assert_eq!(empty.stdout, "");
+    assert_eq!(empty.stderr, "");
+    assert_eq!(empty.output, "<no output>");
+}
+
+#[test]
+fn polling_bash_preserves_last_stdout_and_stderr_evidence() {
+    let cwd = tmp_cwd("polling_split_streams");
+    let mut runtime = NeverCancelRuntime;
+    let outcome = execute_polling_bash_outcome(
+        "printf poll-out; printf poll-err >&2; exit 0",
+        &cwd,
+        10,
+        1000,
+        1000,
+        &mut runtime,
+    );
+
+    assert_eq!(outcome.status, ActionStatus::Completed);
+    let evidence = outcome.bash_result.expect("polling Bash evidence");
+    assert_eq!(evidence.stdout, "poll-out");
+    assert_eq!(evidence.stderr, "poll-err");
+    assert_eq!(evidence.exit_code, Some(0));
+    assert_eq!(evidence.signal, None);
+}
+
+#[test]
+fn historical_shell_job_record_without_stderr_file_is_treated_as_stdout_only() {
+    let dir = tmp_memory_dir("legacy_merged_output");
+    let output_file = dir.join("legacy.out");
+    fs::write(&output_file, "legacy merged bytes").unwrap();
+
+    let record = ShellJobRecord {
+        id: "legacy-job".to_string(),
+        created_at_ms: now_ms(),
+        kind: "background".to_string(),
+        session_id: "legacy-session".to_string(),
+        turn_id: "legacy-turn".to_string(),
+        pid: 1,
+        owner_id: None,
+        command: "legacy".to_string(),
+        cwd: dir.display().to_string(),
+        output_file: output_file.display().to_string(),
+        stderr_file: String::new(),
+        status_file: dir.join("legacy.status").display().to_string(),
+        tail_out: false,
+    };
+
+    let (stdout, stderr) = read_shell_job_streams(&record);
+    assert_eq!(stdout, "legacy merged bytes");
+    assert_eq!(stderr, "");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn shell_job_record_deserializes_without_legacy_stderr_file_field() {
+    let record: ShellJobRecord = serde_json::from_value(serde_json::json!({
+        "id": "legacy-json",
+        "created_at_ms": 1,
+        "pid": 2,
+        "command": "printf legacy",
+        "output_file": "legacy.out",
+        "status_file": "legacy.status"
+    }))
+    .unwrap();
+
+    assert_eq!(record.stderr_file, "");
+    assert_eq!(record.kind, "background");
+}
+
+#[test]
 fn run_bash_action_results_do_not_repeat_command_text() {
     let command = "printf unique_command_marker";
     let completed = BashCommandOutput {
         command: command.to_string(),
         status: Some(0),
         signal: None,
+        stdout: String::new(),
+        stderr: String::new(),
         output: "unique_command_marker".to_string(),
         error: None,
         tail_out: false,
@@ -107,6 +222,8 @@ fn run_bash_action_results_do_not_repeat_command_text() {
         command: "false unique_failure_command".to_string(),
         status: Some(1),
         signal: None,
+        stdout: String::new(),
+        stderr: String::new(),
         output: "<no output>".to_string(),
         error: None,
         tail_out: false,
@@ -119,6 +236,8 @@ fn run_bash_action_results_do_not_repeat_command_text() {
         command: "sleep 123 unique_timeout_command".to_string(),
         status: None,
         signal: None,
+        stdout: String::new(),
+        stderr: String::new(),
         output: String::new(),
         error: Some("timeout_still_running:12345".to_string()),
         tail_out: false,
@@ -143,6 +262,8 @@ fn normal_bash_keeps_thirty_two_kibibytes_worth_of_characters_and_reports_trunca
         command: "printf long-output".to_string(),
         status: Some(0),
         signal: None,
+        stdout: String::new(),
+        stderr: String::new(),
         output,
         error: None,
         tail_out: false,
@@ -558,8 +679,12 @@ fn polling_bash_waits_until_async_file_appears() {
 fn background_job_reports_pid_and_running_list_until_exit() {
     let dir = tmp_memory_dir("background_job");
     let store = FileShellJobStore::new(&dir);
-    let started =
-        store.spawn_background("sleep 1; printf background_ok", &dir, "session_a", "turn_a");
+    let started = store.spawn_background(
+        "sleep 1; printf background_ok; printf background_err >&2",
+        &dir,
+        "session_a",
+        "turn_a",
+    );
     assert!(
         started.contains("now keeps running in background"),
         "{started}"
@@ -590,7 +715,9 @@ fn background_job_reports_pid_and_running_list_until_exit() {
     assert_eq!(updates[0].pid, pid);
     assert_eq!(updates[0].description(), "background job");
     assert_eq!(updates[0].status, "0");
-    assert_eq!(updates[0].output, "background_ok");
+    assert_eq!(updates[0].stdout, "background_ok");
+    assert_eq!(updates[0].stderr, "background_err");
+    assert_eq!(updates[0].output, "background_ok stderr: background_err");
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -637,6 +764,8 @@ fn timeout_job_reports_pid_and_later_exit_update() {
     assert_eq!(updates[0].pid, pid);
     assert_eq!(updates[0].description(), "old timeout job");
     assert_eq!(updates[0].status, "0");
+    assert_eq!(updates[0].stdout, "starteddone");
+    assert_eq!(updates[0].stderr, "");
     assert_eq!(updates[0].output, "starteddone");
     let _ = fs::remove_dir_all(&dir);
 }
@@ -885,6 +1014,7 @@ fn shutdown_ignores_shell_job_record_owned_by_another_process() {
         command: "foreign".to_string(),
         cwd: dir.display().to_string(),
         output_file: dir.join("foreign.out").display().to_string(),
+        stderr_file: dir.join("foreign.err").display().to_string(),
         status_file: status_file.display().to_string(),
         tail_out: false,
     };

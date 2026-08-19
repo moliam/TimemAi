@@ -26,11 +26,49 @@ The `name` attribute is protocol metadata used to associate an action with its
 result. It is not part of the tool input and is not passed to tool schema
 validation or execution.
 
-For XML protocol turns, the runtime returns each tool result with the same
-action name:
-`<action_result><run_bash name="check git diff"><output_id_a1b2c3>...</output_id_a1b2c3></run_bash></action_result>`, where runtime derives `HASH` from the original return content and its generation time; `HASH` is exactly six lowercase hexadecimal digits.
+For XML protocol turns, ordinary tools return a generic action-result envelope
+with the same action name:
+`<action_result><readfile name="read source"><output_id_a1b2c3>...</output_id_a1b2c3></readfile></action_result>`.
+Runtime derives this generic `HASH` from the original return content and its
+generation time; it is exactly six lowercase hexadecimal digits.
 
-The command return section uses `Return:` rather than `Output:` so it is distinct from the `<output_id_......>` envelope.
+`run_bash` uses a dedicated result instead:
+
+```xml
+<bash_result task="check git status" status="success" exit_code="0">
+<<<OUTPUT_a532
+On branch main
+OUTPUT_a532
+</bash_result>
+```
+
+When both stdout and stderr are non-empty, runtime preserves them independently:
+
+```xml
+<bash_result task="build and test" status="error" exit_code="1">
+<stdout>
+<<<OUT_3f2a
+compiled
+OUT_3f2a
+</stdout>
+
+<stderr>
+<<<ERR_3f2a
+test failed
+ERR_3f2a
+</stderr>
+</bash_result>
+```
+
+The Bash boundary ID is exactly four lowercase hexadecimal digits. It is
+derived dynamically from the task, original stdout, original stderr, and
+generation time. One result's `OUT` and `ERR` blocks share the same ID.
+Runtime avoids IDs whose terminating markers already occur in either stream.
+A one-stream result uses `OUTPUT_ID`; a two-stream result uses `OUT_ID` and
+`ERR_ID`. Status is `success`, `error`, `timeout`, `cancelled`, or `running`;
+known `exit_code`, `signal`, and `pid` values are emitted as attributes.
+Bash output inside a dynamic boundary is opaque evidence and may itself
+contain Markdown or XML-looking text.
 
 Note: inside xml label, if strings containing such as `<`, `>`,
 or `&`, should use `<![CDATA[...]]>` to wrap it.
