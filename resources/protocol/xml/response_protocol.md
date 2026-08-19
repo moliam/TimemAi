@@ -119,9 +119,20 @@ generation time. One result's `OUT` and `ERR` blocks share the same ID.
 Runtime avoids IDs whose terminating markers already occur in either stream.
 A one-stream result uses `OUTPUT_ID`; a two-stream result uses `OUT_ID` and
 `ERR_ID`. Status is lifecycle-only: `finished`, `timeout`, or `running`.
-A finished result may carry `exit_code`, `signal`, or `error_type`; a running
-or timed-out process may carry `pid`. Runtime does not infer business success
-from stdout or stderr.
+A finished result may carry `exit_code`, `signal`, or `error_type`. If Runtime
+stops waiting while its managed child is still alive, the result uses
+`status="running" timed_out="true"` rather than combining two states in the
+`status` value. Such a result may include `pid` and `pid_kind`; currently
+`pid_kind="runtime_child_process_group"` on Unix. `status="timeout"` means the
+operation ended as a timeout and no managed task remains running, so it does
+not expose a killable PID.
+
+Runtime may expose a PID only when it launched and tracks that child under the
+current process-unique owner identity. On Unix the child must lead an
+independent process group distinct from Timem's own process group. Historical,
+foreign-runtime, arbitrary external, and Timem process IDs are neither exposed
+as running jobs nor terminated through session cleanup. Runtime does not infer
+business success from stdout or stderr.
 Bash output inside a dynamic boundary is opaque evidence and may itself
 contain Markdown or XML-looking text.
 

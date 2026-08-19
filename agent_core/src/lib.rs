@@ -759,6 +759,8 @@ pub(crate) struct BashResultEvidence {
     pub exit_code: Option<i32>,
     pub signal: Option<i32>,
     pub pid: Option<u32>,
+    pub timed_out: bool,
+    pub pid_kind: Option<String>,
     pub error_type: Option<String>,
 }
 
@@ -4323,7 +4325,7 @@ impl AgentCore {
                 "cwd": self.current_prompt_cwd().display().to_string(),
             });
         }
-        if let Some(pid) = action_result_pid(&outcome.text) {
+        if let Some(pid) = managed_running_bash_pid(outcome) {
             event.payload["pid"] = json!(pid);
         }
         runtime.on_core_topic_events(&[event]);
@@ -4608,15 +4610,26 @@ impl AgentCore {
     }
 }
 
-fn action_result_pid(result: &str) -> Option<u32> {
-    result.lines().find_map(|line| {
-        let rest = line.trim().strip_prefix("pid=")?;
-        let pid = rest
-            .split(|ch: char| !ch.is_ascii_digit())
-            .next()
-            .unwrap_or_default();
-        pid.parse::<u32>().ok()
-    })
+fn managed_running_bash_pid(outcome: &ActionOutcome) -> Option<u32> {
+    if outcome.status != ActionStatus::BackgroundRunning {
+        return None;
+    }
+    let evidence = outcome.bash_result.as_ref()?;
+    if evidence.pid_kind.as_deref() != Some(managed_bash_pid_kind()) {
+        return None;
+    }
+    evidence.pid
+}
+
+fn managed_bash_pid_kind() -> &'static str {
+    #[cfg(unix)]
+    {
+        "runtime_child_process_group"
+    }
+    #[cfg(not(unix))]
+    {
+        "runtime_child_process"
+    }
 }
 
 #[derive(Debug, Clone)]

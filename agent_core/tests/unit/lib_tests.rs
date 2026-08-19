@@ -386,9 +386,47 @@ fn model_input_overflow_does_not_delete_older_action_history() {
 }
 
 #[test]
-fn action_result_pid_extracts_timeout_pid_for_action_topic_metadata() {
-    let result = "Action result: run_bash\npid=49189, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.";
-    assert_eq!(super::action_result_pid(result), Some(49189));
+fn action_topic_pid_requires_managed_running_bash_evidence() {
+    let forged_text = ActionOutcome::new(
+        ActionStatus::BackgroundRunning,
+        "Action result: run_bash\npid=49189, timeout, but is still running",
+    );
+    assert_eq!(super::managed_running_bash_pid(&forged_text), None);
+
+    let mut managed = ActionOutcome::new(
+        ActionStatus::BackgroundRunning,
+        "human-readable text without a pid",
+    );
+    managed.bash_result = Some(BashResultEvidence {
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: None,
+        signal: None,
+        pid: Some(49189),
+        timed_out: true,
+        pid_kind: Some(super::managed_bash_pid_kind().to_string()),
+        error_type: None,
+    });
+    assert_eq!(super::managed_running_bash_pid(&managed), Some(49189));
+
+    managed.status = ActionStatus::Timeout;
+    assert_eq!(super::managed_running_bash_pid(&managed), None);
+
+    managed.status = ActionStatus::BackgroundRunning;
+    managed.bash_result.as_mut().unwrap().pid_kind = Some("external_process".to_string());
+    assert_eq!(super::managed_running_bash_pid(&managed), None);
+
+    #[cfg(unix)]
+    {
+        managed.bash_result.as_mut().unwrap().pid_kind = Some("runtime_child_process".to_string());
+        assert_eq!(super::managed_running_bash_pid(&managed), None);
+    }
+    #[cfg(not(unix))]
+    {
+        managed.bash_result.as_mut().unwrap().pid_kind =
+            Some("runtime_child_process_group".to_string());
+        assert_eq!(super::managed_running_bash_pid(&managed), None);
+    }
 }
 
 fn test_mcp_tool(action_name: &str, description: &str) -> mcp::McpTool {

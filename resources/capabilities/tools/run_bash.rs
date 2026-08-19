@@ -314,6 +314,8 @@ impl FileShellJobStore {
             exit_code: None,
             signal: None,
             pid: Some(record.pid),
+            timed_out: false,
+            pid_kind: Some(runtime_child_pid_kind().to_string()),
             error_type: None,
         })
     }
@@ -357,6 +359,12 @@ impl FileShellJobStore {
         }
         let child = command.spawn()?;
         let pid = child.id();
+        if !is_runtime_child_pid(pid) {
+            terminate_process(pid);
+            return Err(std::io::Error::other(
+                "spawned process did not satisfy the managed-child PID invariant",
+            ));
+        }
         self.watcher.register(pid, child, status_file.clone());
         Ok(ShellJobRecord {
             id,
@@ -524,9 +532,13 @@ impl FileShellJobStore {
             .guard
             .with_read(|| self.records_unlocked())
             .unwrap_or_default();
+        let owner_id = crate::runtime_process_owner_id();
         let mut cancelled = Vec::new();
         for record in records {
-            if record.session_id != clean_session || self.record_finished(&record) {
+            if record.owner_id.as_deref() != Some(owner_id)
+                || record.session_id != clean_session
+                || self.record_finished(&record)
+            {
                 continue;
             }
             terminate_process(record.pid);
@@ -553,11 +565,11 @@ impl FileShellJobStore {
             .with_write(|| {
                 let mut running = Vec::new();
                 let mut exited = Vec::new();
-                for record in self
-                    .records_unlocked()
-                    .into_iter()
-                    .filter(|record| record.session_id == clean_session)
-                {
+                let owner_id = crate::runtime_process_owner_id();
+                for record in self.records_unlocked().into_iter().filter(|record| {
+                    record.owner_id.as_deref() == Some(owner_id)
+                        && record.session_id == clean_session
+                }) {
                     match self.refresh_record_unlocked(record) {
                         ShellJobRefresh::Running(job) => running.push(job),
                         ShellJobRefresh::Exited(update) => exited.push(update),
@@ -1491,6 +1503,8 @@ fn polling_result(
         exit_code: last_status,
         signal: last_signal,
         pid: None,
+        timed_out: false,
+        pid_kind: None,
         error_type: match state {
             "cancelled" => Some("Cancelled".to_string()),
             "not_executed" => Some("InvalidInput".to_string()),
@@ -1581,8 +1595,9 @@ impl BashCommandOutput {
             match error {
                 "timeout" => ActionStatus::Timeout,
                 "cancelled" | "cancelled_by_user" => ActionStatus::Cancelled,
-                _ if error.starts_with("timeout_still_running:") => ActionStatus::Timeout,
-                _ if error.starts_with("long_running_still_running:") => {
+                _ if error.starts_with("timeout_still_running:")
+                    || error.starts_with("long_running_still_running:") =>
+                {
                     ActionStatus::BackgroundRunning
                 }
                 _ => ActionStatus::Failed,
@@ -1594,13 +1609,19 @@ impl BashCommandOutput {
         } else {
             ActionStatus::Failed
         };
-        let pid = self.error.as_deref().and_then(bash_running_pid);
+        let running_error = self.error.as_deref();
+        let pid = running_error.and_then(bash_running_pid);
+        let timed_out =
+            running_error.is_some_and(|error| error.starts_with("timeout_still_running:"));
+        let pid_kind = pid.map(|_| runtime_child_pid_kind().to_string());
         ActionOutcome::new(status, text).with_bash_result(BashResultEvidence {
             stdout: self.stdout.clone(),
             stderr: self.stderr.clone(),
             exit_code: self.status,
             signal: self.signal,
             pid,
+            timed_out,
+            pid_kind,
             error_type: self
                 .error
                 .as_deref()
@@ -1808,8 +1829,37 @@ fn bash_finished_error_outcome(
         exit_code: None,
         signal: None,
         pid: None,
+        timed_out: false,
+        pid_kind: None,
         error_type: Some(error_type.to_string()),
     })
+}
+
+fn is_runtime_child_pid(pid: u32) -> bool {
+    if pid <= 1 || pid == std::process::id() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let pid = pid as libc::pid_t;
+        let pgid = unsafe { libc::getpgid(pid) };
+        pgid == pid && pgid != unsafe { libc::getpgrp() }
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn runtime_child_pid_kind() -> &'static str {
+    #[cfg(unix)]
+    {
+        "runtime_child_process_group"
+    }
+    #[cfg(not(unix))]
+    {
+        "runtime_child_process"
+    }
 }
 
 fn bash_running_pid(error: &str) -> Option<u32> {

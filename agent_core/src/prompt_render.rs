@@ -233,6 +233,16 @@ pub(crate) fn render_xml_bash_result(
         .pid
         .map(|pid| format!(" pid=\"{pid}\""))
         .unwrap_or_default();
+    let timed_out = evidence
+        .timed_out
+        .then_some(" timed_out=\"true\"")
+        .unwrap_or_default();
+    let pid_kind = evidence
+        .pid_kind
+        .as_deref()
+        .map(escape_xml_attribute)
+        .map(|pid_kind| format!(" pid_kind=\"{pid_kind}\""))
+        .unwrap_or_default();
     let error_type = evidence
         .error_type
         .as_deref()
@@ -240,7 +250,7 @@ pub(crate) fn render_xml_bash_result(
         .map(|error_type| format!(" error_type=\"{error_type}\""))
         .unwrap_or_default();
     let prefix = format!(
-        "<bash_result task=\"{escaped_task}\" status=\"{status}\"{exit_code}{signal}{pid}{error_type}>\n"
+        "<bash_result task=\"{escaped_task}\" status=\"{status}\"{exit_code}{signal}{pid}{timed_out}{pid_kind}{error_type}>\n"
     );
     let suffix = "\n</bash_result>";
     let id = bash_boundary_id(task, &evidence.stdout, &evidence.stderr, output_time_ms);
