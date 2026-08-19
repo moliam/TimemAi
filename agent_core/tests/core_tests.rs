@@ -6741,7 +6741,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         other => panic!("expected NeedModel, got {other:?}"),
     };
     assert!(default_prompt.contains("# System Response Protocol"));
-    assert!(default_prompt.contains("protocol-compliant response in XML format"));
+    assert!(default_prompt.contains("protocol-compliant response in **VALID XML**"));
     assert!(!default_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 
     let mut json_core = test_core(
@@ -6755,7 +6755,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         other => panic!("expected NeedModel, got {other:?}"),
     };
     assert!(json_prompt.contains("Always use exactly one top-level JSON object."));
-    assert!(json_prompt.contains("protocol-compliant response in JSON format"));
+    assert!(json_prompt.contains("protocol-compliant response in **VALID JSON**"));
     assert!(json_prompt.contains("\"working_still_action\""));
     assert!(json_prompt.contains("\"ALL_FINISHED\""));
     assert!(json_prompt.contains("[BEGIN DELTA]\ndelta_id: pd_1\ntime: 123"));
@@ -6779,7 +6779,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains("\n</Timem System Prompt>\n"));
     assert!(!xml_prompt.contains("[BEGIN SYSTEM PROMPT]"));
     assert!(xml_prompt.contains("# System Response Protocol"));
-    assert!(xml_prompt.contains("protocol-compliant response in XML format"));
+    assert!(xml_prompt.contains("protocol-compliant response in **VALID XML**"));
     assert!(xml_prompt.contains("`<actions>` are those function provided by capability catalog"));
     assert!(xml_prompt.contains("<actions>"));
     assert!(xml_prompt.contains("<parallel>"));
