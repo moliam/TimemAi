@@ -434,6 +434,10 @@ pub struct ParsedEnvelope {
     /// raw model output.
     pub accepted_response: Option<String>,
     pub runtime_note: Option<String>,
+    /// Protocol defect observed and recovered without requesting another model response.
+    ///
+    /// Hosts may count this for diagnostics, but it must not increment repair_calls.
+    pub recovered_issue: Option<String>,
     pub repair_issue: Option<String>,
 }
 

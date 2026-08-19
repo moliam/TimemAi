@@ -18,8 +18,8 @@ use agent_core::{
     CoreSessionWorkerManager, CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest,
     ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout,
     SessionToolRepo, ToolDetail, ToolGenRequest, ToolSummary, TopicReply, WorkInstructionLoadMode,
-    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
-    CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_TOOLGEN,
+    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, self_tool::SelfToolPaths, shell_exec::FileShellJobStore,
@@ -6867,6 +6867,15 @@ fn handle_scoped_worker_event(
                             if let Err(error) = debug.record_repair(session_id, issue) {
                                 eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
                             }
+                        }
+                    }
+                }
+                if event.topic.name == CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP {
+                    if let Some(debug) = state.debug.as_ref() {
+                        if let Err(error) = debug.record_runtime_root_repair_help(session_id) {
+                            eprintln!(
+                                "[timem_web_debug_error] session_id={session_id:?} reason={error}"
+                            );
                         }
                     }
                 }

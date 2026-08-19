@@ -1084,6 +1084,112 @@ This is an answer, not an executable action:
 }
 
 #[test]
+fn session_turn_counts_successful_xml_root_synthesis_without_a_repair_call() {
+    let dir = tmp_dir("xml_root_synthesis_diagnostic_count");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
+    let mut ui = RetryRecordingUi::default();
+    let mut model = ReplayModel::new([Ok(llm(
+        r#"<actions><run_bash name="run safe command"><cmd>printf safe</cmd></run_bash></actions>"#,
+        1_000,
+        false,
+    ))]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "run it",
+            session: "xml_root_synthesis_diagnostic_count",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.stats.repair_calls, 0);
+    assert_eq!(model.prompts.len(), 2);
+    let diagnostics = ui
+        .events
+        .iter()
+        .filter(|event| event.topic.name == crate::CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP)
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].payload["count"], 1);
+    assert!(ui
+        .events
+        .iter()
+        .filter_map(CoreTopicEvent::as_model_repair)
+        .next()
+        .is_none());
+    assert_eq!(
+        audit_event_count(&read_audit_events(&audit), "model_repair_request"),
+        0
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_turn_failed_xml_root_synthesis_counts_only_one_repair() {
+    let dir = tmp_dir("xml_root_synthesis_failure_count");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_response_protocol(crate::ResponseProtocolKind::Xml);
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Xml;
+    let mut ui = RetryRecordingUi::default();
+    let mut model = ReplayModel::new([
+        Ok(llm(
+            r#"<progress>invalid top-level branch</progress>"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"<ASSISTANT><final_answer>repaired once</final_answer></ASSISTANT>"#,
+            1_100,
+            false,
+        )),
+    ]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "run it",
+            session: "xml_root_synthesis_failure_count",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.stats.repair_calls, 1);
+    let repairs = ui
+        .events
+        .iter()
+        .filter_map(CoreTopicEvent::as_model_repair)
+        .collect::<Vec<_>>();
+    assert_eq!(repairs.len(), 1);
+    assert_eq!(repairs[0].attempt, 1);
+    assert_eq!(
+        audit_event_count(&read_audit_events(&audit), "model_repair_request"),
+        1
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn session_turn_xml_replays_only_the_extracted_response_root() {
     let dir = tmp_dir("xml_root_repair_exact_structure");
     let audit = dir.join("audit.json");

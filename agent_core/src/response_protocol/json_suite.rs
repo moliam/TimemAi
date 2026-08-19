@@ -80,6 +80,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
                 accepted_response: None,
                 memory_candidates: vec![],
                 runtime_note: None,
+                recovered_issue: None,
                 repair_issue: Some("invalid_json".to_string()),
             };
         }
@@ -97,6 +98,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
             accepted_response: None,
             memory_candidates: vec![],
             runtime_note: None,
+            recovered_issue: None,
             repair_issue: Some("root_must_be_json_object".to_string()),
         };
     }
@@ -234,6 +236,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
         memory_candidates,
         accepted_response: None,
         runtime_note,
+        recovered_issue: None,
         repair_issue,
     }
 }

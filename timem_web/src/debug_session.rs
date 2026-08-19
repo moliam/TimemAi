@@ -40,6 +40,7 @@ struct SessionDebug {
     llm_latency_ms: Vec<u64>,
     tools_per_response: [u64; 11],
     repairs: BTreeMap<String, u64>,
+    runtime_root_repair_help: u64,
 }
 
 impl DebugStore {
@@ -180,6 +181,12 @@ impl DebugStore {
         self.update(session_id, |stats| {
             stats.tools_per_response[count.min(10)] =
                 stats.tools_per_response[count.min(10)].saturating_add(1);
+        })
+    }
+
+    pub(crate) fn record_runtime_root_repair_help(&self, session_id: &str) -> Result<(), String> {
+        self.update(session_id, |stats| {
+            stats.runtime_root_repair_help = stats.runtime_root_repair_help.saturating_add(1);
         })
     }
 
@@ -335,6 +342,10 @@ fn render_statistics_markdown(session_id: &str, stats: &SessionDebug) -> String 
             stats.action_cpu_unavailable.to_string(),
         ],
         vec!["Protocol repairs".to_string(), repair_total.to_string()],
+        vec![
+            "runtime_root_repair_help".to_string(),
+            stats.runtime_root_repair_help.to_string(),
+        ],
     ];
     render_markdown_table(
         &mut out,
