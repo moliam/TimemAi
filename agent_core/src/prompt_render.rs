@@ -488,6 +488,20 @@ pub(crate) fn render_xml_action_result(
     format!("{prefix}{escaped_result}{suffix}")
 }
 
+fn render_prompt_context_structure(
+    boundaries: crate::response_protocol::PromptBoundarySpec,
+) -> &'static str {
+    if boundaries.uses_xml_role_elements() {
+        "Each `<prompt_delta>` is an outer dynamic container that may wrap `<USER>`, \
+`<ASSISTANT>`, and `<RUNTIME>` entries in chronological order. Static system \
+content is separate in `<Timem System Prompt>`."
+    } else {
+        "Each dynamic delta is enclosed by `[BEGIN DELTA]` and `[END DELTA]`, with \
+USER, ASSISTANT, and RUNTIME entries rendered as headings in chronological order. \
+Static system content is enclosed separately by the system-prompt boundaries."
+    }
+}
+
 fn render_prompt_delta_example(
     boundaries: crate::response_protocol::PromptBoundarySpec,
     assistant_heading: &str,
@@ -505,9 +519,7 @@ fn render_prompt_delta_example(
         ),
     ];
 
-    example.push_str(
-        "\n`pd_1` is the runtime-generated identity. It is a simple globally increasing sequence: pd_1, pd_2, ...\n",
-    );
+    example.push_str("\nUse the delta `id` for context maintenance when needed.\n");
     for (role, body) in roles {
         example.push('\n');
         example.push_str(&boundaries.render_role_open(
@@ -544,6 +556,10 @@ pub(crate) fn render_static_prompt(
     );
     let with_protocol =
         with_protocol.replace("{{CURRENT_PROTOCOL_LANG}}", protocol_suite.lang_format());
+    let with_protocol = with_protocol.replace(
+        "{{PROMPT_CONTEXT_STRUCTURE}}",
+        render_prompt_context_structure(*protocol_suite.prompt_boundaries()),
+    );
     let with_protocol = with_protocol.replace(
         "{{PROMPT_DELTA_EXAMPLE}}",
         &render_prompt_delta_example(

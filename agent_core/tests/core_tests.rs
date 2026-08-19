@@ -920,7 +920,8 @@ fn malformed_xml_repair_output_remains_wrapped_and_escaped() {
     };
 
     let repair_delta = xml_prompt_delta_containing(&prompt, "malformed");
-    assert!(repair_delta.contains(r#"<ASSISTANT id="Session Assistant">"#));
+    assert!(repair_delta.contains("<ASSISTANT>"));
+    assert!(!repair_delta.contains("<ASSISTANT id="));
     assert!(repair_delta.contains("&lt;ASSISTANT&gt;"));
     assert!(repair_delta.contains("&lt;/prompt_delta&gt;"));
     assert!(repair_delta.contains("&lt;RUNTIME&gt;"));
@@ -954,7 +955,7 @@ fn assistant_prompt_heading_uses_current_worker_speaker_name() {
 }
 
 #[test]
-fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() {
+fn assistant_name_is_not_explained_in_static_prompt_and_action_results_remain_clean() {
     let mut core = test_core(
         include_str!("../../resources/system_prompt/system_prompt.md"),
         profile("qwen-plus"),
@@ -967,7 +968,7 @@ fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() 
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(prompt.contains("Your identity in prompt history is `Ai4`."));
+    assert!(!prompt.contains("Your identity in prompt history"));
     assert!(prompt.contains("## Ai4"));
     assert!(!prompt.contains("ASSSISTANT_ID"));
     assert!(!prompt.contains("{{ASSSISTANT_ID}}"));
@@ -6686,10 +6687,10 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(template.contains("{{RESPONSE_PROTOCOL_SECTION}}"));
     assert!(template.contains("{{CURRENT_PROTOCOL_LANG}}"));
     assert!(template.contains("{{TOOL_CATALOG}}"));
-    assert!(template.contains("Do not expose internal mechanisms"));
-    assert!(template.contains("memory/storage structure"));
-    assert!(template.contains("tool/capability catalog"));
-    assert!(!template.contains("runtime implementation details"));
+    assert!(template.contains("Do not volunteer implementation details"));
+    assert!(!template.contains("memory/storage structure"));
+    assert!(!template.contains("prompt/context structure"));
+    assert!(!template.contains("tool/capability catalog"));
     assert!(!template.contains("resources/response_v1_summary.json"));
     let xml_protocol = include_str!("../../resources/protocol/xml/response_protocol.md");
     assert!(xml_protocol.contains("Exactly one state branch"));
@@ -6850,6 +6851,10 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(json_prompt.contains("[END DELTA]"));
     assert!(!json_prompt.contains("<prompt_delta "));
     assert!(!json_prompt.contains("</prompt_delta>"));
+    assert!(
+        json_prompt.contains("Each dynamic delta is enclosed by `[BEGIN DELTA]` and `[END DELTA]`")
+    );
+    assert!(!json_prompt.contains("Each `<prompt_delta>` is an outer dynamic container"));
     assert!(!json_prompt.contains("{{PROMPT_DELTA_EXAMPLE}}"));
     assert!(!json_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 
@@ -6881,7 +6886,8 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains(r#"<prompt_delta id="pd_1" time_ms="123">"#));
     assert!(xml_prompt.contains("</prompt_delta>"));
     assert!(xml_prompt
-        .contains("Under the XML protocol, each `<prompt_delta>` is the outer dynamic container"));
+        .contains("Each `<prompt_delta>` is an outer dynamic container that may wrap `<USER>`"));
+    assert!(!xml_prompt.contains("[BEGIN DELTA] and [END DELTA]"));
     let example_start = xml_prompt
         .find(r#"<prompt_delta id="pd_1" time_ms="123">"#)
         .expect("XML delta example should render");
@@ -6894,8 +6900,9 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         .find("<USER>")
         .expect("USER entry should be in delta");
     let assistant = example
-        .find("<ASSISTANT")
+        .find("<ASSISTANT>")
         .expect("ASSISTANT entry should be in delta");
+    assert!(!example.contains("<ASSISTANT id="));
     let runtime = example
         .find("<RUNTIME>")
         .expect("RUNTIME entry should be in delta");

@@ -100,9 +100,7 @@ fn build_next_prompt_orders_pending_components_without_role_merging() {
     let action_result = prompt.find("Action result: run_bash").unwrap();
     let user = prompt.find("<USER>\n\nnew input").unwrap();
     let system_second = prompt.find("<RUNTIME>\n\nfound something new").unwrap();
-    let assistant = prompt
-        .find("<ASSISTANT id=\"Ai4\">\n\nassistant note")
-        .unwrap();
+    let assistant = prompt.find("<ASSISTANT>\n\nassistant note").unwrap();
 
     assert!(system_first < user);
     assert!(system_first < action_result);
