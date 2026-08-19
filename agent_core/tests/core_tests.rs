@@ -383,8 +383,7 @@ fn startup_stamp_is_fixed_for_one_core_instance_across_static_prompt_refreshes()
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    let timestamp_section =
-        "## TIMESTAMP\nThis is the time stamp when this whole agent interaction starts:\n";
+    let timestamp_section = "## Interaction timestamp\n\n";
     let stamp = first
         .rsplit_once(timestamp_section)
         .and_then(|(_, rest)| rest.lines().next())
@@ -883,7 +882,7 @@ fn assistant_name_placeholder_is_replaced_in_static_prompt_and_action_results() 
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(prompt.contains("YOUR ID is: Ai4"));
+    assert!(prompt.contains("Your identity in prompt history is `Ai4`."));
     assert!(prompt.contains("## Ai4"));
     assert!(!prompt.contains("ASSSISTANT_ID"));
     assert!(!prompt.contains("{{ASSSISTANT_ID}}"));
@@ -6590,12 +6589,13 @@ fn static_prompt_keeps_contracts_concise() {
     let protocol_section = include_str!("../../resources/protocol/json/response_protocol.md");
     // Template-level checks
     assert!(template.contains("# Timem System Prompt"));
-    assert!(template.contains("exactly protocol-compliant response"));
-    assert!(template.contains("Answer based on collected evidence"));
+    assert!(template.contains("Return exactly one response"));
+    assert!(template.contains("Base answers on collected evidence"));
     assert!(template.contains("Use emoji sparingly"));
     assert!(template.contains("{{PROMPT_DELTA_EXAMPLE}}"));
     assert!(!template.contains("replay of your response"));
-    assert!(template.contains("Do not decorate ordinary headings, status updates, test results"));
+    assert!(template.contains("Do not decorate ordinary headings, status updates, test"));
+    assert!(template.contains("results, or confirmations with emoji"));
     assert!(template.contains("Context maintenance"));
     assert!(template.contains("{{RESPONSE_PROTOCOL_SECTION}}"));
     assert!(template.contains("{{CURRENT_PROTOCOL_LANG}}"));
@@ -6606,7 +6606,7 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(!template.contains("runtime implementation details"));
     assert!(!template.contains("resources/response_v1_summary.json"));
     let xml_protocol = include_str!("../../resources/protocol/xml/response_protocol.md");
-    assert!(xml_protocol.contains("`<actions>` are those function provided by capability catalog"));
+    assert!(xml_protocol.contains("Exactly one state branch"));
     assert!(xml_protocol.contains("<actions>"));
     assert!(xml_protocol.contains("<parallel>"));
     assert!(!xml_protocol.contains("<action_json>"));
@@ -6717,7 +6717,9 @@ fn rendered_static_prompt_preserves_source_rule_order() {
     };
 
     let role_pos = prompt.find("## Role").expect("role section should render");
-    let style_pos = prompt.find("## Soul").expect("Soul section should render");
+    let style_pos = prompt
+        .find("## Working principles")
+        .expect("working principles section should render");
     let memory_pos = prompt
         .find("## Memory")
         .expect("memory section should render");
@@ -6741,7 +6743,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         other => panic!("expected NeedModel, got {other:?}"),
     };
     assert!(default_prompt.contains("# System Response Protocol"));
-    assert!(default_prompt.contains("protocol-compliant response in **VALID XML**"));
+    assert!(default_prompt.contains("active **XML** response protocol"));
     assert!(!default_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));
 
     let mut json_core = test_core(
@@ -6755,7 +6757,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         other => panic!("expected NeedModel, got {other:?}"),
     };
     assert!(json_prompt.contains("Always use exactly one top-level JSON object."));
-    assert!(json_prompt.contains("protocol-compliant response in **VALID JSON**"));
+    assert!(json_prompt.contains("active **JSON** response protocol"));
     assert!(json_prompt.contains("\"working_still_action\""));
     assert!(json_prompt.contains("\"ALL_FINISHED\""));
     assert!(json_prompt.contains("[BEGIN DELTA]\ndelta_id: pd_1\ntime: 123"));
@@ -6779,8 +6781,8 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains("\n</Timem System Prompt>\n"));
     assert!(!xml_prompt.contains("[BEGIN SYSTEM PROMPT]"));
     assert!(xml_prompt.contains("# System Response Protocol"));
-    assert!(xml_prompt.contains("protocol-compliant response in **VALID XML**"));
-    assert!(xml_prompt.contains("`<actions>` are those function provided by capability catalog"));
+    assert!(xml_prompt.contains("active **XML** response protocol"));
+    assert!(xml_prompt.contains("Exactly one state branch"));
     assert!(xml_prompt.contains("<actions>"));
     assert!(xml_prompt.contains("<parallel>"));
     assert!(!xml_prompt.contains("<action_json>"));
@@ -6788,8 +6790,8 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains("<discard>"));
     assert!(xml_prompt.contains("<offload>"));
     assert!(xml_prompt.contains("<summary>"));
-    assert!(xml_prompt.contains("offload: will be saved into scratch memory"));
-    assert!(xml_prompt.contains("## RESPONSE EXAMPLES"));
+    assert!(xml_prompt.contains("save to scratch before"));
+    assert!(xml_prompt.contains("## Response examples"));
     assert!(xml_prompt.contains(r#"<prompt_delta id="pd_1" time_ms="123">"#));
     assert!(xml_prompt.contains("</prompt_delta>"));
     assert!(!xml_prompt.contains("[BEGIN DELTA]"));
@@ -7081,7 +7083,7 @@ fn rendered_static_prompt_examples_avoid_task_like_action_instructions() {
         other => panic!("expected NeedModel, got {other:?}"),
     };
 
-    assert!(prompt.contains("## RESPONSE EXAMPLES"));
+    assert!(prompt.contains("## Response examples"));
     for leaked_example_task in [
         "project codename",
         "Get the OS version",

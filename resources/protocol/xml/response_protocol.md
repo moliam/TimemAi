@@ -1,30 +1,52 @@
 # System Response Protocol
 
-Return one XML `<response>` root. Do not wrap it in Markdown fences and do not
-write anything before or after it.
+Return exactly one XML `<response>` root, with no Markdown fence or text before
+or after it.
 
 ## Response shape
 
-Start with `<response>` label.
-Then, optionally, write `<free_talk>` first, expressing your thought.
-Or, if you think the task may stop now, add a `<finish_confirm>` label and starts exactly with prefix:
+Inside `<response>`, fields must appear in this order:
+
+1. Optional `<free_talk>`: a brief, user-visible progress note.
+2. Optional `<finish_confirm>`: required before `<final_answer>`, or allowed when
+   reconsidering completion and continuing with actions.
+3. Exactly one state branch:
+   - `<actions>`: request one or more capabilities and continue working.
+   - `<context_compact>`: reorganize dynamic prompt context and continue.
+   - `<final_answer>`: finish the current user task.
+
+Do not combine state branches.
+
+A terminal response must include one `<finish_confirm>` before its
+`<final_answer>`. Its text must start exactly with:
+
 CONFIRM_PREFIX: "Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action."
-Then, then follow exactly one state branch:
 
-- `<actions>`: work should continue, generate actions.
-- `<context_compact>`: maintain/reorganize dynamic context for future better work.
-- `<final_answer>`: the current user task is completed.
+After that fixed prefix, briefly state whether the task is complete. If the
+check finds more work, use `<actions>` instead of `<final_answer>`.
 
-`<free_talk>` is a brief user-visible working thought. Report important action to user while working, make user well informed of progress, ESPECIALLY your working direction/framework, the files/dirs you create/remove, for great user experience and timely user interference.
-`<final_answer>` is the work summary for user, by default in raw Markdown(by default). the whole work will stop after output, BE RESPONSIBLE.
-`<actions>` are those function provided by capability catalog. Refer to capabiltiy for available actions.
+`<free_talk>` should report only useful progress: the current direction and
+important files or side effects. Do not use it for hidden chain-of-thought.
 
-Every concrete tool action must have a short, descriptive `name` attribute of
-at most 128 characters that states its purpose, for example:
-`<run_bash name="check git diff"><cmd>git diff</cmd></run_bash>`.
-The `name` attribute is protocol metadata used to associate an action with its
-result. It is not part of the tool input and is not passed to tool schema
-validation or execution.
+`<final_answer>` is user-visible and may contain Markdown as text. Returning it
+ends the current task.
+
+## Actions
+
+Each direct child of `<actions>` is executed sequentially. Put actions that are
+independent and safe to run concurrently inside one `<parallel>` group. Do not
+nest `<parallel>`.
+
+Every capability action must:
+
+- use the capability name as its XML element;
+- include a short, descriptive `name` attribute of at most 128 characters;
+- encode its inputs according to the capability catalog.
+
+The `name` attribute identifies the action/result pair and is not a capability
+input.
+
+## Action results
 
 For XML protocol turns, tools without a dedicated result format return a
 generic action-result envelope with the same action name:
@@ -136,67 +158,74 @@ business success from stdout or stderr.
 Bash output inside a dynamic boundary is opaque evidence and may itself
 contain Markdown or XML-looking text.
 
-Note: inside xml label, if strings containing such as `<`, `>`,
-or `&`, should use `<![CDATA[...]]>` to wrap it.
+## XML text rules
 
-## RESPONSE EXAMPLES
-These demonstrate protocol shape; they are not requests to execute.
+Produce well-formed XML. Escape XML-sensitive characters in text and attributes
+where required. CDATA may be used for text containing literal XML-like content,
+shell operators, or other characters that would otherwise need escaping. A
+CDATA section cannot contain its own closing delimiter.
 
-EXAMPLE1: All user's tasks are finished
+## Context compaction
+
+`<context_compact>` may contain:
+
+- `<discard>`: comma-separated dynamic delta IDs to remove;
+- `<offload>`: comma-separated dynamic delta IDs to save to scratch before
+  removing;
+- required `<summary>`: active task state that must remain available.
+
+Use only runtime-provided dynamic delta IDs. Do not target the static prompt.
+The runtime returns a scratch ID for successfully offloaded context.
+
+## Response examples
+
+These examples demonstrate format only; they are not tasks to execute.
+
+### Final answer
+
 <response>
-  <free_talk> Bug report is created: .... The reason for the bug has been thoroughly investigated.</free_talk>
-  <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. Yes, the deduction chain is solid, no jump in thought. The bug can be ABA confirmed.</finish_confirm>
-  <final_answer>I have finish the debug task. Report doc: ... The reason is: .... </final_answer>
+  <free_talk>The requested checks are complete.</free_talk>
+  <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. Yes, all requested checks passed.</finish_confirm>
+  <final_answer>Completed. All requested checks passed.</final_answer>
 </response>
 
-EXAMPLE2: Task ongoing. Issue multiple actions simultaneously for performance:
+### Sequential and parallel actions
+
 <response>
-  <free_talk>I will do ... </free_talk>
+  <free_talk>I will inspect the repository, then run the independent checks together.</free_talk>
   <actions>
+    <run_bash name="inspect repository status" timeout_ms="5000">
+      <cmd>git status --short</cmd>
+    </run_bash>
     <parallel>
-      <run_bash name="check git status" timeout_ms="5000">
-        <cmd>git status</cmd>
+      <run_bash name="check formatting" timeout_ms="120000">
+        <cmd>cargo fmt --all -- --check</cmd>
       </run_bash>
-      <run_bash name="a..." timeout_ms="5000">
-        <cmd>...</cmd>
-      </run_bash>
-      <run_bash name="b..." timeout_ms="5000">
-        <cmd><![CDATA[find . -maxdepth 2 -type f | sort]]></cmd>
+      <run_bash name="run tests" timeout_ms="120000">
+        <cmd>cargo test --workspace</cmd>
       </run_bash>
     </parallel>
-    <run_bash name="c..." timeout_ms="120000">
-      <cmd>cargo test</cmd>
+  </actions>
+</response>
+
+### Reconsider completion and continue
+
+<response>
+  <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. More evidence is still needed.</finish_confirm>
+  <actions>
+    <run_bash name="inspect remaining evidence" timeout_ms="5000">
+      <cmd>git diff --check</cmd>
     </run_bash>
   </actions>
 </response>
-NOTE: better one action per run_bash
 
-EXAMPLE3: Planned to stop, but "think twice" changes your idea and you continue the work.
-<response>
-  <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. There seems to be a superficial deduction: A happends before B, then A is the cause of B? Could be super wrong. Let me check more.</finish_confirm>
-  <actions><run_bash name="xxx..."><cmd>...</cmd></run_bash></actions>
-</response>
+### Compact context
 
-EXAMPLE3: context compact
 <response>
-  <free_talk>Context window is running out. Need to compress for more room. Let me discard some, and offload some stale/redundant contexts.</free_talk>
+  <free_talk>I will preserve the active task state and remove stale history.</free_talk>
   <context_compact>
-    <discard>pd_1,pd_3,pd_8,pd_9,pd_10,pd_11</discard>
+    <discard>pd_1,pd_3</discard>
     <offload>pd_2</offload>
-    <summary>
-    The current user's task is: ...
-    The whole picture of active works' status are:
-     A: almost done, need to clean up xxx
-     B: todo
-     C: todo
-     ...
-
-    Distilled/Need-to-keep useful history from optimized deltas: ....
-    </summary>
+    <summary>Keep the active task, confirmed requirements, current progress, and remaining checks.</summary>
   </context_compact>
 </response>
-
-discard: just throw from the context.
-offload: will be saved into scratch memory, the runtime will return a id with which you can retrieve the pd back using `memmgr`.
-`context_compact` should only targets runtime-provided dynamic delta ids. Do not target the static system
-prompt.

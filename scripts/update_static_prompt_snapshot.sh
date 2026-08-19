@@ -73,13 +73,13 @@ validate_one xml "$TMP_XML" \
   "<Timem System Prompt>" \
   "</Timem System Prompt>" \
   "# System Response Protocol" \
-  'Return one XML `<response>` root.' \
+  'Return exactly one XML `<response>` root' \
   '`<response>`' \
   '`<final_answer>`' \
   '<actions>' \
   '<parallel>' \
-  '<run_bash name="check git status" timeout_ms="5000">' \
-  '<cmd>git status</cmd>' \
+  '<run_bash name="inspect repository status" timeout_ms="5000">' \
+  '<cmd>git status --short</cmd>' \
   '<output_id_a1b2c3>' \
   '</output_id_a1b2c3>'
 

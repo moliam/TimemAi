@@ -88,7 +88,7 @@ fn static_prompt_uses_full_shared_v1_resource() {
     assert!(!STATIC_PROMPT.contains("\"perspective_policy\""));
     assert!(!STATIC_PROMPT.contains("\"tool_claim_policy\""));
     assert!(!STATIC_PROMPT.contains("\"storage_style_policy\""));
-    assert!(STATIC_PROMPT.contains("runtime's automatic chat audit records"));
+    assert!(STATIC_PROMPT.contains("search the visible conversation record"));
     assert!(!STATIC_PROMPT.contains("\"durable|raw_chat|scratch|context\""));
     assert!(!STATIC_PROMPT.contains("\"durable: query|schema|sql|insert|update|upsert|delete; raw_chat: query|sql|delete; scratch: query|write|read|delete; context: shrink\""));
     assert!(!STATIC_PROMPT.contains("\"query\": {\"type\": \"string\""));
@@ -109,8 +109,8 @@ fn static_prompt_uses_full_shared_v1_resource() {
     assert!(!STATIC_PROMPT.contains("\"durable_ctx_score\""));
     assert!(!STATIC_PROMPT.contains("Every model response must score"));
     assert!(STATIC_PROMPT.contains("Context maintenance"));
-    assert!(STATIC_PROMPT.contains("response protocol's context compact branch"));
-    assert!(STATIC_PROMPT.contains("do not target this system prompt"));
+    assert!(STATIC_PROMPT.contains("Compact context when dynamic deltas become stale"));
+    assert!(STATIC_PROMPT.contains("Never target this static"));
     assert!(!STATIC_PROMPT.contains("\"json_protocol\""));
     assert!(!STATIC_PROMPT.contains("\"evidence_guard\""));
     assert!(!STATIC_PROMPT.contains("\"action_result_guard\""));
