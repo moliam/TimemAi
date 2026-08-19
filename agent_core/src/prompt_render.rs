@@ -164,17 +164,20 @@ pub(crate) fn render_xml_action_result(
 
 fn render_prompt_delta_example(boundaries: crate::response_protocol::PromptBoundarySpec) -> String {
     let mut example = boundaries.render_delta_open("pd_1", 123);
-    example.push_str(
+    example.push_str(&format!(
         "\n`pd_1` is the runtime-generated identity. It is a simple globally increasing sequence: pd_1, pd_2, ...\n\n\
-## USER\n\
+{}\n\
 new user input, or user supplement entered while the current turn was already in\n\
 progress.\n\n\
-## {{ASSSISTANT_ID}}\n\
+## {{{{ASSSISTANT_ID}}}}\n\
 your response in this round\n\n\
-## SYSTEM\n\
+{}\n\
 Timem Runtime's feedback, tips, etc.\n\
-SYSTEM's 'TIPS' will occasionally show up. They are the philosophy you should really seriously respect.\n\n",
-    );
+{}'s 'TIPS' will occasionally show up. They are the philosophy you should really seriously respect.\n\n",
+        boundaries.user_heading_line(),
+        boundaries.runtime_heading_line(),
+        boundaries.runtime_role,
+    ));
     example.push_str(boundaries.delta_close());
     example
 }

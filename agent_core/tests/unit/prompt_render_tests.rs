@@ -311,14 +311,24 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
     assert!(json.contains("[END DELTA]"));
     assert!(!json.contains("<prompt_delta "));
     assert!(!json.contains("</prompt_delta>"));
+    assert!(json.contains("## USER"));
     assert!(json.contains("## Ai7"));
+    assert!(json.contains("## RUNTIME"));
+    assert!(json.contains("RUNTIME's 'TIPS'"));
+    assert!(!json.contains("## SYSTEM"));
+    assert!(!json.contains("SYSTEM's 'TIPS'"));
 
     assert!(xml.contains(r#"<prompt_delta id="pd_1" time_ms="123">"#));
     assert!(xml.contains("</prompt_delta>"));
     assert!(!xml.contains("[BEGIN DELTA]"));
     assert!(!xml.contains("[END DELTA]"));
     assert!(!xml.contains("delta_id: pd_1"));
+    assert!(xml.contains("## USER"));
     assert!(xml.contains("## Ai7"));
+    assert!(xml.contains("## RUNTIME"));
+    assert!(xml.contains("RUNTIME's 'TIPS'"));
+    assert!(!xml.contains("## SYSTEM"));
+    assert!(!xml.contains("SYSTEM's 'TIPS'"));
 
     assert!(!json.contains("{{PROMPT_DELTA_EXAMPLE}}"));
     assert!(!xml.contains("{{PROMPT_DELTA_EXAMPLE}}"));
