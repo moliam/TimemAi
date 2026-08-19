@@ -8,11 +8,11 @@ const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => (
 attachmentIds: index === 0 ? ["upload-a"] : [], }));
 
 describe("queued messages", () => {
-  it("direct-sends only an idle session without backlog or a queue pause", () => {
+  it("direct-sends from ready, stopped, or error without backlog or pause", () => {
     expect(shouldDirectManualMessage("ready", 0, false)).toBe(true);
     expect(shouldDirectManualMessage("working", 0, false)).toBe(false);
-    expect(shouldDirectManualMessage("error", 0, false)).toBe(false);
-    expect(shouldDirectManualMessage("stopped", 0, false)).toBe(false);
+    expect(shouldDirectManualMessage("error", 0, false)).toBe(true);
+    expect(shouldDirectManualMessage("stopped", 0, false)).toBe(true);
     expect(shouldDirectManualMessage("ready", 1, false)).toBe(false);
     expect(shouldDirectManualMessage("ready", 0, true)).toBe(false);
   });

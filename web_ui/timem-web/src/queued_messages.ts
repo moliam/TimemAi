@@ -208,7 +208,7 @@ export function shouldDirectManualMessage(
  queuedMessageCount: number,
  paused: boolean,
 ) {
- return sessionState === "ready" && queuedMessageCount === 0 && !paused;
+ return (sessionState === "ready" || sessionState === "stopped" || sessionState === "error") && queuedMessageCount === 0 && !paused;
 }
 
 export type QueuedMessageClaims = Set<string>;
