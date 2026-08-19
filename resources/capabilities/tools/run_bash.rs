@@ -1513,7 +1513,7 @@ impl BashCommandOutput {
                     action_name, pid, elapsed_ms
                 );
                 if !self.output.trim().is_empty() {
-                    out.push_str("\nPartial output:\n");
+                    out.push_str("\nPartial return:\n");
                     out.push_str(&compact_text_with_tail(&self.output, 2000, self.tail_out));
                 }
                 return out;
@@ -1524,7 +1524,7 @@ impl BashCommandOutput {
                     action_name, pid
                 );
                 if !self.output.trim().is_empty() {
-                    out.push_str("\nPartial output:\n");
+                    out.push_str("\nPartial return:\n");
                     out.push_str(&compact_text_with_tail(&self.output, 2000, self.tail_out));
                 }
                 return out;
@@ -1537,14 +1537,14 @@ impl BashCommandOutput {
         }
         if let Some(signal) = self.signal {
             return format!(
-                "Action result: {}\nThe command terminated because of a process signal.\nSignal: {}\nOutput:\n{}",
+                "Action result: {}\nThe command terminated because of a process signal.\nSignal: {}\nReturn:\n{}",
                 action_name,
                 signal,
                 compact_text_with_tail(&self.output, MAX_BASH_OUTPUT_CHARS, self.tail_out)
             );
         }
         format!(
-            "Action result: {}\nThe command finished.\nExit code: {}\nOutput:\n{}",
+            "Action result: {}\nThe command finished.\nExit code: {}\nReturn:\n{}",
             action_name,
             self.status.unwrap_or(-1),
             compact_text_with_tail(&self.output, MAX_BASH_OUTPUT_CHARS, self.tail_out)

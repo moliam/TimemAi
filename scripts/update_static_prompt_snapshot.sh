@@ -80,8 +80,8 @@ validate_one xml "$TMP_XML" \
   '<parallel>' \
   '<run_bash name="check git status" timeout_ms="5000">' \
   '<cmd>git status</cmd>' \
-  '<output_id_HASH>' \
-  '</output_id_HASH>'
+  '<output_id_a1b2c3>' \
+  '</output_id_a1b2c3>'
 
 if [ "${1:-}" = "--check" ]; then
   echo "static_prompt_expansion: ok"

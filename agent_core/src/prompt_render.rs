@@ -148,7 +148,7 @@ fn action_output_id(output: &str, time_ms: i64) -> String {
     let mut hasher = DefaultHasher::new();
     output.hash(&mut hasher);
     time_ms.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    format!("{:06x}", hasher.finish() & 0x00ff_ffff)
 }
 
 pub(crate) fn render_xml_action_result(

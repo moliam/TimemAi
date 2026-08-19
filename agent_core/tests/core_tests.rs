@@ -529,6 +529,15 @@ fn xml_action_results_preserve_names_for_sequential_and_parallel_actions() {
         "every sequential/parallel action must have one output envelope: {prompt}"
     );
     for output_tag in &opening_tags {
+        let hash = output_tag
+            .strip_prefix("output_id_")
+            .expect("output envelope must use the output_id_ prefix");
+        assert_eq!(hash.len(), 6, "output ID must contain six hex digits");
+        assert!(
+            hash.bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+            "output ID must use lowercase hexadecimal digits: {output_tag}"
+        );
         assert_eq!(
             prompt.matches(&format!("<{output_tag}>")).count(),
             1,
@@ -5226,7 +5235,8 @@ fn run_bash_allows_readonly_count_command() {
     };
     assert!(prompt.contains("Action result: run_bash"));
     assert!(prompt.contains("Exit code: 0"));
-    assert!(prompt.contains("Output:"));
+    assert!(prompt.contains("Return:"));
+    assert!(!prompt.contains("Output:"));
 }
 
 #[test]

@@ -139,6 +139,13 @@ fn xml_action_result_preserves_name_escapes_xml_and_wraps_output_with_stable_id(
         123,
     );
     let expected_id = action_output_id("output <ready> & done", 123);
+    assert_eq!(expected_id.len(), 6);
+    assert!(
+        expected_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "output ID must contain exactly six lowercase hexadecimal digits"
+    );
     assert_eq!(
         rendered,
         format!(
