@@ -2,7 +2,8 @@ use crate::response_protocol::ParsedAction;
 use crate::MemGuard;
 use crate::{
     ActionExecution, ActionOutcome, ActionRuntime, ActionStatus, AgentCore, ApprovalRequest,
-    BashApprovalMode, LongRunningCommandStatus, PendingApproval, PendingApprovedAction,
+    BashApprovalMode, BashResultEvidence, LongRunningCommandStatus, PendingApproval,
+    PendingApprovedAction,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -47,6 +48,8 @@ pub struct ShellJobRecord {
     #[serde(default)]
     pub cwd: String,
     pub output_file: String,
+    #[serde(default)]
+    pub stderr_file: String,
     pub status_file: String,
     #[serde(default)]
     pub tail_out: bool,
@@ -78,6 +81,8 @@ pub struct ShellJobExitUpdate {
     pub created_at_ms: i64,
     pub elapsed_ms: i64,
     pub status: String,
+    pub stdout: String,
+    pub stderr: String,
     pub output: String,
 }
 
@@ -298,6 +303,13 @@ impl FileShellJobStore {
             "Action result: run_bash\npid={}, now keeps running in background",
             record.pid
         ))
+        .with_bash_result(BashResultEvidence {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            signal: None,
+            pid: Some(record.pid),
+        })
     }
 
     fn spawn_record(
@@ -312,13 +324,18 @@ impl FileShellJobStore {
         fs::create_dir_all(&self.dir)?;
         let id = unique_shell_id("job");
         let output_file = self.dir.join(format!("{id}.out"));
+        let stderr_file = self.dir.join(format!("{id}.err"));
         let status_file = self.dir.join(format!("{id}.status"));
         let output = OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
             .open(&output_file)?;
-        let stderr = output.try_clone()?;
+        let stderr = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&stderr_file)?;
         let mut command = Command::new(BASH_EXECUTABLE);
         configure_run_bash_environment(&mut command);
         command
@@ -346,6 +363,7 @@ impl FileShellJobStore {
             command: clean.to_string(),
             cwd: cwd.to_string_lossy().to_string(),
             output_file: output_file.to_string_lossy().to_string(),
+            stderr_file: stderr_file.to_string_lossy().to_string(),
             status_file: status_file.to_string_lossy().to_string(),
             tail_out,
         })
@@ -413,12 +431,14 @@ impl FileShellJobStore {
             }
             self.watcher.refresh_pid(record.pid);
             if let Some(status) = read_process_status(&record.status_file) {
-                let output = fs::read_to_string(&record.output_file).unwrap_or_default();
+                let (stdout, stderr) = read_shell_job_streams(&record);
                 return BashCommandOutput {
                     command: clean.to_string(),
                     status: status.code,
                     signal: status.signal,
-                    output: normalized_shell_output(&output),
+                    output: normalized_shell_output(&combined_shell_output(&stdout, &stderr)),
+                    stdout,
+                    stderr,
                     error: None,
                     tail_out,
                 };
@@ -433,12 +453,14 @@ impl FileShellJobStore {
                 };
                 runtime.on_long_running_command(&status);
                 let _ = self.append(&record);
-                let partial = fs::read_to_string(&record.output_file).unwrap_or_default();
+                let (stdout, stderr) = read_shell_job_streams(&record);
                 return BashCommandOutput {
                     command: clean.to_string(),
                     status: None,
                     signal: None,
-                    output: partial,
+                    output: combined_shell_output(&stdout, &stderr),
+                    stdout,
+                    stderr,
                     error: Some(format!(
                         "long_running_still_running:{}:{}",
                         record.pid,
@@ -449,12 +471,14 @@ impl FileShellJobStore {
             }
             if started.elapsed() >= timeout {
                 let _ = self.append(&record);
-                let partial = fs::read_to_string(&record.output_file).unwrap_or_default();
+                let (stdout, stderr) = read_shell_job_streams(&record);
                 return BashCommandOutput {
                     command: clean.to_string(),
                     status: None,
                     signal: None,
-                    output: partial,
+                    output: combined_shell_output(&stdout, &stderr),
+                    stdout,
+                    stderr,
                     error: Some(format!("timeout_still_running:{}", record.pid)),
                     tail_out,
                 };
@@ -640,6 +664,7 @@ impl FileShellJobStore {
             return ShellJobRefresh::Finished;
         }
         let _ = fs::write(&notified_file, now_ms().to_string());
+        let (stdout, stderr) = read_shell_job_streams(&record);
         ShellJobRefresh::Exited(ShellJobExitUpdate {
             pid: record.pid,
             kind: record.kind,
@@ -653,10 +678,10 @@ impl FileShellJobStore {
                 .unwrap_or_else(|_| "unknown".to_string())
                 .trim()
                 .to_string(),
+            stdout: compact_text_with_tail(&stdout, MAX_BASH_OUTPUT_CHARS, record.tail_out),
+            stderr: compact_text_with_tail(&stderr, MAX_BASH_OUTPUT_CHARS, record.tail_out),
             output: compact_text_with_tail(
-                &normalized_shell_output(
-                    &fs::read_to_string(&record.output_file).unwrap_or_default(),
-                ),
+                &normalized_shell_output(&combined_shell_output(&stdout, &stderr)),
                 MAX_BASH_OUTPUT_CHARS,
                 record.tail_out,
             ),
@@ -1272,6 +1297,9 @@ pub(crate) fn execute_polling_bash_outcome_with_tail(
             0,
             Duration::ZERO,
             None,
+            None,
+            "",
+            "",
             "",
             tail_out,
             Some("loop_timeout_ms must be a positive integer."),
@@ -1284,6 +1312,9 @@ pub(crate) fn execute_polling_bash_outcome_with_tail(
             0,
             Duration::ZERO,
             None,
+            None,
+            "",
+            "",
             "",
             tail_out,
             Some("interval_ms must be a positive integer."),
@@ -1296,6 +1327,9 @@ pub(crate) fn execute_polling_bash_outcome_with_tail(
             0,
             Duration::ZERO,
             None,
+            None,
+            "",
+            "",
             "",
             tail_out,
             Some("once_timeout_ms must be a positive integer."),
@@ -1307,6 +1341,9 @@ pub(crate) fn execute_polling_bash_outcome_with_tail(
     let mut attempts = 0_u64;
     let mut last_status = None;
     let mut last_output = String::new();
+    let mut last_stdout = String::new();
+    let mut last_stderr = String::new();
+    let mut last_signal = None;
     let mut last_error = None;
 
     loop {
@@ -1317,6 +1354,9 @@ pub(crate) fn execute_polling_bash_outcome_with_tail(
                 attempts,
                 started.elapsed(),
                 last_status,
+                last_signal,
+                &last_stdout,
+                &last_stderr,
                 &last_output,
                 tail_out,
                 last_error.as_deref(),
@@ -1326,6 +1366,9 @@ pub(crate) fn execute_polling_bash_outcome_with_tail(
         attempts = attempts.saturating_add(1);
         let result = execute_one_bash_structured(command, cwd, once_timeout_ms as i64, runtime);
         last_status = result.status;
+        last_signal = result.signal;
+        last_stdout = result.stdout;
+        last_stderr = result.stderr;
         last_output = result.output;
         last_error = result.error;
 
@@ -1337,6 +1380,9 @@ pub(crate) fn execute_polling_bash_outcome_with_tail(
                     attempts,
                     started.elapsed(),
                     last_status,
+                    last_signal,
+                    &last_stdout,
+                    &last_stderr,
                     &last_output,
                     tail_out,
                     None,
@@ -1351,6 +1397,9 @@ pub(crate) fn execute_polling_bash_outcome_with_tail(
                 attempts,
                 started.elapsed(),
                 last_status,
+                last_signal,
+                &last_stdout,
+                &last_stderr,
                 &last_output,
                 tail_out,
                 last_error.as_deref(),
@@ -1369,6 +1418,9 @@ fn polling_result(
     attempts: u64,
     elapsed: Duration,
     last_status: Option<i32>,
+    last_signal: Option<i32>,
+    stdout: &str,
+    stderr: &str,
     output: &str,
     tail_out: bool,
     error: Option<&str>,
@@ -1405,7 +1457,13 @@ fn polling_result(
         "cancelled" => ActionStatus::Cancelled,
         _ => ActionStatus::Failed,
     };
-    ActionOutcome::new(status, out)
+    ActionOutcome::new(status, out).with_bash_result(BashResultEvidence {
+        stdout: stdout.to_string(),
+        stderr: stderr.to_string(),
+        exit_code: last_status,
+        signal: last_signal,
+        pid: None,
+    })
 }
 
 fn sleep_cancelable(duration: Duration, cancelled: &mut impl FnMut() -> bool) {
@@ -1472,6 +1530,8 @@ pub struct BashCommandOutput {
     pub command: String,
     pub status: Option<i32>,
     pub signal: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
     pub output: String,
     pub error: Option<String>,
     pub tail_out: bool,
@@ -1501,7 +1561,14 @@ impl BashCommandOutput {
         } else {
             ActionStatus::Failed
         };
-        ActionOutcome::new(status, text)
+        let pid = self.error.as_deref().and_then(bash_running_pid);
+        ActionOutcome::new(status, text).with_bash_result(BashResultEvidence {
+            stdout: self.stdout.clone(),
+            stderr: self.stderr.clone(),
+            exit_code: self.status,
+            signal: self.signal,
+            pid,
+        })
     }
 
     fn render_action_result(&self, action_name: &str) -> String {
@@ -1628,26 +1695,15 @@ fn execute_one_bash_structured_with_prompt_after(
     }
     match child.wait_with_output() {
         Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let mut combined = String::new();
-            if !stdout.trim().is_empty() {
-                combined.push_str(stdout.trim_end());
-            }
-            if !stderr.trim().is_empty() {
-                if !combined.is_empty() {
-                    combined.push('\n');
-                }
-                combined.push_str("stderr: ");
-                combined.push_str(stderr.trim_end());
-            }
-            if combined.is_empty() {
-                combined = "<no output>".to_string();
-            }
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            let combined = combined_shell_output(&stdout, &stderr);
             BashCommandOutput {
                 command: command.to_string(),
                 status: output.status.code(),
                 signal: exit_signal(&output.status),
+                stdout,
+                stderr,
                 output: combined,
                 error: None,
                 tail_out: false,
@@ -1657,12 +1713,56 @@ fn execute_one_bash_structured_with_prompt_after(
     }
 }
 
+fn read_shell_job_streams(record: &ShellJobRecord) -> (String, String) {
+    let stdout = fs::read_to_string(&record.output_file).unwrap_or_default();
+    let stderr = if record.stderr_file.trim().is_empty() {
+        // Historical records merged both streams into output_file. Treat that
+        // file as stdout and never guess which lines originally came from stderr.
+        String::new()
+    } else {
+        fs::read_to_string(&record.stderr_file).unwrap_or_default()
+    };
+    (stdout, stderr)
+}
+
+fn combined_shell_output(stdout: &str, stderr: &str) -> String {
+    let mut combined = String::new();
+    if !stdout.trim().is_empty() {
+        combined.push_str(stdout.trim_end());
+    }
+    if !stderr.trim().is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str("stderr: ");
+        combined.push_str(stderr.trim_end());
+    }
+    if combined.is_empty() {
+        "<no output>".to_string()
+    } else {
+        combined
+    }
+}
+
+fn bash_running_pid(error: &str) -> Option<u32> {
+    if let Some(pid) = error.strip_prefix("timeout_still_running:") {
+        return pid.parse().ok();
+    }
+    error
+        .strip_prefix("long_running_still_running:")
+        .and_then(|details| details.split(':').next())
+        .and_then(|pid| pid.parse().ok())
+}
+
 fn bash_error(command: &str, error: &str) -> BashCommandOutput {
+    let diagnostic = bash_runtime_error_message(error).to_string();
     BashCommandOutput {
         command: command.to_string(),
         status: None,
         signal: None,
-        output: String::new(),
+        stdout: String::new(),
+        stderr: diagnostic.clone(),
+        output: diagnostic,
         error: Some(error.to_string()),
         tail_out: false,
     }

@@ -632,8 +632,10 @@ fn xml_parallel_run_bash_results_use_action_names_without_repeating_commands() {
         other => panic!("expected XML parallel bash results, got {other:?}"),
     };
 
-    let first_tag = r#"<action_result><run_bash name="output first concurrent marker">"#;
-    let second_tag = r#"<action_result><run_bash name="output second concurrent marker">"#;
+    let first_tag =
+        r#"<bash_result task="output first concurrent marker" status="success" exit_code="0">"#;
+    let second_tag =
+        r#"<bash_result task="output second concurrent marker" status="success" exit_code="0">"#;
     let first = prompt.find(first_tag).expect("first named result");
     let second = prompt.find(second_tag).expect("second named result");
 
@@ -653,6 +655,30 @@ fn xml_parallel_run_bash_results_use_action_names_without_repeating_commands() {
         !action_results.contains("printf SECOND_XML_MARKER"),
         "{prompt}"
     );
+
+    let ids = action_results
+        .match_indices("<<<OUTPUT_")
+        .filter_map(|(start, _)| {
+            let suffix = &action_results[start + "<<<OUTPUT_".len()..];
+            Some(suffix.get(..4)?.to_string())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids.len(),
+        2,
+        "each Bash result must have one output boundary: {prompt}"
+    );
+    assert_ne!(
+        ids[0], ids[1],
+        "parallel Bash results must have independent IDs"
+    );
+    for id in ids {
+        assert_eq!(
+            action_results.matches(&format!("OUTPUT_{id}")).count(),
+            2,
+            "each ID must appear in one opening and one closing marker: {prompt}"
+        );
+    }
 }
 
 #[test]

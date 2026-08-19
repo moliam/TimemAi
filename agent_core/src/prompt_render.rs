@@ -1,7 +1,7 @@
 use crate::capability::CapabilityRegistry;
 use crate::prompt_spec;
 use crate::response_protocol::{PromptBoundarySpec, ResponseProtocolSuite};
-use crate::{PromptDelta, PromptSlice};
+use crate::{ActionStatus, BashResultEvidence, PromptDelta, PromptSlice};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 pub(crate) const RESPONSE_TRAILER: &str =
@@ -149,6 +149,133 @@ fn action_output_id(output: &str, time_ms: i64) -> String {
     output.hash(&mut hasher);
     time_ms.hash(&mut hasher);
     format!("{:06x}", hasher.finish() & 0x00ff_ffff)
+}
+
+fn bash_boundary_id(task: &str, stdout: &str, stderr: &str, output_time_ms: i64) -> String {
+    for salt in 0_u32..=u32::MAX {
+        let mut hasher = DefaultHasher::new();
+        task.hash(&mut hasher);
+        stdout.hash(&mut hasher);
+        stderr.hash(&mut hasher);
+        output_time_ms.hash(&mut hasher);
+        salt.hash(&mut hasher);
+        let id = format!("{:04x}", hasher.finish() & 0xffff);
+        let output_marker = format!("OUTPUT_{id}");
+        let stdout_marker = format!("OUT_{id}");
+        let stderr_marker = format!("ERR_{id}");
+        if !stdout.contains(&output_marker)
+            && !stderr.contains(&output_marker)
+            && !stdout.contains(&stdout_marker)
+            && !stderr.contains(&stdout_marker)
+            && !stdout.contains(&stderr_marker)
+            && !stderr.contains(&stderr_marker)
+        {
+            return id;
+        }
+    }
+    unreachable!("the finite Bash output cannot contain every possible salted boundary")
+}
+
+fn bash_status(status: ActionStatus, evidence: &BashResultEvidence) -> &'static str {
+    match status {
+        ActionStatus::Completed if evidence.exit_code == Some(0) && evidence.signal.is_none() => {
+            "success"
+        }
+        ActionStatus::Timeout => "timeout",
+        ActionStatus::Cancelled => "cancelled",
+        ActionStatus::BackgroundRunning => "running",
+        _ => "error",
+    }
+}
+
+fn truncate_raw_text_for_budget(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    let mut retained_budget = budget;
+    loop {
+        let mut retained_end = retained_budget.min(text.len());
+        while retained_end > 0 && !text.is_char_boundary(retained_end) {
+            retained_end -= 1;
+        }
+        let truncated_words = text[retained_end..].split_whitespace().count();
+        let notice = format!(
+            "!!!Too long, {truncated_words} words truncated. Generate more actions if necessary !!!"
+        );
+        let next_budget = budget.saturating_sub(notice.len() + 1);
+        if next_budget == retained_budget {
+            return format!("{}\n{notice}", text[..retained_end].trim_end());
+        }
+        retained_budget = next_budget;
+    }
+}
+
+pub(crate) fn render_xml_bash_result(
+    action_name: Option<&str>,
+    status: ActionStatus,
+    evidence: &BashResultEvidence,
+    output_time_ms: i64,
+) -> String {
+    let task = action_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("run_bash");
+    let escaped_task = escape_xml_attribute(task);
+    let status = bash_status(status, evidence);
+    let exit_code = evidence
+        .exit_code
+        .map(|code| format!(" exit_code=\"{code}\""))
+        .unwrap_or_default();
+    let signal = evidence
+        .signal
+        .map(|signal| format!(" signal=\"{signal}\""))
+        .unwrap_or_default();
+    let pid = evidence
+        .pid
+        .map(|pid| format!(" pid=\"{pid}\""))
+        .unwrap_or_default();
+    let prefix = format!(
+        "<bash_result task=\"{escaped_task}\" status=\"{status}\"{exit_code}{signal}{pid}>\n"
+    );
+    let suffix = "\n</bash_result>";
+    let id = bash_boundary_id(task, &evidence.stdout, &evidence.stderr, output_time_ms);
+
+    let stdout_nonempty = !evidence.stdout.is_empty();
+    let stderr_nonempty = !evidence.stderr.is_empty();
+    let both_streams = stdout_nonempty && stderr_nonempty;
+
+    if both_streams {
+        let out_open = format!("<stdout>\n<<<OUT_{id}\n");
+        let out_close = format!("\nOUT_{id}\n</stdout>\n\n");
+        let err_open = format!("<stderr>\n<<<ERR_{id}\n");
+        let err_close = format!("\nERR_{id}\n</stderr>");
+        let fixed = prefix.len()
+            + suffix.len()
+            + out_open.len()
+            + out_close.len()
+            + err_open.len()
+            + err_close.len();
+        let body_budget = MAX_ACTION_RESULT_PROMPT_BYTES.saturating_sub(fixed);
+        let stdout_budget = body_budget / 2;
+        let stderr_budget = body_budget.saturating_sub(stdout_budget);
+        let stdout = truncate_raw_text_for_budget(evidence.stdout.trim_end(), stdout_budget);
+        let stderr = truncate_raw_text_for_budget(evidence.stderr.trim_end(), stderr_budget);
+        return format!(
+            "{prefix}{out_open}{stdout}{out_close}{err_open}{stderr}{err_close}{suffix}"
+        );
+    }
+
+    let content = if stdout_nonempty {
+        evidence.stdout.as_str()
+    } else {
+        evidence.stderr.as_str()
+    };
+    let open = format!("<<<OUTPUT_{id}\n");
+    let close = format!("\nOUTPUT_{id}");
+    let fixed = prefix.len() + suffix.len() + open.len() + close.len();
+    let body_budget = MAX_ACTION_RESULT_PROMPT_BYTES.saturating_sub(fixed);
+    let content = truncate_raw_text_for_budget(content.trim_end(), body_budget);
+    format!("{prefix}{open}{content}{close}{suffix}")
 }
 
 pub(crate) fn render_xml_action_result(

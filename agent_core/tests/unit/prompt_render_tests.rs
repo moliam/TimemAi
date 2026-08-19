@@ -133,7 +133,7 @@ fn xml_protocol_uses_xml_style_prompt_delta_boundaries() {
 #[test]
 fn xml_action_result_preserves_name_escapes_xml_and_wraps_output_with_stable_id() {
     let rendered = render_xml_action_result(
-        "run_bash",
+        "readfile",
         Some(r#" check <diff> & "status" "#),
         "output <ready> & done",
         123,
@@ -149,26 +149,26 @@ fn xml_action_result_preserves_name_escapes_xml_and_wraps_output_with_stable_id(
     assert_eq!(
         rendered,
         format!(
-            "<action_result><run_bash name=\"check &lt;diff&gt; &amp; &quot;status&quot;\"><output_id_{expected_id}>output &lt;ready&gt; &amp; done</output_id_{expected_id}></run_bash></action_result>"
+            "<action_result><readfile name=\"check &lt;diff&gt; &amp; &quot;status&quot;\"><output_id_{expected_id}>output &lt;ready&gt; &amp; done</output_id_{expected_id}></readfile></action_result>"
         )
     );
 
     let repeated = render_xml_action_result(
-        "run_bash",
+        "readfile",
         Some(r#" check <diff> & "status" "#),
         "output <ready> & done",
         123,
     );
     assert_eq!(repeated, rendered);
 
-    let changed_time = render_xml_action_result("run_bash", None, "output <ready> & done", 124);
+    let changed_time = render_xml_action_result("readfile", None, "output <ready> & done", 124);
     assert!(!changed_time.contains(&format!("output_id_{expected_id}")));
 
-    let changed_output = render_xml_action_result("run_bash", None, "different", 123);
+    let changed_output = render_xml_action_result("readfile", None, "different", 123);
     assert!(!changed_output.contains(&format!("output_id_{expected_id}")));
 
     let whitespace_variant =
-        render_xml_action_result("run_bash", None, " output <ready> & done ", 123);
+        render_xml_action_result("readfile", None, " output <ready> & done ", 123);
     assert!(
         !whitespace_variant.contains(&format!("output_id_{expected_id}")),
         "the hash must use the original output bytes, even though display whitespace is trimmed"
@@ -185,13 +185,316 @@ fn xml_action_result_preserves_name_escapes_xml_and_wraps_output_with_stable_id(
 }
 
 #[test]
+fn xml_bash_result_uses_single_dynamic_output_block_for_one_stream() {
+    let evidence = BashResultEvidence {
+        stdout: "On branch main\nmodified: src/<App>.tsx\n```bash\necho \"</bash_result>\"\n```"
+            .to_string(),
+        stderr: String::new(),
+        exit_code: Some(0),
+        signal: None,
+        pid: None,
+    };
+    let rendered = render_xml_bash_result(
+        Some(r#" check <tree> & "status" "#),
+        ActionStatus::Completed,
+        &evidence,
+        123,
+    );
+    let id = bash_boundary_id(
+        r#"check <tree> & "status""#,
+        &evidence.stdout,
+        &evidence.stderr,
+        123,
+    );
+
+    assert_eq!(id.len(), 4);
+    assert!(id
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+    assert!(rendered.starts_with(
+        r#"<bash_result task="check &lt;tree&gt; &amp; &quot;status&quot;" status="success" exit_code="0">"#
+    ));
+    assert!(rendered.contains(&format!("<<<OUTPUT_{id}\n")));
+    assert!(rendered.contains("src/<App>.tsx"));
+    assert!(rendered.contains("echo \"</bash_result>\""));
+    assert!(rendered.ends_with(&format!("OUTPUT_{id}\n</bash_result>")));
+    assert_eq!(
+        render_xml_bash_result(
+            Some(r#" check <tree> & "status" "#),
+            ActionStatus::Completed,
+            &evidence,
+            123,
+        ),
+        rendered
+    );
+}
+
+#[test]
+fn xml_bash_result_handles_empty_and_stderr_only_streams() {
+    let empty_evidence = BashResultEvidence {
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: Some(0),
+        signal: None,
+        pid: None,
+    };
+    let empty = render_xml_bash_result(
+        Some("empty command"),
+        ActionStatus::Completed,
+        &empty_evidence,
+        10,
+    );
+    let empty_id = bash_boundary_id("empty command", "", "", 10);
+    assert_eq!(
+        empty,
+        format!(
+            "<bash_result task=\"empty command\" status=\"success\" exit_code=\"0\">\n<<<OUTPUT_{empty_id}\n\nOUTPUT_{empty_id}\n</bash_result>"
+        )
+    );
+
+    let stderr_evidence = BashResultEvidence {
+        stdout: String::new(),
+        stderr: "fatal <message>\n".to_string(),
+        exit_code: Some(2),
+        signal: None,
+        pid: None,
+    };
+    let stderr_only = render_xml_bash_result(
+        Some("stderr only"),
+        ActionStatus::Failed,
+        &stderr_evidence,
+        11,
+    );
+    let stderr_id = bash_boundary_id("stderr only", "", &stderr_evidence.stderr, 11);
+    assert!(
+        stderr_only.starts_with(r#"<bash_result task="stderr only" status="error" exit_code="2">"#)
+    );
+    assert!(stderr_only.contains(&format!(
+        "<<<OUTPUT_{stderr_id}\nfatal <message>\nOUTPUT_{stderr_id}"
+    )));
+    assert!(!stderr_only.contains("<stderr>"));
+}
+
+#[test]
+fn xml_bash_result_preserves_unicode_and_trims_only_trailing_stream_whitespace() {
+    let evidence = BashResultEvidence {
+        stdout: "开始\n界🙂\n\n".to_string(),
+        stderr: String::new(),
+        exit_code: Some(0),
+        signal: None,
+        pid: None,
+    };
+    let rendered = render_xml_bash_result(Some("unicode"), ActionStatus::Completed, &evidence, 12);
+    let id = bash_boundary_id("unicode", &evidence.stdout, "", 12);
+
+    assert!(rendered.contains(&format!("<<<OUTPUT_{id}\n开始\n界🙂\nOUTPUT_{id}")));
+    assert!(rendered.is_char_boundary(rendered.len()));
+    assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
+}
+
+#[test]
+fn xml_bash_result_uses_shared_dynamic_id_for_stdout_and_stderr() {
+    let evidence = BashResultEvidence {
+        stdout: "compiled".to_string(),
+        stderr: "test failed".to_string(),
+        exit_code: Some(1),
+        signal: None,
+        pid: None,
+    };
+    let rendered =
+        render_xml_bash_result(Some("build and test"), ActionStatus::Failed, &evidence, 456);
+    let id = bash_boundary_id("build and test", &evidence.stdout, &evidence.stderr, 456);
+
+    assert!(
+        rendered.starts_with(r#"<bash_result task="build and test" status="error" exit_code="1">"#)
+    );
+    assert!(rendered.contains(&format!(
+        "<stdout>\n<<<OUT_{id}\ncompiled\nOUT_{id}\n</stdout>"
+    )));
+    assert!(rendered.contains(&format!(
+        "<stderr>\n<<<ERR_{id}\ntest failed\nERR_{id}\n</stderr>"
+    )));
+}
+
+#[test]
+fn xml_bash_result_boundary_changes_for_time_content_task_and_marker_collision() {
+    let first = bash_boundary_id("task one", "same", "", 100);
+    assert_ne!(first, bash_boundary_id("task two", "same", "", 100));
+    assert_ne!(first, bash_boundary_id("task one", "different", "", 100));
+    assert_ne!(first, bash_boundary_id("task one", "same", "", 101));
+
+    let colliding = format!("payload contains OUTPUT_{first}");
+    let collision_safe = bash_boundary_id("task one", &colliding, "", 100);
+    assert_ne!(collision_safe, first);
+    let rendered = render_xml_bash_result(
+        Some("task one"),
+        ActionStatus::Completed,
+        &BashResultEvidence {
+            stdout: colliding,
+            stderr: String::new(),
+            exit_code: Some(0),
+            signal: None,
+            pid: None,
+        },
+        100,
+    );
+    assert!(rendered.contains(&format!("<<<OUTPUT_{collision_safe}")));
+    assert!(rendered.ends_with(&format!("OUTPUT_{collision_safe}\n</bash_result>")));
+}
+
+#[test]
+fn xml_bash_result_avoids_output_out_and_err_marker_collisions_in_either_stream() {
+    let first = bash_boundary_id("collision task", "seed", "error", 77);
+    for payload in [
+        format!("OUTPUT_{first}"),
+        format!("OUT_{first}"),
+        format!("ERR_{first}"),
+    ] {
+        let next = bash_boundary_id("collision task", &payload, "error", 77);
+        assert_ne!(next, first);
+        let rendered = render_xml_bash_result(
+            Some("collision task"),
+            ActionStatus::Failed,
+            &BashResultEvidence {
+                stdout: payload,
+                stderr: "error".to_string(),
+                exit_code: Some(1),
+                signal: None,
+                pid: None,
+            },
+            77,
+        );
+        assert!(rendered.contains(&format!("<<<OUT_{next}")));
+        assert!(rendered.contains(&format!("<<<ERR_{next}")));
+        assert!(rendered.ends_with("</bash_result>"));
+    }
+}
+
+#[test]
+fn xml_bash_result_single_stream_budget_boundary_stays_complete() {
+    let evidence = BashResultEvidence {
+        stdout: "界".repeat(MAX_ACTION_RESULT_PROMPT_BYTES),
+        stderr: String::new(),
+        exit_code: Some(0),
+        signal: None,
+        pid: None,
+    };
+    let rendered = render_xml_bash_result(
+        Some("large unicode"),
+        ActionStatus::Completed,
+        &evidence,
+        88,
+    );
+    let id = bash_boundary_id("large unicode", &evidence.stdout, "", 88);
+
+    assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
+    assert!(rendered.is_char_boundary(rendered.len()));
+    assert!(rendered
+        .starts_with(r#"<bash_result task="large unicode" status="success" exit_code="0">"#));
+    assert!(rendered.contains(&format!("<<<OUTPUT_{id}\n")));
+    assert!(rendered.ends_with(&format!("OUTPUT_{id}\n</bash_result>")));
+    assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
+}
+
+#[test]
+fn oversized_xml_bash_result_keeps_stream_tags_and_markers_complete() {
+    let evidence = BashResultEvidence {
+        stdout: format!(
+            "{} stdout tail words",
+            "x".repeat(MAX_ACTION_RESULT_PROMPT_BYTES)
+        ),
+        stderr: format!(
+            "{} stderr tail words",
+            "y".repeat(MAX_ACTION_RESULT_PROMPT_BYTES)
+        ),
+        exit_code: Some(1),
+        signal: None,
+        pid: None,
+    };
+    let rendered =
+        render_xml_bash_result(Some("large build"), ActionStatus::Failed, &evidence, 789);
+    let id = bash_boundary_id("large build", &evidence.stdout, &evidence.stderr, 789);
+
+    assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
+    assert!(
+        rendered.starts_with(r#"<bash_result task="large build" status="error" exit_code="1">"#)
+    );
+    assert!(rendered.contains(&format!("<stdout>\n<<<OUT_{id}\n")));
+    assert!(rendered.contains(&format!("\nOUT_{id}\n</stdout>")));
+    assert!(rendered.contains(&format!("<stderr>\n<<<ERR_{id}\n")));
+    assert!(rendered.contains(&format!("\nERR_{id}\n</stderr>")));
+    assert!(rendered.ends_with("</bash_result>"));
+    assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
+}
+
+#[test]
+fn xml_bash_result_renders_running_timeout_cancelled_and_signal_metadata() {
+    let running = render_xml_bash_result(
+        Some("background server"),
+        ActionStatus::BackgroundRunning,
+        &BashResultEvidence {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            signal: None,
+            pid: Some(4321),
+        },
+        1,
+    );
+    assert!(running
+        .starts_with(r#"<bash_result task="background server" status="running" pid="4321">"#));
+
+    let timeout = render_xml_bash_result(
+        Some("slow command"),
+        ActionStatus::Timeout,
+        &BashResultEvidence {
+            stdout: "partial".to_string(),
+            stderr: String::new(),
+            exit_code: None,
+            signal: None,
+            pid: Some(9876),
+        },
+        2,
+    );
+    assert!(timeout.starts_with(r#"<bash_result task="slow command" status="timeout" pid="9876">"#));
+
+    let cancelled = render_xml_bash_result(
+        Some("cancel command"),
+        ActionStatus::Cancelled,
+        &BashResultEvidence {
+            stdout: String::new(),
+            stderr: "cancelled".to_string(),
+            exit_code: None,
+            signal: None,
+            pid: None,
+        },
+        3,
+    );
+    assert!(cancelled.starts_with(r#"<bash_result task="cancel command" status="cancelled">"#));
+
+    let signal = render_xml_bash_result(
+        Some("crash command"),
+        ActionStatus::Failed,
+        &BashResultEvidence {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            signal: Some(11),
+            pid: None,
+        },
+        4,
+    );
+    assert!(signal.starts_with(r#"<bash_result task="crash command" status="error" signal="11">"#));
+}
+
+#[test]
 fn oversized_xml_action_result_is_truncated_inside_output_id_envelope() {
     let result = format!(
         "{}界 <tag> & tail words",
         "&".repeat(MAX_ACTION_RESULT_PROMPT_BYTES)
     );
     let rendered = render_xml_action_result(
-        "run_bash",
+        "readfile",
         Some(r#"inspect <large> & "escaped" output"#),
         &result,
         789,
@@ -200,10 +503,10 @@ fn oversized_xml_action_result_is_truncated_inside_output_id_envelope() {
 
     assert!(rendered.len() <= MAX_ACTION_RESULT_PROMPT_BYTES);
     assert!(rendered.starts_with(&format!(
-        r#"<action_result><run_bash name="inspect &lt;large&gt; &amp; &quot;escaped&quot; output"><output_id_{output_id}>"#
+        r#"<action_result><readfile name="inspect &lt;large&gt; &amp; &quot;escaped&quot; output"><output_id_{output_id}>"#
     )));
     assert!(rendered.ends_with(&format!(
-        "</output_id_{output_id}></run_bash></action_result>"
+        "</output_id_{output_id}></readfile></action_result>"
     )));
     assert!(rendered.contains("words truncated. Generate more actions if necessary !!!"));
     assert!(!rendered.contains("<tag>"));
