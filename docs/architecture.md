@@ -348,7 +348,7 @@ format is JSONL with explicit `message` and `event` records so a future host can
 page and replay the same data. The first resume implementation intentionally
 does not persist live Worker/Context runtime state or running action queues:
 when a Session is restored, the host creates a fresh primary Worker and Context,
-then injects one `## SYSTEM` notice pointing the model to the raw chat history
+then injects one `## RUNTIME` notice pointing the model to the raw chat history
 file and its exact format. The model should read that file only when needed for
 the current task, using bounded tools such as `tail`, `rg`, `jq`, or short
 scripts instead of loading the whole file into prompt context. Web restores the
@@ -837,7 +837,7 @@ new user input or mid-turn supplement
 ## {{ASSSISTANT_ID}}
 raw model output recorded for continuity by default
 
-## SYSTEM
+## RUNTIME
 The following are results of {{ASSSISTANT_ID}} newly initiated actions:
 
 Action result: run_bash
@@ -890,16 +890,16 @@ Runtime shrink review and context maintenance should use `delta_id`:
   pending prompt components, the candidate Delta, and conservative render
   overhead. If that projection exceeds 95% of `TIMEM_MAX_LLM_INPUT`, core does
   not commit that candidate Delta or same-batch action-result components. It
-  commits a bounded SYSTEM note reporting the output size and remaining
+  commits a bounded RUNTIME note reporting the output size and remaining
   context budget instead. Non-ASCII action output is conservatively estimated at no
   less than one token per character instead of using the general `chars / 4`
   approximation. `build_next_prompt` applies the same guard to pending runtime
   action results such as memory precheck output while retaining the new USER
-  input and unrelated SYSTEM metadata.
+  input and unrelated RUNTIME metadata.
 - A model service may still reject input because its tokenizer or effective limit
   differs from the local estimate. For explicit `E2BIG`, HTTP 413, or
   input/context-length errors, session runtime removes the newest Delta that
-  contains action results, replaces it with the same bounded SYSTEM guidance,
+  contains action results, replaces it with the same bounded RUNTIME guidance,
   records `model_input_overflow_recovery`, and retries the model once through
   the normal turn loop. If no action-result Delta remains, the error stops the
   turn; this prevents an unbounded recovery loop and avoids silently deleting
@@ -924,7 +924,7 @@ logical prompt stream
 Delta blocks make the rendered boundary explicit:
 
 - The model can audit evidence because runtime action results are visible in
-  rendered `## SYSTEM` blocks.
+  rendered `## RUNTIME` blocks.
 - The runtime can keep model service cache behavior stable by isolating `prompt_0`.
 - Debug logs can identify which event introduced a piece of context.
 - Protocol repair can be represented as another runtime delta instead of a
@@ -952,7 +952,8 @@ Important invariants:
   to exact logical deltas.
 - Valid model-visible role blocks are `## USER`, the current assistant/session-worker
   heading represented as `## {{ASSSISTANT_ID}}` in prompt examples, and
-  `## SYSTEM`. Runtime replaces it with the actual worker role, such as `## ID0`.
+  `## RUNTIME`. Runtime replaces the assistant placeholder with the actual worker
+  role, such as `## ID0`.
 - The static prefix is sent through model service system-role/system-field support
   when available. Dynamic deltas go in the user message.
 - Anthropic-protocol requests attach `cache_control: {"type": "ephemeral"}` to
@@ -1139,7 +1140,7 @@ dynamic prompt refs. If all refs exist, it writes offloaded deltas into scratch,
 hides discarded/offloaded refs, and appends the summary as a new
 `context_compact` dynamic delta. The next prompt delta records the scratch id for
 offloaded deltas. When the worker currently has applied MCP tools, the same new
-SYSTEM delta also carries one bounded, deterministic snapshot of active MCP
+RUNTIME delta also carries one bounded, deterministic snapshot of active MCP
 action names and server labels. It contains no endpoint, header, environment, or
 credential data; complete argument definitions remain in the current static
 capability catalog. Pending Web MCP edits are excluded until the next new-turn
@@ -1186,7 +1187,7 @@ produce a protocol repair slice instead of being bridged to an old tool.
 ### Action Result Prompt Component
 
 After an action runs, `agent_core` appends the action result into the current
-runtime increment's prompt delta as a `## SYSTEM` block. That system evidence is
+runtime increment's prompt delta as a `## RUNTIME` block. That runtime evidence is
 the only action-result evidence the model may claim it has seen.
 
 Example:
@@ -1196,7 +1197,7 @@ Example:
 delta_id: pd_4
 time: 1782200001000
 
-## SYSTEM
+## RUNTIME
 The following are results of {{ASSSISTANT_ID}} newly initiated actions:
 
 Action result: memmgr
@@ -1225,14 +1226,14 @@ Model output is untrusted. The runtime validates:
 - SQL and bash actions pass their own safety checks.
 
 If validation fails, the runtime builds a temporary, non-cache-controlled repair
-delta containing the malformed assistant response and a `## SYSTEM` block with
+delta containing the malformed assistant response and a `## RUNTIME` block with
 the concrete protocol error:
 
 ```text
 ## <ASSSISTANT_ID>
 <the malformed model response>
 
-## SYSTEM
+## RUNTIME
 <ASSSISTANT_ID>'s previous response is not protocol compliant.
 error: invalid_xml_response_root
 
@@ -1244,7 +1245,7 @@ repair attempt emits a structured repair topic for hosts to render, and each
 attempt is audited. In addition to the generic `model_repair_request` API audit
 event, core appends a realtime diagnostic record to
 `audit/api_output_repair.json`. That record contains the session/turn id, issue,
-malformed assistant response, SYSTEM repair message shown to the model, and a
+malformed assistant response, RUNTIME repair message shown to the model, and a
 human-readable rendered block:
 
 ```text
@@ -1252,7 +1253,7 @@ human-readable rendered block:
 ## assistant:
 <malformed model response>
 
-## SYSTEM
+## RUNTIME
 <repair message>
 ```
 
@@ -1318,7 +1319,7 @@ memory work remains `memmgr`.
 
 Runtime configuration mutation and model notification are separate concerns.
 Hosts update the owning Session worker; Core coalesces any number of successful
-changes into one pending SYSTEM notice consumed by the next model interaction.
+changes into one pending RUNTIME notice consumed by the next model interaction.
 The notice is never repeated once per changed field.
 
 ### Read-only SQL
@@ -1377,7 +1378,7 @@ Long-running shell work that should survive later prompt deltas should use
 `timeout_ms`. Runtime returns a process id and tracks it in the session
 running-pid set. The start/timeout transition is present in the action result
 once; later exits are injected once as `RUNNING_JOB_UPDATE`. When
-discard/offload/compact references prompt deltas whose SYSTEM section recorded
+discard/offload/compact references prompt deltas whose RUNTIME section recorded
 a still-running job pid, runtime refreshes those jobs at prompt-build time and
 adds a `RUNNING JOB LIST` snapshot only for pids that are still running. The
 model inspects or stops those jobs through ordinary `run_bash` commands such as

@@ -76,7 +76,7 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   repair issue classification, repair counter updates, repair prompt-slice
   injection, generic repair audit events, and realtime
   `audit/api_output_repair.json` diagnostics containing malformed output plus
-  the SYSTEM repair message.
+  the RUNTIME repair message.
 - Turn supporting-context assembly, including runtime identity and host-provided
   additional context. Hosts provide source values; core owns how they are
   combined for the model.
@@ -84,7 +84,7 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   structured turn input. Core consumes these values when assembling model
   context; reusable runtime loops should not hard-code a terminal host identity.
 - Memory, scratch, raw chat, context shrink/compact, and conflict handling.
-  A successful compact re-injects one bounded SYSTEM snapshot of currently
+  A successful compact re-injects one bounded RUNTIME snapshot of currently
   applied MCP actions when any are active; pending host configuration and MCP
   secrets are never included.
 - Cross-host Session persistence schemas. Core owns `StoredSession`,

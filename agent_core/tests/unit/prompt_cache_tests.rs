@@ -26,7 +26,7 @@ fn cache_planner_splits_xml_static_prompt_boundary_from_xml_deltas() {
 fn cache_planner_does_not_treat_dynamic_tool_output_as_static_prompt() {
     let prompt = r#"<prompt_delta id="pd_31" time_ms="1">
 
-## SYSTEM
+## RUNTIME
 agent_core/tests/unit/prompt_render_tests.rs:86: assert!(rendered.starts_with("<Timem System Prompt>\n"));
 agent_core/tests/unit/prompt_render_tests.rs:89: assert!(rendered.ends_with("\n</Timem System Prompt>"));
 
@@ -51,7 +51,7 @@ STATIC XML
 </Timem System Prompt>
 <prompt_delta id="pd_31" time_ms="1">
 
-## SYSTEM
+## RUNTIME
 assert!(rendered.starts_with("<Timem System Prompt>\n"));
 assert!(rendered.ends_with("\n</Timem System Prompt>"));
 
@@ -330,7 +330,7 @@ fn appending_delta_preserves_existing_cache_block_text_and_order() {
                 "[BEGIN DELTA]\ndelta_id: pd_{idx}\n\n## USER\nstable delta {idx}\n[END DELTA]\n"
             ));
         }
-        prompt.push_str("\n");
+        prompt.push('\n');
         prompt.push_str(crate::prompt_render::RESPONSE_TRAILER);
         prompt
     }
@@ -372,7 +372,7 @@ fn appending_delta_keeps_model_visible_token_text_as_a_prefix_before_trailer() {
                 "[BEGIN DELTA]\ndelta_id: pd_{idx}\n\n## USER\nstable delta {idx}\n[END DELTA]\n"
             ));
         }
-        prompt.push_str("\n");
+        prompt.push('\n');
         prompt.push_str(crate::prompt_render::RESPONSE_TRAILER);
         prompt
     }

@@ -157,7 +157,7 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   values, not decide how runtime identity and additional context are combined.
 - Session prompt component assembly. Shell may submit user input, user
   supplements, and host-provided context values through core APIs, but it must
-  not build dynamic prompt deltas itself or format `## USER` / `## SYSTEM` /
+  not build dynamic prompt deltas itself or format `## USER` / `## RUNTIME` /
   assistant blocks. The per-session pending component buffer and
   `build_next_prompt()` belong to `agent_core`.
 - Long-lived runtime state that another UI would need to reproduce.
