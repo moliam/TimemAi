@@ -181,10 +181,21 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
         tail_out: false,
     }
     .to_action_outcome("run_bash");
-    assert_eq!(timeout.status, ActionStatus::Timeout);
+    assert_eq!(timeout.status, ActionStatus::BackgroundRunning);
     let evidence = timeout.bash_result.expect("timeout Bash evidence");
     assert_eq!(evidence.pid, Some(4321));
+    assert!(evidence.timed_out);
+    assert_eq!(evidence.pid_kind.as_deref(), Some(runtime_child_pid_kind()));
     assert_eq!(evidence.error_type, None);
+
+    let ended_timeout = bash_error("sleep 10", "timeout").to_action_outcome("run_bash");
+    assert_eq!(ended_timeout.status, ActionStatus::Timeout);
+    let evidence = ended_timeout
+        .bash_result
+        .expect("ended timeout Bash evidence");
+    assert_eq!(evidence.pid, None);
+    assert!(!evidence.timed_out);
+    assert_eq!(evidence.pid_kind, None);
 
     let running = BashCommandOutput {
         command: "build".to_string(),
@@ -200,6 +211,8 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
     assert_eq!(running.status, ActionStatus::BackgroundRunning);
     let evidence = running.bash_result.expect("running Bash evidence");
     assert_eq!(evidence.pid, Some(9876));
+    assert!(!evidence.timed_out);
+    assert_eq!(evidence.pid_kind.as_deref(), Some(runtime_child_pid_kind()));
     assert_eq!(evidence.error_type, None);
 }
 
@@ -1126,6 +1139,64 @@ fn shutdown_ignores_shell_job_record_owned_by_another_process() {
     assert!(!status_file.exists());
     assert_eq!(unsafe { libc::kill(libc::getpid(), 0) }, 0);
 
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn session_cancel_and_running_list_ignore_foreign_runtime_records() {
+    let dir = tmp_memory_dir("foreign_session_record");
+    let store = FileShellJobStore::new(&dir);
+    let status_file = dir.join("foreign-session.status");
+    let record = ShellJobRecord {
+        id: "foreign-session-job".to_string(),
+        created_at_ms: now_ms(),
+        kind: "timeout".to_string(),
+        session_id: "shared-session".to_string(),
+        turn_id: "foreign-turn".to_string(),
+        pid: std::process::id(),
+        owner_id: Some("foreign-runtime-owner".to_string()),
+        command: "must-not-be-exposed".to_string(),
+        cwd: dir.display().to_string(),
+        output_file: dir.join("foreign-session.out").display().to_string(),
+        stderr_file: dir.join("foreign-session.err").display().to_string(),
+        status_file: status_file.display().to_string(),
+        tail_out: false,
+    };
+    store.append(&record).unwrap();
+
+    assert!(store.running_for_session("shared-session").is_empty());
+    assert!(store.running_job_list_context("shared-session").is_none());
+    assert!(store
+        .cancel_unfinished_for_session("shared-session")
+        .is_empty());
+    assert!(!status_file.exists());
+    assert_eq!(unsafe { libc::kill(libc::getpid(), 0) }, 0);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_shell_job_pid_is_a_distinct_runtime_child_process_group() {
+    let dir = tmp_memory_dir("managed_child_group");
+    let store = FileShellJobStore::new(&dir);
+    let started =
+        store.spawn_background_outcome("sleep 30", &dir, "managed-session", "managed-turn", false);
+    let evidence = started.bash_result.expect("managed child evidence");
+    let pid = evidence.pid.expect("managed child pid");
+
+    assert_ne!(pid, std::process::id());
+    assert!(is_runtime_child_pid(pid));
+    assert_eq!(
+        evidence.pid_kind.as_deref(),
+        Some("runtime_child_process_group")
+    );
+
+    assert_eq!(
+        store.cancel_unfinished_for_session("managed-session").len(),
+        1
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 

@@ -193,6 +193,8 @@ fn xml_bash_result_uses_single_dynamic_output_block_for_one_stream() {
         exit_code: Some(0),
         signal: None,
         pid: None,
+        timed_out: false,
+        pid_kind: None,
         error_type: None,
     };
     let rendered = render_xml_bash_result(
@@ -238,6 +240,8 @@ fn xml_bash_result_handles_empty_and_stderr_only_streams() {
         exit_code: Some(0),
         signal: None,
         pid: None,
+        timed_out: false,
+        pid_kind: None,
         error_type: None,
     };
     let empty = render_xml_bash_result(
@@ -260,6 +264,8 @@ fn xml_bash_result_handles_empty_and_stderr_only_streams() {
         exit_code: Some(2),
         signal: None,
         pid: None,
+        timed_out: false,
+        pid_kind: None,
         error_type: None,
     };
     let stderr_only = render_xml_bash_result(
@@ -285,6 +291,8 @@ fn xml_bash_result_preserves_unicode_and_trims_only_trailing_stream_whitespace()
         exit_code: Some(0),
         signal: None,
         pid: None,
+        timed_out: false,
+        pid_kind: None,
         error_type: None,
     };
     let rendered = render_xml_bash_result(Some("unicode"), ActionStatus::Completed, &evidence, 12);
@@ -303,6 +311,8 @@ fn xml_bash_result_uses_shared_dynamic_id_for_stdout_and_stderr() {
         exit_code: Some(1),
         signal: None,
         pid: None,
+        timed_out: false,
+        pid_kind: None,
         error_type: None,
     };
     let rendered =
@@ -338,6 +348,8 @@ fn xml_bash_result_boundary_changes_for_time_content_task_and_marker_collision()
             exit_code: Some(0),
             signal: None,
             pid: None,
+            timed_out: false,
+            pid_kind: None,
             error_type: None,
         },
         100,
@@ -365,6 +377,8 @@ fn xml_bash_result_avoids_output_out_and_err_marker_collisions_in_either_stream(
                 exit_code: Some(1),
                 signal: None,
                 pid: None,
+                timed_out: false,
+                pid_kind: None,
                 error_type: None,
             },
             77,
@@ -383,6 +397,8 @@ fn xml_bash_result_single_stream_budget_boundary_stays_complete() {
         exit_code: Some(0),
         signal: None,
         pid: None,
+        timed_out: false,
+        pid_kind: None,
         error_type: None,
     };
     let rendered = render_xml_bash_result(
@@ -416,6 +432,8 @@ fn oversized_xml_bash_result_keeps_stream_tags_and_markers_complete() {
         exit_code: Some(1),
         signal: None,
         pid: None,
+        timed_out: false,
+        pid_kind: None,
         error_type: None,
     };
     let rendered =
@@ -445,27 +463,53 @@ fn xml_bash_result_renders_running_timeout_cancelled_and_signal_metadata() {
             exit_code: None,
             signal: None,
             pid: Some(4321),
+            timed_out: false,
+            pid_kind: Some("runtime_child_process_group".to_string()),
             error_type: None,
         },
         1,
     );
-    assert!(running
-        .starts_with(r#"<bash_result task="background server" status="running" pid="4321">"#));
+    assert!(running.starts_with(
+        r#"<bash_result task="background server" status="running" pid="4321" pid_kind="runtime_child_process_group">"#
+    ));
 
-    let timeout = render_xml_bash_result(
+    let running_after_timeout = render_xml_bash_result(
         Some("slow command"),
-        ActionStatus::Timeout,
+        ActionStatus::BackgroundRunning,
         &BashResultEvidence {
             stdout: "partial".to_string(),
             stderr: String::new(),
             exit_code: None,
             signal: None,
             pid: Some(9876),
+            timed_out: true,
+            pid_kind: Some("runtime_child_process_group".to_string()),
             error_type: None,
         },
         2,
     );
-    assert!(timeout.starts_with(r#"<bash_result task="slow command" status="timeout" pid="9876">"#));
+    assert!(running_after_timeout.starts_with(
+        r#"<bash_result task="slow command" status="running" pid="9876" timed_out="true" pid_kind="runtime_child_process_group">"#
+    ));
+
+    let timeout = render_xml_bash_result(
+        Some("terminated on timeout"),
+        ActionStatus::Timeout,
+        &BashResultEvidence {
+            stdout: "partial".to_string(),
+            stderr: String::new(),
+            exit_code: None,
+            signal: None,
+            pid: None,
+            timed_out: false,
+            pid_kind: None,
+            error_type: None,
+        },
+        3,
+    );
+    assert!(timeout.starts_with(r#"<bash_result task="terminated on timeout" status="timeout">"#));
+    assert!(!timeout.contains(" pid="));
+    assert!(!timeout.contains(" timed_out="));
 
     let cancelled = render_xml_bash_result(
         Some("cancel command"),
@@ -476,6 +520,8 @@ fn xml_bash_result_renders_running_timeout_cancelled_and_signal_metadata() {
             exit_code: None,
             signal: None,
             pid: None,
+            timed_out: false,
+            pid_kind: None,
             error_type: Some("Cancelled".to_string()),
         },
         3,
@@ -493,6 +539,8 @@ fn xml_bash_result_renders_running_timeout_cancelled_and_signal_metadata() {
             exit_code: None,
             signal: Some(11),
             pid: None,
+            timed_out: false,
+            pid_kind: None,
             error_type: None,
         },
         4,
@@ -513,6 +561,8 @@ fn xml_bash_result_escapes_error_type_without_changing_finished_lifecycle() {
             exit_code: None,
             signal: None,
             pid: None,
+            timed_out: false,
+            pid_kind: None,
             error_type: Some(r#"Invalid<&"'"#.to_string()),
         },
         5,

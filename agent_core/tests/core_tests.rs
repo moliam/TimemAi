@@ -590,6 +590,81 @@ fn xml_readfile_result_reports_file_name_matcher_and_line_range_before_content()
 }
 
 #[test]
+fn xml_timeout_still_running_uses_orthogonal_lifecycle_evidence() {
+    let mut core = AgentCore::new(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("xml_timeout_still_running"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Xml);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("run a task past the wait timeout", None);
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        content: r#"<response>
+  <actions>
+    <run_bash name="wait briefly for managed task" timeout_ms="100"><cmd>sleep 10; printf late</cmd></run_bash>
+  </actions>
+</response>"#
+            .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected XML timed-out running Bash result, got {other:?}"),
+    };
+
+    let result_start = prompt
+        .find(r#"<bash_result task="wait briefly for managed task" status="running" pid=""#)
+        .expect("running Bash result with managed pid");
+    let result = &prompt[result_start..];
+    assert!(result.contains(r#"timed_out="true""#), "{prompt}");
+    #[cfg(unix)]
+    assert!(
+        result.contains(r#"pid_kind="runtime_child_process_group""#),
+        "{prompt}"
+    );
+    #[cfg(not(unix))]
+    assert!(
+        result.contains(r#"pid_kind="runtime_child_process""#),
+        "{prompt}"
+    );
+    assert!(
+        !result
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .contains(r#"status="timeout""#),
+        "{prompt}"
+    );
+
+    let pid = result
+        .split_once(r#" pid=""#)
+        .and_then(|(_, rest)| rest.split('"').next())
+        .expect("managed pid")
+        .to_string();
+
+    let cleanup = format!(
+        r#"<response><actions><run_bash name="stop managed task" timeout_ms="1000"><cmd>kill {pid}</cmd></run_bash></actions></response>"#
+    );
+    let cleanup_prompt = match core.apply_model_response(LlmResponse {
+        content: cleanup,
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected cleanup action result, got {other:?}"),
+    };
+    assert!(
+        cleanup_prompt
+            .contains(r#"<bash_result task="stop managed task" status="finished" exit_code="0">"#),
+        "{cleanup_prompt}"
+    );
+}
+
+#[test]
 fn xml_parallel_run_bash_results_use_action_names_without_repeating_commands() {
     let mut core = AgentCore::new(
         "STATIC",

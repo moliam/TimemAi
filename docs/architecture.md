@@ -1217,9 +1217,19 @@ blocks sharing one four-digit lowercase hexadecimal hash. The hash derives
 from task, original stdout, original stderr, generation time, and collision
 salt; runtime rejects a candidate whose marker already appears in either
 stream. The `status` attribute is lifecycle-only: `finished`, `timeout`, or
-`running`. Known exit code, Unix signal, still-running pid, and Runtime
-`error_type` are separate attributes; Runtime does not encode process or
-business success as the lifecycle status. Bounded truncation occurs inside
+`running`. Waiting timeout and process liveness are orthogonal: a managed
+child that remains alive is rendered as `status="running" timed_out="true"`,
+whereas `status="timeout"` means no task remains running. Known exit code,
+Unix signal, still-running pid, PID kind, and Runtime `error_type` are separate
+attributes; Runtime does not encode process or business success as the
+lifecycle status.
+
+A model-visible Bash PID must belong to a child launched and tracked by the
+current Runtime owner. Unix jobs are placed in independent child process
+groups, and the process-group leader PID is distinct from Timem's process and
+process group. Session cancellation, running-job refresh, and model context
+filter out historical or foreign-owner records before inspecting or
+terminating a PID. Bounded truncation occurs inside
 stream boundaries and preserves all closing
 markers and XML result tags. Background and timeout job records write stdout
 and stderr to separate files; historical merged records are treated as stdout
