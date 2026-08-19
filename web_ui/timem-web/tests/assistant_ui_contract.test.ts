@@ -1280,6 +1280,9 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('cancelAllPendingSessionApiKeyCommands(');
     expect(source).toContain('Your input was kept; reconnect and try again.');
     expect(source).not.toContain('onApiKeyUpdate("")}>Clear</button>');
+    expect(source).toContain('disabled={!session || credentialPending} readOnly={sessionWorking}');
+    expect(source).toContain('disabled={!session || credentialPending} onClick={toggleApiKey}');
+    expect(source).toContain('API key is read-only while working; you can still reveal and copy it.');
     expect(source).toContain('Finish or stop the active task before changing credentials.');
     expect(styles).toContain('.session-credential-settings');
     expect(styles).toContain('.session-credential-control');

@@ -89,8 +89,11 @@ describe("session API key presentation", () => {
 
 
 describe("active session runtime controls", () => {
-  it("keeps model settings editable while credentials remain locked during work", () => {
-    expect(mainSource).toContain('disabled={!session || credentialPending || sessionWorking}');
+  it("keeps working API keys revealable and copyable but prevents credential changes", () => {
+    expect(mainSource).toContain('disabled={!session || credentialPending} readOnly={sessionWorking}');
+    expect(mainSource).toContain('disabled={!session || credentialPending} onClick={toggleApiKey}');
+    expect(mainSource).toContain('const canSaveApiKey = !!session && apiKeyDirty && !credentialPending && !sessionWorking;');
+    expect(mainSource).not.toContain('disabled={!session || credentialPending || sessionWorking}');
     expect(mainSource).toContain('disabled={pending}');
     expect(mainSource).toContain('disabled={pending || !dirty}');
     expect(mainSource).not.toContain('disabled={pending || sessionWorking}');
