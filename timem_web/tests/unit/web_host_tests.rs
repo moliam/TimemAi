@@ -8066,7 +8066,7 @@ fn manual_toolgen_uses_system_only_without_optional_user_guidance() {
     assert!(!prompt.contains("Completed task:"));
     assert!(!prompt.contains("Completed task result:"));
     assert!(!prompt.contains("Observed action evidence:"));
-    assert!(prompt.contains("## ToolGen test"));
+    assert!(prompt.contains(r#"<ASSISTANT id="ToolGen test">"#));
     assert!(!prompt.contains("ToolGen test_TOOLGEN"));
     let marker = "[TOOL_GEN_TASK] Please extract the reusable function";
     let marker_at = prompt.find(marker).unwrap();
@@ -8074,7 +8074,9 @@ fn manual_toolgen_uses_system_only_without_optional_user_guidance() {
     let delta_end =
         prompt[marker_at..].find("</prompt_delta>").unwrap() + marker_at + "</prompt_delta>".len();
     let toolgen_delta = &prompt[delta_start..delta_end];
-    assert!(toolgen_delta.contains("## RUNTIME"));
+    assert!(toolgen_delta.contains("<RUNTIME>"));
+    assert!(!toolgen_delta.contains("<USER>"));
+    assert!(!toolgen_delta.contains("## RUNTIME"));
     assert!(!toolgen_delta.contains("## USER"));
 
     let sessions = state.sessions.lock().unwrap();
@@ -8127,13 +8129,15 @@ fn manual_toolgen_adds_optional_guidance_as_user_component() {
         + guidance_at
         + "</prompt_delta>".len();
     let toolgen_delta = &prompt[delta_start..delta_end];
-    assert!(toolgen_delta.contains("## USER"));
-    let system_at = toolgen_delta.find("## RUNTIME").unwrap();
-    let user_at = toolgen_delta.find("## USER").unwrap();
+    assert!(toolgen_delta.contains("<USER>"));
+    let runtime_at = toolgen_delta.find("<RUNTIME>").unwrap();
+    let user_at = toolgen_delta.find("<USER>").unwrap();
     assert!(
-        system_at < user_at,
-        "the fixed ToolGen SYSTEM instruction must precede optional USER guidance"
+        runtime_at < user_at,
+        "the fixed ToolGen RUNTIME instruction must precede optional USER guidance"
     );
+    assert!(!toolgen_delta.contains("## RUNTIME"));
+    assert!(!toolgen_delta.contains("## USER"));
 }
 
 #[test]

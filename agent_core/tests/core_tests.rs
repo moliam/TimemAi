@@ -465,9 +465,12 @@ fn extracted_fields_replay_keeps_the_complete_accepted_xml_response() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(prompt.contains("## Session Assistant"));
-    assert!(prompt.contains(response));
-    assert_eq!(prompt.matches("<response>").count(), 1);
+    assert!(prompt.contains(r#"<ASSISTANT id="Session Assistant">"#));
+    assert!(prompt.contains(
+        "&lt;response&gt;\n  &lt;free_talk&gt;Inspecting the runtime.&lt;/free_talk&gt;"
+    ));
+    assert_eq!(prompt.matches("<response>").count(), 0);
+    assert_eq!(prompt.matches("&lt;response&gt;").count(), 1);
     assert!(prompt.contains(
         r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#
     ));
@@ -837,8 +840,10 @@ discard-after"#;
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("selected larger response"));
-    assert!(prompt.contains(r#"<self_tool name="inspect runtime parameters" type="params"/>"#));
-    assert!(!prompt.contains(r#"<self_tool name="inspect runtime paths" type="path"/>"#));
+    assert!(
+        prompt.contains(r#"&lt;self_tool name="inspect runtime parameters" type="params"/&gt;"#)
+    );
+    assert!(!prompt.contains(r#"&lt;self_tool name="inspect runtime paths" type="path"/&gt;"#));
     assert!(!prompt.contains("discard-before"));
     assert!(!prompt.contains("between-roots"));
     assert!(!prompt.contains("discard-after"));
@@ -1330,10 +1335,10 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     assert_eq!(delta_ids, vec!["pd_1", "pd_2"]);
     assert_eq!(prompt.matches("<prompt_delta ").count(), 2);
     assert_eq!(prompt.matches("</prompt_delta>").count(), 2);
-    assert!(prompt.contains("## TIMEM_ASSISTANT"));
+    assert!(prompt.contains(r#"<ASSISTANT id="TIMEM_ASSISTANT">"#));
     assert!(prompt.contains("先分析"));
-    assert!(prompt.contains("<free_talk>先分析</free_talk><finish_confirm>"));
-    assert!(prompt.contains("</finish_confirm><final_answer>结论</final_answer>"));
+    assert!(prompt.contains("&lt;free_talk&gt;先分析&lt;/free_talk&gt;&lt;finish_confirm&gt;"));
+    assert!(prompt.contains("&lt;/finish_confirm&gt;&lt;final_answer&gt;结论&lt;/final_answer&gt;"));
     assert!(!prompt.contains("All previous pending open tasks are completed."));
 }
 

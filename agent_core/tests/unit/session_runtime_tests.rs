@@ -1070,12 +1070,12 @@ discard-after"#,
     assert_eq!(outcome.stats.repair_calls, 0);
     assert_eq!(outcome.stats.tool_calls, 1);
     assert_eq!(model.prompts.len(), 2);
-    assert!(model.prompts[1].contains("## TIMEM_ASSISTANT"));
-    assert!(model.prompts[1].contains("<response>"));
+    assert!(model.prompts[1].contains(r#"<ASSISTANT id="TIMEM_ASSISTANT">"#));
+    assert!(model.prompts[1].contains("&lt;response&gt;"));
     assert!(model.prompts[1].contains(
-        r#"<memmgr name="search raw chat fixture" type="raw_chat" op="search" limit="1">"#
+        r#"&lt;memmgr name="search raw chat fixture" type="raw_chat" op="search" limit="1"&gt;"#
     ));
-    assert!(!model.prompts[1].contains("<free_talk>search memory</free_talk>"));
+    assert!(!model.prompts[1].contains("&lt;free_talk&gt;search memory&lt;/free_talk&gt;"));
     assert!(!model.prompts[1].contains("discard-after"));
     assert!(model.prompts[1].contains(r#"<memmgr_result task=""#));
     assert!(!model.prompts[1].contains("ERROR: The previous XML response had content outside"));
@@ -2687,12 +2687,12 @@ fn session_turn_defaults_to_raw_assistant_output_replay() {
     assert_eq!(second.text, "second answer");
 
     let prompt = &second_model.prompts[0];
-    let assistant = prompt.find("## Ai4").unwrap();
+    let assistant = prompt.find(r#"<ASSISTANT id="Ai4">"#).unwrap();
     let raw = prompt
-        .find("<free_talk>raw planning note</free_talk>")
+        .find("&lt;free_talk&gt;raw planning note&lt;/free_talk&gt;")
         .unwrap();
-    assert!(prompt.contains("<finish_confirm>"));
-    assert!(prompt.contains("<final_answer>visible answer</final_answer>"));
+    assert!(prompt.contains("&lt;finish_confirm&gt;"));
+    assert!(prompt.contains("&lt;final_answer&gt;visible answer&lt;/final_answer&gt;"));
     let user = prompt.find("second user input").unwrap();
     assert!(assistant < raw);
     assert!(raw < user);

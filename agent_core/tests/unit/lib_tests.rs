@@ -96,21 +96,21 @@ fn build_next_prompt_orders_pending_components_without_role_merging() {
     );
 
     let prompt = core.build_next_prompt();
-    let system_first = prompt
-        .find("## RUNTIME\n\nAction result: run_bash")
-        .unwrap();
+    let system_first = prompt.find("<RUNTIME>\n\nAction result: run_bash").unwrap();
     let action_result = prompt.find("Action result: run_bash").unwrap();
-    let user = prompt.find("## USER\n\nnew input").unwrap();
-    let system_second = prompt.find("## RUNTIME\n\nfound something new").unwrap();
-    let assistant = prompt.find("## Ai4\n\nassistant note").unwrap();
+    let user = prompt.find("<USER>\n\nnew input").unwrap();
+    let system_second = prompt.find("<RUNTIME>\n\nfound something new").unwrap();
+    let assistant = prompt
+        .find("<ASSISTANT id=\"Ai4\">\n\nassistant note")
+        .unwrap();
 
     assert!(system_first < user);
     assert!(system_first < action_result);
     assert!(action_result < user);
     assert!(user < system_second);
     assert!(system_second < assistant);
-    assert!(prompt.matches("## RUNTIME").count() >= 2);
-    let dynamic_prompt = prompt.split("[BEGIN DELTA]").nth(1).unwrap_or("");
+    assert!(prompt.matches("<RUNTIME>").count() >= 2);
+    let dynamic_prompt = prompt.split("<prompt_delta ").nth(1).unwrap_or("");
     assert!(!dynamic_prompt.contains("created_at_ms"));
     assert!(!dynamic_prompt.contains("sequence"));
     assert!(!dynamic_prompt.contains("batch_id"));
@@ -476,7 +476,7 @@ fn mcp_capability_update_is_injected_only_when_tool_content_changes() {
         .unwrap());
     assert_eq!(core.pending_prompt_components.len(), 1);
     let prompt = core.build_next_prompt();
-    assert!(prompt.contains("## RUNTIME"));
+    assert!(prompt.contains("<RUNTIME>"));
     assert!(prompt.contains("MCP capabilities changed for this user request."));
     assert!(prompt.contains("Newly available actions: mcp.test.search."));
     assert!(prompt.contains("Updated action definitions: mcp.test.echo."));
