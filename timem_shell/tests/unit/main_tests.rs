@@ -108,9 +108,9 @@ fn static_prompt_uses_full_shared_v1_resource() {
     assert!(!STATIC_PROMPT.contains("foreground|background"));
     assert!(!STATIC_PROMPT.contains("\"durable_ctx_score\""));
     assert!(!STATIC_PROMPT.contains("Every model response must score"));
-    assert!(STATIC_PROMPT.contains("Context maintenance"));
-    assert!(STATIC_PROMPT.contains("Compact context when dynamic deltas become stale"));
-    assert!(STATIC_PROMPT.contains("Never target this static"));
+    assert!(STATIC_PROMPT.contains("## Prompt context"));
+    assert!(STATIC_PROMPT.contains("Each dynamic delta has a `delta_id`"));
+    assert!(STATIC_PROMPT.contains("context maintenance"));
     assert!(!STATIC_PROMPT.contains("\"json_protocol\""));
     assert!(!STATIC_PROMPT.contains("\"evidence_guard\""));
     assert!(!STATIC_PROMPT.contains("\"action_result_guard\""));
