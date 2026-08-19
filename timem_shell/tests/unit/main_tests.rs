@@ -2051,9 +2051,13 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
     let mut pending = true;
     let notice = take_shell_resume_notice(&store, &loaded.session_id, &workspace, &mut pending)
         .expect("first restored shell turn should include resume notice");
-    assert!(notice.contains("This session was restored"));
+    assert!(notice.contains(
+        "Runtime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them."
+    ));
+    assert!(!notice.contains("This session was restored"));
     assert!(notice.contains("raw_chat_history.jsonl"));
     assert!(notice.contains("format: JSONL, one record per line."));
+    assert!(notice.contains(&format!("Current cwd: {}", workspace.display())));
     assert!(!pending);
     assert!(
         take_shell_resume_notice(&store, &loaded.session_id, &workspace, &mut pending).is_none()
