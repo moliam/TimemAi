@@ -406,7 +406,7 @@ fn dynamic_tool_is_prompt_visible_and_protocol_parser_keeps_arguments_generic() 
         .render_tool_catalog_markdown()
         .contains("mcp.demo.echo-value"));
 
-    let response = r#"<response><actions><mcp.demo.echo-value name="echo protocol-like value"><value><![CDATA[literal </response> and ```xml <response> text]]></value><nested><json>{"action":"not-a-call"}</json></nested></mcp.demo.echo-value></actions></response>"#;
+    let response = r#"<ASSISTANT><actions><mcp.demo.echo-value name="echo protocol-like value"><value><![CDATA[literal </ASSISTANT> and ```xml <ASSISTANT> text]]></value><nested><json>{"action":"not-a-call"}</json></nested></mcp.demo.echo-value></actions></ASSISTANT>"#;
     let parsed = crate::response_protocol::ResponseProtocolKind::Xml
         .suite()
         .parse(response, &registry);
@@ -414,7 +414,7 @@ fn dynamic_tool_is_prompt_visible_and_protocol_parser_keeps_arguments_generic() 
     assert_eq!(parsed.next_actions[0].action, "mcp.demo.echo-value");
     assert_eq!(
         parsed.next_actions[0].raw_input["value"],
-        "literal </response> and ```xml <response> text"
+        "literal </ASSISTANT> and ```xml <ASSISTANT> text"
     );
     assert_eq!(
         parsed.next_actions[0].raw_input["nested"]["json"],

@@ -65,31 +65,31 @@ class Handler(BaseHTTPRequestHandler):
             content = toolgen_scenario_response(prompt)
         elif "CROSS_HOST_RESUME_SMOKE" in prompt:
             content = (
-                "<response>"
+                "<ASSISTANT>"
                 "<final_answer>CROSS_HOST_RESUME_OK</final_answer>"
-                "</response>"
+                "</ASSISTANT>"
             )
         elif "TTY_STRESS" in prompt and "STRESS_ACTION_DONE" in prompt:
             content = (
-                "<response>"
+                "<ASSISTANT>"
                 "<final_answer>STRESS_OK</final_answer>"
-                "</response>"
+                "</ASSISTANT>"
             )
         elif "TTY_STRESS" in prompt:
             time.sleep(self.response_delay)
             content = tty_stress_scenario_response()
         elif "## USER" in prompt and "SUPPLEMENT_OK" in prompt:
             content = (
-                "<response>"
+                "<ASSISTANT>"
                 "<final_answer>SUPPLEMENT_OK</final_answer>"
-                "</response>"
+                "</ASSISTANT>"
             )
         else:
             time.sleep(self.response_delay)
             content = (
-                "<response>"
+                "<ASSISTANT>"
                 "<final_answer>NO_SUPPLEMENT</final_answer>"
-                "</response>"
+                "</ASSISTANT>"
             )
 
         self.send_model_response(prompt, content)
@@ -171,12 +171,12 @@ def xml_action(payload, free_talk):
     action_body = xml_element(tool, arguments)
     action_body = action_body.replace(f"<{tool}>", f'<{tool} name="{action_name}">', 1)
     return (
-        "<response>"
+        "<ASSISTANT>"
         f"<free_talk>{free_talk}</free_talk>"
         "<actions>"
         + action_body
         + "</actions>"
-        "</response>"
+        "</ASSISTANT>"
     )
 
 
@@ -206,9 +206,9 @@ def toolgen_scenario_response(prompt):
     if "[TOOL_GEN_TASK]" not in prompt:
         if "Action result: run_bash" in prompt and "TOOLGEN_E2E_SOURCE_DONE" in prompt:
             return (
-                "<response><free_talk>The reusable source task completed.</free_talk>"
+                "<ASSISTANT><free_talk>The reusable source task completed.</free_talk>"
                 "<final_answer>ToolGen source task completed with two ERROR records.</final_answer>"
-                "</response>"
+                "</ASSISTANT>"
             )
         return xml_action(
             {
@@ -223,15 +223,15 @@ def toolgen_scenario_response(prompt):
     marker = "Write the new tool files only in this temporary staging directory:\n"
     match = re.search(re.escape(marker) + r"([^\n]+)", prompt)
     if not match:
-        return "<response><final_answer>ToolGen fixture could not locate its draft.</final_answer></response>"
+        return "<ASSISTANT><final_answer>ToolGen fixture could not locate its draft.</final_answer></ASSISTANT>"
     draft = match.group(1).strip()
     if "FORCE_TOOLGEN_PROTOCOL_FAILURE" in prompt:
         return "ToolGen fixture intentionally returned a non-protocol response."
     if "Action result: toolgen\nop: publish\nstatus: ready" in prompt:
         return (
-            "<response><toolgen_retrospect>Published deterministic-log-error-counter after runtime validation.</toolgen_retrospect>"
+            "<ASSISTANT><toolgen_retrospect>Published deterministic-log-error-counter after runtime validation.</toolgen_retrospect>"
             "<final_answer>ToolGen generated and validated deterministic-log-error-counter.</final_answer>"
-            "</response>"
+            "</ASSISTANT>"
         )
     if "Action result: run_bash" in prompt and "TOOLGEN_E2E_DRAFT_READY" in prompt:
         return xml_action(

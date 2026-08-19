@@ -1,11 +1,11 @@
 # System Response Protocol
 
-Return exactly one XML `<response>` root, with no Markdown fence or text before
+Return exactly one XML `<ASSISTANT>` root, with no Markdown fence or text before
 or after it.
 
 ## Response shape
 
-Inside `<response>`, fields must appear in this order:
+Inside `<ASSISTANT>`, fields must appear in this order:
 
 1. Optional `<free_talk>`: a brief, user-visible progress note.
 2. Optional `<finish_confirm>`: required before `<final_answer>`, or allowed when
@@ -183,15 +183,15 @@ These examples demonstrate format only; they are not tasks to execute.
 
 ### Final answer
 
-<response>
+<ASSISTANT>
   <free_talk>The requested checks are complete.</free_talk>
   <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. Yes, all requested checks passed.</finish_confirm>
   <final_answer>Completed. All requested checks passed.</final_answer>
-</response>
+</ASSISTANT>
 
 ### Sequential and parallel actions
 
-<response>
+<ASSISTANT>
   <free_talk>I will inspect the repository, then run the independent checks together.</free_talk>
   <actions>
     <run_bash name="inspect repository status" timeout_ms="5000">
@@ -206,26 +206,26 @@ These examples demonstrate format only; they are not tasks to execute.
       </run_bash>
     </parallel>
   </actions>
-</response>
+</ASSISTANT>
 
 ### Reconsider completion and continue
 
-<response>
+<ASSISTANT>
   <finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action. More evidence is still needed.</finish_confirm>
   <actions>
     <run_bash name="inspect remaining evidence" timeout_ms="5000">
       <cmd>git diff --check</cmd>
     </run_bash>
   </actions>
-</response>
+</ASSISTANT>
 
 ### Compact context
 
-<response>
+<ASSISTANT>
   <free_talk>I will preserve the active task state and remove stale history.</free_talk>
   <context_compact>
     <discard>pd_1,pd_3</discard>
     <offload>pd_2</offload>
     <summary>Keep the active task, confirmed requirements, current progress, and remaining checks.</summary>
   </context_compact>
-</response>
+</ASSISTANT>

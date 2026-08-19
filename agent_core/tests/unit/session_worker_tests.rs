@@ -653,17 +653,17 @@ impl ModelClient for ToolGenWorkflowModel {
                 prompt.contains(r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#)
             );
             assert!(prompt.contains(
-                "<response><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></response>"
+                "<ASSISTANT><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></ASSISTANT>"
             ));
             assert!(!prompt.contains(r#"<ASSISTANT id=""#));
-            assert!(!prompt.contains("&lt;response&gt;"));
+            assert!(!prompt.contains("&lt;ASSISTANT&gt;"));
             assert!(!prompt.contains("ID0_TOOLGEN"));
             assert!(!prompt.contains("Referenced completed turn id:"));
             assert!(!prompt.contains("Completed task result:"));
             if prompt.contains(r#"<action_result><toolgen name="publish validated tool draft">"#) {
                 (
                     "toolgen_finish",
-                    confirmed_xml_response("<response><toolgen_retrospect>Created reusable-line-counter; runtime validation returned status: ready.</toolgen_retrospect><final_answer>ToolGen review complete.</final_answer></response>"),
+                    confirmed_xml_response("<ASSISTANT><toolgen_retrospect>Created reusable-line-counter; runtime validation returned status: ready.</toolgen_retrospect><final_answer>ToolGen review complete.</final_answer></ASSISTANT>"),
                 )
             } else {
                 let marker = "Write the new tool files only in this temporary staging directory:\n";
@@ -696,7 +696,7 @@ impl ModelClient for ToolGenWorkflowModel {
                 .unwrap();
                 (
                     "toolgen_publish",
-                    format!("<response><free_talk>Writing and validating the reusable line counter.</free_talk><actions><toolgen name=\"publish validated tool draft\" op=\"publish\"><draft_path>{draft}</draft_path></toolgen></actions></response>"),
+                    format!("<ASSISTANT><free_talk>Writing and validating the reusable line counter.</free_talk><actions><toolgen name=\"publish validated tool draft\" op=\"publish\"><draft_path>{draft}</draft_path></toolgen></actions></ASSISTANT>"),
                 )
             }
         } else if prompt.contains(r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#)
@@ -704,13 +704,13 @@ impl ModelClient for ToolGenWorkflowModel {
             (
                 "main_finish",
                 confirmed_xml_response(
-                    "<response><final_answer>Main task completed.</final_answer></response>",
+                    "<ASSISTANT><final_answer>Main task completed.</final_answer></ASSISTANT>",
                 ),
             )
         } else {
             (
                 "main_action",
-                "<response><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></response>".to_string(),
+                "<ASSISTANT><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></ASSISTANT>".to_string(),
             )
         };
         let prompt_tokens = if phase.starts_with("toolgen") {
@@ -974,10 +974,10 @@ impl ModelClient for LongToolGenWorkflowModel {
             *calls
         };
         let content = if call <= 11 {
-            format!("<response><free_talk>ToolGen round {call}.</free_talk><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></response>")
+            format!("<ASSISTANT><free_talk>ToolGen round {call}.</free_talk><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></ASSISTANT>")
         } else if prompt.contains(r#"<action_result><toolgen name="publish validated tool draft">"#)
         {
-            confirmed_xml_response("<response><toolgen_retrospect>Created long-running-tool after normal runtime validation.</toolgen_retrospect><final_answer>Extended ToolGen workflow completed.</final_answer></response>")
+            confirmed_xml_response("<ASSISTANT><toolgen_retrospect>Created long-running-tool after normal runtime validation.</toolgen_retrospect><final_answer>Extended ToolGen workflow completed.</final_answer></ASSISTANT>")
         } else {
             let marker = "Write the new tool files only in this temporary staging directory:\n";
             let draft = prompt
@@ -1007,7 +1007,7 @@ impl ModelClient for LongToolGenWorkflowModel {
                 .to_string(),
             )
             .unwrap();
-            format!("<response><free_talk>Publishing after {call} normal model calls.</free_talk><actions><toolgen name=\"publish validated tool draft\" op=\"publish\"><draft_path>{draft}</draft_path></toolgen></actions></response>")
+            format!("<ASSISTANT><free_talk>Publishing after {call} normal model calls.</free_talk><actions><toolgen name=\"publish validated tool draft\" op=\"publish\"><draft_path>{draft}</draft_path></toolgen></actions></ASSISTANT>")
         };
         Ok(LlmResponse {
             content,
@@ -1127,9 +1127,9 @@ impl ModelClient for FailingToolGenModel {
             "not xml".to_string()
         } else if prompt.contains(r#"<self_tool_result task="inspect runtime parameters" type="params" status="finished">"#)
         {
-            confirmed_xml_response("<response><final_answer>Main task survives ToolGen failure.</final_answer></response>")
+            confirmed_xml_response("<ASSISTANT><final_answer>Main task survives ToolGen failure.</final_answer></ASSISTANT>")
         } else {
-            "<response><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></response>".to_string()
+            "<ASSISTANT><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></ASSISTANT>".to_string()
         };
         Ok(LlmResponse {
             content,
@@ -2794,7 +2794,7 @@ fn protocol_turn_payload(protocol: ResponseProtocolKind, answer: &str, free_talk
         })
         .to_string(),
         ResponseProtocolKind::Xml => {
-            confirmed_xml_response(&format!("<response><free_talk>{free_talk}</free_talk><final_answer>{answer}</final_answer></response>"))
+            confirmed_xml_response(&format!("<ASSISTANT><free_talk>{free_talk}</free_talk><final_answer>{answer}</final_answer></ASSISTANT>"))
         }
     }
 }

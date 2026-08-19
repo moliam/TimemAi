@@ -27,7 +27,7 @@ impl ResponseProtocolSuite for XmlSuiteV1 {
         None
     }
     fn response_shape_hint(&self) -> &str {
-        "one-root label <response>...</response>"
+        "one-root label <ASSISTANT>...</ASSISTANT>"
     }
     fn protocol_schema(&self) -> &str {
         ""
@@ -175,11 +175,11 @@ fn largest_complete_response_root(text: &str) -> Option<(usize, usize)> {
     let mut best_repairable: Option<(usize, usize)> = None;
 
     while open_cursor < text.len() {
-        let Some(open_rel) = find_open_tag(&text[open_cursor..], "response") else {
+        let Some(open_rel) = find_open_tag(&text[open_cursor..], "ASSISTANT") else {
             break;
         };
         let open_start = open_cursor + open_rel;
-        open_cursor = open_start.saturating_add("<response".len());
+        open_cursor = open_start.saturating_add("<ASSISTANT".len());
 
         if is_inside_cdata(text, open_start)
             || [
@@ -203,19 +203,19 @@ fn largest_complete_response_root(text: &str) -> Option<(usize, usize)> {
         }
 
         let mut close_cursor = open_end + 1;
-        while let Some(close_start) = find_close_tag(text, close_cursor, "response") {
-            close_cursor = close_start + "</response>".len();
+        while let Some(close_start) = find_close_tag(text, close_cursor, "ASSISTANT") {
+            close_cursor = close_start + "</ASSISTANT>".len();
             if is_inside_cdata(text, close_start) {
                 continue;
             }
 
-            let end = close_start + "</response>".len();
+            let end = close_start + "</ASSISTANT>".len();
             let candidate = &text[open_start..end];
             let Some(fields) = parse_response_fields(candidate) else {
                 continue;
             };
 
-            // A literal </response> inside a text field can produce a
+            // A literal </ASSISTANT> inside a text field can produce a
             // repairable-but-truncated candidate. Keep scanning: a later close
             // may form the actual outer root. Structurally clean candidates
             // outrank repairable candidates; within each class, select the
@@ -274,7 +274,7 @@ struct ContextCompactFields {
 
 fn parse_response_fields(text: &str) -> Option<ResponseFields> {
     let text = text.trim();
-    let open_start = find_open_tag(text, "response")?;
+    let open_start = find_open_tag(text, "ASSISTANT")?;
     if !text[..open_start].trim().is_empty() {
         return None;
     }
@@ -282,8 +282,8 @@ fn parse_response_fields(text: &str) -> Option<ResponseFields> {
     if is_self_closing_start_tag(&text[open_start..=open_end]) {
         return None;
     }
-    let close_start = find_last_close_tag(text, open_end + 1, "response")?;
-    let close_end = close_start + "</response>".len();
+    let close_start = find_last_close_tag(text, open_end + 1, "ASSISTANT")?;
+    let close_end = close_start + "</ASSISTANT>".len();
     if !text[close_end..].trim().is_empty() {
         return None;
     }
@@ -293,7 +293,7 @@ fn parse_response_fields(text: &str) -> Option<ResponseFields> {
 
 fn classify_xml_root_issue(text: &str) -> &'static str {
     let text = text.trim();
-    let Some(open_start) = find_open_tag(text, "response") else {
+    let Some(open_start) = find_open_tag(text, "ASSISTANT") else {
         return "xml_response_root_missing";
     };
     if !text[..open_start].trim().is_empty() {
@@ -305,10 +305,10 @@ fn classify_xml_root_issue(text: &str) -> &'static str {
     if is_self_closing_start_tag(&text[open_start..=open_end]) {
         return "xml_response_root_self_closing";
     }
-    let Some(close_start) = find_last_close_tag(text, open_end + 1, "response") else {
+    let Some(close_start) = find_last_close_tag(text, open_end + 1, "ASSISTANT") else {
         return "xml_response_root_unclosed";
     };
-    let close_end = close_start + "</response>".len();
+    let close_end = close_start + "</ASSISTANT>".len();
     if !text[close_end..].trim().is_empty() {
         return "xml_content_after_response";
     }
@@ -1322,13 +1322,13 @@ fn split_id_list(raw: &str) -> Vec<String> {
 pub fn xml_repair_instruction(issue: &str) -> &'static str {
     match issue {
         "empty_response" => {
-            "检查到模型没有生成可解析的内容。请重新输出一个完整的 <response>...</response>；需要工具时提供 XML-native <actions>，已经完成时提供 <final_answer>。"
+            "检查到模型没有生成可解析的内容。请重新输出一个完整的 <ASSISTANT>...</ASSISTANT>；需要工具时提供 XML-native <actions>，已经完成时提供 <final_answer>。"
         }
         "truncated_model_output" => {
             "检查到刚刚的输出被 max output token 截断。请继续使用 XML response protocol，输出更短的 <free_talk> 或 <final_answer>；长报告可用 run_bash 写入文件后在回答中给出路径。"
         }
         "external_tool_call_protocol" => {
-            "检查到刚刚的输出用了外部 tool_call/function_call 格式。请使用 XML-native actions：<response><actions><tool_id><argument>value</argument></tool_id></actions></response>；并行工具放入 <parallel>。"
+            "检查到刚刚的输出用了外部 tool_call/function_call 格式。请使用 XML-native actions：<ASSISTANT><actions><tool_id><argument>value</argument></tool_id></actions></ASSISTANT>；并行工具放入 <parallel>。"
         }
         "status_tag_not_supported" => {
             "检查到刚刚的输出格式有点问题：当前 XML response protocol 不使用 <status>。已完成时提供 <final_answer>；仍需 runtime 工具时提供 <actions>。"
@@ -1343,31 +1343,31 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
             "检查到刚刚的输出格式有点问题：<final_answer> 表示当前请求已完成，不能同时包含 <actions>。仍需工具时只选择 <actions>，拿到结果后再提供 <final_answer>。"
         }
         "xml_recovered_final_answer_requires_retry" => {
-            "The runtime had to recover the outer XML boundary of a response containing <final_answer>. A recovered final answer cannot finish the task. Return the same answer again as one complete, unmodified <response><finish_confirm>CONFIRM_PREFIX followed by the confirmation</finish_confirm><final_answer>...</final_answer></response>, with nothing outside the root."
+            "The runtime had to recover the outer XML boundary of a response containing <final_answer>. A recovered final answer cannot finish the task. Return the same answer again as one complete, unmodified <ASSISTANT><finish_confirm>CONFIRM_PREFIX followed by the confirmation</finish_confirm><final_answer>...</final_answer></ASSISTANT>, with nothing outside the root."
         }
         "next_actions_required_when_status_working" => {
             "检查到刚刚的输出格式有点问题：仍需 runtime 工具时必须提供非空 <actions>；如果当前请求已经完成，请改用 <final_answer>。"
         }
         "invalid_xml_response_root" => {
-            "The response must be exactly one <response>...</response> root element, with no text or tags before <response> or after </response>. Put <free_talk> and the selected state branch inside that root."
+            "The response must be exactly one <ASSISTANT>...</ASSISTANT> root element, with no text or tags before <ASSISTANT> or after </ASSISTANT>. Put <free_talk> and the selected state branch inside that root."
         }
         "xml_response_root_missing" => {
-            "The required <response> root is missing. Return XML only, beginning with <response> and ending with </response>."
+            "The required <ASSISTANT> root is missing. Return XML only, beginning with <ASSISTANT> and ending with </ASSISTANT>."
         }
         "xml_response_root_unclosed" => {
-            "The <response> root is not completely closed. Return one complete <response>...</response> document."
+            "The <ASSISTANT> root is not completely closed. Return one complete <ASSISTANT>...</ASSISTANT> document."
         }
         "xml_response_root_self_closing" => {
-            "A self-closing <response/> cannot contain the required response branch. Use <response>...</response> with exactly one state branch inside."
+            "A self-closing <ASSISTANT/> cannot contain the required response branch. Use <ASSISTANT>...</ASSISTANT> with exactly one state branch inside."
         }
         "xml_content_before_response" => {
-            "The response contains text or tags before <response>. Move all response fields inside the single <response> root."
+            "The response contains text or tags before <ASSISTANT>. Move all response fields inside the single <ASSISTANT> root."
         }
         "xml_content_after_response" => {
-            "The response contains text or tags after </response>. Return exactly one XML root and remove all trailing content."
+            "The response contains text or tags after </ASSISTANT>. Return exactly one XML root and remove all trailing content."
         }
         "xml_unexpected_content_inside_response" => {
-            "The <response> body contains text or an unknown top-level tag outside a supported field. Put text inside <free_talk> or <final_answer>, and use only one supported state branch."
+            "The <ASSISTANT> body contains text or an unknown top-level tag outside a supported field. Put text inside <free_talk> or <final_answer>, and use only one supported state branch."
         }
         "xml_duplicate_free_talk" => {
             "The response contains more than one <free_talk> field. Merge them into one optional <free_talk> before the state branch."
@@ -1376,16 +1376,16 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
             "The response contains more than one <finish_confirm> field. Keep exactly one, after optional <free_talk> and before the selected state branch."
         }
         issue if issue.starts_with("xml_unclosed_tag:") => {
-            "A response field tag is not closed. Close the named tag before writing the next field or </response>."
+            "A response field tag is not closed. Close the named tag before writing the next field or </ASSISTANT>."
         }
         issue if issue.starts_with("xml_malformed_tag:") => {
             "A response field opening tag is malformed. Rewrite that field with a complete opening tag, matching closing tag, and no broken attributes."
         }
         "xml_tags_out_of_order" => {
-            "The XML tags are out of order. Inside <response>, put optional <free_talk> first, optional <finish_confirm> next, then exactly one of <actions>, <context_compact>, or <final_answer>. A final answer requires <finish_confirm>."
+            "The XML tags are out of order. Inside <ASSISTANT>, put optional <free_talk> first, optional <finish_confirm> next, then exactly one of <actions>, <context_compact>, or <final_answer>. A final answer requires <finish_confirm>."
         }
         "state_branch_must_choose_one" => {
-            "The response selected more than one state branch. Inside <response>, use exactly one of <actions>, <context_compact>, or <final_answer>."
+            "The response selected more than one state branch. Inside <ASSISTANT>, use exactly one of <actions>, <context_compact>, or <final_answer>."
         }
         issue if issue.ends_with(".actions_required") => {
             "The <actions> or <parallel> element is empty. Add at least one concrete tool element from the capability catalog."
@@ -1435,7 +1435,7 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
             "The <context_compact> block is missing a non-empty <summary> describing the essential retained task state."
         }
         _ => {
-            "Use one XML <response>. If tools are needed, write XML-native <actions> with exact tool-id elements; if the current request is complete, write <final_answer>."
+            "Use one XML <ASSISTANT>. If tools are needed, write XML-native <actions> with exact tool-id elements; if the current request is complete, write <final_answer>."
         }
     }
 }
@@ -1455,14 +1455,14 @@ pub fn xml_repair_instruction_for_response(issue: &str, raw_response: &str) -> S
                 .to_string()
         });
         return format!(
-            "Exact protocol error: `{issue}`. XML action indexes identify the <actions> block, stage, and tool in order; `input.<name>` identifies the argument.\nCause: {cause}\nCorrection: {}\nPreserve the parts of the previous XML that are already valid; change the smallest failing element or argument and return one complete <response>.",
+            "Exact protocol error: `{issue}`. XML action indexes identify the <actions> block, stage, and tool in order; `input.<name>` identifies the argument.\nCause: {cause}\nCorrection: {}\nPreserve the parts of the previous XML that are already valid; change the smallest failing element or argument and return one complete <ASSISTANT>.",
             xml_repair_instruction(issue)
         );
     }
 
     let trimmed = raw_response.trim();
     let protocol_text = trimmed;
-    let response_start = find_open_tag(protocol_text, "response");
+    let response_start = find_open_tag(protocol_text, "ASSISTANT");
     let has_content_before_root = response_start
         .map(|start| !protocol_text[..start].trim().is_empty())
         .unwrap_or(false);
@@ -1485,25 +1485,25 @@ pub fn xml_repair_instruction_for_response(issue: &str, raw_response: &str) -> S
     } else {
         ""
     };
-    let expected = format!("<response>{free_talk}{finish_confirm}{branch}</response>");
+    let expected = format!("<ASSISTANT>{free_talk}{finish_confirm}{branch}</ASSISTANT>");
 
     if issue == "xml_content_before_response" || has_content_before_root {
         return format!(
-            "Exact protocol error: `{issue}`.\nCause: The previous output placed content before the <response> root.\nCorrection: The response must be in format '{expected}'. Move every tag, including <free_talk>, inside <response>; output nothing before <response> or after </response>.\nPreserve valid inner content and return one complete <response>."
+            "Exact protocol error: `{issue}`.\nCause: The previous output placed content before the <ASSISTANT> root.\nCorrection: The response must be in format '{expected}'. Move every tag, including <free_talk>, inside <ASSISTANT>; output nothing before <ASSISTANT> or after </ASSISTANT>.\nPreserve valid inner content and return one complete <ASSISTANT>."
         );
     }
     if issue == "xml_content_after_response" {
         return format!(
-            "Exact protocol error: `{issue}`.\nCause: The previous output placed content after the </response> root, usually trailing prose or another response root.\nCorrection: The response must be in format '{expected}'. Output nothing before <response> or after </response>.\nPreserve the first valid response content, remove the trailing duplicate or prose, and return one complete <response>."
+            "Exact protocol error: `{issue}`.\nCause: The previous output placed content after the </ASSISTANT> root, usually trailing prose or another response root.\nCorrection: The response must be in format '{expected}'. Output nothing before <ASSISTANT> or after </ASSISTANT>.\nPreserve the first valid response content, remove the trailing duplicate or prose, and return one complete <ASSISTANT>."
         );
     }
     if issue == "xml_response_root_unclosed" || response_start.is_some() {
         return format!(
-            "Exact protocol error: `{issue}`.\nCause: The previous output did not form one complete <response>...</response> root.\nCorrection: The response must be in format '{expected}'. Close the root and every inner tag; output nothing before <response> or after </response>.\nPreserve valid inner content and return one complete <response>."
+            "Exact protocol error: `{issue}`.\nCause: The previous output did not form one complete <ASSISTANT>...</ASSISTANT> root.\nCorrection: The response must be in format '{expected}'. Close the root and every inner tag; output nothing before <ASSISTANT> or after </ASSISTANT>.\nPreserve valid inner content and return one complete <ASSISTANT>."
         );
     }
     format!(
-        "Exact protocol error: `{issue}`.\nCause: The previous output did not contain the required <response> root.\nCorrection: The response must be in format '{expected}'.\nPreserve valid content by moving it into the appropriate branch and return one complete <response>."
+        "Exact protocol error: `{issue}`.\nCause: The previous output did not contain the required <ASSISTANT> root.\nCorrection: The response must be in format '{expected}'.\nPreserve valid content by moving it into the appropriate branch and return one complete <ASSISTANT>."
     )
 }
 

@@ -14,7 +14,7 @@ fn parse_xml(raw: &str) -> ParsedEnvelope {
 
 fn confirmed_xml(body: &str) -> String {
     format!(
-        "\x3cresponse>\x3cfinish_confirm>{} verified\x3c/finish_confirm>{body}\x3c/response>",
+        "\x3cASSISTANT>\x3cfinish_confirm>{} verified\x3c/finish_confirm>{body}\x3c/ASSISTANT>",
         xml_suite::FINISH_CONFIRM_PREFIX
     )
 }
@@ -88,7 +88,7 @@ fn json_xml_protocols_treat_protocol_language_inside_final_text_as_text() {
 fn json_xml_protocols_parse_readfile_selector_objects() {
     assert_protocols_equivalent(
         r#"{"free_talk":"reading","working_still_action":{"readfile":{"path":"src/main.rs","encoding":"utf-8","starter":{"line_nr":20},"ender":{"match":"fn main"},"max_bytes":8192}}}"#,
-        "\x3cresponse>\x3cfree_talk>reading\x3c/free_talk>\x3cactions>\x3creadfile name=\"read main source range\" encoding=\"utf-8\" max_bytes=\"8192\">\x3cpath>src/main.rs\x3c/path>\x3cstarter>\x3cline_nr>20\x3c/line_nr>\x3c/starter>\x3cender>\x3cmatch>fn main\x3c/match>\x3c/ender>\x3c/readfile>\x3c/actions>\x3c/response>",
+        "\x3cASSISTANT>\x3cfree_talk>reading\x3c/free_talk>\x3cactions>\x3creadfile name=\"read main source range\" encoding=\"utf-8\" max_bytes=\"8192\">\x3cpath>src/main.rs\x3c/path>\x3cstarter>\x3cline_nr>20\x3c/line_nr>\x3c/starter>\x3cender>\x3cmatch>fn main\x3c/match>\x3c/ender>\x3c/readfile>\x3c/actions>\x3c/ASSISTANT>",
     );
 }
 
@@ -96,7 +96,7 @@ fn json_xml_protocols_parse_readfile_selector_objects() {
 fn json_xml_protocols_parse_same_parallel_actions() {
     assert_protocols_equivalent(
         r#"{"free_talk":"checking","working_still_action":[{"run_bash":{"cmd":"printf a","timeout_ms":5000}},{"run_bash":{"cmd":"printf b","timeout_ms":5000}}]}"#,
-        "\x3cresponse>\x3cfree_talk>checking\x3c/free_talk>\x3cactions>\x3cparallel>\x3crun_bash name=\"print first marker\" timeout_ms=\"5000\">\x3ccmd>printf a\x3c/cmd>\x3c/run_bash>\x3crun_bash name=\"print second marker\" timeout_ms=\"5000\">\x3ccmd>printf b\x3c/cmd>\x3c/run_bash>\x3c/parallel>\x3c/actions>\x3c/response>",
+        "\x3cASSISTANT>\x3cfree_talk>checking\x3c/free_talk>\x3cactions>\x3cparallel>\x3crun_bash name=\"print first marker\" timeout_ms=\"5000\">\x3ccmd>printf a\x3c/cmd>\x3c/run_bash>\x3crun_bash name=\"print second marker\" timeout_ms=\"5000\">\x3ccmd>printf b\x3c/cmd>\x3c/run_bash>\x3c/parallel>\x3c/actions>\x3c/ASSISTANT>",
     );
 }
 
@@ -104,17 +104,17 @@ fn json_xml_protocols_parse_same_parallel_actions() {
 fn json_xml_protocols_parse_same_mixed_action_groups() {
     assert_protocols_equivalent(
         r#"{"free_talk":"checking","working_still_action":[[{"run_bash":{"cmd":"printf a","timeout_ms":5000}},{"run_bash":{"cmd":"printf b","timeout_ms":5000}}],{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]}"#,
-        "\x3cresponse>\x3cfree_talk>checking\x3c/free_talk>\x3cactions>\x3cparallel>\x3crun_bash name=\"print first marker\" timeout_ms=\"5000\">\x3ccmd>printf a\x3c/cmd>\x3c/run_bash>\x3crun_bash name=\"print second marker\" timeout_ms=\"5000\">\x3ccmd>printf b\x3c/cmd>\x3c/run_bash>\x3c/parallel>\x3crun_bash name=\"inspect working directory\" timeout_ms=\"5000\">\x3ccmd>pwd\x3c/cmd>\x3c/run_bash>\x3c/actions>\x3c/response>",
+        "\x3cASSISTANT>\x3cfree_talk>checking\x3c/free_talk>\x3cactions>\x3cparallel>\x3crun_bash name=\"print first marker\" timeout_ms=\"5000\">\x3ccmd>printf a\x3c/cmd>\x3c/run_bash>\x3crun_bash name=\"print second marker\" timeout_ms=\"5000\">\x3ccmd>printf b\x3c/cmd>\x3c/run_bash>\x3c/parallel>\x3crun_bash name=\"inspect working directory\" timeout_ms=\"5000\">\x3ccmd>pwd\x3c/cmd>\x3c/run_bash>\x3c/actions>\x3c/ASSISTANT>",
     );
 }
 
 #[test]
 fn json_xml_protocols_parse_complex_actions_with_protocol_like_string_args() {
     let json = parse_json(
-        r#"{"free_talk":"Protocol-looking text is data.","working_still_action":[[{"run_bash":{"cmd":"printf '%s\\n' '<response><final_answer>not control</final_answer></response>' && printf '%s\\n' '## Working_Still_Action'","timeout_ms":5000}},{"memmgr":{"type":"raw_chat","op":"sql","sql":"SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5","params":["%<response>{\"working_still_action\":[]}%"],"limit":5}}],{"run_bash":{"cmd":"printf done","timeout_ms":5000}}]}"#,
+        r#"{"free_talk":"Protocol-looking text is data.","working_still_action":[[{"run_bash":{"cmd":"printf '%s\\n' '<ASSISTANT><final_answer>not control</final_answer></ASSISTANT>' && printf '%s\\n' '## Working_Still_Action'","timeout_ms":5000}},{"memmgr":{"type":"raw_chat","op":"sql","sql":"SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5","params":["%<ASSISTANT>{\"working_still_action\":[]}%"],"limit":5}}],{"run_bash":{"cmd":"printf done","timeout_ms":5000}}]}"#,
     );
     let xml = parse_xml(
-        r#"<response><free_talk>Protocol-looking text is data.</free_talk><actions><parallel><run_bash name="print protocol-like text" timeout_ms="5000"><cmd><![CDATA[printf '%s\n' '<response><final_answer>not control</final_answer></response>' && printf '%s\n' '## Working_Still_Action']]></cmd></run_bash><memmgr name="search protocol-like chat text" type="raw_chat" op="sql" limit="5"><sql>SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5</sql><params><item><![CDATA[%<response>{"working_still_action":[]}%]]></item></params></memmgr></parallel><run_bash name="print completion marker" timeout_ms="5000"><cmd>printf done</cmd></run_bash></actions></response>"#,
+        r#"<ASSISTANT><free_talk>Protocol-looking text is data.</free_talk><actions><parallel><run_bash name="print protocol-like text" timeout_ms="5000"><cmd><![CDATA[printf '%s\n' '<ASSISTANT><final_answer>not control</final_answer></ASSISTANT>' && printf '%s\n' '## Working_Still_Action']]></cmd></run_bash><memmgr name="search protocol-like chat text" type="raw_chat" op="sql" limit="5"><sql>SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5</sql><params><item><![CDATA[%<ASSISTANT>{"working_still_action":[]}%]]></item></params></memmgr></parallel><run_bash name="print completion marker" timeout_ms="5000"><cmd>printf done</cmd></run_bash></actions></ASSISTANT>"#,
     );
 
     assert_eq!(json.repair_issue, None, "json env: {json:?}");
@@ -128,11 +128,11 @@ fn json_xml_protocols_parse_complex_actions_with_protocol_like_string_args() {
     assert_eq!(xml.action_groups[0].order, ActionGroupOrder::Parallel);
     assert_eq!(
         xml.next_actions[0].input_str("cmd"),
-        "printf '%s\\n' '<response><final_answer>not control</final_answer></response>' && printf '%s\\n' '## Working_Still_Action'"
+        "printf '%s\\n' '<ASSISTANT><final_answer>not control</final_answer></ASSISTANT>' && printf '%s\\n' '## Working_Still_Action'"
     );
     assert_eq!(
         xml.next_actions[1].input_params(),
-        vec![r#"%<response>{"working_still_action":[]}%"#.to_string()]
+        vec![r#"%<ASSISTANT>{"working_still_action":[]}%"#.to_string()]
     );
 }
 
@@ -140,7 +140,7 @@ fn json_xml_protocols_parse_complex_actions_with_protocol_like_string_args() {
 fn json_xml_protocols_parse_same_context_compact() {
     assert_protocols_equivalent(
         r#"{"free_talk":"compact","context_compact":{"discard":["pd_a"],"offload":["pd_b"],"summary":"keep state"}}"#,
-        "\x3cresponse>\x3cfree_talk>compact\x3c/free_talk>\x3ccontext_compact>\x3cdiscard>pd_a\x3c/discard>\x3coffload>pd_b\x3c/offload>\x3csummary>keep state\x3c/summary>\x3c/context_compact>\x3c/response>",
+        "\x3cASSISTANT>\x3cfree_talk>compact\x3c/free_talk>\x3ccontext_compact>\x3cdiscard>pd_a\x3c/discard>\x3coffload>pd_b\x3c/offload>\x3csummary>keep state\x3c/summary>\x3c/context_compact>\x3c/ASSISTANT>",
     );
 }
 
@@ -169,7 +169,7 @@ fn toolgen_retrospect_is_rejected_from_working_json_and_xml_responses() {
         r#"{"toolgen_retrospect":"premature","working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
     );
     let xml = parse_xml(
-        "\x3cresponse>\x3ctoolgen_retrospect>premature\x3c/toolgen_retrospect>\x3cactions>\x3crun_bash name=\"inspect cwd\">\x3ccmd>pwd\x3c/cmd>\x3c/run_bash>\x3c/actions>\x3c/response>",
+        "\x3cASSISTANT>\x3ctoolgen_retrospect>premature\x3c/toolgen_retrospect>\x3cactions>\x3crun_bash name=\"inspect cwd\">\x3ccmd>pwd\x3c/cmd>\x3c/run_bash>\x3c/actions>\x3c/ASSISTANT>",
     );
     for (protocol, envelope) in [("json", &json), ("xml", &xml)] {
         assert_eq!(
@@ -185,7 +185,7 @@ fn json_xml_protocols_share_action_input_shape() {
     let json =
         parse_json(r#"{"working_still_action":{"run_bash":{"cmd":"pwd","timeout_ms":5000}}}"#);
     let xml = parse_xml(
-        "\x3cresponse>\x3cactions>\x3crun_bash name=\"inspect working directory\" timeout_ms=\"5000\">\x3ccmd>pwd\x3c/cmd>\x3c/run_bash>\x3c/actions>\x3c/response>",
+        "\x3cASSISTANT>\x3cactions>\x3crun_bash name=\"inspect working directory\" timeout_ms=\"5000\">\x3ccmd>pwd\x3c/cmd>\x3c/run_bash>\x3c/actions>\x3c/ASSISTANT>",
     );
     assert_eq!(json.repair_issue, None);
     assert_eq!(xml.repair_issue, None);

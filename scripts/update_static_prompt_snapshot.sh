@@ -73,8 +73,8 @@ validate_one xml "$TMP_XML" \
   "<Timem System Prompt>" \
   "</Timem System Prompt>" \
   "# System Response Protocol" \
-  'Return exactly one XML `<response>` root' \
-  '`<response>`' \
+  'Return exactly one XML `<ASSISTANT>` root' \
+  '`<ASSISTANT>`' \
   '`<final_answer>`' \
   '<actions>' \
   '<parallel>' \
