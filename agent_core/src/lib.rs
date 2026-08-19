@@ -1148,6 +1148,7 @@ pub struct AgentCore {
     last_notifications: Vec<CoreNotification>,
     loaded_work_instruction_fingerprints: HashSet<String>,
     pending_prompt_components: Vec<PromptComponent>,
+    pending_user_interruption_note: bool,
     prompt_component_sequence: u64,
     next_delta_sequence: u64,
     assistant_speaker_name: String,
@@ -1221,6 +1222,7 @@ impl AgentCore {
             last_notifications: Vec::new(),
             loaded_work_instruction_fingerprints: HashSet::new(),
             pending_prompt_components: Vec::new(),
+            pending_user_interruption_note: false,
             prompt_component_sequence: 0,
             next_delta_sequence: 1,
             assistant_speaker_name,
@@ -1915,6 +1917,10 @@ impl AgentCore {
         filtered.trim().to_string()
     }
 
+    pub(crate) fn mark_user_interrupted_work(&mut self) {
+        self.pending_user_interruption_note = true;
+    }
+
     pub fn begin_turn(&mut self, user_input: &str, supporting_context: Option<&str>) -> CoreStep {
         self.current_round = 0;
         self.round_budget = self.configured_round_budget;
@@ -1938,6 +1944,19 @@ impl AgentCore {
             .map(|component| estimate_prompt_tokens(&component.content))
             .sum::<u32>();
         let text = user_input.trim().to_string();
+        if self.pending_user_interruption_note && !text.is_empty() {
+            // Pending components belong to the interrupted work. Commit them
+            // first so the next prompt has an unambiguous chronology:
+            // old work -> interruption note -> new user input -> new runtime context.
+            self.flush_pending_prompt_components();
+            self.pending_user_interruption_note = false;
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "user_interrupted_work",
+                "NOTE: User interrupted the above work. Continue it based on the user's new input's intent. If not sure, ask the user.",
+                "runtime",
+            );
+        }
         let should_memory_precheck = !text.is_empty()
             && supporting_context
                 .map(should_run_memory_precheck)
