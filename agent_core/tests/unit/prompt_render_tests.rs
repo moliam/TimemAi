@@ -1108,9 +1108,15 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
     assert!(!xml.contains("[BEGIN DELTA]"));
     assert!(!xml.contains("[END DELTA]"));
     assert!(!xml.contains("delta_id: pd_1"));
-    assert!(xml.contains("## USER"));
-    assert!(xml.contains("## Ai7"));
-    assert!(xml.contains("## RUNTIME"));
+    assert!(xml.contains("<USER>"));
+    assert!(xml.contains("</USER>"));
+    assert!(xml.contains(r#"<ASSISTANT id="Ai7">"#));
+    assert!(xml.contains("</ASSISTANT>"));
+    assert!(xml.contains("<RUNTIME>"));
+    assert!(xml.contains("</RUNTIME>"));
+    assert!(!xml.contains("## USER"));
+    assert!(!xml.contains("## Ai7"));
+    assert!(!xml.contains("## RUNTIME"));
     assert!(xml.contains("RUNTIME's 'TIPS'"));
     assert!(!xml.contains("## SYSTEM"));
     assert!(!xml.contains("SYSTEM's 'TIPS'"));
