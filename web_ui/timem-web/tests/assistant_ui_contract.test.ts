@@ -1126,7 +1126,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('className="session-name" title={session.display_name}');
     expect(source).toContain('className="session-detail session-cwd" title={session.current_dir}><FolderOpen size={11} aria-hidden="true"/><span className="path-tail">{workspacePathLabel(session.current_dir)}</span>');
     expect(source).toContain('className="session-sub"><span className="session-detail session-cwd"');
-    expect(source).toContain('className="session-detail session-profile" title={session.runtime_profile.model}><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{session.runtime_profile.model}</span></span>');
+    expect(source).toContain('className="session-detail session-profile" title={modelDisplayName(session)}');
     expect(source).toContain('className="session-working-icon" size={15} aria-label="Session working"');
     expect(source).not.toContain('className="session-state">busy</span>');
     expect(styles).not.toContain(".session-state");
@@ -1223,12 +1223,27 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('aria-label={`Reset ${label} to inherited value`}');
     expect(source).toContain('onClick={() => resetEnv(key)}>Reset</button>');
     expect(source).toContain('onCreate={(command) => {');
-    expect(source).toContain('session.runtime_profile.model');
+    expect(source).toContain('modelDisplayName(session)');
     expect(styles).toContain('.session-runtime-grid');
     expect(styles).toContain('.session-runtime-control');
     expect(styles).toContain('.session-runtime-reset');
     expect(styles).toContain(':root[data-theme="light"] .session-runtime-reset');
     expect(styles).toContain('.session-profile');
+  });
+
+  it("keeps model configuration and service failures visible with actionable guidance", () => {
+    expect(source).toContain("const [modelServiceIssues, setModelServiceIssues]");
+    expect(source).toContain("modelServiceIssues[activeSession.session_id] ?? sessionModelConfigurationIssue(activeSession)");
+    expect(source).toContain('className="model-config-banner" role="alert"');
+    expect(source).toContain("{activeModelServiceIssue.title}");
+    expect(source).toContain("{activeModelServiceIssue.detail}");
+    expect(source).toContain("Open Runtime settings");
+    expect(source).toContain("setModelServiceIssues((current) => ({ ...current, [sessionId]: issue }))");
+    expect(source).toContain("setModelServiceIssues((current) => ({ ...current, [event.session_id]: issue }))");
+    expect(source).toContain("commandSessionId(completed?.command)");
+    expect(source).toContain("isModelSubmissionCommand(completed?.command)");
+    expect(source).toContain('kind === "model_error"');
+    expect(styles).toContain(".model-config-banner");
   });
 
   it("lets an existing session edit, reveal, and clear its API key without snapshot leakage", () => {
@@ -1761,7 +1776,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).not.toContain("assistantName={activeSession?.display_name");
     expect(source).not.toContain('<span className="eyebrow">SESSION');
     expect(source).not.toContain('activeSession?.display_name ?? "Starting Timem…"');
-    expect(source).toContain('const headerModelLabel = activeSession?.runtime_profile?.model ?? "";');
+    expect(source).toContain('const headerModelLabel = modelDisplayName(activeSession);');
     expect(source).toContain('className={`header-model ${showRuntime ? "selected" : ""}`}');
     expect(source).toContain('<span title={headerModelLabel}>{headerModelLabel}</span><ChevronDown');
     expect(source).not.toContain('<Settings size={17}/>');
