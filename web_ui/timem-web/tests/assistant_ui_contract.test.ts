@@ -905,9 +905,9 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('cancellingSessionIds.current.delete(event.session_id);');
     expect(source).toContain('{isCancelling ? "Stopping…" : "Stop"}');
     expect(source).toContain("const cancelActiveSessionTurn = async () =>");
-    expect(source).toContain('pauseQueuedMessages("用户停止了当前任务", "user")');
+    expect(source).toContain('pauseQueuedMessages(activeSessionId, "用户停止了当前任务", "user")');
     expect(source).not.toContain("clearSessionQueuedMessages(previous, activeSessionId)");
-    expect(source).toContain("releaseAllQueuedDispatches()");
+    expect(source).toContain("releaseSessionQueuedMessageClaims(queuedMessageClaimsRef.current, sessionId)");
     expect(source).toContain("onClick={() => void cancelActiveSessionTurn()}");
   });
 
@@ -1555,10 +1555,14 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('className="queued-auto-send-switch"');
     expect(source).toContain("aria-checked={!queuedMessagesPause}");
     expect(source).toContain('aria-label={queuedMessagesPause ? "开启自动发送" : "停止自动发送"}');
-    expect(source).toContain('if (queuedMessagesPause) resumeQueuedMessages(); else pauseQueuedMessages("用户关闭了自动发送", "user");');
-    expect(source).toContain("const queuedMessagesPauseRef = useRef<QueuedMessagesPauseState | null>(null);");
+    expect(source).toContain('if (queuedMessagesPause) resumeQueuedMessages(activeSessionId); else pauseQueuedMessages(activeSessionId, "用户关闭了自动发送", "user");');
+    expect(source).toContain("const queuedMessagesPauseBySessionRef = useRef<Record<string, QueuedMessagesPauseState>>({});");
     expect(source).toContain("const pause = stopQueuedAutoSend(current, reason, source, Date.now());");
-    expect(source).toContain("queuedMessagesPauseRef.current = null;");
+    expect(source).toContain("const queuedMessagesPause = activeSessionId ? queuedMessagesPauseBySession[activeSessionId] ?? null : null;");
+    expect(source).toContain("new Set(Object.keys(queuedMessagesPauseBySessionRef.current))");
+    expect(source).toContain("queuedMessagesPauseSessionId(reliableStorageScope, event.key)");
+    expect(source).toContain("liveSessionIds.has(pauseSessionId)");
+    expect(source).toContain("delete next[sessionId];");
     expect(source).not.toContain("手动发送仍可用");
     expect(source).toContain("const sendAsNewTurn = !!queuedMessagesPause;");
     expect(source).toContain('sendAsNewTurn ? "作为新消息开始任务" : "立即发送为当前任务的补充"');
@@ -1642,7 +1646,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('className="queued-message-edit"');
     expect(source).toContain('className="queued-message-editor" autoFocus');
     expect(source).toContain("message.id === edit.id ? { ...message, text, deliveryError: undefined } : message");
-    expect(source).toContain('selectQueuedDispatches(sessions, queuedMessagesBySessionRef.current, queuedDispatchSessionIdsRef.current, editingQueuedMessage?.sessionId)');
+    expect(source).toContain('selectQueuedDispatches(sessions, queuedMessagesBySessionRef.current, queuedDispatchSessionIdsRef.current, editingQueuedMessage?.sessionId, new Set(Object.keys(queuedMessagesPauseBySessionRef.current)))');
     expect(source).toContain(">保存</button>");
     expect(source).toContain('className="queued-message-edit-cancel"');
     expect(source).toContain(">取消</button>");

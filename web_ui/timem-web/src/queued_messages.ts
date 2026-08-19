@@ -38,16 +38,29 @@ export function stopQueuedAutoSend(
  return current ?? { paused: true, source, reason, stoppedAtMs };
 }
 
-export function queuedMessagesPauseStorageKey(scope: string) {
- return `${queuedMessagesStorageKey(scope)}-pause`;
+export function queuedMessagesPauseStorageKey(scope: string, sessionId: string) {
+ return `${queuedMessagesStorageKey(scope)}-pause:${encodeURIComponent(sessionId)}`;
+}
+
+export function queuedMessagesPauseSessionId(scope: string, storageKey: string) {
+ const prefix = `${queuedMessagesStorageKey(scope)}-pause:`;
+ if (!storageKey.startsWith(prefix)) return null;
+ try {
+ const sessionId = decodeURIComponent(storageKey.slice(prefix.length));
+ if (!sessionId || queuedMessagesPauseStorageKey(scope, sessionId) !== storageKey) return null;
+ return sessionId;
+ } catch {
+ return null;
+ }
 }
 
 export function loadQueuedMessagesPause(
  storage: Pick<Storage, "getItem">,
  scope: string,
+ sessionId: string,
 ): QueuedMessagesPauseState | null {
  try {
- const raw = storage.getItem(queuedMessagesPauseStorageKey(scope));
+ const raw = storage.getItem(queuedMessagesPauseStorageKey(scope, sessionId));
  if (!raw || raw.length > MAX_STORED_MESSAGE_BYTES) return null;
  const value = JSON.parse(raw) as Partial<QueuedMessagesPauseState>;
  if (
@@ -72,10 +85,11 @@ export function loadQueuedMessagesPause(
 export function saveQueuedMessagesPause(
  storage: Pick<Storage, "setItem">,
  scope: string,
+ sessionId: string,
  pause: QueuedMessagesPauseState,
 ) {
  try {
- storage.setItem(queuedMessagesPauseStorageKey(scope), JSON.stringify(pause));
+ storage.setItem(queuedMessagesPauseStorageKey(scope, sessionId), JSON.stringify(pause));
  return true;
  } catch {
  return false;
@@ -85,9 +99,10 @@ export function saveQueuedMessagesPause(
 export function clearQueuedMessagesPause(
  storage: Pick<Storage, "removeItem">,
  scope: string,
+ sessionId: string,
 ) {
  try {
- storage.removeItem(queuedMessagesPauseStorageKey(scope));
+ storage.removeItem(queuedMessagesPauseStorageKey(scope, sessionId));
  return true;
  } catch {
  return false;
@@ -291,9 +306,10 @@ export function selectQueuedDispatches(
   queues: Readonly<Record<string, readonly QueuedMessage[]>>,
   dispatchingSessionIds: ReadonlySet<string>,
   editingSessionId?: string,
+  pausedSessionIds: ReadonlySet<string> = new Set(),
 ) {
   return sessions.flatMap((session) => {
-    if (session.state === "working" || dispatchingSessionIds.has(session.session_id) || editingSessionId === session.session_id) return [];
+    if (session.state === "working" || dispatchingSessionIds.has(session.session_id) || editingSessionId === session.session_id || pausedSessionIds.has(session.session_id)) return [];
     const message = queues[session.session_id]?.[0];
     return message && !message.deliveryError ? [{ sessionId: session.session_id, message }] : [];
   });

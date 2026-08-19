@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, shouldPauseQueuedMessages, stopQueuedAutoSend, unclaimedQueuedMessages } from "../src/queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseSessionId, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, shouldPauseQueuedMessages, stopQueuedAutoSend, unclaimedQueuedMessages } from "../src/queued_messages";
 
 const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => ({
   id,
@@ -310,7 +310,7 @@ describe("queued messages", () => {
     expect(selectQueuedDispatches(sessions, queues, dispatching)).toEqual([]);
   });
 
- it("persists and clears a mem-scoped global pause without changing queued messages", () => {
+ it("persists and clears pauses independently for each session without changing queued messages", () => {
  const values = new Map<string, string>();
  const storage = {
  get length() { return values.size; },
@@ -320,29 +320,58 @@ describe("queued messages", () => {
  removeItem: (key: string) => { values.delete(key); },
  };
  expect(saveQueuedMessages(storage, "scope-a", { session_a: messages.slice(0, 2) })).toBe(true);
- expect(saveQueuedMessagesPause(storage, "scope-a", {
+ expect(saveQueuedMessagesPause(storage, "scope-a", "session_a", {
  paused: true,
  source: "user",
  reason: "用户关闭了自动发送",
  stoppedAtMs: 123,
  })).toBe(true);
- expect(loadQueuedMessagesPause(storage, "scope-a")).toEqual({
+ expect(loadQueuedMessagesPause(storage, "scope-a", "session_a")).toEqual({
  paused: true,
  source: "user",
  reason: "用户关闭了自动发送",
  stoppedAtMs: 123,
  });
- expect(loadQueuedMessagesPause(storage, "scope-b")).toBeNull();
+ expect(loadQueuedMessagesPause(storage, "scope-a", "session_b")).toBeNull();
+ expect(loadQueuedMessagesPause(storage, "scope-b", "session_a")).toBeNull();
  expect(loadQueuedMessages(storage, "scope-a").session_a.map(({ id }) => id)).toEqual(["a", "b"]);
- expect(clearQueuedMessagesPause(storage, "scope-a")).toBe(true);
- expect(loadQueuedMessagesPause(storage, "scope-a")).toBeNull();
+ expect(clearQueuedMessagesPause(storage, "scope-a", "session_a")).toBe(true);
+ expect(loadQueuedMessagesPause(storage, "scope-a", "session_a")).toBeNull();
  expect(loadQueuedMessages(storage, "scope-a").session_a.map(({ id }) => id)).toEqual(["a", "b"]);
  });
 
- it("ignores malformed queue pause records", () => {
+ it("keeps other sessions dispatchable when one session is paused", () => {
+ const sessions = [
+ { session_id: "session_a", state: "ready" },
+ { session_id: "session_b", state: "ready" },
+ ];
+ const queues = {
+ session_a: [{ id: "a1", text: "A next", createdAtMs: 1 }],
+ session_b: [{ id: "b1", text: "B next", createdAtMs: 2 }],
+ };
+ expect(selectQueuedDispatches(
+ sessions,
+ queues,
+ new Set(),
+ undefined,
+ new Set(["session_a"]),
+ )).toEqual([
+ { sessionId: "session_b", message: queues.session_b[0] },
+ ]);
+ });
+
+ it("parses a session pause storage key without scanning other sessions", () => {
+ const key = queuedMessagesPauseStorageKey("scope-a", "session / 中文");
+ expect(queuedMessagesPauseSessionId("scope-a", key)).toBe("session / 中文");
+ expect(queuedMessagesPauseSessionId("scope-b", key)).toBeNull();
+ expect(queuedMessagesPauseSessionId("scope-a", `${key}%`)).toBeNull();
+ expect(queuedMessagesPauseSessionId("scope-a", "unrelated")).toBeNull();
+ });
+
+ it("ignores malformed session queue pause records", () => {
  const values = new Map<string, string>();
  const storage = { getItem: (key: string) => values.get(key) ?? null };
- const key = queuedMessagesPauseStorageKey("scope-a");
+ const key = queuedMessagesPauseStorageKey("scope-a", "session_a");
  for (const malformed of [
  "not-json",
  "{}",
@@ -353,7 +382,7 @@ describe("queued messages", () => {
  JSON.stringify({ paused: true, stoppedAtMs: 1, source: "system" }),
  ]) {
  values.set(key, malformed);
- expect(loadQueuedMessagesPause(storage, "scope-a")).toBeNull();
+ expect(loadQueuedMessagesPause(storage, "scope-a", "session_a")).toBeNull();
  }
  });
 });
