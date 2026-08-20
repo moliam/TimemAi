@@ -219,6 +219,7 @@ pub fn save_role_library(path: &Path, library: &WorkerRoleLibrary) -> Result<(),
     save_payload(path, library)
 }
 
+#[cfg(test)]
 pub fn save_roles(path: &Path, roles: &[WorkerRole]) -> Result<(), String> {
     validate_role_collection(roles)?;
     save_payload(path, roles)
