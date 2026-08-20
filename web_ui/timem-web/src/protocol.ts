@@ -68,6 +68,8 @@ export type ToolDetail = {
 };
 
 export type WorkerRole = { id: string; name: string; description: string };
+export type WorkerRoleGroup = { id: string; name: string; role_ids: string[] };
+export type WorkerRoleLibrary = { roles: WorkerRole[]; groups: WorkerRoleGroup[] };
 
 export type Session = {
   session_id: string;
@@ -208,6 +210,7 @@ export type Snapshot = {
     mcp_servers: McpServerReport[];
   };
   sessions: Session[];
+  role_library: WorkerRoleLibrary;
 };
 
 export type WireEvent =
@@ -218,6 +221,7 @@ export type WireEvent =
   | { type: "session_renamed"; session_id: string; display_name: string }
   | { type: "session_deleted"; session_id: string }
   | { type: "worker_roles_updated"; session_id: string; roles: WorkerRole[] }
+  | { type: "worker_role_library_updated"; library: WorkerRoleLibrary }
   | { type: "chat_message_deleted"; session_id: string; turn_id: string; role: "user" | "assistant"; role_index: number }
   | { type: "session_runtime_updated"; session_id: string; runtime_profile: NonNullable<Session["runtime_profile"]> }
   | { type: "session_runtime_config_updated"; session_id: string; key: string; value: string; runtime_profile: NonNullable<Session["runtime_profile"]> }
@@ -250,6 +254,10 @@ export type ClientCommand =
   | { type: "worker_role_create"; session_id: string; name: string; description: string }
   | { type: "worker_role_update"; session_id: string; role_id: string; name: string; description: string }
   | { type: "worker_role_delete"; session_id: string; role_id: string }
+  | { type: "worker_role_group_create"; session_id: string; name: string }
+  | { type: "worker_role_group_update"; session_id: string; group_id: string; name: string }
+  | { type: "worker_role_group_delete"; session_id: string; group_id: string }
+  | { type: "worker_role_library_reorder"; session_id: string; groups: WorkerRoleGroup[]; ungrouped_role_ids: string[] }
   | { type: "turn_submit"; session_id: string; text: string; attachment_ids?: string[]; role_ids?: string[]; input_kind?: "toolgen"; source_turn_id?: string }
   | { type: "turn_supplement"; session_id: string; text: string; attachment_ids?: string[]; role_ids?: string[] }
   | { type: "turn_cancel"; session_id: string }
