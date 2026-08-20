@@ -251,7 +251,7 @@ impl FileShellJobStore {
         Self {
             index_file: dir.join("jobs.jsonl"),
             dir,
-            guard: MemGuard::for_memory_dir(memory_dir),
+            guard: MemGuard::for_memory_domain(memory_dir, "shell-jobs"),
             watcher: ShellJobWatcher::new(),
             long_running_prompt_after: LONG_RUNNING_COMMAND_PROMPT_AFTER,
         }
@@ -507,10 +507,7 @@ impl FileShellJobStore {
     /// are ignored, including records from a process whose PID was later reused.
     pub fn terminate_owned_running(&self) -> usize {
         let owner_id = crate::runtime_process_owner_id();
-        let records = self
-            .guard
-            .with_read(|| self.records_unlocked())
-            .unwrap_or_default();
+        let records = self.records_unlocked();
         let mut terminated = 0;
         for record in records {
             if record.owner_id.as_deref() != Some(owner_id) || self.record_finished(&record) {
@@ -528,10 +525,7 @@ impl FileShellJobStore {
         if clean_session.is_empty() {
             return Vec::new();
         }
-        let records = self
-            .guard
-            .with_read(|| self.records_unlocked())
-            .unwrap_or_default();
+        let records = self.records_unlocked();
         let owner_id = crate::runtime_process_owner_id();
         let mut cancelled = Vec::new();
         for record in records {
@@ -561,24 +555,19 @@ impl FileShellJobStore {
         if clean_session.is_empty() {
             return (Vec::new(), Vec::new());
         }
-        self.guard
-            .with_write(|| {
-                let mut running = Vec::new();
-                let mut exited = Vec::new();
-                let owner_id = crate::runtime_process_owner_id();
-                for record in self.records_unlocked().into_iter().filter(|record| {
-                    record.owner_id.as_deref() == Some(owner_id)
-                        && record.session_id == clean_session
-                }) {
-                    match self.refresh_record_unlocked(record) {
-                        ShellJobRefresh::Running(job) => running.push(job),
-                        ShellJobRefresh::Exited(update) => exited.push(update),
-                        ShellJobRefresh::Finished => {}
-                    }
-                }
-                (running, exited)
-            })
-            .unwrap_or_default()
+        let mut running = Vec::new();
+        let mut exited = Vec::new();
+        let owner_id = crate::runtime_process_owner_id();
+        for record in self.records_unlocked().into_iter().filter(|record| {
+            record.owner_id.as_deref() == Some(owner_id) && record.session_id == clean_session
+        }) {
+            match self.refresh_record_unlocked(record) {
+                ShellJobRefresh::Running(job) => running.push(job),
+                ShellJobRefresh::Exited(update) => exited.push(update),
+                ShellJobRefresh::Finished => {}
+            }
+        }
+        (running, exited)
     }
 
     pub fn running_job_list_context(&self, session_id: &str) -> Option<String> {
@@ -678,10 +667,14 @@ impl FileShellJobStore {
 
     fn exit_update_once_unlocked(&self, record: ShellJobRecord) -> ShellJobRefresh {
         let notified_file = format!("{}.notified", record.status_file);
-        if Path::new(&notified_file).exists() {
+        let claimed = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&notified_file)
+            .and_then(|mut file| write!(file, "{}", now_ms()));
+        if claimed.is_err() {
             return ShellJobRefresh::Finished;
         }
-        let _ = fs::write(&notified_file, now_ms().to_string());
         let (stdout, stderr) = read_shell_job_streams(&record);
         ShellJobRefresh::Exited(ShellJobExitUpdate {
             pid: record.pid,
