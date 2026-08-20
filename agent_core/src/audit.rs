@@ -1,6 +1,6 @@
 use crate::{
-    bash_approval_mode_label, ApiProtocol, ApprovalRequest, BashApprovalMode, MemGuard,
-    TurnStopSummary, UsageStats,
+    atomic_write_file, bash_approval_mode_label, ApiProtocol, ApprovalRequest, BashApprovalMode,
+    MemGuard, TurnStopSummary, UsageStats,
 };
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
@@ -26,7 +26,7 @@ pub fn append_audit_event(path: &Path, event: &Value) -> std::io::Result<()> {
                 .expect("audit doc events must be an array")
                 .push(event.clone());
             let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
-            fs::write(path, format!("{text}\n"))
+            atomic_write_file(path, format!("{text}\n").as_bytes())
         })
         .map_err(std::io::Error::other)?
 }
@@ -45,7 +45,7 @@ pub fn append_repair_output_event(api_audit_file: &Path, event: &Value) -> std::
                 .push(event.clone());
             doc["updated_at_ms"] = json!(audit_now_ms());
             let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
-            fs::write(&repair_file, format!("{text}\n"))
+            atomic_write_file(&repair_file, format!("{text}\n").as_bytes())
         })
         .map_err(std::io::Error::other)?
 }

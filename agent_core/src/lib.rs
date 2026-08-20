@@ -598,17 +598,49 @@ pub struct MemGuard {
     lock_dir: PathBuf,
 }
 
+fn sanitize_mem_guard_domain(domain: &str) -> String {
+    let mut clean = domain
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while clean.contains("--") {
+        clean = clean.replace("--", "-");
+    }
+    clean = clean.trim_matches(['-', '.']).to_string();
+    if clean.is_empty() {
+        "default".to_string()
+    } else {
+        clean
+    }
+}
+
 impl MemGuard {
     pub fn for_memory_dir(memory_dir: impl AsRef<Path>) -> Self {
+        Self::for_memory_domain(memory_dir, "legacy")
+    }
+
+    pub fn for_memory_domain(memory_dir: impl AsRef<Path>, domain: impl AsRef<str>) -> Self {
         let space_dir = space_dir_for_memory_dir(memory_dir.as_ref()).to_path_buf();
-        Self::for_space_dir(space_dir)
+        Self::for_space_domain(space_dir, domain)
     }
 
     pub fn for_space_dir(space_dir: impl AsRef<Path>) -> Self {
+        Self::for_space_domain(space_dir, "legacy")
+    }
+
+    pub fn for_space_domain(space_dir: impl AsRef<Path>, domain: impl AsRef<str>) -> Self {
         let space_dir = fs::canonicalize(space_dir.as_ref())
             .unwrap_or_else(|_| space_dir.as_ref().to_path_buf());
+        let domain = sanitize_mem_guard_domain(domain.as_ref());
         Self {
-            lock_dir: space_dir.join(".guard").join("mem.lock.d"),
+            lock_dir: space_dir.join(".guard").join(format!("{domain}.lock.d")),
         }
     }
 
@@ -624,11 +656,22 @@ impl MemGuard {
                 }
             })
             .unwrap_or_else(|| Path::new("."));
-        Self::for_space_dir(space_dir)
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("audit");
+        let logical_file_name = file_name
+            .strip_suffix(".jsonl")
+            .map(|stem| format!("{stem}.json"))
+            .unwrap_or_else(|| file_name.to_string());
+        Self::for_space_domain(space_dir, format!("audit-{logical_file_name}"))
     }
 
+    /// Reads do not acquire a cross-process lock. Writers publish complete
+    /// snapshots atomically or append complete JSONL records, so a reader may
+    /// observe an older consistent state without blocking unrelated work.
     pub fn with_read<T>(&self, f: impl FnOnce() -> T) -> Result<T, String> {
-        self.with_lock(f)
+        Ok(f())
     }
 
     pub fn with_write<T>(&self, f: impl FnOnce() -> T) -> Result<T, String> {
@@ -714,6 +757,42 @@ fn process_is_alive(pid: u64) -> Option<bool> {
 #[cfg(not(unix))]
 fn process_is_alive(_pid: u64) -> Option<bool> {
     None
+}
+
+pub(crate) fn atomic_write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("snapshot");
+    let temporary = path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        unique_id("write")
+    ));
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -987,10 +1066,8 @@ impl FileActionAuditStore {
     fn new(memory_dir: &Path) -> Self {
         let space_dir = space_dir_for_memory_dir(memory_dir);
         let file = space_dir.join("audit").join("action_audit.json");
-        Self {
-            file,
-            guard: MemGuard::for_memory_dir(memory_dir),
-        }
+        let guard = MemGuard::for_audit_file(&file);
+        Self { file, guard }
     }
 
     fn begin_turn(&self, turn_id: &str, started_at_ms: i64, user_question: &str) {
@@ -1057,7 +1134,7 @@ impl FileActionAuditStore {
         let Ok(text) = serde_json::to_string_pretty(doc) else {
             return;
         };
-        let _ = fs::write(&self.file, format!("{text}\n"));
+        let _ = atomic_write_file(&self.file, format!("{text}\n").as_bytes());
     }
 
     fn empty_doc() -> ActionAuditDocument {
@@ -4677,7 +4754,7 @@ impl FileMemoryStore {
         Self {
             dir: dir.to_path_buf(),
             file: dir.join("memory.jsonl"),
-            guard: MemGuard::for_memory_dir(dir),
+            guard: MemGuard::for_memory_domain(dir, "durable-memory"),
         }
     }
     fn write(&self, content: &str) -> std::io::Result<()> {
@@ -4687,7 +4764,9 @@ impl FileMemoryStore {
         }
         self.guard
             .with_write(|| self.write_clean_unlocked(clean))
-            .map_err(std::io::Error::other)?
+            .map_err(std::io::Error::other)??;
+        self.snapshot_with_git("memory write");
+        Ok(())
     }
 
     fn write_clean_unlocked(&self, clean: &str) -> std::io::Result<()> {
@@ -4708,14 +4787,11 @@ impl FileMemoryStore {
             "{}",
             serde_json::to_string(&record).unwrap_or_default()
         )?;
-        self.snapshot_with_git("memory write");
         Ok(())
     }
 
     fn query(&self, query: &str, limit: usize) -> std::io::Result<Vec<MemoryRecord>> {
-        self.guard
-            .with_read(|| self.query_unlocked(query, limit))
-            .map_err(std::io::Error::other)?
+        self.query_unlocked(query, limit)
     }
 
     fn query_unlocked(&self, query: &str, limit: usize) -> std::io::Result<Vec<MemoryRecord>> {
@@ -4743,20 +4819,14 @@ impl FileMemoryStore {
         Ok(rows)
     }
     fn recent(&self, limit: usize) -> std::io::Result<Vec<MemoryRecord>> {
-        self.guard
-            .with_read(|| {
-                let mut rows = self.read_all_unlocked()?;
-                rows.sort_by_key(|row| std::cmp::Reverse(row.created_at_ms));
-                rows.truncate(limit.clamp(1, 50));
-                Ok(rows)
-            })
-            .map_err(std::io::Error::other)?
+        let mut rows = self.read_all_unlocked()?;
+        rows.sort_by_key(|row| std::cmp::Reverse(row.created_at_ms));
+        rows.truncate(limit.clamp(1, 50));
+        Ok(rows)
     }
 
     fn count(&self) -> std::io::Result<usize> {
-        self.guard
-            .with_read(|| self.read_all_unlocked().map(|rows| rows.len()))
-            .map_err(std::io::Error::other)?
+        self.read_all_unlocked().map(|rows| rows.len())
     }
     fn update(
         &self,
@@ -4765,9 +4835,14 @@ impl FileMemoryStore {
         content: &str,
         expected_version: Option<u64>,
     ) -> Result<String, String> {
-        self.guard
+        let result = self
+            .guard
             .with_write(|| self.update_unlocked(operation, id, content, expected_version))
-            .map_err(|err| err.to_string())?
+            .map_err(|err| err.to_string())?;
+        if result.is_ok() {
+            self.snapshot_with_git("memory update");
+        }
+        result
     }
 
     fn update_unlocked(
@@ -4898,16 +4973,15 @@ impl FileMemoryStore {
     }
 
     fn write_all_unlocked(&self, rows: &[MemoryRecord]) -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.file)?;
+        let mut bytes = Vec::new();
         for row in rows {
-            writeln!(file, "{}", serde_json::to_string(row).unwrap_or_default())?;
+            writeln!(
+                &mut bytes,
+                "{}",
+                serde_json::to_string(row).unwrap_or_default()
+            )?;
         }
-        self.snapshot_with_git("memory update");
-        Ok(())
+        atomic_write_file(&self.file, &bytes)
     }
 
     fn snapshot_with_git(&self, message: &str) {
@@ -5008,8 +5082,7 @@ impl FileMemoryStore {
         params: &[String],
         limit: usize,
     ) -> Result<Vec<Vec<(String, String)>>, String> {
-        self.guard
-            .with_read(|| self.sql_read_unlocked(chat_history, sql, params, limit))?
+        self.sql_read_unlocked(chat_history, sql, params, limit)
     }
 
     fn sql_read_unlocked(
@@ -5138,7 +5211,7 @@ impl FileScratchStore {
         let _ = fs::create_dir_all(dir);
         Self {
             file: dir.join("scratch_notes.jsonl"),
-            guard: MemGuard::for_memory_dir(dir),
+            guard: MemGuard::for_memory_domain(dir, "scratch-notes"),
         }
     }
 
@@ -5230,16 +5303,14 @@ impl FileScratchStore {
         if clean_id.is_empty() {
             return Err("id_required".to_string());
         }
-        self.guard.with_read(|| {
-            Ok(self
-                .read_all_unlocked()?
-                .into_iter()
-                .find(|record| record.id == clean_id))
-        })?
+        Ok(self
+            .read_all_unlocked()?
+            .into_iter()
+            .find(|record| record.id == clean_id))
     }
 
     fn query(&self, query: &str, limit: usize) -> Result<Vec<ScratchNoteRecord>, String> {
-        self.guard.with_read(|| self.query_unlocked(query, limit))?
+        self.query_unlocked(query, limit)
     }
 
     fn query_unlocked(&self, query: &str, limit: usize) -> Result<Vec<ScratchNoteRecord>, String> {
@@ -5289,17 +5360,16 @@ impl FileScratchStore {
     }
 
     fn write_all_unlocked(&self, rows: &[ScratchNoteRecord]) -> Result<(), String> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.file)
-            .map_err(|_| "scratch_open_failed".to_string())?;
+        let mut bytes = Vec::new();
         for row in rows {
-            writeln!(file, "{}", serde_json::to_string(row).unwrap_or_default())
-                .map_err(|_| "scratch_write_failed".to_string())?;
+            writeln!(
+                &mut bytes,
+                "{}",
+                serde_json::to_string(row).unwrap_or_default()
+            )
+            .map_err(|_| "scratch_write_failed".to_string())?;
         }
-        Ok(())
+        atomic_write_file(&self.file, &bytes).map_err(|_| "scratch_write_failed".to_string())
     }
 }
 
@@ -5307,7 +5377,6 @@ impl FileScratchStore {
 struct FileChatHistoryStore {
     audit_file: PathBuf,
     legacy_audit_file: PathBuf,
-    guard: MemGuard,
 }
 impl FileChatHistoryStore {
     fn new(memory_dir: &Path) -> Self {
@@ -5317,7 +5386,6 @@ impl FileChatHistoryStore {
         Self {
             audit_file,
             legacy_audit_file,
-            guard: MemGuard::for_memory_dir(memory_dir),
         }
     }
 
@@ -5340,9 +5408,7 @@ impl FileChatHistoryStore {
         after_ms: Option<i64>,
         before_ms: Option<i64>,
     ) -> std::io::Result<Vec<RawChatHistoryRecord>> {
-        self.guard
-            .with_read(|| self.query_unlocked(query, limit, after_ms, before_ms))
-            .map_err(std::io::Error::other)?
+        self.query_unlocked(query, limit, after_ms, before_ms)
     }
 
     fn query_unlocked(
@@ -5372,21 +5438,21 @@ impl FileChatHistoryStore {
         before_ms: Option<i64>,
     ) -> Result<usize, String> {
         let clean_id = id.trim();
-        self.guard.with_write(|| {
-            let targets = if clean_id.is_empty() {
-                self.query_unlocked(query, limit, after_ms, before_ms)
-                    .map_err(|_| "chat_history_read_failed".to_string())?
-                    .into_iter()
-                    .map(|record| record.turn_id)
-                    .collect::<HashSet<_>>()
-            } else {
-                let mut ids = HashSet::new();
-                ids.insert(clean_id.to_string());
-                ids
-            };
-            if targets.is_empty() {
-                return Ok(0);
-            }
+        let targets = if clean_id.is_empty() {
+            self.query_unlocked(query, limit, after_ms, before_ms)
+                .map_err(|_| "chat_history_read_failed".to_string())?
+                .into_iter()
+                .map(|record| record.turn_id)
+                .collect::<HashSet<_>>()
+        } else {
+            let mut ids = HashSet::new();
+            ids.insert(clean_id.to_string());
+            ids
+        };
+        if targets.is_empty() {
+            return Ok(0);
+        }
+        MemGuard::for_audit_file(&self.audit_file).with_write(|| {
             let mut deleted_turn_ids = HashSet::new();
             for audit_file in self.audit_files() {
                 if !audit_file.exists() {
@@ -5403,21 +5469,19 @@ impl FileChatHistoryStore {
                         .to_string();
                     if !turn_id.is_empty() && targets.contains(&turn_id) {
                         deleted_turn_ids.insert(turn_id);
-                        continue;
+                    } else {
+                        retained.push(value);
                     }
-                    retained.push(value);
                 }
                 write_audit_events_unlocked(&audit_file, &retained)
                     .map_err(|_| "chat_history_write_failed".to_string())?;
             }
-            Ok(deleted_turn_ids.len())
+            Ok::<_, String>(deleted_turn_ids.len())
         })?
     }
 
     fn read_all(&self) -> std::io::Result<Vec<RawChatHistoryRecord>> {
-        self.guard
-            .with_read(|| self.read_all_unlocked())
-            .map_err(std::io::Error::other)?
+        self.read_all_unlocked()
     }
 
     fn read_all_unlocked(&self) -> std::io::Result<Vec<RawChatHistoryRecord>> {
@@ -5520,23 +5584,21 @@ fn read_audit_events_unlocked(path: &Path) -> std::io::Result<Vec<Value>> {
 }
 
 fn write_audit_events_unlocked(path: &Path, events: &[Value]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    let mut bytes = Vec::new();
     if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)?;
         for event in events {
-            writeln!(file, "{}", serde_json::to_string(event).unwrap_or_default())?;
+            writeln!(
+                &mut bytes,
+                "{}",
+                serde_json::to_string(event).unwrap_or_default()
+            )?;
         }
-        return Ok(());
+    } else {
+        let doc = json!({"version": 1, "events": events});
+        let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
+        bytes.extend_from_slice(format!("{text}\n").as_bytes());
     }
-    let doc = json!({"version": 1, "events": events});
-    let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
-    fs::write(path, format!("{text}\n"))
+    atomic_write_file(path, &bytes)
 }
 
 fn validate_memory_sql(sql: &str) -> Result<(), String> {
