@@ -42,7 +42,7 @@ impl FileToolJobStore {
         Self {
             index_file: dir.join("jobs.jsonl"),
             dir,
-            guard: MemGuard::for_memory_dir(memory_dir),
+            guard: MemGuard::for_memory_domain(memory_dir, "tool-jobs"),
         }
     }
 
@@ -182,10 +182,7 @@ impl FileToolJobStore {
     /// signalling historical records even if an operating-system PID is reused.
     pub fn terminate_owned_running(&self) -> usize {
         let owner_id = crate::runtime_process_owner_id();
-        let records = self
-            .guard
-            .with_read(|| self.records_unlocked())
-            .unwrap_or_default();
+        let records = self.records_unlocked();
         let mut terminated = 0;
         for record in records {
             if record.owner_id.as_deref() != Some(owner_id)
@@ -266,7 +263,7 @@ impl FileToolJobStore {
     }
 
     fn find(&self, job_id: &str) -> Option<ToolJobRecord> {
-        self.guard.with_read(|| self.find_unlocked(job_id)).ok()?
+        self.find_unlocked(job_id)
     }
 
     fn find_unlocked(&self, job_id: &str) -> Option<ToolJobRecord> {
