@@ -30,6 +30,7 @@ const STORED_HISTORY_PAGE_SIZE = 200;
 const TOKEN_STORAGE_KEY = "timem-web-access-token";
 const EMPTY_CHAT_MESSAGES: ChatMessage[] = [];
 const SESSION_API_KEY_SAVE_TIMEOUT_MS = 20_000;
+const TURN_CANCEL_UI_TIMEOUT_MS = 15_000;
 type PendingSessionApiKeyCommand = {
   sessionId: string;
   timeoutId: number;
@@ -135,6 +136,8 @@ function TimemApp() {
   const selectedToolRef = useRef<ToolDetail | null>(null);
   const toolCountBySessionRef = useRef<Map<string, number>>(new Map());
   const cancellingSessionIds = useRef<Set<string>>(new Set());
+  const cancellingSessionCommandIds = useRef<Map<string, string>>(new Map());
+  const cancellingSessionTimeouts = useRef<Map<string, number>>(new Map());
   const [cancellingSessionIdSet, setCancellingSessionIdSet] = useState<Set<string>>(() => new Set());
   const [creatingSession, setCreatingSession] = useState(false);
   const [pendingAttachmentRemoveIds, setPendingAttachmentRemoveIds] = useState<Set<string>>(() => new Set());
@@ -432,6 +435,9 @@ function TimemApp() {
   const clearAllPendingCommands = useCallback(() => {
     creatingSessionRef.current = false;
     cancellingSessionIds.current.clear();
+    cancellingSessionCommandIds.current.clear();
+    for (const timeoutId of cancellingSessionTimeouts.current.values()) window.clearTimeout(timeoutId);
+    cancellingSessionTimeouts.current.clear();
     pendingAttachmentRemoveIdsRef.current.clear();
     pendingDecisionKeysRef.current.clear();
     pendingRenameSessionIdsRef.current.clear();
@@ -478,6 +484,10 @@ function TimemApp() {
     for (const sessionId of Array.from(cancellingSessionIds.current)) {
       if (!workingIds.has(sessionId)) {
         cancellingSessionIds.current.delete(sessionId);
+        cancellingSessionCommandIds.current.delete(sessionId);
+        const timeoutId = cancellingSessionTimeouts.current.get(sessionId);
+        if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+        cancellingSessionTimeouts.current.delete(sessionId);
         changed = true;
       }
     }
@@ -578,6 +588,18 @@ function TimemApp() {
           const sessionId = pendingCredential?.sessionId
             ?? commandSessionId(completed?.command)
             ?? (activeSessionIdRef.current || "system");
+          if (
+            completed?.command.type === "turn_cancel"
+            && sessionId !== "system"
+            && cancellingSessionCommandIds.current.get(sessionId) === event.command_id
+          ) {
+            cancellingSessionIds.current.delete(sessionId);
+            cancellingSessionCommandIds.current.delete(sessionId);
+            const timeoutId = cancellingSessionTimeouts.current.get(sessionId);
+            if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+            cancellingSessionTimeouts.current.delete(sessionId);
+            setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
+          }
           if (pendingCredential) {
             reportUiError(
               "API key update rejected",
@@ -885,6 +907,10 @@ function TimemApp() {
       pendingToolgenRequestsRef.current = removeToolgenRequestsForSession(pendingToolgenRequestsRef.current, event.session_id);
       setPendingToolgenRequests(new Set(pendingToolgenRequestsRef.current));
       cancellingSessionIds.current.delete(event.session_id);
+      cancellingSessionCommandIds.current.delete(event.session_id);
+      const cancellationTimeoutId = cancellingSessionTimeouts.current.get(event.session_id);
+      if (cancellationTimeoutId !== undefined) window.clearTimeout(cancellationTimeoutId);
+      cancellingSessionTimeouts.current.delete(event.session_id);
       setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? finishTurn(attachTurnCompletion(session, event.outcome.message_id, event.outcome.completion ?? {}), event.turn_id, event.outcome.completion ?? {})
@@ -1112,12 +1138,33 @@ function TimemApp() {
   const cancelActiveTurn = useCallback(async () => {
     if (!activeSession || activeSession.state !== "working" || pendingMemSwitch) return;
     if (cancellingSessionIds.current.has(activeSession.session_id)) return;
-    cancellingSessionIds.current.add(activeSession.session_id);
+    const sessionId = activeSession.session_id;
+    const commandId = clientId("turn-cancel");
+    cancellingSessionIds.current.add(sessionId);
+    cancellingSessionCommandIds.current.set(sessionId, commandId);
     setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
-    if (!sendCommand({ type: "turn_cancel", session_id: activeSession.session_id })) {
-      cancellingSessionIds.current.delete(activeSession.session_id);
+    const previousTimeoutId = cancellingSessionTimeouts.current.get(sessionId);
+    if (previousTimeoutId !== undefined) window.clearTimeout(previousTimeoutId);
+    const timeoutId = window.setTimeout(() => {
+      if (cancellingSessionCommandIds.current.get(sessionId) !== commandId) return;
+      cancellingSessionTimeouts.current.delete(sessionId);
+      cancellingSessionCommandIds.current.delete(sessionId);
+      if (!cancellingSessionIds.current.delete(sessionId)) return;
       setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
-      const activity: Activity = { id: clientId(), sessionId: activeSession.session_id, tone: "error", title: "Cancel failed", detail: "Reconnect to Timem Web before cancelling this turn.", createdAt: Date.now() };
+      reportUiError(
+        "Cancellation is taking too long",
+        "The runtime has not confirmed that the turn stopped. You can retry Stop, reconnect, or restart Timem Web if the turn remains unresponsive.",
+        sessionId,
+      );
+    }, TURN_CANCEL_UI_TIMEOUT_MS);
+    cancellingSessionTimeouts.current.set(sessionId, timeoutId);
+    if (!sendCommand({ type: "turn_cancel", session_id: sessionId }, commandId)) {
+      window.clearTimeout(timeoutId);
+      cancellingSessionTimeouts.current.delete(sessionId);
+      cancellingSessionCommandIds.current.delete(sessionId);
+      cancellingSessionIds.current.delete(sessionId);
+      setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
+      const activity: Activity = { id: clientId(), sessionId, tone: "error", title: "Cancel failed", detail: "Reconnect to Timem Web before cancelling this turn.", createdAt: Date.now() };
       pushActivity(activity);
     }
   }, [activeSession, pendingMemSwitch, pushActivity, sendCommand]);

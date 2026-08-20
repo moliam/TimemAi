@@ -901,8 +901,15 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain("const cancellingSessionIds = useRef<Set<string>>(new Set());");
     expect(source).toContain("const [cancellingSessionIdSet");
     expect(source).toContain('if (cancellingSessionIds.current.has(activeSession.session_id)) return;');
-    expect(source).toContain('cancellingSessionIds.current.add(activeSession.session_id);');
+    expect(source).toContain('cancellingSessionIds.current.add(sessionId);');
     expect(source).toContain('cancellingSessionIds.current.delete(event.session_id);');
+    expect(source).toContain("const cancellingSessionCommandIds = useRef<Map<string, string>>(new Map());");
+    expect(source).toContain("const cancellingSessionTimeouts = useRef<Map<string, number>>(new Map());");
+    expect(source).toContain("TURN_CANCEL_UI_TIMEOUT_MS = 15_000");
+    expect(source).toContain('const commandId = clientId("turn-cancel");');
+    expect(source).toContain("cancellingSessionCommandIds.current.get(sessionId) === event.command_id");
+    expect(source).toContain('sendCommand({ type: "turn_cancel", session_id: sessionId }, commandId)');
+    expect(source).toContain('"Cancellation is taking too long"');
     expect(source).toContain('{isCancelling ? "Stopping…" : "Stop"}');
     expect(source).toContain("const cancelActiveSessionTurn = async () =>");
     expect(source).toContain("queuedAutoContinueSessionIdsRef.current.delete(activeSessionId)");
