@@ -3846,12 +3846,23 @@ fn restore_stored_sessions_with_runtime_restart_marker(
     state: &AppState,
     record_runtime_restart: bool,
 ) -> Result<usize, String> {
-    let stored_sessions = list_stored_sessions_resilient(&current_session_store(state)?)?;
+    let store = current_session_store(state)?;
+    let stored_sessions = list_stored_sessions_resilient(&store)?;
     let mut restored = 0usize;
     for stored in stored_sessions {
         let session_id = stored.session_id.clone();
         match restore_stored_session(state, stored, record_runtime_restart) {
             Ok(()) => restored += 1,
+            Err(error) if error == "stored_session_workspace_not_found" => {
+                match store.detach_session(&session_id) {
+                    Ok(()) => eprintln!(
+                        "[timem_web_session_restore_repaired] session_id={session_id:?} reason={error} action=detached_from_restore_index history_preserved=true"
+                    ),
+                    Err(detach_error) => eprintln!(
+                        "[timem_web_session_restore_error] session_id={session_id:?} reason={error} repair_error={detach_error}"
+                    ),
+                }
+            }
             Err(error) => eprintln!(
                 "[timem_web_session_restore_error] session_id={session_id:?} reason={error}"
             ),

@@ -255,6 +255,24 @@ impl SessionStore {
             .find(|session| session.session_id == session_id))
     }
 
+    /// Removes a Session from the active restore index while preserving its
+    /// history and Session-scoped files for manual recovery or inspection.
+    pub fn detach_session(&self, session_id: &str) -> Result<(), String> {
+        let _index_lock = self
+            .index_lock
+            .lock()
+            .map_err(|_| "session_index_lock_poisoned".to_string())?;
+        self.guard.with_write(|| {
+            let mut sessions = self.list_sessions_unlocked()?;
+            let original_len = sessions.len();
+            sessions.retain(|session| session.session_id != session_id);
+            if sessions.len() == original_len {
+                return Err("session_not_found".to_string());
+            }
+            self.write_sessions_unlocked(&sessions)
+        })?
+    }
+
     pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
         let _index_lock = self
             .index_lock
