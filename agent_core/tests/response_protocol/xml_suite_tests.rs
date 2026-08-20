@@ -317,14 +317,9 @@ fn xml_native_actions_require_non_empty_descriptive_names() {
         r#"<ASSISTANT><actions><run_bash name="   "><cmd>pwd</cmd></run_bash></actions></ASSISTANT>"#,
     ] {
         let env = parse_xml_envelope(raw, &caps());
-        assert!(
-            env.repair_issue
-                .as_deref()
-                .is_some_and(|issue| issue.ends_with(".name_required")),
-            "{:?}",
-            env.repair_issue
-        );
-        assert!(env.next_actions.is_empty());
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.next_actions.len(), 1);
+        assert_eq!(env.next_actions[0].name.as_deref(), Some("action_0"));
     }
 
     let env = parse_xml_envelope(
