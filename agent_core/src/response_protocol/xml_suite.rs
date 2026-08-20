@@ -702,6 +702,7 @@ fn parse_xml_action_groups(
         return Err(format!("actions[{block_idx}].actions_required"));
     }
     let mut groups = Vec::new();
+    let mut unnamed_counter = 0usize;
     for (idx, element) in elements.iter().enumerate() {
         let label = format!("actions[{block_idx}][{idx}]");
         if element.name == "parallel" {
@@ -711,17 +712,18 @@ fn parse_xml_action_groups(
             if element.children.is_empty() {
                 return Err(format!("{label}.actions_required"));
             }
-            let actions = element
-                .children
-                .iter()
-                .enumerate()
-                .map(|(child_idx, child)| {
-                    if child.name == "parallel" {
-                        return Err(format!("{label}[{child_idx}].parallel_nested"));
-                    }
-                    parse_xml_tool_action(child, &format!("{label}[{child_idx}]"), capabilities)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut actions = Vec::new();
+            for (child_idx, child) in element.children.iter().enumerate() {
+                if child.name == "parallel" {
+                    return Err(format!("{label}[{child_idx}].parallel_nested"));
+                }
+                actions.push(parse_xml_tool_action(
+                    child,
+                    &format!("{label}[{child_idx}]"),
+                    capabilities,
+                    &mut unnamed_counter,
+                )?);
+            }
             groups.push(ParsedActionGroup {
                 order: super::ActionGroupOrder::Parallel,
                 actions,
@@ -729,7 +731,12 @@ fn parse_xml_action_groups(
         } else {
             groups.push(ParsedActionGroup {
                 order: super::ActionGroupOrder::Sequential,
-                actions: vec![parse_xml_tool_action(element, &label, capabilities)?],
+                actions: vec![parse_xml_tool_action(
+                    element,
+                    &label,
+                    capabilities,
+                    &mut unnamed_counter,
+                )?],
             });
         }
     }
@@ -742,6 +749,7 @@ fn parse_xml_tool_action(
     element: &XmlActionElement,
     label: &str,
     capabilities: &CapabilityRegistry,
+    unnamed_counter: &mut usize,
 ) -> Result<ParsedAction, String> {
     if !capabilities.contains_tool(&element.name) {
         return Err(format!("unsupported_action:{}", element.name));
@@ -777,9 +785,11 @@ fn parse_xml_tool_action(
         Value::Object(input),
     )]));
     let mut action = super::parse_action_object(&action_value, label, capabilities)?;
-    let Some(action_name) = action_name else {
-        return Err(format!("{label}.name_required"));
-    };
+    let action_name = action_name.unwrap_or_else(|| {
+        let name = format!("action_{}", *unnamed_counter);
+        *unnamed_counter += 1;
+        name
+    });
     if action_name.chars().count() > MAX_XML_ACTION_NAME_CHARS {
         return Err(format!("{label}.name_too_long"));
     }
@@ -1450,9 +1460,7 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
         {
             "The XML action tree exceeds the runtime safety limit. Flatten unnecessary nesting or split the work across model rounds."
         }
-        issue if issue.ends_with(".name_required") => {
-            "Every XML tool action needs a non-empty, short, descriptive name attribute, for example <run_bash name=\"check git status\">...</run_bash>. The name is protocol metadata and is not passed to the tool."
-        }
+
         issue if issue.ends_with(".name_too_long") => {
             "The XML action name is too long. Shorten it to at most 128 characters while keeping it descriptive; the name is protocol metadata and is not passed to the tool."
         }
