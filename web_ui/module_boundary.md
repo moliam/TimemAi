@@ -10,6 +10,11 @@ It may contain:
 - Session selection and rename controls, composer behavior, file-picker UI,
   session-scoped inline decision queues, activity rendering, completion telemetry, and context
   compaction presentation.
+- A right-side Worker Role library shared across Sessions in the active memory
+  space. The browser may select Roles per outgoing Session message, create and
+  rename groups, and use dnd-kit for keyboard/pointer-accessible ordering and
+  cross-group movement. The Host remains authoritative for persisted library
+  state.
 - MCP server management presentation: transport-specific forms, connection and
   tool-count status, per-Session enable switches, reconnect/edit/delete
   controls, responsive layout, and redacted secret placeholders.

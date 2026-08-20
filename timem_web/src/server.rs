@@ -1,8 +1,9 @@
 use crate::debug_session::DebugStore;
 use crate::event_journal::{EventJournal, JournalInstanceInfo};
 use crate::worker_roles::{
-    load_roles, normalize_role_fields, roles_path_for_history, save_roles, WorkerRole,
-    MAX_WORKER_ROLES,
+    load_role_library, load_roles, normalize_group_name, normalize_role_fields, role_library_path,
+    roles_path_for_history, save_role_library, WorkerRole, WorkerRoleGroup, WorkerRoleLibrary,
+    MAX_WORKER_ROLES, MAX_WORKER_ROLE_GROUPS,
 };
 use agent_core::mcp::{McpRuntime, McpServerConfig, McpServerReport, McpStore, McpTool};
 use agent_core::session_store::{
@@ -401,6 +402,7 @@ struct WebMemState {
     mcp_runtime: McpRuntime,
     mcp_configs: Vec<McpServerConfig>,
     mcp_reports: BTreeMap<String, McpServerReport>,
+    role_library: WorkerRoleLibrary,
 }
 
 impl WebMemState {
@@ -409,6 +411,7 @@ impl WebMemState {
         let layout = RuntimeDataLayout::new(data_dir, space.clone());
         let mcp_store = McpStore::new(layout.memory_dir());
         let mcp_configs = load_mcp_configs_resilient(&mcp_store)?;
+        let role_library = load_role_library(&role_library_path(&layout.memory_dir()))?;
         Ok(Self {
             space,
             session_store: SessionStore::new(layout.memory_dir()),
@@ -416,6 +419,7 @@ impl WebMemState {
             mcp_runtime: McpRuntime::default(),
             mcp_configs,
             mcp_reports: BTreeMap::new(),
+            role_library,
             layout,
         })
     }
@@ -658,9 +662,8 @@ enum WireEvent {
     SessionDeleted {
         session_id: String,
     },
-    WorkerRolesUpdated {
-        session_id: String,
-        roles: Vec<WorkerRole>,
+    WorkerRoleLibraryUpdated {
+        library: WorkerRoleLibrary,
     },
     ChatMessageDeleted {
         session_id: String,
@@ -780,6 +783,7 @@ enum CommandAckStatus {
 struct WebSnapshot {
     server: ServerInfo,
     sessions: Vec<WebSession>,
+    role_library: WorkerRoleLibrary,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -917,6 +921,24 @@ enum ClientCommand {
         session_id: String,
         role_id: String,
     },
+    WorkerRoleGroupCreate {
+        session_id: String,
+        name: String,
+    },
+    WorkerRoleGroupUpdate {
+        session_id: String,
+        group_id: String,
+        name: String,
+    },
+    WorkerRoleGroupDelete {
+        session_id: String,
+        group_id: String,
+    },
+    WorkerRoleLibraryReorder {
+        session_id: String,
+        groups: Vec<WorkerRoleGroup>,
+        ungrouped_role_ids: Vec<String>,
+    },
     TurnSubmit {
         session_id: String,
         #[serde(default)]
@@ -1021,9 +1043,16 @@ impl ClientCommand {
             | Self::ToolRepoDetail { .. }
             | Self::SessionApiKeyReveal { .. }
             | Self::McpServerSecretsReveal { .. } => None,
-            Self::RuntimeUpdate { .. } | Self::MemSwitch { .. } | Self::McpServerDelete { .. } => {
-                Some("global".to_string())
-            }
+            Self::RuntimeUpdate { .. }
+            | Self::MemSwitch { .. }
+            | Self::McpServerDelete { .. }
+            | Self::WorkerRoleCreate { .. }
+            | Self::WorkerRoleUpdate { .. }
+            | Self::WorkerRoleDelete { .. }
+            | Self::WorkerRoleGroupCreate { .. }
+            | Self::WorkerRoleGroupUpdate { .. }
+            | Self::WorkerRoleGroupDelete { .. }
+            | Self::WorkerRoleLibraryReorder { .. } => Some("global".to_string()),
             Self::SessionCreate { .. } => Some("session:create".to_string()),
             Self::McpServerUpsert { config, .. } => Some(format!("mcp:{}", config.id)),
             Self::SessionRename { session_id, .. }
@@ -1031,9 +1060,6 @@ impl ClientCommand {
             | Self::SessionStop { session_id }
             | Self::SessionDelete { session_id }
             | Self::ChatMessageDelete { session_id, .. }
-            | Self::WorkerRoleCreate { session_id, .. }
-            | Self::WorkerRoleUpdate { session_id, .. }
-            | Self::WorkerRoleDelete { session_id, .. }
             | Self::TurnSubmit { session_id, .. }
             | Self::TurnSupplement { session_id, .. }
             | Self::TurnCancel { session_id }
@@ -1050,7 +1076,16 @@ impl ClientCommand {
     fn uses_global_mutation_barrier(&self) -> bool {
         matches!(
             self,
-            Self::RuntimeUpdate { .. } | Self::MemSwitch { .. } | Self::McpServerDelete { .. }
+            Self::RuntimeUpdate { .. }
+                | Self::MemSwitch { .. }
+                | Self::McpServerDelete { .. }
+                | Self::WorkerRoleCreate { .. }
+                | Self::WorkerRoleUpdate { .. }
+                | Self::WorkerRoleDelete { .. }
+                | Self::WorkerRoleGroupCreate { .. }
+                | Self::WorkerRoleGroupUpdate { .. }
+                | Self::WorkerRoleGroupDelete { .. }
+                | Self::WorkerRoleLibraryReorder { .. }
         )
     }
 
@@ -1634,8 +1669,14 @@ fn current_mem_state(state: &AppState) -> Result<WebMemState, String> {
         .map_err(|_| "mem_state_poisoned".to_string())
 }
 
-fn worker_roles_path(state: &AppState, session_id: &str) -> Result<PathBuf, String> {
-    roles_path_for_history(&current_session_store(state)?.history_path_for_session(session_id))
+fn ensure_session_exists(state: &AppState, session_id: &str) -> Result<(), String> {
+    state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .contains_key(session_id)
+        .then_some(())
+        .ok_or_else(|| "session_not_found".to_string())
 }
 
 fn ensure_unique_worker_role_name(
@@ -1651,23 +1692,44 @@ fn ensure_unique_worker_role_name(
     Ok(())
 }
 
-fn mutate_worker_roles(
+fn ensure_unique_worker_role_group_name(
+    groups: &[WorkerRoleGroup],
+    name: &str,
+    except_group_id: Option<&str>,
+) -> Result<(), String> {
+    if groups.iter().any(|group| {
+        Some(group.id.as_str()) != except_group_id && group.name.eq_ignore_ascii_case(name)
+    }) {
+        return Err("worker_role_group_name_duplicate".to_string());
+    }
+    Ok(())
+}
+
+fn mutate_worker_role_library(
     state: &AppState,
     session_id: &str,
-    mutation: impl FnOnce(&mut Vec<WorkerRole>) -> Result<(), String>,
-) -> Result<Vec<WorkerRole>, String> {
+    mutation: impl FnOnce(&mut WorkerRoleLibrary) -> Result<(), String>,
+) -> Result<WorkerRoleLibrary, String> {
+    ensure_session_exists(state, session_id)?;
+    let library = {
+        let mut mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        let mut library = mem.role_library.clone();
+        mutation(&mut library)?;
+        save_role_library(&role_library_path(&mem.layout.memory_dir()), &library)?;
+        mem.role_library = library.clone();
+        library
+    };
     let mut sessions = state
         .sessions
         .lock()
         .map_err(|_| "session_store_poisoned".to_string())?;
-    let session = sessions
-        .get_mut(session_id)
-        .ok_or_else(|| "session_not_found".to_string())?;
-    let mut roles = session.roles.clone();
-    mutation(&mut roles)?;
-    save_roles(&worker_roles_path(state, session_id)?, &roles)?;
-    session.roles = roles.clone();
-    Ok(roles)
+    for session in sessions.values_mut() {
+        session.roles = library.roles.clone();
+    }
+    Ok(library)
 }
 
 fn resolve_worker_roles(
@@ -1676,6 +1738,7 @@ fn resolve_worker_roles(
     role_ids: &[String],
     legacy_role_id: Option<&str>,
 ) -> Result<Vec<WorkerRole>, String> {
+    ensure_session_exists(state, session_id)?;
     let mut requested_ids =
         Vec::with_capacity(role_ids.len() + usize::from(legacy_role_id.is_some()));
     for role_id in role_ids.iter().map(String::as_str).chain(legacy_role_id) {
@@ -1683,17 +1746,11 @@ fn resolve_worker_roles(
             requested_ids.push(role_id);
         }
     }
-    let sessions = state
-        .sessions
-        .lock()
-        .map_err(|_| "session_store_poisoned".to_string())?;
-    let session = sessions
-        .get(session_id)
-        .ok_or_else(|| "session_not_found".to_string())?;
+    let library = current_mem_state(state)?.role_library;
     requested_ids
         .into_iter()
         .map(|role_id| {
-            session
+            library
                 .roles
                 .iter()
                 .find(|role| role.id == role_id)
@@ -2794,19 +2851,19 @@ fn handle_command_with_id(
             description,
         } => {
             let (name, description) = normalize_role_fields(&name, &description)?;
-            let roles = mutate_worker_roles(state, &session_id, |roles| {
-                if roles.len() >= MAX_WORKER_ROLES {
+            let library = mutate_worker_role_library(state, &session_id, |library| {
+                if library.roles.len() >= MAX_WORKER_ROLES {
                     return Err("worker_role_limit_reached".to_string());
                 }
-                ensure_unique_worker_role_name(roles, &name, None)?;
-                roles.push(WorkerRole {
+                ensure_unique_worker_role_name(&library.roles, &name, None)?;
+                library.roles.push(WorkerRole {
                     id: unique_web_id("role"),
                     name,
                     description,
                 });
                 Ok(())
             })?;
-            let event = WireEvent::WorkerRolesUpdated { session_id, roles };
+            let event = WireEvent::WorkerRoleLibraryUpdated { library };
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
         }
@@ -2817,9 +2874,10 @@ fn handle_command_with_id(
             description,
         } => {
             let (name, description) = normalize_role_fields(&name, &description)?;
-            let roles = mutate_worker_roles(state, &session_id, |roles| {
-                ensure_unique_worker_role_name(roles, &name, Some(&role_id))?;
-                let role = roles
+            let library = mutate_worker_role_library(state, &session_id, |library| {
+                ensure_unique_worker_role_name(&library.roles, &name, Some(&role_id))?;
+                let role = library
+                    .roles
                     .iter_mut()
                     .find(|role| role.id == role_id)
                     .ok_or_else(|| "worker_role_not_found".to_string())?;
@@ -2827,7 +2885,7 @@ fn handle_command_with_id(
                 role.description = description;
                 Ok(())
             })?;
-            let event = WireEvent::WorkerRolesUpdated { session_id, roles };
+            let event = WireEvent::WorkerRoleLibraryUpdated { library };
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
         }
@@ -2835,15 +2893,123 @@ fn handle_command_with_id(
             session_id,
             role_id,
         } => {
-            let roles = mutate_worker_roles(state, &session_id, |roles| {
-                let before = roles.len();
-                roles.retain(|role| role.id != role_id);
-                if roles.len() == before {
+            let library = mutate_worker_role_library(state, &session_id, |library| {
+                let before = library.roles.len();
+                library.roles.retain(|role| role.id != role_id);
+                if library.roles.len() == before {
                     return Err("worker_role_not_found".to_string());
+                }
+                for group in &mut library.groups {
+                    group.role_ids.retain(|candidate| candidate != &role_id);
                 }
                 Ok(())
             })?;
-            let event = WireEvent::WorkerRolesUpdated { session_id, roles };
+            let event = WireEvent::WorkerRoleLibraryUpdated { library };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
+        }
+        ClientCommand::WorkerRoleGroupCreate { session_id, name } => {
+            let name = normalize_group_name(&name)?;
+            let library = mutate_worker_role_library(state, &session_id, |library| {
+                if library.groups.len() >= MAX_WORKER_ROLE_GROUPS {
+                    return Err("worker_role_group_limit_reached".to_string());
+                }
+                ensure_unique_worker_role_group_name(&library.groups, &name, None)?;
+                library.groups.push(WorkerRoleGroup {
+                    id: unique_web_id("role_group"),
+                    name,
+                    role_ids: Vec::new(),
+                });
+                Ok(())
+            })?;
+            let event = WireEvent::WorkerRoleLibraryUpdated { library };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
+        }
+        ClientCommand::WorkerRoleGroupUpdate {
+            session_id,
+            group_id,
+            name,
+        } => {
+            let name = normalize_group_name(&name)?;
+            let library = mutate_worker_role_library(state, &session_id, |library| {
+                ensure_unique_worker_role_group_name(&library.groups, &name, Some(&group_id))?;
+                let group = library
+                    .groups
+                    .iter_mut()
+                    .find(|group| group.id == group_id)
+                    .ok_or_else(|| "worker_role_group_not_found".to_string())?;
+                group.name = name;
+                Ok(())
+            })?;
+            let event = WireEvent::WorkerRoleLibraryUpdated { library };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
+        }
+        ClientCommand::WorkerRoleGroupDelete {
+            session_id,
+            group_id,
+        } => {
+            let library = mutate_worker_role_library(state, &session_id, |library| {
+                let before = library.groups.len();
+                library.groups.retain(|group| group.id != group_id);
+                if library.groups.len() == before {
+                    return Err("worker_role_group_not_found".to_string());
+                }
+                Ok(())
+            })?;
+            let event = WireEvent::WorkerRoleLibraryUpdated { library };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
+        }
+        ClientCommand::WorkerRoleLibraryReorder {
+            session_id,
+            groups,
+            ungrouped_role_ids,
+        } => {
+            let library = mutate_worker_role_library(state, &session_id, |library| {
+                let existing_group_ids = library
+                    .groups
+                    .iter()
+                    .map(|group| group.id.as_str())
+                    .collect::<BTreeSet<_>>();
+                let supplied_group_ids = groups
+                    .iter()
+                    .map(|group| group.id.as_str())
+                    .collect::<BTreeSet<_>>();
+                if existing_group_ids != supplied_group_ids {
+                    return Err("worker_role_group_set_mismatch".to_string());
+                }
+                let role_ids = library
+                    .roles
+                    .iter()
+                    .map(|role| role.id.as_str())
+                    .collect::<BTreeSet<_>>();
+                let mut ordered_ids = Vec::new();
+                for group in &groups {
+                    ordered_ids.extend(group.role_ids.iter().cloned());
+                }
+                ordered_ids.extend(ungrouped_role_ids);
+                let supplied_role_ids = ordered_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<BTreeSet<_>>();
+                if supplied_role_ids != role_ids || supplied_role_ids.len() != ordered_ids.len() {
+                    return Err("worker_role_order_invalid".to_string());
+                }
+                let roles_by_id = library
+                    .roles
+                    .drain(..)
+                    .map(|role| (role.id.clone(), role))
+                    .collect::<BTreeMap<_, _>>();
+                library.roles = ordered_ids
+                    .into_iter()
+                    .filter_map(|role_id| roles_by_id.get(&role_id).cloned())
+                    .collect();
+                library.groups = groups;
+                Ok(())
+            })?;
+            let event = WireEvent::WorkerRoleLibraryUpdated { library };
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
         }
@@ -3756,6 +3922,7 @@ fn create_session(
     };
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
     let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
+    let global_roles = current_mem_state(state)?.role_library.roles;
     {
         let mut sessions = state
             .sessions
@@ -3803,7 +3970,7 @@ fn create_session(
                 active_context_id: String::new(),
                 primary_worker_id: String::new(),
                 attachments: Vec::new(),
-                roles: Vec::new(),
+                roles: global_roles,
                 consumed_attachment_ids: BTreeSet::new(),
                 messages: Vec::new(),
                 turns: Vec::new(),
@@ -4002,10 +4169,10 @@ fn restore_stored_session(
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
     let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
     let tool_repo = session_tool_repo(state, &stored.session_id)?;
-    let roles_path = roles_path_for_history(
+    let legacy_roles_path = roles_path_for_history(
         &current_session_store(state)?.history_path_for_session(&stored.session_id),
     )?;
-    let roles = match load_roles(&roles_path) {
+    let legacy_roles = match load_roles(&legacy_roles_path) {
         Ok(roles) => roles,
         Err(error) => {
             eprintln!(
@@ -4015,27 +4182,74 @@ fn restore_stored_session(
             Vec::new()
         }
     };
+    let roles = {
+        let mut mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        let mut changed = false;
+        for mut role in legacy_roles {
+            if mem
+                .role_library
+                .roles
+                .iter()
+                .any(|existing| existing.name.eq_ignore_ascii_case(&role.name))
+            {
+                continue;
+            }
+            if mem.role_library.roles.len() >= MAX_WORKER_ROLES {
+                break;
+            }
+            if mem
+                .role_library
+                .roles
+                .iter()
+                .any(|existing| existing.id == role.id)
+            {
+                role.id = unique_web_id("role");
+            }
+            mem.role_library.roles.push(role);
+            changed = true;
+        }
+        if changed {
+            save_role_library(
+                &role_library_path(&mem.layout.memory_dir()),
+                &mem.role_library,
+            )?;
+        }
+        mem.role_library.roles.clone()
+    };
+    let history_page = current_session_store(state)?.read_history_page(
+        &stored.session_id,
+        None,
+        SESSION_HISTORY_PAGE_LIMIT,
+    )?;
+    let history_records = history_page.records;
+    let messages = restored_messages_from_history_records(&history_records);
+    let turns = restored_turns_from_history_records(&history_records);
+    let tools = tool_repo.list()?;
+    let debug_dir = state
+        .debug
+        .as_ref()
+        .map(|debug| debug.session_dir(&stored.session_id))
+        .transpose()?
+        .map(|path| path.display().to_string());
+    let (mcp_config_revision, applied_mcp_config_revision) =
+        initial_mcp_revisions(&stored.mcp_server_ids);
     {
         let mut sessions = state
             .sessions
             .lock()
             .map_err(|_| "session_store_poisoned")?;
+        for session in sessions.values_mut() {
+            session.roles = roles.clone();
+        }
         let ordinal = sessions
             .values()
             .map(|session| session.ordinal)
             .max()
             .map(|value| value.saturating_add(1))
             .unwrap_or(0);
-        let history_page = current_session_store(state)?.read_history_page(
-            &stored.session_id,
-            None,
-            SESSION_HISTORY_PAGE_LIMIT,
-        )?;
-        let history_records = history_page.records;
-        let messages = restored_messages_from_history_records(&history_records);
-        let turns = restored_turns_from_history_records(&history_records);
-        let (mcp_config_revision, applied_mcp_config_revision) =
-            initial_mcp_revisions(&stored.mcp_server_ids);
         sessions.insert(
             stored.session_id.clone(),
             WebSession {
@@ -4048,14 +4262,9 @@ fn restore_stored_session(
                 }
                 .to_string(),
                 current_dir: current_dir.display().to_string(),
-                debug_dir: state
-                    .debug
-                    .as_ref()
-                    .map(|debug| debug.session_dir(&stored.session_id))
-                    .transpose()?
-                    .map(|path| path.display().to_string()),
+                debug_dir,
                 max_llm_input_tokens,
-                tools: tool_repo.list()?,
+                tools,
                 mcp_server_ids: stored.mcp_server_ids.clone(),
                 mcp_config_revision,
                 applied_mcp_config_revision,
@@ -7449,6 +7658,9 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             space_dir: String::new(),
             memory_dir: String::new(),
         });
+    let role_library = current_mem_state(state)
+        .map(|mem| mem.role_library)
+        .unwrap_or_default();
     WebSnapshot {
         server: ServerInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -7465,6 +7677,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
                 .unwrap_or_default(),
         },
         sessions,
+        role_library,
     }
 }
 
