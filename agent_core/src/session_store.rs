@@ -143,7 +143,6 @@ impl SessionResumeNotice {
 pub struct SessionStore {
     root: PathBuf,
     history_indexes: Arc<Mutex<BTreeMap<PathBuf, HistoryIndex>>>,
-    history_write_lock: Arc<Mutex<()>>,
     index_lock: Arc<Mutex<()>>,
     guard: MemGuard,
 }
@@ -166,10 +165,9 @@ impl SessionStore {
     pub fn new(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref().to_path_buf();
         Self {
-            guard: MemGuard::for_memory_dir(&root),
+            guard: MemGuard::for_memory_domain(&root, "session-index"),
             root,
             history_indexes: Arc::new(Mutex::new(BTreeMap::new())),
-            history_write_lock: Arc::new(Mutex::new(())),
             index_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -215,11 +213,7 @@ impl SessionStore {
     }
 
     pub fn list_sessions(&self) -> Result<Vec<StoredSession>, String> {
-        let _index_lock = self
-            .index_lock
-            .lock()
-            .map_err(|_| "session_index_lock_poisoned".to_string())?;
-        self.guard.with_read(|| self.list_sessions_unlocked())?
+        self.list_sessions_unlocked()
     }
 
     fn list_sessions_unlocked(&self) -> Result<Vec<StoredSession>, String> {
@@ -274,31 +268,61 @@ impl SessionStore {
     }
 
     pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
-        let _index_lock = self
-            .index_lock
-            .lock()
-            .map_err(|_| "session_index_lock_poisoned".to_string())?;
-        self.guard.with_write(|| {
-            let mut sessions = self.list_sessions_unlocked()?;
-            let original_len = sessions.len();
-            sessions.retain(|session| session.session_id != session_id);
-            if sessions.len() == original_len {
-                return Err("session_not_found".to_string());
+        let history_path = self.history_path_for_session(session_id);
+        let session_dir = history_path
+            .parent()
+            .ok_or_else(|| "session_data_path_invalid".to_string())?;
+        let deleted_dir = self.sessions_dir().join(format!(
+            ".deleted-{}-{}-{}",
+            sanitize_session_path_component(session_id),
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let history_guard = MemGuard::for_memory_domain(
+            &self.root,
+            format!(
+                "session-history-{}",
+                sanitize_session_path_component(session_id)
+            ),
+        );
+
+        let renamed = history_guard.with_write(|| {
+            {
+                let _index_lock = self
+                    .index_lock
+                    .lock()
+                    .map_err(|_| "session_index_lock_poisoned".to_string())?;
+                self.guard.with_write(|| {
+                    let mut sessions = self.list_sessions_unlocked()?;
+                    let original_len = sessions.len();
+                    sessions.retain(|session| session.session_id != session_id);
+                    if sessions.len() == original_len {
+                        return Err("session_not_found".to_string());
+                    }
+                    self.write_sessions_unlocked(&sessions)
+                })??;
             }
-            self.write_sessions_unlocked(&sessions)?;
-            let history_path = self.history_path_for_session(session_id);
+
             self.history_indexes
                 .lock()
                 .map_err(|_| "chat_history_index_poisoned")?
                 .remove(&history_path);
-            let session_dir = history_path
-                .parent()
-                .ok_or_else(|| "session_data_path_invalid".to_string())?;
-            if session_dir.exists() {
-                fs::remove_dir_all(session_dir).map_err(|_| "session_data_remove_failed")?;
+            if !session_dir.exists() {
+                return Ok(false);
             }
-            Ok(())
-        })?
+            fs::rename(session_dir, &deleted_dir)
+                .map_err(|_| "session_data_remove_failed".to_string())?;
+            Ok::<_, String>(true)
+        })??;
+
+        if renamed {
+            fs::remove_dir_all(deleted_dir)
+                .map_err(|_| "session_data_remove_failed".to_string())?;
+        }
+        Ok(())
     }
 
     fn write_sessions_unlocked(&self, sessions: &[StoredSession]) -> Result<(), String> {
@@ -334,27 +358,32 @@ impl SessionStore {
         session_id: &str,
         record: &ChatHistoryRecord,
     ) -> Result<(), String> {
-        let _history_write_lock = self
-            .history_write_lock
-            .lock()
-            .map_err(|_| "chat_history_write_lock_poisoned".to_string())?;
         let path = self.history_path_for_session(session_id);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|_| "chat_history_dir_create_failed")?;
-        }
-        let mut options = OpenOptions::new();
-        options.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&path)
-            .map_err(|_| "chat_history_open_failed")?;
-        let line =
-            serde_json::to_string(record).map_err(|_| "chat_history_record_serialize_failed")?;
-        writeln!(file, "{line}").map_err(|_| "chat_history_write_failed".to_string())?;
+        MemGuard::for_memory_domain(
+            &self.root,
+            format!(
+                "session-history-{}",
+                sanitize_session_path_component(session_id)
+            ),
+        )
+        .with_write(|| {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|_| "chat_history_dir_create_failed")?;
+            }
+            let mut options = OpenOptions::new();
+            options.create(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&path)
+                .map_err(|_| "chat_history_open_failed")?;
+            let line = serde_json::to_string(record)
+                .map_err(|_| "chat_history_record_serialize_failed")?;
+            writeln!(file, "{line}").map_err(|_| "chat_history_write_failed".to_string())
+        })??;
         self.history_indexes
             .lock()
             .map_err(|_| "chat_history_index_poisoned")?
@@ -373,11 +402,14 @@ impl SessionStore {
         if turn_id.is_empty() {
             return Err("turn_id_required".to_string());
         }
-        let _history_write_lock = self
-            .history_write_lock
-            .lock()
-            .map_err(|_| "chat_history_write_lock_poisoned".to_string())?;
-        self.guard.with_write(|| {
+        MemGuard::for_memory_domain(
+            &self.root,
+            format!(
+                "session-history-{}",
+                sanitize_session_path_component(session_id)
+            ),
+        )
+        .with_write(|| {
             self.delete_history_message_unlocked(session_id, turn_id, role, role_index)
         })?
     }
