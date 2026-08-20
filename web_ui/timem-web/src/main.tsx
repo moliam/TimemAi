@@ -1682,7 +1682,7 @@ function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOp
   const draggedRole = roleById.get(draggedRoleId);
   return <aside id="worker-role-panel" className={`worker-role-panel ${mobileOpen ? "mobile-open" : ""}`} aria-label="Worker roles">
     <header><span><BriefcaseBusiness size={16}/> Roles</span><div><button type="button" className="worker-role-close" title="Close roles" aria-label="Close roles" onClick={onClose}><X size={15}/></button></div></header>
-    <p className="worker-role-help">所有 Session 共用。拖动 Role 可排序或归入分组。</p>
+    <p className="worker-role-help">拖动 Role 可排序或归入分组。</p>
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={(event) => setDraggedRoleId(String(event.active.id))} onDragCancel={() => setDraggedRoleId("")} onDragEnd={finishRoleDrag}>
       <div className="worker-role-list">
         {library.groups.map((group) => <WorkerRoleDropGroup id={`role-group:${group.id}`} roleIds={group.role_ids} className="worker-role-group" key={group.id}>
