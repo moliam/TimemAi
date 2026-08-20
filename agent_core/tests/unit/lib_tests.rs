@@ -23,6 +23,155 @@ fn invalid_round_budget_uses_product_default() {
     );
 }
 
+#[test]
+fn mem_guard_different_domains_do_not_block_each_other() {
+    let dir = std::env::temp_dir().join(format!(
+        "timem_mem_guard_domains_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let memory_dir = dir.join("memory");
+    std::fs::create_dir_all(&memory_dir).unwrap();
+
+    let first = MemGuard::for_memory_domain(&memory_dir, "session-index");
+    let second = MemGuard::for_memory_domain(&memory_dir, "durable-memory");
+    let marker = dir.join("second-domain-finished");
+    let marker_for_thread = marker.clone();
+
+    let handle = first
+        .with_write(|| {
+            let second_thread = std::thread::spawn(move || {
+                second
+                    .with_write(|| std::fs::write(marker_for_thread, "done"))
+                    .unwrap()
+                    .unwrap();
+            });
+            let started = std::time::Instant::now();
+            while !marker.exists() && started.elapsed() < std::time::Duration::from_secs(2) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(
+                marker.exists(),
+                "a writer in another consistency domain must not wait"
+            );
+            second_thread
+        })
+        .unwrap();
+
+    handle.join().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn mem_guard_reads_do_not_wait_for_same_domain_writer() {
+    let dir = std::env::temp_dir().join(format!(
+        "timem_mem_guard_read_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let memory_dir = dir.join("memory");
+    std::fs::create_dir_all(&memory_dir).unwrap();
+
+    let writer = MemGuard::for_memory_domain(&memory_dir, "durable-memory");
+    let reader = writer.clone();
+
+    writer
+        .with_write(|| {
+            let started = std::time::Instant::now();
+            let observed = reader.with_read(|| "consistent-snapshot").unwrap();
+            assert_eq!(observed, "consistent-snapshot");
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(100),
+                "read path unexpectedly waited for the writer lock"
+            );
+        })
+        .unwrap();
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn mem_guard_same_domain_still_serializes_writers() {
+    let dir = std::env::temp_dir().join(format!(
+        "timem_mem_guard_same_domain_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let memory_dir = dir.join("memory");
+    std::fs::create_dir_all(&memory_dir).unwrap();
+
+    let first = MemGuard::for_memory_domain(&memory_dir, "scratch-notes");
+    let second = first.clone();
+    let marker = dir.join("second-writer-finished");
+    let marker_for_thread = marker.clone();
+
+    let handle = first
+        .with_write(|| {
+            let second_thread = std::thread::spawn(move || {
+                second
+                    .with_write(|| std::fs::write(marker_for_thread, "done"))
+                    .unwrap()
+                    .unwrap();
+            });
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            assert!(
+                !marker.exists(),
+                "writers in the same consistency domain must remain serialized"
+            );
+            second_thread
+        })
+        .unwrap();
+
+    handle.join().unwrap();
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "done");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn atomic_snapshot_readers_only_observe_complete_documents() {
+    let dir = std::env::temp_dir().join(format!(
+        "timem_atomic_snapshot_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("snapshot.json");
+    let first = br#"{"generation":0,"payload":"first"}"#;
+    atomic_write_file(&path, first).unwrap();
+
+    let writer_path = path.clone();
+    let writer = std::thread::spawn(move || {
+        for generation in 1..=200 {
+            let payload = format!(
+                r#"{{"generation":{generation},"payload":"{}"}}"#,
+                "x".repeat(4096)
+            );
+            atomic_write_file(&writer_path, payload.as_bytes()).unwrap();
+        }
+    });
+
+    while !writer.is_finished() {
+        let text = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|error| {
+            panic!("reader observed an incomplete snapshot: {error}: {text}")
+        });
+        assert!(value
+            .get("generation")
+            .and_then(serde_json::Value::as_u64)
+            .is_some());
+        assert!(value
+            .get("payload")
+            .and_then(serde_json::Value::as_str)
+            .is_some());
+    }
+    writer.join().unwrap();
+
+    let final_text = std::fs::read_to_string(&path).unwrap();
+    let final_value: serde_json::Value = serde_json::from_str(&final_text).unwrap();
+    assert_eq!(final_value["generation"], 200);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[cfg(unix)]
 #[test]
 fn mem_guard_reclaims_a_fresh_lock_owned_by_a_dead_process() {
