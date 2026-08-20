@@ -3672,6 +3672,73 @@ fn session_create_command_returns_session_with_runtime_overrides_applied() {
 }
 
 #[test]
+fn missing_workspace_session_is_detached_once_without_deleting_history() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("missing_workspace_restore"));
+    let data_dir = root.join("data");
+    let space = "missing_workspace_mem";
+    let missing_workspace = root.join("removed-workspace");
+    let template_workspace = root.join("fallback-workspace");
+    std::fs::create_dir_all(&template_workspace).unwrap();
+
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = template_workspace.clone();
+    template.workspace_dirs = vec![template_workspace];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template);
+    state.sessions.lock().unwrap().clear();
+
+    let store = current_session_store(&state).unwrap();
+    let session_id = "session_missing_workspace";
+    let history_path = store.history_path_for_session(session_id);
+    store
+        .append_history_record(
+            session_id,
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::User,
+                turn_id: "turn_before_workspace_removal".to_string(),
+                created_at_ms: 1,
+                kind: Some("task".to_string()),
+                command_id: None,
+                delivery_state: None,
+                content: "preserve this history".to_string(),
+            },
+        )
+        .unwrap();
+    store
+        .upsert_session(&StoredSession {
+            session_id: session_id.to_string(),
+            display_name: "Missing workspace".to_string(),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            current_dir: missing_workspace.display().to_string(),
+            profile: StoredSessionProfile::default(),
+            env: BTreeMap::new(),
+            env_overrides: None,
+            mcp_server_ids: Vec::new(),
+            state: StoredSessionState::Ready,
+            last_turn_id: Some("turn_before_workspace_removal".to_string()),
+            raw_chat_history_path: history_path.display().to_string(),
+        })
+        .unwrap();
+
+    assert_eq!(restore_stored_sessions(&state).unwrap(), 0);
+    assert!(store.load_session(session_id).unwrap().is_none());
+    assert!(history_path.exists());
+    assert!(std::fs::read_to_string(&history_path)
+        .unwrap()
+        .contains("preserve this history"));
+
+    // The repair is persistent: a later startup no longer retries this record.
+    assert_eq!(restore_stored_sessions(&state).unwrap(), 0);
+    assert!(history_path.exists());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_session"));
