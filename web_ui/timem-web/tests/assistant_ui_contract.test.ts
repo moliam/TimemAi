@@ -40,6 +40,15 @@ describe("per-message worker role selection", () => {
   });
 });
 
+describe("user message bubble styling", () => {
+  it("uses a readable light-blue background in both themes", () => {
+    expect(styles).toContain(".turn-user-content {\n  background: #d9edff;\n  color: #17324d;");
+    expect(styles).toContain(':root[data-theme="light"] .turn-user-content { background: #d9edff; }');
+    expect(styles).toContain(".turn-user-entry .markdown-body pre { border-color: #9fc6e3; background: #17324d; }");
+    expect(styles).toContain(".turn-user-entry .markdown-body :is(h1, h2, h3, h4, h5, h6) { color: #17324d; }");
+  });
+});
+
 describe("user message selection copying", () => {
   it("normalizes trailing DOM line breaks only for a selection contained in one user message", () => {
     expect(source).toContain('onCopy={(event) => {');
