@@ -44,7 +44,7 @@ describe("user message bubble styling", () => {
   it("defaults the user bubble font to bold while keeping the appearance control configurable", () => {
     expect(appearanceSource).toContain('userBold: true,');
     expect(source).toContain('checked={appearance.userBold}');
-    expect(styles).toContain(':root[data-user-bold="true"] { --user-font-weight: 650; }');
+    expect(styles).toContain(':root[data-user-bold="true"] { --user-font-weight: 550; }');
     expect(styles).toContain('font-weight: var(--user-font-weight)');
   });
 
