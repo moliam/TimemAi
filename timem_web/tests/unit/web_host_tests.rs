@@ -43,6 +43,33 @@ fn reliable_command_wire_is_legacy_compatible_and_ack_is_correlated() {
 }
 
 #[test]
+fn worker_role_create_preserves_client_id_and_correlates_authoritative_event() {
+    let state = routing_test_state();
+    let event = handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("role-command-1"),
+        ClientCommand::WorkerRoleCreate {
+            session_id: "session_a".to_string(),
+            role_id: Some("role-client-1".to_string()),
+            name: "Builder".to_string(),
+            description: "Build carefully.".to_string(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::WorkerRoleLibraryUpdated {
+        library,
+        command_id,
+    } = event
+    else {
+        panic!("role creation should return the correlated authoritative library");
+    };
+    assert_eq!(command_id.as_deref(), Some("role-command-1"));
+    assert_eq!(library.roles[0].id, "role-client-1");
+}
+
+#[test]
 fn worker_roles_are_global_grouped_persisted_and_render_exact_system_context() {
     let state = routing_test_state();
     let event = handle_command(
@@ -50,13 +77,14 @@ fn worker_roles_are_global_grouped_persisted_and_render_exact_system_context() {
         TEST_PORT,
         ClientCommand::WorkerRoleCreate {
             session_id: "session_a".to_string(),
+            role_id: None,
             name: "Reviewer".to_string(),
             description: "Inspect evidence before changing code.".to_string(),
         },
     )
     .unwrap()
     .unwrap();
-    let WireEvent::WorkerRoleLibraryUpdated { library } = event else {
+    let WireEvent::WorkerRoleLibraryUpdated { library, .. } = event else {
         panic!("role creation should publish the authoritative global library")
     };
     assert_eq!(library.roles.len(), 1);
@@ -93,7 +121,7 @@ fn worker_roles_are_global_grouped_persisted_and_render_exact_system_context() {
     )
     .unwrap()
     .unwrap();
-    let WireEvent::WorkerRoleLibraryUpdated { library } = group_event else {
+    let WireEvent::WorkerRoleLibraryUpdated { library, .. } = group_event else {
         panic!("group creation should publish the global library")
     };
     let group = library.groups[0].clone();
@@ -112,7 +140,7 @@ fn worker_roles_are_global_grouped_persisted_and_render_exact_system_context() {
     )
     .unwrap()
     .unwrap();
-    let WireEvent::WorkerRoleLibraryUpdated { library } = reordered else {
+    let WireEvent::WorkerRoleLibraryUpdated { library, .. } = reordered else {
         panic!("role reorder should publish the global library")
     };
     assert_eq!(library.groups[0].role_ids, vec![role_id.clone()]);

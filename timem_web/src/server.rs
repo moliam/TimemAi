@@ -664,6 +664,8 @@ enum WireEvent {
     },
     WorkerRoleLibraryUpdated {
         library: WorkerRoleLibrary,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        command_id: Option<String>,
     },
     ChatMessageDeleted {
         session_id: String,
@@ -908,6 +910,8 @@ enum ClientCommand {
     },
     WorkerRoleCreate {
         session_id: String,
+        #[serde(default)]
+        role_id: Option<String>,
         name: String,
         description: String,
     },
@@ -2847,23 +2851,32 @@ fn handle_command_with_id(
         }
         ClientCommand::WorkerRoleCreate {
             session_id,
+            role_id,
             name,
             description,
         } => {
             let (name, description) = normalize_role_fields(&name, &description)?;
+            let role_id = role_id.unwrap_or_else(|| unique_web_id("role"));
+            crate::worker_roles::validate_role_id(&role_id)?;
             let library = mutate_worker_role_library(state, &session_id, |library| {
                 if library.roles.len() >= MAX_WORKER_ROLES {
                     return Err("worker_role_limit_reached".to_string());
                 }
                 ensure_unique_worker_role_name(&library.roles, &name, None)?;
+                if library.roles.iter().any(|role| role.id == role_id) {
+                    return Err("worker_role_id_duplicate".to_string());
+                }
                 library.roles.push(WorkerRole {
-                    id: unique_web_id("role"),
+                    id: role_id,
                     name,
                     description,
                 });
                 Ok(())
             })?;
-            let event = WireEvent::WorkerRoleLibraryUpdated { library };
+            let event = WireEvent::WorkerRoleLibraryUpdated {
+                library,
+                command_id: command_id.map(str::to_string),
+            };
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
         }
@@ -2885,7 +2898,10 @@ fn handle_command_with_id(
                 role.description = description;
                 Ok(())
             })?;
-            let event = WireEvent::WorkerRoleLibraryUpdated { library };
+            let event = WireEvent::WorkerRoleLibraryUpdated {
+                library,
+                command_id: command_id.map(str::to_string),
+            };
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
         }
@@ -2904,7 +2920,10 @@ fn handle_command_with_id(
                 }
                 Ok(())
             })?;
-            let event = WireEvent::WorkerRoleLibraryUpdated { library };
+            let event = WireEvent::WorkerRoleLibraryUpdated {
+                library,
+                command_id: command_id.map(str::to_string),
+            };
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
         }
@@ -2922,7 +2941,10 @@ fn handle_command_with_id(
                 });
                 Ok(())
             })?;
-            let event = WireEvent::WorkerRoleLibraryUpdated { library };
+            let event = WireEvent::WorkerRoleLibraryUpdated {
+                library,
+                command_id: command_id.map(str::to_string),
+            };
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
         }
@@ -2942,7 +2964,10 @@ fn handle_command_with_id(
                 group.name = name;
                 Ok(())
             })?;
-            let event = WireEvent::WorkerRoleLibraryUpdated { library };
+            let event = WireEvent::WorkerRoleLibraryUpdated {
+                library,
+                command_id: command_id.map(str::to_string),
+            };
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
         }
@@ -2958,7 +2983,10 @@ fn handle_command_with_id(
                 }
                 Ok(())
             })?;
-            let event = WireEvent::WorkerRoleLibraryUpdated { library };
+            let event = WireEvent::WorkerRoleLibraryUpdated {
+                library,
+                command_id: command_id.map(str::to_string),
+            };
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
         }
@@ -3009,7 +3037,10 @@ fn handle_command_with_id(
                 library.groups = groups;
                 Ok(())
             })?;
-            let event = WireEvent::WorkerRoleLibraryUpdated { library };
+            let event = WireEvent::WorkerRoleLibraryUpdated {
+                library,
+                command_id: command_id.map(str::to_string),
+            };
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
         }

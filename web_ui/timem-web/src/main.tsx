@@ -9,6 +9,7 @@ import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole, WorkerRoleGroup, WorkerRoleLibrary } from "./protocol";
+import { applyWorkerRoleMutation, isOptimisticWorkerRoleMutation, replayWorkerRoleMutations, WorkerRoleMutation } from "./worker_roles_ui";
 import { canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, wheelDeltaPixels } from "./scroll";
 import { activeModelRetryStatus, activityFromTopic, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, manualToolGenCommand, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
 import { safeMarkdownUrl } from "./markdown_security";
@@ -100,6 +101,8 @@ function TimemApp() {
   const [appearance, setAppearance] = useState<Appearance>(loadAppearance);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [roleLibrary, setRoleLibrary] = useState<WorkerRoleLibrary>({ roles: [], groups: [] });
+  const authoritativeRoleLibraryRef = useRef<WorkerRoleLibrary>({ roles: [], groups: [] });
+  const pendingWorkerRoleMutationsRef = useRef<Map<string, WorkerRoleMutation>>(new Map());
   const [activeSessionId, setActiveSessionId] = useState("");
   const [selectedRoleIds, setSelectedRoleIds] = useState<Record<string, string[]>>({});
   const [decisions, setDecisions] = useState<Decision[]>([]);
@@ -529,8 +532,11 @@ function TimemApp() {
   const applySnapshot = useCallback((snapshot: Snapshot) => {
     toolCountBySessionRef.current = new Map(snapshot.sessions.map((session) => [session.session_id, session.tools.length]));
     setServer(snapshot.server);
-    setRoleLibrary(snapshot.role_library ?? { roles: snapshot.sessions[0]?.roles ?? [], groups: [] });
-    setSessions(snapshot.sessions.map(boundSessionHistory));
+    const authoritativeRoleLibrary = snapshot.role_library ?? { roles: snapshot.sessions[0]?.roles ?? [], groups: [] };
+    authoritativeRoleLibraryRef.current = authoritativeRoleLibrary;
+    const visibleRoleLibrary = replayWorkerRoleMutations(authoritativeRoleLibrary, pendingWorkerRoleMutationsRef.current.values());
+    setRoleLibrary(visibleRoleLibrary);
+    setSessions(snapshot.sessions.map((session) => boundSessionHistory({ ...session, roles: visibleRoleLibrary.roles })));
     setActiveSessionId((current) => resolveActiveSessionId(current, snapshot.sessions));
   }, []);
 
@@ -587,6 +593,11 @@ function TimemApp() {
           );
         }
         if (event.status === "rejected") {
+          if (pendingWorkerRoleMutationsRef.current.delete(event.command_id)) {
+            const visibleLibrary = replayWorkerRoleMutations(authoritativeRoleLibraryRef.current, pendingWorkerRoleMutationsRef.current.values());
+            setRoleLibrary(visibleLibrary);
+            setSessions((current) => current.map((session) => ({ ...session, roles: visibleLibrary.roles })));
+          }
           const sessionId = pendingCredential?.sessionId
             ?? commandSessionId(completed?.command)
             ?? (activeSessionIdRef.current || "system");
@@ -637,6 +648,10 @@ function TimemApp() {
         commandOutboxScopeRef.current = scope;
         commandOutboxRef.current = loadCommandOutbox(window.localStorage, scope);
         setCommandAcks({});
+      }
+      const durableCommandIds = new Set(commandOutboxRef.current.map((item) => item.commandId));
+      for (const commandId of pendingWorkerRoleMutationsRef.current.keys()) {
+        if (!durableCommandIds.has(commandId)) pendingWorkerRoleMutationsRef.current.delete(commandId);
       }
       clearAllPendingCommands();
       setModelServiceIssues({});
@@ -700,13 +715,16 @@ function TimemApp() {
       return;
     }
     if (event.type === "worker_role_library_updated") {
-      setRoleLibrary(event.library);
-      setSessions((current) => current.map((session) => ({ ...session, roles: event.library.roles })));
+      authoritativeRoleLibraryRef.current = event.library;
+      if (event.command_id) pendingWorkerRoleMutationsRef.current.delete(event.command_id);
+      const visibleLibrary = replayWorkerRoleMutations(event.library, pendingWorkerRoleMutationsRef.current.values());
+      setRoleLibrary(visibleLibrary);
+      setSessions((current) => current.map((session) => ({ ...session, roles: visibleLibrary.roles })));
       setSelectedRoleIds((current) => {
         let changed = false;
         const next: Record<string, string[]> = {};
         for (const [sessionId, selected] of Object.entries(current)) {
-          const retained = selected.filter((roleId) => event.library.roles.some((role) => role.id === roleId));
+          const retained = selected.filter((roleId) => visibleLibrary.roles.some((role) => role.id === roleId));
           if (retained.length > 0) next[sessionId] = retained;
           if (retained.length !== selected.length) changed = true;
         }
@@ -1430,7 +1448,25 @@ function TimemApp() {
             return { ...current, [activeSession.session_id]: nextSelected };
           });
         }}
-        onCommand={(command) => sendCommand(command)}
+        onCommand={(command) => {
+          if (!isOptimisticWorkerRoleMutation(command)) return sendCommand(command);
+          const commandId = clientId("worker-role-command");
+          const optimisticCommand: WorkerRoleMutation = command.type === "worker_role_create"
+            ? { ...command, role_id: command.role_id ?? clientId("role") }
+            : command;
+          pendingWorkerRoleMutationsRef.current.set(commandId, optimisticCommand);
+          setRoleLibrary((current) => applyWorkerRoleMutation(current, optimisticCommand));
+          setSessions((current) => current.map((session) => ({
+            ...session,
+            roles: applyWorkerRoleMutation({ roles: session.roles, groups: [] }, optimisticCommand).roles,
+          })));
+          if (sendCommand(optimisticCommand, commandId)) return true;
+          pendingWorkerRoleMutationsRef.current.delete(commandId);
+          const visibleLibrary = replayWorkerRoleMutations(authoritativeRoleLibraryRef.current, pendingWorkerRoleMutationsRef.current.values());
+          setRoleLibrary(visibleLibrary);
+          setSessions((current) => current.map((session) => ({ ...session, roles: visibleLibrary.roles })));
+          return false;
+        }}
       />}
       {showToolRepo && <button type="button" className="side-panel-backdrop" aria-label="Close ToolRepo" onClick={closeToolRepoPanel}/>}
       {showToolRepo && <ToolRepoPanel
