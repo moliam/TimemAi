@@ -43,7 +43,7 @@ fn reliable_command_wire_is_legacy_compatible_and_ack_is_correlated() {
 }
 
 #[test]
-fn worker_roles_are_session_scoped_persisted_and_render_exact_system_context() {
+fn worker_roles_are_global_grouped_persisted_and_render_exact_system_context() {
     let state = routing_test_state();
     let event = handle_command(
         &state,
@@ -56,27 +56,72 @@ fn worker_roles_are_session_scoped_persisted_and_render_exact_system_context() {
     )
     .unwrap()
     .unwrap();
-    let WireEvent::WorkerRolesUpdated { roles, .. } = event else {
-        panic!("role creation should publish the authoritative role list")
+    let WireEvent::WorkerRoleLibraryUpdated { library } = event else {
+        panic!("role creation should publish the authoritative global library")
     };
-    assert_eq!(roles.len(), 1);
-    assert!(state.sessions.lock().unwrap()["session_b"].roles.is_empty());
+    assert_eq!(library.roles.len(), 1);
     assert_eq!(
-        load_roles(&worker_roles_path(&state, "session_a").unwrap()).unwrap(),
-        roles
+        state.sessions.lock().unwrap()["session_a"].roles,
+        library.roles
     );
     assert_eq!(
-        worker_roles_context(&roles).as_deref(),
+        state.sessions.lock().unwrap()["session_b"].roles,
+        library.roles
+    );
+    assert_eq!(
+        load_role_library(&role_library_path(
+            &current_mem_state(&state).unwrap().layout.memory_dir()
+        ))
+        .unwrap(),
+        library
+    );
+    assert_eq!(
+        worker_roles_context(&library.roles).as_deref(),
         Some(
             r#"TIMEM_WORKER_ROLE_CONTEXT: {"description":"Inspect evidence before changing code.","name":"Reviewer"}"#
         )
     );
-    let role_id = roles[0].id.clone();
+
+    let role_id = library.roles[0].id.clone();
+    let group_event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::WorkerRoleGroupCreate {
+            session_id: "session_b".to_string(),
+            name: "Quality".to_string(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::WorkerRoleLibraryUpdated { library } = group_event else {
+        panic!("group creation should publish the global library")
+    };
+    let group = library.groups[0].clone();
+    let reordered = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::WorkerRoleLibraryReorder {
+            session_id: "session_a".to_string(),
+            groups: vec![WorkerRoleGroup {
+                id: group.id.clone(),
+                name: group.name.clone(),
+                role_ids: vec![role_id.clone()],
+            }],
+            ungrouped_role_ids: Vec::new(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::WorkerRoleLibraryUpdated { library } = reordered else {
+        panic!("role reorder should publish the global library")
+    };
+    assert_eq!(library.groups[0].role_ids, vec![role_id.clone()]);
+
     handle_command(
         &state,
         TEST_PORT,
         ClientCommand::WorkerRoleUpdate {
-            session_id: "session_a".to_string(),
+            session_id: "session_b".to_string(),
             role_id: role_id.clone(),
             name: "Evidence reviewer".to_string(),
             description: "Review logs before changing code.".to_string(),
@@ -87,6 +132,11 @@ fn worker_roles_are_session_scoped_persisted_and_render_exact_system_context() {
         state.sessions.lock().unwrap()["session_a"].roles[0].name,
         "Evidence reviewer"
     );
+    assert_eq!(
+        state.sessions.lock().unwrap()["session_b"].roles[0].name,
+        "Evidence reviewer"
+    );
+
     handle_command(
         &state,
         TEST_PORT,
@@ -97,9 +147,13 @@ fn worker_roles_are_session_scoped_persisted_and_render_exact_system_context() {
     )
     .unwrap();
     assert!(state.sessions.lock().unwrap()["session_a"].roles.is_empty());
-    assert!(load_roles(&worker_roles_path(&state, "session_a").unwrap())
-        .unwrap()
-        .is_empty());
+    assert!(state.sessions.lock().unwrap()["session_b"].roles.is_empty());
+    let persisted = load_role_library(&role_library_path(
+        &current_mem_state(&state).unwrap().layout.memory_dir(),
+    ))
+    .unwrap();
+    assert!(persisted.roles.is_empty());
+    assert!(persisted.groups[0].role_ids.is_empty());
 }
 
 #[test]
@@ -155,13 +209,13 @@ fn multiple_worker_roles_resolve_in_message_order_and_render_all_contexts() {
             description: "Run regression tests.".to_string(),
         },
     ];
-    state
-        .sessions
-        .lock()
-        .unwrap()
-        .get_mut("session_a")
-        .unwrap()
-        .roles = roles.clone();
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.role_library.roles = roles.clone();
+    }
+    for session in state.sessions.lock().unwrap().values_mut() {
+        session.roles = roles.clone();
+    }
     let selected = resolve_worker_roles(
         &state,
         "session_a",
@@ -3779,6 +3833,111 @@ fn missing_workspace_session_is_detached_once_without_deleting_history() {
     // The repair is persistent: a later startup no longer retries this record.
     assert_eq!(restore_stored_sessions(&state).unwrap(), 0);
     assert!(history_path.exists());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn legacy_session_roles_migrate_into_the_mem_scoped_global_library() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_role_migration"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "role_migration_mem";
+
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    set_test_mem(&state, data_dir.clone(), space);
+    state.sessions.lock().unwrap().clear();
+
+    let first_session = create_session(
+        &state,
+        Some("First legacy session".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let second_session = create_session(
+        &state,
+        Some("Second legacy session".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+
+    let store = current_session_store(&state).unwrap();
+    crate::worker_roles::save_roles(
+        &roles_path_for_history(&store.history_path_for_session(&first_session)).unwrap(),
+        &[
+            WorkerRole {
+                id: "legacy_shared_id".to_string(),
+                name: "Reviewer".to_string(),
+                description: "Review evidence before editing.".to_string(),
+            },
+            WorkerRole {
+                id: "legacy_duplicate_name".to_string(),
+                name: "Builder".to_string(),
+                description: "Old duplicate that should not replace the first Builder.".to_string(),
+            },
+        ],
+    )
+    .unwrap();
+    crate::worker_roles::save_roles(
+        &roles_path_for_history(&store.history_path_for_session(&second_session)).unwrap(),
+        &[
+            WorkerRole {
+                id: "legacy_shared_id".to_string(),
+                name: "Builder".to_string(),
+                description: "Implement and verify the requested change.".to_string(),
+            },
+            WorkerRole {
+                id: "legacy_tester".to_string(),
+                name: "Tester".to_string(),
+                description: "Run focused and regression tests.".to_string(),
+            },
+        ],
+    )
+    .unwrap();
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+
+    assert_eq!(restore_stored_sessions(&restarted).unwrap(), 2);
+
+    let mem = current_mem_state(&restarted).unwrap();
+    assert_eq!(mem.role_library.roles.len(), 3);
+    assert_eq!(
+        mem.role_library
+            .roles
+            .iter()
+            .map(|role| role.name.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["Builder", "Reviewer", "Tester"])
+    );
+    assert_eq!(
+        mem.role_library
+            .roles
+            .iter()
+            .map(|role| role.id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3,
+        "legacy ID collisions must be reassigned instead of dropping a distinct role"
+    );
+
+    let persisted = load_role_library(&role_library_path(&mem.layout.memory_dir())).unwrap();
+    assert_eq!(persisted, mem.role_library);
+
+    let sessions = restarted.sessions.lock().unwrap();
+    assert_eq!(sessions[&first_session].roles, persisted.roles);
+    assert_eq!(sessions[&second_session].roles, persisted.roles);
+    drop(sessions);
 
     let _ = std::fs::remove_dir_all(root);
 }
