@@ -13,7 +13,7 @@ use reedline::{
 };
 use serde_json::json;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
@@ -286,40 +286,47 @@ fn main() {
     let mut editor = ShellLineEditor::new(history_file);
     let mut prompt_status = PromptStatusBar::default();
     let mut last_dialog_activity = Instant::now();
+    let mut queued_questions: VecDeque<String> = VecDeque::new();
 
     loop {
         let prompt = render_user_input_prompt(&time_label());
-        let (input, submitted_display) = match editor.readline(&prompt) {
-            ShellReadline::Line { text, display } => (text, display),
-            ShellReadline::PendingPaste {
-                text,
-                display,
-                line_count,
-            } => {
-                if matches!(
-                    choose_raw_multiline_paste_submit(line_count),
-                    ApprovalChoice::Allow
-                ) {
-                    (text, display)
-                } else {
-                    prompt_status.show_info("已取消多行粘贴。");
-                    continue;
+        let (input, submitted_display, was_queued) =
+            if let Some(input) = queued_questions.pop_front() {
+                let display = input.clone();
+                (input, display, true)
+            } else {
+                match editor.readline(&prompt) {
+                    ShellReadline::Line { text, display } => (text, display, false),
+                    ShellReadline::PendingPaste {
+                        text,
+                        display,
+                        line_count,
+                    } => {
+                        if matches!(
+                            choose_raw_multiline_paste_submit(line_count),
+                            ApprovalChoice::Allow
+                        ) {
+                            (text, display, false)
+                        } else {
+                            prompt_status.show_info("已取消多行粘贴。");
+                            continue;
+                        }
+                    }
+                    ShellReadline::Interrupted => {
+                        prompt_status.show_info("已取消当前输入。Ctrl+D 退出。");
+                        continue;
+                    }
+                    ShellReadline::Eof => {
+                        prompt_status.clear_before_exit();
+                        println!("Bye.");
+                        break;
+                    }
+                    ShellReadline::Error(err) => {
+                        eprintln!("[input_error] {err}");
+                        break;
+                    }
                 }
-            }
-            ShellReadline::Interrupted => {
-                prompt_status.show_info("已取消当前输入。Ctrl+D 退出。");
-                continue;
-            }
-            ShellReadline::Eof => {
-                prompt_status.clear_before_exit();
-                println!("Bye.");
-                break;
-            }
-            ShellReadline::Error(err) => {
-                eprintln!("[input_error] {err}");
-                break;
-            }
-        };
+            };
         let input = sanitize_user_input(&input).trim().to_string();
         if input.is_empty() {
             prompt_status.clear_after_empty_input();
@@ -387,7 +394,15 @@ fn main() {
             continue;
         }
 
-        rewrite_submitted_user_line(&submitted_display, prompt_status.take_visible());
+        if was_queued {
+            print!(
+                "{}",
+                render_queued_user_line(&submitted_display, &time_label())
+            );
+            let _ = io::stdout().flush();
+        } else {
+            rewrite_submitted_user_line(&submitted_display, prompt_status.take_visible());
+        }
         let turn_id = shell_turn_id();
         append_shell_history_message(
             &session_store,
@@ -421,7 +436,8 @@ fn main() {
         let mut turn_ui = CliTurnUi {
             status: Some(&mut status),
             interactive_approval: true,
-            supplement_input: ThinkingSupplementInput::new(),
+            queued_input: ThinkingQueuedInput::new(),
+            queued_questions: Vec::new(),
         };
         let prompt_cwd = core.current_prompt_cwd().to_path_buf();
         let turn_work_instruction_context = resolve_work_instruction_context_for_turn(
@@ -455,6 +471,7 @@ fn main() {
             &mut turn_ui,
             Some(&mut profiler),
         );
+        let newly_queued_questions = turn_ui.take_queued_questions();
         drop(turn_ui);
         let is_cancelled =
             outcome.stop_reason == Some(timem_shell::TurnStopReason::CancelledByUser);
@@ -494,6 +511,7 @@ fn main() {
             work_instruction_mode,
             core.current_prompt_cwd(),
         );
+        queued_questions.extend(newly_queued_questions);
         last_dialog_activity = Instant::now();
     }
 }
@@ -786,12 +804,31 @@ fn now_ms_i64() -> i64 {
 struct CliTurnUi<'a> {
     status: Option<&'a mut ThinkingStatus>,
     interactive_approval: bool,
-    supplement_input: Option<ThinkingSupplementInput>,
+    queued_input: Option<ThinkingQueuedInput>,
+    queued_questions: Vec<String>,
+}
+
+impl CliTurnUi<'_> {
+    fn collect_queued_questions(&mut self) -> usize {
+        let questions = self
+            .queued_input
+            .as_mut()
+            .map(ThinkingQueuedInput::drain)
+            .unwrap_or_default();
+        let added = questions.len();
+        self.queued_questions.extend(questions);
+        added
+    }
+
+    fn take_queued_questions(&mut self) -> Vec<String> {
+        self.collect_queued_questions();
+        std::mem::take(&mut self.queued_questions)
+    }
 }
 
 impl TurnUi for CliTurnUi<'_> {
     fn is_cancel_requested(&mut self) -> bool {
-        if let Some(input) = self.supplement_input.as_mut() {
+        if let Some(input) = self.queued_input.as_mut() {
             let _ = input.poll();
         }
         TURN_CANCEL_REQUESTED.load(Ordering::SeqCst)
@@ -802,17 +839,13 @@ impl TurnUi for CliTurnUi<'_> {
     }
 
     fn drain_user_supplements(&mut self) -> Vec<String> {
-        let supplements = self
-            .supplement_input
-            .as_mut()
-            .map(ThinkingSupplementInput::drain)
-            .unwrap_or_default();
-        if !supplements.is_empty() {
+        let added = self.collect_queued_questions();
+        if added > 0 {
             if let Some(status) = self.status.as_deref_mut() {
-                status.add_user_supplement_notice(supplements.len());
+                status.add_queued_question_notice(added);
             }
         }
-        supplements
+        Vec::new()
     }
 
     fn on_model_request(&mut self, round: u32, prompt: &str) {
@@ -854,15 +887,16 @@ impl TurnUi for CliTurnUi<'_> {
     }
 
     fn pause_for_user_decision(&mut self) {
-        self.supplement_input = None;
+        self.collect_queued_questions();
+        self.queued_input = None;
         if let Some(status) = self.status.as_deref_mut() {
             status.pause_for_user_approval();
         }
     }
 
     fn resume_after_user_decision(&mut self) {
-        if self.supplement_input.is_none() {
-            self.supplement_input = ThinkingSupplementInput::new();
+        if self.queued_input.is_none() {
+            self.queued_input = ThinkingQueuedInput::new();
         }
         if let Some(status) = self.status.as_deref_mut() {
             status.resume_after_user_approval();
@@ -1013,11 +1047,11 @@ impl ThinkingStatus {
         }
     }
 
-    fn add_user_supplement_notice(&mut self, count: usize) {
+    fn add_queued_question_notice(&mut self, count: usize) {
         let text = if count == 1 {
-            "已收到用户补充指示，下一轮会使用。".to_string()
+            "已将新问题加入队列；当前回答完成后会单独处理。".to_string()
         } else {
-            format!("已收到 {count} 条用户补充指示，下一轮会使用。")
+            format!("已将 {count} 个新问题加入队列；当前回答完成后会逐个处理。")
         };
         if let Ok(mut state) = self.state.lock() {
             state.observations.apply(ObservationEvent::Persistent(text));
@@ -1285,7 +1319,7 @@ fn render_expand_output_choices(selected: ApprovalChoice) -> String {
     }
 }
 
-struct ThinkingSupplementInput {
+struct ThinkingQueuedInput {
     input: ShellInputSource,
     terminal_mode: TerminalModeGuard,
     nonblocking_mode: NonblockingGuard,
@@ -1293,7 +1327,7 @@ struct ThinkingSupplementInput {
     pending: Vec<String>,
 }
 
-impl ThinkingSupplementInput {
+impl ThinkingQueuedInput {
     fn new() -> Option<Self> {
         let input = ShellInputSource::open().ok()?;
         let fd = input.as_raw_fd();
@@ -1301,7 +1335,7 @@ impl ThinkingSupplementInput {
         if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
             return None;
         }
-        let mode = thinking_supplement_terminal_mode(original);
+        let mode = thinking_queue_terminal_mode(original);
         if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &mode) } != 0 {
             return None;
         }
@@ -1341,16 +1375,16 @@ impl ThinkingSupplementInput {
         if queued.interrupted {
             TURN_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
         }
-        supplements.extend(queued_text_to_supplements(&queued.text));
+        supplements.extend(queued_text_to_questions(&queued.text));
         supplements
     }
 
     fn push_bytes(&mut self, bytes: &[u8]) {
-        push_thinking_supplement_bytes(&mut self.buffer, &mut self.pending, bytes);
+        push_thinking_queue_bytes(&mut self.buffer, &mut self.pending, bytes);
     }
 }
 
-impl Drop for ThinkingSupplementInput {
+impl Drop for ThinkingQueuedInput {
     fn drop(&mut self) {
         let _ = self.poll();
         self.nonblocking_mode.restore();
@@ -1358,19 +1392,19 @@ impl Drop for ThinkingSupplementInput {
     }
 }
 
-fn thinking_supplement_terminal_mode(mut mode: libc::termios) -> libc::termios {
+fn thinking_queue_terminal_mode(mut mode: libc::termios) -> libc::termios {
     mode.c_lflag &= !(libc::ICANON | libc::ECHO);
     // Keep ISIG enabled so Ctrl+C still reaches the process-level turn cancel
-    // handler while ordinary text can be polled as a supplement line.
+    // handler while ordinary text can be polled as a queued next-question line.
     mode.c_cc[libc::VMIN] = 0;
     mode.c_cc[libc::VTIME] = 0;
     mode
 }
 
-fn push_thinking_supplement_bytes(buffer: &mut Vec<u8>, pending: &mut Vec<String>, bytes: &[u8]) {
+fn push_thinking_queue_bytes(buffer: &mut Vec<u8>, pending: &mut Vec<String>, bytes: &[u8]) {
     for &byte in bytes {
         match byte {
-            b'\r' | b'\n' => finish_thinking_supplement_line(buffer, pending),
+            b'\r' | b'\n' => finish_thinking_queue_line(buffer, pending),
             3 | 4 | 27 => {}
             8 | 127 => pop_last_utf8_char_bytes(buffer),
             byte if byte.is_ascii_control() => {}
@@ -1379,7 +1413,7 @@ fn push_thinking_supplement_bytes(buffer: &mut Vec<u8>, pending: &mut Vec<String
     }
 }
 
-fn finish_thinking_supplement_line(buffer: &mut Vec<u8>, pending: &mut Vec<String>) {
+fn finish_thinking_queue_line(buffer: &mut Vec<u8>, pending: &mut Vec<String>) {
     let bytes = std::mem::take(buffer);
     let text = String::from_utf8_lossy(&bytes).trim().to_string();
     if !text.is_empty() {
@@ -1387,7 +1421,7 @@ fn finish_thinking_supplement_line(buffer: &mut Vec<u8>, pending: &mut Vec<Strin
     }
 }
 
-fn queued_text_to_supplements(text: &str) -> Vec<String> {
+fn queued_text_to_questions(text: &str) -> Vec<String> {
     normalize_newlines(text)
         .lines()
         .map(str::trim)
@@ -3455,6 +3489,10 @@ fn render_user_input_prompt(time_label: &str) -> String {
     format!("\x1b[94;1m[{time_label}] You ❯❯\x1b[0m ")
 }
 
+fn render_queued_user_line(input: &str, time_label: &str) -> String {
+    format!("{}{}\n", render_user_input_prompt(time_label), input)
+}
+
 fn render_submitted_user_line_rewrite(
     input: &str,
     status_line_visible: bool,
@@ -3840,11 +3878,11 @@ fn print_help() {
 }
 
 fn cli_help_text() -> &'static str {
-    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override the restored Session cache; the Session cache overrides process env defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it for initial configuration:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir .timem_data --space .test_mem --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; model API format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; inline parser: json|xml, default xml\n  --tool-call-mode <mode>        env TIMEM_TOOL_CALL_MODE; auto|native|inline, default auto\n  --parallel-tool-calls <mode>   env TIMEM_PARALLEL_TOOL_CALLS; auto|true|false, default auto\n  --base-url <url>               env TIMEM_BASE_URL; model API base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root, default .timem_data for new environments\n  --timeout <seconds>            env TIMEM_TIMEOUT; model request timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|20K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 20K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type a supplement and press Enter to add it to the current turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai-compatible\n  Tool calling: auto (native when detected, otherwise inline)\n  Response protocol: xml (inline mode only)\n\nAPI key fallback env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
+    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override the restored Session cache; the Session cache overrides process env defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it for initial configuration:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir .timem_data --space .test_mem --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; model API format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; inline parser: json|xml, default xml\n  --tool-call-mode <mode>        env TIMEM_TOOL_CALL_MODE; auto|native|inline, default auto\n  --parallel-tool-calls <mode>   env TIMEM_PARALLEL_TOOL_CALLS; auto|true|false, default auto\n  --base-url <url>               env TIMEM_BASE_URL; model API base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root, default .timem_data for new environments\n  --timeout <seconds>            env TIMEM_TIMEOUT; model request timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|20K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 20K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type another question and press Enter to queue a separate next turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai-compatible\n  Tool calling: auto (native when detected, otherwise inline)\n  Response protocol: xml (inline mode only)\n\nAPI key fallback env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
 fn runtime_help_text() -> &'static str {
-    "\x1b[1mInteractive commands\x1b[0m\n  /help       show runtime help\n  /config     edit runtime model and token settings\n  /workspace  manage workspace directories shown to the model as reference context\n  /prof       show runtime profiling for tokens, model wait/local time, and storage size\n  /exit       leave the shell intentionally\n\n\x1b[1mInteractive keys\x1b[0m\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type a supplement and press Enter to add it to the current turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Ctrl+D exits the shell intentionally.\n\n\x1b[1mRuntime system\x1b[0m\n  Timem keeps a local memory space, runtime context, action audit, and API audit under the configured data directory.\n  Use /prof to inspect token usage, KVC stats, model wait time, local execution time, and storage size.\n  Use /config for changes that can take effect without restarting this Timem process.\n"
+    "\x1b[1mInteractive commands\x1b[0m\n  /help       show runtime help\n  /config     edit runtime model and token settings\n  /workspace  manage workspace directories shown to the model as reference context\n  /prof       show runtime profiling for tokens, model wait/local time, and storage size\n  /exit       leave the shell intentionally\n\n\x1b[1mInteractive keys\x1b[0m\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type another question and press Enter to queue a separate next turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Ctrl+D exits the shell intentionally.\n\n\x1b[1mRuntime system\x1b[0m\n  Timem keeps a local memory space, runtime context, action audit, and API audit under the configured data directory.\n  Use /prof to inspect token usage, KVC stats, model wait time, local execution time, and storage size.\n  Use /config for changes that can take effect without restarting this Timem process.\n"
 }
 
 fn startup_control_hint() -> &'static str {

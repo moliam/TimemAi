@@ -76,7 +76,7 @@ checks. If a dimension is not applicable, record that residual decision in
   this CI gate.
 - Real TTY stress: compiled release binary driven through a pseudo terminal
   while a fake model service causes repeated model/action redraws, long
-  Thought/Action rows, and mid-turn user supplements.
+  Thought/Action rows, and queued next questions during active work.
 - Web host integration: real `CoreSessionWorker` instances publish concurrent
   topics through `timem_web`, proving session isolation, request correlation,
   completion telemetry, work-instruction decisions, bounded host state, and
@@ -142,7 +142,7 @@ checks. If a dimension is not applicable, record that residual decision in
 | Session worker lifecycle | lifecycle topic/accessor, worker channel tests | `session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement`, `session_worker_rename_emits_updated_identity_topic`, `session_worker_shutdown_cancels_pending_host_decision`, `core_lifecycle_topic_round_trips_worker_identity_workspace_and_context` | full CI |
 | Round limit continuation | core continuation tests | `session_turn_round_limit_continue_recharges_and_finishes_same_task` | session group |
 | Cancellation | cancel before model call, command cancellation tests | real TTY Ctrl+C smoke | real TTY smoke |
-| Interactive input | CJK width, paste placeholder, Shift+Enter, control stripping, true multiline submitted-line redraw row counts, thinking-time user supplement capture | real TTY multiline/paste/config/workspace smokes plus local fake-model-server supplement smoke and stress smoke | real TTY smoke/stress in CI |
+| Interactive input | CJK width, paste placeholder, Shift+Enter, control stripping, true multiline submitted-line redraw row counts, thinking-time next-question queue capture | real TTY multiline/paste/config/workspace smokes plus local fake-model-server supplement smoke and stress smoke | real TTY smoke/stress in CI |
 | Observation panel | observation event/rendering tests | thinking view tests including retry, repair-count status, model-response topics, and global working-worker count | full CI |
 | Profiling | profiler aggregation and storage tests | `session_turn_records_cached_tokens_in_profiler_and_latest_usage`, `/prof` real TTY smoke | real TTY smoke |
 | Runtime performance | `performance_guard_large_context_prompt_render_is_bounded`, `performance_guard_many_overlay_capabilities_render_is_bounded`, `performance_guard_topic_generation_for_many_actions_is_bounded`, `performance_guard_many_observation_events_render_bounded` | real TTY stress covers redraw under fake-model-server delay and mid-turn supplement | `scripts/performance_guard.sh` in full CI |

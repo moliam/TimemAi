@@ -5,13 +5,13 @@ use super::{
     new_shell_session, next_paste_recovery_choice, normalize_newlines, paste_marker_ranges,
     paste_marker_segments, paste_recovery_return_edit_clear_lines,
     paste_recovery_summary_from_markers, pasted_line_count, prev_paste_recovery_choice,
-    push_thinking_supplement_bytes, queued_input_drain_from_bytes, queued_text_to_supplements,
+    push_thinking_queue_bytes, queued_input_drain_from_bytes, queued_text_to_questions,
     random_spinner_tick, raw_multiline_paste_display, raw_multiline_paste_needs_confirmation,
     read_approval_key, read_approval_key_until, read_menu_key, read_paste_recovery_key,
     reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
     render_approval_choices, render_config_apply_report, render_config_menu,
     render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
-    render_paste_recovery_choices, render_paste_recovery_prompt,
+    render_paste_recovery_choices, render_paste_recovery_prompt, render_queued_user_line,
     render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
     render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
     render_stale_context_prompt, render_startup_banner, render_startup_status_block,
@@ -22,13 +22,14 @@ use super::{
     runtime_help_text, sanitize_user_input, shell_session_effective_env, shell_session_env_values,
     shell_session_profile, shell_session_work_dir, startup_control_hint, strip_ansi,
     strip_paste_markers, submitted_input_rows, take_shell_resume_notice,
-    thinking_supplement_terminal_mode, timem_reedline_keybindings, utf8_expected_len,
+    thinking_queue_terminal_mode, timem_reedline_keybindings, utf8_expected_len,
     work_instruction_shell_load_result, workspace_menu_line_count, wrapped_terminal_rows,
-    ApprovalChoice, ApprovalKey, ConfigField, ConfigRow, ConfigTableItem, CoreTopicEvent,
-    HostDecision, HostDecisionRequest, MenuKey, PasteRecord, PasteRecoveryChoice, PasteRecoveryKey,
-    PasteRecoverySummary, QueuedInputDrain, SharedPasteRecords, SharedPrefillInput, ThinkingStatus,
-    TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt, TurnUi, ANSI_HIGHLIGHT,
-    PASTE_END_MARKER, PASTE_START_MARKER, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+    ApprovalChoice, ApprovalKey, CliTurnUi, ConfigField, ConfigRow, ConfigTableItem,
+    CoreTopicEvent, HostDecision, HostDecisionRequest, MenuKey, PasteRecord, PasteRecoveryChoice,
+    PasteRecoveryKey, PasteRecoverySummary, QueuedInputDrain, SharedPasteRecords,
+    SharedPrefillInput, ThinkingStatus, TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt,
+    TurnUi, ANSI_HIGHLIGHT, PASTE_END_MARKER, PASTE_START_MARKER, STATIC_PROMPT,
+    TURN_CANCEL_REQUESTED,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -129,11 +130,31 @@ fn static_prompt_uses_full_shared_v1_resource() {
 }
 
 #[test]
-fn thinking_supplement_collects_utf8_lines() {
+fn busy_shell_input_is_queued_for_a_separate_turn_not_sent_as_a_supplement() {
+    let mut ui = CliTurnUi {
+        status: None,
+        interactive_approval: false,
+        queued_input: None,
+        queued_questions: vec!["Q2".to_string()],
+    };
+
+    assert!(ui.drain_user_supplements().is_empty());
+    assert_eq!(ui.take_queued_questions(), vec!["Q2"]);
+}
+
+#[test]
+fn queued_question_renders_as_a_new_user_bubble() {
+    let rendered = render_queued_user_line("Q2", "12:34:56");
+    assert!(rendered.contains("[12:34:56] You ❯❯"));
+    assert!(rendered.ends_with("Q2\n"));
+}
+
+#[test]
+fn thinking_queue_collects_utf8_lines() {
     let mut buffer = Vec::new();
     let mut pending = Vec::new();
 
-    push_thinking_supplement_bytes(
+    push_thinking_queue_bytes(
         &mut buffer,
         &mut pending,
         "补充：请优先修复 UI\r".as_bytes(),
@@ -144,45 +165,45 @@ fn thinking_supplement_collects_utf8_lines() {
 }
 
 #[test]
-fn thinking_supplement_backspace_removes_one_utf8_char() {
+fn thinking_queue_backspace_removes_one_utf8_char() {
     let mut buffer = Vec::new();
     let mut pending = Vec::new();
 
-    push_thinking_supplement_bytes(&mut buffer, &mut pending, "中文".as_bytes());
-    push_thinking_supplement_bytes(&mut buffer, &mut pending, &[127]);
-    push_thinking_supplement_bytes(&mut buffer, &mut pending, b"\n");
+    push_thinking_queue_bytes(&mut buffer, &mut pending, "中文".as_bytes());
+    push_thinking_queue_bytes(&mut buffer, &mut pending, &[127]);
+    push_thinking_queue_bytes(&mut buffer, &mut pending, b"\n");
 
     assert_eq!(pending, vec!["中"]);
 }
 
 #[test]
-fn thinking_supplement_ignores_empty_and_control_lines() {
+fn thinking_queue_ignores_empty_and_control_lines() {
     let mut buffer = Vec::new();
     let mut pending = Vec::new();
 
-    push_thinking_supplement_bytes(&mut buffer, &mut pending, b"   \n");
-    push_thinking_supplement_bytes(&mut buffer, &mut pending, &[3, 4, 27]);
-    push_thinking_supplement_bytes(&mut buffer, &mut pending, b" keep \n");
+    push_thinking_queue_bytes(&mut buffer, &mut pending, b"   \n");
+    push_thinking_queue_bytes(&mut buffer, &mut pending, &[3, 4, 27]);
+    push_thinking_queue_bytes(&mut buffer, &mut pending, b" keep \n");
 
     assert_eq!(pending, vec!["keep"]);
 }
 
 #[test]
-fn queued_thinking_supplement_text_splits_nonempty_lines() {
+fn queued_thinking_text_splits_nonempty_questions() {
     assert_eq!(
-        queued_text_to_supplements("\n 补充一 \r\n\n补充二\n"),
+        queued_text_to_questions("\n 补充一 \r\n\n补充二\n"),
         vec!["补充一", "补充二"]
     );
 }
 
 #[test]
-fn thinking_supplement_terminal_mode_is_noncanonical_but_keeps_sigint() {
+fn thinking_queue_terminal_mode_is_noncanonical_but_keeps_sigint() {
     let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
     original.c_lflag = libc::ICANON | libc::ECHO | libc::ISIG;
     original.c_cc[libc::VMIN] = 1;
     original.c_cc[libc::VTIME] = 1;
 
-    let mode = thinking_supplement_terminal_mode(original);
+    let mode = thinking_queue_terminal_mode(original);
 
     assert_eq!(mode.c_lflag & libc::ICANON, 0);
     assert_eq!(mode.c_lflag & libc::ECHO, 0);
@@ -966,6 +987,7 @@ fn runtime_help_omits_startup_options_and_highlights_sections() {
         "/exit",
         "Ctrl+C or Esc cancels",
         "While Timem is thinking",
+        "queue a separate next turn",
         "Use /prof to inspect token usage",
         "Use /config for changes that can take effect without restarting",
     ] {

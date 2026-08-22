@@ -145,8 +145,8 @@ Common controls:
 - `Ctrl+C` or `Esc`: cancel the current input, menu, or thinking turn.
 - `Ctrl+D` or `/exit`: exit the shell.
 
-While the model is working, type an additional instruction and press Enter to
-send it as a supplement to the current task.
+While the model is working, type another question and press Enter to queue it as
+a separate next turn. The current final answer stays visible before the queued turn starts.
 
 ## Timem Web Details
 
