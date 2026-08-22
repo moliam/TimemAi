@@ -551,10 +551,28 @@ fn load_or_create_shell_session(
 }
 
 fn load_resumable_shell_session(session_store: &SessionStore) -> Option<StoredSession> {
-    session_store
-        .list_sessions()
-        .ok()
-        .and_then(|sessions| sessions.into_iter().find(stored_session_is_resumable))
+    match session_store.list_sessions_resilient() {
+        Ok(recovery) => {
+            if let Some(backup) = recovery.backup_path.as_ref() {
+                eprintln!(
+                    "[session_recovery_warning] repaired session index by removing {} invalid record(s); original preserved at {}",
+                    recovery.invalid_records,
+                    backup.display()
+                );
+            }
+            recovery
+                .sessions
+                .into_iter()
+                .find(stored_session_is_resumable)
+        }
+        Err(error) => {
+            eprintln!(
+                "[session_recovery_error] could not load or repair the session index: {error}. Timem will start a new session without deleting the existing session data. Inspect {} and its sibling backup files, fix permissions/free disk space, then restart to recover old sessions.",
+                session_store.index_path().display()
+            );
+            None
+        }
+    }
 }
 
 fn new_shell_session(

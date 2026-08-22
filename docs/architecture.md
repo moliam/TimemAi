@@ -369,7 +369,20 @@ history file so Web and Shell can continue the same mem-space work. The Session
 also caches the effective allowlisted TIMEM runtime environment. This permits a
 restart without re-entering model service settings while keeping explicit launch CLI
 options authoritative. On Unix, the Session directory and index use `0700` and
-`0600` permissions because the index may contain the Session API key.
+`0600` permissions because the index may contain the Session API key. Startup
+loads that JSONL index through the shared Core recovery path: malformed,
+non-UTF-8, truncated, and oversized records are skipped with bounded memory,
+valid Session records remain usable, and the exact original index is preserved
+as a timestamped sibling backup before the repaired index is installed. Shell
+prints the backup path and continues with a recovered or fresh Session; Web uses
+the same recovery result. Web also treats the semantic event journal, command
+dedup cache, MCP configuration, and global worker-role library as independently
+recoverable stores. Corrupt worker-role data is quarantined, valid roles are
+salvaged where possible, and the UI starts with the recovered library instead of
+being blocked by optional configuration. Permission, storage, or replacement
+failures remain hard errors because safe repair cannot be proven; those errors
+include the affected path and concrete manual recovery guidance rather than only
+an internal code.
 
 ### `web_ui/`
 

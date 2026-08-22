@@ -485,6 +485,93 @@ fn stored_sessions_are_host_agnostic_and_sorted_by_recent_update() {
 }
 
 #[test]
+fn resilient_session_index_load_preserves_valid_records_and_backs_up_corruption() {
+    let root = tmp_dir("resilient_corrupt_index");
+    let store = SessionStore::new(&root);
+    std::fs::create_dir_all(store.sessions_dir()).unwrap();
+    let valid = new_stored_session(
+        "session_valid",
+        "Recovered",
+        "/tmp/project",
+        profile(),
+        store.history_path_for_session("session_valid"),
+    );
+    let valid_line = serde_json::to_string(&valid).unwrap();
+    let original = format!("{valid_line}\ntruncated-json\n");
+    std::fs::write(store.index_path(), &original).unwrap();
+
+    let recovery = store.list_sessions_resilient().unwrap();
+    assert!(recovery.repaired());
+    assert_eq!(recovery.invalid_records, 1);
+    assert_eq!(recovery.sessions, vec![valid]);
+    let backup = recovery.backup_path.unwrap();
+    assert_eq!(std::fs::read_to_string(backup).unwrap(), original);
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+}
+
+#[test]
+fn resilient_session_index_load_quarantines_non_utf8_records() {
+    let root = tmp_dir("resilient_non_utf8_index");
+    let store = SessionStore::new(&root);
+    std::fs::create_dir_all(store.sessions_dir()).unwrap();
+    let original = [b'{', 0xff, b'}', b'\n'];
+    std::fs::write(store.index_path(), original).unwrap();
+
+    let recovery = store.list_sessions_resilient().unwrap();
+    assert!(recovery.sessions.is_empty());
+    assert_eq!(recovery.invalid_records, 1);
+    assert_eq!(
+        std::fs::read(recovery.backup_path.unwrap()).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn resilient_session_index_load_bounds_oversized_records_and_keeps_following_sessions() {
+    let root = tmp_dir("resilient_oversized_index");
+    let store = SessionStore::new(&root);
+    std::fs::create_dir_all(store.sessions_dir()).unwrap();
+    let valid = new_stored_session(
+        "session_after_large_record",
+        "Recovered after oversized record",
+        "/tmp/project",
+        profile(),
+        store.history_path_for_session("session_after_large_record"),
+    );
+    let valid_line = serde_json::to_string(&valid).unwrap();
+    let mut original = vec![b'x'; 1024 * 1024 + 100];
+    original.push(b'\n');
+    original.extend_from_slice(valid_line.as_bytes());
+    original.push(b'\n');
+    std::fs::write(store.index_path(), &original).unwrap();
+
+    let recovery = store.list_sessions_resilient().unwrap();
+    assert_eq!(recovery.invalid_records, 1);
+    assert_eq!(recovery.sessions, vec![valid]);
+    assert_eq!(
+        std::fs::read(recovery.backup_path.unwrap()).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn resilient_session_index_load_quarantines_fully_corrupt_index_before_reset() {
+    let root = tmp_dir("resilient_fully_corrupt_index");
+    let store = SessionStore::new(&root);
+    std::fs::create_dir_all(store.sessions_dir()).unwrap();
+    std::fs::write(store.index_path(), b"not-json\n").unwrap();
+
+    let recovery = store.list_sessions_resilient().unwrap();
+    assert!(recovery.sessions.is_empty());
+    assert_eq!(recovery.invalid_records, 1);
+    assert_eq!(
+        std::fs::read(recovery.backup_path.unwrap()).unwrap(),
+        b"not-json\n"
+    );
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
 fn concurrent_session_store_instances_never_expose_partial_or_lose_index_records() {
     const WRITERS: usize = 4;
     const UPDATES: usize = 12;

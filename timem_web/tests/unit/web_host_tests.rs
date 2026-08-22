@@ -607,6 +607,92 @@ fn corrupt_mcp_config_is_backed_up_without_blocking_web_startup() {
 }
 
 #[test]
+fn corrupt_worker_role_library_is_backed_up_without_blocking_web_startup() {
+    let data_dir = std::env::temp_dir().join(unique_web_id("corrupt_worker_roles"));
+    let space = ".worker_role_recovery";
+    let memory_dir = RuntimeDataLayout::new(&data_dir, space).memory_dir();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    let path = role_library_path(&memory_dir);
+    std::fs::write(&path, b"not-json").unwrap();
+
+    let mem = WebMemState::new(data_dir.clone(), space.to_string()).unwrap();
+    assert_eq!(mem.role_library, WorkerRoleLibrary::default());
+    assert_eq!(
+        load_role_library(&path).unwrap(),
+        WorkerRoleLibrary::default()
+    );
+    let backups = std::fs::read_dir(&memory_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("worker_roles.json.worker-roles-corrupt-backup-")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(std::fs::read(backups[0].path()).unwrap(), b"not-json");
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[test]
+fn oversized_worker_role_library_is_moved_aside_without_loading_it_into_memory() {
+    let data_dir = std::env::temp_dir().join(unique_web_id("oversized_worker_roles"));
+    let space = ".worker_role_oversized_recovery";
+    let memory_dir = RuntimeDataLayout::new(&data_dir, space).memory_dir();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    let path = role_library_path(&memory_dir);
+    let original = vec![b'x'; MAX_ROLE_FILE_BYTES as usize + 1];
+    std::fs::write(&path, &original).unwrap();
+
+    let mem = WebMemState::new(data_dir.clone(), space.to_string()).unwrap();
+    assert_eq!(mem.role_library, WorkerRoleLibrary::default());
+    let backup = std::fs::read_dir(&memory_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("worker_roles.json.worker-roles-corrupt-backup-")
+        })
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(backup.path()).unwrap().len(),
+        original.len() as u64
+    );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[test]
+fn structurally_invalid_worker_role_library_is_quarantined_on_startup() {
+    let data_dir = std::env::temp_dir().join(unique_web_id("invalid_worker_roles"));
+    let space = ".worker_role_validation_recovery";
+    let memory_dir = RuntimeDataLayout::new(&data_dir, space).memory_dir();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    let path = role_library_path(&memory_dir);
+    let original = br#"{"roles":[{"id":"bad id","name":"Broken","description":"Invalid id"},{"id":"role_valid","name":"Reviewer","description":"Review"}],"groups":[]}"#;
+    std::fs::write(&path, original).unwrap();
+
+    let mem = WebMemState::new(data_dir.clone(), space.to_string()).unwrap();
+    assert_eq!(mem.role_library.roles.len(), 1);
+    assert_eq!(mem.role_library.roles[0].id, "role_valid");
+    let backup = std::fs::read_dir(&memory_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("worker_roles.json.worker-roles-corrupt-backup-")
+        })
+        .unwrap();
+    assert_eq!(std::fs::read(backup.path()).unwrap(), original);
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[test]
 fn corrupt_session_index_record_is_backed_up_while_valid_sessions_remain_usable() {
     let memory_dir = std::env::temp_dir().join(unique_web_id("corrupt_session_index"));
     let store = SessionStore::new(&memory_dir);

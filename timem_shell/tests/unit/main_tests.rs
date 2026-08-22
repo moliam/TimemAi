@@ -2073,6 +2073,68 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
 }
 
 #[test]
+fn shell_start_recovers_valid_session_from_partially_corrupt_index() {
+    let root = std::env::temp_dir().join(format!("timem_shell_corrupt_index_{}", epoch_millis()));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = SessionStore::new(root.join("memory"));
+    fs::create_dir_all(store.sessions_dir()).unwrap();
+    let config = ModelServiceConfig {
+        interaction: Default::default(),
+        api_protocol: ApiProtocol::OpenAiCompatible,
+        api_key: "secret".to_string(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://example.invalid/v1".to_string(),
+        timeout_secs: 120,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        response_protocol: ResponseProtocolKind::Xml,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+    };
+    let stored = StoredSession {
+        session_id: "shell_recovered".to_string(),
+        display_name: "Recovered".to_string(),
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        current_dir: workspace.display().to_string(),
+        profile: shell_session_profile(&config),
+        env: BTreeMap::new(),
+        env_overrides: None,
+        mcp_server_ids: Vec::new(),
+        state: StoredSessionState::Interrupted,
+        last_turn_id: None,
+        raw_chat_history_path: store
+            .history_path_for_session("shell_recovered")
+            .display()
+            .to_string(),
+    };
+    let original = format!("{}\nnot-json\n", serde_json::to_string(&stored).unwrap());
+    fs::write(store.index_path(), &original).unwrap();
+
+    let loaded = load_or_create_shell_session(
+        &store,
+        &config,
+        BashApprovalMode::Approve,
+        WorkInstructionLoadMode::Silent,
+        &workspace,
+    );
+    assert_eq!(loaded.session_id, "shell_recovered");
+    assert_eq!(store.list_sessions().unwrap(), vec![stored]);
+    let backup = fs::read_dir(store.sessions_dir())
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("index.jsonl.session-index-corrupt-backup-")
+        })
+        .unwrap();
+    assert_eq!(fs::read_to_string(backup.path()).unwrap(), original);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
     let root = std::env::temp_dir().join(format!("timem_shell_session_cwd_{}", epoch_millis()));
     let launch_dir = root.join("launch");

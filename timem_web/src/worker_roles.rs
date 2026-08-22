@@ -10,7 +10,7 @@ pub const MAX_WORKER_ROLE_GROUPS: usize = 64;
 pub const MAX_ROLE_NAME_CHARS: usize = 80;
 pub const MAX_ROLE_GROUP_NAME_CHARS: usize = 80;
 pub const MAX_ROLE_DESCRIPTION_BYTES: usize = 16 * 1024;
-const MAX_ROLE_FILE_BYTES: u64 = 4 * 1024 * 1024;
+pub const MAX_ROLE_FILE_BYTES: u64 = 4 * 1024 * 1024;
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -166,6 +166,50 @@ pub fn validate_role_library(library: &WorkerRoleLibrary) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+pub fn recover_role_library(bytes: &[u8]) -> WorkerRoleLibrary {
+    let parsed = serde_json::from_slice::<WorkerRoleLibrary>(bytes).or_else(|_| {
+        serde_json::from_slice::<Vec<WorkerRole>>(bytes).map(|roles| WorkerRoleLibrary {
+            roles,
+            groups: Vec::new(),
+        })
+    });
+    let Ok(parsed) = parsed else {
+        return WorkerRoleLibrary::default();
+    };
+
+    let mut recovered = WorkerRoleLibrary::default();
+    let mut role_ids = BTreeSet::new();
+    let mut role_names = BTreeSet::new();
+    for role in parsed.roles.into_iter().take(MAX_WORKER_ROLES) {
+        if validate_role_id(&role.id).is_err()
+            || normalize_role_fields(&role.name, &role.description).is_err()
+            || !role_ids.insert(role.id.clone())
+            || !role_names.insert(role.name.to_lowercase())
+        {
+            continue;
+        }
+        recovered.roles.push(role);
+    }
+
+    let mut group_ids = BTreeSet::new();
+    let mut group_names = BTreeSet::new();
+    let mut placed_role_ids = BTreeSet::new();
+    for mut group in parsed.groups.into_iter().take(MAX_WORKER_ROLE_GROUPS) {
+        if validate_group_id(&group.id).is_err()
+            || normalize_group_name(&group.name).is_err()
+            || !group_ids.insert(group.id.clone())
+            || !group_names.insert(group.name.to_lowercase())
+        {
+            continue;
+        }
+        group.role_ids.retain(|role_id| {
+            role_ids.contains(role_id) && placed_role_ids.insert(role_id.clone())
+        });
+        recovered.groups.push(group);
+    }
+    recovered
 }
 
 pub fn load_role_library(path: &Path) -> Result<WorkerRoleLibrary, String> {
