@@ -1,5 +1,5 @@
 import { AssistantRuntimeProvider, ThreadMessageLike, ThreadPrimitive, useExternalStoreRuntime } from "@assistant-ui/react";
-import { closestCenter, DndContext, DragEndEvent, DragOverlay, DragOverEvent, KeyboardSensor, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
+import { closestCenter, DndContext, DragEndEvent, DragOverlay, DragOverEvent, KeyboardSensor, PointerSensor, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { ArrowDown, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, FolderOpen, Gauge, GripVertical, KeyRound, LoaderCircle, Menu, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, Trash2, Wrench, X } from "lucide-react";
@@ -8,7 +8,7 @@ import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
-import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole } from "./protocol";
+import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole, WorkerRoleGroup, WorkerRoleLibrary } from "./protocol";
 import { canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, wheelDeltaPixels } from "./scroll";
 import { activeModelRetryStatus, activityFromTopic, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, manualToolGenCommand, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
 import { safeMarkdownUrl } from "./markdown_security";
@@ -99,6 +99,7 @@ function TimemApp() {
   useDialogFocusTrap();
   const [appearance, setAppearance] = useState<Appearance>(loadAppearance);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [roleLibrary, setRoleLibrary] = useState<WorkerRoleLibrary>({ roles: [], groups: [] });
   const [activeSessionId, setActiveSessionId] = useState("");
   const [selectedRoleIds, setSelectedRoleIds] = useState<Record<string, string[]>>({});
   const [decisions, setDecisions] = useState<Decision[]>([]);
@@ -528,6 +529,7 @@ function TimemApp() {
   const applySnapshot = useCallback((snapshot: Snapshot) => {
     toolCountBySessionRef.current = new Map(snapshot.sessions.map((session) => [session.session_id, session.tools.length]));
     setServer(snapshot.server);
+    setRoleLibrary(snapshot.role_library ?? { roles: snapshot.sessions[0]?.roles ?? [], groups: [] });
     setSessions(snapshot.sessions.map(boundSessionHistory));
     setActiveSessionId((current) => resolveActiveSessionId(current, snapshot.sessions));
   }, []);
@@ -694,6 +696,21 @@ function TimemApp() {
           return next;
         }
         return { ...current, [event.session_id]: retained };
+      });
+      return;
+    }
+    if (event.type === "worker_role_library_updated") {
+      setRoleLibrary(event.library);
+      setSessions((current) => current.map((session) => ({ ...session, roles: event.library.roles })));
+      setSelectedRoleIds((current) => {
+        let changed = false;
+        const next: Record<string, string[]> = {};
+        for (const [sessionId, selected] of Object.entries(current)) {
+          const retained = selected.filter((roleId) => event.library.roles.some((role) => role.id === roleId));
+          if (retained.length > 0) next[sessionId] = retained;
+          if (retained.length !== selected.length) changed = true;
+        }
+        return changed ? next : current;
       });
       return;
     }
@@ -1393,6 +1410,7 @@ function TimemApp() {
       {!showToolRepo && showRoles && <button type="button" className="role-panel-backdrop" aria-label="Close worker roles" onClick={() => setShowRoles(false)}/>}
       {!showToolRepo && <WorkerRolePanel
         session={activeSession}
+        library={roleLibrary}
         mobileOpen={showRoles}
         onClose={() => setShowRoles(false)}
         selectedRoleIds={selectedRoleIdsForSession}
@@ -1537,8 +1555,57 @@ function TimemApp() {
   </AssistantRuntimeProvider>;
 }
 
-function WorkerRolePanel({ session, selectedRoleIds, disabled, mobileOpen, onClose, onSelect, onCommand }: {
+type SortableWorkerRoleRenderState = {
+  setNodeRef: (node: HTMLElement | null) => void;
+  style: CSSProperties;
+  attributes: ReturnType<typeof useSortable>["attributes"];
+  listeners: ReturnType<typeof useSortable>["listeners"];
+  isDragging: boolean;
+};
+
+function SortableWorkerRole({ id, disabled, children }: {
+  id: string;
+  disabled: boolean;
+  children: (state: SortableWorkerRoleRenderState) => ReactNode;
+}) {
+  const sortable = useSortable({
+    id,
+    disabled,
+    transition: {
+      duration: 180,
+      easing: "cubic-bezier(.2, .8, .2, 1)",
+    },
+  });
+  return children({
+    setNodeRef: sortable.setNodeRef,
+    style: {
+      transform: CSS.Transform.toString(sortable.transform),
+      transition: sortable.transition,
+      zIndex: sortable.isDragging ? 4 : undefined,
+    },
+    attributes: sortable.attributes,
+    listeners: sortable.listeners,
+    isDragging: sortable.isDragging,
+  });
+}
+
+function WorkerRoleDropGroup({ id, roleIds, className, children }: {
+  id: string;
+  roleIds: string[];
+  className: string;
+  children: ReactNode;
+}) {
+  const droppable = useDroppable({ id });
+  return <section ref={droppable.setNodeRef} className={`${className} ${droppable.isOver ? "drop-target" : ""}`}>
+    <SortableContext items={roleIds} strategy={verticalListSortingStrategy}>
+      {children}
+    </SortableContext>
+  </section>;
+}
+
+function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOpen, onClose, onSelect, onCommand }: {
   session?: Session;
+  library: WorkerRoleLibrary;
   selectedRoleIds: readonly string[];
   disabled: boolean;
   mobileOpen: boolean;
@@ -1550,8 +1617,17 @@ function WorkerRolePanel({ session, selectedRoleIds, disabled, mobileOpen, onClo
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [deleteConfirmId, setDeleteConfirmId] = useState("");
+  const [newGroupName, setNewGroupName] = useState("");
+  const [editingGroupId, setEditingGroupId] = useState("");
+  const [editingGroupName, setEditingGroupName] = useState("");
+  const [draggedRoleId, setDraggedRoleId] = useState("");
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
   const resetEditor = () => { setEditingId(null); setName(""); setDescription(""); };
-  useEffect(() => { resetEditor(); setDeleteConfirmId(""); }, [session?.session_id]);
+  useEffect(() => { resetEditor(); setDeleteConfirmId(""); setEditingGroupId(""); }, [session?.session_id]);
+
   const submit = () => {
     if (!session || !name.trim() || !description.trim()) return;
     const command: ClientCommand = editingId
@@ -1559,20 +1635,81 @@ function WorkerRolePanel({ session, selectedRoleIds, disabled, mobileOpen, onClo
       : { type: "worker_role_create", session_id: session.session_id, name, description };
     if (onCommand(command)) resetEditor();
   };
+
+  const groupedRoleIds = new Set(library.groups.flatMap((group) => group.role_ids));
+  const ungroupedRoles = library.roles.filter((role) => !groupedRoleIds.has(role.id));
+  const roleById = new Map(library.roles.map((role) => [role.id, role]));
+  const groupForRole = (roleId: string) => library.groups.find((group) => group.role_ids.includes(roleId))?.id ?? null;
+
+  const reorderRole = (roleId: string, targetGroupId: string | null, beforeRoleId?: string) => {
+    if (!session || disabled) return;
+    const groups = library.groups.map((group) => ({ ...group, role_ids: group.role_ids.filter((id) => id !== roleId) }));
+    const ungrouped = ungroupedRoles.map((role) => role.id).filter((id) => id !== roleId);
+    const target = targetGroupId ? groups.find((group) => group.id === targetGroupId)?.role_ids : ungrouped;
+    if (!target) return;
+    const beforeIndex = beforeRoleId ? target.indexOf(beforeRoleId) : -1;
+    if (beforeIndex >= 0) target.splice(beforeIndex, 0, roleId); else target.push(roleId);
+    onCommand({ type: "worker_role_library_reorder", session_id: session.session_id, groups, ungrouped_role_ids: ungrouped });
+  };
+
+  const finishRoleDrag = (event: DragEndEvent) => {
+    setDraggedRoleId("");
+    const roleId = String(event.active.id);
+    const overId = event.over ? String(event.over.id) : "";
+    if (!overId || overId === roleId) return;
+    if (overId === "role-group:ungrouped") {
+      reorderRole(roleId, null);
+      return;
+    }
+    if (overId.startsWith("role-group:")) {
+      reorderRole(roleId, overId.slice("role-group:".length));
+      return;
+    }
+    if (roleById.has(overId)) reorderRole(roleId, groupForRole(overId), overId);
+  };
+
+  const roleItem = (role: WorkerRole) => <SortableWorkerRole id={role.id} disabled={disabled} key={role.id}>{({ setNodeRef, style, attributes, listeners, isDragging }) =>
+    <article ref={setNodeRef} style={style} className={`worker-role-item ${selectedRoleIds.includes(role.id) ? "selected" : ""} ${isDragging ? "dragging" : ""}`}>
+      <button type="button" className="worker-role-drag" disabled={disabled} title={`拖动 ${role.name}`} aria-label={`拖动 ${role.name}`} {...attributes} {...listeners}><GripVertical size={13}/></button>
+      <label title={`Use ${role.name} for the next message`}><input type="checkbox" checked={selectedRoleIds.includes(role.id)} disabled={disabled} onChange={() => onSelect(role.id)}/><span><strong>{role.name}</strong><small>{role.description}</small></span></label>
+      <div className="worker-role-actions"><button type="button" className="worker-role-action worker-role-edit" disabled={disabled} title={`Edit ${role.name}`} aria-label={`Edit ${role.name}`} onClick={() => { setEditingId(role.id); setName(role.name); setDescription(role.description); setDeleteConfirmId(""); }}><Pencil size={12}/></button><button type="button" className={`worker-role-action worker-role-delete ${deleteConfirmId === role.id ? "confirm-delete" : ""}`} disabled={disabled} title={deleteConfirmId === role.id ? `Confirm delete ${role.name}` : `Delete ${role.name}`} aria-label={deleteConfirmId === role.id ? `Confirm delete ${role.name}` : `Delete ${role.name}`} onClick={() => {
+        if (deleteConfirmId !== role.id) { setDeleteConfirmId(role.id); return; }
+        if (session && onCommand({ type: "worker_role_delete", session_id: session.session_id, role_id: role.id })) setDeleteConfirmId("");
+      }}>{deleteConfirmId === role.id ? <Check size={12}/> : <Trash2 size={12}/>}</button></div>
+    </article>
+  }</SortableWorkerRole>;
+
+  const draggedRole = roleById.get(draggedRoleId);
   return <aside id="worker-role-panel" className={`worker-role-panel ${mobileOpen ? "mobile-open" : ""}`} aria-label="Worker roles">
     <header><span><BriefcaseBusiness size={16}/> Roles</span><div><button type="button" className="worker-role-close" title="Close roles" aria-label="Close roles" onClick={onClose}><X size={15}/></button></div></header>
-    <p className="worker-role-help">为工作添加工作指导角色</p>
-    <div className="worker-role-list">
-      {(session?.roles ?? []).map((role) => <article className={`worker-role-item ${selectedRoleIds.includes(role.id) ? "selected" : ""}`} key={role.id}>
-        <label title={`Use ${role.name} for the next message`}><input type="checkbox" checked={selectedRoleIds.includes(role.id)} disabled={disabled} onChange={() => onSelect(role.id)}/><span><strong>{role.name}</strong><small>{role.description}</small></span></label>
-        <div className="worker-role-actions"><button type="button" className="worker-role-action worker-role-edit" disabled={disabled} title={`Edit ${role.name}`} aria-label={`Edit ${role.name}`} onClick={() => { setEditingId(role.id); setName(role.name); setDescription(role.description); setDeleteConfirmId(""); }}><Pencil size={12}/></button><button type="button" className={`worker-role-action worker-role-delete ${deleteConfirmId === role.id ? "confirm-delete" : ""}`} disabled={disabled} title={deleteConfirmId === role.id ? `Confirm delete ${role.name}` : `Delete ${role.name}`} aria-label={deleteConfirmId === role.id ? `Confirm delete ${role.name}` : `Delete ${role.name}`} onClick={() => {
-          if (deleteConfirmId !== role.id) { setDeleteConfirmId(role.id); return; }
-          if (session && onCommand({ type: "worker_role_delete", session_id: session.session_id, role_id: role.id })) setDeleteConfirmId("");
-        }}>{deleteConfirmId === role.id ? <Check size={12}/> : <Trash2 size={12}/>}</button></div>
-      </article>)}
-      {session && session.roles.length === 0 && <div className="worker-role-empty">还没有 Role。创建一个，安排重复的工作步骤、要求。</div>}
-      {!session && <div className="worker-role-empty">Select a session to manage its roles.</div>}
-    </div>
+    <p className="worker-role-help">拖动 Role 可排序或归入分组。</p>
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={(event) => setDraggedRoleId(String(event.active.id))} onDragCancel={() => setDraggedRoleId("")} onDragEnd={finishRoleDrag}>
+      <div className="worker-role-list">
+        {library.groups.map((group) => <WorkerRoleDropGroup id={`role-group:${group.id}`} roleIds={group.role_ids} className="worker-role-group" key={group.id}>
+          <header>
+            {editingGroupId === group.id ? <input autoFocus value={editingGroupName} maxLength={80} aria-label={`Rename group ${group.name}`} onChange={(event) => setEditingGroupName(event.target.value)} onKeyDown={(event) => {
+              if (event.key === "Escape") setEditingGroupId("");
+              if (event.key === "Enter" && session && editingGroupName.trim() && onCommand({ type: "worker_role_group_update", session_id: session.session_id, group_id: group.id, name: editingGroupName })) setEditingGroupId("");
+            }}/> : <strong>{group.name}</strong>}
+            <div><button type="button" className="worker-role-action worker-role-edit" disabled={disabled} title={`Rename ${group.name}`} aria-label={`Rename ${group.name}`} onClick={() => { setEditingGroupId(group.id); setEditingGroupName(group.name); }}><Pencil size={11}/></button><button type="button" className="worker-role-action worker-role-delete" disabled={disabled} title={`Delete ${group.name}`} aria-label={`Delete ${group.name}`} onClick={() => session && onCommand({ type: "worker_role_group_delete", session_id: session.session_id, group_id: group.id })}><Trash2 size={11}/></button></div>
+          </header>
+          <div className="worker-role-group-list">{group.role_ids.map((id) => roleById.get(id)).filter((role): role is WorkerRole => !!role).map(roleItem)}{group.role_ids.length === 0 && <span className="worker-role-drop-hint">拖动 Role 到这里</span>}</div>
+        </WorkerRoleDropGroup>)}
+        <WorkerRoleDropGroup id="role-group:ungrouped" roleIds={ungroupedRoles.map((role) => role.id)} className="worker-role-group worker-role-ungrouped">
+          <header><strong>未分组</strong></header>
+          <div className="worker-role-group-list">{ungroupedRoles.map(roleItem)}{ungroupedRoles.length === 0 && library.roles.length > 0 && <span className="worker-role-drop-hint">所有 Role 已归组</span>}</div>
+        </WorkerRoleDropGroup>
+        {library.roles.length === 0 && <div className="worker-role-empty">还没有 Role。创建一个，供所有 Session 使用。</div>}
+        {!session && <div className="worker-role-empty">Select a session to manage roles.</div>}
+      </div>
+      <DragOverlay dropAnimation={prefersReducedMotion() ? null : { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" }}>
+        {draggedRole && <article className="worker-role-item worker-role-overlay" aria-hidden="true"><span className="worker-role-drag"><GripVertical size={13}/></span><span><strong>{draggedRole.name}</strong><small>{draggedRole.description}</small></span></article>}
+      </DragOverlay>
+    </DndContext>
+    {session && <form className="worker-role-group-editor" onSubmit={(event) => { event.preventDefault(); if (newGroupName.trim() && onCommand({ type: "worker_role_group_create", session_id: session.session_id, name: newGroupName })) setNewGroupName(""); }}>
+      <input value={newGroupName} maxLength={80} disabled={disabled} placeholder="新分组名称" aria-label="Role group name" onChange={(event) => setNewGroupName(event.target.value)}/>
+      <button type="submit" disabled={disabled || !newGroupName.trim()}><Plus size={12}/> 分组</button>
+    </form>}
     {session && <form className={`worker-role-editor ${editingId ? "editing" : "creating"}`} onSubmit={(event) => { event.preventDefault(); submit(); }}>
       <strong>{editingId ? "编辑 Role" : "新建 Role"}</strong>
       <input value={name} maxLength={80} disabled={disabled} placeholder="称呼，例如：严谨审查员" aria-label="Role name" onChange={(event) => setName(event.target.value)}/>
