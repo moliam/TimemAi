@@ -56,6 +56,45 @@ fn host_profile_can_enable_local_command_capabilities_without_shell_ui() {
 }
 
 #[test]
+fn run_bash_host_environment_placeholder_is_replaced() {
+    let description =
+        "`run_bash` runs locally ({{RUN_BASH_HOST_ENVIRONMENT}}) and returns evidence.";
+
+    let rendered =
+        replace_run_bash_host_environment(description, "OS: ExampleOS 1.2; Bash: 5.2.0-release");
+
+    assert_eq!(
+        rendered,
+        "`run_bash` runs locally (OS: ExampleOS 1.2; Bash: 5.2.0-release) and returns evidence."
+    );
+    assert!(!rendered.contains(RUN_BASH_HOST_ENVIRONMENT_PLACEHOLDER));
+}
+
+#[test]
+fn builtin_run_bash_description_includes_dynamic_os_and_bash_versions() {
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
+    let rendered = registry.render_tool_catalog_markdown();
+    let run_bash = rendered
+        .split("#### `run_bash`")
+        .nth(1)
+        .and_then(|tail| tail.split("\n#### `").next())
+        .expect("run_bash catalog section");
+
+    let os_version = crate::os::version().expect("local OS version should be detectable");
+    let bash_version = crate::os::bash_version().expect("/bin/bash version should be detectable");
+    let expected_environment = format!("(OS: {os_version}; Bash: {bash_version})");
+
+    assert!(run_bash.contains(&expected_environment), "{run_bash}");
+    assert!(!run_bash.contains("(OS: unknown"), "{run_bash}");
+    assert!(!run_bash.contains("; Bash: unknown"), "{run_bash}");
+    assert!(
+        !run_bash.contains(RUN_BASH_HOST_ENVIRONMENT_PLACEHOLDER),
+        "{run_bash}"
+    );
+}
+
+#[test]
 fn registry_renders_prompt_tool_catalog_from_manifests() {
     let registry = CapabilityRegistry::builtin();
     let rendered = registry.render_tool_catalog_markdown();
@@ -99,12 +138,12 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(!rendered.contains("large_readback"));
     assert!(!rendered.contains("check_timeout_ms"));
     assert!(rendered.contains("`background`:"));
-    assert!(rendered.contains("Normal/Polling returns status and bounded output"));
+    assert!(rendered.contains("Normal/Polling captures status plus stdout/stderr"));
     assert!(rendered.contains("Background returns"));
     assert!(rendered.contains("Timeout command won't be killed automatically"));
     assert!(rendered.contains("`timeout_ms` is only how long Timem waits"));
     assert!(rendered.contains("It is not a kill deadline"));
-    assert!(rendered.contains("Use loop_cmd with interval_ms"));
+    assert!(rendered.contains("provide loop_cmd with interval_ms"));
     assert!(rendered.contains("`op`:"));
     assert!(rendered.contains("`kind`:"));
     assert!(rendered.contains("`id`:"));
@@ -141,11 +180,11 @@ fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
         .and_then(|tail| tail.split("\n#### `").next())
         .expect("readfile catalog section");
     assert!(
-        !readfile_catalog.contains("**Result**"),
+        readfile_catalog.contains("**Result**"),
         "{readfile_catalog}"
     );
     assert!(
-        !readfile_catalog.contains("If args do not match this tool spec"),
+        readfile_catalog.contains("If args do not match this tool spec"),
         "{readfile_catalog}"
     );
     assert!(
@@ -911,11 +950,76 @@ fn native_tool_schemas_use_gateway_compatible_single_value_enums() {
             "native schema for {} contains unsupported const: {schema}",
             tool.name
         );
+        assert!(
+            tool.description.contains("Valid argument examples:"),
+            "{} native description must carry self-contained examples",
+            tool.name
+        );
+        assert!(
+            !tool.description.contains(&format!("{{\"{}\":", tool.name)),
+            "{} native examples must contain arguments, not the inline tool wrapper",
+            tool.name
+        );
     }
     let memmgr = tools.iter().find(|tool| tool.name == "memmgr").unwrap();
-    let condition = &memmgr.input_schema["allOf"][0]["if"];
+    let condition = memmgr.input_schema["allOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|rule| rule.get("if"))
+        .find(|condition| condition["required"] == serde_json::json!(["op", "type"]))
+        .expect("combined memmgr type/op condition");
     assert!(condition.get("properties").is_some());
     assert_eq!(condition["required"], serde_json::json!(["op", "type"]));
+}
+
+#[test]
+fn builtin_native_schemas_preserve_runtime_constraints_and_argument_examples() {
+    let tools = CapabilityRegistry::builtin().native_tool_definitions();
+    for tool in &tools {
+        assert_eq!(
+            tool.input_schema["additionalProperties"],
+            Value::Bool(false),
+            "{} must reject undeclared fields like the builtin runtime",
+            tool.name
+        );
+    }
+
+    let readfile = tools.iter().find(|tool| tool.name == "readfile").unwrap();
+    let starter = &readfile.input_schema["properties"]["starter"];
+    assert_eq!(starter["minProperties"], 1);
+    assert_eq!(starter["maxProperties"], 1);
+    assert_eq!(starter["additionalProperties"], false);
+    assert_eq!(starter["oneOf"].as_array().unwrap().len(), 3);
+    assert_eq!(starter["properties"]["line_nr"]["minimum"], 1);
+    assert_eq!(starter["properties"]["byte_nr"]["minimum"], 0);
+    assert_eq!(
+        readfile.input_schema["properties"]["max_bytes"]["maximum"],
+        32768
+    );
+    assert!(readfile.description.contains("Valid argument examples:"));
+    assert!(readfile.description.contains(r#""path":"src/main.rs""#));
+    assert!(!readfile.description.contains(r#"{"readfile":{"#));
+
+    let run_bash = tools.iter().find(|tool| tool.name == "run_bash").unwrap();
+    assert_eq!(run_bash.input_schema["oneOf"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        run_bash.input_schema["properties"]["interval_ms"]["minimum"],
+        1
+    );
+
+    let compact = tools
+        .iter()
+        .find(|tool| tool.name == "context_compact")
+        .unwrap();
+    assert_eq!(compact.input_schema["properties"]["discard"]["minItems"], 1);
+
+    let memmgr = tools.iter().find(|tool| tool.name == "memmgr").unwrap();
+    assert!(memmgr.input_schema["properties"]["op"]["enum"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("schema".to_string())));
+    assert_eq!(memmgr.input_schema["properties"]["limit"]["maximum"], 200);
 }
 
 fn temp_capability_dir(name: &str) -> PathBuf {

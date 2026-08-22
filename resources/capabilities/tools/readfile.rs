@@ -496,7 +496,9 @@ fn parse_selector(value: Option<&Value>, field: &str) -> Result<Option<Selector>
     if object.len() != 1 {
         return Err(ReadfileError::new(
             "invalid_selector",
-            format!("`{field}` must contain exactly one selector field."),
+            format!(
+                "`{field}` must contain exactly one of `line_nr`, `byte_nr`, or `match`. Remove the other selector fields; for example: `\"{field}\": {{\"line_nr\": 1}}`."
+            ),
         ));
     }
     let (kind, value) = object.iter().next().expect("one selector entry");

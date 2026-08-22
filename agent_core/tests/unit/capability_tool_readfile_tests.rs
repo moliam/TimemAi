@@ -541,6 +541,8 @@ fn selector_and_range_errors_are_explicit() {
     let unsupported = execute(dir.path(), &json!({"path": "text.txt", "surprise": true}));
 
     assert!(multiple.contains("error: invalid_selector"), "{multiple}");
+    assert!(multiple.contains("for example:"), "{multiple}");
+    assert!(multiple.contains("line_nr"), "{multiple}");
     assert!(
         missing_match.contains("error: start_match_not_found"),
         "{missing_match}"

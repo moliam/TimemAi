@@ -9,9 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-
 static TOOL_JOB_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,23 +66,21 @@ impl FileToolJobStore {
         }
 
         let script = format!(
-            "/bin/sh {} < {} > {} 2>&1; printf '%s' \"$?\" > {}",
+            "{} {} < {} > {} 2>&1; printf '%s' \"$?\" > {}",
+            crate::os::POSIX_SHELL_EXECUTABLE,
             shell_quote_path(path),
             shell_quote_path(&payload_file),
             shell_quote_path(&output_file),
             shell_quote_path(&status_file)
         );
-        let mut command = Command::new("/bin/sh");
+        let mut command = Command::new(crate::os::POSIX_SHELL_EXECUTABLE);
         command
             .arg("-lc")
             .arg(script)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        #[cfg(unix)]
-        {
-            command.process_group(0);
-        }
+        crate::os::configure_child_process_group(&mut command);
         let spawn = command.spawn();
         let child = match spawn {
             Ok(child) => child,
@@ -310,94 +305,7 @@ fn shell_quote_path(path: &Path) -> String {
 }
 
 fn terminate_process(pid: u32) {
-    #[cfg(unix)]
-    {
-        terminate_process_unix(pid);
-    }
-    #[cfg(not(unix))]
-    {
-        let status = Command::new("/bin/kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if status.as_ref().is_ok_and(|status| status.success()) {
-            thread::sleep(Duration::from_millis(100));
-            if process_running(pid) {
-                let _ = Command::new("/bin/kill")
-                    .arg("-KILL")
-                    .arg(pid.to_string())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-fn terminate_process_unix(pid: u32) {
-    let pid = pid as libc::pid_t;
-    let pgid = unsafe { libc::getpgid(pid) };
-    if pgid < 0 {
-        return;
-    }
-    if pgid == pid && pgid != unsafe { libc::getpgrp() } {
-        signal_process_group(pgid, libc::SIGTERM);
-        thread::sleep(Duration::from_millis(100));
-        if process_group_running(pgid as u32) {
-            signal_process_group(pgid, libc::SIGKILL);
-        }
-        return;
-    }
-    signal_process(pid, libc::SIGTERM);
-    thread::sleep(Duration::from_millis(100));
-    if process_running(pid as u32) {
-        signal_process(pid, libc::SIGKILL);
-    }
-}
-
-fn process_running(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
-    #[cfg(not(unix))]
-    {
-        Command::new("/bin/kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .ok()
-            .is_some_and(|status| status.success())
-    }
-}
-
-#[cfg(unix)]
-fn process_group_running(group_leader_pid: u32) -> bool {
-    if group_leader_pid as libc::pid_t == unsafe { libc::getpgrp() } {
-        return false;
-    }
-    let result = unsafe { libc::kill(-(group_leader_pid as libc::pid_t), 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(unix)]
-fn signal_process(pid: libc::pid_t, signal: libc::c_int) {
-    if pid > 1 && pid != unsafe { libc::getpid() } {
-        let _ = unsafe { libc::kill(pid, signal) };
-    }
-}
-
-#[cfg(unix)]
-fn signal_process_group(pgid: libc::pid_t, signal: libc::c_int) {
-    if pgid > 1 && pgid != unsafe { libc::getpgrp() } {
-        let _ = unsafe { libc::kill(-pgid, signal) };
-    }
+    crate::os::terminate_process(pid);
 }
 
 fn compact_text(text: &str, max_chars: usize) -> String {

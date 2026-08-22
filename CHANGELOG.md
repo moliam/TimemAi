@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Added a centralized `agent_core::os` abstraction with initial macOS and Linux
+  implementations for host/version detection, shell paths, default config
+  directories, browser and terminal launch commands, and process-group
+  lifecycle operations. The model-facing `run_bash` description now dynamically
+  includes the detected host OS and `/bin/bash` versions.
+
 ### Removed
 
 - Removed unused capability `output_schema` declarations and parser state.

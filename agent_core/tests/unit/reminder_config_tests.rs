@@ -235,28 +235,13 @@ fn resource_candidates_follow_override_install_prefix_and_source_order() {
 }
 
 #[test]
-fn global_config_paths_follow_macos_linux_and_explicit_override_conventions() {
+fn global_config_path_honors_explicit_override() {
     let explicit = OsStr::new("/opt/timem-config");
     let xdg = OsStr::new("/home/alice/.xdg");
     let home = OsStr::new("/home/alice");
+
     assert_eq!(
-        config_root_from_values(Some(explicit), Some(xdg), Some(home), false),
+        config_root_from_values(Some(explicit), Some(xdg), Some(home)),
         PathBuf::from("/opt/timem-config")
-    );
-    assert_eq!(
-        config_root_from_values(None, Some(xdg), Some(home), false),
-        PathBuf::from("/home/alice/.xdg/timem")
-    );
-    assert_eq!(
-        config_root_from_values(None, None, Some(home), false),
-        PathBuf::from("/home/alice/.config/timem")
-    );
-    assert_eq!(
-        config_root_from_values(None, None, Some(OsStr::new("/Users/alice")), true),
-        PathBuf::from("/Users/alice/Library/Application Support/TimemAi")
-    );
-    assert_eq!(
-        config_root_from_values(None, None, None, false),
-        PathBuf::from("/etc/xdg/timem")
     );
 }

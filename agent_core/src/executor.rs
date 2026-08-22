@@ -7,9 +7,6 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-
 const COMMAND_OUTPUT_CAPTURE_BYTES: usize = 64 * 1024;
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -76,16 +73,13 @@ pub(crate) fn execute_command_action_outcome(
     payload: &Value,
     timeout_ms: u64,
 ) -> ActionOutcome {
-    let mut command = Command::new("/bin/sh");
+    let mut command = Command::new(crate::os::POSIX_SHELL_EXECUTABLE);
     command
         .arg(path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        command.process_group(0);
-    }
+    crate::os::configure_child_process_group(&mut command);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -220,26 +214,13 @@ fn render_command_output(
 }
 
 fn terminate_command_process(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    unsafe {
-        let pid = child.id() as libc::pid_t;
-        if pid > 1 && pid != libc::getpgrp() {
-            let _ = libc::kill(-pid, libc::SIGKILL);
-        }
-    }
+    crate::os::kill_process_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
 
-#[cfg(unix)]
 fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
-    use std::os::unix::process::ExitStatusExt;
-    status.signal()
-}
-
-#[cfg(not(unix))]
-fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
-    None
+    crate::os::exit_signal(status)
 }
 
 fn compact_text(text: &str, max_chars: usize) -> String {

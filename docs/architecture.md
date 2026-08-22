@@ -128,6 +128,17 @@ flowchart LR
 
 `agent_core` owns the agent loop and is platform independent.
 
+`agent_core/src/os/` is the centralized operating-system policy boundary.
+Its common interface owns host/version detection, executable conventions,
+default configuration roots, browser/terminal launch commands, and reusable
+process/process-group lifecycle operations. Platform policy implementations
+currently live in `os/macos.rs` and `os/linux.rs`. Business modules consume the
+common interface and must not add direct macOS/Linux branches or fixed system
+command paths. Low-level Unix mechanisms intrinsic to a subsystem—such as
+terminal `termios`, file permission bits, nonblocking file descriptors, and
+file locking—remain beside that subsystem rather than being hidden behind an
+OS policy facade.
+
 - Provides reusable capability functions and state-machine functions. Host
   adapters call core functions instead of reimplementing agent behavior.
 - Exposes state/progress through structured topic events and structured return

@@ -1575,7 +1575,11 @@ mod tests {
                 agent_core::ToolDefinition {
                     name: "self_tool".to_string(),
                     description: "Inspect runtime state".to_string(),
-                    input_schema: serde_json::json!({"type": "object"}),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {"type": {"enum": ["cwd"]}},
+                        "additionalProperties": false
+                    }),
                 },
                 agent_core::ToolDefinition {
                     name: "mcp.demo.echo".to_string(),
@@ -1630,6 +1634,8 @@ mod tests {
         assert!(tool_schema.contains("tool_definitions: 2"));
         assert!(tool_schema.contains("mcp.demo.echo"));
         assert!(tool_schema.contains("Dynamic MCP echo"));
+        assert!(tool_schema.contains("\"additionalProperties\": false"));
+        assert!(tool_schema.contains("\"enum\": ["));
         assert!(!tool_schema.contains("call_previous"));
         assert!(session_dir.join("statistics.html").is_file());
         assert!(!session_dir.join("statistics.md").exists());

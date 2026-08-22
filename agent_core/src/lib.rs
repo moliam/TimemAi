@@ -49,6 +49,7 @@ pub mod model_service_config;
 pub mod model_transport;
 pub mod negotiation;
 mod notification;
+pub mod os;
 pub mod profiler;
 pub mod prompt_cache;
 pub mod prompt_components;
@@ -805,23 +806,8 @@ impl MemGuard {
     }
 }
 
-#[cfg(unix)]
 fn process_is_alive(pid: u64) -> Option<bool> {
-    let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
-    let result = unsafe { libc::kill(pid, 0) };
-    if result == 0 {
-        return Some(true);
-    }
-    match std::io::Error::last_os_error().raw_os_error() {
-        Some(libc::ESRCH) => Some(false),
-        Some(libc::EPERM) => Some(true),
-        _ => None,
-    }
-}
-
-#[cfg(not(unix))]
-fn process_is_alive(_pid: u64) -> Option<bool> {
-    None
+    os::process_is_alive(pid)
 }
 
 pub(crate) fn atomic_write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

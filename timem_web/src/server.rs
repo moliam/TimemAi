@@ -8540,31 +8540,12 @@ impl WebLaunchOptions {
     }
 }
 
-fn browser_command(url: &str) -> (OsString, Vec<OsString>) {
-    #[cfg(target_os = "macos")]
-    {
-        (OsString::from("open"), vec![OsString::from(url)])
-    }
-    #[cfg(target_os = "windows")]
-    {
-        (
-            OsString::from("cmd"),
-            vec![
-                OsString::from("/C"),
-                OsString::from("start"),
-                OsString::from(""),
-                OsString::from(url),
-            ],
-        )
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        (OsString::from("xdg-open"), vec![OsString::from(url)])
-    }
+fn browser_command(url: &str) -> Result<(OsString, Vec<OsString>), String> {
+    agent_core::os::browser_command(url).ok_or_else(|| "browser_open_unsupported".to_string())
 }
 
 fn open_browser(url: &str) -> Result<(), String> {
-    let (program, args) = browser_command(url);
+    let (program, args) = browser_command(url)?;
     let mut child = Command::new(program)
         .args(args)
         .spawn()
@@ -8580,17 +8561,7 @@ fn should_auto_open_browser() -> bool {
         .into_iter()
         .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));
 
-    #[cfg(target_os = "linux")]
-    let has_graphical_session = std::env::var_os("DISPLAY").is_some_and(|value| !value.is_empty())
-        || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty());
-
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    let has_graphical_session = true;
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    let has_graphical_session = false;
-
-    browser_auto_open_allowed_for(is_ssh, has_graphical_session)
+    browser_auto_open_allowed_for(is_ssh, agent_core::os::graphical_session_available())
 }
 
 fn browser_auto_open_allowed_for(is_ssh: bool, has_graphical_session: bool) -> bool {
@@ -8601,35 +8572,16 @@ fn open_directory_in_terminal(path: &Path) -> Result<(), String> {
     if !path.is_dir() {
         return Err("tool_directory_not_found".to_string());
     }
-    #[cfg(target_os = "macos")]
-    let child = Command::new("open")
-        .args(["-a", "Terminal"])
-        .arg(path)
-        .spawn();
-    #[cfg(target_os = "linux")]
-    let child = Command::new("x-terminal-emulator")
-        .arg("--working-directory")
-        .arg(path)
-        .spawn();
-    #[cfg(target_os = "windows")]
-    let child = Command::new("cmd")
-        .args(["/C", "start", "cmd", "/K", "cd", "/D"])
-        .arg(path)
-        .spawn();
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    let child: Result<std::process::Child, std::io::Error> = Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "unsupported platform",
-    ));
-    match child {
-        Ok(mut child) => {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-            Ok(())
-        }
-        Err(error) => Err(format!("terminal_open_failed:{error}")),
-    }
+    let (program, args) = agent_core::os::terminal_command(path)
+        .ok_or_else(|| "terminal_open_unsupported".to_string())?;
+    let mut child = Command::new(program)
+        .args(args)
+        .spawn()
+        .map_err(|error| format!("terminal_open_failed:{error}"))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 async fn bind_web_listener(

@@ -404,8 +404,16 @@ fn dynamic_tool_is_prompt_visible_and_protocol_parser_keeps_arguments_generic() 
         description: "Echo a value from MCP".to_string(),
         input_schema: json!({
             "type": "object",
-            "properties": { "value": { "type": "string" } },
-            "required": ["value"]
+            "properties": {
+                "value": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "integer"}
+                    ]
+                }
+            },
+            "required": ["value"],
+            "additionalProperties": false
         }),
     };
     let registry = crate::capability::CapabilityRegistry::builtin()
@@ -432,6 +440,14 @@ fn dynamic_tool_is_prompt_visible_and_protocol_parser_keeps_arguments_generic() 
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
         vec!["mcp.demo.echo-value"]
+    );
+    assert_eq!(dynamic_tools[0].input_schema["additionalProperties"], false);
+    assert_eq!(
+        dynamic_tools[0].input_schema["properties"]["value"]["oneOf"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
     );
 
     let response = r#"<ASSISTANT><actions><mcp.demo.echo-value name="echo protocol-like value"><value><![CDATA[literal </ASSISTANT> and ```xml <ASSISTANT> text]]></value><nested><json>{"action":"not-a-call"}</json></nested></mcp.demo.echo-value></actions></ASSISTANT>"#;

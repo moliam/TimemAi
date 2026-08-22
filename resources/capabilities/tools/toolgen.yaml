@@ -29,9 +29,10 @@ input_schema: |
   {
     "type": "object",
     "required": ["op", "draft_path"],
+    "additionalProperties": false,
     "properties": {
       "op": {"type": "string", "enum": ["publish"], "description": "Publish a validated ToolGen draft."},
-      "draft_path": {"type": "string", "description": "Absolute draft directory supplied by runtime."}
+      "draft_path": {"type": "string", "minLength": 1, "pattern": "^/", "description": "Absolute session draft directory supplied by runtime; arbitrary directories are rejected."}
     }
   }
 example_json: |

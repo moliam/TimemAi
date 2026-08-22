@@ -16,11 +16,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
-const BASH_EXECUTABLE: &str = "/bin/bash";
 const LONG_RUNNING_COMMAND_PROMPT_AFTER: Duration = Duration::from_secs(60);
 
 fn configure_run_bash_environment(command: &mut Command) {
@@ -343,7 +339,7 @@ impl FileShellJobStore {
             .truncate(true)
             .write(true)
             .open(&stderr_file)?;
-        let mut command = Command::new(BASH_EXECUTABLE);
+        let mut command = Command::new(crate::os::BASH_EXECUTABLE);
         configure_run_bash_environment(&mut command);
         command
             .arg("-c")
@@ -352,10 +348,7 @@ impl FileShellJobStore {
             .stdin(Stdio::null())
             .stdout(Stdio::from(output))
             .stderr(Stdio::from(stderr));
-        #[cfg(unix)]
-        {
-            command.process_group(0);
-        }
+        crate::os::configure_child_process_group(&mut command);
         let child = command.spawn()?;
         let pid = child.id();
         if !is_runtime_child_pid(pid) {
@@ -1688,7 +1681,7 @@ fn execute_one_bash_structured_with_prompt_after(
     if timeout_ms <= 0 {
         return bash_error(command, "invalid_timeout");
     }
-    let mut shell = Command::new(BASH_EXECUTABLE);
+    let mut shell = Command::new(crate::os::BASH_EXECUTABLE);
     configure_run_bash_environment(&mut shell);
     shell
         .arg("-lc")
@@ -1696,10 +1689,7 @@ fn execute_one_bash_structured_with_prompt_after(
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        shell.process_group(0);
-    }
+    crate::os::configure_child_process_group(&mut shell);
     let spawn = shell.spawn();
     let mut child = match spawn {
         Ok(child) => child,
@@ -1821,30 +1811,11 @@ fn bash_finished_error_outcome(
 }
 
 fn is_runtime_child_pid(pid: u32) -> bool {
-    if pid <= 1 || pid == std::process::id() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        let pid = pid as libc::pid_t;
-        let pgid = unsafe { libc::getpgid(pid) };
-        pgid == pid && pgid != unsafe { libc::getpgrp() }
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    crate::os::is_runtime_child_process_group(pid)
 }
 
 fn runtime_child_pid_kind() -> &'static str {
-    #[cfg(unix)]
-    {
-        "runtime_child_process_group"
-    }
-    #[cfg(not(unix))]
-    {
-        "runtime_child_process"
-    }
+    crate::os::runtime_child_pid_kind()
 }
 
 fn bash_running_pid(error: &str) -> Option<u32> {
@@ -1871,15 +1842,8 @@ fn bash_error(command: &str, error: &str) -> BashCommandOutput {
     }
 }
 
-#[cfg(unix)]
 fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
-    use std::os::unix::process::ExitStatusExt;
-    status.signal()
-}
-
-#[cfg(not(unix))]
-fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
-    None
+    crate::os::exit_signal(status)
 }
 
 fn bash_action_not_executed(_command: Option<&str>, reason: &str) -> String {
@@ -1957,42 +1921,7 @@ fn normalized_shell_output(output: &str) -> String {
 }
 
 fn process_running(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        let mut status = 0;
-        let wait = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
-        if wait == pid as libc::pid_t {
-            return false;
-        }
-        if wait == 0 {
-            return true;
-        }
-        if let Ok(output) = Command::new("/bin/ps")
-            .arg("-o")
-            .arg("stat=")
-            .arg("-p")
-            .arg(pid.to_string())
-            .output()
-        {
-            if !output.status.success() {
-                return false;
-            }
-            let stat = String::from_utf8_lossy(&output.stdout);
-            let state = stat.trim();
-            if state.starts_with('Z') || state.contains('Z') {
-                return false;
-            }
-            return !state.is_empty();
-        }
-    }
-    Command::new("/bin/kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()
-        .is_some_and(|status| status.success())
+    crate::os::child_process_running(pid)
 }
 
 #[cfg(test)]
@@ -2002,75 +1931,7 @@ fn shell_quote_path(path: &Path) -> String {
 }
 
 fn terminate_process(pid: u32) {
-    #[cfg(unix)]
-    {
-        terminate_process_unix(pid);
-    }
-    #[cfg(not(unix))]
-    {
-        let status = Command::new("/bin/kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if status.as_ref().is_ok_and(|s| s.success()) {
-            thread::sleep(Duration::from_millis(100));
-            if process_running(pid) {
-                let _ = Command::new("/bin/kill")
-                    .arg("-KILL")
-                    .arg(pid.to_string())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-fn terminate_process_unix(pid: u32) {
-    let pid = pid as libc::pid_t;
-    let pgid = unsafe { libc::getpgid(pid) };
-    if pgid < 0 {
-        return;
-    }
-    if pgid == pid && pgid != unsafe { libc::getpgrp() } {
-        signal_process_group(pgid, libc::SIGTERM);
-        thread::sleep(Duration::from_millis(100));
-        if process_group_running(pgid as u32) {
-            signal_process_group(pgid, libc::SIGKILL);
-        }
-        return;
-    }
-    signal_process(pid, libc::SIGTERM);
-    thread::sleep(Duration::from_millis(100));
-    if process_running(pid as u32) {
-        signal_process(pid, libc::SIGKILL);
-    }
-}
-
-#[cfg(unix)]
-fn signal_process(pid: libc::pid_t, signal: libc::c_int) {
-    if pid > 1 && pid != unsafe { libc::getpid() } {
-        let _ = unsafe { libc::kill(pid, signal) };
-    }
-}
-
-#[cfg(unix)]
-fn signal_process_group(pgid: libc::pid_t, signal: libc::c_int) {
-    if pgid > 1 && pgid != unsafe { libc::getpgrp() } {
-        let _ = unsafe { libc::kill(-pgid, signal) };
-    }
-}
-
-#[cfg(unix)]
-fn process_group_running(group_leader_pid: u32) -> bool {
-    if group_leader_pid as libc::pid_t == unsafe { libc::getpgrp() } {
-        return false;
-    }
-    let result = unsafe { libc::kill(-(group_leader_pid as libc::pid_t), 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    crate::os::terminate_process(pid);
 }
 
 pub(crate) fn compact_text(text: &str, max_chars: usize) -> String {
