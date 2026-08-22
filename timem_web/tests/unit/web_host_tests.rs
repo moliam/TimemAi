@@ -5661,6 +5661,90 @@ fn primary_turn_finish_clears_stale_working_workers_and_session_spinner() {
 }
 
 #[test]
+fn final_answer_is_preserved_before_unconsumed_supplement_starts_a_new_turn() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let first = start_web_turn(&state, session_id, "Q1").unwrap();
+    let (context_id, worker_id) = primary_worker_scope(&state, session_id).unwrap();
+
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(CORE_TOPIC_MODEL_RESPONSE, json!({})),
+            CoreSessionState::Finished,
+            json!({
+                "status": "ALL_FINISHED",
+                "final_answer": "final_answer1",
+                "continue_work": false,
+                "global": {
+                    "working_worker_count": 0,
+                    "session_working_worker_count": 0
+                }
+            }),
+        )
+        .with_worker_scope(context_id.clone(), worker_id.clone())]),
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::UnconsumedSupplements {
+            supplements: vec!["Q2".to_string()],
+        },
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnFinished {
+            outcome: TurnOutcome::final_response(
+                "final_answer1",
+                UsageStats::zero(),
+                None,
+                None,
+                Duration::from_millis(1),
+            ),
+        },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.turns.len(), 2);
+    assert_eq!(session.turns[0].turn_id, first.turn_id);
+    assert_eq!(
+        session.turns[0].final_answer.as_deref(),
+        Some("final_answer1")
+    );
+    assert_eq!(session.turns[0].state, "finished");
+    assert_ne!(session.turns[1].turn_id, first.turn_id);
+    assert_eq!(session.turns[1].user_entries.len(), 1);
+    assert_eq!(session.turns[1].user_entries[0].kind, "task");
+    assert_eq!(session.turns[1].user_entries[0].text, "Q2");
+    assert!(session.turns[1].final_answer.is_none());
+    assert!(
+        session.active_turn_id.as_deref() == Some(session.turns[1].turn_id.as_str())
+            || session.pending_turn_id.as_deref() == Some(session.turns[1].turn_id.as_str()),
+        "Q2 must have a distinct active or pending turn identity"
+    );
+    assert_eq!(
+        session
+            .messages
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["final_answer1"],
+        "starting Q2 must not replace Q1's assistant message"
+    );
+}
+
+#[test]
 fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() {
     let state = routing_test_state();
     let session_id = "session_a";

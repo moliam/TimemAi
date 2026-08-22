@@ -531,6 +531,79 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
 }
 
 #[test]
+fn worker_option_returns_late_supplement_after_preserving_the_first_final_answer() {
+    let dir = tmp_dir("separate_late_supplement_turn");
+    let core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let calls = Arc::new(Mutex::new(0));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "separate_late_supplement_turn", 1)
+            .with_separate_turn_for_supplements_after_final_answer(),
+        SupplementReplayModel {
+            calls: Arc::clone(&calls),
+        },
+    );
+    let handle = worker.handle();
+    let _ = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker lifecycle");
+    handle.run_turn("Q1", None).unwrap();
+
+    loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first model request")
+        {
+            CoreSessionWorkerEvent::ModelRequest { .. } => {
+                handle.add_user_supplement("Q2 SUPPLEMENT");
+                break;
+            }
+            CoreSessionWorkerEvent::TurnStarted { .. } | CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::ModelRequestCompleted { .. }
+            | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
+            other => panic!("unexpected event before request: {other:?}"),
+        }
+    }
+
+    let mut returned = Vec::new();
+    let outcome = loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first turn completion")
+        {
+            CoreSessionWorkerEvent::UnconsumedSupplements { supplements } => {
+                returned.extend(supplements);
+            }
+            CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
+            CoreSessionWorkerEvent::Topics(_)
+            | CoreSessionWorkerEvent::ModelRequest { .. }
+            | CoreSessionWorkerEvent::ModelResponse { .. }
+            | CoreSessionWorkerEvent::ModelRequestCompleted { .. }
+            | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
+            other => panic!("unexpected event before completion: {other:?}"),
+        }
+    };
+
+    assert_eq!(outcome.text, "STALE");
+    assert_eq!(outcome.stats.llm_calls, 1);
+    assert_eq!(returned, vec!["Q2 SUPPLEMENT".to_string()]);
+    assert_eq!(*calls.lock().unwrap(), 1);
+    handle.request_shutdown().unwrap();
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn session_worker_does_not_revive_terminal_repair_failure_with_late_supplement() {
     let dir = tmp_dir("terminal_repair_late_supplement");
     let core = AgentCore::new(
@@ -897,6 +970,7 @@ fn toolgen_approval_topic_keeps_session_context_and_worker_scope() {
         current_turn_active: None,
         phase: Some("toolgen".to_string()),
         accept_supplements: false,
+        continue_supplements_after_final_answer: true,
         pending_bash_always_allow: false,
         pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
         interaction_profile: None,

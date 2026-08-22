@@ -1704,6 +1704,14 @@ pub trait TurnUi {
             .collect()
     }
 
+    /// Whether supplements discovered after a final model response may reopen
+    /// the same host-visible turn for another model call. Turn-based UIs can
+    /// return `false` so the completed answer stays attached to its original
+    /// turn and the host can resubmit the late input as a distinct follow-up.
+    fn continue_supplements_after_final_answer(&self) -> bool {
+        true
+    }
+
     fn apply_pending_runtime_updates(
         &mut self,
         _core: &mut crate::AgentCore,
