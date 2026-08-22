@@ -48,11 +48,13 @@ describe("user message bubble styling", () => {
     expect(styles).toContain('font-weight: var(--user-font-weight)');
   });
 
-  it("uses a readable light-blue background in both themes", () => {
-    expect(styles).toContain(".turn-user-content {\n  background: #d9edff;\n  color: #17324d;");
-    expect(styles).toContain(':root[data-theme="light"] .turn-user-content { background: #d9edff; }');
-    expect(styles).toContain(".turn-user-entry .markdown-body pre { border-color: #9fc6e3; background: #17324d; }");
-    expect(styles).toContain(".turn-user-entry .markdown-body :is(h1, h2, h3, h4, h5, h6) { color: #17324d; }");
+  it("uses a muted blue-gray bubble in dark mode and keeps the readable light-blue bubble in light mode", () => {
+    expect(styles).toContain(".turn-user-content {\n  background: #263746;\n  color: #e7f1f8;");
+    expect(styles).toContain(".turn-user-entry .markdown-body pre { border-color: #456176; background: #111a22; }");
+    expect(styles).toContain(".turn-user-entry .markdown-body :is(h1, h2, h3, h4, h5, h6) { color: #f1f7fb; }");
+    expect(styles).toContain(':root[data-theme="light"] .turn-user-content { background: #d9edff; color: #17324d; }');
+    expect(styles).toContain(':root[data-theme="light"] .turn-user-entry .markdown-body pre { border-color: #9fc6e3; background: #17324d; }');
+    expect(styles).toContain(':root[data-theme="light"] .turn-user-entry .markdown-body :is(h1, h2, h3, h4, h5, h6) { color: #17324d; }');
   });
 });
 
