@@ -2614,7 +2614,7 @@ const toggleQueuedMessages = () => {
           if (!claimQueuedMessage(queuedMessageClaimsRef.current, activeSession.session_id, queuedMessagesBySession[activeSession.session_id] ?? [], message.id)) return;
           queuedAutoContinueSessionIdsRef.current.delete(activeSession.session_id);
           setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-          if (!onSendForSession(activeSession.session_id, message.text, message.id, message.attachmentIds, false, messageRoleIds, sendAsNewTurn)) {
+          if (!onSendForSession(activeSession.session_id, message.text, message.id, message.attachmentIds, !sendAsNewTurn, messageRoleIds, sendAsNewTurn)) {
             releaseQueuedMessageClaim(queuedMessageClaimsRef.current, activeSession.session_id, message.id);
             setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
             updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: (current[activeSession.session_id] ?? []).map((candidate) => candidate.id === message.id ? { ...candidate, deliveryError: "消息尚未安全保存，请检查浏览器存储后重试" } : candidate) }));

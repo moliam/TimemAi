@@ -3056,14 +3056,15 @@ fn handle_command_with_id(
                     return Err("unsupported_turn_input_kind".to_string());
                 }
                 let text = nonempty_text(text, "turn text")?;
-                submit_or_supplement_turn(
+                let worker_roles =
+                    resolve_worker_roles(state, &session_id, &role_ids, role_id.as_deref())?;
+                submit_turn_with_selected_attachments(
                     state,
                     &session_id,
                     text,
                     attachment_ids.as_deref(),
                     command_id,
-                    &role_ids,
-                    role_id.as_deref(),
+                    worker_roles,
                 )?
             };
             return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
@@ -4816,38 +4817,6 @@ fn redeliver_recorded_turn(
             Some(command_id.to_string()),
         )
     }
-}
-
-fn submit_or_supplement_turn(
-    state: &AppState,
-    session_id: &str,
-    text: String,
-    attachment_ids: Option<&[String]>,
-    command_id: Option<&str>,
-    role_ids: &[String],
-    legacy_role_id: Option<&str>,
-) -> Result<WebTurn, String> {
-    let worker_roles = resolve_worker_roles(state, session_id, role_ids, legacy_role_id)?;
-    if session_has_active_turn(state, session_id)? {
-        if let Some(turn) = try_append_turn_supplement(
-            state,
-            session_id,
-            text.clone(),
-            attachment_ids,
-            command_id,
-            worker_roles.clone(),
-        )? {
-            return Ok(turn);
-        }
-    }
-    submit_turn_with_selected_attachments(
-        state,
-        session_id,
-        text,
-        attachment_ids,
-        command_id,
-        worker_roles,
-    )
 }
 
 fn append_supplement_or_submit_turn(

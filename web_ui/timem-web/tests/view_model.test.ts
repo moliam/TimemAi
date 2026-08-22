@@ -173,13 +173,13 @@ describe("web topic view model", () => {
     });
   });
 
-  it("sends working-session text as a supplement instead of disabling input", () => {
+  it("keeps ordinary working-session text as a separate next turn", () => {
     const current = { ...session("session_1"), state: "working" };
-    expect(composerSendDecision(current, "  add this constraint  ", false)).toEqual({
+    expect(composerSendDecision(current, "  ask this next  ", false)).toEqual({
       kind: "send",
-      text: "add this constraint",
+      text: "ask this next",
       clearDraftOnSuccess: true,
-      command: { type: "turn_supplement", session_id: "session_1", text: "add this constraint" },
+      command: { type: "turn_submit", session_id: "session_1", text: "ask this next" },
     });
   });
 
@@ -228,14 +228,14 @@ describe("web topic view model", () => {
  });
  });
 
- it("keeps rapid repeated sends during a working turn as separate supplements", () => {
+ it("keeps rapid ordinary sends during a working turn as separate next-turn submissions", () => {
     const current = { ...session("session_1"), state: "working" };
-    const decisions = ["first correction", "second correction", "third correction"].map((text) => composerSendDecision(current, text, false));
+    const decisions = ["second question", "third question", "fourth question"].map((text) => composerSendDecision(current, text, false));
     expect(decisions.map((decision) => decision.kind)).toEqual(["send", "send", "send"]);
     expect(decisions.map((decision) => decision.kind === "send" ? decision.command : undefined)).toEqual([
-      { type: "turn_supplement", session_id: "session_1", text: "first correction" },
-      { type: "turn_supplement", session_id: "session_1", text: "second correction" },
-      { type: "turn_supplement", session_id: "session_1", text: "third correction" },
+      { type: "turn_submit", session_id: "session_1", text: "second question" },
+      { type: "turn_submit", session_id: "session_1", text: "third question" },
+      { type: "turn_submit", session_id: "session_1", text: "fourth question" },
     ]);
   });
 
@@ -1501,7 +1501,7 @@ describe("web topic view model", () => {
       const active = upsertTurn(session(`storm_${index}`), turn(`turn_${index}`));
       return updateSessionWorkerState(active, active.primary_worker_id, "working");
     });
-    const acceptedSupplements = new Map<string, string[]>();
+    const acceptedNextTurns = new Map<string, string[]>();
 
     for (let index = 0; index < 600; index += 1) {
       const targetIndex = index % sessions.length;
@@ -1514,10 +1514,10 @@ describe("web topic view model", () => {
       } else {
         expect(decision).toMatchObject({
           kind: "send",
-          command: { type: "turn_supplement", session_id: target.session_id, text },
+          command: { type: "turn_submit", session_id: target.session_id, text },
         });
-        acceptedSupplements.set(target.session_id, [
-          ...(acceptedSupplements.get(target.session_id) ?? []),
+        acceptedNextTurns.set(target.session_id, [
+          ...(acceptedNextTurns.get(target.session_id) ?? []),
           text,
         ]);
       }
@@ -1535,7 +1535,7 @@ describe("web topic view model", () => {
       expect(events.every((event) => event.payload.owner === current.session_id)).toBe(true);
       expect(current.state).toBe("working");
       expect(current.workers.every((worker) => worker.state === "working")).toBe(true);
-      expect(acceptedSupplements.get(current.session_id)?.length).toBeGreaterThan(80);
+      expect(acceptedNextTurns.get(current.session_id)?.length).toBeGreaterThan(80);
       const finished = finishTurn(current, current.active_turn_id, { elapsed_ms: 42_000, stop_reason: "CancelledByUser" });
       expect(finished.state).toBe("ready");
       expect(finished.active_turn_id).toBeNull();

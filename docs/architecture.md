@@ -43,7 +43,7 @@ agent_core
 
 The Web surface includes per-Session model/API configuration, multi-session
 profiles, paged history,
-attachments, active-turn supplements, inline decisions, live action lifecycle
+attachments, queued next-turn questions, explicit active-turn supplements, inline decisions, live action lifecycle
 rows, reconnect/runtime-exit states, context-compact visualization, Markdown
 rendering, syntax highlighting, responsive layout, and final usage telemetry.
 These are host renderings of core data; they must not be reimplemented as a
@@ -750,9 +750,10 @@ Web command handling is deliberately idempotent under high-pressure human
 clicking. The browser uses same-event-loop local guards for Stop, Create
 Session, attachment removal, inline decisions, rename, and runtime config
 updates so repeated clicks show immediate feedback instead of issuing duplicate
-commands. The server remains authoritative: repeated Stop is harmless, Send
-during an active turn becomes a supplement, stale supplements can start a new
-turn after cancellation/completion, repeated attachment removal for the same
+commands. The server remains authoritative: repeated Stop is harmless; ordinary
+Send during an active turn is durably queued as the next task; only an explicit
+supplement command joins the active turn; stale supplements can start a new turn
+after cancellation/completion; repeated attachment removal for the same
 session is treated as success, and stale decision replies after a turn has
 finished are ignored before they reach a worker.
 
