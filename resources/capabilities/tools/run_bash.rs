@@ -21,7 +21,6 @@ use std::os::unix::process::CommandExt;
 
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const BASH_EXECUTABLE: &str = "/bin/bash";
-const MAX_BASH_OUTPUT_CHARS: usize = 32 * 1024;
 const LONG_RUNNING_COMMAND_PROMPT_AFTER: Duration = Duration::from_secs(60);
 
 fn configure_run_bash_environment(command: &mut Command) {
@@ -676,6 +675,7 @@ impl FileShellJobStore {
             return ShellJobRefresh::Finished;
         }
         let (stdout, stderr) = read_shell_job_streams(&record);
+        let output = normalized_shell_output(&combined_shell_output(&stdout, &stderr));
         ShellJobRefresh::Exited(ShellJobExitUpdate {
             pid: record.pid,
             kind: record.kind,
@@ -689,13 +689,9 @@ impl FileShellJobStore {
                 .unwrap_or_else(|_| "unknown".to_string())
                 .trim()
                 .to_string(),
-            stdout: compact_text_with_tail(&stdout, MAX_BASH_OUTPUT_CHARS, record.tail_out),
-            stderr: compact_text_with_tail(&stderr, MAX_BASH_OUTPUT_CHARS, record.tail_out),
-            output: compact_text_with_tail(
-                &normalized_shell_output(&combined_shell_output(&stdout, &stderr)),
-                MAX_BASH_OUTPUT_CHARS,
-                record.tail_out,
-            ),
+            stdout,
+            stderr,
+            output,
         })
     }
 }
@@ -1455,7 +1451,7 @@ fn polling_result(
     stdout: &str,
     stderr: &str,
     output: &str,
-    tail_out: bool,
+    _tail_out: bool,
     error: Option<&str>,
 ) -> ActionOutcome {
     let state_sentence = match state {
@@ -1478,11 +1474,7 @@ fn polling_result(
     }
     if !output.trim().is_empty() {
         out.push_str("\nLast output:\n");
-        out.push_str(&compact_text_with_tail(
-            output,
-            MAX_BASH_OUTPUT_CHARS,
-            tail_out,
-        ));
+        out.push_str(output);
     }
     let status = match state {
         "finished" => ActionStatus::Completed,
@@ -1633,7 +1625,7 @@ impl BashCommandOutput {
                 );
                 if !self.output.trim().is_empty() {
                     out.push_str("\nPartial return:\n");
-                    out.push_str(&compact_text_with_tail(&self.output, 2000, self.tail_out));
+                    out.push_str(&self.output);
                 }
                 return out;
             }
@@ -1644,7 +1636,7 @@ impl BashCommandOutput {
                 );
                 if !self.output.trim().is_empty() {
                     out.push_str("\nPartial return:\n");
-                    out.push_str(&compact_text_with_tail(&self.output, 2000, self.tail_out));
+                    out.push_str(&self.output);
                 }
                 return out;
             }
@@ -1659,14 +1651,14 @@ impl BashCommandOutput {
                 "Action result: {}\nThe command terminated because of a process signal.\nSignal: {}\nReturn:\n{}",
                 action_name,
                 signal,
-                compact_text_with_tail(&self.output, MAX_BASH_OUTPUT_CHARS, self.tail_out)
+                self.output
             );
         }
         format!(
             "Action result: {}\nThe command finished.\nExit code: {}\nReturn:\n{}",
             action_name,
             self.status.unwrap_or(-1),
-            compact_text_with_tail(&self.output, MAX_BASH_OUTPUT_CHARS, self.tail_out)
+            self.output
         )
     }
 }
@@ -2082,37 +2074,14 @@ fn process_group_running(group_leader_pid: u32) -> bool {
 }
 
 pub(crate) fn compact_text(text: &str, max_chars: usize) -> String {
-    compact_text_with_tail(text, max_chars, false)
-}
-
-pub(crate) fn compact_text_with_tail(text: &str, max_chars: usize, tail_out: bool) -> String {
     let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let char_count = normalized.chars().count();
     if char_count <= max_chars {
         return normalized;
     }
-
-    if tail_out {
-        let truncated = normalized
-            .chars()
-            .take(char_count.saturating_sub(max_chars))
-            .collect::<String>();
-        let truncated_words = truncated.split_whitespace().count();
-        let retained = normalized
-            .chars()
-            .skip(char_count.saturating_sub(max_chars))
-            .collect::<String>();
-        format!(
-            "!!!Too long, {truncated_words} words truncated before. Generate more actions if necessary !!!\n{retained}"
-        )
-    } else {
-        let retained = normalized.chars().take(max_chars).collect::<String>();
-        let truncated = normalized.chars().skip(max_chars).collect::<String>();
-        let truncated_words = truncated.split_whitespace().count();
-        format!(
-            "{retained}\n!!!Too long, {truncated_words} words truncated after. Generate more actions if necessary !!!"
-        )
-    }
+    let mut result = normalized.chars().take(max_chars).collect::<String>();
+    result.push('…');
+    result
 }
 
 fn now_ms() -> i64 {

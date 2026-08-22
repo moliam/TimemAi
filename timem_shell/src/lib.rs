@@ -1,4 +1,7 @@
-use agent_core::{model_service_config_from_sources, ModelServiceConfigSource, UsageStats};
+use agent_core::{
+    model_service_config_from_sources, parse_parallel_tool_calls, parse_tool_call_mode,
+    ModelServiceConfigSource, UsageStats,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -562,6 +565,8 @@ pub struct CliOptions {
     pub space: Option<String>,
     pub api_protocol: Option<String>,
     pub response_protocol: Option<String>,
+    pub tool_call_mode: Option<String>,
+    pub parallel_tool_calls: Option<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
@@ -593,6 +598,14 @@ pub fn parse_cli_args(args: &[String]) -> CliOptions {
             }
             ("--response-protocol", Some(v)) => {
                 options.response_protocol = Some(v);
+                idx += 2;
+            }
+            ("--tool-call-mode", Some(v)) => {
+                options.tool_call_mode = Some(v);
+                idx += 2;
+            }
+            ("--parallel-tool-calls", Some(v)) => {
+                options.parallel_tool_calls = Some(v);
                 idx += 2;
             }
             ("--api-key", Some(v)) => {
@@ -657,6 +670,16 @@ pub fn model_service_config_from_env(
 ) -> Result<ModelServiceConfig, String> {
     model_service_config_from_sources(
         &ModelServiceConfigSource {
+            tool_call_mode: options
+                .tool_call_mode
+                .as_deref()
+                .map(parse_tool_call_mode)
+                .transpose()?,
+            parallel_tool_calls: options
+                .parallel_tool_calls
+                .as_deref()
+                .map(parse_parallel_tool_calls)
+                .transpose()?,
             api_protocol: options.api_protocol.clone(),
             api_key: options.api_key.clone(),
             model: options.model.clone(),

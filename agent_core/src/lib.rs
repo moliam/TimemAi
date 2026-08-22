@@ -14,6 +14,17 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+type ParallelActionResult = (usize, ParsedAction, ActionOutcome, Option<Duration>);
+type ApprovedParallelBashResult = (
+    usize,
+    ParsedAction,
+    PendingApproval,
+    ActionOutcome,
+    Option<Duration>,
+);
+type ParallelActionHandle = thread::JoinHandle<ParallelActionResult>;
+type ApprovedParallelBashHandle = thread::JoinHandle<ApprovedParallelBashResult>;
+
 pub mod audit;
 pub mod capability;
 #[path = "../../resources/capabilities/tools/capmgr.rs"]
@@ -24,15 +35,19 @@ use capability::CapabilityRegistry;
 pub mod config_edit;
 pub mod config_report;
 pub mod context;
+#[path = "../../resources/capabilities/tools/context_compact.rs"]
+pub mod context_compact;
 pub mod context_policy;
 pub mod data_layout;
 pub mod executor;
 pub mod host;
+pub mod interaction;
 #[path = "../../resources/capabilities/tools/memmgr.rs"]
 pub mod memmgr;
 pub mod model_api;
 pub mod model_service_config;
 pub mod model_transport;
+pub mod negotiation;
 mod notification;
 pub mod profiler;
 pub mod prompt_cache;
@@ -59,6 +74,7 @@ pub mod tool_jobs;
 #[path = "../../resources/capabilities/tools/registry.rs"]
 pub(crate) mod tool_registry;
 pub mod tool_repo;
+mod tool_result_gate;
 #[path = "../../resources/capabilities/tools/toolgen.rs"]
 pub mod toolgen;
 pub mod work_instructions;
@@ -112,16 +128,22 @@ pub use host::{
     CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
 };
+pub use interaction::{
+    parse_parallel_tool_calls, parse_tool_call_mode, CapabilityProbeSource, InteractionConfig,
+    InteractionProfile, ModelInteractionRequest, NativeExchange, NativeToolCall, NativeToolChoice,
+    NativeToolResult, ParallelToolCalls, ToolCallMode, ToolDefinition,
+    DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE,
+};
 pub use model_api::{
     build_model_request, default_api_protocol, default_base_url, default_model,
     interpret_model_http_response, is_default_base_url, is_default_model, model_http_error_message,
     model_prompt_blocks, model_request_audit_event, model_response_audit_event, parse_api_protocol,
     parse_model_response, parse_openai_compatible_cache_mode, plan_structured_output,
-    prepare_model_http_request, prepare_model_request, prompt_cache_plan_audit,
-    without_openai_compatible_cache_control, ApiProtocol, ModelCacheControl,
-    ModelHttpResponseInterpretation, ModelPromptBlock, ModelPromptRole, ModelServiceConfig,
-    OpenAiCompatibleCacheMode, OpenAiCompatibleOptions, PreparedModelHttpRequest,
-    PreparedModelRequest, StructuredOutputHint,
+    prepare_model_http_request, prepare_model_interaction_http_request, prepare_model_request,
+    prompt_cache_plan_audit, without_openai_compatible_cache_control, ApiProtocol,
+    ModelCacheControl, ModelHttpResponseInterpretation, ModelPromptBlock, ModelPromptRole,
+    ModelServiceConfig, OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
+    PreparedModelHttpRequest, PreparedModelRequest, StructuredOutputHint,
 };
 pub use model_service_config::{
     apply_openai_compatible_env_value, model_service_config_from_sources,
@@ -129,6 +151,7 @@ pub use model_service_config::{
     ModelServiceConfigSource,
 };
 pub use model_transport::{call_model, call_model_with_cancel, HttpModelClient};
+pub use negotiation::negotiate_interaction;
 use notification::CoreNotification;
 pub use notification::{CoreActionKind, CoreMemoryActivity};
 pub use profiler::{
@@ -260,6 +283,8 @@ impl UsageStats {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LlmResponse {
     pub content: String,
+    #[serde(default)]
+    pub tool_calls: Vec<NativeToolCall>,
     pub model_name: String,
     pub usage: UsageStats,
     pub truncated: bool,
@@ -315,6 +340,41 @@ fn role_for_prompt_type(prompt_type: &str, assistant_speaker_name: &str) -> Prom
         }
         _ => PromptComponentRole::system(),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpServerUpdate {
+    Enabled,
+    Disabled,
+}
+
+fn mcp_server_update_line(server: &mcp::McpServerConfig, update: McpServerUpdate) -> String {
+    let label = mcp_server_label(server);
+    let state = match update {
+        McpServerUpdate::Enabled => "IS ENABLED",
+        McpServerUpdate::Disabled => "IS DISABLED",
+    };
+    format!("MCP update: MCP {label} {state} by user !!!")
+}
+
+fn mcp_server_label(server: &mcp::McpServerConfig) -> String {
+    if server.name.trim().is_empty() || server.name == server.id {
+        server.id.clone()
+    } else {
+        format!("{} ({})", server.name, server.id)
+    }
+}
+
+fn bounded_mcp_server_instructions(instructions: &str) -> String {
+    let instructions = instructions.trim();
+    if instructions.chars().count() <= MAX_MCP_SERVER_INSTRUCTIONS_CHARS {
+        return instructions.to_string();
+    }
+    let retained = instructions
+        .chars()
+        .take(MAX_MCP_SERVER_INSTRUCTIONS_CHARS)
+        .collect::<String>();
+    format!("{retained}\n...[MCP server instructions truncated by Timem]")
 }
 
 fn context_reduction_delta_ids_from_action_groups(groups: &[ParsedActionGroup]) -> Vec<String> {
@@ -514,6 +574,10 @@ impl PendingApprovedAction {
         }
     }
 
+    fn tail_out(&self) -> bool {
+        matches!(self, PendingApprovedAction::RunBash { tail_out: true, .. })
+    }
+
     fn audit_input(&self, approval_id: &str, risk: &str, reason: &str) -> Value {
         match self {
             PendingApprovedAction::RunBash {
@@ -552,6 +616,7 @@ impl PendingApprovedAction {
 }
 
 const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;
+const MAX_MCP_SERVER_INSTRUCTIONS_CHARS: usize = 32_000;
 pub const UNLIMITED_ROUND_BUDGET: u32 = u32::MAX;
 const DEFAULT_ROUND_BUDGET: u32 = UNLIMITED_ROUND_BUDGET;
 const MAX_CONFIGURED_ROUND_BUDGET: u32 = 10_000;
@@ -1195,6 +1260,8 @@ pub struct AgentCore {
     mcp_runtime: mcp::McpRuntime,
     mcp_servers: BTreeMap<String, mcp::McpServerConfig>,
     mcp_tools: BTreeMap<String, mcp::McpTool>,
+    mcp_instructions: BTreeMap<String, String>,
+    configured_inline_response_protocol: ResponseProtocolKind,
     response_protocol: ResponseProtocolKind,
     pub(crate) memory: FileMemoryStore,
     pub(crate) scratch: FileScratchStore,
@@ -1231,6 +1298,10 @@ pub struct AgentCore {
     current_prompt_cwd: PathBuf,
     cwd_note_pending: bool,
     tool_repo_session_id: String,
+    resolved_tool_call_mode: ToolCallMode,
+    native_parallel_tool_calls: bool,
+    native_exchanges: Vec<NativeExchange>,
+    pending_native_exchange: Option<(String, Vec<NativeToolCall>, Vec<String>)>,
 }
 impl AgentCore {
     pub fn new(
@@ -1252,12 +1323,13 @@ impl AgentCore {
         let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
         let startup_stamp = runtime_time_context();
         let current_prompt_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let rendered_static_prompt = prompt_render::render_static_prompt(
+        let rendered_static_prompt = prompt_render::render_static_prompt_for_mode(
             &static_prompt,
             &capabilities,
             response_protocol.suite(),
             &assistant_speaker_name,
             &startup_stamp,
+            ToolCallMode::Inline,
         );
         Self {
             memory_dir: memory_dir.to_path_buf(),
@@ -1269,6 +1341,8 @@ impl AgentCore {
             mcp_runtime: mcp::McpRuntime::default(),
             mcp_servers: BTreeMap::new(),
             mcp_tools: BTreeMap::new(),
+            mcp_instructions: BTreeMap::new(),
+            configured_inline_response_protocol: response_protocol,
             response_protocol,
             memory: FileMemoryStore::new(memory_dir),
             scratch: FileScratchStore::new(memory_dir),
@@ -1305,6 +1379,74 @@ impl AgentCore {
             current_prompt_cwd,
             cwd_note_pending: true,
             tool_repo_session_id: "default".to_string(),
+            resolved_tool_call_mode: ToolCallMode::Inline,
+            native_parallel_tool_calls: false,
+            native_exchanges: Vec::new(),
+            pending_native_exchange: None,
+        }
+    }
+
+    pub fn set_interaction_profile(&mut self, profile: &InteractionProfile) {
+        if self.resolved_tool_call_mode == ToolCallMode::Native
+            && profile.resolved_mode != ToolCallMode::Native
+        {
+            self.materialize_native_exchanges();
+        }
+        self.resolved_tool_call_mode = profile.resolved_mode;
+        self.response_protocol = if profile.resolved_mode == ToolCallMode::Native {
+            ResponseProtocolKind::Json
+        } else {
+            self.configured_inline_response_protocol
+        };
+        self.native_parallel_tool_calls = profile.parallel_enabled;
+        self.refresh_rendered_static_prompt();
+    }
+
+    pub fn model_interaction_request(
+        &self,
+        rendered_prompt: impl Into<String>,
+    ) -> ModelInteractionRequest {
+        if self.resolved_tool_call_mode != ToolCallMode::Native {
+            return ModelInteractionRequest::inline(rendered_prompt);
+        }
+        let mut tools = self.capabilities.native_builtin_tool_definitions();
+        let static_tool_count = tools.len();
+        let mut dynamic_tools = self.capabilities.native_dynamic_tool_definitions();
+        self.attach_mcp_instructions_to_native_tools(&mut dynamic_tools);
+        tools.extend(dynamic_tools);
+        ModelInteractionRequest {
+            rendered_prompt: rendered_prompt.into(),
+            static_tool_count,
+            tools,
+            native_exchanges: self.native_exchanges.clone(),
+            resolved_mode: ToolCallMode::Native,
+            parallel_tool_calls: self.native_parallel_tool_calls,
+            tool_choice: NativeToolChoice::Auto,
+        }
+    }
+
+    fn attach_mcp_instructions_to_native_tools(&self, tools: &mut [ToolDefinition]) {
+        let mut described_servers = HashSet::new();
+        for tool in tools {
+            let Some(mcp_tool) = self.mcp_tools.get(&tool.name) else {
+                continue;
+            };
+            let server_id = &mcp_tool.server_id;
+            if described_servers.contains(server_id) {
+                continue;
+            }
+            let Some(instructions) = self.mcp_instructions.get(server_id) else {
+                continue;
+            };
+            let server_label = self
+                .mcp_servers
+                .get(server_id)
+                .map(mcp_server_label)
+                .unwrap_or_else(|| server_id.clone());
+            tool.description.push_str(&format!(
+                "\n\nMCP server-wide instructions for {server_label}; apply these instructions to every tool from this server:\n{instructions}"
+            ));
+            described_servers.insert(server_id.clone());
         }
     }
 
@@ -1326,6 +1468,7 @@ impl AgentCore {
             &self.memory_dir,
         );
         fork.capabilities = self.capabilities.clone();
+        fork.configured_inline_response_protocol = self.configured_inline_response_protocol;
         fork.response_protocol = self.response_protocol;
         fork.max_llm_input_tokens = self.max_llm_input_tokens;
         fork.configured_round_budget = self.configured_round_budget;
@@ -1630,12 +1773,13 @@ impl AgentCore {
         self.self_tool.set_env_value(key, value);
     }
     fn refresh_rendered_static_prompt(&mut self) {
-        self.rendered_static_prompt = prompt_render::render_static_prompt(
+        self.rendered_static_prompt = prompt_render::render_static_prompt_for_mode(
             &self.static_prompt,
             &self.capabilities,
             self.response_protocol.suite(),
             &self.assistant_speaker_name,
             &self.startup_stamp,
+            self.resolved_tool_call_mode,
         );
     }
     pub fn set_capability_registry(&mut self, capabilities: CapabilityRegistry) {
@@ -1650,6 +1794,36 @@ impl AgentCore {
         servers: Vec<mcp::McpServerConfig>,
         tools: Vec<mcp::McpTool>,
     ) -> Result<(), String> {
+        self.configure_mcp_with_instructions(
+            base_capabilities,
+            runtime,
+            servers,
+            tools,
+            BTreeMap::new(),
+        )
+    }
+
+    pub fn configure_mcp_with_instructions(
+        &mut self,
+        base_capabilities: CapabilityRegistry,
+        runtime: mcp::McpRuntime,
+        servers: Vec<mcp::McpServerConfig>,
+        tools: Vec<mcp::McpTool>,
+        instructions: BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        self.replace_mcp_state(base_capabilities, runtime, servers, tools, instructions)?;
+        self.append_initial_mcp_state_delta();
+        Ok(())
+    }
+
+    fn replace_mcp_state(
+        &mut self,
+        base_capabilities: CapabilityRegistry,
+        runtime: mcp::McpRuntime,
+        servers: Vec<mcp::McpServerConfig>,
+        tools: Vec<mcp::McpTool>,
+        instructions: BTreeMap<String, String>,
+    ) -> Result<(), String> {
         self.capabilities = base_capabilities
             .with_mcp_tools(&tools)?
             .without_tool("toolgen");
@@ -1662,8 +1836,84 @@ impl AgentCore {
             .into_iter()
             .map(|tool| (tool.action_name.clone(), tool))
             .collect();
+        self.mcp_instructions = instructions
+            .into_iter()
+            .filter_map(|(server_id, instructions)| {
+                let instructions = instructions.trim();
+                (!instructions.is_empty() && self.mcp_servers.contains_key(&server_id))
+                    .then(|| (server_id, bounded_mcp_server_instructions(instructions)))
+            })
+            .collect();
         self.refresh_rendered_static_prompt();
         Ok(())
+    }
+
+    fn append_initial_mcp_state_delta(&mut self) {
+        let visible_server_ids = self
+            .mcp_tools
+            .values()
+            .map(|tool| tool.server_id.as_str())
+            .chain(self.mcp_instructions.keys().map(String::as_str))
+            .collect::<HashSet<_>>();
+        let mut lines = self
+            .mcp_servers
+            .values()
+            .filter(|server| visible_server_ids.contains(server.id.as_str()))
+            .map(|server| mcp_server_update_line(server, McpServerUpdate::Enabled))
+            .collect::<Vec<_>>();
+        let catalog = self.current_mcp_catalog_text();
+        if let Some(catalog) = catalog.as_ref() {
+            lines.push(catalog.clone());
+        }
+        if lines.is_empty() {
+            return;
+        }
+        self.append_delta(vec![(
+            if catalog.is_some() {
+                "mcp_capability_catalog"
+            } else {
+                "mcp_capability_update"
+            }
+            .to_string(),
+            lines.join("\n"),
+        )]);
+    }
+
+    fn current_mcp_catalog_text(&self) -> Option<String> {
+        let tools = self.capabilities.render_native_dynamic_tool_catalog_json();
+        if tools.is_none() && self.mcp_instructions.is_empty() {
+            return None;
+        }
+        let instructions = self
+            .mcp_instructions
+            .iter()
+            .map(|(server_id, instructions)| {
+                let server_name = self
+                    .mcp_servers
+                    .get(server_id)
+                    .map(|server| server.name.as_str())
+                    .unwrap_or(server_id);
+                json!({
+                    "server_id": server_id,
+                    "server_name": server_name,
+                    "instructions": instructions,
+                })
+            })
+            .collect::<Vec<_>>();
+        let tools = tools
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()
+            .expect("rendered MCP tool definitions must be valid JSON")
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let catalog = serde_json::to_string_pretty(&json!({
+            "server_instructions": instructions,
+            "tools": tools,
+        }))
+        .expect("MCP prompt catalog must serialize");
+        Some(format!(
+            "MCP update: the following MCP capabilities are enabled. Server instructions in this catalog are authoritative. This newer catalog overrides earlier entries for the same server or action name.\n\n```json\n{catalog}\n```"
+        ))
     }
 
     pub fn apply_mcp_update(
@@ -1673,14 +1923,50 @@ impl AgentCore {
         servers: Vec<mcp::McpServerConfig>,
         tools: Vec<mcp::McpTool>,
     ) -> Result<bool, String> {
-        let previous = self.mcp_tools.clone();
-        self.configure_mcp(base_capabilities, runtime, servers, tools)?;
-        if previous == self.mcp_tools {
+        self.apply_mcp_update_with_instructions(
+            base_capabilities,
+            runtime,
+            servers,
+            tools,
+            self.mcp_instructions.clone(),
+        )
+    }
+
+    pub fn apply_mcp_update_with_instructions(
+        &mut self,
+        base_capabilities: CapabilityRegistry,
+        runtime: mcp::McpRuntime,
+        servers: Vec<mcp::McpServerConfig>,
+        tools: Vec<mcp::McpTool>,
+        instructions: BTreeMap<String, String>,
+    ) -> Result<bool, String> {
+        let previous_tools = self.mcp_tools.clone();
+        let previous_servers = self.mcp_servers.clone();
+        let previous_instructions = self.mcp_instructions.clone();
+        let previous_model_tools = self
+            .capabilities
+            .native_dynamic_tool_definitions()
+            .into_iter()
+            .map(|tool| (tool.name.clone(), tool))
+            .collect::<BTreeMap<_, _>>();
+        self.replace_mcp_state(base_capabilities, runtime, servers, tools, instructions)?;
+        let current_model_tools = self
+            .capabilities
+            .native_dynamic_tool_definitions()
+            .into_iter()
+            .map(|tool| (tool.name.clone(), tool))
+            .collect::<BTreeMap<_, _>>();
+        if previous_model_tools == current_model_tools
+            && previous_instructions == self.mcp_instructions
+        {
             return Ok(false);
         }
 
-        let previous_names = previous.keys().cloned().collect::<BTreeSet<_>>();
-        let current_names = self.mcp_tools.keys().cloned().collect::<BTreeSet<_>>();
+        let previous_names = previous_model_tools
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let current_names = current_model_tools.keys().cloned().collect::<BTreeSet<_>>();
         let added = current_names
             .difference(&previous_names)
             .cloned()
@@ -1691,33 +1977,113 @@ impl AgentCore {
             .collect::<Vec<_>>();
         let updated = current_names
             .intersection(&previous_names)
-            .filter(|name| previous.get(*name) != self.mcp_tools.get(*name))
+            .filter(|name| previous_model_tools.get(*name) != current_model_tools.get(*name))
             .cloned()
             .collect::<Vec<_>>();
+        let previous_visible_server_ids = previous_tools
+            .values()
+            .map(|tool| tool.server_id.as_str())
+            .chain(previous_instructions.keys().map(String::as_str))
+            .collect::<HashSet<_>>();
+        let current_visible_server_ids = self
+            .mcp_tools
+            .values()
+            .map(|tool| tool.server_id.as_str())
+            .chain(self.mcp_instructions.keys().map(String::as_str))
+            .collect::<HashSet<_>>();
+        let removed_servers = previous_servers
+            .keys()
+            .filter(|id| {
+                previous_visible_server_ids.contains(id.as_str())
+                    && !self.mcp_servers.contains_key(*id)
+            })
+            .map(|id| &previous_servers[id])
+            .collect::<Vec<_>>();
+        let added_servers = self
+            .mcp_servers
+            .keys()
+            .filter(|id| {
+                current_visible_server_ids.contains(id.as_str())
+                    && !previous_servers.contains_key(*id)
+            })
+            .map(|id| &self.mcp_servers[id])
+            .collect::<Vec<_>>();
 
-        let mut lines = vec!["MCP capabilities changed for this user request.".to_string()];
+        let mut lines = Vec::new();
+        for server in removed_servers {
+            lines.push(mcp_server_update_line(server, McpServerUpdate::Disabled));
+        }
+        for server in added_servers {
+            lines.push(mcp_server_update_line(server, McpServerUpdate::Enabled));
+        }
         if !added.is_empty() {
-            lines.push(format!("Newly available actions: {}.", added.join(", ")));
+            lines.push(format!(
+                "MCP update: newly available actions: {}.",
+                added.join(", ")
+            ));
         }
         if !updated.is_empty() {
             lines.push(format!(
-                "Updated action definitions: {}.",
+                "MCP update: updated action definitions: {}.",
                 updated.join(", ")
             ));
         }
         if !removed.is_empty() {
             lines.push(format!(
-                "Actions no longer available: {}.",
+                "MCP update: actions no longer available: {}.",
                 removed.join(", ")
             ));
         }
-        lines.push("Use only actions in the current capability catalog.".to_string());
-        self.submit_prompt_component(
-            PromptComponentRole::system(),
-            "mcp_capability_update",
-            lines.join("\n"),
-            "mcp_runtime",
-        );
+        let removed_instruction_ids = previous_instructions
+            .keys()
+            .filter(|id| !self.mcp_instructions.contains_key(*id))
+            .filter(|id| self.mcp_servers.contains_key(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let changed_instruction_ids = self
+            .mcp_instructions
+            .keys()
+            .filter(|id| previous_instructions.get(*id) != self.mcp_instructions.get(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for server_id in &removed_instruction_ids {
+            let label = self
+                .mcp_servers
+                .get(server_id)
+                .map(mcp_server_label)
+                .unwrap_or_else(|| server_id.clone());
+            lines.push(format!(
+                "MCP update: instructions for MCP {label} ARE NO LONGER ACTIVE !!!"
+            ));
+        }
+        for server_id in &changed_instruction_ids {
+            let label = self
+                .mcp_servers
+                .get(server_id)
+                .map(mcp_server_label)
+                .unwrap_or_else(|| server_id.clone());
+            lines.push(format!(
+                "MCP update: instructions for MCP {label} ARE UPDATED."
+            ));
+        }
+        let includes_catalog =
+            !added.is_empty() || !updated.is_empty() || !changed_instruction_ids.is_empty();
+        if includes_catalog {
+            if let Some(catalog) = self.current_mcp_catalog_text() {
+                lines.push(catalog);
+            }
+        }
+        if !lines.is_empty() {
+            self.append_delta(vec![(
+                if includes_catalog {
+                    "mcp_capability_catalog"
+                } else {
+                    "mcp_capability_update"
+                }
+                .to_string(),
+                lines.join("\n"),
+            )]);
+        }
         Ok(true)
     }
 
@@ -1731,7 +2097,10 @@ impl AgentCore {
         self.refresh_rendered_static_prompt();
     }
     pub fn set_response_protocol(&mut self, protocol: ResponseProtocolKind) {
-        self.response_protocol = protocol;
+        self.configured_inline_response_protocol = protocol;
+        if self.resolved_tool_call_mode != ToolCallMode::Native {
+            self.response_protocol = protocol;
+        }
         self.refresh_rendered_static_prompt();
     }
     pub fn set_self_tool_state(&mut self, self_tool: SelfToolState) {
@@ -2216,7 +2585,13 @@ impl AgentCore {
             );
         }
         let protocol_suite = self.response_protocol.suite();
-        let parsed = protocol_suite.parse(&response.content, &self.capabilities);
+        let native_calls = response.tool_calls.clone();
+        let mut parsed = if self.resolved_tool_call_mode == ToolCallMode::Native {
+            self.parse_native_response(&response)
+        } else {
+            protocol_suite.parse(&response.content, &self.capabilities)
+        };
+        self.normalize_intrinsic_actions(&mut parsed);
         let mut slices = Vec::new();
         if parsed.repair_issue.is_none() {
             let tool_count = parsed
@@ -2303,7 +2678,7 @@ impl AgentCore {
             );
             runtime.on_core_topic_events(&events);
         }
-        if parsed.continue_work {
+        if parsed.continue_work && self.resolved_tool_call_mode != ToolCallMode::Native {
             // Preserve the actual turn chronology in the replayed prompt: the
             // assistant requested the compact before the runtime reported its
             // result. Prompt components with the same logical timestamp retain
@@ -2319,6 +2694,13 @@ impl AgentCore {
             &self.current_session_id(),
             &compact_delta_ids,
         );
+        let compact_refs_mcp_catalog = parsed.context_compacts.iter().any(|compact| {
+            self.prompt_refs_include_type(
+                &compact.delta_ids,
+                &compact.slice_ids,
+                "mcp_capability_catalog",
+            )
+        });
         let mut compacted_successfully = false;
         for compact in &parsed.context_compacts {
             let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
@@ -2387,7 +2769,7 @@ impl AgentCore {
                 ));
             }
         }
-        if compacted_successfully {
+        if compacted_successfully && native_calls.is_empty() {
             slices.push((
                 "context_compacted".to_string(),
                 format!(
@@ -2395,6 +2777,11 @@ impl AgentCore {
                     self.current_prompt_cwd.display()
                 ),
             ));
+        }
+        if compacted_successfully && compact_refs_mcp_catalog {
+            if let Some(catalog) = self.current_mcp_catalog_text() {
+                slices.push(("mcp_capability_catalog".to_string(), catalog));
+            }
         }
         if !parsed.continue_work {
             for candidate in &parsed.memory_candidates {
@@ -2410,6 +2797,9 @@ impl AgentCore {
                 Some(&final_text),
             ));
             self.defer_next_turn_slices(slices);
+            if self.resolved_tool_call_mode == ToolCallMode::Native {
+                self.native_exchanges.clear();
+            }
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
                 toolgen_retrospect: parsed.toolgen_retrospect.clone(),
@@ -2441,7 +2831,10 @@ impl AgentCore {
             let result_lines = match self.execute_action_groups(parsed.action_groups, runtime) {
                 Ok(result_lines) => result_lines,
                 Err((result_lines, pending)) => {
-                    if !result_lines.is_empty() {
+                    if !native_calls.is_empty() {
+                        self.pending_native_exchange =
+                            Some((response.content.clone(), native_calls, result_lines));
+                    } else if !result_lines.is_empty() {
                         slices.push((
                             "result_of_llm_action".to_string(),
                             result_lines.join("\n\n"),
@@ -2453,11 +2846,27 @@ impl AgentCore {
                     return CoreStep::NeedsUserApproval { request };
                 }
             };
-            if !result_lines.is_empty() {
+            if !result_lines.is_empty() && native_calls.is_empty() {
                 slices.push((
                     "result_of_llm_action".to_string(),
                     result_lines.join("\n\n"),
                 ));
+            }
+            if !native_calls.is_empty() {
+                self.native_exchanges.push(NativeExchange {
+                    assistant_text: response.content.clone(),
+                    results: native_calls
+                        .iter()
+                        .zip(result_lines.iter())
+                        .map(|(call, result)| NativeToolResult {
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            content: result.clone(),
+                            is_error: result.contains("\nerror:"),
+                        })
+                        .collect(),
+                    calls: native_calls,
+                });
             }
             if should_snapshot_running_jobs {
                 self.submit_running_job_list_if_any(&self.current_session_id());
@@ -2477,6 +2886,33 @@ impl AgentCore {
             };
         }
         if !parsed.context_compacts.is_empty() {
+            if !native_calls.is_empty() {
+                let result = if compacted_successfully {
+                    "Action result: context_compact\nstatus: completed".to_string()
+                } else {
+                    slices
+                        .iter()
+                        .find(|(kind, _)| kind == "result_of_llm_action")
+                        .map(|(_, text)| text.clone())
+                        .unwrap_or_else(|| {
+                            "Action result: context_compact\nerror: compaction_failed".to_string()
+                        })
+                };
+                self.native_exchanges.push(NativeExchange {
+                    assistant_text: response.content.clone(),
+                    results: native_calls
+                        .iter()
+                        .map(|call| NativeToolResult {
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            content: result.clone(),
+                            is_error: !compacted_successfully,
+                        })
+                        .collect(),
+                    calls: native_calls,
+                });
+                slices.clear();
+            }
             if compact_refs_current_running_jobs {
                 self.submit_running_job_list_if_any(&self.current_session_id());
             } else {
@@ -2527,6 +2963,162 @@ impl AgentCore {
         self.current_stats.add(usage);
         self.last_observed_prompt_tokens =
             self.last_observed_prompt_tokens.max(usage.prompt_tokens);
+    }
+
+    fn parse_native_response(&self, response: &LlmResponse) -> ParsedEnvelope {
+        let actions = response
+            .tool_calls
+            .iter()
+            .map(|call| ParsedAction {
+                action: call.name.clone(),
+                name: None,
+                raw_input: call.arguments.clone(),
+            })
+            .collect::<Vec<_>>();
+        let action_groups = if actions.is_empty() {
+            Vec::new()
+        } else {
+            vec![ParsedActionGroup {
+                order: if self.native_parallel_tool_calls && actions.len() > 1 {
+                    ActionGroupOrder::Parallel
+                } else {
+                    ActionGroupOrder::Sequential
+                },
+                actions,
+            }]
+        };
+        let has_calls = !response.tool_calls.is_empty();
+        ParsedEnvelope {
+            final_answer: if has_calls {
+                String::new()
+            } else {
+                response.content.clone()
+            },
+            toolgen_retrospect: String::new(),
+            continue_work: has_calls,
+            thought: response.content.clone(),
+            thought_keep_in_context: has_calls && !response.content.trim().is_empty(),
+            next_actions: Vec::new(),
+            action_groups,
+            context_compacts: Vec::new(),
+            memory_candidates: Vec::new(),
+            accepted_response: None,
+            runtime_note: None,
+            recovered_issue: None,
+            repair_issue: None,
+        }
+    }
+
+    fn materialize_native_exchanges(&mut self) {
+        let exchanges = std::mem::take(&mut self.native_exchanges);
+        for exchange in exchanges {
+            let mut assistant = exchange.assistant_text.trim().to_string();
+            if !exchange.calls.is_empty() {
+                let calls = exchange
+                    .calls
+                    .iter()
+                    .map(|call| {
+                        json!({
+                            "id": call.id,
+                            "name": call.name,
+                            "arguments": call.arguments,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if !assistant.is_empty() {
+                    assistant.push('\n');
+                }
+                assistant.push_str("Native tool calls:\n");
+                assistant.push_str(&serde_json::to_string(&calls).unwrap_or_default());
+            }
+            self.submit_prompt_component(
+                PromptComponentRole::assistant(self.assistant_speaker_name.clone()),
+                "llm_response",
+                assistant,
+                "native_interaction",
+            );
+            for result in exchange.results {
+                self.submit_prompt_component(
+                    PromptComponentRole::system(),
+                    "result_of_llm_action",
+                    result.content,
+                    "native_interaction",
+                );
+            }
+        }
+    }
+
+    fn complete_pending_native_exchange(&mut self, new_results: Vec<String>) -> bool {
+        let Some((assistant_text, calls, mut results)) = self.pending_native_exchange.take() else {
+            return false;
+        };
+        results.extend(new_results);
+        let tool_results = calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| {
+                let content = results.get(index).cloned().unwrap_or_else(|| {
+                    format!(
+                        "Action result: {}\nerror: not_executed_after_approval_boundary",
+                        call.name
+                    )
+                });
+                NativeToolResult {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    is_error: content.contains("\nerror:"),
+                    content,
+                }
+            })
+            .collect();
+        self.native_exchanges.push(NativeExchange {
+            assistant_text,
+            calls,
+            results: tool_results,
+        });
+        true
+    }
+
+    fn normalize_intrinsic_actions(&self, parsed: &mut ParsedEnvelope) {
+        if parsed.repair_issue.is_some() {
+            return;
+        }
+        let total_actions = parsed
+            .action_groups
+            .iter()
+            .map(|group| group.actions.len())
+            .sum::<usize>();
+        let compact_count = parsed
+            .action_groups
+            .iter()
+            .flat_map(|group| group.actions.iter())
+            .filter(|action| action.action == "context_compact")
+            .count();
+        if compact_count == 0 {
+            return;
+        }
+        if compact_count != 1 || total_actions != 1 || !parsed.context_compacts.is_empty() {
+            parsed.repair_issue = Some("context_compact_must_be_exclusive".to_string());
+            return;
+        }
+        let action = parsed
+            .action_groups
+            .iter()
+            .flat_map(|group| group.actions.iter())
+            .find(|action| action.action == "context_compact")
+            .expect("counted intrinsic action")
+            .clone();
+        match context_compact::from_action(&action) {
+            Ok(compact) => {
+                parsed.action_groups.clear();
+                parsed.context_compacts.push(compact);
+                parsed.continue_work = true;
+            }
+            Err(issue) if self.resolved_tool_call_mode == ToolCallMode::Native => {
+                parsed.runtime_note = Some(issue);
+            }
+            Err(issue) => parsed.repair_issue = Some(issue),
+        }
     }
 
     pub fn apply_model_response_with_repair_audit(
@@ -2817,10 +3409,12 @@ impl AgentCore {
             runtime,
         );
         let prompt_result = self.format_pending_action_result(&pending, &outcome.text);
-        self.append_delta_with_action_output_budget(vec![(
-            "result_of_llm_action".to_string(),
-            prompt_result,
-        )]);
+        if !self.complete_pending_native_exchange(vec![prompt_result.clone()]) {
+            self.append_delta_with_action_output_budget(vec![(
+                "result_of_llm_action".to_string(),
+                prompt_result,
+            )]);
+        }
         self.append_in_turn_shrink_review_if_needed();
         if self.remaining_rounds() == 0 {
             return CoreStep::RoundLimitReached {
@@ -2983,20 +3577,26 @@ impl AgentCore {
             Ok(results) => results,
             Err((partial, pending)) => {
                 self.pending_approval = Some(pending.clone());
-                self.append_delta_with_action_output_budget(vec![(
-                    "result_of_llm_action".to_string(),
-                    partial.join("\n\n"),
-                )]);
+                if let Some((_, _, results)) = self.pending_native_exchange.as_mut() {
+                    results.extend(partial);
+                } else {
+                    self.append_delta_with_action_output_budget(vec![(
+                        "result_of_llm_action".to_string(),
+                        partial.join("\n\n"),
+                    )]);
+                }
                 return CoreStep::NeedsUserApproval {
                     request: pending.request,
                 };
             }
         };
 
-        self.append_delta_with_action_output_budget(vec![(
-            "result_of_llm_action".to_string(),
-            result_lines.join("\n\n"),
-        )]);
+        if !self.complete_pending_native_exchange(result_lines.clone()) {
+            self.append_delta_with_action_output_budget(vec![(
+                "result_of_llm_action".to_string(),
+                result_lines.join("\n\n"),
+            )]);
+        }
         self.append_in_turn_shrink_review_if_needed();
         if self.remaining_rounds() == 0 {
             return CoreStep::RoundLimitReached {
@@ -3129,11 +3729,12 @@ impl AgentCore {
     }
 
     pub fn render_prompt(&self) -> String {
-        prompt_render::render_prompt_with_rendered_static(
+        prompt_render::render_prompt_with_rendered_static_for_mode(
             &self.rendered_static_prompt,
             &self.deltas,
             &self.assistant_speaker_name,
             self.response_protocol.suite(),
+            self.resolved_tool_call_mode,
         )
     }
 
@@ -3310,11 +3911,12 @@ impl AgentCore {
             slices,
             hidden_slice_ids: Vec::new(),
         });
-        prompt_render::render_prompt_with_rendered_static(
+        prompt_render::render_prompt_with_rendered_static_for_mode(
             &self.rendered_static_prompt,
             &deltas,
             &self.assistant_speaker_name,
             self.response_protocol.suite(),
+            self.resolved_tool_call_mode,
         )
     }
 
@@ -3404,7 +4006,10 @@ impl AgentCore {
         let kind = kind.into();
         let mut content = content.into();
         if role.prompt_type_hint(&kind) == "result_of_llm_action" {
-            content = prompt_render::truncate_action_result_for_prompt(&content);
+            // Defensive ingress for legacy/internal producers that do not originate
+            // from a typed action. Normal tool execution has already selected its
+            // per-call retention policy before reaching this point.
+            content = tool_result_gate::gate(&content, tool_result_gate::Retention::Head);
         }
         if content.trim().is_empty() {
             return None;
@@ -3453,11 +4058,6 @@ impl AgentCore {
         &mut self,
         mut slice_texts: Vec<(String, String)>,
     ) -> bool {
-        for (prompt_type, text) in &mut slice_texts {
-            if prompt_type == "result_of_llm_action" {
-                *text = prompt_render::truncate_action_result_for_prompt(text);
-            }
-        }
         let action_output_bytes = slice_texts
             .iter()
             .filter(|(prompt_type, _)| prompt_type == "result_of_llm_action")
@@ -3791,56 +4391,62 @@ impl AgentCore {
     }
 
     fn format_action_outcome(&self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
+        let retention = tool_result_gate::Retention::from_tail_out(action.input_bool("tail_out"));
         if self.response_protocol == ResponseProtocolKind::Xml {
             let output_time_ms = now_ms();
             if action.action == "run_bash" {
                 if let Some(bash_result) = outcome.bash_result.as_ref() {
-                    return prompt_render::render_xml_bash_result(
+                    return prompt_render::render_xml_bash_result_with_retention(
                         action.name.as_deref(),
                         outcome.status,
                         bash_result,
                         output_time_ms,
+                        retention,
                     );
                 }
             }
             if action.action == "readfile" {
                 if let Some(readfile_result) = outcome.readfile_result.as_ref() {
-                    return prompt_render::render_xml_readfile_result(
+                    return prompt_render::render_xml_readfile_result_with_retention(
                         action.name.as_deref(),
                         outcome.status,
                         readfile_result,
                         output_time_ms,
+                        retention,
                     );
                 }
             }
             if action.action == "memmgr" {
                 if let Some(memmgr_result) = outcome.memmgr_result.as_ref() {
-                    return prompt_render::render_xml_memmgr_result(
+                    return prompt_render::render_xml_memmgr_result_with_retention(
                         action.name.as_deref(),
                         outcome.status,
                         memmgr_result,
                         output_time_ms,
+                        retention,
                     );
                 }
             }
             if action.action == "self_tool" {
                 if let Some(self_tool_result) = outcome.self_tool_result.as_ref() {
-                    return prompt_render::render_xml_self_tool_result(
+                    return prompt_render::render_xml_self_tool_result_with_retention(
                         action.name.as_deref(),
                         outcome.status,
                         self_tool_result,
                         output_time_ms,
+                        retention,
                     );
                 }
             }
-            prompt_render::render_xml_action_result(
+            prompt_render::render_xml_action_result_with_retention(
                 &action.action,
                 action.name.as_deref(),
                 &outcome.text,
                 now_ms(),
+                retention,
             )
         } else {
-            outcome.text.clone()
+            tool_result_gate::gate(&outcome.text, retention)
         }
     }
 
@@ -3852,7 +4458,7 @@ impl AgentCore {
         let action = ParsedAction {
             action: pending.request.action.clone(),
             name: pending.action_name.clone(),
-            raw_input: Value::Null,
+            raw_input: json!({ "tail_out": pending.approved_action.tail_out() }),
         };
         self.format_action_result(&action, result)
     }
@@ -3913,7 +4519,7 @@ impl AgentCore {
         &mut self,
         idx: usize,
         action: ParsedAction,
-    ) -> thread::JoinHandle<(usize, ParsedAction, ActionOutcome, Option<Duration>)> {
+    ) -> ParallelActionHandle {
         let action_for_thread = action.clone();
         let cwd = self.current_prompt_cwd().to_path_buf();
         self.current_stats.tool_calls += 1;
@@ -3962,13 +4568,7 @@ impl AgentCore {
         idx: usize,
         pending: PendingApproval,
         cancel_requested: Arc<AtomicBool>,
-    ) -> thread::JoinHandle<(
-        usize,
-        ParsedAction,
-        PendingApproval,
-        ActionOutcome,
-        Option<Duration>,
-    )> {
+    ) -> ApprovedParallelBashHandle {
         let action = ParsedAction {
             action: pending.request.action.clone(),
             name: pending.action_name.clone(),
@@ -4029,7 +4629,7 @@ impl AgentCore {
         idx: usize,
         action: ParsedAction,
         cancel_requested: Arc<AtomicBool>,
-    ) -> thread::JoinHandle<(usize, ParsedAction, ActionOutcome, Option<Duration>)> {
+    ) -> ParallelActionHandle {
         let action_for_audit = action.clone();
         let shell_jobs = self.shell_jobs.clone();
         let session_id = self.current_session_id();
@@ -4085,9 +4685,7 @@ impl AgentCore {
 
     fn collect_parallel_action_handles(
         &self,
-        mut handles: Vec<
-            thread::JoinHandle<(usize, ParsedAction, ActionOutcome, Option<Duration>)>,
-        >,
+        mut handles: Vec<ParallelActionHandle>,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
         cancel_requested: &Arc<AtomicBool>,
@@ -4122,15 +4720,7 @@ impl AgentCore {
 
     fn collect_approved_parallel_bash_handles(
         &self,
-        mut handles: Vec<
-            thread::JoinHandle<(
-                usize,
-                ParsedAction,
-                PendingApproval,
-                ActionOutcome,
-                Option<Duration>,
-            )>,
-        >,
+        mut handles: Vec<ApprovedParallelBashHandle>,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
         cancel_requested: &Arc<AtomicBool>,
@@ -4425,11 +5015,8 @@ impl AgentCore {
         }
         if action.action == "self_tool"
             && action.input_lower("type") == "cwd"
-            && outcome
-                .text
-                .lines()
-                .nth(2)
-                .is_some_and(|line| line.starts_with("CWD changed to "))
+            && action.raw_input.get("new_path").is_some()
+            && outcome.status == ActionStatus::Completed
         {
             event.payload["context_state"] = json!({
                 "cwd": self.current_prompt_cwd().display().to_string(),
@@ -4717,6 +5304,25 @@ impl AgentCore {
         missing.sort();
         missing.dedup();
         missing
+    }
+
+    fn prompt_refs_include_type(
+        &self,
+        delta_ids: &[String],
+        slice_ids: &[String],
+        prompt_type: &str,
+    ) -> bool {
+        let delta_ids = delta_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+        let slice_ids = slice_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+        self.deltas.iter().any(|delta| {
+            prompt_render::render_delta_slices(delta)
+                .iter()
+                .any(|slice| {
+                    slice.prompt_type == prompt_type
+                        && (delta_ids.contains(delta.delta_id.as_str())
+                            || slice_ids.contains(slice.slice_id.as_str()))
+                })
+        })
     }
 }
 
@@ -5978,6 +6584,7 @@ pub extern "C" fn timem_core_apply_model_response(
     };
     let response = match serde_json::from_str::<FfiLlmResponse>(&response_text) {
         Ok(value) => LlmResponse {
+            tool_calls: Vec::new(),
             content: value.content,
             model_name: value
                 .model_name

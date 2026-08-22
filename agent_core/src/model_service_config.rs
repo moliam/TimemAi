@@ -1,7 +1,7 @@
 use crate::{
     default_api_protocol, default_base_url, default_model, parse_api_protocol,
     parse_openai_compatible_cache_mode, parse_token_count, ApiProtocol, ModelServiceConfig,
-    OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
+    OpenAiCompatibleCacheMode, OpenAiCompatibleOptions, ParallelToolCalls, ToolCallMode,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -22,6 +22,8 @@ pub struct ModelServiceConfigSource {
     pub reasoning_effort: Option<String>,
     pub stream: Option<bool>,
     pub openai_cache_mode: Option<String>,
+    pub tool_call_mode: Option<ToolCallMode>,
+    pub parallel_tool_calls: Option<ParallelToolCalls>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +95,10 @@ impl LocalLLMKeyFile {
             max_llm_input_tokens: 100_000,
             api_protocol: ApiProtocol::OpenAiCompatible,
             response_protocol: crate::ResponseProtocolKind::default(),
+            interaction: crate::InteractionConfig {
+                tool_call_mode: ToolCallMode::Auto,
+                ..crate::InteractionConfig::default()
+            },
             openai_compatible: OpenAiCompatibleOptions::default(),
         }
     }
@@ -197,6 +203,22 @@ fn model_service_config_from_sources_with_key_policy(
         .map(|value| parse_openai_compatible_cache_mode(&value))
         .transpose()?
         .unwrap_or(OpenAiCompatibleCacheMode::Auto);
+    let tool_call_mode = match source.tool_call_mode {
+        Some(mode) => mode,
+        None => env
+            .get("TIMEM_TOOL_CALL_MODE")
+            .map(|value| crate::parse_tool_call_mode(value))
+            .transpose()?
+            .unwrap_or(ToolCallMode::Auto),
+    };
+    let parallel_tool_calls = match source.parallel_tool_calls {
+        Some(mode) => mode,
+        None => env
+            .get("TIMEM_PARALLEL_TOOL_CALLS")
+            .map(|value| crate::parse_parallel_tool_calls(value))
+            .transpose()?
+            .unwrap_or_default(),
+    };
     Ok(ModelServiceConfig {
         model,
         base_url,
@@ -206,6 +228,11 @@ fn model_service_config_from_sources_with_key_policy(
         max_llm_input_tokens,
         api_protocol,
         response_protocol: crate::ResponseProtocolKind::default(),
+        interaction: crate::InteractionConfig {
+            tool_call_mode,
+            parallel_tool_calls,
+            ..crate::InteractionConfig::default()
+        },
         openai_compatible: OpenAiCompatibleOptions {
             enable_thinking,
             reasoning_effort,

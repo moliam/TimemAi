@@ -69,11 +69,19 @@ pub struct McpTool {
     pub input_schema: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerCapabilities {
+    pub instructions: Option<String>,
+    pub tools: Vec<McpTool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpServerReport {
     pub config: McpServerConfig,
     pub state: String,
     pub error: Option<String>,
+    #[serde(skip)]
+    pub instructions: Option<String>,
     pub tools: Vec<McpTool>,
 }
 
@@ -159,15 +167,26 @@ impl McpRuntime {
     }
 
     pub fn connect(&self, config: &McpServerConfig) -> Result<Vec<McpTool>, String> {
+        self.connect_with_capabilities(config)
+            .map(|capabilities| capabilities.tools)
+    }
+
+    pub fn connect_with_capabilities(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<McpServerCapabilities, String> {
         validate_server_config(config)?;
         let mut connection = McpConnection::open(config.clone())?;
-        connection.initialize()?;
+        let instructions = connection.initialize()?;
         let tools = connection.list_tools()?;
         self.inner
             .lock()
             .map_err(|_| "mcp_runtime_poisoned".to_string())?
             .insert(config.id.clone(), Arc::new(Mutex::new(connection)));
-        Ok(tools)
+        Ok(McpServerCapabilities {
+            instructions,
+            tools,
+        })
     }
 
     pub fn list_tools(&self, config: &McpServerConfig) -> Result<Vec<McpTool>, String> {
@@ -279,7 +298,7 @@ impl McpConnection {
         }
     }
 
-    fn initialize(&mut self) -> Result<(), String> {
+    fn initialize(&mut self) -> Result<Option<String>, String> {
         let result = self.request(
             "initialize",
             json!({
@@ -295,7 +314,14 @@ impl McpConnection {
         {
             return Err("mcp_initialize_missing_protocol_version".to_string());
         }
-        self.notify("notifications/initialized", json!({}))
+        let instructions = result
+            .get("instructions")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|instructions| !instructions.is_empty())
+            .map(str::to_string);
+        self.notify("notifications/initialized", json!({}))?;
+        Ok(instructions)
     }
 
     fn list_tools(&mut self) -> Result<Vec<McpTool>, String> {
@@ -975,20 +1001,17 @@ fn render_call_result(server: &str, tool: &str, result: &Value) -> String {
             match item.get("type").and_then(Value::as_str) {
                 Some("text") => {
                     if let Some(text) = item.get("text").and_then(Value::as_str) {
-                        lines.push(bounded_text(text, 32_000));
+                        lines.push(text.to_string());
                     }
                 }
-                Some(kind) => lines.push(format!(
-                    "[{kind} content: {}]",
-                    bounded_text(&item.to_string(), 4000)
-                )),
-                None => lines.push(bounded_text(&item.to_string(), 4000)),
+                Some(kind) => lines.push(format!("[{kind} content: {}]", item)),
+                None => lines.push(item.to_string()),
             }
         }
     } else if let Some(structured) = result.get("structuredContent") {
-        lines.push(bounded_text(&structured.to_string(), 32_000));
+        lines.push(structured.to_string());
     } else {
-        lines.push(bounded_text(&result.to_string(), 32_000));
+        lines.push(result.to_string());
     }
     lines.join("\n")
 }

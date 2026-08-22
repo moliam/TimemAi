@@ -12,6 +12,8 @@ fn env(items: &[(&str, &str)]) -> HashMap<String, String> {
 fn generic_api_key_wins_over_vendor_key() {
     let config = model_service_config_from_sources(
         &ModelServiceConfigSource {
+            tool_call_mode: None,
+            parallel_tool_calls: None,
             ..ModelServiceConfigSource::default()
         },
         &env(&[
@@ -76,6 +78,8 @@ fn api_protocols_have_explicit_default_base_urls() {
     for (protocol, expected_base_url, expected_protocol) in cases {
         let config = model_service_config_from_sources(
             &ModelServiceConfigSource {
+                tool_call_mode: None,
+                parallel_tool_calls: None,
                 api_protocol: Some(protocol.to_string()),
                 ..ModelServiceConfigSource::default()
             },
@@ -91,6 +95,8 @@ fn api_protocols_have_explicit_default_base_urls() {
 fn empty_generic_api_key_falls_back_to_vendor_key() {
     let config = model_service_config_from_sources(
         &ModelServiceConfigSource {
+            tool_call_mode: None,
+            parallel_tool_calls: None,
             ..ModelServiceConfigSource::default()
         },
         &env(&[("TIMEM_API_KEY", ""), ("DASHSCOPE_API_KEY", "vendor")]),
@@ -103,6 +109,8 @@ fn empty_generic_api_key_falls_back_to_vendor_key() {
 fn local_key_is_available_to_the_default_model_service() {
     let config = model_service_config_from_sources(
         &ModelServiceConfigSource {
+            tool_call_mode: None,
+            parallel_tool_calls: None,
             local_api_key: Some("local-key".into()),
             ..ModelServiceConfigSource::default()
         },
@@ -140,6 +148,8 @@ fn local_llm_key_file_builds_model_service_config() {
 fn empty_api_key_reports_missing_key() {
     let err = model_service_config_from_sources(
         &ModelServiceConfigSource {
+            tool_call_mode: None,
+            parallel_tool_calls: None,
             ..ModelServiceConfigSource::default()
         },
         &env(&[("TIMEM_API_KEY", ""), ("OPENAI_API_KEY", "")]),
@@ -152,6 +162,8 @@ fn empty_api_key_reports_missing_key() {
 fn non_ascii_api_key_reports_clear_error() {
     let err = model_service_config_from_sources(
         &ModelServiceConfigSource {
+            tool_call_mode: None,
+            parallel_tool_calls: None,
             ..ModelServiceConfigSource::default()
         },
         &env(&[("TIMEM_API_KEY", "你的token")]),
@@ -165,6 +177,8 @@ fn api_key_rejects_control_characters_and_whitespace() {
     for key in ["sk-test\nInjected: yes", "sk-test token", "sk-test\tsecret"] {
         let err = model_service_config_from_sources(
             &ModelServiceConfigSource {
+                tool_call_mode: None,
+                parallel_tool_calls: None,
                 ..ModelServiceConfigSource::default()
             },
             &env(&[("TIMEM_API_KEY", key)]),
@@ -181,6 +195,8 @@ fn api_key_rejects_control_characters_and_whitespace() {
 fn source_values_override_env_config_values() {
     let config = model_service_config_from_sources(
         &ModelServiceConfigSource {
+            tool_call_mode: None,
+            parallel_tool_calls: None,
             api_protocol: Some("anthropic".into()),
             model: Some("cli-model".into()),
             base_url: Some("https://cli.example/v1".into()),
@@ -301,6 +317,8 @@ fn openai_cache_mode_defaults_to_auto_and_accepts_all_documented_values() {
 fn openai_cache_mode_source_overrides_environment_and_invalid_values_fail() {
     let config = model_service_config_from_sources(
         &ModelServiceConfigSource {
+            tool_call_mode: None,
+            parallel_tool_calls: None,
             openai_cache_mode: Some("off".to_string()),
             ..ModelServiceConfigSource::default()
         },

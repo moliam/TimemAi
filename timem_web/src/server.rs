@@ -3293,6 +3293,7 @@ fn mcp_reports(mem: &WebMemState) -> Vec<McpServerReport> {
                     }
                     .to_string(),
                     error: None,
+                    instructions: None,
                     tools: Vec::new(),
                 })
         })
@@ -3529,6 +3530,7 @@ fn schedule_mcp_server_refresh(state: &AppState, server_id: &str) -> Result<bool
                 config: config.clone(),
                 state: "connecting".to_string(),
                 error: None,
+                instructions: None,
                 tools: Vec::new(),
             },
         );
@@ -3538,17 +3540,19 @@ fn schedule_mcp_server_refresh(state: &AppState, server_id: &str) -> Result<bool
     std::thread::Builder::new()
         .name(format!("timem-mcp-connect-{}", config.id))
         .spawn(move || {
-            let report = match runtime.connect(&config) {
-                Ok(tools) => McpServerReport {
+            let report = match runtime.connect_with_capabilities(&config) {
+                Ok(capabilities) => McpServerReport {
                     config: config.clone(),
                     state: "connected".to_string(),
                     error: None,
-                    tools,
+                    instructions: capabilities.instructions,
+                    tools: capabilities.tools,
                 },
                 Err(error) => McpServerReport {
                     config: config.clone(),
                     state: "error".to_string(),
                     error: Some(error),
+                    instructions: None,
                     tools: Vec::new(),
                 },
             };
@@ -3668,6 +3672,7 @@ fn sync_session_mcp(state: &AppState, session_id: &str) -> Result<(), String> {
         (mem.mcp_runtime.clone(), configs, mem.mcp_reports.clone())
     };
     let mut tools = Vec::<McpTool>::new();
+    let mut instructions = BTreeMap::<String, String>::new();
     let mut refresh_ids = Vec::new();
     for config in &configs {
         let cached = cached_reports
@@ -3676,6 +3681,12 @@ fn sync_session_mcp(state: &AppState, session_id: &str) -> Result<(), String> {
             .map(|report| report.tools.clone());
         if let Some(discovered) = cached {
             tools.extend(discovered);
+            if let Some(server_instructions) = cached_reports
+                .get(&config.id)
+                .and_then(|report| report.instructions.as_ref())
+            {
+                instructions.insert(config.id.clone(), server_instructions.clone());
+            }
         } else {
             refresh_ids.push(config.id.clone());
         }
@@ -3689,11 +3700,12 @@ fn sync_session_mcp(state: &AppState, session_id: &str) -> Result<(), String> {
         .map_err(|_| "worker_manager_poisoned".to_string())?;
     for worker_id in worker_ids {
         if let Some(handle) = manager.handle(&worker_id) {
-            handle.update_mcp(
+            handle.update_mcp_with_instructions(
                 base.clone(),
                 runtime.clone(),
                 configs.clone(),
                 tools.clone(),
+                instructions.clone(),
             )?;
         }
     }
@@ -3987,11 +3999,15 @@ fn restore_stored_session(
     if record_runtime_restart {
         append_runtime_restart_history_marker(state, &stored.session_id)?;
     }
-    let cached_env = sanitize_restored_session_env(if stored.env.is_empty() {
-        stored.env_overrides.clone().unwrap_or_default()
-    } else {
-        stored.env.clone()
-    });
+    let explicit_overrides = stored.env_overrides.clone().unwrap_or_default();
+    let cached_env = sanitize_restored_session_env(
+        if stored.env.is_empty() {
+            explicit_overrides.clone()
+        } else {
+            stored.env.clone()
+        },
+        &explicit_overrides,
+    );
     let settings = state.template.session_settings(&cached_env)?;
     let session_env = state.template.session_env(&settings, &cached_env);
     let runtime = WebSessionRuntime {
@@ -4849,6 +4865,7 @@ fn attach_worker_to_session_context(
         .cloned()
         .collect::<Vec<_>>();
     let mut mcp_tools = Vec::new();
+    let mut mcp_instructions = BTreeMap::new();
     for config in &mcp_configs {
         if let Some(report) = mem
             .mcp_reports
@@ -4856,12 +4873,21 @@ fn attach_worker_to_session_context(
             .filter(|report| report.config == *config && report.state == "connected")
         {
             mcp_tools.extend(report.tools.clone());
+            if let Some(instructions) = report.instructions.as_ref() {
+                mcp_instructions.insert(config.id.clone(), instructions.clone());
+            }
         }
     }
     let base =
         CapabilityRegistry::builtin_with_overlay_dir(state.template.data_dir.join("capabilities"))
             .unwrap_or_else(|_| CapabilityRegistry::builtin());
-    core.configure_mcp(base, mem.mcp_runtime.clone(), mcp_configs, mcp_tools)?;
+    core.configure_mcp_with_instructions(
+        base,
+        mem.mcp_runtime.clone(),
+        mcp_configs,
+        mcp_tools,
+        mcp_instructions,
+    )?;
     let workspace = state
         .template
         .workspace_at(&mem, &current_dir, runtime.env.clone());
@@ -6872,7 +6898,7 @@ fn handle_scoped_worker_event(
                 if event.topic.name == CORE_TOPIC_MODEL_REPAIR {
                     if let Some(issue) = event.payload.get("issue").and_then(Value::as_str) {
                         if let Some(debug) = state.debug.as_ref() {
-                            if let Err(error) = debug.record_repair(session_id, issue) {
+                            if let Err(error) = debug.record_repair(session_id, worker_id, issue) {
                                 eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
                             }
                         }
@@ -6880,7 +6906,9 @@ fn handle_scoped_worker_event(
                 }
                 if event.topic.name == CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP {
                     if let Some(debug) = state.debug.as_ref() {
-                        if let Err(error) = debug.record_runtime_root_repair_help(session_id) {
+                        if let Err(error) =
+                            debug.record_runtime_root_repair_help(session_id, worker_id)
+                        {
                             eprintln!(
                                 "[timem_web_debug_error] session_id={session_id:?} reason={error}"
                             );
@@ -6905,7 +6933,8 @@ fn handle_scoped_worker_event(
                         } else {
                             None
                         };
-                        if let Err(error) = debug.record_action_cpu(session_id, cpu_time) {
+                        if let Err(error) = debug.record_action_cpu(session_id, worker_id, cpu_time)
+                        {
                             eprintln!(
                                 "[timem_web_debug_error] session_id={session_id:?} reason={error}"
                             );
@@ -7077,9 +7106,29 @@ fn handle_scoped_worker_event(
                 );
             }
         }
-        CoreSessionWorkerEvent::ModelRequest { round, prompt } => {
+        CoreSessionWorkerEvent::ModelRequest {
+            round,
+            prompt,
+            interaction_profile,
+            interaction_request,
+        } => {
             if let Some(debug) = state.debug.as_ref() {
-                if let Err(error) = debug.record_prompt(session_id, round, &prompt) {
+                if let Some(profile) = interaction_profile.as_ref() {
+                    if let Err(error) =
+                        debug.record_interaction_profile(session_id, worker_id, profile)
+                    {
+                        eprintln!(
+                            "[timem_web_debug_error] session_id={session_id:?} reason={error}"
+                        );
+                    }
+                }
+                if let Err(error) = debug.record_prompt(
+                    session_id,
+                    worker_id,
+                    round,
+                    &prompt,
+                    interaction_request.as_deref(),
+                ) {
                     eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
                 }
             }
@@ -7094,14 +7143,16 @@ fn handle_scoped_worker_event(
         }
         CoreSessionWorkerEvent::ModelRequestCompleted { latency } => {
             if let Some(debug) = state.debug.as_ref() {
-                if let Err(error) = debug.record_llm_latency(session_id, latency) {
+                if let Err(error) = debug.record_llm_latency(session_id, worker_id, latency) {
                     eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
                 }
             }
         }
         CoreSessionWorkerEvent::ModelResponseParsed { tool_count } => {
             if let Some(debug) = state.debug.as_ref() {
-                if let Err(error) = debug.record_tools_per_response(session_id, tool_count) {
+                if let Err(error) =
+                    debug.record_tools_per_response(session_id, worker_id, tool_count)
+                {
                     eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
                 }
             }
@@ -7110,10 +7161,13 @@ fn handle_scoped_worker_event(
             round,
             usage,
             content,
+            tool_calls,
             runtime_phase,
         } => {
             if let Some(debug) = state.debug.as_ref() {
-                if let Err(error) = debug.record_llm_response(session_id, round, &content) {
+                if let Err(error) =
+                    debug.record_llm_response(session_id, worker_id, round, &content, &tool_calls)
+                {
                     eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
                 }
             }
@@ -7140,6 +7194,13 @@ fn handle_scoped_worker_event(
             );
         }
         CoreSessionWorkerEvent::ModelError { error } => {
+            if let Some(debug) = state.debug.as_ref() {
+                if let Err(debug_error) = debug.record_model_failure(session_id, worker_id) {
+                    eprintln!(
+                        "[timem_web_debug_error] session_id={session_id:?} reason={debug_error}"
+                    );
+                }
+            }
             set_worker_state(state, session_id, worker_id, "error");
             emit_worker_activity(
                 state,
@@ -7598,11 +7659,15 @@ impl WorkerTemplate {
             if let Some(stored) = sessions.into_iter().find(|session| {
                 !session.session_id.trim().is_empty() && Path::new(&session.current_dir).is_dir()
             }) {
-                let cached_env = sanitize_restored_session_env(if stored.env.is_empty() {
-                    stored.env_overrides.unwrap_or_default()
-                } else {
-                    stored.env
-                });
+                let explicit_overrides = stored.env_overrides.unwrap_or_default();
+                let cached_env = sanitize_restored_session_env(
+                    if stored.env.is_empty() {
+                        explicit_overrides.clone()
+                    } else {
+                        stored.env
+                    },
+                    &explicit_overrides,
+                );
                 env.extend(cached_env);
             }
         }
@@ -7776,6 +7841,13 @@ impl WorkerTemplate {
                 settings.config.api_key = value.clone();
             }
         }
+        if let Some(value) = env_overrides.get("TIMEM_TOOL_CALL_MODE") {
+            settings.config.interaction.tool_call_mode = agent_core::parse_tool_call_mode(value)?;
+        }
+        if let Some(value) = env_overrides.get("TIMEM_PARALLEL_TOOL_CALLS") {
+            settings.config.interaction.parallel_tool_calls =
+                agent_core::parse_parallel_tool_calls(value)?;
+        }
         for key in [
             "TIMEM_ENABLE_THINKING",
             "TIMEM_REASONING_EFFORT",
@@ -7830,6 +7902,24 @@ impl WorkerTemplate {
             round_budget_value(settings.max_rounds),
         );
         env.insert("TIMEM_API_KEY".to_string(), settings.config.api_key.clone());
+        env.insert(
+            "TIMEM_TOOL_CALL_MODE".to_string(),
+            settings
+                .config
+                .interaction
+                .tool_call_mode
+                .label()
+                .to_string(),
+        );
+        env.insert(
+            "TIMEM_PARALLEL_TOOL_CALLS".to_string(),
+            settings
+                .config
+                .interaction
+                .parallel_tool_calls
+                .label()
+                .to_string(),
+        );
         if let Some(value) = settings.config.openai_compatible.enable_thinking {
             env.insert("TIMEM_ENABLE_THINKING".to_string(), value.to_string());
         }
@@ -7900,6 +7990,8 @@ const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_REASONING_EFFORT",
     "TIMEM_STREAM",
     "TIMEM_OPENAI_CACHE_MODE",
+    "TIMEM_TOOL_CALL_MODE",
+    "TIMEM_PARALLEL_TOOL_CALLS",
 ];
 
 fn parse_round_budget(value: &str) -> Result<u32, String> {
@@ -7923,10 +8015,24 @@ fn round_budget_value(max_rounds: u32) -> String {
 }
 
 const RETIRED_SESSION_ENV_KEYS: &[&str] = &["TIMEM_GATEWAY_PROVIDER"];
+const DERIVED_INTERACTION_ENV_KEYS: &[&str] =
+    &["TIMEM_TOOL_CALL_MODE", "TIMEM_PARALLEL_TOOL_CALLS"];
 
-fn sanitize_restored_session_env(mut env: BTreeMap<String, String>) -> BTreeMap<String, String> {
+fn sanitize_restored_session_env(
+    mut env: BTreeMap<String, String>,
+    explicit_overrides: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
     for key in RETIRED_SESSION_ENV_KEYS {
         env.remove(*key);
+    }
+    // These values were briefly persisted from an accidental Web-only inline
+    // default. Treat effective cached values as derived configuration and keep
+    // only explicit per-Session overrides. The template supplies the current
+    // host default (`auto` for a normal Web launch).
+    for key in DERIVED_INTERACTION_ENV_KEYS {
+        if !explicit_overrides.contains_key(*key) {
+            env.remove(*key);
+        }
     }
     env
 }
@@ -8007,6 +8113,24 @@ fn session_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
         (
             "TIMEM_WORK_INSTRUCTIONS".to_string(),
             agent_core::work_instruction_mode_label(settings.work_instruction_mode).to_string(),
+        ),
+        (
+            "TIMEM_TOOL_CALL_MODE".to_string(),
+            settings
+                .config
+                .interaction
+                .tool_call_mode
+                .label()
+                .to_string(),
+        ),
+        (
+            "TIMEM_PARALLEL_TOOL_CALLS".to_string(),
+            settings
+                .config
+                .interaction
+                .parallel_tool_calls
+                .label()
+                .to_string(),
         ),
     ]);
     if let Some(value) = settings.config.openai_compatible.enable_thinking {
@@ -8181,6 +8305,8 @@ impl WebLaunchOptions {
 
     fn model_service_source(&self) -> ModelServiceConfigSource {
         ModelServiceConfigSource {
+            tool_call_mode: None,
+            parallel_tool_calls: None,
             api_protocol: self.api_protocol.clone(),
             api_key: self.api_key.clone(),
             model: self.model.clone(),

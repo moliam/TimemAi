@@ -20,7 +20,7 @@ fn fake_server_script() -> &'static str {
 while IFS= read -r line; do
   case "$line" in
     *\"method\":\"initialize\"*)
-      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}}'
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"},"instructions":"Always inspect metadata before using this server."}}'
       ;;
     *\"method\":\"tools/list\"*)
       printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo-value","description":"Echo a value","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}]}}'
@@ -37,10 +37,14 @@ done
 fn stdio_client_initializes_discovers_and_calls_tool() {
     let runtime = McpRuntime::default();
     let config = stdio_config(fake_server_script());
-    let tools = runtime.connect(&config).unwrap();
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].action_name, "mcp.demo.echo-value");
-    assert_eq!(tools[0].input_schema["required"][0], "value");
+    let capabilities = runtime.connect_with_capabilities(&config).unwrap();
+    assert_eq!(
+        capabilities.instructions.as_deref(),
+        Some("Always inspect metadata before using this server.")
+    );
+    assert_eq!(capabilities.tools.len(), 1);
+    assert_eq!(capabilities.tools[0].action_name, "mcp.demo.echo-value");
+    assert_eq!(capabilities.tools[0].input_schema["required"][0], "value");
 
     let result = runtime
         .call_tool(&config, "echo-value", &json!({ "value": "hello" }))
@@ -112,8 +116,12 @@ fn legacy_sse_client_discovers_and_calls_tool() {
         request_timeout_ms: 2_000,
     };
     let runtime = McpRuntime::default();
-    let tools = runtime.connect(&config).unwrap();
-    assert_eq!(tools[0].action_name, "mcp.legacy.echo");
+    let capabilities = runtime.connect_with_capabilities(&config).unwrap();
+    assert_eq!(
+        capabilities.instructions.as_deref(),
+        Some("Use the legacy workflow before calling tools.")
+    );
+    assert_eq!(capabilities.tools[0].action_name, "mcp.legacy.echo");
     let result = runtime
         .call_tool(&config, "echo", &json!({ "value": "hello" }))
         .unwrap();
@@ -173,7 +181,8 @@ fn serve_legacy_sse_request(
         Some("initialize") => json!({
             "protocolVersion": LEGACY_SSE_PROTOCOL_VERSION,
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "legacy-test", "version": "1" }
+            "serverInfo": { "name": "legacy-test", "version": "1" },
+            "instructions": "Use the legacy workflow before calling tools."
         }),
         Some("tools/list") => json!({
             "tools": [{
@@ -405,6 +414,25 @@ fn dynamic_tool_is_prompt_visible_and_protocol_parser_keeps_arguments_generic() 
     assert!(registry
         .render_tool_catalog_markdown()
         .contains("mcp.demo.echo-value"));
+    assert!(registry
+        .render_mcp_tool_catalog_markdown_for_protocol("XML")
+        .contains("mcp.demo.echo-value"));
+    assert!(!registry
+        .enrich_static_prompt("STATIC\n{{TOOL_CATALOG}}")
+        .contains("mcp.demo.echo-value"));
+    let builtin_tools = registry.native_builtin_tool_definitions();
+    let dynamic_tools = registry.native_dynamic_tool_definitions();
+    assert!(builtin_tools.iter().any(|tool| tool.name == "self_tool"));
+    assert!(builtin_tools
+        .iter()
+        .all(|tool| !tool.name.starts_with("mcp.")));
+    assert_eq!(
+        dynamic_tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["mcp.demo.echo-value"]
+    );
 
     let response = r#"<ASSISTANT><actions><mcp.demo.echo-value name="echo protocol-like value"><value><![CDATA[literal </ASSISTANT> and ```xml <ASSISTANT> text]]></value><nested><json>{"action":"not-a-call"}</json></nested></mcp.demo.echo-value></actions></ASSISTANT>"#;
     let parsed = crate::response_protocol::ResponseProtocolKind::Xml

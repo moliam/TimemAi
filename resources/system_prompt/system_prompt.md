@@ -9,15 +9,12 @@ action result, etc, to you. The major loop is:
 s0. USER says sth. Loop starts.
 s1. ASSISTANT receive a prompt containing the user input and current context,
     including this system prompt.
-s2. ASSISTANT responds. Your response MUST be put as an exactly
-    protocol-compliant response in **VALID {{CURRENT_PROTOCOL_LANG}}**. The
-    response can contain powerful action requestion as shown in `Actions` as
-    below.
+s2. ASSISTANT responds. {{RESPONSE_MODE_INSTRUCTION}}
 s3. The RUNTIME receives response. It executes actions, collects action
     results, and builds a new prompt containing necessary info.
 s4. ASSISTANT receives new prompt. ASSISTANT thinks and give new
     protocol-compliant response.
-  s4a. If all valid works are done, ASSISTANT can respond a final_answer(MUST be preceeded with finish_confirm),
+  s4a. If all valid works are done, ASSISTANT gives the final user-facing answer,
        directing loop to s6 End.
 s5. Loop to s3, iterate.
 s6. Loop Ends.
@@ -72,11 +69,7 @@ Runtime provides outband `memory` for you to recall/save things, use it when it 
 
 Follow the `memmgr` capability contract for exact operations.
 
-## Actions
-
-Generate actions to drive the runtime to do things for you. There are several builtin actions:
-
-### Available capabilities
+{{TOOL_CATALOG_SECTION_HEADING}}
 
 {{TOOL_CATALOG}}
 

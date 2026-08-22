@@ -1,4 +1,6 @@
-use crate::prompt_render::{split_formatted_response_trailer, RESPONSE_TRAILER};
+use crate::prompt_render::split_formatted_response_trailer;
+#[cfg(test)]
+use crate::prompt_render::RESPONSE_TRAILER;
 use crate::response_protocol::KNOWN_PROMPT_BOUNDARIES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,7 +155,7 @@ pub fn plan_prompt_cache(rendered_prompt: &str) -> Vec<PromptBlock> {
     let (prompt_without_trailer, trailer) = split_formatted_response_trailer(rendered_prompt);
     let mut blocks =
         plan_incremental_cache(prompt_parts_from_rendered_prompt(prompt_without_trailer));
-    if let Some(trailer) = trailer.filter(|trailer| trailer == RESPONSE_TRAILER) {
+    if let Some(trailer) = trailer {
         blocks.push(PromptBlock {
             role: PromptBlockRole::User,
             text: trailer,

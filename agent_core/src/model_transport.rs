@@ -1,9 +1,9 @@
 use crate::{
     append_audit_event, interpret_model_http_response, model_request_audit_event,
-    model_response_audit_event, prepare_model_http_request,
+    model_response_audit_event, prepare_model_http_request, prepare_model_interaction_http_request,
     without_openai_compatible_cache_control, ApiProtocol, LlmResponse, ModelClient,
-    ModelHttpResponseInterpretation, ModelServiceConfig, OpenAiCompatibleCacheMode,
-    PreparedModelHttpRequest,
+    ModelHttpResponseInterpretation, ModelInteractionRequest, ModelServiceConfig,
+    OpenAiCompatibleCacheMode, PreparedModelHttpRequest,
 };
 use std::io::{Read, Write};
 use std::path::Path;
@@ -23,6 +23,22 @@ impl ModelClient for HttpModelClient {
     ) -> Result<LlmResponse, String> {
         call_model_with_cancel(config, prompt, audit_file, should_cancel)
     }
+
+    fn call_model_interaction(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        audit_file: &Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        let http_request = prepare_model_interaction_http_request(config, request);
+        execute_prepared_request_with_cache_fallback(
+            config,
+            http_request,
+            audit_file,
+            should_cancel,
+        )
+    }
 }
 
 pub fn call_model(
@@ -40,6 +56,15 @@ pub fn call_model_with_cancel(
     should_cancel: &mut dyn FnMut() -> bool,
 ) -> Result<LlmResponse, String> {
     let http_request = prepare_model_http_request(config, prompt);
+    execute_prepared_request_with_cache_fallback(config, http_request, audit_file, should_cancel)
+}
+
+fn execute_prepared_request_with_cache_fallback(
+    config: &ModelServiceConfig,
+    http_request: PreparedModelHttpRequest,
+    audit_file: &Path,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> Result<LlmResponse, String> {
     let first = execute_model_http_request(config, &http_request, audit_file, should_cancel)?;
 
     if should_retry_without_openai_cache_control(config, &http_request, &first) {

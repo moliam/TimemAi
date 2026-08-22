@@ -234,6 +234,8 @@ pub enum CoreSessionWorkerEvent {
     ModelRequest {
         round: u32,
         prompt: String,
+        interaction_profile: Option<crate::InteractionProfile>,
+        interaction_request: Option<Box<crate::ModelInteractionRequest>>,
     },
     ModelRequestCompleted {
         latency: Duration,
@@ -245,6 +247,7 @@ pub enum CoreSessionWorkerEvent {
         round: u32,
         usage: UsageStats,
         content: String,
+        tool_calls: Vec<crate::NativeToolCall>,
         runtime_phase: Option<String>,
     },
     ModelRetry {
@@ -295,6 +298,7 @@ enum CoreSessionWorkerCommand {
         runtime: crate::mcp::McpRuntime,
         servers: Vec<crate::mcp::McpServerConfig>,
         tools: Vec<crate::mcp::McpTool>,
+        instructions: BTreeMap<String, String>,
     },
     Shutdown,
 }
@@ -711,6 +715,23 @@ impl CoreSessionWorkerHandle {
         servers: Vec<crate::mcp::McpServerConfig>,
         tools: Vec<crate::mcp::McpTool>,
     ) -> Result<(), String> {
+        self.update_mcp_with_instructions(
+            base_capabilities,
+            runtime,
+            servers,
+            tools,
+            BTreeMap::new(),
+        )
+    }
+
+    pub fn update_mcp_with_instructions(
+        &self,
+        base_capabilities: crate::capability::CapabilityRegistry,
+        runtime: crate::mcp::McpRuntime,
+        servers: Vec<crate::mcp::McpServerConfig>,
+        tools: Vec<crate::mcp::McpTool>,
+        instructions: BTreeMap<String, String>,
+    ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
         }
@@ -720,6 +741,7 @@ impl CoreSessionWorkerHandle {
                 runtime,
                 servers,
                 tools,
+                instructions,
             })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
@@ -1190,6 +1212,7 @@ impl CoreSessionWorker {
                 accept_supplements: true,
                 pending_bash_always_allow: false,
                 pending_runtime_updates,
+                interaction_profile: None,
             };
 
             while let Ok(command) = command_rx.recv() {
@@ -1408,10 +1431,15 @@ impl CoreSessionWorker {
                         runtime,
                         servers,
                         tools,
+                        instructions,
                     } => {
-                        if let Err(error) =
-                            core.apply_mcp_update(base_capabilities, runtime, servers, tools)
-                        {
+                        if let Err(error) = core.apply_mcp_update_with_instructions(
+                            base_capabilities,
+                            runtime,
+                            servers,
+                            tools,
+                            instructions,
+                        ) {
                             let _ = event_tx.send(CoreSessionWorkerEvent::ModelError { error });
                         }
                     }
@@ -1477,6 +1505,7 @@ struct WorkerTurnUi {
     accept_supplements: bool,
     pending_bash_always_allow: bool,
     pending_runtime_updates: Arc<Mutex<Vec<PendingRuntimeUpdate>>>,
+    interaction_profile: Option<crate::InteractionProfile>,
 }
 
 fn toolgen_completion_instruction(protocol: ResponseProtocolKind) -> &'static str {
@@ -1741,10 +1770,16 @@ impl TurnUi for WorkerTurnUi {
             .unwrap_or_default()
     }
 
-    fn on_model_request(&mut self, round: u32, prompt: &str) {
+    fn on_model_interaction_request(
+        &mut self,
+        round: u32,
+        request: &crate::ModelInteractionRequest,
+    ) {
         let _ = self.event_tx.send(CoreSessionWorkerEvent::ModelRequest {
             round,
-            prompt: prompt.to_string(),
+            prompt: request.rendered_prompt.clone(),
+            interaction_profile: self.interaction_profile.clone(),
+            interaction_request: Some(Box::new(request.clone())),
         });
     }
 
@@ -1760,11 +1795,16 @@ impl TurnUi for WorkerTurnUi {
             .send(CoreSessionWorkerEvent::ModelResponseParsed { tool_count });
     }
 
-    fn on_model_response(&mut self, round: u32, usage: &UsageStats, content: &str) {
+    fn on_interaction_profile(&mut self, profile: &crate::InteractionProfile) {
+        self.interaction_profile = Some(profile.clone());
+    }
+
+    fn on_model_interaction_response(&mut self, round: u32, response: &crate::LlmResponse) {
         let _ = self.event_tx.send(CoreSessionWorkerEvent::ModelResponse {
             round,
-            usage: usage.clone(),
-            content: content.to_string(),
+            usage: response.usage.clone(),
+            content: response.content.clone(),
+            tool_calls: response.tool_calls.clone(),
             runtime_phase: self.phase.clone(),
         });
     }

@@ -13,6 +13,12 @@
 # Known values: openai-compatible, openai-responses, anthropic.
 # Default: openai-compatible.
 # export TIMEM_API_PROTOCOL=openai-compatible
+# Tool-call transport: auto probes once per provider/model configuration and
+# chooses native when supported, otherwise inline. Parallel calls are probed
+# independently and their API flag is always sent explicitly.
+# export TIMEM_TOOL_CALL_MODE=auto
+# export TIMEM_PARALLEL_TOOL_CALLS=auto
+# Inline response syntax only; ignored in native mode.
 # export TIMEM_RESPONSE_PROTOCOL=xml
 
 # Generic API key. Prefer env/source over command-line flags so secrets do not

@@ -778,7 +778,16 @@ fn parse_xml_tool_action(
             return Err(format!("{label}.input.{}_duplicate", child.name));
         }
         let schema = capabilities.tool_input_property_schema(&element.name, &child.name);
-        input.insert(child.name.clone(), xml_element_value(child, schema, label)?);
+        let value = if element.name == "context_compact"
+            && crate::context_compact::is_delta_list_field(&child.name)
+            && child.children.is_empty()
+            && child.attributes.is_empty()
+        {
+            crate::context_compact::inline_xml_delta_list(&child.text)
+        } else {
+            xml_element_value(child, schema, label)?
+        };
+        input.insert(child.name.clone(), value);
     }
     let action_value = Value::Object(Map::from_iter([(
         element.name.clone(),

@@ -1773,6 +1773,7 @@ fn parses_basic_web_launch_options() {
     assert_eq!(options.space.as_deref(), Some("web_test"));
     assert_eq!(options.model.as_deref(), Some("test-model"));
     assert!(!options.public_access);
+    assert!(!options.debug);
     assert!(options.open_browser);
 
     let headless =
@@ -1787,6 +1788,10 @@ fn parses_basic_web_launch_options() {
     ])
     .unwrap();
     assert_eq!(advertised.public_host.as_deref(), Some("10.125.112.83"));
+
+    let debug = WebLaunchOptions::parse(&["--debug".to_string(), "--no-open".to_string()]).unwrap();
+    assert!(debug.debug);
+    assert!(!debug.open_browser);
 }
 
 #[test]
@@ -1829,7 +1834,7 @@ fn mcp_definition_is_mem_scoped_and_session_enablement_is_isolated() {
             command: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
-                r#"while IFS= read -r line; do case "$line" in *\"method\":\"initialize\"*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}}';; *\"method\":\"tools/list\"*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object","properties":{}}}]}}';; esac; done"#.to_string(),
+                r#"while IFS= read -r line; do case "$line" in *\"method\":\"initialize\"*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake","version":"1"},"instructions":"Use Demo MCP only after validating its input."}}';; *\"method\":\"tools/list\"*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object","properties":{}}}]}}';; esac; done"#.to_string(),
             ],
             env: BTreeMap::new(),
         },
@@ -1872,6 +1877,12 @@ fn mcp_definition_is_mem_scoped_and_session_enablement_is_isolated() {
     assert_eq!(
         mcp_reports(&state.mem.lock().unwrap())[0].tools[0].action_name,
         "mcp.demo.echo"
+    );
+    assert_eq!(
+        mcp_reports(&state.mem.lock().unwrap())[0]
+            .instructions
+            .as_deref(),
+        Some("Use Demo MCP only after validating its input.")
     );
 
     assert!(apply_pending_session_mcp(&state, "session_a").unwrap());
@@ -2722,6 +2733,10 @@ fn web_draft_model_service_config_allows_startup_without_an_api_key() {
         model_service_config_for_web_launch(&WebLaunchOptions::default(), &HashMap::new()).unwrap();
     assert!(config.api_key.is_empty());
     assert_eq!(config.model, "qwen-plus");
+    assert_eq!(
+        config.interaction.tool_call_mode,
+        agent_core::ToolCallMode::Auto
+    );
 }
 
 #[test]
@@ -2993,6 +3008,35 @@ fn web_startup_can_bootstrap_model_service_config_from_latest_session_cache() {
     let settings = restored_template.settings.lock().unwrap();
     assert_eq!(settings.config.model, "cached-session-model");
     assert_eq!(settings.config.api_key, "cached-session-secret");
+    assert_eq!(
+        settings.config.interaction.tool_call_mode,
+        agent_core::ToolCallMode::Auto
+    );
+}
+
+#[test]
+fn restored_interaction_cache_keeps_only_explicit_session_overrides() {
+    let effective_env = BTreeMap::from([
+        ("TIMEM_TOOL_CALL_MODE".to_string(), "inline".to_string()),
+        ("TIMEM_PARALLEL_TOOL_CALLS".to_string(), "false".to_string()),
+        ("TIMEM_MODEL".to_string(), "cached-model".to_string()),
+    ]);
+    let implicit = sanitize_restored_session_env(effective_env.clone(), &BTreeMap::new());
+    assert!(!implicit.contains_key("TIMEM_TOOL_CALL_MODE"));
+    assert!(!implicit.contains_key("TIMEM_PARALLEL_TOOL_CALLS"));
+    assert_eq!(
+        implicit.get("TIMEM_MODEL").map(String::as_str),
+        Some("cached-model")
+    );
+
+    let explicit_overrides =
+        BTreeMap::from([("TIMEM_TOOL_CALL_MODE".to_string(), "inline".to_string())]);
+    let explicit = sanitize_restored_session_env(effective_env, &explicit_overrides);
+    assert_eq!(
+        explicit.get("TIMEM_TOOL_CALL_MODE").map(String::as_str),
+        Some("inline")
+    );
+    assert!(!explicit.contains_key("TIMEM_PARALLEL_TOOL_CALLS"));
 }
 
 #[test]
@@ -3066,6 +3110,7 @@ fn workspace_snapshot_deduplicates_registered_current_directory() {
     let template = WorkerTemplate {
         settings: Arc::new(Mutex::new(RuntimeSettings {
             config: ModelServiceConfig {
+                interaction: Default::default(),
                 model: "test-model".to_string(),
                 base_url: "http://127.0.0.1".to_string(),
                 api_key: "test".to_string(),
@@ -4837,6 +4882,7 @@ fn ask_mode_does_not_announce_work_instructions_before_user_acceptance() {
 
 fn routing_test_state() -> AppState {
     let config = ModelServiceConfig {
+        interaction: Default::default(),
         model: "test-model".to_string(),
         base_url: "http://127.0.0.1".to_string(),
         api_key: "test".to_string(),
@@ -4967,6 +5013,7 @@ fn test_worker_id(session_id: &str) -> String {
 fn test_runtime_settings() -> RuntimeSettings {
     RuntimeSettings {
         config: ModelServiceConfig {
+            interaction: Default::default(),
             model: "model".to_string(),
             base_url: "http://127.0.0.1:9".to_string(),
             api_key: "test".to_string(),
@@ -5204,6 +5251,8 @@ fn barrier_synchronized_sessions_keep_request_action_final_and_completion_scoped
                     CoreSessionWorkerEvent::ModelRequest {
                         round: 1,
                         prompt: String::new(),
+                        interaction_profile: None,
+                        interaction_request: None,
                     },
                 );
                 after_request.wait();
@@ -5315,6 +5364,8 @@ fn one_session_aggregates_primary_and_subworker_state_without_cross_finishing() 
         CoreSessionWorkerEvent::ModelRequest {
             round: 1,
             prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
         },
     );
     handle_scoped_worker_event(
@@ -5325,6 +5376,8 @@ fn one_session_aggregates_primary_and_subworker_state_without_cross_finishing() 
         CoreSessionWorkerEvent::ModelRequest {
             round: 1,
             prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
         },
     );
     handle_scoped_worker_event(
@@ -5408,6 +5461,8 @@ fn primary_turn_finish_clears_stale_working_workers_and_session_spinner() {
         CoreSessionWorkerEvent::ModelRequest {
             round: 1,
             prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
         },
     );
     handle_scoped_worker_event(
@@ -5490,6 +5545,8 @@ fn stopped_primary_turn_removes_its_stale_reported_working_count() {
         CoreSessionWorkerEvent::ModelRequest {
             round: 1,
             prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
         },
     );
     handle_scoped_worker_event(
@@ -5570,6 +5627,8 @@ fn stopped_primary_turn_preserves_a_reported_active_subworker() {
         CoreSessionWorkerEvent::ModelRequest {
             round: 1,
             prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
         },
     );
     handle_scoped_worker_event(
@@ -5669,6 +5728,8 @@ fn primary_turn_finish_preserves_explicitly_reported_active_subworker() {
         CoreSessionWorkerEvent::ModelRequest {
             round: 1,
             prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
         },
     );
     handle_scoped_worker_event(
@@ -5747,6 +5808,8 @@ fn primary_turn_finish_ignores_other_sessions_global_worker_count() {
         CoreSessionWorkerEvent::ModelRequest {
             round: 1,
             prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
         },
     );
     handle_scoped_worker_event(
@@ -5996,6 +6059,7 @@ impl ModelClient for BlockingShutdownModel {
         self.entered.fetch_add(1, Ordering::SeqCst);
         thread::sleep(Duration::from_secs(2));
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: confirmed_xml_response("<final_answer>late</final_answer>"),
             model_name: "test-model".to_string(),
             usage: UsageStats::zero(),
@@ -6081,6 +6145,7 @@ impl ModelClient for CancelThenFinishModel {
             return Err("cancelled_by_user".to_string());
         }
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: confirmed_xml_response(&format!(
                 "<final_answer>{}</final_answer>",
                 self.final_text
@@ -6675,7 +6740,7 @@ fn mismatched_core_topic_is_not_forwarded_or_written_to_another_agent() {
 }
 
 #[test]
-fn model_repair_topic_updates_debug_statistics_and_persists_repair_history() {
+fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history() {
     let mut state = routing_test_state();
     let debug = Arc::new(DebugStore::create().unwrap());
     let debug_root = debug.root().to_path_buf();
@@ -6683,6 +6748,97 @@ fn model_repair_topic_updates_debug_statistics_and_persists_repair_history() {
 
     let session_id = "session_a";
     let turn = start_web_turn(&state, session_id, "repair malformed XML").unwrap();
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: "debug prompt".to_string(),
+            interaction_profile: Some(agent_core::InteractionProfile {
+                api_protocol: "openai_compatible".to_string(),
+                model: "qwen-plus".to_string(),
+                gateway: "https://gateway.example.test/v1".to_string(),
+                requested_mode: agent_core::ToolCallMode::Auto,
+                resolved_mode: agent_core::ToolCallMode::Native,
+                active_prompt_protocol: "json".to_string(),
+                parallel_supported: true,
+                parallel_enabled: true,
+                source: agent_core::CapabilityProbeSource::Probe,
+                reason: "native_and_parallel_probe_succeeded".to_string(),
+                probe_latency_ms: Some(10),
+                observed_tool_calls: 2,
+            }),
+            interaction_request: Some(Box::new(agent_core::ModelInteractionRequest {
+                rendered_prompt: "debug prompt".to_string(),
+                static_tool_count: 1,
+                tools: vec![agent_core::ToolDefinition {
+                    name: "self_tool".to_string(),
+                    description: "Inspect runtime state".to_string(),
+                    input_schema: json!({"type": "object"}),
+                }],
+                native_exchanges: vec![agent_core::NativeExchange {
+                    assistant_text: "previous".to_string(),
+                    calls: vec![agent_core::NativeToolCall {
+                        id: "call_previous".to_string(),
+                        name: "self_tool".to_string(),
+                        arguments: json!({"type": "cwd"}),
+                        raw_arguments: r#"{"type":"cwd"}"#.to_string(),
+                    }],
+                    results: vec![agent_core::NativeToolResult {
+                        call_id: "call_previous".to_string(),
+                        name: "self_tool".to_string(),
+                        content: "CWD: /work".to_string(),
+                        is_error: false,
+                    }],
+                }],
+                resolved_mode: agent_core::ToolCallMode::Native,
+                parallel_tool_calls: true,
+                tool_choice: agent_core::NativeToolChoice::Auto,
+            })),
+        },
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::ModelRequestCompleted {
+            latency: Duration::from_millis(425),
+        },
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::ModelResponseParsed { tool_count: 1 },
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::ModelResponse {
+            round: 1,
+            usage: UsageStats::zero(),
+            content: "I will inspect the workspace.".to_string(),
+            tool_calls: vec![agent_core::NativeToolCall {
+                id: "call_current".to_string(),
+                name: "self_tool".to_string(),
+                arguments: json!({"type": "cwd"}),
+                raw_arguments: r#"{"type":"cwd"}"#.to_string(),
+            }],
+            runtime_phase: None,
+        },
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(CORE_TOPIC_ACTION, json!({})),
+            CoreSessionState::Running,
+            json!({
+                "event": "finish",
+                "cpu_time_available": true,
+                "cpu_time_ns": 25_000_000_u64,
+            }),
+        )]),
+    );
     handle_worker_event(
         &state,
         session_id,
@@ -6708,27 +6864,112 @@ fn model_repair_topic_updates_debug_statistics_and_persists_repair_history() {
             session_id,
         )]),
     );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 2,
+            prompt: "inline retry prompt".to_string(),
+            interaction_profile: Some(agent_core::InteractionProfile {
+                api_protocol: "anthropic".to_string(),
+                model: "claude-inline".to_string(),
+                gateway: "https://inline.example/v1".to_string(),
+                requested_mode: agent_core::ToolCallMode::Inline,
+                resolved_mode: agent_core::ToolCallMode::Inline,
+                active_prompt_protocol: "xml".to_string(),
+                parallel_supported: false,
+                parallel_enabled: false,
+                source: agent_core::CapabilityProbeSource::Explicit,
+                reason: "explicit_inline".to_string(),
+                probe_latency_ms: None,
+                observed_tool_calls: 0,
+            }),
+            interaction_request: Some(Box::new(agent_core::ModelInteractionRequest::inline(
+                "inline retry prompt",
+            ))),
+        },
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::ModelError {
+            error: "synthetic terminal failure".to_string(),
+        },
+    );
 
     let statistics =
-        std::fs::read_to_string(debug_root.join(session_id).join("statistics.md")).unwrap();
-    let markdown_row = |name: &str, count: &str| {
-        statistics.lines().any(|line| {
-            let cells = line
-                .split('|')
-                .map(str::trim)
-                .filter(|cell| !cell.is_empty())
-                .collect::<Vec<_>>();
-            cells.first() == Some(&name) && cells.get(1) == Some(&count)
-        })
-    };
-    assert!(markdown_row("Protocol repairs", "1"), "{statistics}");
+        std::fs::read_to_string(debug_root.join(session_id).join("statistics.html")).unwrap();
     assert!(
-        markdown_row("missing_or_invalid_response_root", "1"),
+        statistics.contains("Repair error categories"),
         "{statistics}"
     );
     assert!(
-        markdown_row("runtime_root_repair_help", "1"),
+        statistics.contains("missing_or_invalid_response_root"),
         "{statistics}"
+    );
+    assert!(
+        statistics.contains("Runtime root repair help: 1"),
+        "{statistics}"
+    );
+    assert!(statistics.contains("badge-native"), "{statistics}");
+    assert!(statistics.contains("Action on-CPU time"), "{statistics}");
+    assert!(statistics.contains("LLM API latency"), "{statistics}");
+    assert!(statistics.contains("100.0%"), "{statistics}");
+    assert!(statistics.contains("claude-inline"), "{statistics}");
+    assert!(statistics.contains("badge-inline"), "{statistics}");
+
+    let prompt_dump =
+        std::fs::read_to_string(debug_root.join(session_id).join("llm_prompt.dump")).unwrap();
+    assert!(
+        prompt_dump.contains("scope: latest_request_only"),
+        "{prompt_dump}"
+    );
+    assert!(
+        prompt_dump.contains("tool_call_mode: inline"),
+        "{prompt_dump}"
+    );
+    assert!(prompt_dump.contains("inline retry prompt"), "{prompt_dump}");
+    assert!(!prompt_dump.contains("call_previous"), "{prompt_dump}");
+    assert!(!prompt_dump.contains("CWD: /work"), "{prompt_dump}");
+    assert_eq!(prompt_dump.matches("request_sequence:").count(), 1);
+    assert!(
+        prompt_dump.contains(&format!("worker_id: {}", test_worker_id(session_id))),
+        "{prompt_dump}"
+    );
+
+    let tool_schema_dump =
+        std::fs::read_to_string(debug_root.join(session_id).join("tool_schema.dump")).unwrap();
+    assert!(
+        tool_schema_dump.contains("scope: latest_request_only"),
+        "{tool_schema_dump}"
+    );
+    assert!(
+        tool_schema_dump.contains("tool_call_mode: inline"),
+        "{tool_schema_dump}"
+    );
+    assert!(
+        tool_schema_dump.contains("no native API tools field"),
+        "{tool_schema_dump}"
+    );
+    assert!(
+        !tool_schema_dump.contains("self_tool"),
+        "{tool_schema_dump}"
+    );
+
+    let response_dump =
+        std::fs::read_to_string(debug_root.join(session_id).join("llm_response.dump")).unwrap();
+    assert!(
+        response_dump.contains("request_sequence: 1"),
+        "{response_dump}"
+    );
+    assert!(
+        response_dump.contains("tool_call_count: 1"),
+        "{response_dump}"
+    );
+    assert!(response_dump.contains("call_current"), "{response_dump}");
+    assert!(
+        response_dump.contains("I will inspect the workspace."),
+        "{response_dump}"
     );
 
     let records = read_all_history_records(
@@ -6891,6 +7132,7 @@ fn live_model_usage_is_retained_in_the_active_turn_and_correct_session() {
         CoreSessionWorkerEvent::ModelResponse {
             round: 2,
             content: String::new(),
+            tool_calls: Vec::new(),
             runtime_phase: None,
             usage: UsageStats {
                 prompt_tokens: 8_200,
@@ -6906,6 +7148,7 @@ fn live_model_usage_is_retained_in_the_active_turn_and_correct_session() {
         CoreSessionWorkerEvent::ModelResponse {
             round: 3,
             content: String::new(),
+            tool_calls: Vec::new(),
             runtime_phase: Some("toolgen".to_string()),
             usage: UsageStats {
                 prompt_tokens: 3_100,
@@ -7738,6 +7981,7 @@ impl ModelClient for TaggedFinalModel {
         _should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<LlmResponse, String> {
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: confirmed_xml_response(&format!("<final_answer>{}</final_answer>", self.0)),
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -7769,6 +8013,7 @@ impl ModelClient for RestoreBarrierModel {
         self.prompts.lock().unwrap().push(prompt.to_string());
         self.barrier.wait();
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: confirmed_xml_response(&format!(
                 "<final_answer>{}</final_answer>",
                 self.final_answer
@@ -7800,6 +8045,7 @@ impl ModelClient for ToolGenPromptCaptureModel {
     ) -> Result<LlmResponse, String> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         Ok(LlmResponse {
+        tool_calls: Vec::new(),
             content: confirmed_xml_response("<toolgen_retrospect>No reusable tool was published.</toolgen_retrospect><final_answer>ToolGen review complete.</final_answer>"),
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -7866,6 +8112,7 @@ impl ModelClient for ToolGenPublishModel {
             )
         };
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content,
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -7899,6 +8146,7 @@ impl ModelClient for InspectPathModel {
             confirmed_xml_response("<final_answer>paths inspected</final_answer>")
         };
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content,
             model_name: "test-model".to_string(),
             usage: UsageStats {

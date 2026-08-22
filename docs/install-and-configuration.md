@@ -134,8 +134,16 @@ export TIMEM_MODEL=...
 - `openai-responses`
 - `anthropic`
 
-`TIMEM_RESPONSE_PROTOCOL` chooses the model response format parsed by the local
-runtime. Supported values are `xml` and `json`; default is `xml`.
+`TIMEM_TOOL_CALL_MODE` chooses `auto`, `native`, or `inline` (default `auto`).
+Auto mode probes the configured gateway/model and falls back to inline when
+native tool calls are unsupported. `TIMEM_PARALLEL_TOOL_CALLS` accepts `auto`,
+`true`, or `false`; Timem sends the resolved parallel flag explicitly to the API.
+
+`TIMEM_RESPONSE_PROTOCOL` chooses the inline response format parsed by the local
+runtime. Supported values are `xml` and `json`; default is `xml`. Native mode
+uses provider tool-call structures, does not inject this inline protocol, and
+automatically uses JSON prompt serialization. The configured inline protocol is
+restored if the runtime later switches back to inline mode.
 
 ## Runtime Options
 

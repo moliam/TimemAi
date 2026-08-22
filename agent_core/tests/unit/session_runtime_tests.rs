@@ -29,6 +29,7 @@ fn test_profile() -> CoreProfile {
 
 fn test_config() -> ModelServiceConfig {
     ModelServiceConfig {
+        interaction: Default::default(),
         model: "test-model".to_string(),
         api_key: "dummy".to_string(),
         base_url: "http://127.0.0.1:9/v1".to_string(),
@@ -78,6 +79,7 @@ fn llm(content: impl Into<String>, prompt_tokens: u32, truncated: bool) -> LlmRe
         }
     }
     LlmResponse {
+        tool_calls: Vec::new(),
         content,
         model_name: "test-model".to_string(),
         usage: usage(prompt_tokens, 10),
@@ -2916,12 +2918,14 @@ fn session_turn_records_cached_tokens_in_profiler_and_latest_usage() {
     second_usage.cached_tokens = 6_500;
     let mut model = ReplayModel::new([
             Ok(LlmResponse {
+        tool_calls: Vec::new(),
                 content: r#"{"status":"working","free_talk":"先查询 scratch。","working_still_action":[{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":3}}]}"#.to_string(),
                 model_name: "test-model".to_string(),
                 usage: first_usage.clone(),
                 truncated: false,
             }),
             Ok(LlmResponse {
+        tool_calls: Vec::new(),
                 content: r#"{"status":"ALL_FINISHED","final_answer":"完成。"}"#.to_string(),
                 model_name: "test-model".to_string(),
                 usage: second_usage.clone(),
@@ -4523,4 +4527,139 @@ fn noop_turn_ui_uses_core_default_host_decisions() {
     assert!(ui.request_round_limit_continue(RoundLimitDecisionRequest::new(20)));
     assert!(ui.can_request_output_expansion());
     assert!(ui.request_expand_output_tokens(OutputExpansionRequest::new(10_000)));
+}
+
+struct NativeRoundTripModel {
+    business_calls: usize,
+    observed_structured_result: bool,
+    observed_native_prompt_contract: bool,
+}
+
+impl ModelClient for NativeRoundTripModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_inline_model_call".to_string())
+    }
+
+    fn call_model_interaction(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        if request
+            .tools
+            .iter()
+            .any(|tool| tool.name == "timem_capability_probe")
+        {
+            let count = usize::from(request.parallel_tool_calls) + 1;
+            return Ok(LlmResponse {
+                tool_calls: (0..count)
+                    .map(|index| crate::NativeToolCall {
+                        id: format!("probe_{index}"),
+                        name: "timem_capability_probe".to_string(),
+                        arguments: serde_json::json!({"slot": index + 1}),
+                        raw_arguments: format!("{{\"slot\":{}}}", index + 1),
+                    })
+                    .collect(),
+                content: String::new(),
+                model_name: config.model.clone(),
+                usage: usage(10, 2),
+                truncated: false,
+            });
+        }
+        self.business_calls += 1;
+        self.observed_native_prompt_contract = request
+            .rendered_prompt
+            .starts_with("[BEGIN SYSTEM PROMPT]\n")
+            && request
+                .rendered_prompt
+                .ends_with(crate::prompt_render::NATIVE_RESPONSE_TRAILER)
+            && !request
+                .rendered_prompt
+                .contains("# ASSISTANT Response Protocol")
+            && !request
+                .rendered_prompt
+                .contains("## Built-in Native Tool Schemas")
+            && !request.rendered_prompt.contains("## Actions")
+            && !request
+                .rendered_prompt
+                .contains("### Available capabilities")
+            && !request.rendered_prompt.contains("\"input_schema\"")
+            && !request.rendered_prompt.contains("\"name\": \"run_bash\"")
+            && request.tools.iter().any(|tool| tool.name == "run_bash");
+        if self.business_calls == 1 {
+            return Ok(LlmResponse {
+                tool_calls: vec![crate::NativeToolCall {
+                    id: "call_count".to_string(),
+                    name: "run_bash".to_string(),
+                    arguments: serde_json::json!({"cmd": "printf 'Rust 42\\n'"}),
+                    raw_arguments: "{\"cmd\":\"printf 'Rust 42\\\\n'\"}".to_string(),
+                }],
+                content: "正在统计。".to_string(),
+                model_name: config.model.clone(),
+                usage: usage(100, 20),
+                truncated: false,
+            });
+        }
+        self.observed_structured_result = request.native_exchanges.len() == 1
+            && request.native_exchanges[0].calls[0].id == "call_count"
+            && request.native_exchanges[0].results[0]
+                .content
+                .contains("Rust 42");
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: "统计完成：Rust 42 行。".to_string(),
+            model_name: config.model.clone(),
+            usage: usage(120, 10),
+            truncated: false,
+        })
+    }
+}
+
+#[test]
+fn native_mode_round_trips_structured_calls_and_results_before_final_text() {
+    let dir = tmp_dir("native_round_trip");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(
+        include_str!("../../../resources/system_prompt/system_prompt.md"),
+        test_profile(),
+        &dir,
+    );
+    let mut config = test_config();
+    config.model = format!("native-round-trip-{}", epoch_millis());
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+    config.interaction.parallel_tool_calls = crate::ParallelToolCalls::Auto;
+    let mut model = NativeRoundTripModel {
+        business_calls: 0,
+        observed_structured_result: false,
+        observed_native_prompt_contract: false,
+    };
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "统计代码行数",
+            session: "native_session",
+            audit_file: &audit,
+            runtime: "test",
+            run_bash_target: "test_machine",
+            additional_context: None,
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "统计完成：Rust 42 行。");
+    assert_eq!(model.business_calls, 2);
+    assert!(model.observed_structured_result);
+    assert!(model.observed_native_prompt_contract);
 }

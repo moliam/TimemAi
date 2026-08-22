@@ -449,6 +449,23 @@ server becomes connection-status evidence and does not stall agent work.
 registry used by prompt rendering, response validation, executor routing, and
 action topics. Names are namespaced as `mcp.<server>.<tool>` to avoid collisions.
 
+MCP definitions never enter the cacheable static system prompt. Inline mode
+stores complete canonical JSON definitions, MCP initialize `instructions`, and
+enable/disable updates in the ordinary persistent prompt-delta sequence. Later
+inline requests reuse those append-only deltas instead of regenerating a
+synthetic catalog for every render. Native mode filters those inline-only
+catalog/update slices out of the rendered messages. Its currently enabled MCP
+definitions exist only in the provider API `tools` field, and MCP server-wide
+instructions are carried by the corresponding native tool descriptions.
+Enabling, disabling, or changing an MCP definition therefore changes the next
+native API tools field without adding a redundant RUNTIME availability notice.
+Core decides whether to append this delta from the model-visible tool
+definitions (`name`, `description`, and `input_schema`) plus server
+`instructions`, not from raw MCP
+configuration equality. Transport, timeout, endpoint/header, credential, and
+display-metadata changes update runtime state silently when callable definitions
+are unchanged.
+
 The worker command channel orders the capability update before the user turn.
 Core compares complete MCP tool definitions with the previously applied set. A
 real add/update/remove injects one natural-language `SYSTEM` prompt component
@@ -510,8 +527,8 @@ in one response; `<status>` is rejected. A terminal `<final_answer>` is accepted
 only when preceded by one `<finish_confirm>` whose content starts with the
 protocol's exact confirmation prefix.
 
-The selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL` or
-`--response-protocol`. The default is `xml`; `json` is also available. Both
+In inline mode, the selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL`
+or `--response-protocol`. The default is `xml`; `json` is also available. Both
 suites must produce the same internal `ParsedEnvelope` semantics
 for the same user-visible capability: status/final answer, free_talk retention,
 actions, and `context_compact`.
@@ -956,8 +973,14 @@ Important invariants:
   role, such as `## ID0`.
 - The static prefix is sent through model service system-role/system-field support
   when available. Dynamic deltas go in the user message.
+- In native mode, `prompt_0` contains stable behavior and protocol guidance but
+  no complete tool definitions. Built-in and currently enabled MCP definitions
+  exist only in the native API `tools` field. Inline-only MCP catalog and
+  enable/disable slices remain persistent for lossless mode switching but are
+  filtered out of native messages.
 - Anthropic-protocol requests attach `cache_control: {"type": "ephemeral"}` to
-  the static system block and to the latest three dynamic prompt deltas. The
+  the static system block, the last built-in API tool, and the latest three
+  dynamic prompt deltas. The
   newest prompt delta can be marked cacheable because model service prefix-cache
   lookup can look backward from the newest breakpoint to prior cached prefixes
   in append-only conversations. This keeps model service cache boundaries near the
@@ -1034,15 +1057,42 @@ Limitations:
 
 ## Response Protocol And Action Execution
 
-The model does not call Rust functions directly. It sends one response in the
-currently selected response protocol. `TIMEM_RESPONSE_PROTOCOL` selects the
-model response protocol (`xml` by default; `json` optional). This
-is separate from `TIMEM_API_PROTOCOL`, which selects model HTTP payload shape.
+Core owns one provider-independent interaction IR: tool definitions, structured
+tool calls, structured tool results, assistant text, and sequential/parallel
+action groups. Provider codecs serialize that IR as OpenAI Chat Completions,
+OpenAI Responses, or Anthropic messages. This keeps provider wire details out of
+the action executor and allows a session to switch native/inline modes without
+losing structured history.
 
-Each response parses into the same runtime envelope: optional `status`, optional
-`free_talk`, optional `working_still_action`, optional `context_compact`, and
-optional `final_answer`. Protocols may express completion differently: JSON and
-Markdown use their status field/section, while XML uses a validated
+`TIMEM_TOOL_CALL_MODE` selects `auto`, `native`, or `inline`. Auto negotiation is
+single-flight per normalized gateway/model/protocol configuration: it probes one
+required call and then two parallel calls. Temporary transport failures receive
+only a short fallback cache, while verified capabilities are process-cached.
+The resolved mode and parallel capability are published to hosts and written to
+the auto-refreshing web debug `statistics.html`. The report groups request
+outcomes and detailed latency/CPU/repair metrics by model, gateway, and resolved
+tool-call protocol. `TIMEM_PARALLEL_TOOL_CALLS` controls whether the
+resolved parallel flag is enabled; provider adapters always send it explicitly.
+
+Web debug request and response dumps retain the newest ten entries per session.
+Each entry records its worker and request sequence for correlation. Native-mode
+request dumps include tool definitions and prior tool exchanges; response dumps
+include both assistant text and the provider's structured tool calls, including
+the lossless raw argument representation.
+
+Inline mode sends one response in the selected response protocol.
+`TIMEM_RESPONSE_PROTOCOL` selects `xml` (default) or `json`; native mode omits
+that protocol section, uses the API tool-call channel, and automatically renders
+the static prompt plus prompt deltas with JSON boundaries. The configured inline
+protocol is retained separately and restored if negotiation later falls back to
+inline. This is separate from `TIMEM_API_PROTOCOL`, which selects the HTTP
+payload shape.
+
+Each inline response parses into the same runtime envelope: optional `status`,
+optional `free_talk`, optional `working_still_action`, and optional
+`final_answer`. `context_compact` is an intrinsic action capability and must be
+exclusive with other actions. Protocols may express completion differently:
+JSON uses its status field, while XML uses a validated
 `<finish_confirm>` followed by `<final_answer>` as the completion branch.
 `free_talk` is the visible working note for the Thought/Action panel while
 the job is working. It is emitted to the host/UI as part of the accepted model
@@ -1139,11 +1189,10 @@ Runtime validates `discard` and `offload` delta ids against currently visible
 dynamic prompt refs. If all refs exist, it writes offloaded deltas into scratch,
 hides discarded/offloaded refs, and appends the summary as a new
 `context_compact` dynamic delta. The next prompt delta records the scratch id for
-offloaded deltas. When the worker currently has applied MCP tools, the same new
-RUNTIME delta also carries one bounded, deterministic snapshot of active MCP
-action names and server labels. It contains no endpoint, header, environment, or
-credential data; complete argument definitions remain in the current static
-capability catalog. Pending Web MCP edits are excluded until the next new-turn
+offloaded deltas. If compaction targets the active persistent MCP catalog, Core
+appends exactly one replacement catalog delta using the currently applied tool
+definitions. It contains no endpoint, header, environment, or credential data.
+Pending Web MCP edits are excluded until the next new-turn
 boundary applies them. If any ref is missing, runtime returns a
 repairable action result and does not silently discard context.
 
@@ -1355,11 +1404,13 @@ Current implemented surface:
 `self_tool` is for Timem self-information and prompt-context cwd control, not
 user memory or arbitrary local project edits. Its public contract is
 `type=path|cwd|params`, with no operation argument. `path` answers where runtime
-resources are and returns all relevant known locations. `cwd` requires
-`new_path`, resolves relative paths from the current prompt-context cwd, and on
-success returns `CWD changed to ...`. The Core action finish event then carries
-`context_state.cwd`, allowing hosts such as Web to synchronize the owning
-Session. `params` answers how the current runtime is configured and returns all
+resources are and returns all relevant known locations. `cwd` without
+`new_path` reads the current prompt-context directory and returns `CWD: ...`
+without changing state. With `new_path`, it resolves relative paths from the
+current prompt-context cwd and returns `CWD changed to: ...` on success. Only a
+successful change adds `context_state.cwd` to the Core action finish event,
+allowing hosts such as Web to synchronize the owning Session. `params` answers
+how the current runtime is configured and returns all
 relevant effective non-sensitive values. It uses an explicit parameter
 allowlist rather than dumping the Session environment; URL userinfo, query, and
 fragment data are removed before a Base URL is shown. Sensitive env values are

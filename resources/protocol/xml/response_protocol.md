@@ -1,6 +1,6 @@
 # ASSISTANT Response Protocol
 Response must be put as ONE VALID XML `<ASSISTANT>` ROOT, STRICTLY NOTHING OUTSIDE.
-Inside the root, there are several major labels: free_talk, finish_confirm, actions, context_compact, final_answer.
+Inside the root, there are several major labels: free_talk, finish_confirm, actions, final_answer.
 Their relation is(in pseudo-code for better clarification):
 ```
 need_free_talk, need_finish_confirm, decision = assistant_thought();   # decision can be overriden by finish confirm
@@ -12,7 +12,6 @@ if need_finish_confirm:
 
 switch decision:
   case "actions": EMIT_actions();
-  case "context_compact": EMIT_context_compact();
   case "final_answer": EMIT_final_answer();
   default: NEVER
 
@@ -24,10 +23,10 @@ switch decision:
 `<finish_confirm>` decides the validity of <final_answer>, its content starts exactly with prefix:
 CONFIRM_PREFIX: "Now let me think seriously twice before I announce stop. Review user's task list. Is my delivery consistent with user's demand?"
 
-Three mutually-exclusive state branch:
+Two mutually-exclusive state branches:
 - `<actions>`: work should continue, generate actions. Refer to `Actions` for available actions.
   Tool actions may include a short, descriptive `name` attribute of at most 128 characters. If omitted, the runtime injects `action_N` (per Delta, N from 0). A descriptive name helps identify results, for example: `<run_bash name="check git diff"><cmd>git diff</cmd></run_bash>`.
-- `<context_compact>`: maintain/reorganize dynamic context for future better work. Target with prompt delta ids. Two compact methods are provided:
+- `<context_compact>` is an exclusive capability inside `<actions>` that maintains/reorganizes dynamic context for future work. Target with prompt delta ids. Two compact methods are provided:
   - discard: just throw from the context.
   - offload: will be saved into scratch memory, the runtime will return a id with which you can retrieve the pd back using `memmgr` `context_compact` should only targets runtime-provided dynamic delta ids.
 prompt.
@@ -75,10 +74,11 @@ EXAMPLE3: Planned to stop, but "think twice" changes your idea and you continue 
 EXAMPLE4: context compact
 <ASSISTANT>
   <free_talk>There are too many stale things in context. I can compress it for more room. Let me discard some, and offload some stale/redundant contexts.</free_talk>
-  <context_compact>
-    <discard>pd_1,pd_3,pd_8,pd_9,pd_10,pd_11</discard>
-    <offload>pd_2</offload>
-    <summary>
+  <actions>
+    <context_compact>
+      <discard>pd_1,pd_3,pd_8,pd_9,pd_10,pd_11</discard>
+      <offload>pd_2</offload>
+      <summary>
     ![CDATA[
     The current user's task is: ...
     The whole picture of active works' status are:
@@ -91,6 +91,7 @@ EXAMPLE4: context compact
     (long complex cmd) gives important insight: ....
 
     Valuable runtime info: ....
-    ]]</summary>
-  </context_compact>
+      ]]</summary>
+    </context_compact>
+  </actions>
 </ASSISTANT>
