@@ -250,6 +250,15 @@ export function resolveActiveSessionId(currentSessionId: string, sessions: Pick<
   return sessions[0]?.session_id ?? "";
 }
 
+export function composerPrimaryAction(
+  sessionState: Pick<Session, "state">["state"] | undefined,
+  text: string,
+  isCancelling: boolean,
+): "send" | "stop" {
+  if (isCancelling) return "stop";
+  return sessionState === "working" && !text.trim() ? "stop" : "send";
+}
+
 export function composerSendDecision(
   session: Pick<Session, "session_id" | "state"> | undefined,
   text: string,

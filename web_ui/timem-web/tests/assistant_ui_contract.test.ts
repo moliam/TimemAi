@@ -157,7 +157,7 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".attachment-strip { align-items: stretch; }");
     expect(styles).toContain(".pending-attachment { width: 100%; max-width: none; }");
     expect(styles).toContain(".completion-card span { white-space: normal; }");
-    expect(source).toContain('{activeSession?.state === "working" && <button className={`stop-button ${isCancelling ? "sending" : ""}`');
+    expect(source).toContain('{showStopAction ? <button className={`stop-button ${isCancelling ? "sending" : ""}`');
   });
 
   it("makes disabled high-frequency controls visibly non-interactive", () => {
@@ -191,7 +191,9 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("queues working-turn input while keeping an explicit supplement escape hatch", () => {
-    expect(source).toContain('const sendLabel = isCancelling ? "Cancellation in progress" : activeSession?.state === "working" ? "Queue message" : "Send message";');
+    expect(source).toContain('const hasDraftText = !!draft.trim();');
+    expect(source).toContain('const showStopAction = composerPrimaryAction(activeSession?.state, draft, isCancelling) === "stop";');
+    expect(source).toContain('const sendLabel = activeSession?.state === "working" ? "Queue message" : "Send message";');
     expect(source).toContain('const missingSessionHint = activeSession ? "" : "Create a session before using Timem";');
     expect(source).toContain('const uploadingAttachmentText = uploadingAttachmentFile ? `Uploading ${uploadingAttachmentFile.name}` : "Uploading file…";');
     expect(source).toContain('`${uploadingAttachmentText} · send is paused until it finishes`');
@@ -206,10 +208,11 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('<span className="composer-cwd-inline" title={activeSession.current_dir}><b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span></span>');
     expect(source).toContain('title={effectiveSendLabel}');
     expect(source).toContain('aria-label={effectiveSendLabel}');
-    expect(source).toContain('className={`send-button ${submittingDraft ? "sending" : ""}`}');
+    expect(source).toContain('{showStopAction ? <button className={`stop-button ${isCancelling ? "sending" : ""}`}');
+    expect(source).toContain(': <button className={`send-button ${submittingDraft ? "sending" : ""}`}');
     expect(source).toContain('{submittingDraft ? <LoaderCircle size={17}/> : <Send size={17}/>}');
     expect(styles).toContain(".send-button.sending svg");
-    expect(source).toContain('className={`stop-button ${isCancelling ? "sending" : ""}`}');
+    expect(source).toContain('disabled={!activeSession || !hasDraftText || submittingDraft || uploadingAttachment || sessionInteractionLocked}');
     expect(source).toContain('{isCancelling ? <LoaderCircle size={17}/> : <CircleStop size={17}/>} {isCancelling ? "Stopping…" : "Stop"}');
     expect(styles).toContain(".stop-button.sending svg");
     expect(styles).toContain(".send-button.sending svg, .stop-button.sending svg");
@@ -978,7 +981,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain("sessionIds={sessions.map((session) => session.session_id)}");
     expect(source).toContain("pruneSessionDrafts(current, sessionIds)");
     expect(source).toContain("pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds)");
-    expect(source).toContain("disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}");
+    expect(source).toContain("disabled={!activeSession || !hasDraftText || submittingDraft || uploadingAttachment || sessionInteractionLocked}");
     expect(source).toContain("pendingAttachmentRemoveIdsRef");
     expect(source).toContain("pendingDecisionKeysRef");
     expect(source).toContain("pendingRenameSessionIdsRef");
@@ -1003,7 +1006,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain("if (pendingMemSwitch) return;");
     expect(source).toContain('reason === "mem_switching"');
     expect(source).toContain("disabled={!activeSession || sessionInteractionLocked}");
-    expect(source).toContain("disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}");
+    expect(source).toContain("disabled={!activeSession || !hasDraftText || submittingDraft || uploadingAttachment || sessionInteractionLocked}");
     expect(source).toContain("disabled={loadingHistory || sessionInteractionLocked}");
     expect(source).toContain("disabled={removing || sessionInteractionLocked}");
     expect(source).toContain("const disabled = pending || locked;");
@@ -1548,7 +1551,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('title={attachTitle}');
     expect(source).toContain('aria-label={attachLabel}');
     expect(source).toContain("disabled={!activeSession || uploadingAttachment || sessionInteractionLocked}");
-    expect(source).toContain("disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}");
+    expect(source).toContain("disabled={!activeSession || !hasDraftText || submittingDraft || uploadingAttachment || sessionInteractionLocked}");
     expect(source).toContain('aria-label={attachmentStripLabel} aria-live="polite" aria-busy={uploadingAttachment || undefined}');
     expect(source).toContain('uploadingAttachment && <div className="pending-attachment uploading" role="status"');
     expect(source).toContain('aria-label={uploadingAttachmentFile ? `${uploadingAttachmentText}, ${formatBytes(uploadingAttachmentFile.bytes)}` : uploadingAttachmentText}');
