@@ -61,14 +61,20 @@ input_schema: |
     },
     "x-required-any": [["cmd", "loop_cmd"]],
     "oneOf": [
+      {"required": ["cmd"]},
+      {"required": ["loop_cmd"]}
+    ],
+    "allOf": [
       {
-        "required": ["cmd"],
-        "not": {"anyOf": [{"required": ["loop_cmd"]}, {"required": ["interval_ms"]}]}
+        "if": {"required": ["loop_cmd"]},
+        "then": {
+          "required": ["interval_ms"],
+          "properties": {"background": {"enum": [false]}}
+        }
       },
       {
-        "required": ["loop_cmd", "interval_ms"],
-        "not": {"required": ["cmd"]},
-        "properties": {"background": {"enum": [false]}}
+        "if": {"required": ["interval_ms"]},
+        "then": {"required": ["loop_cmd"]}
       }
     ]
   }
