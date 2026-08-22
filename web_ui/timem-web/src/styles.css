@@ -11,7 +11,7 @@
 :root[data-agent-chinese-font="heiti"] { --agent-chinese-font: "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans CJK SC", sans-serif; }
 :root[data-agent-chinese-font="kaiti"] { --agent-chinese-font: Kaiti SC, STKaiti, KaiTi, "FZKai-Z03", "Noto Serif CJK SC", serif; }
 :root[data-agent-chinese-font="songti"] { --agent-chinese-font: "Songti SC", STSong, SimSun, "Source Han Serif SC", "Noto Serif CJK SC", serif; }
-:root[data-user-bold="true"] { --user-font-weight: 650; }
+:root[data-user-bold="true"] { --user-font-weight: 550; }
 :root[data-agent-bold="true"] { --agent-font-weight: 650; }
 :root[data-text-size="small"] { --content-size: 12.6px; }
 :root[data-text-size="large"] { --content-size: 14.4px; }
