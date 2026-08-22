@@ -77,7 +77,8 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(rendered.contains("Read a bounded range from a normal text file"));
     assert!(!rendered.contains("Byte numbers address the original"));
     assert!(!rendered.contains("macOS and Linux"));
-    assert!(rendered.contains("Ask for path when you need to know where something is"));
+    assert!(rendered.contains("Ask for path when you need to know where runtime resources are"));
+    assert!(rendered.contains("Use cwd without"));
     assert!(rendered.contains("Ask for params when"));
     assert!(rendered.contains("Allowed: `path`, `cwd`, `params`"));
     assert!(rendered.contains("`new_path`:"));
@@ -206,8 +207,7 @@ fn registry_validates_required_input_fields_from_manifest() {
             "self_tool",
             &json_object([("type", Value::String("cwd".to_string()))]),
         )
-        .unwrap_err()
-        .contains("input.new_path_required_when_type=cwd"));
+        .is_ok());
     assert!(registry
         .validate_action_input(
             "self_tool",
@@ -898,6 +898,24 @@ example_json: |
 
     let err = CapabilityRegistry::builtin_with_overlay_dir(&dir).unwrap_err();
     assert!(err.contains("ghost:unsupported_builtin_binding"));
+}
+
+#[test]
+fn native_tool_schemas_use_gateway_compatible_single_value_enums() {
+    let registry = CapabilityRegistry::builtin();
+    let tools = registry.native_tool_definitions();
+    for tool in &tools {
+        let schema = serde_json::to_string(&tool.input_schema).unwrap();
+        assert!(
+            !schema.contains("\"const\":"),
+            "native schema for {} contains unsupported const: {schema}",
+            tool.name
+        );
+    }
+    let memmgr = tools.iter().find(|tool| tool.name == "memmgr").unwrap();
+    let condition = &memmgr.input_schema["allOf"][0]["if"];
+    assert!(condition.get("properties").is_some());
+    assert_eq!(condition["required"], serde_json::json!(["op", "type"]));
 }
 
 fn temp_capability_dir(name: &str) -> PathBuf {

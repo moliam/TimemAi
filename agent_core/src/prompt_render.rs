@@ -1,36 +1,26 @@
 use crate::capability::CapabilityRegistry;
 use crate::prompt_spec;
 use crate::response_protocol::{PromptBoundarySpec, ResponseProtocolSuite};
+use crate::tool_result_gate::{self, Retention};
 use crate::{
     ActionStatus, BashResultEvidence, MemmgrResultEvidence, PromptDelta, PromptSlice,
-    ReadfileResultEvidence, SelfToolResultEvidence,
+    ReadfileResultEvidence, SelfToolResultEvidence, ToolCallMode,
 };
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 pub(crate) const RESPONSE_TRAILER: &str =
     "Please continue the work and respond as protocol requires in user's language:";
-pub(crate) const MAX_ACTION_RESULT_PROMPT_BYTES: usize = 32 * 1024;
+pub(crate) const NATIVE_RESPONSE_TRAILER: &str = "Continue the work in the user's language. Call API tools when more evidence or actions are needed; otherwise give the final user-facing answer:";
+const NATIVE_PROTOCOL_SECTION: &str = "## Native Tool Calling\n\nCapabilities are provided through the model API. Call them through the API tool-call channel. You may request independent calls together. Text accompanying calls is a user-visible progress note. A response with no tool calls is the final user-facing answer. `context_compact` is an ordinary runtime capability and is exclusive with other calls in the same response.";
+const NATIVE_RESPONSE_MODE_INSTRUCTION: &str = "Use the API's native tool-call channel for runtime capabilities. Ordinary response text is user-visible; text without tool calls finishes the loop.";
+const INLINE_RESPONSE_MODE_INSTRUCTION: &str =
+    "Your response MUST be exactly protocol-compliant in the response protocol below.";
+const INLINE_TOOL_CATALOG_SECTION_HEADING: &str = "## Actions\n\nGenerate actions to drive the runtime to do things for you. There are several builtin actions:\n\n### Available capabilities";
+pub(crate) const MAX_ACTION_RESULT_PROMPT_BYTES: usize =
+    tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES;
 
 pub(crate) fn truncate_action_result_for_prompt(text: &str) -> String {
-    if text.len() <= MAX_ACTION_RESULT_PROMPT_BYTES {
-        return text.to_string();
-    }
-    let mut retained_budget = MAX_ACTION_RESULT_PROMPT_BYTES;
-    loop {
-        let mut retained_end = retained_budget.min(text.len());
-        while retained_end > 0 && !text.is_char_boundary(retained_end) {
-            retained_end -= 1;
-        }
-        let truncated_words = text[retained_end..].split_whitespace().count();
-        let notice = format!(
-            "!!!Too long, {truncated_words} words truncated. Generate more actions if necessary !!!"
-        );
-        let next_budget = MAX_ACTION_RESULT_PROMPT_BYTES.saturating_sub(notice.len() + 1);
-        if next_budget == retained_budget {
-            return format!("{}\n{notice}", text[..retained_end].trim_end());
-        }
-        retained_budget = next_budget;
-    }
+    tool_result_gate::gate(text, Retention::Head)
 }
 
 pub(crate) fn formatted_response_trailer(
@@ -42,12 +32,14 @@ pub(crate) fn formatted_response_trailer(
 
 pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, Option<String>) {
     let trimmed = rendered_prompt.trim_end();
-    let marker = format!("\n\n{RESPONSE_TRAILER}");
-    let Some(trailer_start) = trimmed.strip_suffix(&marker).map(str::len) else {
-        return (rendered_prompt, None);
-    };
-    let prefix = trimmed[..trailer_start].trim_end();
-    (prefix, Some(RESPONSE_TRAILER.to_string()))
+    for trailer in [RESPONSE_TRAILER, NATIVE_RESPONSE_TRAILER] {
+        let marker = format!("\n\n{trailer}");
+        if let Some(trailer_start) = trimmed.strip_suffix(&marker).map(str::len) {
+            let prefix = trimmed[..trailer_start].trim_end();
+            return (prefix, Some(trailer.to_string()));
+        }
+    }
+    (rendered_prompt, None)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,57 +94,26 @@ fn escape_xml_attribute(text: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn escaped_xml_text_len(text: &str) -> usize {
-    text.chars()
-        .map(|ch| match ch {
-            '&' => 5,
-            '<' | '>' => 4,
-            _ => ch.len_utf8(),
-        })
-        .sum()
-}
-
-fn xml_prefix_end_for_escaped_budget(text: &str, budget: usize) -> usize {
-    let mut escaped_bytes = 0usize;
-    let mut end = 0usize;
-    for (index, ch) in text.char_indices() {
-        let char_bytes = match ch {
-            '&' => 5,
-            '<' | '>' => 4,
-            _ => ch.len_utf8(),
-        };
-        if escaped_bytes.saturating_add(char_bytes) > budget {
+fn truncate_xml_result_text_for_budget(text: &str, budget: usize, retention: Retention) -> String {
+    // Escaping can expand the payload, so find the largest raw budget whose escaped,
+    // already-gated representation still fits the XML envelope.
+    let mut low = 0usize;
+    let mut high = budget.min(text.len());
+    let mut best = String::new();
+    while low <= high {
+        let candidate_budget = low + (high - low) / 2;
+        let candidate = tool_result_gate::fit(text, candidate_budget, retention);
+        let escaped = escape_xml_text(&candidate);
+        if escaped.len() <= budget {
+            best = escaped;
+            low = candidate_budget.saturating_add(1);
+        } else if candidate_budget == 0 {
             break;
+        } else {
+            high = candidate_budget - 1;
         }
-        escaped_bytes += char_bytes;
-        end = index + ch.len_utf8();
     }
-    end
-}
-
-fn truncate_xml_result_text_for_budget(text: &str, budget: usize) -> String {
-    if escaped_xml_text_len(text) <= budget {
-        return escape_xml_text(text);
-    }
-
-    let mut retained_end = xml_prefix_end_for_escaped_budget(text, budget);
-    loop {
-        let truncated_words = text[retained_end..].split_whitespace().count();
-        let notice = format!(
-            "!!!Too long, {truncated_words} words truncated. Generate more actions if necessary !!!"
-        );
-        let notice_bytes = escaped_xml_text_len(&notice).saturating_add(1);
-        let retained_budget = budget.saturating_sub(notice_bytes);
-        let next_end = xml_prefix_end_for_escaped_budget(text, retained_budget);
-        if next_end == retained_end {
-            return format!(
-                "{}\n{}",
-                escape_xml_text(text[..retained_end].trim_end()),
-                escape_xml_text(&notice)
-            );
-        }
-        retained_end = next_end;
-    }
+    best
 }
 
 fn action_output_id(output: &str, time_ms: i64) -> String {
@@ -195,33 +156,12 @@ fn action_lifecycle_status(status: ActionStatus) -> &'static str {
     }
 }
 
-fn truncate_raw_text_for_budget(text: &str, budget: usize) -> String {
-    if text.len() <= budget {
-        return text.to_string();
-    }
-    let mut retained_budget = budget;
-    loop {
-        let mut retained_end = retained_budget.min(text.len());
-        while retained_end > 0 && !text.is_char_boundary(retained_end) {
-            retained_end -= 1;
-        }
-        let truncated_words = text[retained_end..].split_whitespace().count();
-        let notice = format!(
-            "!!!Too long, {truncated_words} words truncated. Generate more actions if necessary !!!"
-        );
-        let next_budget = budget.saturating_sub(notice.len() + 1);
-        if next_budget == retained_budget {
-            return format!("{}\n{notice}", text[..retained_end].trim_end());
-        }
-        retained_budget = next_budget;
-    }
-}
-
-pub(crate) fn render_xml_bash_result(
+pub(crate) fn render_xml_bash_result_with_retention(
     action_name: Option<&str>,
     status: ActionStatus,
     evidence: &BashResultEvidence,
     output_time_ms: i64,
+    retention: Retention,
 ) -> String {
     let task = action_name
         .map(str::trim)
@@ -281,8 +221,8 @@ pub(crate) fn render_xml_bash_result(
         let body_budget = MAX_ACTION_RESULT_PROMPT_BYTES.saturating_sub(fixed);
         let stdout_budget = body_budget / 2;
         let stderr_budget = body_budget.saturating_sub(stdout_budget);
-        let stdout = truncate_raw_text_for_budget(evidence.stdout.trim_end(), stdout_budget);
-        let stderr = truncate_raw_text_for_budget(evidence.stderr.trim_end(), stderr_budget);
+        let stdout = tool_result_gate::fit(evidence.stdout.trim_end(), stdout_budget, retention);
+        let stderr = tool_result_gate::fit(evidence.stderr.trim_end(), stderr_budget, retention);
         return format!(
             "{prefix}{out_open}{stdout}{out_close}{err_open}{stderr}{err_close}{suffix}"
         );
@@ -297,8 +237,24 @@ pub(crate) fn render_xml_bash_result(
     let close = format!("\nOUTPUT_{id}");
     let fixed = prefix.len() + suffix.len() + open.len() + close.len();
     let body_budget = MAX_ACTION_RESULT_PROMPT_BYTES.saturating_sub(fixed);
-    let content = truncate_raw_text_for_budget(content.trim_end(), body_budget);
+    let content = tool_result_gate::fit(content.trim_end(), body_budget, retention);
     format!("{prefix}{open}{content}{close}{suffix}")
+}
+
+#[cfg(test)]
+pub(crate) fn render_xml_bash_result(
+    action_name: Option<&str>,
+    status: ActionStatus,
+    evidence: &BashResultEvidence,
+    output_time_ms: i64,
+) -> String {
+    render_xml_bash_result_with_retention(
+        action_name,
+        status,
+        evidence,
+        output_time_ms,
+        Retention::Head,
+    )
 }
 
 fn specialized_boundary_id(
@@ -333,15 +289,28 @@ fn append_xml_attribute(attributes: &mut String, name: &str, value: &str) {
     attributes.push('"');
 }
 
-fn render_xml_specialized_result(
-    root: &str,
-    task: &str,
+struct XmlSpecializedResult<'a> {
+    root: &'a str,
+    task: &'a str,
     status: ActionStatus,
-    mut attributes: String,
-    content: &str,
-    error_type: Option<&str>,
+    attributes: String,
+    content: &'a str,
+    error_type: Option<&'a str>,
     output_time_ms: i64,
-) -> String {
+    retention: Retention,
+}
+
+fn render_xml_specialized_result(result: XmlSpecializedResult<'_>) -> String {
+    let XmlSpecializedResult {
+        root,
+        task,
+        status,
+        mut attributes,
+        content,
+        error_type,
+        output_time_ms,
+        retention,
+    } = result;
     append_xml_attribute(&mut attributes, "status", action_lifecycle_status(status));
     if let Some(error_type) = error_type {
         append_xml_attribute(&mut attributes, "error_type", error_type);
@@ -364,15 +333,16 @@ fn render_xml_specialized_result(
     let close = format!("\n{label}_{id}");
     let fixed = prefix.len() + suffix.len() + open.len() + close.len();
     let body_budget = MAX_ACTION_RESULT_PROMPT_BYTES.saturating_sub(fixed);
-    let content = truncate_raw_text_for_budget(content.trim_end(), body_budget);
+    let content = tool_result_gate::fit(content.trim_end(), body_budget, retention);
     format!("{prefix}{open}{content}{close}{suffix}")
 }
 
-pub(crate) fn render_xml_readfile_result(
+pub(crate) fn render_xml_readfile_result_with_retention(
     action_name: Option<&str>,
     status: ActionStatus,
     evidence: &ReadfileResultEvidence,
     output_time_ms: i64,
+    retention: Retention,
 ) -> String {
     let task = action_name
         .map(str::trim)
@@ -404,22 +374,40 @@ pub(crate) fn render_xml_readfile_result(
     if let Some(tail_out) = evidence.tail_out {
         append_xml_attribute(&mut attributes, "tail_out", &tail_out.to_string());
     }
-    render_xml_specialized_result(
-        "readfile_result",
+    render_xml_specialized_result(XmlSpecializedResult {
+        root: "readfile_result",
         task,
         status,
         attributes,
-        &evidence.content,
-        evidence.error_type.as_deref(),
+        content: &evidence.content,
+        error_type: evidence.error_type.as_deref(),
         output_time_ms,
+        retention,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn render_xml_readfile_result(
+    action_name: Option<&str>,
+    status: ActionStatus,
+    evidence: &ReadfileResultEvidence,
+    output_time_ms: i64,
+) -> String {
+    render_xml_readfile_result_with_retention(
+        action_name,
+        status,
+        evidence,
+        output_time_ms,
+        Retention::Head,
     )
 }
 
-pub(crate) fn render_xml_memmgr_result(
+pub(crate) fn render_xml_memmgr_result_with_retention(
     action_name: Option<&str>,
     status: ActionStatus,
     evidence: &MemmgrResultEvidence,
     output_time_ms: i64,
+    retention: Retention,
 ) -> String {
     let task = action_name
         .map(str::trim)
@@ -428,22 +416,40 @@ pub(crate) fn render_xml_memmgr_result(
     let mut attributes = String::new();
     append_xml_attribute(&mut attributes, "type", &evidence.memory_type);
     append_xml_attribute(&mut attributes, "op", &evidence.op);
-    render_xml_specialized_result(
-        "memmgr_result",
+    render_xml_specialized_result(XmlSpecializedResult {
+        root: "memmgr_result",
         task,
         status,
         attributes,
-        &evidence.content,
-        evidence.error_type.as_deref(),
+        content: &evidence.content,
+        error_type: evidence.error_type.as_deref(),
         output_time_ms,
+        retention,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn render_xml_memmgr_result(
+    action_name: Option<&str>,
+    status: ActionStatus,
+    evidence: &MemmgrResultEvidence,
+    output_time_ms: i64,
+) -> String {
+    render_xml_memmgr_result_with_retention(
+        action_name,
+        status,
+        evidence,
+        output_time_ms,
+        Retention::Head,
     )
 }
 
-pub(crate) fn render_xml_self_tool_result(
+pub(crate) fn render_xml_self_tool_result_with_retention(
     action_name: Option<&str>,
     status: ActionStatus,
     evidence: &SelfToolResultEvidence,
     output_time_ms: i64,
+    retention: Retention,
 ) -> String {
     let task = action_name
         .map(str::trim)
@@ -454,22 +460,40 @@ pub(crate) fn render_xml_self_tool_result(
     if let Some(cwd) = evidence.cwd.as_deref() {
         append_xml_attribute(&mut attributes, "cwd", cwd);
     }
-    render_xml_specialized_result(
-        "self_tool_result",
+    render_xml_specialized_result(XmlSpecializedResult {
+        root: "self_tool_result",
         task,
         status,
         attributes,
-        &evidence.content,
-        evidence.error_type.as_deref(),
+        content: &evidence.content,
+        error_type: evidence.error_type.as_deref(),
         output_time_ms,
+        retention,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn render_xml_self_tool_result(
+    action_name: Option<&str>,
+    status: ActionStatus,
+    evidence: &SelfToolResultEvidence,
+    output_time_ms: i64,
+) -> String {
+    render_xml_self_tool_result_with_retention(
+        action_name,
+        status,
+        evidence,
+        output_time_ms,
+        Retention::Head,
     )
 }
 
-pub(crate) fn render_xml_action_result(
+pub(crate) fn render_xml_action_result_with_retention(
     action: &str,
     action_name: Option<&str>,
     result: &str,
     output_time_ms: i64,
+    retention: Retention,
 ) -> String {
     let display_name = action_name
         .map(str::trim)
@@ -484,8 +508,24 @@ pub(crate) fn render_xml_action_result(
     let body_budget = MAX_ACTION_RESULT_PROMPT_BYTES
         .saturating_sub(prefix.len())
         .saturating_sub(suffix.len());
-    let escaped_result = truncate_xml_result_text_for_budget(output, body_budget);
+    let escaped_result = truncate_xml_result_text_for_budget(output, body_budget, retention);
     format!("{prefix}{escaped_result}{suffix}")
+}
+
+#[cfg(test)]
+pub(crate) fn render_xml_action_result(
+    action: &str,
+    action_name: Option<&str>,
+    output: &str,
+    output_time_ms: i64,
+) -> String {
+    render_xml_action_result_with_retention(
+        action,
+        action_name,
+        output,
+        output_time_ms,
+        Retention::Head,
+    )
 }
 
 fn render_prompt_context_structure(
@@ -552,6 +592,7 @@ fn render_prompt_delta_example(
     example
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn render_static_prompt(
     static_prompt: &str,
     capabilities: &CapabilityRegistry,
@@ -559,11 +600,38 @@ pub(crate) fn render_static_prompt(
     assistant_heading: &str,
     startup_stamp: &str,
 ) -> String {
+    render_static_prompt_for_mode(
+        static_prompt,
+        capabilities,
+        protocol_suite,
+        assistant_heading,
+        startup_stamp,
+        ToolCallMode::Inline,
+    )
+}
+
+pub(crate) fn render_static_prompt_for_mode(
+    static_prompt: &str,
+    capabilities: &CapabilityRegistry,
+    protocol_suite: &dyn ResponseProtocolSuite,
+    assistant_heading: &str,
+    startup_stamp: &str,
+    tool_call_mode: ToolCallMode,
+) -> String {
     // 1. Fill {{RESPONSE_PROTOCOL_SECTION}} from protocol suite
-    let with_protocol = static_prompt.replace(
-        "{{RESPONSE_PROTOCOL_SECTION}}",
-        &protocol_suite.protocol_prompt_section(),
-    );
+    let protocol_section = if tool_call_mode == ToolCallMode::Native {
+        NATIVE_PROTOCOL_SECTION.to_string()
+    } else {
+        protocol_suite.protocol_prompt_section()
+    };
+    let with_protocol = static_prompt.replace("{{RESPONSE_PROTOCOL_SECTION}}", &protocol_section);
+    let response_mode_instruction = if tool_call_mode == ToolCallMode::Native {
+        NATIVE_RESPONSE_MODE_INSTRUCTION
+    } else {
+        INLINE_RESPONSE_MODE_INSTRUCTION
+    };
+    let with_protocol =
+        with_protocol.replace("{{RESPONSE_MODE_INSTRUCTION}}", response_mode_instruction);
     let with_protocol =
         with_protocol.replace("{{CURRENT_PROTOCOL_LANG}}", protocol_suite.lang_format());
     let with_protocol = with_protocol.replace(
@@ -581,9 +649,19 @@ pub(crate) fn render_static_prompt(
     let with_protocol = with_protocol.replace("{{ASSSISTANT_ID}}", assistant_heading);
     let with_protocol = with_protocol.replace("ASSSISTANT_ID", assistant_heading);
     let with_protocol = with_protocol.replace("{{STARTUP_STAMP}}", startup_stamp);
+    let tool_catalog_heading = if tool_call_mode == ToolCallMode::Native {
+        ""
+    } else {
+        INLINE_TOOL_CATALOG_SECTION_HEADING
+    };
+    let with_protocol =
+        with_protocol.replace("{{TOOL_CATALOG_SECTION_HEADING}}", tool_catalog_heading);
     // 2. Fill {{TOOL_CATALOG}} from capabilities
-    let with_caps = capabilities
-        .enrich_static_prompt_for_protocol(&with_protocol, protocol_suite.lang_format());
+    let with_caps = if tool_call_mode == ToolCallMode::Native {
+        with_protocol.replace("{{TOOL_CATALOG}}", "")
+    } else {
+        capabilities.enrich_static_prompt_for_protocol(&with_protocol, protocol_suite.lang_format())
+    };
     // 3. Fill {{RESPONSE_V1_SCHEMA}} from prompt_spec
     let static_prompt = prompt_spec::enrich_static_prompt_with_response_schema(
         &with_caps,
@@ -595,16 +673,33 @@ pub(crate) fn render_static_prompt(
         .wrap_static_prompt(&static_prompt)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn render_prompt_with_rendered_static(
     rendered_static_prompt: &str,
     deltas: &[PromptDelta],
     assistant_heading: &str,
     protocol_suite: &dyn ResponseProtocolSuite,
 ) -> String {
+    render_prompt_with_rendered_static_for_mode(
+        rendered_static_prompt,
+        deltas,
+        assistant_heading,
+        protocol_suite,
+        ToolCallMode::Inline,
+    )
+}
+
+pub(crate) fn render_prompt_with_rendered_static_for_mode(
+    rendered_static_prompt: &str,
+    deltas: &[PromptDelta],
+    assistant_heading: &str,
+    protocol_suite: &dyn ResponseProtocolSuite,
+    tool_call_mode: ToolCallMode,
+) -> String {
     let mut out = rendered_static_prompt.to_string();
 
     for delta in deltas {
-        let slices = render_delta_slices(delta);
+        let slices = render_delta_slices_for_mode(delta, tool_call_mode);
         if slices.is_empty() {
             continue;
         }
@@ -693,10 +788,14 @@ pub(crate) fn render_prompt_with_rendered_static(
     }
 
     out.push_str("\n\n");
-    out.push_str(&formatted_response_trailer(
-        protocol_suite.response_shape_hint(),
-        assistant_heading,
-    ));
+    if tool_call_mode == ToolCallMode::Native {
+        out.push_str(NATIVE_RESPONSE_TRAILER);
+    } else {
+        out.push_str(&formatted_response_trailer(
+            protocol_suite.response_shape_hint(),
+            assistant_heading,
+        ));
+    }
     out
 }
 
@@ -705,6 +804,22 @@ pub(crate) fn render_prompt_slices(deltas: &[PromptDelta]) -> Vec<PromptSlice> {
         .iter()
         .flat_map(render_delta_slices)
         .collect::<Vec<_>>()
+}
+
+fn render_delta_slices_for_mode(
+    delta: &PromptDelta,
+    tool_call_mode: ToolCallMode,
+) -> Vec<PromptSlice> {
+    render_delta_slices(delta)
+        .into_iter()
+        .filter(|slice| {
+            tool_call_mode != ToolCallMode::Native
+                || !matches!(
+                    slice.prompt_type.as_str(),
+                    "mcp_capability_catalog" | "mcp_capability_update"
+                )
+        })
+        .collect()
 }
 
 pub(crate) fn render_delta_slices(delta: &PromptDelta) -> Vec<PromptSlice> {

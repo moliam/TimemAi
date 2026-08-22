@@ -1,7 +1,9 @@
 use super::*;
+use crate::{NativeToolChoice, ToolCallMode};
 
 fn config(api_protocol: ApiProtocol) -> ModelServiceConfig {
     ModelServiceConfig {
+        interaction: Default::default(),
         model: "test-model".to_string(),
         base_url: "https://example.invalid/v1".to_string(),
         api_key: "dummy".to_string(),
@@ -834,4 +836,118 @@ fn model_http_error_is_resilient_to_unusual_bodies() {
         assert!(rendered.starts_with("model_http_500"));
         assert!(rendered.len() < 280);
     }
+}
+
+fn native_request() -> ModelInteractionRequest {
+    ModelInteractionRequest {
+        rendered_prompt: "SYSTEM PROMPT\n\n---USER---\ncount files".to_string(),
+        static_tool_count: 1,
+        tools: vec![ToolDefinition {
+            name: "count_lines".to_string(),
+            description: "Count source lines.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"language": {"type": "string"}},
+                "required": ["language"]
+            }),
+        }],
+        native_exchanges: Vec::new(),
+        resolved_mode: ToolCallMode::Native,
+        parallel_tool_calls: true,
+        tool_choice: NativeToolChoice::Auto,
+    }
+}
+
+#[test]
+fn native_tool_wires_are_provider_specific_and_parallel_is_explicit() {
+    let chat_body = prepare_model_interaction_http_request(
+        &config(ApiProtocol::OpenAiCompatible),
+        &native_request(),
+    )
+    .model_request
+    .body;
+    assert_eq!(chat_body["parallel_tool_calls"], json!(true));
+    assert_eq!(chat_body["tools"][0]["function"]["name"], "count_lines");
+
+    let responses_body = prepare_model_interaction_http_request(
+        &config(ApiProtocol::OpenAiResponses),
+        &native_request(),
+    )
+    .model_request
+    .body;
+    assert_eq!(responses_body["tools"][0]["name"], "count_lines");
+    assert!(responses_body["input"].is_array());
+
+    let anthropic_body =
+        prepare_model_interaction_http_request(&config(ApiProtocol::Anthropic), &native_request())
+            .model_request
+            .body;
+    assert_eq!(anthropic_body["tools"][0]["name"], "count_lines");
+    assert_eq!(
+        anthropic_body["tools"][0]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+    assert_eq!(
+        anthropic_body["tool_choice"]["disable_parallel_tool_use"],
+        json!(false)
+    );
+}
+
+#[test]
+fn anthropic_native_cache_breakpoint_ends_at_static_builtin_tool_prefix() {
+    let mut request = native_request();
+    request.tools.push(ToolDefinition {
+        name: "mcp.demo.search".to_string(),
+        description: "Dynamic MCP search.".to_string(),
+        input_schema: json!({"type": "object"}),
+    });
+    let prepared =
+        prepare_model_interaction_http_request(&config(ApiProtocol::Anthropic), &request);
+    let tools = prepared.model_request.body["tools"].as_array().unwrap();
+    assert_eq!(tools[0]["name"], "count_lines");
+    assert_eq!(tools[0]["cache_control"], json!({"type": "ephemeral"}));
+    assert_eq!(tools[1]["name"], "mcp.demo.search");
+    assert!(tools[1].get("cache_control").is_none());
+    assert!(prepared.model_request.cache_mark_count >= 1);
+}
+
+#[test]
+fn openai_compatible_tool_calls_do_not_depend_on_finish_reason() {
+    let response = parse_model_response(
+        &config(ApiProtocol::OpenAiCompatible),
+        &json!({
+            "choices": [{
+                "message": {"content": null, "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "count_lines", "arguments": "{\"language\":\"Rust\"}"}
+                }]},
+                "finish_reason": "stop"
+            }],
+            "usage": {}
+        }),
+    )
+    .unwrap();
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_eq!(response.tool_calls[0].arguments["language"], "Rust");
+}
+
+#[test]
+fn openai_compatible_sse_assembles_parallel_tool_arguments_by_index() {
+    let first = json!({"choices":[{"delta":{"tool_calls":[
+        {"index":0,"id":"a","function":{"name":"count_lines","arguments":"{\"lang\""}},
+        {"index":1,"id":"b","function":{"name":"count_lines","arguments":"{\"lang\""}}
+    ]}}]});
+    let second = json!({"choices":[{"delta":{"tool_calls":[
+        {"index":0,"function":{"arguments":":\"Rust\"}"}},
+        {"index":1,"function":{"arguments":":\"Go\"}"}}
+    ]},"finish_reason":"tool_calls"}],"usage":{}});
+    let body = format!("data: {first}\n\ndata: {second}\n\ndata: [DONE]\n");
+    let response =
+        interpret_model_http_response(&config(ApiProtocol::OpenAiCompatible), 200, &body, "")
+            .result
+            .unwrap();
+    assert_eq!(response.tool_calls.len(), 2);
+    assert_eq!(response.tool_calls[0].arguments["lang"], "Rust");
+    assert_eq!(response.tool_calls[1].arguments["lang"], "Go");
 }

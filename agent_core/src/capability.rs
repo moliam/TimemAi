@@ -5,9 +5,12 @@ use std::path::{Path, PathBuf};
 
 use crate::mcp::McpTool;
 use crate::prompt_spec::replace_markdown_placeholder_with_text;
+use crate::ToolDefinition;
 
 const MEMMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/memmgr.yaml");
 const CAPMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/capmgr.yaml");
+const CONTEXT_COMPACT_MANIFEST: &str =
+    include_str!("../../resources/capabilities/tools/context_compact.yaml");
 const READFILE_MANIFEST: &str = include_str!("../../resources/capabilities/tools/readfile.yaml");
 const RUN_BASH_MANIFEST: &str = include_str!("../../resources/capabilities/tools/run_bash.yaml");
 const SELF_TOOL_MANIFEST: &str = include_str!("../../resources/capabilities/tools/self_tool.yaml");
@@ -133,6 +136,19 @@ fn local_command_execution_available() -> bool {
     }
 }
 
+fn native_tool_definition(manifest: &ToolManifest) -> ToolDefinition {
+    ToolDefinition {
+        name: manifest.id.clone(),
+        description: format!(
+            "{}\n\nUsage: {}\n\nResult: {}",
+            manifest.prompt.description.trim(),
+            manifest.prompt.input.trim(),
+            manifest.prompt.result.trim()
+        ),
+        input_schema: provider_input_schema_value(&manifest.input_schema),
+    }
+}
+
 impl CapabilityRegistry {
     pub fn from_manifests(
         tool_manifests: &[&str],
@@ -185,6 +201,7 @@ impl CapabilityRegistry {
             &[
                 MEMMGR_MANIFEST,
                 CAPMGR_MANIFEST,
+                CONTEXT_COMPACT_MANIFEST,
                 READFILE_MANIFEST,
                 RUN_BASH_MANIFEST,
                 SELF_TOOL_MANIFEST,
@@ -654,6 +671,33 @@ impl CapabilityRegistry {
         Value::Object(catalog)
     }
 
+    pub fn native_tool_definitions(&self) -> Vec<ToolDefinition> {
+        let mut tools = self.native_builtin_tool_definitions();
+        tools.extend(self.native_dynamic_tool_definitions());
+        tools
+    }
+
+    pub fn native_builtin_tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.tools
+            .values()
+            .filter(|manifest| manifest.id != "capmgr" && manifest.binding.binding_type != "mcp")
+            .map(native_tool_definition)
+            .collect()
+    }
+
+    pub fn native_dynamic_tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.tools
+            .values()
+            .filter(|manifest| manifest.binding.binding_type == "mcp")
+            .map(native_tool_definition)
+            .collect()
+    }
+
+    pub(crate) fn render_native_dynamic_tool_catalog_json(&self) -> Option<String> {
+        let tools = self.native_dynamic_tool_definitions();
+        (!tools.is_empty()).then(|| render_native_tool_definitions_json(&tools))
+    }
+
     pub fn render_tool_catalog_json(&self) -> String {
         serde_json::to_string_pretty(&self.tool_catalog_value())
             .expect("tool catalog must render as JSON")
@@ -664,11 +708,34 @@ impl CapabilityRegistry {
     }
 
     pub fn render_tool_catalog_markdown_for_protocol(&self, protocol_format: &str) -> String {
+        self.render_tool_catalog_markdown_matching(protocol_format, |_| true)
+    }
+
+    pub fn render_mcp_tool_catalog_markdown_for_protocol(&self, protocol_format: &str) -> String {
+        self.render_tool_catalog_markdown_matching(protocol_format, |manifest| {
+            manifest.binding.binding_type == "mcp"
+        })
+    }
+
+    pub(crate) fn render_static_tool_catalog_markdown_for_protocol(
+        &self,
+        protocol_format: &str,
+    ) -> String {
+        self.render_tool_catalog_markdown_matching(protocol_format, |manifest| {
+            manifest.binding.binding_type != "mcp"
+        })
+    }
+
+    fn render_tool_catalog_markdown_matching(
+        &self,
+        protocol_format: &str,
+        include: impl Fn(&ToolManifest) -> bool,
+    ) -> String {
         self.tools
             .values()
             // Keep capmgr registered and executable, but do not advertise it
             // to the model as part of the prompt tool catalog.
-            .filter(|manifest| manifest.id != "capmgr")
+            .filter(|manifest| manifest.id != "capmgr" && include(manifest))
             .map(|manifest| render_tool_manifest_markdown(manifest, protocol_format))
             .collect::<Vec<_>>()
             .join("\n\n")
@@ -686,10 +753,24 @@ impl CapabilityRegistry {
         replace_markdown_placeholder_with_text(
             static_prompt,
             "{{TOOL_CATALOG}}",
-            &self.render_tool_catalog_markdown_for_protocol(protocol_format),
+            &self.render_static_tool_catalog_markdown_for_protocol(protocol_format),
         )
         .unwrap_or_else(|| static_prompt.to_string())
     }
+}
+
+fn render_native_tool_definitions_json(tools: &[ToolDefinition]) -> String {
+    let tools = tools
+        .iter()
+        .map(|tool| {
+            serde_json::json!({
+                "name": tool.name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string_pretty(&tools).expect("native tool definitions must serialize")
 }
 
 fn render_tool_manifest_markdown(manifest: &ToolManifest, protocol_format: &str) -> String {
@@ -1804,6 +1885,141 @@ fn input_schema_value(schema: &CapabilityInputSchema) -> Value {
         );
     }
     Value::Object(object)
+}
+
+fn provider_input_schema_value(schema: &CapabilityInputSchema) -> Value {
+    let mut object = Map::new();
+    object.insert(
+        "type".to_string(),
+        Value::String(schema.schema_type.clone()),
+    );
+    object.insert(
+        "properties".to_string(),
+        Value::Object(
+            schema
+                .properties
+                .iter()
+                .map(|(key, value)| (key.clone(), normalize_provider_schema(value)))
+                .collect(),
+        ),
+    );
+    if !schema.required.is_empty() {
+        object.insert(
+            "required".to_string(),
+            Value::Array(schema.required.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    let mut all_of = Vec::new();
+    for group in &schema.required_any {
+        all_of.push(json_object([(
+            "anyOf",
+            Value::Array(
+                group
+                    .iter()
+                    .map(|field| {
+                        json_object([(
+                            "required",
+                            Value::Array(vec![Value::String(field.clone())]),
+                        )])
+                    })
+                    .collect(),
+            ),
+        )]));
+    }
+    for rule in &schema.required_when {
+        all_of.push(provider_conditional_schema(rule, false));
+    }
+    for rule in &schema.required_any_when {
+        all_of.push(provider_conditional_schema(rule, true));
+    }
+    if !all_of.is_empty() {
+        object.insert("allOf".to_string(), Value::Array(all_of));
+    }
+    Value::Object(object)
+}
+
+fn provider_conditional_schema(rule: &CapabilityRequiredWhen, any_required: bool) -> Value {
+    let mut conditions = rule.conditions.clone();
+    if !rule.field.trim().is_empty() && !rule.values.is_empty() {
+        conditions.insert(rule.field.clone(), rule.values.clone());
+    }
+    let if_properties = conditions
+        .into_iter()
+        .map(|(field, values)| {
+            // Some OpenAI-compatible gateways reject JSON Schema `const` even
+            // though they accept the equivalent single-value `enum`.
+            let condition = json_object([
+                (
+                    "enum",
+                    Value::Array(values.into_iter().map(Value::String).collect()),
+                ),
+                ("type", Value::String("string".to_string())),
+            ]);
+            (field, condition)
+        })
+        .collect::<Map<_, _>>();
+    let condition_fields = if_properties
+        .keys()
+        .cloned()
+        .map(Value::String)
+        .collect::<Vec<_>>();
+    let then_schema = if any_required {
+        json_object([(
+            "anyOf",
+            Value::Array(
+                rule.required
+                    .iter()
+                    .map(|field| {
+                        json_object([(
+                            "required",
+                            Value::Array(vec![Value::String(field.clone())]),
+                        )])
+                    })
+                    .collect(),
+            ),
+        )])
+    } else {
+        json_object([(
+            "required",
+            Value::Array(rule.required.iter().cloned().map(Value::String).collect()),
+        )])
+    };
+    json_object([
+        (
+            "if",
+            json_object([
+                ("properties", Value::Object(if_properties)),
+                ("required", Value::Array(condition_fields)),
+            ]),
+        ),
+        ("then", then_schema),
+    ])
+}
+
+fn normalize_provider_schema(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut normalized = object
+                .iter()
+                .map(|(key, value)| (key.clone(), normalize_provider_schema(value)))
+                .collect::<Map<_, _>>();
+            if let Some(Value::String(schema_type)) = normalized.get_mut("type") {
+                let replacement = match schema_type.as_str() {
+                    ">0 integer" | ">=0 integer" => Some("integer"),
+                    _ => None,
+                };
+                if let Some(replacement) = replacement {
+                    *schema_type = replacement.to_string();
+                }
+            }
+            if let Some(constant) = normalized.remove("const") {
+                normalized.insert("enum".to_string(), Value::Array(vec![constant]));
+            }
+            Value::Object(normalized)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(normalize_provider_schema).collect()),
+        _ => value.clone(),
+    }
 }
 
 fn validate_manifest(manifest: &ToolManifest) -> Result<(), String> {

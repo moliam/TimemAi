@@ -354,13 +354,8 @@ fn run_bash_action_results_do_not_repeat_command_text() {
 }
 
 #[test]
-fn normal_bash_keeps_thirty_two_kibibytes_worth_of_characters_and_reports_truncated_word_count() {
-    assert_eq!(MAX_BASH_OUTPUT_CHARS, 32 * 1024);
-    let boundary = compact_text(&"x".repeat(MAX_BASH_OUTPUT_CHARS), MAX_BASH_OUTPUT_CHARS);
-    assert_eq!(boundary.chars().count(), MAX_BASH_OUTPUT_CHARS);
-    assert!(!boundary.contains("!!!Too long,"));
-
-    let output = format!("{} alpha beta gamma", "x".repeat(MAX_BASH_OUTPUT_CHARS - 1));
+fn bash_result_builder_preserves_raw_output_for_the_model_result_gate() {
+    let output = format!("{} alpha beta gamma", "x".repeat(33_000));
     let result = BashCommandOutput {
         command: "printf long-output".to_string(),
         status: Some(0),
@@ -376,12 +371,9 @@ fn normal_bash_keeps_thirty_two_kibibytes_worth_of_characters_and_reports_trunca
     let rendered_output = result.split_once("Return:\n").unwrap().1;
     assert_eq!(
         rendered_output,
-        format!(
-            "{} \n!!!Too long, 3 words truncated after. Generate more actions if necessary !!!",
-            "x".repeat(MAX_BASH_OUTPUT_CHARS - 1)
-        )
+        format!("{} alpha beta gamma", "x".repeat(33_000))
     );
-    assert!(!rendered_output.ends_with('…'));
+    assert!(!rendered_output.contains("!!!Too long,"));
 }
 
 #[cfg(unix)]
@@ -832,7 +824,7 @@ fn background_job_reports_pid_and_running_list_until_exit() {
     assert_eq!(updates[0].status, "0");
     assert_eq!(updates[0].stdout, "background_ok");
     assert_eq!(updates[0].stderr, "background_err");
-    assert_eq!(updates[0].output, "background_ok stderr: background_err");
+    assert_eq!(updates[0].output, "background_ok\nstderr: background_err");
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -1432,22 +1424,7 @@ fn run_bash_allows_safe_tmp_delete() {
 }
 
 #[test]
-fn compact_text_can_retain_the_tail_with_unicode_safely() {
-    let forward = compact_text_with_tail("BEGIN α β γ END", 8, false);
-    assert!(forward.starts_with("BEGIN α "), "{forward}");
-    assert!(forward.contains("\n!!!Too long,"));
-    assert!(forward.contains("truncated after"));
-    assert!(!forward.ends_with("γ END"));
-
-    let tail = compact_text_with_tail("BEGIN α β γ END", 7, true);
-    assert!(tail.starts_with("!!!Too long,"), "{tail}");
-    assert!(tail.contains("truncated before"));
-    assert!(tail.ends_with("β γ END"), "{tail}");
-    assert!(!tail.contains('�'));
-}
-
-#[test]
-fn foreground_run_bash_tail_out_retains_final_summary() {
+fn foreground_run_bash_preserves_raw_output_and_tail_policy_for_the_gate() {
     let store = FileShellJobStore::new(&tmp_memory_dir("foreground_tail_out"));
     let cwd = tmp_cwd("foreground_tail_out");
     let command =
@@ -1479,19 +1456,16 @@ fn foreground_run_bash_tail_out_retains_final_summary() {
         .split_once("Return:\n")
         .expect("finished result should contain a return section")
         .1;
-    assert!(
-        rendered_output.contains("truncated before"),
-        "{rendered_output}"
-    );
+    assert!(!rendered_output.contains("truncated"), "{rendered_output}");
     assert!(rendered_output.contains("END_MARKER"), "{rendered_output}");
     assert!(
-        !rendered_output.contains("BEGIN_MARKER"),
+        rendered_output.contains("BEGIN_MARKER"),
         "{rendered_output}"
     );
 }
 
 #[test]
-fn polling_tail_out_retains_last_output_summary() {
+fn polling_result_preserves_raw_output_for_the_gate() {
     let cwd = tmp_cwd("polling_tail_out");
     let command =
         "printf BEGIN_MARKER; i=0; while [ $i -lt 33000 ]; do printf x; i=$((i+1)); done; printf END_MARKER; exit 0"
@@ -1512,9 +1486,9 @@ fn polling_tail_out_retains_last_output_summary() {
         .split_once("Last output:\n")
         .expect("polling result should contain a last-output section")
         .1;
-    assert!(last_output.contains("truncated before"), "{last_output}");
+    assert!(!last_output.contains("truncated"), "{last_output}");
     assert!(last_output.contains("END_MARKER"), "{last_output}");
-    assert!(!last_output.contains("BEGIN_MARKER"), "{last_output}");
+    assert!(last_output.contains("BEGIN_MARKER"), "{last_output}");
 }
 
 #[test]
@@ -1553,13 +1527,9 @@ fn background_tail_out_is_persisted_until_exit_refresh() {
         thread::sleep(Duration::from_millis(20));
     };
 
-    assert!(
-        update.output.contains("truncated before"),
-        "{}",
-        update.output
-    );
+    assert!(!update.output.contains("truncated"), "{}", update.output);
     assert!(update.output.contains("END_MARKER"), "{}", update.output);
-    assert!(!update.output.contains("BEGIN_MARKER"), "{}", update.output);
+    assert!(update.output.contains("BEGIN_MARKER"), "{}", update.output);
     let _ = fs::remove_dir_all(dir);
 }
 

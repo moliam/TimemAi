@@ -3,6 +3,7 @@ use crate::ApiProtocol;
 
 fn config() -> ModelServiceConfig {
     ModelServiceConfig {
+        interaction: Default::default(),
         model: "qwen-plus".to_string(),
         base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
         api_key: "secret".to_string(),

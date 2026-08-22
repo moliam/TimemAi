@@ -37,6 +37,8 @@ impl PromptComponentRole {
                 "response_repair" => "response_repair".to_string(),
                 "context_compacted" => "context_compacted".to_string(),
                 "runtime_note" => "runtime_note".to_string(),
+                "mcp_capability_catalog" => "mcp_capability_catalog".to_string(),
+                "mcp_capability_update" => "mcp_capability_update".to_string(),
                 _ => "result_of_llm_action".to_string(),
             },
         }

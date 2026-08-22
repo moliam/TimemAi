@@ -1,0 +1,37 @@
+kind: tool
+id: context_compact
+binding_type: builtin
+binding_name: context_compact
+summary: Compact selected dynamic prompt deltas while preserving an essential summary.
+prompt_synopsis: |
+  {"context_compact":{"discard":["pd_1"],"offload":["pd_2"],"summary":"Essential active state..."}}
+description: |
+  Maintain long-running context by discarding stale dynamic prompt deltas and/or
+  offloading important but bulky deltas to scratch memory. Preserve the active
+  task, progress, evidence, constraints, and next steps in summary. This action
+  is exclusive: do not request another capability in the same response.
+prompt_input: |
+  Use only runtime-provided dynamic delta ids. Provide at least one id in
+  discard or offload, plus a non-empty summary.
+prompt_result: |
+  Returns whether compaction succeeded and, when offloading, the scratch record
+  that can be retrieved later through memmgr.
+input_schema: |
+  {
+    "type": "object",
+    "properties": {
+      "discard": {"type": "array", "items": {"type": "string"}, "description": "Stale delta ids to remove."},
+      "offload": {"type": "array", "items": {"type": "string"}, "description": "Important bulky delta ids to save to scratch before removal."},
+      "summary": {"type": "string", "minLength": 1, "description": "Compact retained state for subsequent work."}
+    },
+    "required": ["summary"],
+    "x-required-any": [["discard", "offload"]]
+  }
+example_json: |
+  {
+    "context_compact": {
+      "discard": ["pd_1", "pd_3"],
+      "offload": ["pd_2"],
+      "summary": "The active task is ... Current progress ... Next steps ..."
+    }
+  }

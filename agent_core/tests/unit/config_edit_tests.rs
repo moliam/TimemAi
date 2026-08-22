@@ -3,6 +3,7 @@ use crate::ApiProtocol;
 
 fn test_config() -> ModelServiceConfig {
     ModelServiceConfig {
+        interaction: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),

@@ -31,7 +31,7 @@ fn json_response_v1_summary_resource_is_valid() {
         .and_then(|value| value.get("intent?"))
         .is_none());
     let text = serde_json::to_string(&summary).unwrap();
-    assert!(text.contains("context_compact?"));
+    assert!(text.contains("context_compact is an exclusive action"));
     for legacy_field in [
         "acceptance_check?",
         "continuation?",

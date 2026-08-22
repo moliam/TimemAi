@@ -283,6 +283,73 @@ fn common_prompt_component_ingress_marks_every_truncated_action_result() {
 }
 
 #[test]
+fn model_result_gate_uses_each_actions_tail_out_policy() {
+    let mut core = test_core("tail_result_gate");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let raw = format!("BEGIN_MARKER {} END_MARKER", "内容 ".repeat(20_000));
+    let outcome = ActionOutcome::completed(raw);
+
+    let head = core.format_action_outcome(
+        &ParsedAction {
+            action: "run_bash".to_string(),
+            name: None,
+            raw_input: json!({"tail_out": false}),
+        },
+        &outcome,
+    );
+    assert!(head.contains("BEGIN_MARKER"));
+    assert!(!head.contains("END_MARKER"));
+    assert!(head.contains("words truncated."));
+
+    let tail = core.format_action_outcome(
+        &ParsedAction {
+            action: "run_bash".to_string(),
+            name: None,
+            raw_input: json!({"tail_out": true}),
+        },
+        &outcome,
+    );
+    assert!(!tail.contains("BEGIN_MARKER"));
+    assert!(tail.contains("END_MARKER"));
+    assert!(tail.starts_with("!!!Too long,"));
+    assert!(tail.contains("truncated before"));
+    assert!(head.len() <= tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES);
+    assert!(tail.len() <= tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES);
+}
+
+#[test]
+fn xml_model_result_gate_retains_tail_inside_a_complete_envelope() {
+    let mut core = test_core("xml_tail_result_gate");
+    core.set_response_protocol(ResponseProtocolKind::Xml);
+    let raw = format!("BEGIN_MARKER {} END_MARKER", "内容 ".repeat(20_000));
+    let outcome = ActionOutcome::completed("unused").with_bash_result(BashResultEvidence {
+        stdout: raw,
+        stderr: String::new(),
+        exit_code: Some(0),
+        signal: None,
+        pid: None,
+        timed_out: false,
+        pid_kind: None,
+        error_type: None,
+    });
+    let result = core.format_action_outcome(
+        &ParsedAction {
+            action: "run_bash".to_string(),
+            name: Some("tail XML".to_string()),
+            raw_input: json!({"tail_out": true}),
+        },
+        &outcome,
+    );
+
+    assert!(result.starts_with("<bash_result "));
+    assert!(result.ends_with("</bash_result>"));
+    assert!(result.contains("truncated before"));
+    assert!(!result.contains("BEGIN_MARKER"));
+    assert!(result.contains("END_MARKER"));
+    assert!(result.len() <= tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES);
+}
+
+#[test]
 fn previous_model_response_components_share_earliest_logical_time() {
     let mut core = test_core("previous_batch");
     let batch_time = 100;
@@ -587,6 +654,23 @@ fn test_mcp_tool(action_name: &str, description: &str) -> mcp::McpTool {
     }
 }
 
+fn test_mcp_server() -> mcp::McpServerConfig {
+    mcp::McpServerConfig {
+        id: "filesystem".to_string(),
+        name: "Filesystem MCP".to_string(),
+        enabled: true,
+        transport: mcp::McpTransportConfig::default(),
+        request_timeout_ms: 1_000,
+    }
+}
+
+fn test_filesystem_mcp_tool() -> mcp::McpTool {
+    let mut tool = test_mcp_tool("mcp.filesystem.echo", "Echo");
+    tool.server_id = "filesystem".to_string();
+    tool.server_name = "Filesystem MCP".to_string();
+    tool
+}
+
 #[test]
 fn mcp_capability_update_is_injected_only_when_tool_content_changes() {
     let mut core = test_core("mcp_deferred_update");
@@ -599,6 +683,7 @@ fn mcp_capability_update_is_injected_only_when_tool_content_changes() {
     )
     .unwrap();
     assert!(core.pending_prompt_components.is_empty());
+    assert_eq!(core.deltas.len(), 1);
 
     assert!(!core
         .apply_mcp_update(
@@ -609,6 +694,7 @@ fn mcp_capability_update_is_injected_only_when_tool_content_changes() {
         )
         .unwrap());
     assert!(core.pending_prompt_components.is_empty());
+    assert_eq!(core.deltas.len(), 1);
 
     assert!(core
         .apply_mcp_update(
@@ -621,12 +707,11 @@ fn mcp_capability_update_is_injected_only_when_tool_content_changes() {
             ],
         )
         .unwrap());
-    assert_eq!(core.pending_prompt_components.len(), 1);
+    assert!(core.pending_prompt_components.is_empty());
     let prompt = core.build_next_prompt();
     assert!(prompt.contains("<RUNTIME>"));
-    assert!(prompt.contains("MCP capabilities changed for this user request."));
-    assert!(prompt.contains("Newly available actions: mcp.test.search."));
-    assert!(prompt.contains("Updated action definitions: mcp.test.echo."));
+    assert!(prompt.contains("MCP update: newly available actions: mcp.test.search."));
+    assert!(prompt.contains("MCP update: updated action definitions: mcp.test.echo."));
 
     assert!(core
         .apply_mcp_update(
@@ -637,7 +722,118 @@ fn mcp_capability_update_is_injected_only_when_tool_content_changes() {
         )
         .unwrap());
     let prompt = core.build_next_prompt();
-    assert!(prompt.contains("Actions no longer available: mcp.test.echo, mcp.test.search."));
+    assert!(
+        prompt.contains("MCP update: actions no longer available: mcp.test.echo, mcp.test.search.")
+    );
+}
+
+#[test]
+fn disabling_mcp_server_appends_explicit_persistent_runtime_update() {
+    let mut core = test_core("mcp_disabled_update");
+    core.configure_mcp(
+        CapabilityRegistry::builtin(),
+        mcp::McpRuntime::default(),
+        vec![test_mcp_server()],
+        vec![test_filesystem_mcp_tool()],
+    )
+    .unwrap();
+    let catalog_delta_count = core.deltas.len();
+    assert!(core
+        .build_next_prompt()
+        .contains("MCP update: MCP Filesystem MCP (filesystem) IS ENABLED by user !!!"));
+
+    assert!(core
+        .apply_mcp_update(
+            CapabilityRegistry::builtin(),
+            mcp::McpRuntime::default(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap());
+    assert_eq!(core.deltas.len(), catalog_delta_count + 1);
+    let prompt = core.build_next_prompt();
+    assert!(prompt.contains("MCP update: MCP Filesystem MCP (filesystem) IS DISABLED by user !!!"));
+}
+
+#[test]
+fn model_transparent_mcp_configuration_update_does_not_append_prompt_delta() {
+    let mut core = test_core("mcp_configuration_update");
+    core.configure_mcp(
+        CapabilityRegistry::builtin(),
+        mcp::McpRuntime::default(),
+        vec![test_mcp_server()],
+        Vec::new(),
+    )
+    .unwrap();
+    let delta_count = core.deltas.len();
+    let mut updated = test_mcp_server();
+    updated.request_timeout_ms = 2_000;
+
+    assert!(!core
+        .apply_mcp_update(
+            CapabilityRegistry::builtin(),
+            mcp::McpRuntime::default(),
+            vec![updated],
+            Vec::new(),
+        )
+        .unwrap());
+    assert_eq!(core.deltas.len(), delta_count);
+    let prompt = core.build_next_prompt();
+    assert!(!prompt.contains("CONFIGURATION IS UPDATED"));
+    assert!(!prompt.contains("request_timeout_ms"));
+}
+
+#[test]
+fn mcp_server_instructions_are_persistent_and_model_visible_changes_append_updates() {
+    let mut core = test_core("mcp_server_instructions");
+    core.configure_mcp_with_instructions(
+        CapabilityRegistry::builtin(),
+        mcp::McpRuntime::default(),
+        vec![test_mcp_server()],
+        Vec::new(),
+        BTreeMap::from([(
+            "filesystem".to_string(),
+            "Read metadata before modifying a file.".to_string(),
+        )]),
+    )
+    .unwrap();
+    let initial_prompt = core.build_next_prompt();
+    assert!(initial_prompt
+        .contains("MCP update: MCP Filesystem MCP (filesystem) IS ENABLED by user !!!"));
+    assert!(initial_prompt.contains("Read metadata before modifying a file."));
+    assert!(initial_prompt.contains("\"server_instructions\""));
+    let initial_delta_count = core.deltas.len();
+
+    assert!(core
+        .apply_mcp_update_with_instructions(
+            CapabilityRegistry::builtin(),
+            mcp::McpRuntime::default(),
+            vec![test_mcp_server()],
+            Vec::new(),
+            BTreeMap::from([(
+                "filesystem".to_string(),
+                "Preserve file metadata after every modification.".to_string(),
+            )]),
+        )
+        .unwrap());
+    assert_eq!(core.deltas.len(), initial_delta_count + 1);
+    let updated_prompt = core.build_next_prompt();
+    assert!(updated_prompt
+        .contains("MCP update: instructions for MCP Filesystem MCP (filesystem) ARE UPDATED."));
+    assert!(updated_prompt.contains("Preserve file metadata after every modification."));
+
+    assert!(core
+        .apply_mcp_update_with_instructions(
+            CapabilityRegistry::builtin(),
+            mcp::McpRuntime::default(),
+            vec![test_mcp_server()],
+            Vec::new(),
+            BTreeMap::new(),
+        )
+        .unwrap());
+    assert!(core.build_next_prompt().contains(
+        "MCP update: instructions for MCP Filesystem MCP (filesystem) ARE NO LONGER ACTIVE !!!"
+    ));
 }
 
 #[test]
@@ -657,6 +853,7 @@ fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
     let second_id = core.deltas[1].delta_id.clone();
 
     let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
         content: serde_json::json!({
             "free_talk": "compact both",
             "context_compact": [
@@ -673,9 +870,22 @@ fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
         panic!("context compact should continue with a model request")
     };
     assert_eq!(prompt.matches("context compacted successfully.").count(), 1);
-    assert_eq!(prompt.matches("CWD: ").count(), 1);
+    assert_eq!(
+        prompt
+            .matches("context compacted successfully.\nCWD: ")
+            .count(),
+        1
+    );
     assert!(!prompt.contains("Active MCP capabilities after context compaction"));
     assert!(!prompt.contains("Action result: context_compact"));
     assert!(!prompt.contains("removed_delta_count:"));
     assert!(!prompt.contains("scratch_id:"));
+    assert_eq!(
+        prompt
+            .matches("MCP update: the following MCP capabilities are enabled")
+            .count(),
+        1,
+        "compacting the active catalog must persist exactly one replacement catalog: {prompt}"
+    );
+    assert!(prompt.contains("mcp.test.echo"));
 }

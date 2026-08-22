@@ -73,10 +73,37 @@ pub(crate) fn execute_action_outcome(core: &mut AgentCore, action: &ParsedAction
                 content,
             )
         }
-        "cwd" => match core.change_prompt_cwd(action.input_raw_str("new_path")) {
-            Ok(path) => {
+        "cwd" => {
+            if let Some(new_path) = action
+                .raw_input
+                .get("new_path")
+                .and_then(serde_json::Value::as_str)
+            {
+                match core.change_prompt_cwd(new_path) {
+                    Ok(path) => {
+                        evidence_cwd = Some(path.display().to_string());
+                        let content = format!("CWD changed to: {}", path.display());
+                        (
+                            ActionOutcome::completed(format!(
+                                "Action result: self_tool\ntype: cwd\n{content}"
+                            )),
+                            content,
+                        )
+                    }
+                    Err(error) => {
+                        let content = error.to_string();
+                        (
+                            ActionOutcome::failed(format!(
+                                "Action result: self_tool\ntype: cwd\nerror: {content}"
+                            )),
+                            content,
+                        )
+                    }
+                }
+            } else {
+                let path = core.current_prompt_cwd();
                 evidence_cwd = Some(path.display().to_string());
-                let content = format!("CWD changed to {}", path.display());
+                let content = format!("CWD: {}", path.display());
                 (
                     ActionOutcome::completed(format!(
                         "Action result: self_tool\ntype: cwd\n{content}"
@@ -84,16 +111,7 @@ pub(crate) fn execute_action_outcome(core: &mut AgentCore, action: &ParsedAction
                     content,
                 )
             }
-            Err(error) => {
-                let content = error.to_string();
-                (
-                    ActionOutcome::failed(format!(
-                        "Action result: self_tool\ntype: cwd\nerror: {content}"
-                    )),
-                    content,
-                )
-            }
-        },
+        }
         "params" => {
             let content = execute_params_action(core);
             (

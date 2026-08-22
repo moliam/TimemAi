@@ -886,7 +886,7 @@ fn xml_memmgr_and_self_tool_results_escape_attributes_and_preserve_body() {
         &SelfToolResultEvidence {
             self_type: r#"cwd<&""#.to_string(),
             cwd: Some(r#"/tmp/<work>&"dir""#.to_string()),
-            content: "CWD changed to /tmp/<work>".to_string(),
+            content: "CWD changed to: /tmp/<work>".to_string(),
             error_type: None,
         },
         106,

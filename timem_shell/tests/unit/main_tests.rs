@@ -77,7 +77,7 @@ fn static_prompt_uses_full_shared_v1_resource() {
     assert!(STATIC_PROMPT.contains("# Timem System Prompt"));
     assert!(STATIC_PROMPT.contains("## Role"));
     assert!(STATIC_PROMPT.contains("## Memory"));
-    assert!(STATIC_PROMPT.contains("## Actions"));
+    assert!(STATIC_PROMPT.contains("{{TOOL_CATALOG_SECTION_HEADING}}"));
     assert!(STATIC_PROMPT.contains("{{RESPONSE_PROTOCOL_SECTION}}"));
     // Response schema is now inside protocol section file
     assert!(STATIC_PROMPT.contains("{{TOOL_CATALOG}}"));
@@ -123,7 +123,9 @@ fn static_prompt_uses_full_shared_v1_resource() {
     assert!(!STATIC_PROMPT.contains("rounds_guard"));
     assert!(!STATIC_PROMPT.contains("perspective_rewrite"));
     assert!(!STATIC_PROMPT.contains("continue:false"));
-    assert!(STATIC_PROMPT.len() > 3_000);
+    assert!(STATIC_PROMPT.contains("{{RESPONSE_MODE_INSTRUCTION}}"));
+    assert!(STATIC_PROMPT.contains("{{TOOL_CATALOG}}"));
+    assert!(STATIC_PROMPT.contains("{{RESPONSE_PROTOCOL_SECTION}}"));
 }
 
 #[test]
@@ -457,6 +459,7 @@ fn workspace_path_normalization_canonicalizes_existing_paths() {
 #[test]
 fn config_menu_renders_effective_values_and_can_apply_updates() {
     let mut config = ModelServiceConfig {
+        interaction: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -542,6 +545,7 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
 #[test]
 fn config_protocol_update_keeps_endpoint_defaults_consistent() {
     let mut config = ModelServiceConfig {
+        interaction: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -600,6 +604,7 @@ fn config_protocol_update_keeps_endpoint_defaults_consistent() {
 #[test]
 fn config_protocol_update_preserves_explicit_endpoint() {
     let mut config = ModelServiceConfig {
+        interaction: Default::default(),
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
@@ -663,6 +668,7 @@ fn random_spinner_tick_maps_to_valid_icon_slot() {
 #[test]
 fn startup_banner_lists_env_overrides_on_separate_lines() {
     let config = ModelServiceConfig {
+        interaction: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -805,6 +811,7 @@ fn config_table_uses_window_width_ratio_and_wraps_long_values() {
 #[test]
 fn startup_banner_highlights_values_outside_protocol_defaults() {
     let default_config = ModelServiceConfig {
+        interaction: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -827,6 +834,7 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
     assert!(!default_banner.contains(ANSI_HIGHLIGHT));
 
     let override_config = ModelServiceConfig {
+        interaction: Default::default(),
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
@@ -862,6 +870,7 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
 #[test]
 fn startup_banner_highlights_custom_model_and_base_url() {
     let config = ModelServiceConfig {
+        interaction: Default::default(),
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
@@ -1978,6 +1987,7 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
     fs::create_dir_all(&workspace).unwrap();
     let store = SessionStore::new(root.join("memory"));
     let config = ModelServiceConfig {
+        interaction: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2049,6 +2059,7 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
     fs::create_dir_all(&restored_dir).unwrap();
     let store = SessionStore::new(root.join("memory"));
     let config = ModelServiceConfig {
+        interaction: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2192,6 +2203,7 @@ fn shell_resume_selects_the_most_recent_valid_session() {
     fs::create_dir_all(&workspace).unwrap();
     let store = SessionStore::new(root.join("memory"));
     let config = ModelServiceConfig {
+        interaction: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "launch-secret".to_string(),
         model: "launch-model".to_string(),
@@ -2245,6 +2257,7 @@ fn shell_runtime_config_changes_are_cached_before_another_turn_runs() {
     fs::create_dir_all(&workspace).unwrap();
     let store = SessionStore::new(root.join("memory"));
     let mut config = ModelServiceConfig {
+        interaction: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "cached-secret".to_string(),
         model: "old-model".to_string(),
@@ -2293,6 +2306,7 @@ fn shell_can_resume_web_style_session_history() {
     let store = SessionStore::new(root.join("memory"));
     let session_id = "web_session_handoff";
     let config = ModelServiceConfig {
+        interaction: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),

@@ -1714,11 +1714,25 @@ pub trait TurnUi {
 
     fn on_model_request(&mut self, _round: u32, _prompt: &str) {}
 
+    fn on_model_interaction_request(
+        &mut self,
+        round: u32,
+        request: &crate::ModelInteractionRequest,
+    ) {
+        self.on_model_request(round, &request.rendered_prompt);
+    }
+
     fn on_model_request_completed(&mut self, _latency: Duration) {}
 
     fn on_model_response(&mut self, _round: u32, _usage: &UsageStats, _content: &str) {}
 
+    fn on_model_interaction_response(&mut self, round: u32, response: &crate::LlmResponse) {
+        self.on_model_response(round, &response.usage, &response.content);
+    }
+
     fn on_model_response_parsed(&mut self, _tool_count: usize) {}
+
+    fn on_interaction_profile(&mut self, _profile: &crate::InteractionProfile) {}
 
     fn on_core_topic_events(&mut self, _events: &[CoreTopicEvent]) {}
 

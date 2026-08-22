@@ -142,6 +142,7 @@ fn tmp_dir(name: &str) -> PathBuf {
 
 fn test_config() -> ModelServiceConfig {
     ModelServiceConfig {
+        interaction: Default::default(),
         model: "test-model".to_string(),
         base_url: "http://127.0.0.1/v1".to_string(),
         api_key: "dummy".to_string(),
@@ -205,6 +206,7 @@ impl ModelClient for ImmediateFinalPromptCaptureModel {
     ) -> Result<LlmResponse, String> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: r#"{"status":"ALL_FINISHED","final_answer":"IMMEDIATE_FINAL"}"#.to_string(),
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -247,6 +249,7 @@ impl ModelClient for SupplementReplayModel {
             r#"{"status":"ALL_FINISHED","final_answer":"STALE"}"#
         };
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: content.to_string(),
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -392,6 +395,7 @@ impl ModelClient for TerminalRepairModel {
         *calls += 1;
         let call = *calls;
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: if call <= crate::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1 {
                 format!("{{invalid repair response {call}")
             } else {
@@ -464,8 +468,20 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
             .recv_timeout(Duration::from_secs(2))
             .expect("worker should emit model request")
         {
-            CoreSessionWorkerEvent::ModelRequest { round, .. } => {
+            CoreSessionWorkerEvent::ModelRequest {
+                round,
+                prompt,
+                interaction_profile,
+                interaction_request,
+            } => {
                 assert_eq!(round, 1);
+                let profile = interaction_profile
+                    .expect("model request should carry the negotiated interaction profile");
+                assert_eq!(profile.model, "test-model");
+                assert_eq!(profile.resolved_mode, crate::ToolCallMode::Inline);
+                let request = interaction_request
+                    .expect("model request event should retain the structured API request");
+                assert_eq!(request.rendered_prompt, prompt);
                 handle.add_user_supplement("补充：最终答案必须使用 SUPPLEMENT_WORKER_OK。");
                 break;
             }
@@ -720,6 +736,7 @@ impl ModelClient for ToolGenWorkflowModel {
         };
         self.calls.lock().unwrap().push(phase.to_string());
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content,
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -882,6 +899,7 @@ fn toolgen_approval_topic_keeps_session_context_and_worker_scope() {
         accept_supplements: false,
         pending_bash_always_allow: false,
         pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
+        interaction_profile: None,
     };
     let waiter = std::thread::spawn(move || {
         ui.request_host_decision_topic(
@@ -1010,6 +1028,7 @@ impl ModelClient for LongToolGenWorkflowModel {
             format!("<ASSISTANT><free_talk>Publishing after {call} normal model calls.</free_talk><actions><toolgen name=\"publish validated tool draft\" op=\"publish\"><draft_path>{draft}</draft_path></toolgen></actions></ASSISTANT>")
         };
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content,
             model_name: "test-model".into(),
             usage: UsageStats {
@@ -1132,6 +1151,7 @@ impl ModelClient for FailingToolGenModel {
             "<ASSISTANT><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></ASSISTANT>".to_string()
         };
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content,
             model_name: "test-model".into(),
             usage: UsageStats {
@@ -1364,6 +1384,7 @@ impl ModelClient for ManagerOkModel {
         _should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<LlmResponse, String> {
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: r#"{"status":"ALL_FINISHED","final_answer":"MANAGER_OK"}"#.to_string(),
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -1660,6 +1681,7 @@ impl ModelClient for BlockingManagerModel {
             thread::sleep(Duration::from_millis(5));
         }
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: r#"{"status":"ALL_FINISHED","final_answer":"COUNT_OK"}"#.to_string(),
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -1772,6 +1794,7 @@ impl ModelClient for ApprovalReplayModel {
             r#"{"free_talk":"需要用户确认后执行本地命令。","working_still_action":{"run_bash":{"cmd":"printf approval-worker-ok","timeout_ms":5000}}}"#
         };
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: content.to_string(),
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -1809,6 +1832,7 @@ impl ModelClient for AssistantHeadingModel {
             );
         }
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: r#"{"status":"ALL_FINISHED","final_answer":"ok"}"#.to_string(),
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -2028,6 +2052,7 @@ impl ModelClient for CancellableCountingModel {
             std::thread::sleep(Duration::from_millis(10));
         }
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: r#"{"status":"ALL_FINISHED","final_answer":"DONE"}"#.to_string(),
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -2285,6 +2310,7 @@ impl ModelClient for ConcurrentWorkerModel {
             _ => "UNKNOWN_WORKER",
         };
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: format!(
                 r#"{{"status":"ALL_FINISHED","final_answer":{}}}"#,
                 serde_json::to_string(&answer).unwrap()
@@ -2433,6 +2459,7 @@ impl ModelClient for WorkerCountModel {
             r#"{"status":"ALL_FINISHED","final_answer":"WORKER_COUNT_DONE"}"#.to_string()
         };
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content,
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -2848,6 +2875,7 @@ impl ModelClient for ProtocolTurnStressModel {
             &format!("worker {} turn {turn_idx} protocol stress", self.worker_idx),
         );
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content,
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -3003,6 +3031,7 @@ impl ModelClient for StressWorkerModel {
                 stress_action_response(self.worker_idx, turn_idx, completed_actions)
             );
             return Ok(LlmResponse {
+                tool_calls: Vec::new(),
                 content,
                 model_name: "test-model".to_string(),
                 usage: UsageStats {
@@ -3023,6 +3052,7 @@ impl ModelClient for StressWorkerModel {
             format!("WORKER_{}_TURN_{turn_idx}_OK", self.worker_idx)
         };
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: format!(
                 r#"{{"status":"ALL_FINISHED","final_answer":{}}}"#,
                 serde_json::to_string(&answer).unwrap()
@@ -3535,6 +3565,7 @@ fn update_runtime_config_applies_before_next_model_request_of_active_turn() {
                     .recv_timeout(Duration::from_secs(5))
                     .expect("test should release the first model request");
                 return Ok(LlmResponse {
+        tool_calls: Vec::new(),
                     content: r#"{"status":"working","working_still_action":{"self_tool":{"type":"params"}}}"#
                         .to_string(),
                     model_name: config.model.clone(),
@@ -3543,6 +3574,7 @@ fn update_runtime_config_applies_before_next_model_request_of_active_turn() {
                 });
             }
             Ok(LlmResponse {
+                tool_calls: Vec::new(),
                 content: r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#.to_string(),
                 model_name: config.model.clone(),
                 usage: UsageStats::zero(),
@@ -3650,6 +3682,7 @@ fn update_runtime_config_changes_worker_model_service_config() {
             self.calls += 1;
             if self.calls == 1 {
                 return Ok(LlmResponse {
+        tool_calls: Vec::new(),
                     content: r#"{"status":"working","working_still_action":{"self_tool":{"type":"params"}}}"#
                     .to_string(),
                     model_name: config.model.clone(),
@@ -3658,6 +3691,7 @@ fn update_runtime_config_changes_worker_model_service_config() {
                 });
             }
             Ok(LlmResponse {
+                tool_calls: Vec::new(),
                 content: r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#.to_string(),
                 model_name: config.model.clone(),
                 usage: UsageStats::zero(),
@@ -3769,6 +3803,7 @@ fn update_runtime_config_max_input_also_updates_core() {
         ) -> Result<LlmResponse, String> {
             *self.captured_prompt_len.lock().unwrap() = prompt.len();
             Ok(LlmResponse {
+                tool_calls: Vec::new(),
                 content: r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#.to_string(),
                 model_name: "test".to_string(),
                 usage: UsageStats::zero(),
@@ -3851,6 +3886,7 @@ fn queued_mcp_update_is_applied_before_the_next_user_turn_prompt() {
         ) -> Result<LlmResponse, String> {
             *self.prompt.lock().unwrap() = prompt.to_string();
             Ok(LlmResponse {
+                tool_calls: Vec::new(),
                 content: r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#.to_string(),
                 model_name: "test".to_string(),
                 usage: UsageStats::zero(),
@@ -3908,7 +3944,16 @@ fn queued_mcp_update_is_applied_before_the_next_user_turn_prompt() {
     }
     let prompt = captured.lock().unwrap().clone();
     assert!(prompt.contains("mcp.demo.echo"));
-    assert!(prompt.contains("MCP capabilities changed for this user request."));
+    let dynamic_heading = prompt
+        .find("MCP update: the following MCP capabilities are enabled")
+        .expect("MCP catalog should be in a persistent dynamic delta");
+    let static_end = prompt
+        .find("[END SYSTEM PROMPT]")
+        .or_else(|| prompt.find("</Timem System Prompt>"))
+        .expect("static prompt boundary");
+    assert!(static_end < dynamic_heading);
+    assert!(!prompt[..static_end].contains("mcp.demo.echo"));
+    assert!(prompt.contains("MCP update: newly available actions: mcp.demo.echo."));
     assert!(prompt.contains("## USER\n\nUse the new capability."));
 
     worker.shutdown().unwrap();

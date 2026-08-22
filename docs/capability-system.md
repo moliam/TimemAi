@@ -25,8 +25,9 @@ builtin resources/capabilities/tools/{tool}.yaml + {tool}.rs
 optional TIMEM_CAPABILITIES_DIR overlay
         ↓ load at runtime
 CapabilityRegistry
-        ↓ render
-{{TOOL_CATALOG}} in the Markdown static prompt
+        ↓ render by interaction mode
+inline: builtin/overlay catalog in Static + persistent MCP update deltas
+native: builtin/overlay/current MCP definitions in API tools only
         ↓ generic parse
 parse model next_actions action/intent/args
         ↓ resolve binding
@@ -34,6 +35,21 @@ ExecutorTarget
         ↓ dispatch
 paired builtin tool callback or overlay command
 ```
+
+MCP tools are deliberately excluded from the inline Static catalog: a Session
+can enable, disable, or reconnect an MCP server between requests. Initial
+enablement and definition/instruction changes append canonical JSON catalogs to
+ordinary persistent prompt deltas for inline rendering. In native mode those
+inline-only slices are filtered from messages; current definitions form the MCP
+portion of the provider API tool list, with server instructions attached to the
+corresponding tool descriptions. Disabling MCP removes those definitions from
+the next API tools field without injecting an enable/disable RUNTIME notice.
+Historical inline deltas remain immutable and become visible again if the
+session switches back to inline mode.
+Prompt updates are keyed to the model-visible definitions rather than the raw
+server configuration. Runtime-only changes such as transport, timeout, endpoint,
+headers, credentials, or display metadata do not consume prompt context when the
+callable names, descriptions, input schemas, and server instructions are unchanged.
 
 The manifest is the human-maintained source for:
 
@@ -229,19 +245,21 @@ control through three classes:
 - `type=path`: use for questions about where Timem runtime resources are. The
   result returns the relevant known file and directory locations; the model may
   then use normal `run_bash` policy if file contents are actually needed.
-- `type=cwd`: set `new_path` to an absolute path or a path relative to the
-  current prompt-context cwd. On success, the result contains
-  `CWD changed to ...`; later `run_bash` and `readfile` actions in that context
-  use the canonical directory. The action finish event also carries
-  `context_state.cwd` so hosts can synchronize their Session display.
+- `type=cwd`: omit `new_path` to read the current prompt-context directory as
+  `CWD: ...` without changing state. Set `new_path` to an absolute path or a
+  path relative to the current prompt-context cwd to change it; on success the
+  result contains `CWD changed to: ...`. Later `run_bash` and `readfile` actions
+  use the canonical directory. Only a successful change adds
+  `context_state.cwd` to the action finish event so hosts can synchronize their
+  Session display.
 - `type=params`: use for questions about how the current Timem runtime is
   configured. The result returns the relevant effective runtime values.
 
 API keys, tokens, passwords, secrets, credentials, and similarly named env
 values are excluded. `params` is an explicit allowlist and never dumps arbitrary
 Session environment entries; Base URL userinfo, query, and fragment data are
-redacted. Only `cwd` mutates prompt-context state; `path` and `params` remain
-read-only.
+redacted. `cwd` mutates prompt-context state only when `new_path` is supplied;
+`cwd` without it, `path`, and `params` remain read-only.
 
 Successful runtime configuration changes set one Core-side pending notice.
 Regardless of how many fields the user changes before the next interaction,

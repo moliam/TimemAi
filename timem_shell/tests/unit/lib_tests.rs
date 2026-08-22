@@ -108,6 +108,10 @@ fn parse_cli_args_reads_model_service_and_limits() {
         "openai-compatible",
         "--response-protocol",
         "xml",
+        "--tool-call-mode",
+        "native",
+        "--parallel-tool-calls",
+        "false",
         "--api-key",
         "cli-key",
         "--model",
@@ -140,6 +144,8 @@ fn parse_cli_args_reads_model_service_and_limits() {
     assert_eq!(options.space.as_deref(), Some(".x"));
     assert_eq!(options.api_protocol.as_deref(), Some("openai-compatible"));
     assert_eq!(options.response_protocol.as_deref(), Some("xml"));
+    assert_eq!(options.tool_call_mode.as_deref(), Some("native"));
+    assert_eq!(options.parallel_tool_calls.as_deref(), Some("false"));
     assert_eq!(options.api_key.as_deref(), Some("cli-key"));
     assert_eq!(options.model.as_deref(), Some("gpt-x"));
     assert_eq!(options.base_url.as_deref(), Some("http://local/v1"));

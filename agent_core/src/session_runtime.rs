@@ -3,10 +3,10 @@ use crate::{
     model_retry_audit_event, model_retry_decision, normalize_user_supplements_with_context,
     ActionRuntime, AgentCore, CoreStep, CoreTopicEvent, HostDecisionRequest, HttpModelClient,
     LlmResponse, LongRunningCommandDecision, LongRunningCommandStatus, ModelCallOutcome,
-    ModelServiceConfig, ModelSystemRetryPolicy, OutputExpansionRequest, OutputExpansionResolution,
-    PromptComponentRole, RoundLimitDecisionRequest, RoundLimitResolution, RuntimeProfiler,
-    StoppedTurn, TurnInput, TurnOutcome, TurnStopReason, TurnStopSummary, TurnUi, UsageStats,
-    UserSupplement,
+    ModelInteractionRequest, ModelServiceConfig, ModelSystemRetryPolicy, OutputExpansionRequest,
+    OutputExpansionResolution, PromptComponentRole, RoundLimitDecisionRequest,
+    RoundLimitResolution, RuntimeProfiler, StoppedTurn, TurnInput, TurnOutcome, TurnStopReason,
+    TurnStopSummary, TurnUi, UsageStats, UserSupplement,
 };
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -146,6 +146,16 @@ pub trait ModelClient {
         audit_file: &Path,
         should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<LlmResponse, String>;
+
+    fn call_model_interaction(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        audit_file: &Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.call_model(config, &request.rendered_prompt, audit_file, should_cancel)
+    }
 }
 
 pub fn run_session_turn(
@@ -215,6 +225,12 @@ fn run_session_turn_with_model_client_and_reminder_override(
         reminders.override_first_time_interval(interval);
     }
     core.record_turn_start_audit(request.audit_file, request.session, &turn_id, request.input);
+    let profile =
+        crate::negotiate_interaction(model_client, config, request.audit_file, &mut || {
+            ui.is_cancel_requested()
+        });
+    core.set_interaction_profile(&profile);
+    ui.on_interaction_profile(&profile);
     let start = Instant::now();
     let mut user_wait_this_turn = Duration::ZERO;
     let additional_context = request
@@ -234,6 +250,14 @@ fn run_session_turn_with_model_client_and_reminder_override(
             CoreStep::NeedModel { ref prompt, .. } => {
                 if ui.apply_pending_runtime_updates(core, config) {
                     core.set_response_protocol(config.response_protocol);
+                    let profile = crate::negotiate_interaction(
+                        model_client,
+                        config,
+                        request.audit_file,
+                        &mut || ui.is_cancel_requested(),
+                    );
+                    core.set_interaction_profile(&profile);
+                    ui.on_interaction_profile(&profile);
                     step = CoreStep::NeedModel {
                         prompt: core.build_next_prompt(),
                         rounds_remaining: core.remaining_rounds(),
@@ -293,11 +317,12 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     }
                 }
                 rounds += 1;
-                ui.on_model_request(rounds, prompt);
+                let interaction_request = core.model_interaction_request(prompt.clone());
+                ui.on_model_interaction_request(rounds, &interaction_request);
                 match call_model_with_system_retries(
                     model_client,
                     config,
-                    prompt,
+                    &interaction_request,
                     request.audit_file,
                     ui,
                     &mut profiler,
@@ -358,11 +383,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                             }
                         }
                         latest_usage = Some(response.response.usage.clone());
-                        ui.on_model_response(
-                            rounds,
-                            &response.response.usage,
-                            &response.response.content,
-                        );
+                        ui.on_model_interaction_response(rounds, &response.response);
                         let mut action_runtime = TurnActionRuntime::new(ui);
                         step = core.apply_model_response_with_repair_audit_and_runtime(
                             response.response,
@@ -616,7 +637,7 @@ impl ActionRuntime for TurnActionRuntime<'_> {
 fn call_model_with_system_retries(
     model_client: &mut dyn ModelClient,
     config: &ModelServiceConfig,
-    prompt: &str,
+    request: &ModelInteractionRequest,
     audit_file: &Path,
     ui: &mut dyn TurnUi,
     profiler: &mut Option<&mut RuntimeProfiler>,
@@ -628,8 +649,9 @@ fn call_model_with_system_retries(
     let mut total_retry_wait = Duration::ZERO;
     for attempt in 0..=retry_policy.max_attempts {
         let model_wait_start = Instant::now();
-        let result =
-            model_client.call_model(config, prompt, audit_file, &mut || ui.is_cancel_requested());
+        let result = model_client.call_model_interaction(config, request, audit_file, &mut || {
+            ui.is_cancel_requested()
+        });
         let model_wait = model_wait_start.elapsed();
         total_model_wait = total_model_wait.saturating_add(model_wait);
         match result {

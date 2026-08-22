@@ -6,6 +6,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
     "memmgr",
     "capmgr",
+    "context_compact",
     "readfile",
     "run_bash",
     "self_tool",
@@ -40,6 +41,7 @@ where
 fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
     match binding_name {
         "capmgr" => Some(execute_capmgr),
+        "context_compact" => Some(execute_context_compact),
         "memmgr" => Some(execute_memmgr),
         "readfile" => Some(execute_readfile),
         "self_tool" => Some(execute_self_tool),
@@ -47,6 +49,19 @@ fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
         "toolgen" => Some(execute_toolgen),
         _ => None,
     }
+}
+
+fn execute_context_compact(
+    _core: &mut AgentCore,
+    _action: &ParsedAction,
+    _runtime: &mut dyn ActionRuntime,
+) -> ActionExecution {
+    // AgentCore promotes this intrinsic action before ordinary dispatch so it
+    // can atomically rewrite prompt state. This callback is a defensive guard
+    // that also keeps manifest and compiled binding registries paired.
+    ActionExecution::Completed(crate::ActionOutcome::failed(
+        "Action result: context_compact\nerror: intrinsic_dispatch_required",
+    ))
 }
 
 fn execute_toolgen(
