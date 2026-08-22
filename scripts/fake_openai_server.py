@@ -77,6 +77,12 @@ class Handler(BaseHTTPRequestHandler):
         elif "TTY_STRESS" in prompt:
             time.sleep(self.response_delay)
             content = tty_stress_scenario_response()
+        elif "Q2：最终答案只输出 SUPPLEMENT_OK。" in prompt:
+            content = (
+                "<ASSISTANT>"
+                "<final_answer>SUPPLEMENT_OK</final_answer>"
+                "</ASSISTANT>"
+            )
         elif "## USER" in prompt and "SUPPLEMENT_OK" in prompt:
             content = (
                 "<ASSISTANT>"

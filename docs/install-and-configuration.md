@@ -206,8 +206,8 @@ Shell:
 - `/workspace` manages workspace reference directories.
 - `Ctrl+C` / `Esc` cancel the current input/menu/turn; use `/exit` or `Ctrl+D`
   to exit.
-- While the model is working, typing and pressing Enter submits a supplement to
-  the active turn.
+- While the model is working, typing another question and pressing Enter queues a
+  separate next turn; it does not replace the current turn’s final answer.
 
 Web:
 

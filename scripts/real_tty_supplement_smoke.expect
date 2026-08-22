@@ -1,6 +1,6 @@
 #!/usr/bin/env expect
 #
-# Real PTY smoke for active-turn user supplements. It uses a local fake
+# Real PTY smoke for questions queued while an active turn is running. It uses a local fake
 # OpenAI-compatible model server, so it does not need network or a real API key.
 
 set timeout 60
@@ -125,10 +125,10 @@ if {$cancel_elapsed > 1500} {
     error "active turn Ctrl+C cancellation took ${cancel_elapsed}ms, expected <= 1500ms; output=$cancel_output"
 }
 wait_prompt
-send "请等待补充后再回答，最终答案只输出一个标记词。\r"
+send "Q1：最终答案只输出 NO_SUPPLEMENT。\r"
 answer_cursor_queries
 after 500
-send "补充：最终标记词必须是 SUPPLEMENT_OK。\r"
+send "Q2：最终答案只输出 SUPPLEMENT_OK。\r"
 set supplement_output ""
 expect {
     -re "\033\\\[6n" {
@@ -136,24 +136,33 @@ expect {
         send "\033\[24;1R"
         exp_continue
     }
-    -re "思考中\\.\\.\\. x2" {
-        error "thinking transient should not double-count after supplement preempts a stale response"
-    }
-    -re "❯❯" {
+    -re "SUPPLEMENT_OK" {
         append supplement_output $expect_out(buffer)
+        if {[regexp -all -- "SUPPLEMENT_OK" $supplement_output] < 2} {
+            exp_continue
+        }
     }
     timeout {
-        error "timeout waiting for supplement answer"
+        error "timeout waiting for queued second answer"
     }
     eof {
-        error "unexpected EOF waiting for supplement answer"
+        error "unexpected EOF waiting for queued second answer"
     }
 }
-if {[string first "NO_SUPPLEMENT" $supplement_output] >= 0} {
-    error "supplement was not applied before stale answer"
+set first_answer [string first "NO_SUPPLEMENT" $supplement_output]
+set second_question [string first "Q2：最终答案只输出" $supplement_output]
+set second_answer [string first "SUPPLEMENT_OK" $supplement_output [expr {$second_question + 1}]]
+if {$first_answer < 0} {
+    error "first answer was lost or overwritten; output=$supplement_output"
 }
-if {[string first "SUPPLEMENT_OK" $supplement_output] < 0} {
-    error "supplement answer missing SUPPLEMENT_OK; output=$supplement_output"
+if {$second_question < 0} {
+    error "queued Q2 was not rendered as a new user turn; output=$supplement_output"
+}
+if {$second_answer < 0} {
+    error "queued Q2 answer missing SUPPLEMENT_OK; output=$supplement_output"
+}
+if {!($first_answer < $second_question && $second_question < $second_answer)} {
+    error "expected Q1 answer, then Q2 user bubble, then Q2 answer; output=$supplement_output"
 }
 send "/prof\r"
 set prof_output ""
