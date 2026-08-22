@@ -384,6 +384,8 @@ fn run_session_turn_with_model_client_and_reminder_override(
                         }
                         latest_usage = Some(response.response.usage.clone());
                         ui.on_model_interaction_response(rounds, &response.response);
+                        let continue_supplements_after_final_answer =
+                            ui.continue_supplements_after_final_answer();
                         let mut action_runtime = TurnActionRuntime::new(ui);
                         step = core.apply_model_response_with_repair_audit_and_runtime(
                             response.response,
@@ -394,7 +396,10 @@ fn run_session_turn_with_model_client_and_reminder_override(
                         );
                         user_wait_this_turn =
                             user_wait_this_turn.saturating_add(action_runtime.user_wait());
-                        if !is_terminal_stop(&step) {
+                        if !is_terminal_stop(&step)
+                            && (!matches!(step, CoreStep::Final(_))
+                                || continue_supplements_after_final_answer)
+                        {
                             let mut all_supplements = action_runtime
                                 .take_pending_supplements()
                                 .into_iter()
@@ -535,18 +540,22 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 if let Some(stop) = turn.stop_summary {
                     break turn_stop_parts(stop);
                 }
-                let supplements = normalize_user_supplements_with_context(
-                    ui.drain_user_supplements_with_context(),
-                );
-                if !supplements.is_empty() {
-                    if let Some(next_step) = core.append_user_supplements_with_context_and_audit(
-                        supplements,
-                        request.audit_file,
-                        request.session,
-                        &turn_id,
-                    ) {
-                        step = next_step;
-                        continue;
+                if ui.continue_supplements_after_final_answer() {
+                    let supplements = normalize_user_supplements_with_context(
+                        ui.drain_user_supplements_with_context(),
+                    );
+                    if !supplements.is_empty() {
+                        if let Some(next_step) = core
+                            .append_user_supplements_with_context_and_audit(
+                                supplements,
+                                request.audit_file,
+                                request.session,
+                                &turn_id,
+                            )
+                        {
+                            step = next_step;
+                            continue;
+                        }
                     }
                 }
                 break (

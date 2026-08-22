@@ -752,7 +752,11 @@ Session, attachment removal, inline decisions, rename, and runtime config
 updates so repeated clicks show immediate feedback instead of issuing duplicate
 commands. The server remains authoritative: repeated Stop is harmless; ordinary
 Send during an active turn is durably queued as the next task; only an explicit
-supplement command joins the active turn; stale supplements can start a new turn
+supplement command joins the active turn. For Web workers, a final answer is a
+host-visible turn boundary: any explicit supplement still pending when that
+answer arrives is handed back to the Host and starts a distinct follow-up turn,
+so the first answer remains attached to its original bubble; stale supplements
+can also start a new turn
 after cancellation/completion; repeated attachment removal for the same
 session is treated as success, and stale decision replies after a turn has
 finished are ignored before they reach a worker.

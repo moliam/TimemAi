@@ -5078,7 +5078,7 @@ fn attach_worker_to_session_context(
         .manager
         .lock()
         .map_err(|_| "worker_manager_poisoned".to_string())?
-        .spawn_worker_in_session_with_assistant_speaker_name(
+        .spawn_worker_in_session_with_separate_late_supplement_turn(
             core,
             runtime.settings.config,
             workspace,

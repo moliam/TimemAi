@@ -37,6 +37,7 @@ pub struct CoreSessionWorkerConfig {
     pub identity: CoreSessionWorkerIdentity,
     pub workspace: CoreSessionWorkerWorkspace,
     pub assistant_speaker_name: Option<String>,
+    pub continue_supplements_after_final_answer: bool,
 }
 
 impl CoreSessionWorkerConfig {
@@ -45,11 +46,17 @@ impl CoreSessionWorkerConfig {
             identity,
             workspace,
             assistant_speaker_name: None,
+            continue_supplements_after_final_answer: true,
         }
     }
 
     pub fn with_assistant_speaker_name(mut self, name: impl Into<String>) -> Self {
         self.assistant_speaker_name = Some(name.into());
+        self
+    }
+
+    pub fn with_separate_turn_for_supplements_after_final_answer(mut self) -> Self {
+        self.continue_supplements_after_final_answer = false;
         self
     }
 
@@ -887,6 +894,32 @@ impl CoreSessionWorkerManager {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn spawn_worker_in_session_with_separate_late_supplement_turn(
+        &mut self,
+        core: AgentCore,
+        config: ModelServiceConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        session_id: impl Into<String>,
+        context_id: impl Into<String>,
+        display_name: Option<String>,
+        parent_worker_id: Option<String>,
+        assistant_speaker_name: Option<String>,
+    ) -> Result<String, String> {
+        self.spawn_worker_in_session_with_model_client_and_options(
+            core,
+            config,
+            workspace,
+            session_id,
+            context_id,
+            display_name,
+            parent_worker_id,
+            assistant_speaker_name,
+            false,
+            HttpModelClient,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_worker_in_session_with_assistant_speaker_name(
         &mut self,
         core: AgentCore,
@@ -984,6 +1017,37 @@ impl CoreSessionWorkerManager {
     where
         M: ModelClient + Send + 'static,
     {
+        self.spawn_worker_in_session_with_model_client_and_options(
+            core,
+            config,
+            workspace,
+            session_id,
+            context_id,
+            display_name,
+            parent_worker_id,
+            assistant_speaker_name,
+            true,
+            model_client,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_worker_in_session_with_model_client_and_options<M>(
+        &mut self,
+        core: AgentCore,
+        config: ModelServiceConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        session_id: impl Into<String>,
+        context_id: impl Into<String>,
+        display_name: Option<String>,
+        parent_worker_id: Option<String>,
+        assistant_speaker_name: Option<String>,
+        continue_supplements_after_final_answer: bool,
+        model_client: M,
+    ) -> Result<String, String>
+    where
+        M: ModelClient + Send + 'static,
+    {
         let session_id = session_id.into();
         let context_id = context_id.into();
         if self.workers.values().any(|worker| {
@@ -1018,11 +1082,15 @@ impl CoreSessionWorkerManager {
             core,
             config,
             {
-                let worker_config = CoreSessionWorkerConfig::new(identity.clone(), workspace);
-                match assistant_speaker_name {
-                    Some(name) => worker_config.with_assistant_speaker_name(name),
-                    None => worker_config,
+                let mut worker_config = CoreSessionWorkerConfig::new(identity.clone(), workspace);
+                if let Some(name) = assistant_speaker_name {
+                    worker_config = worker_config.with_assistant_speaker_name(name);
                 }
+                if !continue_supplements_after_final_answer {
+                    worker_config =
+                        worker_config.with_separate_turn_for_supplements_after_final_answer();
+                }
+                worker_config
             },
             self.runtime.clone(),
             model_client,
@@ -1180,6 +1248,8 @@ impl CoreSessionWorker {
                 .assistant_speaker_name
                 .clone()
                 .unwrap_or_else(|| identity.display_name.clone());
+            let continue_supplements_after_final_answer =
+                worker_config.continue_supplements_after_final_answer;
             core.set_response_protocol(config.response_protocol);
             core.set_assistant_speaker_name(&assistant_speaker_name);
             core.set_tool_repo_session_id(&identity.session_id);
@@ -1210,6 +1280,7 @@ impl CoreSessionWorker {
                 current_turn_active: None,
                 phase: None,
                 accept_supplements: true,
+                continue_supplements_after_final_answer,
                 pending_bash_always_allow: false,
                 pending_runtime_updates,
                 interaction_profile: None,
@@ -1285,10 +1356,12 @@ impl CoreSessionWorker {
                                     Some(&mut profiler),
                                     &mut model_client,
                                 );
-                                if main_outcome.stop_summary.is_some() {
-                                    // A structured stop is a hard boundary. Late supplements are
-                                    // already retained by the host turn UI, but must not bypass
-                                    // cancellation, repair, or runtime-failure limits here.
+                                if main_outcome.stop_summary.is_some()
+                                    || !ui.continue_supplements_after_final_answer
+                                {
+                                    // A structured stop is a hard boundary. Web-style turn UIs
+                                    // also treat a visible final answer as a boundary so a late
+                                    // supplement cannot create a second answer in the same turn.
                                     let supplements = ui.close_supplements_for_main_context();
                                     if !supplements.is_empty() {
                                         let _ = event_tx.send(
@@ -1503,6 +1576,7 @@ struct WorkerTurnUi {
     current_turn_active: Option<Arc<AtomicBool>>,
     phase: Option<String>,
     accept_supplements: bool,
+    continue_supplements_after_final_answer: bool,
     pending_bash_always_allow: bool,
     pending_runtime_updates: Arc<Mutex<Vec<PendingRuntimeUpdate>>>,
     interaction_profile: Option<crate::InteractionProfile>,
@@ -1575,7 +1649,7 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
                 Some(profiler),
                 model_client,
             );
-            if current.stop_summary.is_some() {
+            if current.stop_summary.is_some() || !ui.continue_supplements_after_final_answer {
                 let supplements = ui.close_supplements_for_main_context();
                 if !supplements.is_empty() {
                     let _ = ui
@@ -1768,6 +1842,10 @@ impl TurnUi for WorkerTurnUi {
             .lock()
             .map(|mut mailbox| self.accept_queued_supplements(std::mem::take(&mut mailbox.queue)))
             .unwrap_or_default()
+    }
+
+    fn continue_supplements_after_final_answer(&self) -> bool {
+        self.continue_supplements_after_final_answer
     }
 
     fn on_model_interaction_request(
