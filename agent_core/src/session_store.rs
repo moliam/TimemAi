@@ -1,8 +1,7 @@
 use crate::MemGuard;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -285,15 +284,24 @@ impl SessionStore {
                 Err(_) => invalid_records = invalid_records.saturating_add(1),
             }
         }
-        if invalid_records == 0 {
-            return Err("session_index_recovery_not_needed".to_string());
-        }
         sessions.sort_by(|left, right| {
             right
                 .updated_at_ms
                 .cmp(&left.updated_at_ms)
                 .then_with(|| left.session_id.cmp(&right.session_id))
         });
+        let mut seen_session_ids = BTreeSet::new();
+        sessions.retain(|session| {
+            if seen_session_ids.insert(session.session_id.clone()) {
+                true
+            } else {
+                invalid_records = invalid_records.saturating_add(1);
+                false
+            }
+        });
+        if invalid_records == 0 {
+            return Err("session_index_recovery_not_needed".to_string());
+        }
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -318,6 +326,7 @@ impl SessionStore {
         let file = fs::File::open(path).map_err(|_| "session_index_open_failed")?;
         let mut reader = BufReader::new(file);
         let mut sessions = Vec::new();
+        let mut session_ids = BTreeSet::new();
         while let Some(line) = read_bounded_jsonl_record(
             &mut reader,
             MAX_SESSION_INDEX_RECORD_BYTES,
@@ -329,10 +338,12 @@ impl SessionStore {
                 }
                 continue;
             }
-            sessions.push(
-                serde_json::from_slice::<StoredSession>(&line.bytes)
-                    .map_err(|_| "session_record_parse_failed")?,
-            );
+            let session = serde_json::from_slice::<StoredSession>(&line.bytes)
+                .map_err(|_| "session_record_parse_failed")?;
+            if !session_ids.insert(session.session_id.clone()) {
+                return Err("session_record_parse_failed".to_string());
+            }
+            sessions.push(session);
         }
         sessions.sort_by(|left, right| {
             right
@@ -436,22 +447,28 @@ impl SessionStore {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options
-            .open(&temporary)
-            .map_err(|_| "session_index_open_failed")?;
-        for session in sessions {
-            let line =
-                serde_json::to_string(session).map_err(|_| "session_record_serialize_failed")?;
-            writeln!(file, "{line}").map_err(|_| "session_index_write_failed")?;
+        let result = (|| {
+            let mut file = options
+                .open(&temporary)
+                .map_err(|_| "session_index_open_failed")?;
+            for session in sessions {
+                let line = serde_json::to_string(session)
+                    .map_err(|_| "session_record_serialize_failed")?;
+                writeln!(file, "{line}").map_err(|_| "session_index_write_failed")?;
+            }
+            file.sync_all().map_err(|_| "session_index_sync_failed")?;
+            fs::rename(&temporary, &index_path).map_err(|_| "session_index_replace_failed")?;
+            restrict_session_path_permissions(&index_path, false)?;
+            #[cfg(unix)]
+            fs::File::open(self.sessions_dir())
+                .and_then(|directory| directory.sync_all())
+                .map_err(|_| "session_index_dir_sync_failed")?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
         }
-        file.sync_all().map_err(|_| "session_index_sync_failed")?;
-        fs::rename(&temporary, &index_path).map_err(|_| "session_index_replace_failed")?;
-        restrict_session_path_permissions(&index_path, false)?;
-        #[cfg(unix)]
-        fs::File::open(self.sessions_dir())
-            .and_then(|directory| directory.sync_all())
-            .map_err(|_| "session_index_dir_sync_failed")?;
-        Ok(())
+        result
     }
 
     pub fn append_history_record(

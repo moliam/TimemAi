@@ -371,7 +371,8 @@ restart without re-entering model service settings while keeping explicit launch
 options authoritative. On Unix, the Session directory and index use `0700` and
 `0600` permissions because the index may contain the Session API key. Startup
 loads that JSONL index through the shared Core recovery path: malformed,
-non-UTF-8, truncated, and oversized records are skipped with bounded memory,
+non-UTF-8, truncated, oversized, and duplicate-ID records are skipped with bounded
+memory. For duplicate IDs the newest `updated_at_ms` record wins deterministically,
 valid Session records remain usable, and the exact original index is preserved
 as a timestamped sibling backup before the repaired index is installed. Shell
 prints the backup path and continues with a recovered or fresh Session; Web uses

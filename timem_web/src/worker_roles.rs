@@ -355,6 +355,83 @@ mod tests {
     }
 
     #[test]
+    fn recovery_drops_invalid_duplicates_and_repairs_group_references_deterministically() {
+        let library = WorkerRoleLibrary {
+            roles: vec![
+                role("role_keep", "Reviewer"),
+                role("role_duplicate_name", "reviewer"),
+                role("bad id", "Broken"),
+                role("role_second", "Builder"),
+            ],
+            groups: vec![
+                WorkerRoleGroup {
+                    id: "group_keep".to_string(),
+                    name: "Quality".to_string(),
+                    role_ids: vec![
+                        "missing".to_string(),
+                        "role_keep".to_string(),
+                        "role_keep".to_string(),
+                    ],
+                },
+                WorkerRoleGroup {
+                    id: "group_duplicate_name".to_string(),
+                    name: "quality".to_string(),
+                    role_ids: vec!["role_second".to_string()],
+                },
+                WorkerRoleGroup {
+                    id: "group_second".to_string(),
+                    name: "Delivery".to_string(),
+                    role_ids: vec!["role_keep".to_string(), "role_second".to_string()],
+                },
+            ],
+        };
+        let bytes = serde_json::to_vec(&library).unwrap();
+
+        let recovered = recover_role_library(&bytes);
+
+        assert_eq!(
+            recovered
+                .roles
+                .iter()
+                .map(|role| role.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["role_keep", "role_second"]
+        );
+        assert_eq!(recovered.groups.len(), 2);
+        assert_eq!(recovered.groups[0].role_ids, vec!["role_keep"]);
+        assert_eq!(recovered.groups[1].role_ids, vec!["role_second"]);
+        validate_role_library(&recovered).unwrap();
+    }
+
+    #[test]
+    fn failed_role_library_replace_removes_temporary_file() {
+        let root = std::env::temp_dir().join(format!(
+            "timem_worker_roles_replace_failure_{}_{}",
+            std::process::id(),
+            NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("worker_roles.json");
+        fs::create_dir(&path).unwrap();
+        let result = save_role_library(
+            &path,
+            &WorkerRoleLibrary {
+                roles: vec![role("role_1", "Reviewer")],
+                groups: Vec::new(),
+            },
+        );
+
+        assert_eq!(result.unwrap_err(), "worker_role_store_replace_failed");
+        let leftovers = fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "failed save left temporary files");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn validation_rejects_duplicate_placement_and_names() {
         let duplicate_names = WorkerRoleLibrary {
             roles: vec![role("role_1", "Review"), role("role_2", "review")],
