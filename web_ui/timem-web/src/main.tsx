@@ -1744,13 +1744,13 @@ function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOp
     </DndContext>
     {session && <form className="worker-role-group-editor" onSubmit={(event) => { event.preventDefault(); if (newGroupName.trim() && onCommand({ type: "worker_role_group_create", session_id: session.session_id, name: newGroupName })) setNewGroupName(""); }}>
       <input value={newGroupName} maxLength={80} disabled={disabled} placeholder="新分组名称" aria-label="Role group name" onChange={(event) => setNewGroupName(event.target.value)}/>
-      <button type="submit" disabled={disabled || !newGroupName.trim()}><Plus size={12}/> 分组</button>
+      <button type="submit" className="worker-role-group-create" disabled={disabled || !newGroupName.trim()}><Plus size={12}/> 分组</button>
     </form>}
     {session && <form className={`worker-role-editor ${editingId ? "editing" : "creating"}`} onSubmit={(event) => { event.preventDefault(); submit(); }}>
       <strong>{editingId ? "编辑 Role" : "新建 Role"}</strong>
       <input value={name} maxLength={80} disabled={disabled} placeholder="称呼，例如：严谨审查员" aria-label="Role name" onChange={(event) => setName(event.target.value)}/>
       <textarea value={description} maxLength={16384} disabled={disabled} placeholder="描述工作要求、步骤和约束…" aria-label="Role description" onChange={(event) => setDescription(event.target.value)}/>
-      <div><button type="submit" disabled={disabled || !name.trim() || !description.trim()}>{editingId ? "保存" : "创建"}</button>{editingId && <button type="button" onClick={resetEditor}>取消</button>}</div>
+      <div><button type="submit" className="worker-role-primary-action" disabled={disabled || !name.trim() || !description.trim()}>{editingId ? "保存" : "创建"}</button>{editingId && <button type="button" onClick={resetEditor}>取消</button>}</div>
     </form>}
   </aside>;
 }

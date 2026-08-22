@@ -40,4 +40,38 @@ describe("worker role action theme", () => {
     expect(remove).toContain("background: #f8eae9");
     expect(remove).toContain("color: #9e4c47");
   });
+
+  it("uses the role accent palette for group and role creation in both themes", () => {
+    expect(source).toContain('className="worker-role-group-create"');
+    expect(source).toContain('className="worker-role-primary-action"');
+
+    const dark = rule(".worker-role-panel :is(.worker-role-group-create, .worker-role-primary-action)");
+    const light = rule(':root[data-theme="light"] .worker-role-panel :is(.worker-role-group-create, .worker-role-primary-action)');
+    const lightHover = rule(':root[data-theme="light"] .worker-role-panel :is(.worker-role-group-create, .worker-role-primary-action):hover:not(:disabled)');
+
+    expect(dark).toContain("border-color: #487568");
+    expect(dark).toContain("background: #23483f");
+    expect(dark).toContain("color: #c7e8df");
+    expect(light).toContain("border-color: #79aa9d");
+    expect(light).toContain("background: #dcefeb");
+    expect(light).toContain("color: #245f55");
+    expect(lightHover).toContain("background: #cce6df");
+    expect(light).not.toMatch(/background:\s*#(?:171717|202020|222)/i);
+  });
+  it("uses a compact, readable type scale inside the narrow roles panel", () => {
+    const panel = rule(".worker-role-panel");
+    const title = rule(".worker-role-panel > header > span");
+    const input = rule(".worker-role-editor input");
+    const action = rule(".worker-role-editor > div button");
+
+    expect(panel).toContain("--worker-role-title-size: 13px");
+    expect(panel).toContain("--worker-role-control-size: 12px");
+    expect(panel).toContain("--worker-role-meta-size: 10.5px");
+    expect(title).toContain("font-size: var(--worker-role-title-size)");
+    expect(input).toContain("font-size: var(--worker-role-control-size)");
+    expect(styles).toContain(".worker-role-editor textarea { min-height: 112px; resize: vertical; padding: 9px; font-size: var(--worker-role-control-size)");
+    expect(action).toContain("font-size: var(--worker-role-control-size)");
+    expect(input).not.toContain("font-size: var(--content-size)");
+  });
+
 });
