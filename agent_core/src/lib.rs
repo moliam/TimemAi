@@ -62,6 +62,7 @@ pub mod reminder_config;
 pub mod response_protocol;
 pub mod retry_policy;
 pub mod runtime_context;
+mod schema_optimizer;
 #[path = "../../resources/capabilities/tools/self_tool.rs"]
 pub mod self_tool;
 pub mod session_runtime;
