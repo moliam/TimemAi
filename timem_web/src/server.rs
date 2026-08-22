@@ -1,9 +1,10 @@
 use crate::debug_session::DebugStore;
 use crate::event_journal::{EventJournal, JournalInstanceInfo};
 use crate::worker_roles::{
-    load_role_library, load_roles, normalize_group_name, normalize_role_fields, role_library_path,
-    roles_path_for_history, save_role_library, WorkerRole, WorkerRoleGroup, WorkerRoleLibrary,
-    MAX_WORKER_ROLES, MAX_WORKER_ROLE_GROUPS,
+    load_role_library, load_roles, normalize_group_name, normalize_role_fields,
+    recover_role_library, role_library_path, roles_path_for_history, save_role_library, WorkerRole,
+    WorkerRoleGroup, WorkerRoleLibrary, MAX_ROLE_FILE_BYTES, MAX_WORKER_ROLES,
+    MAX_WORKER_ROLE_GROUPS,
 };
 use agent_core::mcp::{McpRuntime, McpServerConfig, McpServerReport, McpStore, McpTool};
 use agent_core::session_store::{
@@ -411,7 +412,7 @@ impl WebMemState {
         let layout = RuntimeDataLayout::new(data_dir, space.clone());
         let mcp_store = McpStore::new(layout.memory_dir());
         let mcp_configs = load_mcp_configs_resilient(&mcp_store)?;
-        let role_library = load_role_library(&role_library_path(&layout.memory_dir()))?;
+        let role_library = load_role_library_resilient(&role_library_path(&layout.memory_dir()))?;
         Ok(Self {
             space,
             session_store: SessionStore::new(layout.memory_dir()),
@@ -467,6 +468,55 @@ fn load_mcp_configs_resilient(mcp_store: &McpStore) -> Result<Vec<McpServerConfi
         }
         Err(error) => Err(error),
     }
+}
+
+fn load_role_library_resilient(path: &Path) -> Result<WorkerRoleLibrary, String> {
+    match load_role_library(path) {
+        Ok(library) => Ok(library),
+        Err(error) if worker_role_error_is_recoverable(&error) => {
+            let recovered = std::fs::metadata(path)
+                .ok()
+                .filter(|metadata| metadata.is_file() && metadata.len() <= MAX_ROLE_FILE_BYTES)
+                .and_then(|_| std::fs::read(path).ok())
+                .map(|original| recover_role_library(&original))
+                .unwrap_or_default();
+            let replacement = serde_json::to_vec_pretty(&recovered).map_err(|serialize_error| {
+                format!("worker_role_recovery_serialize_failed:{serialize_error}")
+            })?;
+            let backup = quarantine_and_replace_corrupt_state(
+                path,
+                &replacement,
+                "worker-roles-corrupt-backup",
+            )
+            .map_err(|repair_error| {
+                format!(
+                    "Worker role data is invalid ({error}) and automatic recovery failed ({repair_error}). Fix permissions or free disk space, then move {} aside and restart. The original file must be preserved for manual recovery.",
+                    path.display()
+                )
+            })?;
+            eprintln!(
+                "[timem_web_warning] worker_role_corruption_repaired error={error} recovered_roles={} recovered_groups={} backup={}",
+                recovered.roles.len(),
+                recovered.groups.len(),
+                backup.display()
+            );
+            Ok(recovered)
+        }
+        Err(error) => Err(format!(
+            "Worker role data could not be read ({error}). Timem did not modify {}. Fix file permissions or storage access and restart.",
+            path.display()
+        )),
+    }
+}
+
+fn worker_role_error_is_recoverable(error: &str) -> bool {
+    error == "worker_role_store_parse_failed"
+        || error == "worker_role_store_invalid"
+        || error.starts_with("worker_role_id_")
+        || error.starts_with("worker_role_name_")
+        || error.starts_with("worker_role_description_")
+        || error.starts_with("worker_role_group_")
+        || error == "worker_role_limit_reached"
 }
 
 #[derive(Debug, Clone)]
@@ -4083,48 +4133,55 @@ fn restore_stored_sessions_with_runtime_restart_marker(
 }
 
 fn list_stored_sessions_resilient(store: &SessionStore) -> Result<Vec<StoredSession>, String> {
-    match store.list_sessions() {
-        Ok(sessions) => Ok(sessions),
-        Err(error) if error == "session_record_parse_failed" => {
-            let path = store.index_path();
-            let raw = std::fs::read(&path)
-                .map_err(|read_error| format!("session_index_recovery_read_failed:{read_error}"))?;
-            let mut sessions = Vec::new();
-            let mut repaired = Vec::with_capacity(raw.len());
-            let mut invalid_records = 0usize;
-            for line in raw.split(|byte| *byte == b'\n') {
-                if line.iter().all(|byte| byte.is_ascii_whitespace()) {
-                    continue;
-                }
-                match serde_json::from_slice::<StoredSession>(line) {
-                    Ok(session) => {
-                        serde_json::to_writer(&mut repaired, &session).map_err(
-                            |serialize_error| {
-                                format!("session_index_recovery_serialize_failed:{serialize_error}")
-                            },
-                        )?;
-                        repaired.push(b'\n');
-                        sessions.push(session);
-                    }
-                    Err(_) => invalid_records = invalid_records.saturating_add(1),
-                }
-            }
-            let backup =
-                backup_and_replace_corrupt_state(&path, &repaired, "session-index-corrupt-backup")?;
-            sessions.sort_by(|left, right| {
-                right
-                    .updated_at_ms
-                    .cmp(&left.updated_at_ms)
-                    .then_with(|| left.session_id.cmp(&right.session_id))
-            });
-            eprintln!(
-                "[timem_web_warning] session_index_corruption_repaired invalid_records={invalid_records} backup={}",
-                backup.display()
-            );
-            Ok(sessions)
-        }
-        Err(error) => Err(error),
+    let recovery = store.list_sessions_resilient().map_err(|error| {
+        format!(
+            "Session restore index could not be loaded or repaired ({error}). Timem cannot safely update it. Fix permissions or free disk space, inspect {}, and restart.",
+            store.index_path().display()
+        )
+    })?;
+    if let Some(backup) = recovery.backup_path.as_ref() {
+        eprintln!(
+            "[timem_web_warning] session_index_corruption_repaired invalid_records={} backup={}",
+            recovery.invalid_records,
+            backup.display()
+        );
     }
+    Ok(recovery.sessions)
+}
+
+fn quarantine_and_replace_corrupt_state(
+    path: &Path,
+    replacement: &[u8],
+    backup_label: &str,
+) -> Result<PathBuf, String> {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let backup = path_with_appended_suffix(path, &format!(".{backup_label}-{suffix}"));
+    std::fs::rename(path, &backup)
+        .map_err(|error| format!("recoverable_state_quarantine_failed:{error}"))?;
+    if let Err(error) = sync_state_parent_directory(path) {
+        let _ = std::fs::rename(&backup, path);
+        return Err(error);
+    }
+    let temporary = path_with_appended_suffix(
+        path,
+        &format!(".recovery-{}-{suffix}.tmp", std::process::id()),
+    );
+    if let Err(error) =
+        write_new_private_synced_file(&temporary, replacement, "recoverable_state_replacement")
+    {
+        let _ = std::fs::rename(&backup, path);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        let _ = std::fs::rename(&backup, path);
+        return Err(format!("recoverable_state_replace_failed:{error}"));
+    }
+    sync_state_parent_directory(path)?;
+    Ok(backup)
 }
 
 fn backup_and_replace_corrupt_state(

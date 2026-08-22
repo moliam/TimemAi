@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_HISTORY_PAGE_LIMIT: usize = 200;
+const MAX_SESSION_INDEX_RECORD_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredSession {
@@ -124,6 +125,19 @@ pub struct ChatHistoryPage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionIndexRecovery {
+    pub sessions: Vec<StoredSession>,
+    pub invalid_records: usize,
+    pub backup_path: Option<PathBuf>,
+}
+
+impl SessionIndexRecovery {
+    pub fn repaired(&self) -> bool {
+        self.backup_path.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionResumeNotice {
     pub history_path: PathBuf,
     pub current_dir: PathBuf,
@@ -216,20 +230,107 @@ impl SessionStore {
         self.list_sessions_unlocked()
     }
 
+    /// Loads the restore index and repairs malformed JSONL records without
+    /// discarding valid sessions. The exact original file is retained beside
+    /// the index before the repaired replacement is installed.
+    pub fn list_sessions_resilient(&self) -> Result<SessionIndexRecovery, String> {
+        match self.list_sessions() {
+            Ok(sessions) => Ok(SessionIndexRecovery {
+                sessions,
+                invalid_records: 0,
+                backup_path: None,
+            }),
+            Err(error) if error == "session_record_parse_failed" => {
+                let _index_lock = self
+                    .index_lock
+                    .lock()
+                    .map_err(|_| "session_index_lock_poisoned".to_string())?;
+                self.guard
+                    .with_write(|| self.repair_session_index_unlocked())?
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn repair_session_index_unlocked(&self) -> Result<SessionIndexRecovery, String> {
+        // Another process may have repaired the index while this caller waited
+        // for the cross-process memory guard.
+        if let Ok(sessions) = self.list_sessions_unlocked() {
+            return Ok(SessionIndexRecovery {
+                sessions,
+                invalid_records: 0,
+                backup_path: None,
+            });
+        }
+        let path = self.index_path();
+        let file =
+            fs::File::open(&path).map_err(|_| "session_index_recovery_read_failed".to_string())?;
+        let mut reader = BufReader::new(file);
+        let mut sessions = Vec::new();
+        let mut invalid_records = 0usize;
+        while let Some(line) = read_bounded_jsonl_record(
+            &mut reader,
+            MAX_SESSION_INDEX_RECORD_BYTES,
+            "session_index_recovery_read_failed",
+        )? {
+            if line.oversized {
+                invalid_records = invalid_records.saturating_add(1);
+                continue;
+            }
+            if line.bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
+                continue;
+            }
+            match serde_json::from_slice::<StoredSession>(&line.bytes) {
+                Ok(session) => sessions.push(session),
+                Err(_) => invalid_records = invalid_records.saturating_add(1),
+            }
+        }
+        if invalid_records == 0 {
+            return Err("session_index_recovery_not_needed".to_string());
+        }
+        sessions.sort_by(|left, right| {
+            right
+                .updated_at_ms
+                .cmp(&left.updated_at_ms)
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let backup_path = self
+            .sessions_dir()
+            .join(format!("index.jsonl.session-index-corrupt-backup-{suffix}"));
+        copy_file_synced(&path, &backup_path, "session_index_backup")?;
+        self.write_sessions_unlocked(&sessions)?;
+        Ok(SessionIndexRecovery {
+            sessions,
+            invalid_records,
+            backup_path: Some(backup_path),
+        })
+    }
+
     fn list_sessions_unlocked(&self) -> Result<Vec<StoredSession>, String> {
         let path = self.index_path();
         if !path.exists() {
             return Ok(Vec::new());
         }
         let file = fs::File::open(path).map_err(|_| "session_index_open_failed")?;
+        let mut reader = BufReader::new(file);
         let mut sessions = Vec::new();
-        for line in BufReader::new(file).lines() {
-            let line = line.map_err(|_| "session_index_read_failed")?;
-            if line.trim().is_empty() {
+        while let Some(line) = read_bounded_jsonl_record(
+            &mut reader,
+            MAX_SESSION_INDEX_RECORD_BYTES,
+            "session_index_read_failed",
+        )? {
+            if line.oversized || line.bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
+                if line.oversized {
+                    return Err("session_record_parse_failed".to_string());
+                }
                 continue;
             }
             sessions.push(
-                serde_json::from_str::<StoredSession>(&line)
+                serde_json::from_slice::<StoredSession>(&line.bytes)
                     .map_err(|_| "session_record_parse_failed")?,
             );
         }
@@ -529,6 +630,79 @@ impl SessionStore {
             .insert(path.to_path_buf(), index.clone());
         Ok(index)
     }
+}
+
+struct BoundedJsonlRecord {
+    bytes: Vec<u8>,
+    oversized: bool,
+}
+
+fn read_bounded_jsonl_record(
+    reader: &mut impl BufRead,
+    max_bytes: usize,
+    read_error: &str,
+) -> Result<Option<BoundedJsonlRecord>, String> {
+    let mut bytes = Vec::new();
+    let mut oversized = false;
+    let mut saw_data = false;
+    loop {
+        let buffer = reader.fill_buf().map_err(|_| read_error.to_string())?;
+        if buffer.is_empty() {
+            return if saw_data {
+                Ok(Some(BoundedJsonlRecord { bytes, oversized }))
+            } else {
+                Ok(None)
+            };
+        }
+        saw_data = true;
+        let consumed = buffer
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| index + 1)
+            .unwrap_or(buffer.len());
+        let content_len = if buffer.get(consumed.saturating_sub(1)) == Some(&b'\n') {
+            consumed - 1
+        } else {
+            consumed
+        };
+        if !oversized {
+            let remaining = max_bytes.saturating_sub(bytes.len());
+            let keep = content_len.min(remaining);
+            bytes.extend_from_slice(&buffer[..keep]);
+            if keep < content_len {
+                oversized = true;
+            }
+        }
+        let finished = buffer.get(consumed.saturating_sub(1)) == Some(&b'\n');
+        reader.consume(consumed);
+        if finished {
+            return Ok(Some(BoundedJsonlRecord { bytes, oversized }));
+        }
+    }
+}
+
+fn copy_file_synced(source: &Path, target: &Path, label: &str) -> Result<(), String> {
+    let mut source_file = fs::File::open(source).map_err(|_| format!("{label}_read_failed"))?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut target_file = options
+        .open(target)
+        .map_err(|_| format!("{label}_open_failed"))?;
+    std::io::copy(&mut source_file, &mut target_file)
+        .and_then(|_| target_file.sync_all())
+        .map_err(|_| format!("{label}_write_failed"))?;
+    #[cfg(unix)]
+    if let Some(parent) = target.parent() {
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|_| format!("{label}_dir_sync_failed"))?;
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
