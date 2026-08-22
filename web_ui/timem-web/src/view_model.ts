@@ -268,7 +268,7 @@ forceNewTurn = false,
     kind: "send",
     text: trimmed,
     clearDraftOnSuccess: true,
-    command: !forceNewTurn && (forceSupplement || session.state === "working")
+    command: forceSupplement && !forceNewTurn
  ? { type: "turn_supplement", session_id: session.session_id, text: trimmed, ...(attachmentIds === undefined ? {} : { attachment_ids: [...attachmentIds] }) }
  : { type: "turn_submit", session_id: session.session_id, text: trimmed, ...(attachmentIds === undefined ? {} : { attachment_ids: [...attachmentIds] }) },
   };

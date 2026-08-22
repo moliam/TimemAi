@@ -7817,7 +7817,37 @@ fn duplicate_cancel_commands_are_idempotent_for_one_active_turn() {
 }
 
 #[test]
-fn rapid_submit_during_an_active_turn_is_treated_as_a_supplement() {
+fn turn_submit_during_an_active_turn_cannot_merge_into_the_current_turn() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "QUEUED_NEXT_TURN");
+    let first = start_web_turn(&state, &session_id, "Q1").unwrap();
+
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "Q2".to_string(),
+            input_kind: None,
+            source_turn_id: None,
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "turn_already_active_use_supplement");
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(session.turns.len(), 1);
+    assert_eq!(session.turns[0].turn_id, first.turn_id);
+    assert_eq!(session.turns[0].user_entries.len(), 1);
+    assert_eq!(session.turns[0].user_entries[0].text, "Q1");
+}
+
+#[test]
+fn explicit_supplement_during_an_active_turn_stays_in_the_current_turn() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "SUBMIT_RACE");
     let first = start_web_turn(&state, &session_id, "initial upload task").unwrap();

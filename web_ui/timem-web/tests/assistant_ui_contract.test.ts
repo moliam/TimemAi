@@ -933,8 +933,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     const end = source.indexOf("const uploadFile = useCallback", start);
     const sendText = source.slice(start, end);
     expect(source).toContain("composerSendDecision");
-    expect(viewModelSource).toContain('session.state === "working"');
-    expect(viewModelSource).toContain('{ type: "turn_supplement"');
+    expect(viewModelSource).toContain('command: forceSupplement && !forceNewTurn');
     expect(sendText).toContain("composerSendDecision(");
     expect(source).toContain('value={draft}');
     expect(source).toContain('onSubmit={(event) => { event.preventDefault(); submitDraft(); }}');
@@ -1582,9 +1581,9 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).not.toContain("手动发送仍可用");
     expect(source).toContain('const sendAsNewTurn = activeSession.state !== "working";');
     expect(source).toContain('sendAsNewTurn ? "作为新消息开始任务" : "立即发送为当前任务的补充"');
-    expect(source).toContain("messageRoleIds, sendAsNewTurn)");
+    expect(source).toContain("!sendAsNewTurn, messageRoleIds, sendAsNewTurn)");
     expect(source).toContain("forceNewTurn = false");
-    expect(viewModelSource).toContain('!forceNewTurn && (forceSupplement || session.state === "working")');
+    expect(viewModelSource).toContain('command: forceSupplement && !forceNewTurn');
     expect(source).not.toContain('onClick={resumeQueuedMessages}>继续发送</button>');
     expect(styles).toContain(".queued-auto-send-switch[aria-checked=\"true\"]");
     expect(styles).toContain("transform: translateX(14px)");
