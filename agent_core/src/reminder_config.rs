@@ -69,7 +69,6 @@ pub fn default_config_root() -> PathBuf {
         std::env::var_os("TIMEM_CONFIG_DIR").as_deref(),
         std::env::var_os("XDG_CONFIG_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),
-        cfg!(target_os = "macos"),
     )
 }
 
@@ -77,29 +76,8 @@ fn config_root_from_values(
     explicit: Option<&OsStr>,
     xdg: Option<&OsStr>,
     home: Option<&OsStr>,
-    macos: bool,
 ) -> PathBuf {
-    if let Some(path) = explicit.filter(|path| !path.is_empty()) {
-        return PathBuf::from(path);
-    }
-    if macos {
-        return home
-            .filter(|path| !path.is_empty())
-            .map(PathBuf::from)
-            .map(|home| {
-                home.join("Library")
-                    .join("Application Support")
-                    .join("TimemAi")
-            })
-            .unwrap_or_else(|| PathBuf::from("/Library/Application Support/TimemAi"));
-    }
-    if let Some(path) = xdg.filter(|path| !path.is_empty()) {
-        return PathBuf::from(path).join("timem");
-    }
-    home.filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .map(|home| home.join(".config").join("timem"))
-        .unwrap_or_else(|| PathBuf::from("/etc/xdg/timem"))
+    crate::os::default_config_root(explicit, xdg, home)
 }
 
 pub fn reminder_tips_config_path(config_root: &Path) -> PathBuf {

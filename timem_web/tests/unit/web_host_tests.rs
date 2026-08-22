@@ -2732,7 +2732,7 @@ fn always_allow_topic_reply_promotes_session_bash_approval() {
 #[test]
 fn browser_open_uses_a_direct_argument_without_shell_interpolation() {
     let url = "http://127.0.0.1:12345/?token=test&name=a b";
-    let (_program, args) = browser_command(url);
+    let (_program, args) = browser_command(url).expect("supported browser command");
     assert_eq!(args.last().and_then(|arg| arg.to_str()), Some(url));
 }
 

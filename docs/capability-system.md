@@ -66,6 +66,19 @@ The manifest is the human-maintained source for:
 - enum field constraints derived from property `enum` values
 - examples
 
+The complete standard JSON Schema document is retained for native provider
+requests, including nested and top-level `oneOf`/`allOf`, numeric and collection
+bounds, patterns, and `additionalProperties`. Timem's `x-required-*` extensions
+are removed from the provider payload and translated to standard conditional
+schema clauses. MCP schemas follow the same lossless path instead of being
+reduced to only top-level properties. Native tool descriptions include valid
+argument-object examples (without the inline tool-name wrapper), so usage text
+must never refer to an example that the provider request does not contain.
+Builtin manifests close their input objects when the paired runtime rejects
+unknown fields, and tool-specific schemas must encode the same mutually
+exclusive modes, required combinations, and numeric limits enforced by the
+paired Rust callback.
+
 Normal/background execution is part of the capability interface:
 
 - Built-in tools can own specialized lifecycle semantics when needed. `run_bash`
@@ -90,6 +103,11 @@ Normal/background execution is part of the capability interface:
   bounds each individual check command. The model owns the check command; core
   owns the fixed success condition, interval/timeout bounds, cancellation
   checks, bounded output, approval, audit, and the structured action result.
+- The built-in `run_bash` manifest contains a host-environment placeholder.
+  During capability registration, core replaces it with the OS and `/bin/bash`
+  versions reported by the centralized `agent_core::os` interface. Detection is
+  cached for the process lifetime and degrades to `unknown` without leaving
+  template syntax in the model prompt.
 - Normal `run_bash` uses a positive model-provided `timeout_ms`. Core still owns
   the process and emits a structured host decision request after the
   long-command threshold, so a UI can render elapsed/remaining time and let the

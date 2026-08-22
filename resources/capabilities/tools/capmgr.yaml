@@ -16,7 +16,8 @@ description: |
   command-bound tools. Do not use these for run_bash jobs; run_bash returns pid
   and the runtime injects running job updates.
 prompt_input: |
-  Requires op. For op=load, also provide kind=tool|skill and id.
+  Requires op. For op=list, omit kind to list all or use kind=all|tool|skill.
+  For op=load, provide kind=tool|skill and id.
   For op=job_status or op=job_cancel, provide job_id. For job_status,
   timeout_ms is chosen by you; 0 means immediate check, max 15000.
 prompt_result: |
@@ -28,6 +29,7 @@ input_schema: |
   {
     "type": "object",
     "required": ["op"],
+    "additionalProperties": false,
     "properties": {
       "op": {
         "type": "string",
@@ -36,25 +38,37 @@ input_schema: |
       },
       "kind": {
         "type": "string",
-        "enum": ["tool", "skill"],
-        "description": "Capability kind."
+        "enum": ["all", "tool", "skill"],
+        "description": "Capability kind. all is valid only for list; load accepts tool or skill."
       },
       "id": {
         "type": "string",
+        "minLength": 1,
+        "pattern": "\\S",
         "description": "Capability id; required for load."
       },
       "job_id": {
         "type": "string",
+        "minLength": 1,
+        "pattern": "\\S",
         "description": "Background job id returned by a registered command-bound tool."
       },
       "timeout_ms": {
         "type": "integer",
+        "minimum": 0,
+        "maximum": 15000,
         "description": "Wait budget for job_status; 0 means immediate check, max 15000."
       }
     },
     "x-required-when": [
       {"field": "op", "values": ["load"], "required": ["kind", "id"]},
       {"field": "op", "values": ["job_status", "job_cancel"], "required": ["job_id"]}
+    ],
+    "oneOf": [
+      {"properties": {"op": {"enum": ["list"]}, "kind": {"enum": ["all", "tool", "skill"]}}},
+      {"properties": {"op": {"enum": ["load"]}, "kind": {"enum": ["tool", "skill"]}}, "required": ["kind", "id"]},
+      {"properties": {"op": {"enum": ["job_status"]}}, "required": ["job_id"]},
+      {"properties": {"op": {"enum": ["job_cancel"]}}, "required": ["job_id"]}
     ]
   }
 example_json: |

@@ -29,6 +29,7 @@ prompt_result: |
 input_schema: |
   {
     "type": "object",
+    "additionalProperties": false,
     "properties": {
       "type": {
         "type": "string",
@@ -37,10 +38,18 @@ input_schema: |
       },
       "new_path": {
         "type": "string",
+        "minLength": 1,
+        "pattern": "\\S",
         "description": "Optional new prompt-context directory for type=cwd. Omit to query the current directory. Relative paths resolve from the current prompt-context cwd."
       }
     },
-    "required": ["type"]
+    "required": ["type"],
+    "allOf": [
+      {
+        "if": {"properties": {"type": {"enum": ["path", "params"]}}, "required": ["type"]},
+        "then": {"not": {"required": ["new_path"]}}
+      }
+    ]
   }
 example_json: |
   {

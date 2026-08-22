@@ -40,6 +40,10 @@ pub struct CapabilityInputSchema {
     pub required_any_when: Vec<CapabilityRequiredWhen>,
     pub enum_fields: BTreeMap<String, Vec<String>>,
     pub properties: BTreeMap<String, Value>,
+    /// Complete standard JSON Schema supplied by the manifest or MCP server.
+    /// Runtime-specific `x-*` requirement extensions are translated before
+    /// this schema is sent to a model provider.
+    pub provider_schema: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,22 +130,52 @@ impl CapabilityHostProfile {
 }
 
 fn local_command_execution_available() -> bool {
-    #[cfg(unix)]
-    {
-        Path::new("/bin/bash").is_file()
+    crate::os::local_command_execution_available()
+}
+
+const RUN_BASH_HOST_ENVIRONMENT_PLACEHOLDER: &str = "{{RUN_BASH_HOST_ENVIRONMENT}}";
+
+fn inject_run_bash_host_environment(manifest: &mut ToolManifest) {
+    if manifest.id != "run_bash" || manifest.binding.name != "run_bash" {
+        return;
     }
-    #[cfg(not(unix))]
-    {
-        false
-    }
+    manifest.prompt.description = replace_run_bash_host_environment(
+        &manifest.prompt.description,
+        crate::os::host_environment(),
+    );
+}
+
+fn replace_run_bash_host_environment(description: &str, environment: &str) -> String {
+    description.replace(RUN_BASH_HOST_ENVIRONMENT_PLACEHOLDER, environment)
 }
 
 fn native_tool_definition(manifest: &ToolManifest) -> ToolDefinition {
+    let examples = manifest
+        .prompt
+        .synopsis
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            serde_json::from_str::<Value>(line)
+                .ok()?
+                .get(&manifest.id)
+                .filter(|arguments| arguments.is_object())
+                .and_then(|arguments| serde_json::to_string(arguments).ok())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let examples = if examples.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nValid argument examples:\n{examples}")
+    };
     ToolDefinition {
         name: manifest.id.clone(),
         description: format!(
-            "{}\n\nUsage: {}\n\nResult: {}",
+            "{}{}\n\nUsage: {}\n\nResult: {}",
             manifest.prompt.description.trim(),
+            examples,
             manifest.prompt.input.trim(),
             manifest.prompt.result.trim()
         ),
@@ -168,7 +202,8 @@ impl CapabilityRegistry {
     ) -> Result<Self, String> {
         let mut tools = BTreeMap::new();
         for raw in tool_manifests {
-            let manifest = parse_tool_manifest(raw)?;
+            let mut manifest = parse_tool_manifest(raw)?;
+            inject_run_bash_host_environment(&mut manifest);
             validate_manifest(&manifest)?;
             if !profile.supports_tool(&manifest) {
                 continue;
@@ -291,6 +326,7 @@ impl CapabilityRegistry {
                         required_any_when: Vec::new(),
                         enum_fields: BTreeMap::new(),
                         properties,
+                        provider_schema: tool.input_schema.clone(),
                     },
                     example: Value::Object(Map::new()),
                 },
@@ -1357,7 +1393,7 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
     let example = serde_json::from_str(example_json.trim())
         .map_err(|err| format!("{id}:example_json_invalid:{err}"))?;
     let input_schema = if input_schema_json.trim().is_empty() {
-        CapabilityInputSchema {
+        let mut schema = CapabilityInputSchema {
             schema_type: "object".to_string(),
             required,
             required_any,
@@ -1365,7 +1401,10 @@ fn parse_tool_manifest(raw: &str) -> Result<ToolManifest, String> {
             required_any_when,
             enum_fields,
             properties: input_properties,
-        }
+            provider_schema: Value::Null,
+        };
+        schema.provider_schema = base_provider_schema_value(&schema);
+        schema
     } else {
         parse_input_schema_json(&id, input_schema_json.trim())?
     };
@@ -1433,6 +1472,7 @@ fn parse_input_schema_json(tool_id: &str, raw: &str) -> Result<CapabilityInputSc
         required_any_when,
         enum_fields,
         properties,
+        provider_schema: value,
     })
 }
 
@@ -1827,27 +1867,19 @@ fn condition_field_order(field: &str) -> (usize, &str) {
 }
 
 fn input_schema_value(schema: &CapabilityInputSchema) -> Value {
-    let mut object = Map::new();
-    object.insert(
-        "type".to_string(),
-        Value::String(schema.schema_type.clone()),
-    );
-    object.insert(
-        "properties".to_string(),
-        Value::Object(
-            schema
-                .properties
-                .iter()
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
-        ),
-    );
-    if !schema.required.is_empty() {
-        object.insert(
-            "required".to_string(),
-            Value::Array(schema.required.iter().cloned().map(Value::String).collect()),
-        );
-    }
+    let mut object = schema
+        .provider_schema
+        .as_object()
+        .cloned()
+        .unwrap_or_else(|| {
+            base_provider_schema_value(schema)
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+        });
+    object.remove("x-required-any");
+    object.remove("x-required-when");
+    object.remove("x-required-any-when");
     if !schema.required_any.is_empty() {
         object.insert(
             "required_any".to_string(),
@@ -1887,7 +1919,7 @@ fn input_schema_value(schema: &CapabilityInputSchema) -> Value {
     Value::Object(object)
 }
 
-fn provider_input_schema_value(schema: &CapabilityInputSchema) -> Value {
+fn base_provider_schema_value(schema: &CapabilityInputSchema) -> Value {
     let mut object = Map::new();
     object.insert(
         "type".to_string(),
@@ -1909,7 +1941,27 @@ fn provider_input_schema_value(schema: &CapabilityInputSchema) -> Value {
             Value::Array(schema.required.iter().cloned().map(Value::String).collect()),
         );
     }
-    let mut all_of = Vec::new();
+    Value::Object(object)
+}
+
+fn provider_input_schema_value(schema: &CapabilityInputSchema) -> Value {
+    let source = if schema.provider_schema.is_object() {
+        schema.provider_schema.clone()
+    } else {
+        base_provider_schema_value(schema)
+    };
+    let mut object = normalize_provider_schema(&source)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    object.remove("x-required-any");
+    object.remove("x-required-when");
+    object.remove("x-required-any-when");
+
+    let mut all_of = object
+        .remove("allOf")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
     for group in &schema.required_any {
         all_of.push(json_object([(
             "anyOf",

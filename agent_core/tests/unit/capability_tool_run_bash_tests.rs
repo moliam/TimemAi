@@ -738,7 +738,7 @@ fn polling_bash_waits_until_async_file_appears() {
     let flag_path = shell_quote_path(&flag);
     let mut runtime = NeverCancelRuntime;
     let _ = fs::remove_file(&flag);
-    let mut child = Command::new(BASH_EXECUTABLE)
+    let mut child = Command::new(crate::os::BASH_EXECUTABLE)
         .arg("-lc")
         .arg(format!("sleep 0.3; touch {flag_path}"))
         .stdin(Stdio::null())
@@ -1071,7 +1071,7 @@ fn watcher_reaps_background_job_without_refresh_polling() {
 
 #[test]
 fn process_running_treats_zombie_as_not_running() {
-    let mut child = Command::new(BASH_EXECUTABLE)
+    let mut child = Command::new(crate::os::BASH_EXECUTABLE)
         .arg("-lc")
         .arg("exit 0")
         .stdin(Stdio::null())

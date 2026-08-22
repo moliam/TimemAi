@@ -19,10 +19,11 @@ prompt_result: |
 input_schema: |
   {
     "type": "object",
+    "additionalProperties": false,
     "properties": {
-      "discard": {"type": "array", "items": {"type": "string"}, "description": "Stale delta ids to remove."},
-      "offload": {"type": "array", "items": {"type": "string"}, "description": "Important bulky delta ids to save to scratch before removal."},
-      "summary": {"type": "string", "minLength": 1, "description": "Compact retained state for subsequent work."}
+      "discard": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}, "description": "Non-empty stale delta ids to remove."},
+      "offload": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1, "pattern": "\\S"}, "description": "Non-empty important bulky delta ids to save to scratch before removal."},
+      "summary": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty compact retained state for subsequent work."}
     },
     "required": ["summary"],
     "x-required-any": [["discard", "offload"]]
