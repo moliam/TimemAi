@@ -26,14 +26,44 @@ fn chat_history_message_command_id_round_trips_for_exactly_once_recovery() {
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn tmp_dir(name: &str) -> PathBuf {
+struct TestDir(PathBuf);
+
+impl Deref for TestDir {
+    type Target = PathBuf;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for TestDir {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            if error.kind() != std::io::ErrorKind::NotFound && !std::thread::panicking() {
+                panic!(
+                    "failed to clean test directory {}: {error}",
+                    self.0.display()
+                );
+            }
+        }
+    }
+}
+
+fn tmp_dir(name: &str) -> TestDir {
     let mut path = std::env::temp_dir();
     path.push(format!(
         "timem_session_store_test_{}_{}_{}_{}",
@@ -44,7 +74,7 @@ fn tmp_dir(name: &str) -> PathBuf {
     ));
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).unwrap();
-    path
+    TestDir(path)
 }
 
 fn now_ms() -> u128 {
@@ -555,6 +585,42 @@ fn resilient_session_index_load_bounds_oversized_records_and_keeps_following_ses
 }
 
 #[test]
+fn resilient_session_index_deduplicates_ids_by_latest_update_and_is_idempotent() {
+    let root = tmp_dir("resilient_duplicate_ids");
+    let store = SessionStore::new(&root);
+    fs::create_dir_all(store.sessions_dir()).unwrap();
+    let mut older = new_stored_session(
+        "session_duplicate",
+        "Older",
+        "/tmp/project",
+        profile(),
+        store.history_path_for_session("session_duplicate"),
+    );
+    older.updated_at_ms = 10;
+    let mut newer = older.clone();
+    newer.display_name = "Newer".to_string();
+    newer.updated_at_ms = 20;
+    let original = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&older).unwrap(),
+        serde_json::to_string(&newer).unwrap()
+    );
+    fs::write(store.index_path(), &original).unwrap();
+
+    let first = store.list_sessions_resilient().unwrap();
+    assert_eq!(first.invalid_records, 1);
+    assert_eq!(first.sessions, vec![newer.clone()]);
+    let backup = first.backup_path.unwrap();
+    assert_eq!(fs::read_to_string(backup).unwrap(), original);
+    assert!(!store.index_path().with_extension("jsonl.tmp").exists());
+
+    let second = store.list_sessions_resilient().unwrap();
+    assert_eq!(second.invalid_records, 0);
+    assert!(second.backup_path.is_none());
+    assert_eq!(second.sessions, vec![newer]);
+}
+
+#[test]
 fn resilient_session_index_load_quarantines_fully_corrupt_index_before_reset() {
     let root = tmp_dir("resilient_fully_corrupt_index");
     let store = SessionStore::new(&root);
@@ -580,7 +646,7 @@ fn concurrent_session_store_instances_never_expose_partial_or_lose_index_records
     let mut workers = Vec::new();
 
     for ordinal in 0..WRITERS {
-        let root = root.clone();
+        let root = root.to_path_buf();
         let barrier = barrier.clone();
         workers.push(std::thread::spawn(move || {
             let store = SessionStore::new(&root);
