@@ -41,6 +41,13 @@ describe("per-message worker role selection", () => {
 });
 
 describe("user message bubble styling", () => {
+  it("defaults the user bubble font to bold while keeping the appearance control configurable", () => {
+    expect(appearanceSource).toContain('userBold: true,');
+    expect(source).toContain('checked={appearance.userBold}');
+    expect(styles).toContain(':root[data-user-bold="true"] { --user-font-weight: 650; }');
+    expect(styles).toContain('font-weight: var(--user-font-weight)');
+  });
+
   it("uses a readable light-blue background in both themes", () => {
     expect(styles).toContain(".turn-user-content {\n  background: #d9edff;\n  color: #17324d;");
     expect(styles).toContain(':root[data-theme="light"] .turn-user-content { background: #d9edff; }');

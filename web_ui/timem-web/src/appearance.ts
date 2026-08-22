@@ -21,7 +21,7 @@ export function defaultAppearance(prefersLight: boolean): Appearance {
     theme: prefersLight ? "light" : "dark",
     userFont: "system",
     userChineseFont: "system",
-    userBold: false,
+    userBold: true,
     agentFont: "system",
     agentChineseFont: "system",
     agentBold: false,
