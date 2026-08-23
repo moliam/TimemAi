@@ -1284,8 +1284,10 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('model_endpoint_secret_reveal');
     expect(source).toContain('event.type === "model_endpoint_secret_revealed"');
     expect(source).toContain('api_key_configured');
-    expect(source).toContain('type="password"');
-    expect(source).toContain('autoComplete="new-password"');
+    expect(source).toContain('className="endpoint-api-key"');
+    expect(source).toContain('idle: "复制 API Key"');
+    expect(source).toContain('<input type="text" autoComplete="off" value={apiKey}');
+    expect(styles).toContain('.endpoint-api-key button.copy-success');
     expect(source).toContain('endpointMatchesProfile');
     expect(styles).toContain('.endpoint-menu');
     expect(styles).toContain('.endpoint-actions');
