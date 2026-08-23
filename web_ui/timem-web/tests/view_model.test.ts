@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnTimelinePlacement, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
+import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnTimelinePlacement, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -273,10 +273,11 @@ describe("web topic view model", () => {
     expect(restored.turns.at(-1)?.turn_id).toBe("current_199");
   });
 
-  it("keeps restored action history bounded without reducing the live turn event budget", () => {
+  it("retains complete restored and live action history", () => {
+    const eventCount = 530;
     const restored = {
       ...turn("restored_turn", "restored"),
-      events: Array.from({ length: MAX_RESTORED_TURN_EVENTS + 30 }, (_, index) => ({
+      events: Array.from({ length: eventCount }, (_, index) => ({
         event_id: `restored_event_${index}`,
         source: "worker_activity",
         payload: { kind: "action", index },
@@ -285,7 +286,7 @@ describe("web topic view model", () => {
     };
     const live = {
       ...turn("live_turn", "finished"),
-      events: Array.from({ length: MAX_RESTORED_TURN_EVENTS + 30 }, (_, index) => ({
+      events: Array.from({ length: eventCount }, (_, index) => ({
         event_id: `live_event_${index}`,
         source: "worker_activity",
         payload: { kind: "action", index },
@@ -293,10 +294,12 @@ describe("web topic view model", () => {
       })),
     };
 
-    const bounded = boundSessionHistory({ ...session("session_1"), turns: [restored, live] });
+    const retained = boundSessionHistory({ ...session("session_1"), turns: [restored, live] });
 
-    expect(bounded.turns[0]?.events).toHaveLength(MAX_RESTORED_TURN_EVENTS);
-    expect(bounded.turns[1]?.events).toHaveLength(MAX_RESTORED_TURN_EVENTS + 30);
+    expect(retained.turns[0]?.events).toHaveLength(eventCount);
+    expect(retained.turns[0]?.events[0]?.event_id).toBe("restored_event_0");
+    expect(retained.turns[1]?.events).toHaveLength(eventCount);
+    expect(retained.turns[1]?.events[0]?.event_id).toBe("live_event_0");
   });
 
   it("guards one browser draft submission while preserving text typed during the pending send", () => {
@@ -613,6 +616,16 @@ describe("web topic view model", () => {
     ]);
     expect(events).toHaveLength(1);
     expect((events[0].payload.payload as Record<string, unknown>).status).toBe("background_running");
+  });
+
+  it("replaces a background-running action with its later process exit", () => {
+    const events = coalesceActionLifecycle([
+      actionEvent("event_1", "start", "running", { cmd: "cargo test", background: true }, "call_bg"),
+      actionEvent("event_2", "finish", "background_running", { cmd: "cargo test", background: true }, "call_bg"),
+      actionEvent("event_3", "finish", "completed", { cmd: "cargo test", background: true }, "call_bg"),
+    ]);
+    expect(events).toHaveLength(1);
+    expect((events[0].payload.payload as Record<string, unknown>).status).toBe("completed");
   });
 
   it("replaces the ToolGen start row with one terminal failure row", () => {
@@ -1498,10 +1511,11 @@ describe("web topic view model", () => {
   });
 
   it("bounds a reconnect snapshot with many turns and high-frequency events", () => {
+    const eventCount = 550;
     const current = session("session_pressure");
     current.turns = Array.from({ length: MAX_CLIENT_TURNS + 40 }, (_, turnIndex) => ({
       ...turn(`turn_${turnIndex}`, "finished"),
-      events: Array.from({ length: MAX_CLIENT_TURN_EVENTS + 50 }, (_, eventIndex) => ({
+      events: Array.from({ length: eventCount }, (_, eventIndex) => ({
         event_id: `event_${turnIndex}_${eventIndex}`,
         source: "worker_activity",
         payload: { kind: "progress", marker: `${turnIndex}:${eventIndex}` },
@@ -1512,13 +1526,14 @@ describe("web topic view model", () => {
     const bounded = boundSessionHistory(current);
     expect(bounded.turns).toHaveLength(MAX_CLIENT_TURNS);
     expect(bounded.turns[0]?.turn_id).toBe("turn_40");
-    expect(bounded.turns.every((item) => item.events.length === MAX_CLIENT_TURN_EVENTS)).toBe(true);
-    expect(bounded.turns.at(-1)?.events[0]?.payload.marker).toBe(`${MAX_CLIENT_TURNS + 39}:50`);
+    expect(bounded.turns.every((item) => item.events.length === eventCount)).toBe(true);
+    expect(bounded.turns.at(-1)?.events[0]?.payload.marker).toBe(`${MAX_CLIENT_TURNS + 39}:0`);
   });
 
   it("keeps repeated live event bursts bounded and isolated across sessions", () => {
+    const totalEvents = 1500;
     let sessions = Array.from({ length: 5 }, (_, index) => upsertTurn(session(`pressure_${index}`), turn(`turn_${index}`)));
-    for (let eventIndex = 0; eventIndex < MAX_CLIENT_TURN_EVENTS * 3; eventIndex += 1) {
+    for (let eventIndex = 0; eventIndex < totalEvents; eventIndex += 1) {
       const target = eventIndex % sessions.length;
       sessions = sessions.map((current, index) => index === target ? appendTurnEvent(current, `turn_${index}`, {
         event_id: `event_${index}_${eventIndex}`,
@@ -1530,7 +1545,7 @@ describe("web topic view model", () => {
 
     for (const current of sessions) {
       const events = current.turns[0]?.events ?? [];
-      expect(events.length).toBeLessThanOrEqual(MAX_CLIENT_TURN_EVENTS);
+      expect(events.length).toBe(totalEvents / sessions.length);
       expect(events.every((event) => event.payload.owner === current.session_id)).toBe(true);
     }
   });
@@ -1570,7 +1585,7 @@ describe("web topic view model", () => {
 
     for (const current of sessions) {
       const events = current.turns[0]?.events ?? [];
-      expect(events.length).toBeLessThanOrEqual(MAX_CLIENT_TURN_EVENTS);
+      expect(events.length).toBe(120);
       expect(events.every((event) => event.payload.owner === current.session_id)).toBe(true);
       expect(current.state).toBe("working");
       expect(current.workers.every((worker) => worker.state === "working")).toBe(true);

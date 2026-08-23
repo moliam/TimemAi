@@ -25,7 +25,9 @@ description: |
   transform long sleeps into loop_cmd or `while` loops with short sleeps that
   can return as soon as the work is done. The loop command is re-run until it
   exits with code 0 or loop_timeout_ms is reached. For long local work that
-  should keep running across interaction rounds, use background=true.
+  should keep running across interaction rounds, use background=true. Runtime
+  rejects explicit process-group escape such as `setsid`, `disown`, or daemon
+  launchers, including in background mode.
   Background and timeout jobs return a pid; manage them with
   normal shell commands if the user asks you to inspect or stop them.
   NOTE: CAREFULLY USE MULTI-LINE CMD. Try to split them into individual

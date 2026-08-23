@@ -428,6 +428,7 @@ impl CoreGlobalWorkerStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreActionTopic {
     pub action: String,
+    pub action_id: String,
     pub input: Value,
     pub kind: CoreActionKind,
     pub active: bool,
@@ -739,6 +740,10 @@ impl CoreTopicEvent {
         }
         Some(CoreActionTopic {
             action: self.payload["action"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            action_id: self.payload["action_id"]
                 .as_str()
                 .unwrap_or_default()
                 .to_string(),
@@ -1427,6 +1432,7 @@ pub(crate) fn notification_topic_event(
         }
         CoreNotification::Action {
             action,
+            action_id,
             input,
             kind,
             active,
@@ -1438,6 +1444,7 @@ pub(crate) fn notification_topic_event(
                 json!({
                     "name": CORE_TOPIC_ACTION,
                     "action": action,
+                    "action_id": action_id,
                     "active": active,
                     "event": "start",
                 }),
@@ -1445,6 +1452,7 @@ pub(crate) fn notification_topic_event(
             CoreSessionState::Running,
             json!({
                 "action": action,
+                "action_id": action_id,
                 "input": input,
                 "kind": action_kind_topic_payload(kind),
                 "active": active,
@@ -1454,6 +1462,59 @@ pub(crate) fn notification_topic_event(
             }),
         ),
     }
+}
+
+pub fn running_shell_job_exit_topic_event(update: &crate::ShellJobExitUpdate) -> CoreTopicEvent {
+    let status = match update.status.as_str() {
+        "0" => "completed",
+        "cancelled" => "cancelled",
+        _ => "failed",
+    };
+    let input = match update.kind.as_str() {
+        "background" => json!({
+            "cmd": update.command,
+            "background": true,
+        }),
+        _ => json!({
+            "cmd": update.command,
+        }),
+    };
+    CoreTopicEvent::new(
+        update.session_id.clone(),
+        CoreTopic::new(
+            CORE_TOPIC_ACTION,
+            json!({
+                "name": CORE_TOPIC_ACTION,
+                "action": "run_bash",
+                "action_id": update.tool_call_id,
+                "active": false,
+                "event": "finish",
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "action": "run_bash",
+            "action_id": update.tool_call_id,
+            "turn_id": update.turn_id,
+            "input": input,
+            "kind": {
+                "kind": "bash",
+                "command": update.command,
+                "mode": update.kind,
+                "interval_ms": null,
+                "timeout_ms": null,
+                "loop_timeout_ms": null,
+                "once_timeout_ms": null,
+            },
+            "active": false,
+            "event": "finish",
+            "status": status,
+            "pid": update.pid,
+            "exit_status": update.status,
+            "elapsed_ms": update.elapsed_ms,
+            "memory_activity": "none",
+        }),
+    )
 }
 
 pub fn topic_event_status_hint(events: &[CoreTopicEvent]) -> Option<CoreTopicStatusHint> {

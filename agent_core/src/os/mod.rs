@@ -236,13 +236,19 @@ fn terminate_process_unix(pid: u32) {
     }
 }
 
-#[cfg(unix)]
-fn process_group_running(group_leader_pid: u32) -> bool {
-    if group_leader_pid as libc::pid_t == unsafe { libc::getpgrp() } {
-        return false;
+pub fn process_group_running(group_leader_pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        if group_leader_pid <= 1 || group_leader_pid as libc::pid_t == unsafe { libc::getpgrp() } {
+            return false;
+        }
+        let result = unsafe { libc::kill(-(group_leader_pid as libc::pid_t), 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
-    let result = unsafe { libc::kill(-(group_leader_pid as libc::pid_t), 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    #[cfg(not(unix))]
+    {
+        process_running(group_leader_pid)
+    }
 }
 
 #[cfg(unix)]

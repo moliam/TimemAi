@@ -526,6 +526,7 @@ fn core_notifications_can_be_published_as_topic_events() {
         },
         CoreNotification::Action {
             action: "run_bash".to_string(),
+            action_id: "action_test".to_string(),
             input: serde_json::json!({"cmd": "pwd"}),
             kind: crate::CoreActionKind::Bash {
                 command: "pwd".to_string(),
@@ -597,6 +598,7 @@ fn core_notifications_can_be_published_as_topic_events() {
                 "attributes": {
                     "name": CORE_TOPIC_ACTION,
                     "action": "run_bash",
+                    "action_id": "action_test",
                     "active": true,
                     "event": "start",
                 },
@@ -606,6 +608,7 @@ fn core_notifications_can_be_published_as_topic_events() {
             },
             "payload": {
                 "action": "run_bash",
+                "action_id": "action_test",
                 "input": {
                     "cmd": "pwd",
                 },
@@ -629,6 +632,7 @@ fn core_notifications_can_be_published_as_topic_events() {
         events[1].as_action(),
         Some(CoreActionTopic {
             action: "run_bash".to_string(),
+            action_id: "action_test".to_string(),
             input: serde_json::json!({"cmd": "pwd"}),
             kind: CoreActionKind::Bash {
                 command: "pwd".to_string(),
@@ -870,6 +874,7 @@ fn core_lifecycle_topic_round_trips_worker_identity_workspace_and_context() {
 fn topic_callbacks_can_copy_owned_snapshots_for_async_hosts() {
     let notifications = vec![CoreNotification::Action {
         action: "run_bash".to_string(),
+        action_id: "action_test".to_string(),
         input: serde_json::json!({"cmd": "pwd"}),
         kind: CoreActionKind::Bash {
             command: "pwd".to_string(),

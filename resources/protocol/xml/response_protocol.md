@@ -91,7 +91,7 @@ EXAMPLE4: context compact
     (long complex cmd) gives important insight: ....
 
     Valuable runtime info: ....
-      ]]</summary>
+      ]]></summary>
     </context_compact>
   </actions>
 </ASSISTANT>

@@ -372,6 +372,82 @@ fn mem_guard_reclaims_a_fresh_lock_owned_by_a_dead_process() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn completed_background_bash_emits_terminal_topic_for_original_action() {
+    #[derive(Default)]
+    struct TopicRecorder(Vec<CoreTopicEvent>);
+
+    impl ActionRuntime for TopicRecorder {
+        fn should_cancel(&mut self) -> bool {
+            false
+        }
+
+        fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+            self.0.extend_from_slice(events);
+        }
+    }
+
+    let mut core = test_core("background_exit_topic");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("start a background command", None);
+    let mut runtime = TopicRecorder::default();
+    let step = core.apply_model_response_with_action_runtime(
+        LlmResponse {
+            tool_calls: Vec::new(),
+            content: r#"{"status":"working","working_still_action":[{"run_bash":{"cmd":"sleep 0.1; printf done","background":true}}]}"#.to_string(),
+            model_name: "test".to_string(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        },
+        &mut runtime,
+    );
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    let background = runtime
+        .0
+        .iter()
+        .find(|event| event.payload["status"] == "background_running")
+        .expect("background-running topic");
+    let action_id = background.payload["action_id"]
+        .as_str()
+        .expect("action id")
+        .to_string();
+    assert!(!action_id.is_empty());
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let _ = core.build_model_request_prompt_with_runtime(&prompt, &mut runtime);
+        if runtime.0.iter().any(|event| {
+            event.payload["event"] == "finish"
+                && event.payload["status"] == "completed"
+                && event.payload["action_id"] == action_id
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "missing terminal background topic"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    let terminal = runtime
+        .0
+        .iter()
+        .find(|event| {
+            event.payload["event"] == "finish"
+                && event.payload["status"] == "completed"
+                && event.payload["action_id"] == action_id
+        })
+        .expect("terminal background topic");
+    assert_eq!(terminal.payload["action"], "run_bash");
+    assert_eq!(terminal.payload["exit_status"], "0");
+    assert_eq!(terminal.payload["turn_id"], core.current_action_turn_id());
+}
+
 fn test_core(name: &str) -> AgentCore {
     let dir = std::env::temp_dir().join(format!(
         "timem_prompt_component_test_{}_{}",

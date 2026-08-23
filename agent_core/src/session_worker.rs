@@ -1286,7 +1286,29 @@ impl CoreSessionWorker {
                 interaction_profile: None,
             };
 
-            while let Ok(command) = command_rx.recv() {
+            let mut has_running_shell_jobs = false;
+            loop {
+                let command = if has_running_shell_jobs {
+                    match command_rx.recv_timeout(Duration::from_millis(100)) {
+                        Ok(command) => command,
+                        Err(RecvTimeoutError::Timeout) => {
+                            let context_id = identity.context_id.clone();
+                            has_running_shell_jobs = !core
+                                .refresh_running_shell_jobs_for_session_with_runtime(
+                                    &context_id,
+                                    Some(&mut ui),
+                                )
+                                .is_empty();
+                            continue;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                } else {
+                    match command_rx.recv() {
+                        Ok(command) => command,
+                        Err(_) => break,
+                    }
+                };
                 match command {
                     CoreSessionWorkerCommand::RunTurn { .. }
                     | CoreSessionWorkerCommand::RunToolGen { .. }
@@ -1399,6 +1421,7 @@ impl CoreSessionWorker {
                             drop(working);
                             outcome
                         };
+                        has_running_shell_jobs = !outcome.running_jobs.is_empty();
                         let _ = event_tx.send(CoreSessionWorkerEvent::TurnFinished { outcome });
                     }
                     CoreSessionWorkerCommand::RunToolGen {
@@ -1458,6 +1481,7 @@ impl CoreSessionWorker {
                         outcome.toolgen_retrospect = outcome.toolgen_retrospect.trim().to_string();
                         ui.current_turn_active = None;
                         drop(working);
+                        has_running_shell_jobs = !outcome.running_jobs.is_empty();
                         let _ = event_tx.send(CoreSessionWorkerEvent::TurnFinished { outcome });
                     }
                     CoreSessionWorkerCommand::Rename {
@@ -1973,6 +1997,22 @@ impl TurnUi for WorkerTurnUi {
                 return decision;
             }
         }
+    }
+
+    fn take_bash_always_allow(&mut self) -> bool {
+        let flag = self.pending_bash_always_allow;
+        self.pending_bash_always_allow = false;
+        flag
+    }
+}
+
+impl crate::ActionRuntime for WorkerTurnUi {
+    fn should_cancel(&mut self) -> bool {
+        self.cancel_requested.load(Ordering::SeqCst)
+    }
+
+    fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+        TurnUi::on_core_topic_events(self, events);
     }
 
     fn take_bash_always_allow(&mut self) -> bool {

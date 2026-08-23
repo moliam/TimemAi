@@ -9,6 +9,15 @@ fn notification_events_are_protocol_independent_core_data() {
             &crate::capability::CapabilityRegistry::builtin(),
         );
     let events = notifications_from_envelope(&envelope);
+    let action_ids = events
+        .iter()
+        .filter_map(|event| match event {
+            CoreNotification::Action { action_id, .. } => Some(action_id.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(action_ids.len(), 3);
+    assert!(action_ids.iter().all(|action_id| !action_id.is_empty()));
     assert_eq!(
         events,
         vec![
@@ -20,6 +29,7 @@ fn notification_events_are_protocol_independent_core_data() {
             },
             CoreNotification::Action {
                 action: "memmgr".to_string(),
+                action_id: action_ids[0].clone(),
                 input: serde_json::json!({
                     "type": "durable",
                     "op": "sql",
@@ -36,6 +46,7 @@ fn notification_events_are_protocol_independent_core_data() {
             },
             CoreNotification::Action {
                 action: "run_bash".to_string(),
+                action_id: action_ids[1].clone(),
                 input: serde_json::json!({
                     "cmd": "pwd"
                 }),
@@ -52,6 +63,7 @@ fn notification_events_are_protocol_independent_core_data() {
             },
             CoreNotification::Action {
                 action: "self_tool".to_string(),
+                action_id: action_ids[2].clone(),
                 input: serde_json::json!({"type": "params"}),
                 kind: CoreActionKind::SelfTool {
                     self_type: "params".to_string(),
