@@ -1762,6 +1762,12 @@ body {
 .endpoint-editor-grid label.wide { grid-column: 1 / -1; }
 .endpoint-editor-grid input, .endpoint-editor-grid select { min-width: 0; width: 100%; border: 1px solid #38515e; border-radius: 4px; padding: 7px 8px; background: #091319; color: #e1edf2; outline: none; }
 .endpoint-editor-grid input:focus, .endpoint-editor-grid select:focus { border-color: #64bbaa; }
+.endpoint-api-key { display: grid; grid-template-columns: minmax(0, 1fr) 34px; gap: 6px; }
+.endpoint-api-key button { display: grid; place-items: center; border: 1px solid #38515e; border-radius: 4px; background: #12232b; color: #91a6b0; }
+.endpoint-api-key button:hover:not(:disabled) { border-color: #64bbaa; color: #dce9ed; }
+.endpoint-api-key button:disabled { opacity: .45; cursor: default; }
+.endpoint-api-key button.copy-success { border-color: #4ba891; color: #76cfb8; }
+.endpoint-api-key button.copy-failed { border-color: #b46f54; color: #e6aa87; }
 .endpoint-editor-buttons { justify-content: flex-end; margin-top: 11px; }
 .endpoint-editor-buttons .primary { border: 1px solid #4ba891; border-radius: 4px; background: #4ba891; color: #071512; font-weight: 700; }
 @media (max-width: 720px) { .endpoint-menu { position: fixed; top: 62px; left: 12px; width: calc(100% - 24px); max-height: calc(100vh - 76px); margin: 0; }.endpoint-editor-grid { grid-template-columns: 1fr; }.endpoint-editor-grid label.wide { grid-column: auto; } }
@@ -1774,6 +1780,8 @@ body {
 :root[data-theme="light"] .endpoint-actions button:hover, :root[data-theme="light"] .endpoint-editor-heading button:hover { background: #edf3f5; color: #26343a; }
 :root[data-theme="light"] .endpoint-editor-grid label { color: #526a75; }
 :root[data-theme="light"] .endpoint-editor-grid input, :root[data-theme="light"] .endpoint-editor-grid select { border-color: #b8cbd2; background: #fff; color: #172229; }
+:root[data-theme="light"] .endpoint-api-key button { border-color: #b8cbd2; background: #edf3f5; color: #526a75; }
+:root[data-theme="light"] .endpoint-api-key button:hover:not(:disabled) { border-color: #4b9c8b; color: #145f56; }
 
 /* First-run guidance points directly at the shared endpoint selector. */
 .header-model-guide-anchor { position: relative; min-width: 0; flex: 0 1 auto; }

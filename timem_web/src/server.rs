@@ -1279,7 +1279,9 @@ impl ClientCommand {
     fn result_is_sensitive(&self) -> bool {
         matches!(
             self,
-            Self::SessionApiKeyReveal { .. } | Self::McpServerSecretsReveal { .. }
+            Self::SessionApiKeyReveal { .. }
+                | Self::McpServerSecretsReveal { .. }
+                | Self::ModelEndpointSecretReveal { .. }
         )
     }
 
@@ -1291,6 +1293,7 @@ impl ClientCommand {
                 | Self::ToolRepoDetail { .. }
                 | Self::SessionApiKeyReveal { .. }
                 | Self::McpServerSecretsReveal { .. }
+                | Self::ModelEndpointSecretReveal { .. }
         )
     }
 
@@ -2690,7 +2693,9 @@ fn command_lane(
 fn durable_command_result(event: &WireEvent) -> Option<Value> {
     if matches!(
         event,
-        WireEvent::SessionApiKeyRevealed { .. } | WireEvent::McpServerSecretsRevealed { .. }
+        WireEvent::SessionApiKeyRevealed { .. }
+            | WireEvent::McpServerSecretsRevealed { .. }
+            | WireEvent::ModelEndpointSecretRevealed { .. }
     ) {
         return None;
     }

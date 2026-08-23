@@ -551,6 +551,13 @@ fn command_dedup_terminal_result_survives_restart_without_persisting_secrets() {
         api_key: "secret".to_string(),
     })
     .is_none());
+    assert!(
+        durable_command_result(&WireEvent::ModelEndpointSecretRevealed {
+            endpoint_id: "endpoint_a".to_string(),
+            api_key: "secret".to_string(),
+        })
+        .is_none()
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -9887,6 +9894,25 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         model_endpoint_api_key(&state, "endpoint-one").unwrap(),
         "secret-endpoint-key"
     );
+    let reveal = execute_browser_command(
+        &state,
+        TEST_PORT,
+        BrowserCommand {
+            command_id: None,
+            accepted_mem_epoch: 1,
+            accepted_lane: None,
+            command: ClientCommand::ModelEndpointSecretReveal {
+                endpoint_id: "endpoint-one".to_string(),
+            },
+        },
+    );
+    assert!(matches!(
+        reveal.event,
+        Some(WireEvent::ModelEndpointSecretRevealed {
+            ref endpoint_id,
+            ref api_key,
+        }) if endpoint_id == "endpoint-one" && api_key == "secret-endpoint-key"
+    ));
 
     handle_command(
         &state,
