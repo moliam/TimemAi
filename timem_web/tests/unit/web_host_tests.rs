@@ -9741,6 +9741,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
             api_protocol: "openai-compatible".to_string(),
             response_protocol: "xml".to_string(),
             base_url: format!("https://api-{index:05}.example.test/v1"),
+            max_llm_input_tokens: 100_000,
+            max_llm_output_tokens: 10_000,
             api_key: format!("secret-{index:05}"),
         }
     }
@@ -9791,6 +9793,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                 api_protocol: "openai-compatible".to_string(),
                 response_protocol: "json".to_string(),
                 base_url: "https://updated.example.test/v1".to_string(),
+                max_llm_input_tokens: 100_000,
+                max_llm_output_tokens: 10_000,
                 api_key: None,
             },
         )
@@ -9838,6 +9842,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                         api_protocol: "openai-compatible".to_string(),
                         response_protocol: "xml".to_string(),
                         base_url: format!("https://concurrent-{index}.example.test/v1"),
+                        max_llm_input_tokens: 100_000,
+                        max_llm_output_tokens: 10_000,
                         api_key: None,
                     },
                 )
@@ -9859,10 +9865,63 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
 }
 
 #[test]
+fn legacy_model_endpoints_load_with_default_token_limits() {
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_legacy_model_endpoint"));
+    let memory_dir = root.join("memory");
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    std::fs::write(
+        model_endpoints_path(&memory_dir),
+        r#"[{"id":"legacy","name":"Legacy","model":"gpt","api_protocol":"openai-compatible","response_protocol":"xml","base_url":"https://api.example.test/v1","api_key":""}]"#,
+    )
+    .unwrap();
+
+    let endpoints = load_model_endpoints_resilient(&memory_dir).unwrap();
+    assert_eq!(endpoints[0].max_llm_input_tokens, 100_000);
+    assert_eq!(endpoints[0].max_llm_output_tokens, 10_000);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_endpoint_rejects_token_limits_outside_supported_lists() {
+    let invalid_input = ModelEndpointInput {
+        id: None,
+        name: "Invalid input".to_string(),
+        model: "gpt".to_string(),
+        api_protocol: "openai-compatible".to_string(),
+        response_protocol: "xml".to_string(),
+        base_url: "https://api.example.test/v1".to_string(),
+        max_llm_input_tokens: 128_000,
+        max_llm_output_tokens: 10_000,
+        api_key: None,
+    };
+    assert_eq!(
+        normalize_model_endpoint_input(None, invalid_input).unwrap_err(),
+        "invalid_model_endpoint_max_input_tokens"
+    );
+
+    let invalid_output = ModelEndpointInput {
+        id: None,
+        name: "Invalid output".to_string(),
+        model: "gpt".to_string(),
+        api_protocol: "openai-compatible".to_string(),
+        response_protocol: "xml".to_string(),
+        base_url: "https://api.example.test/v1".to_string(),
+        max_llm_input_tokens: 200_000,
+        max_llm_output_tokens: 8_000,
+        api_key: None,
+    };
+    assert_eq!(
+        normalize_model_endpoint_input(None, invalid_output).unwrap_err(),
+        "invalid_model_endpoint_max_output_tokens"
+    );
+}
+
+#[test]
 fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     let state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_model_endpoints"));
     set_test_mem(&state, root.clone(), ".test_mem");
+    let session_id = register_real_worker(&state, "MODEL_ENDPOINT_APPLY");
 
     let created = handle_command(
         &state,
@@ -9875,6 +9934,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 api_protocol: "openai-compatible".to_string(),
                 response_protocol: "xml".to_string(),
                 base_url: "https://api.example.test/v1".to_string(),
+                max_llm_input_tokens: 100_000,
+                max_llm_output_tokens: 10_000,
                 api_key: Some("secret-endpoint-key".to_string()),
             },
         },
@@ -9889,6 +9950,30 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         model_endpoint_api_key(&state, "endpoint-one").unwrap(),
         "secret-endpoint-key"
     );
+    let applied = apply_model_endpoint(&state, &session_id, "endpoint-one").unwrap();
+    assert_eq!(applied.model, "gpt-4.1");
+    assert_eq!(applied.max_llm_input_tokens, 100_000);
+    assert_eq!(applied.max_llm_output_tokens, 10_000);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(
+            session
+                .runtime
+                .env
+                .get("TIMEM_MAX_LLM_INPUT")
+                .map(String::as_str),
+            Some("100000")
+        );
+        assert_eq!(
+            session
+                .runtime
+                .env
+                .get("TIMEM_MAX_LLM_OUTPUT")
+                .map(String::as_str),
+            Some("10000")
+        );
+    }
     let reveal = execute_browser_command(
         &state,
         TEST_PORT,
@@ -9920,6 +10005,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 api_protocol: "openai-responses".to_string(),
                 response_protocol: "json".to_string(),
                 base_url: "https://responses.example.test/v1".to_string(),
+                max_llm_input_tokens: 1_000_000,
+                max_llm_output_tokens: 50_000,
                 api_key: None,
             },
         },
@@ -9932,6 +10019,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
     let restored = load_model_endpoints_resilient(&memory_dir).unwrap();
     assert_eq!(restored[0].name, "Production renamed");
+    assert_eq!(restored[0].max_llm_input_tokens, 1_000_000);
+    assert_eq!(restored[0].max_llm_output_tokens, 50_000);
     assert_eq!(restored[0].api_key, "secret-endpoint-key");
 
     handle_command(
@@ -9945,5 +10034,10 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     assert!(load_model_endpoints_resilient(&memory_dir)
         .unwrap()
         .is_empty());
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
     let _ = std::fs::remove_dir_all(root);
 }

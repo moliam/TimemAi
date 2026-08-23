@@ -198,6 +198,8 @@ export type ModelEndpoint = {
   api_protocol: string;
   response_protocol: string;
   base_url: string;
+  max_llm_input_tokens: number;
+  max_llm_output_tokens: number;
   api_key_configured: boolean;
 };
 
@@ -282,7 +284,7 @@ export type ClientCommand =
   | { type: "tool_repo_open_terminal"; session_id: string; tool_id: string }
   | { type: "runtime_update"; key: string; value: string }
   | { type: "session_runtime_update"; session_id: string; key: string; value: string }
-  | { type: "model_endpoint_upsert"; endpoint: { id?: string; name: string; model: string; api_protocol: string; response_protocol: string; base_url: string; api_key?: string } }
+  | { type: "model_endpoint_upsert"; endpoint: { id?: string; name: string; model: string; api_protocol: string; response_protocol: string; base_url: string; max_llm_input_tokens: number; max_llm_output_tokens: number; api_key?: string } }
   | { type: "model_endpoint_delete"; endpoint_id: string }
   | { type: "model_endpoint_apply"; session_id: string; endpoint_id: string }
   | { type: "model_endpoint_secret_reveal"; endpoint_id: string }

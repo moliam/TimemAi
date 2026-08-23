@@ -462,7 +462,19 @@ struct ModelEndpointConfig {
     api_protocol: String,
     response_protocol: String,
     base_url: String,
+    #[serde(default = "default_endpoint_max_input_tokens")]
+    max_llm_input_tokens: u32,
+    #[serde(default = "default_endpoint_max_output_tokens")]
+    max_llm_output_tokens: u32,
     api_key: String,
+}
+
+fn default_endpoint_max_input_tokens() -> u32 {
+    100_000
+}
+
+fn default_endpoint_max_output_tokens() -> u32 {
+    10_000
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -473,6 +485,8 @@ struct ModelEndpointReport {
     api_protocol: String,
     response_protocol: String,
     base_url: String,
+    max_llm_input_tokens: u32,
+    max_llm_output_tokens: u32,
     api_key_configured: bool,
 }
 
@@ -485,6 +499,8 @@ impl From<&ModelEndpointConfig> for ModelEndpointReport {
             api_protocol: endpoint.api_protocol.clone(),
             response_protocol: endpoint.response_protocol.clone(),
             base_url: endpoint.base_url.clone(),
+            max_llm_input_tokens: endpoint.max_llm_input_tokens,
+            max_llm_output_tokens: endpoint.max_llm_output_tokens,
             api_key_configured: !endpoint.api_key.is_empty(),
         }
     }
@@ -1036,6 +1052,8 @@ struct ModelEndpointInput {
     api_protocol: String,
     response_protocol: String,
     base_url: String,
+    max_llm_input_tokens: u32,
+    max_llm_output_tokens: u32,
     #[serde(default)]
     api_key: Option<String>,
 }
@@ -5671,12 +5689,24 @@ fn normalize_model_endpoint_input(
         validate_api_key(&api_key)
             .map_err(|error| format!("invalid_model_endpoint_api_key:{error}"))?;
     }
+    let max_llm_input_tokens = input.max_llm_input_tokens;
+    let max_llm_output_tokens = input.max_llm_output_tokens;
+    if ![100_000, 200_000, 1_000_000].contains(&max_llm_input_tokens) {
+        return Err("invalid_model_endpoint_max_input_tokens".to_string());
+    }
+    if ![10_000, 20_000, 50_000].contains(&max_llm_output_tokens) {
+        return Err("invalid_model_endpoint_max_output_tokens".to_string());
+    }
+    let max_input_value = max_llm_input_tokens.to_string();
+    let max_output_value = max_llm_output_tokens.to_string();
     let mut settings = testable_endpoint_validation_settings();
     for (key, value) in [
         ("TIMEM_MODEL", model.as_str()),
         ("TIMEM_API_PROTOCOL", api_protocol.as_str()),
         ("TIMEM_RESPONSE_PROTOCOL", response_protocol.as_str()),
         ("TIMEM_BASE_URL", base_url.as_str()),
+        ("TIMEM_MAX_LLM_INPUT", max_input_value.as_str()),
+        ("TIMEM_MAX_LLM_OUTPUT", max_output_value.as_str()),
     ] {
         let field = runtime_config_field_from_key(key)?;
         apply_runtime_config_value(
@@ -5699,6 +5729,8 @@ fn normalize_model_endpoint_input(
         api_protocol,
         response_protocol,
         base_url,
+        max_llm_input_tokens,
+        max_llm_output_tokens,
         api_key,
     })
 }
@@ -5809,16 +5841,21 @@ fn apply_model_endpoint(
         .cloned()
         .ok_or_else(|| "model_endpoint_not_found".to_string())?;
     let fields = [
-        ("TIMEM_MODEL", endpoint.model.as_str()),
-        ("TIMEM_API_PROTOCOL", endpoint.api_protocol.as_str()),
+        ("TIMEM_MODEL", endpoint.model),
+        ("TIMEM_API_PROTOCOL", endpoint.api_protocol),
+        ("TIMEM_RESPONSE_PROTOCOL", endpoint.response_protocol),
+        ("TIMEM_BASE_URL", endpoint.base_url),
         (
-            "TIMEM_RESPONSE_PROTOCOL",
-            endpoint.response_protocol.as_str(),
+            "TIMEM_MAX_LLM_INPUT",
+            endpoint.max_llm_input_tokens.to_string(),
         ),
-        ("TIMEM_BASE_URL", endpoint.base_url.as_str()),
+        (
+            "TIMEM_MAX_LLM_OUTPUT",
+            endpoint.max_llm_output_tokens.to_string(),
+        ),
     ];
     for (key, value) in fields {
-        update_session_runtime_setting(state, session_id, key, value)?;
+        update_session_runtime_setting(state, session_id, key, &value)?;
     }
     update_session_api_key(state, session_id, endpoint.api_key)
 }

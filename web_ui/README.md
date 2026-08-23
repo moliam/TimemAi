@@ -50,4 +50,4 @@ responsibilities.
 
 ## Shared model endpoints
 
-The model label in the chat header opens a mem-scoped endpoint list shared by all Sessions. Users can add, edit, delete, and select endpoints. Selecting one applies its model, API/response protocols, Base URL, and API key to the current idle Session. Endpoint API keys are stored in the host memory directory with private file permissions and are redacted from snapshots and browser-persistent command queues.
+The model label in the chat header opens a mem-scoped endpoint list shared by all Sessions. Users can add, edit, delete, and select endpoints. Selecting one applies its model, API/response protocols, Base URL, API key, maximum context window, and maximum output to the current idle Session. Endpoint editors offer context windows of `100K`, `200K`, or `1M`, and output limits of `10K`, `20K`, or `50K`; older saved endpoints load as `100K` / `10K`. Endpoint API keys are stored in the host memory directory with private file permissions and are redacted from snapshots and browser-persistent command queues.
