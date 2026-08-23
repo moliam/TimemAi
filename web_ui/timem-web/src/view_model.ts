@@ -1021,6 +1021,8 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
   const label = (value: unknown) => typeof value === "string" ? value : "";
   switch (event.topic.name) {
     case "core.model.response": {
+      const finalAnswer = label(payload.final_answer).trim();
+      if (finalAnswer && payload.runtime_phase !== "toolgen") return null;
       const freeTalk = label(payload.free_talk);
       const progress = label(payload.progress);
       const detail = [freeTalk, progress].filter((text) => text.trim()).join("\n\n");

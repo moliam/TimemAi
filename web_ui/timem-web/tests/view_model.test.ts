@@ -1263,6 +1263,15 @@ describe("web topic view model", () => {
     });
   });
 
+  it("keeps a completed final answer out of the thought and action timeline", () => {
+    expect(activityFromTopic(topic("core.model.response", {
+      status: "finished",
+      free_talk: "这是完成前的总结。",
+      progress: "已经完成。",
+      final_answer: "这是只应出现在最终答案区域的内容。",
+    }))).toBeNull();
+  });
+
   it("renders model progress even when free talk is omitted", () => {
     const activity = activityFromTopic(topic("core.model.response", {
       status: "working",
