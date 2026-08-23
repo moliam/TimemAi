@@ -168,7 +168,9 @@ payload:
 ```
 
 `free_talk` is lightweight model context that a host may render as a status
-note during an active turn. `global` carries cross-session state; hosts can keep
+note only while `continue_work` is true. A finished response's `final_answer`
+belongs to the host's separate final-delivery surface and must not be duplicated
+in a Thought / Action panel. `global` carries cross-session state; hosts can keep
 a global thinking indicator visible while `working_worker_count > 0` and stop it
 when the count reaches zero. Direct single-turn shells use `1` while the current
 turn continues and `0` when it is finished. Session-worker hosts override this

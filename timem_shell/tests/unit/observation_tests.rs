@@ -108,6 +108,25 @@ fn model_response_topic(free_talk: &str, _progress: &str) -> CoreTopicEvent {
     )
 }
 
+fn final_model_response_topic(free_talk: &str, final_answer: &str) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        "session_test",
+        CoreTopic::new(
+            CORE_TOPIC_MODEL_RESPONSE,
+            json!({
+                "name": CORE_TOPIC_MODEL_RESPONSE,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "status": "finished",
+            "free_talk": free_talk,
+            "final_answer": final_answer,
+            "continue_work": false,
+        }),
+    )
+}
+
 fn model_response_topic_with_worker_count(
     free_talk: &str,
     _progress: &str,
@@ -572,6 +591,18 @@ fn core_topic_events_map_action_without_protocol_parsing() {
         vec![ObservationEvent::Active(
             "`git log --oneline v0.5.2..HEAD`".to_string()
         )]
+    );
+}
+
+#[test]
+fn final_model_response_does_not_render_in_thought_action_panel() {
+    let events = observation_events_from_core_topic_events(&[final_model_response_topic(
+        "最后补充说明。",
+        "这是最终答复。",
+    )]);
+    assert!(
+        events.is_empty(),
+        "final response leaked into observations: {events:?}"
     );
 }
 
