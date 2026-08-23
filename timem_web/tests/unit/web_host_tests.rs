@@ -3427,19 +3427,8 @@ fn session_delete_stops_workers_and_removes_persisted_session() {
 }
 
 #[test]
-fn assistant_speaker_name_uses_normalized_session_display_name() {
-    assert_eq!(
-        assistant_speaker_name_for_session("Build session"),
-        "ASSISTANT_of_Build session"
-    );
-    assert_eq!(
-        assistant_speaker_name_for_session("  研发\n  会话  "),
-        "ASSISTANT_of_研发 会话"
-    );
-    assert_eq!(
-        assistant_speaker_name_for_session("Session0"),
-        "ASSISTANT_of_Session0"
-    );
+fn assistant_speaker_name_is_fixed() {
+    assert_eq!(assistant_speaker_name(), "ASSISTANT");
 }
 
 #[test]
