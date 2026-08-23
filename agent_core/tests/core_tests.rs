@@ -218,7 +218,7 @@ fn mcp_action_runs_through_protocol_registry_and_executor() {
 }
 
 #[test]
-fn native_mode_keeps_tool_schemas_out_of_prompt_and_mcp_tools_in_api_field() {
+fn native_mode_puts_builtin_descriptions_in_static_and_mcp_descriptions_in_api_field() {
     let memory_dir = tmp_dir("native_mcp_not_static");
     let mut core = test_core(
         "STATIC\n{{TOOL_CATALOG}}\n{{RESPONSE_PROTOCOL_SECTION}}",
@@ -282,9 +282,12 @@ fn native_mode_keeps_tool_schemas_out_of_prompt_and_mcp_tools_in_api_field() {
     assert!(prompt.starts_with("[BEGIN SYSTEM PROMPT]\n"), "{prompt}");
     assert!(!prompt.contains("<Timem System Prompt>"));
     let static_end = prompt.find("[END SYSTEM PROMPT]").unwrap();
-    assert!(!prompt.contains("run_bash"), "{prompt}");
-    assert!(!prompt.contains("self_tool"), "{prompt}");
-    assert!(!prompt.contains("Built-in Native Tool Schemas"), "{prompt}");
+    assert!(prompt.contains("### `run_bash`"), "{prompt}");
+    assert!(prompt.contains("### `self_tool`"), "{prompt}");
+    assert!(
+        prompt.contains("`run_bash` runs a shell command"),
+        "{prompt}"
+    );
     assert!(!prompt.contains("\"input_schema\""), "{prompt}");
     assert!(!prompt.contains("mcp.demo.echo"), "{prompt}");
     assert!(!prompt.contains("MCP update:"), "{prompt}");
@@ -297,6 +300,9 @@ fn native_mode_keeps_tool_schemas_out_of_prompt_and_mcp_tools_in_api_field() {
     assert!(request.tools[..request.static_tool_count]
         .iter()
         .all(|tool| !tool.name.starts_with("mcp.")));
+    assert!(request.tools[..request.static_tool_count]
+        .iter()
+        .all(|tool| !tool.description.is_empty()));
     assert!(request.tools[request.static_tool_count..]
         .iter()
         .any(|tool| tool.name == "mcp.demo.echo"));

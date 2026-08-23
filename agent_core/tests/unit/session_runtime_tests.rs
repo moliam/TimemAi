@@ -749,6 +749,73 @@ fn free_talk_resets_progress_reminder_streak() {
 }
 
 #[test]
+fn progress_reminder_streak_does_not_carry_across_turns() {
+    let dir = tmp_dir("turn_progress_reminder_cross_turn_reset");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    core.set_max_rounds(PROGRESS_UPDATE_REMINDER_ROUNDS.saturating_add(2));
+    core.set_reminder_tips_config(crate::ReminderTipsConfig { schedules: vec![] });
+    let mut config = test_config();
+    let tool_only = r#"{"working_still_action":{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":1}}}"#;
+    let finished = r#"{"status":"ALL_FINISHED","final_answer":"完成。"}"#;
+
+    let mut first_responses = (0..PROGRESS_UPDATE_REMINDER_ROUNDS.saturating_sub(1))
+        .map(|_| Ok(llm(tool_only, 1_000, false)))
+        .collect::<Vec<_>>();
+    first_responses.push(Ok(llm(finished, 1_100, false)));
+    let mut first_model = ReplayModel::new(first_responses);
+    let first_outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "第一轮连续调用工具",
+            session: "progress_reminder_cross_turn_session",
+            audit_file: &audit,
+            runtime: "test_runtime",
+            run_bash_target: "test_target",
+            additional_context: None,
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut first_model,
+    );
+
+    assert_eq!(first_outcome.text, "完成。");
+    assert!(first_model
+        .prompts
+        .iter()
+        .all(|prompt| !prompt.contains(PROGRESS_UPDATE_REMINDER)));
+
+    let mut second_model = ReplayModel::new(vec![
+        Ok(llm(tool_only, 1_000, false)),
+        Ok(llm(finished, 1_100, false)),
+    ]);
+    let second_outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "第二轮再调用一次工具",
+            session: "progress_reminder_cross_turn_session",
+            audit_file: &audit,
+            runtime: "test_runtime",
+            run_bash_target: "test_target",
+            additional_context: None,
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut second_model,
+    );
+
+    assert_eq!(second_outcome.text, "完成。");
+    assert!(second_model
+        .prompts
+        .iter()
+        .all(|prompt| !prompt.contains(PROGRESS_UPDATE_REMINDER)));
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn session_turn_injects_reasoning_reminder_after_configured_rounds() {
     let dir = tmp_dir("turn_reasoning_reminder");
     let audit = dir.join("audit.json");
@@ -4752,6 +4819,7 @@ struct NativeRoundTripModel {
     business_calls: usize,
     observed_structured_result: bool,
     observed_native_prompt_contract: bool,
+    observed_previous_turn_tool_history: bool,
 }
 
 impl ModelClient for NativeRoundTripModel {
@@ -4803,15 +4871,15 @@ impl ModelClient for NativeRoundTripModel {
             && !request
                 .rendered_prompt
                 .contains("# ASSISTANT Response Protocol")
-            && !request
+            && request
                 .rendered_prompt
-                .contains("## Built-in Native Tool Schemas")
+                .contains("## Built-in Tool Descriptions")
+            && request.rendered_prompt.contains("### `run_bash`")
             && !request.rendered_prompt.contains("## Actions")
             && !request
                 .rendered_prompt
                 .contains("### Available capabilities")
             && !request.rendered_prompt.contains("\"input_schema\"")
-            && !request.rendered_prompt.contains("\"name\": \"run_bash\"")
             && request.tools.iter().any(|tool| tool.name == "run_bash");
         if self.business_calls == 1 {
             return Ok(LlmResponse {
@@ -4827,14 +4895,30 @@ impl ModelClient for NativeRoundTripModel {
                 truncated: false,
             });
         }
-        self.observed_structured_result = request.native_exchanges.len() == 1
-            && request.native_exchanges[0].calls[0].id == "call_count"
-            && request.native_exchanges[0].results[0]
-                .content
-                .contains("Rust 42");
+        if self.business_calls == 2 {
+            self.observed_structured_result = request.native_exchanges.len() == 1
+                && request.native_exchanges[0].calls[0].id == "call_count"
+                && request.native_exchanges[0].results[0]
+                    .content
+                    .contains("Rust 42");
+        } else {
+            self.observed_previous_turn_tool_history = request.native_exchanges.is_empty()
+                && request.rendered_prompt.contains("Tool calls:")
+                && !request
+                    .rendered_prompt
+                    .to_ascii_lowercase()
+                    .contains("native")
+                && request.rendered_prompt.contains("call_count")
+                && request.rendered_prompt.contains("Rust 42")
+                && request.rendered_prompt.contains("再说一次结果");
+        }
         Ok(LlmResponse {
             tool_calls: Vec::new(),
-            content: "统计完成：Rust 42 行。".to_string(),
+            content: if self.business_calls == 2 {
+                "统计完成：Rust 42 行。".to_string()
+            } else {
+                "上一轮结果仍是 Rust 42 行。".to_string()
+            },
             model_name: config.model.clone(),
             usage: usage(120, 10),
             truncated: false,
@@ -4859,6 +4943,7 @@ fn native_mode_round_trips_structured_calls_and_results_before_final_text() {
         business_calls: 0,
         observed_structured_result: false,
         observed_native_prompt_contract: false,
+        observed_previous_turn_tool_history: false,
     };
 
     let outcome = run_session_turn_with_model_client(
@@ -4881,4 +4966,24 @@ fn native_mode_round_trips_structured_calls_and_results_before_final_text() {
     assert_eq!(model.business_calls, 2);
     assert!(model.observed_structured_result);
     assert!(model.observed_native_prompt_contract);
+
+    let follow_up = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "再说一次结果",
+            session: "native_session",
+            audit_file: &audit,
+            runtime: "test",
+            run_bash_target: "test_machine",
+            additional_context: None,
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(follow_up.text, "上一轮结果仍是 Rust 42 行。");
+    assert_eq!(model.business_calls, 3);
+    assert!(model.observed_previous_turn_tool_history);
 }

@@ -735,6 +735,14 @@ impl CapabilityRegistry {
         (!tools.is_empty()).then(|| render_native_tool_definitions_json(&tools))
     }
 
+    pub(crate) fn render_native_builtin_tool_descriptions_markdown(&self) -> String {
+        self.native_builtin_tool_definitions()
+            .into_iter()
+            .map(|tool| format!("### `{}`\n\n{}", tool.name, tool.description.trim()))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
     pub fn render_tool_catalog_json(&self) -> String {
         serde_json::to_string_pretty(&self.tool_catalog_value())
             .expect("tool catalog must render as JSON")
