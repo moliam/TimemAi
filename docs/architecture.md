@@ -479,9 +479,12 @@ stores complete canonical JSON definitions, MCP initialize `instructions`, and
 enable/disable updates in the ordinary persistent prompt-delta sequence. Later
 inline requests reuse those append-only deltas instead of regenerating a
 synthetic catalog for every render. Native mode filters those inline-only
-catalog/update slices out of the rendered messages. Its currently enabled MCP
-definitions exist only in the provider API `tools` field, and MCP server-wide
-instructions are carried by the corresponding native tool descriptions.
+catalog/update slices out of the rendered messages. Stable builtin descriptions are rendered in the cacheable static system
+prompt, while builtin entries in the provider API `tools` field contain only
+the tool name and input schema. Currently enabled MCP definitions exist only in
+the provider API `tools` field, and retain both their descriptions and schemas;
+MCP server-wide instructions are carried by the corresponding native tool
+descriptions.
 Enabling, disabling, or changing an MCP definition therefore changes the next
 native API tools field without adding a redundant RUNTIME availability notice.
 Core decides whether to append this delta from the model-visible tool
@@ -1003,11 +1006,13 @@ Important invariants:
   role, such as `## ID0`.
 - The static prefix is sent through model service system-role/system-field support
   when available. Dynamic deltas go in the user message.
-- In native mode, `prompt_0` contains stable behavior and protocol guidance but
-  no complete tool definitions. Built-in and currently enabled MCP definitions
-  exist only in the native API `tools` field. Inline-only MCP catalog and
-  enable/disable slices remain persistent for lossless mode switching but are
-  filtered out of native messages.
+- In native mode, `prompt_0` contains stable behavior, protocol guidance, and
+  builtin tool descriptions, but no tool input schemas or dynamic MCP
+  definitions. Builtin entries in the native API `tools` field contain only
+  names and input schemas; currently enabled MCP entries retain names,
+  descriptions, and schemas there. Inline-only MCP catalog and enable/disable
+  slices remain persistent for lossless mode switching but are filtered out of
+  native messages.
 - Anthropic-protocol requests attach `cache_control: {"type": "ephemeral"}` to
   the static system block, the last built-in API tool, and the latest three
   dynamic prompt deltas. The

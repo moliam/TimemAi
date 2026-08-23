@@ -52,6 +52,86 @@ fn forced_compaction_materializes_native_history_and_restricts_model_request() {
 }
 
 #[test]
+fn native_final_materializes_tool_history_before_final_replay() {
+    let mut core = test_core("native_final_history");
+    core.set_interaction_profile(&InteractionProfile {
+        api_protocol: "openai_compatible".to_string(),
+        model: "test".to_string(),
+        gateway: "test".to_string(),
+        requested_mode: ToolCallMode::Native,
+        resolved_mode: ToolCallMode::Native,
+        active_prompt_protocol: "json".to_string(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: CapabilityProbeSource::Explicit,
+        reason: "test".to_string(),
+        probe_latency_ms: None,
+        observed_tool_calls: 1,
+    });
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "inspect the project".to_string(),
+    )]);
+    core.native_exchanges.push(NativeExchange {
+        assistant_text: "I will inspect it.".to_string(),
+        calls: vec![NativeToolCall {
+            id: "call_read".to_string(),
+            name: "readfile".to_string(),
+            arguments: serde_json::json!({"path":"README.md"}),
+            raw_arguments: r#"{"path":"README.md"}"#.to_string(),
+        }],
+        results: vec![NativeToolResult {
+            call_id: "call_read".to_string(),
+            name: "readfile".to_string(),
+            content: "PROJECT-EVIDENCE-42".to_string(),
+            is_error: false,
+        }],
+    });
+
+    let step = core.apply_model_response(LlmResponse {
+        content: "Final answer based on PROJECT-EVIDENCE-42".to_string(),
+        tool_calls: Vec::new(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+
+    assert!(matches!(step, CoreStep::Final(_)));
+    assert!(core.native_exchanges.is_empty());
+    let prompt = core.build_next_prompt();
+    let tool_pos = prompt.find("Tool calls:").unwrap();
+    let result_pos = prompt.find("PROJECT-EVIDENCE-42").unwrap();
+    let final_pos = prompt
+        .rfind("Final answer based on PROJECT-EVIDENCE-42")
+        .unwrap();
+    assert!(tool_pos < result_pos);
+    assert!(result_pos < final_pos);
+    assert_eq!(
+        prompt
+            .matches("Final answer based on PROJECT-EVIDENCE-42")
+            .count(),
+        1
+    );
+
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "what did you find?".to_string(),
+    )]);
+    let next_prompt = core.render_prompt();
+    let next_request = core.model_interaction_request(next_prompt.clone());
+    assert!(next_request.native_exchanges.is_empty());
+    assert!(next_prompt.contains("Tool calls:"));
+    assert!(!next_prompt.to_ascii_lowercase().contains("native"));
+    assert!(next_prompt.contains("PROJECT-EVIDENCE-42"));
+    assert!(
+        next_prompt
+            .find("Final answer based on PROJECT-EVIDENCE-42")
+            .unwrap()
+            < next_prompt.rfind("what did you find?").unwrap()
+    );
+}
+
+#[test]
 fn forced_compaction_ignores_non_compact_output_then_unlocks_after_success() {
     let mut core = test_core("forced_compaction_ignore");
     core.set_response_protocol(ResponseProtocolKind::Json);

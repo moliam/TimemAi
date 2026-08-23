@@ -860,29 +860,53 @@ fn native_request() -> ModelInteractionRequest {
 
 #[test]
 fn native_tool_wires_are_provider_specific_and_parallel_is_explicit() {
-    let chat_body = prepare_model_interaction_http_request(
-        &config(ApiProtocol::OpenAiCompatible),
-        &native_request(),
-    )
-    .model_request
-    .body;
+    let mut request = native_request();
+    request.tools.push(ToolDefinition {
+        name: "mcp.demo.search".to_string(),
+        description: "Dynamic MCP search.".to_string(),
+        input_schema: json!({"type": "object"}),
+    });
+    let chat_body =
+        prepare_model_interaction_http_request(&config(ApiProtocol::OpenAiCompatible), &request)
+            .model_request
+            .body;
     assert_eq!(chat_body["parallel_tool_calls"], json!(true));
     assert_eq!(chat_body["tools"][0]["function"]["name"], "count_lines");
+    assert!(chat_body["tools"][0]["function"]
+        .get("description")
+        .is_none());
+    assert!(chat_body["tools"][0]["function"]
+        .get("parameters")
+        .is_some());
+    assert_eq!(
+        chat_body["tools"][1]["function"]["description"],
+        "Dynamic MCP search."
+    );
 
-    let responses_body = prepare_model_interaction_http_request(
-        &config(ApiProtocol::OpenAiResponses),
-        &native_request(),
-    )
-    .model_request
-    .body;
+    let responses_body =
+        prepare_model_interaction_http_request(&config(ApiProtocol::OpenAiResponses), &request)
+            .model_request
+            .body;
     assert_eq!(responses_body["tools"][0]["name"], "count_lines");
+    assert!(responses_body["tools"][0].get("description").is_none());
+    assert!(responses_body["tools"][0].get("parameters").is_some());
+    assert_eq!(
+        responses_body["tools"][1]["description"],
+        "Dynamic MCP search."
+    );
     assert!(responses_body["input"].is_array());
 
     let anthropic_body =
-        prepare_model_interaction_http_request(&config(ApiProtocol::Anthropic), &native_request())
+        prepare_model_interaction_http_request(&config(ApiProtocol::Anthropic), &request)
             .model_request
             .body;
     assert_eq!(anthropic_body["tools"][0]["name"], "count_lines");
+    assert!(anthropic_body["tools"][0].get("description").is_none());
+    assert!(anthropic_body["tools"][0].get("input_schema").is_some());
+    assert_eq!(
+        anthropic_body["tools"][1]["description"],
+        "Dynamic MCP search."
+    );
     assert_eq!(
         anthropic_body["tools"][0]["cache_control"],
         json!({"type": "ephemeral"})
@@ -907,6 +931,8 @@ fn anthropic_native_cache_breakpoint_ends_at_static_builtin_tool_prefix() {
     assert_eq!(tools[0]["name"], "count_lines");
     assert_eq!(tools[0]["cache_control"], json!({"type": "ephemeral"}));
     assert_eq!(tools[1]["name"], "mcp.demo.search");
+    assert_eq!(tools[1]["description"], "Dynamic MCP search.");
+    assert!(tools[1].get("input_schema").is_some());
     assert!(tools[1].get("cache_control").is_none());
     assert!(prepared.model_request.cache_mark_count >= 1);
 }

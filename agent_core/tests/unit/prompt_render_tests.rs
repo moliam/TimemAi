@@ -1185,6 +1185,38 @@ fn prompt_renderer_uses_protocol_native_tool_synopses() {
 }
 
 #[test]
+fn native_prompt_contains_builtin_descriptions_without_schemas_or_dynamic_tools() {
+    let rendered = render_static_prompt_for_mode(
+        "{{TOOL_CATALOG_SECTION_HEADING}}\n\n{{TOOL_CATALOG}}\n\n{{RESPONSE_PROTOCOL_SECTION}}",
+        &CapabilityRegistry::builtin(),
+        &JsonSuiteV1,
+        "Ai7",
+        "startup",
+        ToolCallMode::Native,
+    );
+
+    assert!(
+        rendered.contains("## Built-in Tool Descriptions"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("### `run_bash`"), "{rendered}");
+    assert!(
+        !rendered.to_ascii_lowercase().contains("native"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("`run_bash` runs a shell command"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("input_schema"), "{rendered}");
+    assert!(!rendered.contains("properties"), "{rendered}");
+    assert!(
+        !rendered.contains("### Available capabilities"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn prompt_renderer_replaces_assistant_id() {
     let rendered = render_static_prompt(
         "YOUR ID is: {{ASSSISTANT_ID}}\n## ASSSISTANT_ID",

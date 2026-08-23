@@ -27,7 +27,8 @@ optional TIMEM_CAPABILITIES_DIR overlay
 CapabilityRegistry
         ↓ render by interaction mode
 inline: builtin/overlay catalog in Static + persistent MCP update deltas
-native: builtin/overlay/current MCP definitions in API tools only
+native: builtin/overlay descriptions in Static; builtin schemas plus current MCP
+        descriptions/schemas in API tools
         ↓ generic parse
 parse model next_actions action/intent/args
         ↓ resolve binding
@@ -40,9 +41,11 @@ MCP tools are deliberately excluded from the inline Static catalog: a Session
 can enable, disable, or reconnect an MCP server between requests. Initial
 enablement and definition/instruction changes append canonical JSON catalogs to
 ordinary persistent prompt deltas for inline rendering. In native mode those
-inline-only slices are filtered from messages; current definitions form the MCP
-portion of the provider API tool list, with server instructions attached to the
-corresponding tool descriptions. Disabling MCP removes those definitions from
+inline-only slices are filtered from messages. Stable builtin descriptions are
+rendered into the static system prompt, while builtin API tool entries retain
+only their names and input schemas. Current MCP definitions form the dynamic
+portion of the provider API tool list, with each MCP description, schema, and
+server instructions kept together there. Disabling MCP removes those definitions from
 the next API tools field without injecting an enable/disable RUNTIME notice.
 Historical inline deltas remain immutable and become visible again if the
 session switches back to inline mode.
@@ -76,9 +79,12 @@ the same `x-required-any` group. The optimization pass is recursive, so the same
 rule applies to nested object schemas. This keeps runtime validation metadata as the
 single manifest source without sending duplicate constraints to the model.
 MCP schemas follow the same lossless path instead of being reduced to only
-top-level properties. Native tool descriptions include valid
-argument-object examples (without the inline tool-name wrapper), so usage text
-must never refer to an example that the provider request does not contain.
+top-level properties. Native builtin descriptions in the static system prompt
+include valid argument-object examples (without the inline tool-name wrapper),
+while their API tool entries contain only names and schemas. Dynamic MCP API
+tool entries continue to contain descriptions and schemas together, so usage
+text must never refer to an example that is absent from both the static prompt
+and the dynamic API definition.
 Builtin manifests close their input objects when the paired runtime rejects
 unknown fields, and tool-specific schemas must encode the same mutually
 exclusive modes, required combinations, and numeric limits enforced by the

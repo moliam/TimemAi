@@ -2778,10 +2778,14 @@ impl AgentCore {
                 Some(&parsed),
                 Some(&final_text),
             ));
-            self.defer_next_turn_slices(slices);
+            // Native exchanges are kept as structured provider messages only while
+            // the current turn is still running. Before the final assistant reply is
+            // replayed, materialize those exchanges into prompt deltas so the next
+            // user turn preserves both their chronology and their evidence.
             if self.resolved_tool_call_mode == ToolCallMode::Native {
-                self.native_exchanges.clear();
+                self.materialize_native_exchanges();
             }
+            self.defer_next_turn_slices(slices);
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
                 toolgen_retrospect: parsed.toolgen_retrospect.clone(),
@@ -2997,7 +3001,7 @@ impl AgentCore {
                 if !assistant.is_empty() {
                     assistant.push('\n');
                 }
-                assistant.push_str("Native tool calls:\n");
+                assistant.push_str("Tool calls:\n");
                 assistant.push_str(&serde_json::to_string(&calls).unwrap_or_default());
             }
             self.submit_prompt_component(

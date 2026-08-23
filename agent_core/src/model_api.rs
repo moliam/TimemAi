@@ -270,7 +270,10 @@ fn apply_native_interaction(
                 interaction
                     .tools
                     .iter()
-                    .map(openai_chat_tool_definition)
+                    .enumerate()
+                    .map(|(index, tool)| {
+                        openai_chat_tool_definition(tool, index >= interaction.static_tool_count)
+                    })
                     .collect(),
             );
             body["tool_choice"] = json!(native_tool_choice_label(interaction.tool_choice));
@@ -284,7 +287,13 @@ fn apply_native_interaction(
                 interaction
                     .tools
                     .iter()
-                    .map(openai_responses_tool_definition)
+                    .enumerate()
+                    .map(|(index, tool)| {
+                        openai_responses_tool_definition(
+                            tool,
+                            index >= interaction.static_tool_count,
+                        )
+                    })
                     .collect(),
             );
             body["tool_choice"] = json!(native_tool_choice_label(interaction.tool_choice));
@@ -304,7 +313,10 @@ fn apply_native_interaction(
             let mut tools = interaction
                 .tools
                 .iter()
-                .map(anthropic_tool_definition)
+                .enumerate()
+                .map(|(index, tool)| {
+                    anthropic_tool_definition(tool, index >= interaction.static_tool_count)
+                })
                 .collect::<Vec<_>>();
             mark_anthropic_static_tool_prefix(&mut tools, interaction.static_tool_count);
             body["tools"] = Value::Array(tools);
@@ -333,32 +345,38 @@ fn anthropic_tool_choice_label(choice: crate::NativeToolChoice) -> &'static str 
     }
 }
 
-fn openai_chat_tool_definition(tool: &ToolDefinition) -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": tool.input_schema,
-        }
-    })
+fn openai_chat_tool_definition(tool: &ToolDefinition, include_description: bool) -> Value {
+    let mut function = serde_json::Map::from_iter([
+        ("name".to_string(), json!(tool.name)),
+        ("parameters".to_string(), tool.input_schema.clone()),
+    ]);
+    if include_description {
+        function.insert("description".to_string(), json!(tool.description));
+    }
+    json!({"type": "function", "function": function})
 }
 
-fn openai_responses_tool_definition(tool: &ToolDefinition) -> Value {
-    json!({
-        "type": "function",
-        "name": tool.name,
-        "description": tool.description,
-        "parameters": tool.input_schema,
-    })
+fn openai_responses_tool_definition(tool: &ToolDefinition, include_description: bool) -> Value {
+    let mut definition = serde_json::Map::from_iter([
+        ("type".to_string(), json!("function")),
+        ("name".to_string(), json!(tool.name)),
+        ("parameters".to_string(), tool.input_schema.clone()),
+    ]);
+    if include_description {
+        definition.insert("description".to_string(), json!(tool.description));
+    }
+    Value::Object(definition)
 }
 
-fn anthropic_tool_definition(tool: &ToolDefinition) -> Value {
-    json!({
-        "name": tool.name,
-        "description": tool.description,
-        "input_schema": tool.input_schema,
-    })
+fn anthropic_tool_definition(tool: &ToolDefinition, include_description: bool) -> Value {
+    let mut definition = serde_json::Map::from_iter([
+        ("name".to_string(), json!(tool.name)),
+        ("input_schema".to_string(), tool.input_schema.clone()),
+    ]);
+    if include_description {
+        definition.insert("description".to_string(), json!(tool.description));
+    }
+    Value::Object(definition)
 }
 
 fn mark_anthropic_static_tool_prefix(tools: &mut [Value], static_tool_count: usize) {
