@@ -79,7 +79,7 @@ EXAMPLE4: context compact
       <discard>pd_1,pd_3,pd_8,pd_9,pd_10,pd_11</discard>
       <offload>pd_2</offload>
       <summary>
-    ![CDATA[
+    <![CDATA[
     The current user's task is: ...
     The whole picture of active works' status are:
      A: almost done, need to clean up ...
