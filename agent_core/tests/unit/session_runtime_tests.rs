@@ -689,14 +689,25 @@ fn session_turn_injects_progress_reminder_after_six_tool_only_rounds() {
     assert!(model.prompts[..reminder_prompt_index]
         .iter()
         .all(|prompt| !prompt.contains(PROGRESS_UPDATE_REMINDER)));
-    assert!(model.prompts[reminder_prompt_index].contains(PROGRESS_UPDATE_REMINDER));
-    assert_eq!(
-        model.prompts[reminder_prompt_index]
-            .matches(PROGRESS_UPDATE_REMINDER)
-            .count(),
-        1
+    let reminder_prompt = &model.prompts[reminder_prompt_index];
+    assert!(reminder_prompt.contains(PROGRESS_UPDATE_REMINDER));
+    assert!(PROGRESS_UPDATE_REMINDER.starts_with("REMIND: "));
+    assert_eq!(reminder_prompt.matches(PROGRESS_UPDATE_REMINDER).count(), 1);
+    assert!(reminder_prompt.contains("## RUNTIME"));
+    let reminder_offset = reminder_prompt
+        .find(PROGRESS_UPDATE_REMINDER)
+        .expect("progress reminder");
+    let reminder_delta_start = reminder_prompt[..reminder_offset]
+        .rfind("[BEGIN DELTA]")
+        .expect("reminder delta start");
+    let reminder_delta_end = reminder_prompt[reminder_delta_start..]
+        .find("[END DELTA]")
+        .map(|offset| reminder_delta_start + offset)
+        .expect("reminder delta end");
+    let reminder_delta = &reminder_prompt[reminder_delta_start..reminder_delta_end];
+    assert!(
+        !reminder_delta.contains("The following are results of the actions generated in response:")
     );
-    assert!(model.prompts[reminder_prompt_index].contains("## RUNTIME"));
 
     let _ = fs::remove_dir_all(dir);
 }

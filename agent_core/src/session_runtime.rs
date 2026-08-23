@@ -33,7 +33,7 @@ struct TurnReminderSchedules {
 }
 
 const PROGRESS_UPDATE_REMINDER_ROUNDS: u32 = 6;
-const PROGRESS_UPDATE_REMINDER: &str = "Has been 6 rounds since last time you updates progress to user (that is, some useful remarks besides tool call).  Pay attention to good user experience, make user well informed.";
+const PROGRESS_UPDATE_REMINDER: &str = "REMIND: It has been 6 rounds since your last progress update to the user (that is, a useful update beyond tool calls). Pay attention to the user experience and keep the user well informed.";
 
 #[derive(Default)]
 struct TurnProgressReminder {
