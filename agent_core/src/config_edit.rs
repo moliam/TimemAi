@@ -9,6 +9,7 @@ use std::path::PathBuf;
 pub enum RuntimeConfigField {
     Model,
     ApiProtocol,
+    ResponseProtocol,
     BaseUrl,
     MaxInput,
     MaxOutput,
@@ -76,9 +77,10 @@ impl RuntimeConfigApplyReport {
     }
 }
 
-pub const RUNTIME_CONFIG_FIELDS: [RuntimeConfigField; 7] = [
+pub const RUNTIME_CONFIG_FIELDS: [RuntimeConfigField; 8] = [
     RuntimeConfigField::Model,
     RuntimeConfigField::ApiProtocol,
+    RuntimeConfigField::ResponseProtocol,
     RuntimeConfigField::BaseUrl,
     RuntimeConfigField::MaxInput,
     RuntimeConfigField::MaxOutput,
@@ -118,6 +120,7 @@ impl RuntimeConfigField {
         match self {
             RuntimeConfigField::Model => "TIMEM_MODEL",
             RuntimeConfigField::ApiProtocol => "TIMEM_API_PROTOCOL",
+            RuntimeConfigField::ResponseProtocol => "TIMEM_RESPONSE_PROTOCOL",
             RuntimeConfigField::BaseUrl => "TIMEM_BASE_URL",
             RuntimeConfigField::MaxInput => "TIMEM_MAX_LLM_INPUT",
             RuntimeConfigField::MaxOutput => "TIMEM_MAX_LLM_OUTPUT",
@@ -136,6 +139,7 @@ pub fn runtime_config_field_value(
     match field {
         RuntimeConfigField::Model => config.model.clone(),
         RuntimeConfigField::ApiProtocol => config.api_protocol.label().to_string(),
+        RuntimeConfigField::ResponseProtocol => config.response_protocol.name().to_string(),
         RuntimeConfigField::BaseUrl => config.base_url.clone(),
         RuntimeConfigField::MaxInput => config.max_llm_input_tokens.to_string(),
         RuntimeConfigField::MaxOutput => config.max_llm_output_tokens.to_string(),
@@ -205,6 +209,16 @@ pub fn apply_runtime_config_value(
             config.api_protocol = next_protocol;
             if used_default_base_url {
                 config.base_url = default_base_url(&next_protocol).to_string();
+            }
+            Ok(RuntimeConfigEffect::None)
+        }
+        RuntimeConfigField::ResponseProtocol => {
+            config.response_protocol = crate::ResponseProtocolKind::from_name(value);
+            if !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "xml" | "xml_v1" | "json" | "json_v1" | "response_v1"
+            ) {
+                return Err(RuntimeConfigApplyError::InvalidApiProtocol);
             }
             Ok(RuntimeConfigEffect::None)
         }

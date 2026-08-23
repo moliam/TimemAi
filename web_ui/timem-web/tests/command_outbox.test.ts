@@ -81,3 +81,15 @@ describe("reliable command outbox", () => {
     expect(saveCommandOutboxItem(storage, "scope", item)).toBe(false);
   });
 });
+
+describe("model endpoint command delivery", () => {
+  it("keeps endpoint API keys out of persistent browser storage", () => {
+    const command = { type: "model_endpoint_upsert", endpoint: { name: "prod", model: "gpt", api_protocol: "openai-compatible", response_protocol: "xml", base_url: "https://api.example", api_key: "secret" } } as const;
+    expect(commandNeedsReliableDelivery(command)).toBe(true);
+    expect(commandMayPersist(command)).toBe(false);
+  });
+
+  it("treats endpoint secret reveal as best effort", () => {
+    expect(commandNeedsReliableDelivery({ type: "model_endpoint_secret_reveal", endpoint_id: "one" })).toBe(false);
+  });
+});

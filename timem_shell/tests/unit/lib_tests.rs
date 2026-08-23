@@ -292,6 +292,7 @@ fn shell_does_not_append_running_job_list_after_final_answer() {
     )
     .with_running_jobs(vec![RunningShellJob {
         pid: 12345,
+        tool_call_id: "call_test".to_string(),
         kind: "timeout".to_string(),
         command: "sleep 30".to_string(),
         cwd: "/tmp".to_string(),

@@ -271,6 +271,8 @@ fn historical_shell_job_record_without_stderr_file_is_treated_as_stdout_only() {
         session_id: "legacy-session".to_string(),
         turn_id: "legacy-turn".to_string(),
         pid: 1,
+        process_identity: None,
+        tool_call_id: "test_call".to_string(),
         owner_id: None,
         command: "legacy".to_string(),
         cwd: dir.display().to_string(),
@@ -783,6 +785,39 @@ fn polling_bash_waits_until_async_file_appears() {
 }
 
 #[test]
+fn refresh_rejects_a_live_pid_when_the_recorded_process_identity_does_not_match() {
+    let dir = tmp_memory_dir("pid_identity_mismatch");
+    let store = FileShellJobStore::new(&dir);
+    let started = store.spawn_background("sleep 30", &dir, "identity_session", "identity_turn");
+    let pid = started
+        .lines()
+        .find_map(|line| line.strip_prefix("pid="))
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|pid| pid.parse::<u32>().ok())
+        .expect("pid");
+    store.forget_watched_job_for_tests(pid);
+
+    let index = dir.join("shell_jobs/jobs.jsonl");
+    let text = fs::read_to_string(&index).unwrap();
+    let mut record: ShellJobRecord = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    record.process_identity = Some("definitely-not-this-process".to_string());
+    fs::write(
+        &index,
+        format!("{}\n", serde_json::to_string(&record).unwrap()),
+    )
+    .unwrap();
+
+    let (running, updates) = store.refresh_for_session("identity_session");
+    assert!(running.is_empty());
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].pid, pid);
+    assert_eq!(updates[0].status, "pid_identity_changed");
+
+    crate::os::terminate_process(pid);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn background_job_reports_pid_and_running_list_until_exit() {
     let dir = tmp_memory_dir("background_job");
     let store = FileShellJobStore::new(&dir);
@@ -1117,6 +1152,8 @@ fn shutdown_ignores_shell_job_record_owned_by_another_process() {
         session_id: "foreign-session".to_string(),
         turn_id: "foreign-turn".to_string(),
         pid: std::process::id(),
+        process_identity: None,
+        tool_call_id: "test_call".to_string(),
         owner_id: Some("foreign-runtime-owner".to_string()),
         command: "foreign".to_string(),
         cwd: dir.display().to_string(),
@@ -1147,6 +1184,8 @@ fn session_cancel_and_running_list_ignore_foreign_runtime_records() {
         session_id: "shared-session".to_string(),
         turn_id: "foreign-turn".to_string(),
         pid: std::process::id(),
+        process_identity: None,
+        tool_call_id: "test_call".to_string(),
         owner_id: Some("foreign-runtime-owner".to_string()),
         command: "must-not-be-exposed".to_string(),
         cwd: dir.display().to_string(),
@@ -1173,8 +1212,14 @@ fn session_cancel_and_running_list_ignore_foreign_runtime_records() {
 fn managed_shell_job_pid_is_a_distinct_runtime_child_process_group() {
     let dir = tmp_memory_dir("managed_child_group");
     let store = FileShellJobStore::new(&dir);
-    let started =
-        store.spawn_background_outcome("sleep 30", &dir, "managed-session", "managed-turn", false);
+    let started = store.spawn_background_outcome(
+        "sleep 30",
+        &dir,
+        "managed-session",
+        "managed-turn",
+        "test_call",
+        false,
+    );
     let evidence = started.bash_result.expect("managed child evidence");
     let pid = evidence.pid.expect("managed child pid");
 
@@ -1442,6 +1487,7 @@ fn foreground_run_bash_preserves_raw_output_and_tail_policy_for_the_gate() {
         &store,
         "session_tail",
         "turn_tail",
+        "test_call",
         true,
         true,
         &mut NeverCancelRuntime,
@@ -1503,6 +1549,7 @@ fn background_tail_out_is_persisted_until_exit_refresh() {
         &dir,
         "session_tail_background",
         "turn_tail_background",
+        "test_call",
         true,
     );
     assert_eq!(started.status, ActionStatus::BackgroundRunning);
@@ -1548,6 +1595,7 @@ fn approval_pending_action_preserves_tail_out() {
         &store,
         "session_approval_tail",
         "turn_approval_tail",
+        "test_call",
         true,
         true,
         &mut NeverCancelRuntime,

@@ -25,7 +25,7 @@ CONFIRM_PREFIX: "Now let me think seriously twice before I announce stop. Review
 
 Two mutually-exclusive state branches:
 - `<actions>`: work should continue, generate actions. Refer to `Actions` for available actions.
-  Tool actions may include a short, descriptive `name` attribute of at most 128 characters. If omitted, the runtime injects `action_N` (per Delta, N from 0). A descriptive name helps identify results, for example: `<run_bash name="check git diff"><cmd>git diff</cmd></run_bash>`.
+  Tool actions may include a short, descriptive `name` attribute of at most 128 characters. If omitted, runtime may use the tool name for display. The runtime—not the model—assigns the tool-call id used to correlate results and still-running reminders. Example: `<run_bash name="check git diff"><cmd>git diff</cmd></run_bash>`.
 - `<context_compact>` is an exclusive capability inside `<actions>` that maintains/reorganizes dynamic context for future work. Target with prompt delta ids. Two compact methods are provided:
   - discard: just throw from the context.
   - offload: will be saved into scratch memory, the runtime will return a id with which you can retrieve the pd back using `memmgr` `context_compact` should only targets runtime-provided dynamic delta ids.

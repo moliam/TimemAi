@@ -1,6 +1,103 @@
 use super::*;
 
 #[test]
+fn forced_compaction_materializes_native_history_and_restricts_model_request() {
+    let mut core = test_core("forced_native_compaction_gate");
+    core.set_max_llm_input_tokens(3_000);
+    core.set_interaction_profile(&InteractionProfile {
+        api_protocol: "openai_compatible".to_string(),
+        model: "test".to_string(),
+        gateway: "test".to_string(),
+        requested_mode: ToolCallMode::Native,
+        resolved_mode: ToolCallMode::Native,
+        active_prompt_protocol: "json".to_string(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: CapabilityProbeSource::Explicit,
+        reason: "test".to_string(),
+        probe_latency_ms: None,
+        observed_tool_calls: 1,
+    });
+    core.append_delta(vec![("user_question".to_string(), "keep task".to_string())]);
+    core.native_exchanges.push(NativeExchange {
+        assistant_text: "old tool work".to_string(),
+        calls: vec![NativeToolCall {
+            id: "call_old".to_string(),
+            name: "readfile".to_string(),
+            arguments: serde_json::json!({"path":"large.txt"}),
+            raw_arguments: r#"{"path":"large.txt"}"#.to_string(),
+        }],
+        results: vec![NativeToolResult {
+            call_id: "call_old".to_string(),
+            name: "readfile".to_string(),
+            content: "large old result".repeat(100),
+            is_error: false,
+        }],
+    });
+    core.last_observed_prompt_tokens = 2_700;
+
+    core.append_in_turn_shrink_review_if_needed();
+
+    assert!(core.context_compact_required);
+    assert!(core.native_exchanges.is_empty());
+    let prompt = core.render_prompt();
+    assert!(prompt.contains("old tool work"));
+    assert!(prompt.contains("mode=force_shrink_required"));
+    let request_prompt = core.build_model_request_prompt(&prompt);
+    assert!(request_prompt.ends_with("Context too long, please compress first:"));
+    let request = core.model_interaction_request(request_prompt);
+    assert_eq!(request.tool_choice, NativeToolChoice::Required);
+    assert_eq!(request.tools.len(), 1);
+    assert_eq!(request.tools[0].name, "context_compact");
+}
+
+#[test]
+fn forced_compaction_ignores_non_compact_output_then_unlocks_after_success() {
+    let mut core = test_core("forced_compaction_ignore");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.context_compact_required = true;
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "active task".to_string(),
+    )]);
+    let before = core.render_prompt();
+    let round_before = core.current_round;
+
+    let ignored = core.apply_model_response(LlmResponse {
+        content: r#"{"final_answer":"must not be shown"}"#.to_string(),
+        tool_calls: Vec::new(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    assert!(matches!(ignored, CoreStep::NeedModel { .. }));
+    assert_eq!(core.current_round, round_before);
+    assert_eq!(core.render_prompt(), before);
+    assert!(core.context_compact_required);
+
+    let ids = core
+        .deltas
+        .iter()
+        .map(|delta| delta.delta_id.clone())
+        .collect::<Vec<_>>();
+    let completed = core.apply_model_response(LlmResponse {
+        content: serde_json::json!({
+            "context_compact": {
+                "discard": ids,
+                "summary": "keep active task and continue"
+            }
+        })
+        .to_string(),
+        tool_calls: Vec::new(),
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    assert!(matches!(completed, CoreStep::NeedModel { .. }));
+    assert!(!core.context_compact_required);
+}
+
+#[test]
 fn product_default_and_explicit_unlimited_have_no_round_limit() {
     assert_eq!(configured_round_budget(None), UNLIMITED_ROUND_BUDGET);
     assert_eq!(
@@ -293,6 +390,7 @@ fn model_result_gate_uses_each_actions_tail_out_policy() {
         &ParsedAction {
             action: "run_bash".to_string(),
             name: None,
+            call_id: "test_call".to_string(),
             raw_input: json!({"tail_out": false}),
         },
         &outcome,
@@ -305,16 +403,23 @@ fn model_result_gate_uses_each_actions_tail_out_policy() {
         &ParsedAction {
             action: "run_bash".to_string(),
             name: None,
+            call_id: "test_call".to_string(),
             raw_input: json!({"tail_out": true}),
         },
         &outcome,
     );
     assert!(!tail.contains("BEGIN_MARKER"));
     assert!(tail.contains("END_MARKER"));
-    assert!(tail.starts_with("!!!Too long,"));
+    assert!(tail.contains("!!!Too long,"));
     assert!(tail.contains("truncated before"));
-    assert!(head.len() <= tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES);
-    assert!(tail.len() <= tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES);
+    assert!(
+        head.len() <= tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES + 64,
+        "tool-call correlation metadata stays bounded"
+    );
+    assert!(
+        tail.len() <= tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES + 64,
+        "tool-call correlation metadata stays bounded"
+    );
 }
 
 #[test]
@@ -336,17 +441,21 @@ fn xml_model_result_gate_retains_tail_inside_a_complete_envelope() {
         &ParsedAction {
             action: "run_bash".to_string(),
             name: Some("tail XML".to_string()),
+            call_id: "test_call".to_string(),
             raw_input: json!({"tail_out": true}),
         },
         &outcome,
     );
 
-    assert!(result.starts_with("<bash_result "));
+    assert!(result.contains("<bash_result "));
     assert!(result.ends_with("</bash_result>"));
     assert!(result.contains("truncated before"));
     assert!(!result.contains("BEGIN_MARKER"));
     assert!(result.contains("END_MARKER"));
-    assert!(result.len() <= tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES);
+    assert!(
+        result.len() <= tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES + 64,
+        "tool-call correlation metadata stays bounded"
+    );
 }
 
 #[test]

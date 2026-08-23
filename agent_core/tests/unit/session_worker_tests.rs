@@ -744,7 +744,7 @@ impl ModelClient for ToolGenWorkflowModel {
             assert!(prompt.contains(
                 "<ASSISTANT><actions><self_tool name=\"inspect runtime parameters\" type=\"params\"/></actions></ASSISTANT>"
             ));
-            assert!(!prompt.contains(r#"<ASSISTANT id=""#));
+            assert!(!prompt.contains(r#"<ASSISTANT name=""#));
             assert!(!prompt.contains("&lt;ASSISTANT&gt;"));
             assert!(!prompt.contains("ID0_TOOLGEN"));
             assert!(!prompt.contains("Referenced completed turn id:"));

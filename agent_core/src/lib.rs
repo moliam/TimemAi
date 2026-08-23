@@ -379,24 +379,6 @@ fn bounded_mcp_server_instructions(instructions: &str) -> String {
     format!("{retained}\n...[MCP server instructions truncated by Timem]")
 }
 
-fn context_reduction_delta_ids_from_action_groups(groups: &[ParsedActionGroup]) -> Vec<String> {
-    let _ = groups;
-    Vec::new()
-}
-
-fn extract_pid_after_marker(text: &str, marker: &str) -> Option<u32> {
-    let start = text.find(marker)? + marker.len();
-    let digits = text[start..]
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit())
-        .collect::<String>();
-    if digits.is_empty() {
-        None
-    } else {
-        digits.parse::<u32>().ok()
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ApprovalRequest {
     pub approval_id: String,
@@ -533,6 +515,7 @@ pub(crate) struct PendingApproval {
     request: ApprovalRequest,
     approved_action: PendingApprovedAction,
     action_name: Option<String>,
+    action_call_id: String,
     continuation: Option<PendingApprovalContinuation>,
 }
 
@@ -557,6 +540,7 @@ pub(crate) enum PendingApprovedAction {
         once_timeout_ms: u64,
         session_id: String,
         turn_id: String,
+        tool_call_id: String,
         cwd: PathBuf,
         tail_out: bool,
     },
@@ -590,6 +574,7 @@ impl PendingApprovedAction {
                 once_timeout_ms,
                 session_id,
                 turn_id,
+                tool_call_id,
                 cwd,
                 tail_out,
             } => json!({
@@ -601,6 +586,7 @@ impl PendingApprovedAction {
                 "once_timeout_ms": if interval_ms.is_some() { Some(*once_timeout_ms) } else { None },
                 "session_id": session_id,
                 "turn_id": turn_id,
+                "tool_call_id": tool_call_id,
                 "cwd": cwd,
                 "tail_out": tail_out,
                 "approval_id": approval_id,
@@ -1045,7 +1031,13 @@ pub trait ActionRuntime {
 
     fn on_core_topic_events(&mut self, _events: &[host::CoreTopicEvent]) {}
 
-    fn on_model_response_parsed(&mut self, _tool_count: usize) {}
+    fn on_model_response_parsed(
+        &mut self,
+        _tool_count: usize,
+        _has_free_talk: bool,
+        _has_tool_call: bool,
+    ) {
+    }
 
     fn on_long_running_command(
         &mut self,
@@ -1260,6 +1252,7 @@ pub struct AgentCore {
     deltas: Vec<PromptDelta>,
     max_llm_input_tokens: u32,
     last_observed_prompt_tokens: u32,
+    context_compact_required: bool,
     configured_round_budget: u32,
     round_budget: u32,
     reminder_tips_config: ReminderTipsConfig,
@@ -1341,6 +1334,7 @@ impl AgentCore {
             deltas: Vec::new(),
             max_llm_input_tokens: 100_000,
             last_observed_prompt_tokens: 0,
+            context_compact_required: false,
             configured_round_budget,
             round_budget: configured_round_budget,
             reminder_tips_config: ReminderTipsConfig::default(),
@@ -1397,10 +1391,14 @@ impl AgentCore {
             return ModelInteractionRequest::inline(rendered_prompt);
         }
         let mut tools = self.capabilities.native_builtin_tool_definitions();
-        let static_tool_count = tools.len();
+        let mut static_tool_count = tools.len();
         let mut dynamic_tools = self.capabilities.native_dynamic_tool_definitions();
         self.attach_mcp_instructions_to_native_tools(&mut dynamic_tools);
         tools.extend(dynamic_tools);
+        if self.context_compact_required {
+            tools.retain(|tool| tool.name == "context_compact");
+            static_tool_count = tools.len();
+        }
         ModelInteractionRequest {
             rendered_prompt: rendered_prompt.into(),
             static_tool_count,
@@ -1408,7 +1406,11 @@ impl AgentCore {
             native_exchanges: self.native_exchanges.clone(),
             resolved_mode: ToolCallMode::Native,
             parallel_tool_calls: self.native_parallel_tool_calls,
-            tool_choice: NativeToolChoice::Auto,
+            tool_choice: if self.context_compact_required {
+                NativeToolChoice::Required
+            } else {
+                NativeToolChoice::Auto
+            },
         }
     }
 
@@ -1605,82 +1607,68 @@ impl AgentCore {
         );
     }
 
-    fn submit_running_job_list_if_any(&mut self, session_id: &str) {
+    fn still_running_cmds_context(&mut self, session_id: &str) -> Option<String> {
         let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
         self.submit_running_job_updates(updates);
         if running.is_empty() {
-            return;
+            return None;
         }
-        let mut text = String::from("RUNNING JOB LIST:");
+        let mut text = String::from(
+            "still running cmds:
+
+### STILL RUNNING
+| pid | created by tool_call id |
+|---:|---|",
+        );
         for job in running {
+            let call_id = markdown_table_cell(if job.tool_call_id.trim().is_empty() {
+                "unknown_tool_call"
+            } else {
+                &job.tool_call_id
+            });
             text.push_str(&format!(
-                "\npid={}, {}, cmd={}, elapsed_ms={}, still running",
-                job.pid,
-                job.description(),
-                compact_text(&job.command, 500),
-                job.elapsed_ms(),
+                "
+| {} | `{}` |",
+                job.pid, call_id
             ));
         }
-        text.push_str(
-            "\nContinue the task by deciding whether to wait, inspect, terminate, or take another appropriate action. Do not ask the user merely because a command is still running.",
-        );
-        self.submit_prompt_component(
-            PromptComponentRole::system(),
-            "running_job_list",
-            text,
-            "runtime",
-        );
+        Some(text)
     }
 
-    fn referenced_system_slices_running_pids(&self, delta_ids: &[String]) -> BTreeSet<u32> {
-        let target_delta_ids = delta_ids
-            .iter()
-            .map(|id| id.trim().to_string())
-            .filter(|id| !id.is_empty())
-            .collect::<HashSet<_>>();
-        if target_delta_ids.is_empty() {
-            return BTreeSet::new();
+    pub fn build_model_request_prompt(&mut self, current_prompt: &str) -> String {
+        let session_id = self.current_session_id();
+        let still_running = self.still_running_cmds_context(&session_id);
+        if still_running.is_none() && !self.context_compact_required {
+            return current_prompt.to_string();
         }
-
-        let mut pids = BTreeSet::new();
-        for delta in &self.deltas {
-            if !target_delta_ids.contains(&delta.delta_id) {
-                continue;
-            }
-            for slice in prompt_render::render_delta_slices(delta) {
-                if role_for_prompt_type(&slice.prompt_type, &self.assistant_speaker_name)
-                    != PromptComponentRole::system()
-                {
-                    continue;
-                }
-                for line in slice.text.lines() {
-                    let lower = line.to_ascii_lowercase();
-                    let is_running_line = lower.contains("still running")
-                        || lower.contains("keeps running")
-                        || lower.contains("is still running");
-                    if is_running_line {
-                        if let Some(pid) = extract_pid_after_marker(line, "pid=") {
-                            pids.insert(pid);
-                        }
-                    }
-                }
-            }
+        let (body, trailer) = prompt_render::split_formatted_response_trailer(current_prompt);
+        let mut prompt = body.trim_end().to_string();
+        if let Some(still_running) = still_running {
+            prompt.push_str("\n\n");
+            prompt.push_str(&still_running);
         }
-        pids
+        prompt.push_str("\n\n");
+        if self.context_compact_required {
+            prompt.push_str(prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER);
+        } else if let Some(trailer) = trailer {
+            prompt.push_str(&trailer);
+        }
+        prompt
     }
 
-    fn referenced_deltas_have_current_running_jobs(
-        &mut self,
-        session_id: &str,
-        delta_ids: &[String],
-    ) -> bool {
-        let referenced_pids = self.referenced_system_slices_running_pids(delta_ids);
-        if referenced_pids.is_empty() {
+    pub fn should_suppress_model_response(&self, response: &LlmResponse) -> bool {
+        if !self.context_compact_required {
             return false;
         }
-        let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
-        self.submit_running_job_updates(updates);
-        running.iter().any(|job| referenced_pids.contains(&job.pid))
+        let mut parsed = if self.resolved_tool_call_mode == ToolCallMode::Native {
+            self.parse_native_response(response)
+        } else {
+            self.response_protocol
+                .suite()
+                .parse(&response.content, &self.capabilities)
+        };
+        self.normalize_intrinsic_actions(&mut parsed);
+        parsed.context_compacts.len() != 1 || parsed.repair_issue.is_some()
     }
 
     pub fn set_max_llm_input_tokens(&mut self, max_llm_input_tokens: u32) {
@@ -2199,6 +2187,7 @@ impl AgentCore {
     pub fn clear_dynamic_context(&mut self) {
         self.deltas.clear();
         self.last_observed_prompt_tokens = 0;
+        self.context_compact_required = false;
         self.current_round = 0;
         self.current_stats = UsageStats::zero();
         self.repair_attempted = false;
@@ -2560,8 +2549,24 @@ impl AgentCore {
             .last_observed_prompt_tokens
             .max(response.usage.prompt_tokens);
         let raw_model_output = response.content.clone();
+        let protocol_suite = self.response_protocol.suite();
+        let native_calls = response.tool_calls.clone();
+        let mut parsed = if self.resolved_tool_call_mode == ToolCallMode::Native {
+            self.parse_native_response(&response)
+        } else {
+            protocol_suite.parse(&response.content, &self.capabilities)
+        };
+        self.normalize_intrinsic_actions(&mut parsed);
+        if self.context_compact_required
+            && (parsed.context_compacts.len() != 1 || parsed.repair_issue.is_some())
+        {
+            self.current_round = self.current_round.saturating_sub(1);
+            return CoreStep::NeedModel {
+                prompt: self.render_prompt(),
+                rounds_remaining: self.remaining_rounds(),
+            };
+        }
         if response.truncated && self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
-            let protocol_suite = self.response_protocol.suite();
             let instruction = protocol_suite
                 .repair_instruction_for_response("truncated_model_output", &response.content);
             return self.request_protocol_repair(
@@ -2571,14 +2576,6 @@ impl AgentCore {
                 runtime,
             );
         }
-        let protocol_suite = self.response_protocol.suite();
-        let native_calls = response.tool_calls.clone();
-        let mut parsed = if self.resolved_tool_call_mode == ToolCallMode::Native {
-            self.parse_native_response(&response)
-        } else {
-            protocol_suite.parse(&response.content, &self.capabilities)
-        };
-        self.normalize_intrinsic_actions(&mut parsed);
         let mut slices = Vec::new();
         if parsed.repair_issue.is_none() {
             let tool_count = parsed
@@ -2586,7 +2583,11 @@ impl AgentCore {
                 .iter()
                 .map(|group| group.actions.len())
                 .sum();
-            runtime.on_model_response_parsed(tool_count);
+            runtime.on_model_response_parsed(
+                tool_count,
+                !parsed.thought.trim().is_empty(),
+                tool_count > 0 || !parsed.context_compacts.is_empty() || !native_calls.is_empty(),
+            );
             if parsed.recovered_issue.as_deref() == Some("runtime_root_repair_help") {
                 runtime.on_core_topic_events(&[host::runtime_root_repair_help_topic_event(
                     self.current_session_id(),
@@ -2672,15 +2673,6 @@ impl AgentCore {
             // this insertion order through their sequence number.
             slices.extend(self.assistant_replay_slices(&raw_model_output, Some(&parsed), None));
         }
-        let compact_delta_ids = parsed
-            .context_compacts
-            .iter()
-            .flat_map(|compact| compact.delta_ids.iter().cloned())
-            .collect::<Vec<_>>();
-        let compact_refs_current_running_jobs = self.referenced_deltas_have_current_running_jobs(
-            &self.current_session_id(),
-            &compact_delta_ids,
-        );
         let compact_refs_mcp_catalog = parsed.context_compacts.iter().any(|compact| {
             self.prompt_refs_include_type(
                 &compact.delta_ids,
@@ -2756,6 +2748,9 @@ impl AgentCore {
                 ));
             }
         }
+        if compacted_successfully {
+            self.context_compact_required = false;
+        }
         if compacted_successfully && native_calls.is_empty() {
             slices.push((
                 "context_compacted".to_string(),
@@ -2809,12 +2804,6 @@ impl AgentCore {
         }
 
         if !parsed.action_groups.is_empty() {
-            let context_reduction_delta_ids =
-                context_reduction_delta_ids_from_action_groups(&parsed.action_groups);
-            let should_snapshot_running_jobs = self.referenced_deltas_have_current_running_jobs(
-                &self.current_session_id(),
-                &context_reduction_delta_ids,
-            );
             let result_lines = match self.execute_action_groups(parsed.action_groups, runtime) {
                 Ok(result_lines) => result_lines,
                 Err((result_lines, pending)) => {
@@ -2855,11 +2844,7 @@ impl AgentCore {
                     calls: native_calls,
                 });
             }
-            if should_snapshot_running_jobs {
-                self.submit_running_job_list_if_any(&self.current_session_id());
-            } else {
-                self.submit_running_job_updates_for_session(&self.current_session_id());
-            }
+            self.submit_running_job_updates_for_session(&self.current_session_id());
             self.append_delta_with_action_output_budget(slices);
             self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {
@@ -2900,11 +2885,7 @@ impl AgentCore {
                 });
                 slices.clear();
             }
-            if compact_refs_current_running_jobs {
-                self.submit_running_job_list_if_any(&self.current_session_id());
-            } else {
-                self.submit_running_job_updates_for_session(&self.current_session_id());
-            }
+            self.submit_running_job_updates_for_session(&self.current_session_id());
             self.append_delta_with_action_output_budget(slices);
             self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {
@@ -2959,6 +2940,7 @@ impl AgentCore {
             .map(|call| ParsedAction {
                 action: call.name.clone(),
                 name: None,
+                call_id: call.id.clone(),
                 raw_input: call.arguments.clone(),
             })
             .collect::<Vec<_>>();
@@ -3345,6 +3327,7 @@ impl AgentCore {
                     once_timeout_ms,
                     session_id,
                     turn_id,
+                    tool_call_id,
                     cwd,
                     tail_out,
                 } => shell_exec::execute_approved_bash_with_tail(
@@ -3356,6 +3339,7 @@ impl AgentCore {
                     *once_timeout_ms,
                     session_id,
                     turn_id,
+                    tool_call_id,
                     interval_ms.is_none(),
                     *tail_out,
                     &pending.request,
@@ -3380,6 +3364,7 @@ impl AgentCore {
             &ParsedAction {
                 action: pending.request.action.clone(),
                 name: pending.action_name.clone(),
+                call_id: pending.action_call_id.clone(),
                 raw_input: pending.approved_action.audit_input(
                     &pending.request.approval_id,
                     &pending.request.risk,
@@ -3916,6 +3901,35 @@ impl AgentCore {
         }
     }
 
+    fn inline_tool_call_labels(&self, parsed: &ParsedEnvelope) -> Vec<(String, String)> {
+        if self.resolved_tool_call_mode == ToolCallMode::Native {
+            return Vec::new();
+        }
+        parsed
+            .action_groups
+            .iter()
+            .flat_map(|group| group.actions.iter())
+            .map(|action| (action.call_id.clone(), action.action.clone()))
+            .collect()
+    }
+
+    fn append_inline_tool_call_labels(&self, replay: &mut String, parsed: &ParsedEnvelope) {
+        let calls = self.inline_tool_call_labels(parsed);
+        if calls.is_empty() {
+            return;
+        }
+        replay.push_str(
+            "
+Runtime tool_call ids:",
+        );
+        for (call_id, action) in calls {
+            replay.push_str(&format!(
+                "
+- {call_id}: {action}"
+            ));
+        }
+    }
+
     fn assistant_replay_slices(
         &self,
         raw_response: &str,
@@ -3926,7 +3940,10 @@ impl AgentCore {
             AssistantReplayMode::RawOutput => {
                 let accepted_response =
                     parsed.and_then(|parsed| parsed.accepted_response.as_deref());
-                let replay = accepted_response.unwrap_or(raw_response).trim();
+                let mut replay = accepted_response.unwrap_or(raw_response).trim().to_string();
+                if let Some(parsed) = parsed {
+                    self.append_inline_tool_call_labels(&mut replay, parsed);
+                }
                 if replay.is_empty() {
                     Vec::new()
                 } else {
@@ -3937,21 +3954,24 @@ impl AgentCore {
                     } else {
                         "llm_response"
                     };
-                    vec![(prompt_type.to_string(), replay.to_string())]
+                    vec![(prompt_type.to_string(), replay)]
                 }
             }
             AssistantReplayMode::ExtractedFields => {
                 if let Some(accepted_response) =
                     parsed.and_then(|parsed| parsed.accepted_response.as_deref())
                 {
-                    let replay = accepted_response.trim();
+                    let mut replay = accepted_response.trim().to_string();
+                    if let Some(parsed) = parsed {
+                        self.append_inline_tool_call_labels(&mut replay, parsed);
+                    }
                     if !replay.is_empty() {
                         let prompt_type = if self.response_protocol == ResponseProtocolKind::Xml {
                             "llm_response_raw_xml"
                         } else {
                             "llm_response"
                         };
-                        return vec![(prompt_type.to_string(), replay.to_string())];
+                        return vec![(prompt_type.to_string(), replay)];
                     }
                 }
 
@@ -4255,23 +4275,23 @@ impl AgentCore {
     ) -> Option<String> {
         let estimated_prompt_tokens = self.estimate_rendered_prompt_tokens(incoming_prompt_tokens);
         let force_threshold = self.max_llm_input_tokens.saturating_mul(90) / 100;
+        if !self.context_compact_required && estimated_prompt_tokens < force_threshold {
+            return None;
+        }
+        if self.resolved_tool_call_mode == ToolCallMode::Native && !self.native_exchanges.is_empty()
+        {
+            self.materialize_native_exchanges();
+        }
         let slices = self.render_prompt_slices();
         if slices.is_empty() {
             return None;
         }
+        self.context_compact_required = true;
         let dynamic_tokens = slices
             .iter()
             .map(|slice| estimate_prompt_tokens(&slice.text))
             .sum::<u32>()
             .saturating_add(pending_dynamic_tokens);
-        if estimated_prompt_tokens < force_threshold {
-            return None;
-        }
-        let excess_tokens = estimated_prompt_tokens.saturating_sub(force_threshold);
-        let practical_shrink_capacity = dynamic_tokens.saturating_mul(8) / 10;
-        if practical_shrink_capacity < excess_tokens {
-            return None;
-        }
         let current_count = self.deltas.len();
         let delta_refs = self
             .deltas
@@ -4295,9 +4315,9 @@ impl AgentCore {
             .collect::<Vec<_>>()
             .join("\n");
         let tip = "TIPS: You can update your job list plan, steer and optimize your work based on the above work.";
-        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0.";
+        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0. Until compaction succeeds, every response except one exclusive context_compact call is ignored without being shown or executed.";
         Some(format!(
-            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{tip}\n{instruction}",
+            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\ndynamic_context_tokens={dynamic_tokens}\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{tip}\n{instruction}",
             self.max_llm_input_tokens
         ))
     }
@@ -4377,7 +4397,7 @@ impl AgentCore {
         rows
     }
 
-    fn format_action_outcome(&self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
+    fn format_action_outcome_body(&self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
         let retention = tool_result_gate::Retention::from_tail_out(action.input_bool("tail_out"));
         if self.response_protocol == ResponseProtocolKind::Xml {
             let output_time_ms = now_ms();
@@ -4437,6 +4457,19 @@ impl AgentCore {
         }
     }
 
+    fn format_action_outcome(&self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
+        let body = self.format_action_outcome_body(action, outcome);
+        if self.response_protocol == ResponseProtocolKind::Xml {
+            format!("<tool_call_id>{}</tool_call_id>{body}", action.call_id)
+        } else {
+            format!(
+                "tool_call_id: {}
+{body}",
+                action.call_id
+            )
+        }
+    }
+
     fn format_action_result(&self, action: &ParsedAction, result: &str) -> String {
         self.format_action_outcome(action, &ActionOutcome::completed(result))
     }
@@ -4445,6 +4478,7 @@ impl AgentCore {
         let action = ParsedAction {
             action: pending.request.action.clone(),
             name: pending.action_name.clone(),
+            call_id: pending.action_call_id.clone(),
             raw_input: json!({ "tail_out": pending.approved_action.tail_out() }),
         };
         self.format_action_result(&action, result)
@@ -4559,6 +4593,7 @@ impl AgentCore {
         let action = ParsedAction {
             action: pending.request.action.clone(),
             name: pending.action_name.clone(),
+            call_id: pending.action_call_id.clone(),
             raw_input: pending.approved_action.audit_input(
                 &pending.request.approval_id,
                 &pending.request.risk,
@@ -4578,6 +4613,7 @@ impl AgentCore {
                     once_timeout_ms,
                     session_id,
                     turn_id,
+                    tool_call_id,
                     cwd,
                     tail_out,
                 } => {
@@ -4592,6 +4628,7 @@ impl AgentCore {
                         *once_timeout_ms,
                         session_id,
                         turn_id,
+                        tool_call_id,
                         interval_ms.is_none(),
                         *tail_out,
                         &pending_for_thread.request,
@@ -4654,6 +4691,7 @@ impl AgentCore {
                     &shell_jobs,
                     &session_id,
                     &turn_id,
+                    action.call_id.as_str(),
                     is_regular_command,
                     action.input_bool("tail_out"),
                     &mut runtime,
@@ -4962,6 +5000,7 @@ impl AgentCore {
             }
             ActionExecution::NeedsApproval(mut pending) => {
                 pending.action_name = action_for_audit.name.clone();
+                pending.action_call_id = action_for_audit.call_id.clone();
                 let result = format!(
                     "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: needs_user_approval\nrisk: {}\nreason: {}",
                     action_for_audit.action,
@@ -6407,7 +6446,15 @@ fn memory_missing_expected_version_result(
 fn should_run_memory_precheck(supporting_context: &str) -> bool {
     supporting_context.contains("memory_lookup_hint:")
 }
-pub(crate) fn compact_text(text: &str, max_chars: usize) -> String {
+fn markdown_table_cell(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('`', "\\`")
+        .replace(['\r', '\n'], " ")
+}
+
+fn compact_text(text: &str, max_chars: usize) -> String {
     let mut out = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if out.chars().count() > max_chars {
         out = out.chars().take(max_chars).collect::<String>();

@@ -2870,7 +2870,7 @@ fn web_runtime_updates_only_accept_the_shared_runtime_config_keys() {
 }
 
 #[test]
-fn incomplete_session_model_service_config_blocks_send_without_starting_a_turn() {
+fn session_model_service_config_allows_send_without_an_api_key() {
     let state = routing_test_state();
     {
         let mut sessions = state.sessions.lock().unwrap();
@@ -2884,15 +2884,7 @@ fn incomplete_session_model_service_config_blocks_send_without_starting_a_turn()
             .clear();
     }
 
-    let error = submit_turn(&state, "session_a", "hello".to_string()).unwrap_err();
-    assert_eq!(
-        error,
-        "session_model_service_config_incomplete:missing_api_key"
-    );
-    let sessions = state.sessions.lock().unwrap();
-    let session = &sessions["session_a"];
-    assert!(session.active_turn_id.is_none());
-    assert!(session.turns.is_empty());
+    assert!(validate_session_model_service_config(&state, "session_a").is_ok());
 }
 
 #[test]
@@ -9729,4 +9721,208 @@ fn startup_resource_errors_are_actionable_instead_of_internal_codes() {
     assert!(exhausted.contains("local web port"));
     assert!(exhausted.contains("firewall or sandbox"));
     assert!(!exhausted.contains("no_available_port_in_range"));
+}
+
+#[test]
+#[ignore = "manual endpoint scale/concurrency performance profile"]
+fn model_endpoint_scale_and_concurrency_performance_profile() {
+    fn percentile(mut samples: Vec<std::time::Duration>, percentile: usize) -> std::time::Duration {
+        samples.sort_unstable();
+        samples[(samples.len() - 1) * percentile / 100]
+    }
+
+    fn endpoint(index: usize) -> ModelEndpointConfig {
+        ModelEndpointConfig {
+            id: format!("endpoint-{index:05}"),
+            name: format!("Endpoint {index:05}"),
+            model: "gpt-4.1-mini".to_string(),
+            api_protocol: "openai-compatible".to_string(),
+            response_protocol: "xml".to_string(),
+            base_url: format!("https://api-{index:05}.example.test/v1"),
+            api_key: format!("secret-{index:05}"),
+        }
+    }
+
+    for count in [100usize, 1_000, 5_000] {
+        let state = routing_test_state();
+        let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_perf"));
+        set_test_mem(&state, root.clone(), ".test_mem");
+        {
+            let mut mem = state.mem.lock().unwrap();
+            mem.model_endpoints = (0..count).map(endpoint).collect();
+            save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints).unwrap();
+        }
+        let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+        let file_bytes = std::fs::metadata(model_endpoints_path(&memory_dir))
+            .unwrap()
+            .len();
+
+        let reports = model_endpoint_reports(&state).unwrap();
+        assert_eq!(reports.len(), count);
+        let report_json_bytes = serde_json::to_vec(&reports).unwrap().len();
+        let report_samples = (0..25)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let reports = model_endpoint_reports(&state).unwrap();
+                assert_eq!(reports.len(), count);
+                started.elapsed()
+            })
+            .collect::<Vec<_>>();
+        let secret_samples = (0..25)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                assert_eq!(
+                    model_endpoint_api_key(&state, &format!("endpoint-{:05}", count - 1)).unwrap(),
+                    format!("secret-{:05}", count - 1)
+                );
+                started.elapsed()
+            })
+            .collect::<Vec<_>>();
+
+        let update_started = std::time::Instant::now();
+        upsert_model_endpoint(
+            &state,
+            ModelEndpointInput {
+                id: Some(format!("endpoint-{:05}", count - 1)),
+                name: format!("Endpoint {:05} renamed", count - 1),
+                model: "gpt-4.1".to_string(),
+                api_protocol: "openai-compatible".to_string(),
+                response_protocol: "json".to_string(),
+                base_url: "https://updated.example.test/v1".to_string(),
+                api_key: None,
+            },
+        )
+        .unwrap();
+        let update_elapsed = update_started.elapsed();
+
+        let reload_started = std::time::Instant::now();
+        assert_eq!(
+            load_model_endpoints_resilient(&memory_dir).unwrap().len(),
+            count
+        );
+        let reload_elapsed = reload_started.elapsed();
+
+        eprintln!(
+            "endpoint_perf count={count} file_bytes={file_bytes} report_json_bytes={report_json_bytes} reports_p50_us={} reports_p95_us={} secret_p50_us={} secret_p95_us={} update_fsync_us={} reload_us={}",
+            percentile(report_samples.clone(), 50).as_micros(),
+            percentile(report_samples, 95).as_micros(),
+            percentile(secret_samples.clone(), 50).as_micros(),
+            percentile(secret_samples, 95).as_micros(),
+            update_elapsed.as_micros(),
+            reload_elapsed.as_micros(),
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_concurrency_perf"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.model_endpoints = (0..1_000).map(endpoint).collect();
+        save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints).unwrap();
+    }
+    let started = std::time::Instant::now();
+    let threads = (0..16)
+        .map(|index| {
+            let state = state.clone();
+            std::thread::spawn(move || {
+                upsert_model_endpoint(
+                    &state,
+                    ModelEndpointInput {
+                        id: Some(format!("endpoint-{index:05}")),
+                        name: format!("Concurrent {index:05}"),
+                        model: "gpt-4.1-mini".to_string(),
+                        api_protocol: "openai-compatible".to_string(),
+                        response_protocol: "xml".to_string(),
+                        base_url: format!("https://concurrent-{index}.example.test/v1"),
+                        api_key: None,
+                    },
+                )
+                .unwrap();
+            })
+        })
+        .collect::<Vec<_>>();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let elapsed = started.elapsed();
+    eprintln!(
+        "endpoint_perf concurrent_updates=16 list_count=1000 total_us={} mean_us={}",
+        elapsed.as_micros(),
+        elapsed.as_micros() / 16
+    );
+    assert_eq!(model_endpoint_reports(&state).unwrap().len(), 1_000);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_model_endpoints"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+
+    let created = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointUpsert {
+            endpoint: ModelEndpointInput {
+                id: Some("endpoint-one".to_string()),
+                name: "Production".to_string(),
+                model: "gpt-4.1".to_string(),
+                api_protocol: "openai-compatible".to_string(),
+                response_protocol: "xml".to_string(),
+                base_url: "https://api.example.test/v1".to_string(),
+                api_key: Some("secret-endpoint-key".to_string()),
+            },
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let serialized = serde_json::to_string(&created).unwrap();
+    assert!(serialized.contains("Production"));
+    assert!(serialized.contains("api_key_configured"));
+    assert!(!serialized.contains("secret-endpoint-key"));
+    assert_eq!(
+        model_endpoint_api_key(&state, "endpoint-one").unwrap(),
+        "secret-endpoint-key"
+    );
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointUpsert {
+            endpoint: ModelEndpointInput {
+                id: Some("endpoint-one".to_string()),
+                name: "Production renamed".to_string(),
+                model: "gpt-4.1-mini".to_string(),
+                api_protocol: "openai-responses".to_string(),
+                response_protocol: "json".to_string(),
+                base_url: "https://responses.example.test/v1".to_string(),
+                api_key: None,
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        model_endpoint_api_key(&state, "endpoint-one").unwrap(),
+        "secret-endpoint-key"
+    );
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    let restored = load_model_endpoints_resilient(&memory_dir).unwrap();
+    assert_eq!(restored[0].name, "Production renamed");
+    assert_eq!(restored[0].api_key, "secret-endpoint-key");
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointDelete {
+            endpoint_id: "endpoint-one".to_string(),
+        },
+    )
+    .unwrap();
+    assert!(load_model_endpoints_resilient(&memory_dir)
+        .unwrap()
+        .is_empty());
+    let _ = std::fs::remove_dir_all(root);
 }

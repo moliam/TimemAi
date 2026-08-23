@@ -403,6 +403,7 @@ struct WebMemState {
     mcp_runtime: McpRuntime,
     mcp_configs: Vec<McpServerConfig>,
     mcp_reports: BTreeMap<String, McpServerReport>,
+    model_endpoints: Vec<ModelEndpointConfig>,
     role_library: WorkerRoleLibrary,
 }
 
@@ -413,6 +414,7 @@ impl WebMemState {
         let mcp_store = McpStore::new(layout.memory_dir());
         let mcp_configs = load_mcp_configs_resilient(&mcp_store)?;
         let role_library = load_role_library_resilient(&role_library_path(&layout.memory_dir()))?;
+        let model_endpoints = load_model_endpoints_resilient(&layout.memory_dir())?;
         Ok(Self {
             space,
             session_store: SessionStore::new(layout.memory_dir()),
@@ -420,6 +422,7 @@ impl WebMemState {
             mcp_runtime: McpRuntime::default(),
             mcp_configs,
             mcp_reports: BTreeMap::new(),
+            model_endpoints,
             role_library,
             layout,
         })
@@ -449,6 +452,96 @@ impl WebMemState {
                 .to_string(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ModelEndpointConfig {
+    id: String,
+    name: String,
+    model: String,
+    api_protocol: String,
+    response_protocol: String,
+    base_url: String,
+    api_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ModelEndpointReport {
+    id: String,
+    name: String,
+    model: String,
+    api_protocol: String,
+    response_protocol: String,
+    base_url: String,
+    api_key_configured: bool,
+}
+
+impl From<&ModelEndpointConfig> for ModelEndpointReport {
+    fn from(endpoint: &ModelEndpointConfig) -> Self {
+        Self {
+            id: endpoint.id.clone(),
+            name: endpoint.name.clone(),
+            model: endpoint.model.clone(),
+            api_protocol: endpoint.api_protocol.clone(),
+            response_protocol: endpoint.response_protocol.clone(),
+            base_url: endpoint.base_url.clone(),
+            api_key_configured: !endpoint.api_key.is_empty(),
+        }
+    }
+}
+
+fn model_endpoints_path(memory_dir: &Path) -> PathBuf {
+    memory_dir.join("model_endpoints.json")
+}
+
+fn load_model_endpoints_resilient(memory_dir: &Path) -> Result<Vec<ModelEndpointConfig>, String> {
+    let path = model_endpoints_path(memory_dir);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|error| format!("model_endpoint_store_read_failed:{error}"))?;
+    match serde_json::from_str(&raw) {
+        Ok(endpoints) => Ok(endpoints),
+        Err(error) => {
+            let backup =
+                backup_and_replace_corrupt_state(&path, b"[]\n", "model-endpoints-corrupt-backup")?;
+            eprintln!(
+                "[timem_web_warning] model_endpoint_corruption_quarantined error={error} backup={}",
+                backup.display()
+            );
+            Ok(Vec::new())
+        }
+    }
+}
+
+fn save_model_endpoints(
+    memory_dir: &Path,
+    endpoints: &[ModelEndpointConfig],
+) -> Result<(), String> {
+    let path = model_endpoints_path(memory_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("model_endpoint_store_dir_failed:{error}"))?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    let raw = serde_json::to_vec_pretty(endpoints)
+        .map_err(|error| format!("model_endpoint_store_serialize_failed:{error}"))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("model_endpoint_store_open_failed:{error}"))?;
+    file.write_all(&raw)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("model_endpoint_store_write_failed:{error}"))?;
+    std::fs::rename(&temporary, &path)
+        .map_err(|error| format!("model_endpoint_store_replace_failed:{error}"))
 }
 
 fn load_mcp_configs_resilient(mcp_store: &McpStore) -> Result<Vec<McpServerConfig>, String> {
@@ -821,6 +914,13 @@ enum WireEvent {
         server_id: String,
         values: BTreeMap<String, String>,
     },
+    ModelEndpointsUpdated {
+        endpoints: Vec<ModelEndpointReport>,
+    },
+    ModelEndpointSecretRevealed {
+        endpoint_id: String,
+        api_key: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -850,6 +950,7 @@ struct ServerInfo {
     session_env_defaults: BTreeMap<String, String>,
     workspace_dirs: Vec<String>,
     mcp_servers: Vec<McpServerReport>,
+    model_endpoints: Vec<ModelEndpointReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -924,6 +1025,19 @@ impl Drop for AcceptedCommandLane {
             lanes.remove(&self.key);
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelEndpointInput {
+    #[serde(default)]
+    id: Option<String>,
+    name: String,
+    model: String,
+    api_protocol: String,
+    response_protocol: String,
+    base_url: String,
+    #[serde(default)]
+    api_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1064,6 +1178,19 @@ enum ClientCommand {
         key: String,
         value: String,
     },
+    ModelEndpointUpsert {
+        endpoint: ModelEndpointInput,
+    },
+    ModelEndpointDelete {
+        endpoint_id: String,
+    },
+    ModelEndpointApply {
+        session_id: String,
+        endpoint_id: String,
+    },
+    ModelEndpointSecretReveal {
+        endpoint_id: String,
+    },
     McpServerUpsert {
         session_id: String,
         config: McpServerConfig,
@@ -1096,10 +1223,13 @@ impl ClientCommand {
             | Self::ToolRepoSearch { .. }
             | Self::ToolRepoDetail { .. }
             | Self::SessionApiKeyReveal { .. }
-            | Self::McpServerSecretsReveal { .. } => None,
+            | Self::McpServerSecretsReveal { .. }
+            | Self::ModelEndpointSecretReveal { .. } => None,
             Self::RuntimeUpdate { .. }
             | Self::MemSwitch { .. }
             | Self::McpServerDelete { .. }
+            | Self::ModelEndpointUpsert { .. }
+            | Self::ModelEndpointDelete { .. }
             | Self::WorkerRoleCreate { .. }
             | Self::WorkerRoleUpdate { .. }
             | Self::WorkerRoleDelete { .. }
@@ -1122,6 +1252,7 @@ impl ClientCommand {
             | Self::ToolRepoOpenTerminal { session_id, .. }
             | Self::TopicReply { session_id, .. }
             | Self::SessionRuntimeUpdate { session_id, .. }
+            | Self::ModelEndpointApply { session_id, .. }
             | Self::McpSessionToggle { session_id, .. }
             | Self::McpServerReconnect { session_id, .. } => Some(format!("session:{session_id}")),
         }
@@ -1133,6 +1264,8 @@ impl ClientCommand {
             Self::RuntimeUpdate { .. }
                 | Self::MemSwitch { .. }
                 | Self::McpServerDelete { .. }
+                | Self::ModelEndpointUpsert { .. }
+                | Self::ModelEndpointDelete { .. }
                 | Self::WorkerRoleCreate { .. }
                 | Self::WorkerRoleUpdate { .. }
                 | Self::WorkerRoleDelete { .. }
@@ -3365,6 +3498,41 @@ fn handle_command_with_id(
                 },
             )?;
         }
+        ClientCommand::ModelEndpointUpsert { endpoint } => {
+            upsert_model_endpoint(state, endpoint)?;
+            let event = WireEvent::ModelEndpointsUpdated {
+                endpoints: model_endpoint_reports(state)?,
+            };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
+        }
+        ClientCommand::ModelEndpointDelete { endpoint_id } => {
+            delete_model_endpoint(state, &endpoint_id)?;
+            let event = WireEvent::ModelEndpointsUpdated {
+                endpoints: model_endpoint_reports(state)?,
+            };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
+        }
+        ClientCommand::ModelEndpointApply {
+            session_id,
+            endpoint_id,
+        } => {
+            let runtime_profile = apply_model_endpoint(state, &session_id, &endpoint_id)?;
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id,
+                    runtime_profile,
+                },
+            )?;
+        }
+        ClientCommand::ModelEndpointSecretReveal { endpoint_id } => {
+            return Ok(Some(WireEvent::ModelEndpointSecretRevealed {
+                api_key: model_endpoint_api_key(state, &endpoint_id)?,
+                endpoint_id,
+            }));
+        }
         ClientCommand::McpServerUpsert { session_id, config } => {
             let server_id = config.id.clone();
             upsert_mcp_server(state, config)?;
@@ -5484,6 +5652,177 @@ fn switch_session_bash_approval(
     persist_web_session(state, session_id)
 }
 
+fn normalize_model_endpoint_input(
+    existing: Option<&ModelEndpointConfig>,
+    input: ModelEndpointInput,
+) -> Result<ModelEndpointConfig, String> {
+    let name = nonempty_text(input.name, "model endpoint name")?;
+    let model = nonempty_text(input.model, "model endpoint model")?;
+    let api_protocol = nonempty_text(input.api_protocol, "model endpoint api protocol")?;
+    let response_protocol =
+        nonempty_text(input.response_protocol, "model endpoint response protocol")?;
+    let base_url = nonempty_text(input.base_url, "model endpoint base url")?;
+    let api_key = input.api_key.unwrap_or_else(|| {
+        existing
+            .map(|item| item.api_key.clone())
+            .unwrap_or_default()
+    });
+    if !api_key.is_empty() {
+        validate_api_key(&api_key)
+            .map_err(|error| format!("invalid_model_endpoint_api_key:{error}"))?;
+    }
+    let mut settings = testable_endpoint_validation_settings();
+    for (key, value) in [
+        ("TIMEM_MODEL", model.as_str()),
+        ("TIMEM_API_PROTOCOL", api_protocol.as_str()),
+        ("TIMEM_RESPONSE_PROTOCOL", response_protocol.as_str()),
+        ("TIMEM_BASE_URL", base_url.as_str()),
+    ] {
+        let field = runtime_config_field_from_key(key)?;
+        apply_runtime_config_value(
+            &mut settings.config,
+            &mut settings.bash_approval_mode,
+            &mut settings.work_instruction_mode,
+            field,
+            value,
+        )
+        .map_err(|error| format!("invalid_model_endpoint:{error:?}"))?;
+    }
+    Ok(ModelEndpointConfig {
+        id: existing
+            .map(|item| item.id.clone())
+            .or(input.id)
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| unique_web_id("endpoint")),
+        name,
+        model,
+        api_protocol,
+        response_protocol,
+        base_url,
+        api_key,
+    })
+}
+
+fn testable_endpoint_validation_settings() -> RuntimeSettings {
+    RuntimeSettings {
+        config: ModelServiceConfig {
+            interaction: Default::default(),
+            model: "model".to_string(),
+            base_url: "http://127.0.0.1".to_string(),
+            api_key: String::new(),
+            timeout_secs: 60,
+            max_llm_output_tokens: 4_096,
+            max_llm_input_tokens: 32_000,
+            api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
+            response_protocol: ResponseProtocolKind::Xml,
+            openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        },
+        bash_approval_mode: BashApprovalMode::Ask,
+        work_instruction_mode: WorkInstructionLoadMode::Silent,
+        max_rounds: 50,
+    }
+}
+
+fn model_endpoint_reports(state: &AppState) -> Result<Vec<ModelEndpointReport>, String> {
+    let mem = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?;
+    Ok(mem
+        .model_endpoints
+        .iter()
+        .map(ModelEndpointReport::from)
+        .collect())
+}
+
+fn upsert_model_endpoint(state: &AppState, input: ModelEndpointInput) -> Result<(), String> {
+    let mut mem = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?;
+    let existing_index = input
+        .id
+        .as_ref()
+        .and_then(|id| mem.model_endpoints.iter().position(|item| item.id == *id));
+    let endpoint = normalize_model_endpoint_input(
+        existing_index.map(|index| &mem.model_endpoints[index]),
+        input,
+    )?;
+    if mem
+        .model_endpoints
+        .iter()
+        .enumerate()
+        .any(|(index, item)| Some(index) != existing_index && item.name == endpoint.name)
+    {
+        return Err("model_endpoint_name_conflict".to_string());
+    }
+    if let Some(index) = existing_index {
+        mem.model_endpoints[index] = endpoint;
+    } else {
+        mem.model_endpoints.push(endpoint);
+    }
+    mem.model_endpoints
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints)
+}
+
+fn delete_model_endpoint(state: &AppState, endpoint_id: &str) -> Result<(), String> {
+    let mut mem = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?;
+    let before = mem.model_endpoints.len();
+    mem.model_endpoints.retain(|item| item.id != endpoint_id);
+    if mem.model_endpoints.len() == before {
+        return Err("model_endpoint_not_found".to_string());
+    }
+    save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints)
+}
+
+fn model_endpoint_api_key(state: &AppState, endpoint_id: &str) -> Result<String, String> {
+    state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?
+        .model_endpoints
+        .iter()
+        .find(|item| item.id == endpoint_id)
+        .map(|item| item.api_key.clone())
+        .ok_or_else(|| "model_endpoint_not_found".to_string())
+}
+
+fn apply_model_endpoint(
+    state: &AppState,
+    session_id: &str,
+    endpoint_id: &str,
+) -> Result<WebSessionRuntimeProfile, String> {
+    if session_has_active_turn(state, session_id)? {
+        return Err("model_endpoint_apply_while_working".to_string());
+    }
+    let endpoint = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?
+        .model_endpoints
+        .iter()
+        .find(|item| item.id == endpoint_id)
+        .cloned()
+        .ok_or_else(|| "model_endpoint_not_found".to_string())?;
+    let fields = [
+        ("TIMEM_MODEL", endpoint.model.as_str()),
+        ("TIMEM_API_PROTOCOL", endpoint.api_protocol.as_str()),
+        (
+            "TIMEM_RESPONSE_PROTOCOL",
+            endpoint.response_protocol.as_str(),
+        ),
+        ("TIMEM_BASE_URL", endpoint.base_url.as_str()),
+    ];
+    for (key, value) in fields {
+        update_session_runtime_setting(state, session_id, key, value)?;
+    }
+    update_session_api_key(state, session_id, endpoint.api_key)
+}
+
 fn update_session_api_key(
     state: &AppState,
     session_id: &str,
@@ -6132,7 +6471,11 @@ fn validate_session_model_service_config(state: &AppState, session_id: &str) -> 
     let session = sessions
         .get(session_id)
         .ok_or_else(|| "session_not_found".to_string())?;
-    validate_api_key(&session.runtime.settings.config.api_key)
+    let api_key = &session.runtime.settings.config.api_key;
+    if api_key.is_empty() {
+        return Ok(());
+    }
+    validate_api_key(api_key)
         .map_err(|error| format!("session_model_service_config_incomplete:{error}"))
 }
 
@@ -7793,6 +8136,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             mcp_servers: current_mem_state(state)
                 .map(|mem| mcp_reports(&mem))
                 .unwrap_or_default(),
+            model_endpoints: model_endpoint_reports(state).unwrap_or_default(),
         },
         sessions,
         role_library,
@@ -7896,6 +8240,7 @@ fn runtime_config_field_from_key(key: &str) -> Result<agent_core::RuntimeConfigF
     Ok(match key {
         "TIMEM_MODEL" => agent_core::RuntimeConfigField::Model,
         "TIMEM_API_PROTOCOL" => agent_core::RuntimeConfigField::ApiProtocol,
+        "TIMEM_RESPONSE_PROTOCOL" => agent_core::RuntimeConfigField::ResponseProtocol,
         "TIMEM_BASE_URL" => agent_core::RuntimeConfigField::BaseUrl,
         "TIMEM_MAX_LLM_INPUT" => agent_core::RuntimeConfigField::MaxInput,
         "TIMEM_MAX_LLM_OUTPUT" => agent_core::RuntimeConfigField::MaxOutput,

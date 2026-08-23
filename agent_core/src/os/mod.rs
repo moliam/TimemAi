@@ -116,6 +116,25 @@ pub fn process_running(pid: u32) -> bool {
     process_is_alive(u64::from(pid)).unwrap_or(false)
 }
 
+/// Returns a kernel-derived identity that changes when an operating-system PID
+/// is reused. Callers must treat `None` as "identity unavailable", not as a
+/// positive match.
+pub fn process_identity(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::process_identity(pid)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos::process_identity(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 pub fn child_process_running(pid: u32) -> bool {
     #[cfg(unix)]
     {

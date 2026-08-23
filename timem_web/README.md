@@ -48,3 +48,5 @@ cargo test -p timem_web
 
 Read [`module_boundary.md`](module_boundary.md) before changing host/core
 responsibilities.
+
+The model selector uses a memory-space-scoped endpoint library shared by all Sessions in that space. Endpoint definitions can be added, edited, deleted, and applied to any idle Session; applying one updates the Session model, API protocol, response protocol, Base URL, and API key together. Secrets remain host-local and are redacted from snapshots.

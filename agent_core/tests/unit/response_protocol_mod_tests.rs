@@ -25,6 +25,7 @@ fn actions_without_protocol_metadata(actions: &[ParsedAction]) -> Vec<ParsedActi
         .cloned()
         .map(|mut action| {
             action.name = None;
+            action.call_id.clear();
             action
         })
         .collect()
@@ -37,6 +38,7 @@ fn groups_without_protocol_metadata(groups: &[ParsedActionGroup]) -> Vec<ParsedA
         .map(|mut group| {
             for action in &mut group.actions {
                 action.name = None;
+                action.call_id.clear();
             }
             group
         })

@@ -405,6 +405,79 @@ impl TurnUi for SupplementAndExpansionUi {
 }
 
 #[test]
+fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_id() {
+    let dir = tmp_dir("still_running_model_prompt");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let mut config = test_config();
+    let mut model = ReplayModel::new([
+        Ok(llm(
+            r#"{"working_still_action":{"run_bash":{"cmd":"sleep 30","background":true}}}"#,
+            1_000,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"background task started"}"#,
+            1_000,
+            false,
+        )),
+    ]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "start background work",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "background task started");
+    assert_eq!(model.prompts.len(), 2);
+    assert!(!model.prompts[0].contains("### STILL RUNNING"));
+    let second = &model.prompts[1];
+    assert!(second.contains("still running cmds:"), "{second}");
+    assert!(second.contains("### STILL RUNNING"), "{second}");
+    assert!(
+        second.contains("| pid | created by tool_call id |"),
+        "{second}"
+    );
+    let call_id = second
+        .lines()
+        .find(|line| line.starts_with("| ") && line.contains('`'))
+        .and_then(|line| line.split('`').nth(1))
+        .expect("tool call id in still-running table");
+    assert_eq!(call_id.len(), 6, "{second}");
+    assert!(call_id.chars().all(|ch| ch.is_ascii_hexdigit()), "{second}");
+    assert!(
+        second.contains(&format!("tool_call_id: {call_id}")),
+        "{second}"
+    );
+    assert!(
+        second.contains(&format!("- {call_id}: run_bash")),
+        "{second}"
+    );
+    assert_eq!(second.matches("### STILL RUNNING").count(), 1, "{second}");
+    assert_eq!(
+        core.render_prompt().matches("### STILL RUNNING").count(),
+        0,
+        "the reminder is request-scoped and must not accumulate in prompt history"
+    );
+
+    core.shell_jobs
+        .cancel_unfinished_for_session("test_session");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn session_turn_uses_model_service_config_response_protocol_over_core_state() {
     let dir = tmp_dir("runtime_config_protocol_wins");
     let audit = dir.join("audit.json");
@@ -541,6 +614,136 @@ fn independent_schedules_due_at_one_boundary_are_each_consumed_once() {
     assert!(schedules.take_due_time(Duration::from_secs(60)).is_empty());
     assert!(schedules.take_due_rounds(1).is_empty());
     assert_eq!(schedules.rounds[1].last_emitted_period, 1);
+}
+
+#[test]
+fn progress_reminder_tracks_only_consecutive_tool_only_rounds() {
+    let mut reminder = TurnProgressReminder::default();
+
+    for _ in 0..PROGRESS_UPDATE_REMINDER_ROUNDS - 1 {
+        reminder.observe(true, false);
+        assert!(reminder.take_due().is_none());
+    }
+    reminder.observe(true, false);
+    assert_eq!(reminder.take_due(), Some(PROGRESS_UPDATE_REMINDER));
+    assert!(reminder.take_due().is_none());
+
+    for _ in 1..PROGRESS_UPDATE_REMINDER_ROUNDS {
+        reminder.observe(true, false);
+        assert!(reminder.take_due().is_none());
+    }
+    reminder.observe(true, false);
+    assert_eq!(reminder.take_due(), Some(PROGRESS_UPDATE_REMINDER));
+    reminder.observe(true, true);
+    assert!(reminder.take_due().is_none());
+    for _ in 0..PROGRESS_UPDATE_REMINDER_ROUNDS {
+        reminder.observe(true, false);
+    }
+    assert_eq!(reminder.take_due(), Some(PROGRESS_UPDATE_REMINDER));
+
+    reminder.observe(false, false);
+    assert!(reminder.take_due().is_none());
+}
+
+#[test]
+fn session_turn_injects_progress_reminder_after_six_tool_only_rounds() {
+    let dir = tmp_dir("turn_progress_reminder");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    core.set_max_rounds(PROGRESS_UPDATE_REMINDER_ROUNDS.saturating_add(4));
+    core.set_reminder_tips_config(crate::ReminderTipsConfig { schedules: vec![] });
+    let mut config = test_config();
+    let working = r#"{"working_still_action":{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":1}}}"#;
+    let mut responses = (0..PROGRESS_UPDATE_REMINDER_ROUNDS)
+        .map(|_| Ok(llm(working, 1_000, false)))
+        .collect::<Vec<_>>();
+    responses.push(Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"完成。"}"#,
+        1_100,
+        false,
+    )));
+    let mut model = ReplayModel::new(responses);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "连续调用工具",
+            session: "progress_reminder_session",
+            audit_file: &audit,
+            runtime: "test_runtime",
+            run_bash_target: "test_target",
+            additional_context: None,
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "完成。");
+    let reminder_prompt_index =
+        usize::try_from(PROGRESS_UPDATE_REMINDER_ROUNDS).expect("round threshold fits usize");
+    assert_eq!(model.prompts.len(), reminder_prompt_index + 1);
+    assert!(model.prompts[..reminder_prompt_index]
+        .iter()
+        .all(|prompt| !prompt.contains(PROGRESS_UPDATE_REMINDER)));
+    assert!(model.prompts[reminder_prompt_index].contains(PROGRESS_UPDATE_REMINDER));
+    assert_eq!(
+        model.prompts[reminder_prompt_index]
+            .matches(PROGRESS_UPDATE_REMINDER)
+            .count(),
+        1
+    );
+    assert!(model.prompts[reminder_prompt_index].contains("## RUNTIME"));
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn free_talk_resets_progress_reminder_streak() {
+    let dir = tmp_dir("turn_progress_reminder_reset");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    core.set_max_rounds(PROGRESS_UPDATE_REMINDER_ROUNDS.saturating_mul(2));
+    core.set_reminder_tips_config(crate::ReminderTipsConfig { schedules: vec![] });
+    let mut config = test_config();
+    let tool_only = r#"{"working_still_action":{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":1}}}"#;
+    let with_progress = r#"{"free_talk":"已完成一轮检查，继续核对。","working_still_action":{"memmgr":{"type":"scratch","op":"search","search_text":"","limit":1}}}"#;
+    let mut responses = (0..5)
+        .map(|_| Ok(llm(tool_only, 1_000, false)))
+        .collect::<Vec<_>>();
+    responses.push(Ok(llm(with_progress, 1_000, false)));
+    responses.extend((0..5).map(|_| Ok(llm(tool_only, 1_000, false))));
+    responses.push(Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"完成。"}"#,
+        1_100,
+        false,
+    )));
+    let mut model = ReplayModel::new(responses);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "中途汇报进度",
+            session: "progress_reminder_reset_session",
+            audit_file: &audit,
+            runtime: "test_runtime",
+            run_bash_target: "test_target",
+            additional_context: None,
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "完成。");
+    assert!(model
+        .prompts
+        .iter()
+        .all(|prompt| !prompt.contains(PROGRESS_UPDATE_REMINDER)));
+
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -872,8 +1075,13 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
             false,
         )),
         Ok(llm(
-            r#"{"status":"ALL_FINISHED","final_answer":"已根据上下文预算停止回填大输出。"}"#,
+            r#"{"context_compact":{"discard":["pd_1","pd_2","pd_3"],"summary":"保留用户要求和大输出已被预算保护的信息。"}}"#,
             2_800,
+            false,
+        )),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"已根据上下文预算停止回填大输出。"}"#,
+            1_000,
             false,
         )),
     ]);
@@ -895,8 +1103,10 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
     );
 
     assert_eq!(outcome.text, "已根据上下文预算停止回填大输出。");
-    assert_eq!(model.prompts.len(), 2);
+    assert_eq!(model.prompts.len(), 3);
     assert!(model.prompts[1].contains("Your action's output is too large:"));
+    assert!(model.prompts[1].ends_with("Context too long, please compress first:"));
+    assert!(model.prompts[2].contains("context compacted successfully."));
     assert!(model.prompts[1].contains("optimize your action or compact context"));
     assert!(!model.prompts[1].contains(&"0".repeat(1_000)));
     let _ = std::fs::remove_dir_all(dir);
@@ -1237,7 +1447,7 @@ discard-after"#,
     assert_eq!(outcome.stats.repair_calls, 0);
     assert_eq!(outcome.stats.tool_calls, 1);
     assert_eq!(model.prompts.len(), 2);
-    assert!(!model.prompts[1].contains(r#"<ASSISTANT id=""#));
+    assert!(!model.prompts[1].contains(r#"<ASSISTANT name=""#));
     assert!(model.prompts[1].contains(
         "<ASSISTANT>\n  <actions><memmgr name=\"search raw chat fixture\" type=\"raw_chat\" op=\"search\" limit=\"1\"><search_text>fixture</search_text></memmgr></actions>\n</ASSISTANT>"
     ));
@@ -2856,7 +3066,7 @@ fn session_turn_defaults_to_raw_assistant_output_replay() {
 
     let prompt = &second_model.prompts[0];
     let raw = prompt.find(&accepted_first_response).unwrap();
-    assert!(!prompt.contains(r#"<ASSISTANT id="Ai4">"#));
+    assert!(!prompt.contains(r#"<ASSISTANT name="Ai4">"#));
     assert!(!prompt.contains("&lt;ASSISTANT&gt;"));
     let user = prompt.find("second user input").unwrap();
     assert!(raw < user);
@@ -3128,7 +3338,7 @@ fn cancelled_turn_injects_one_runtime_note_before_next_user_and_runtime_context(
     assert!(note < new_user, "{prompt}");
     assert!(new_user < new_runtime, "{prompt}");
     assert_eq!(prompt.matches(note_text).count(), 1);
-    assert!(!prompt.contains("<ASSISTANT id="));
+    assert!(!prompt.contains("<ASSISTANT name="));
 
     let note_delta_start = prompt[..note].rfind("<prompt_delta ").unwrap();
     let note_delta_end = prompt[note..].find("</prompt_delta>").unwrap() + note;
@@ -4358,12 +4568,26 @@ impl ModelClient for StoryReplayModel {
                     false,
                 ))
             }
-            6 => Ok(llm(
-                r#"{"free_talk":"","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试项目代号%"],"limit":5}}]}"#,
-                2_500,
-                false,
-            )),
+            6 => {
+                assert!(prompt.contains("mode=force_shrink_required"));
+                let mut delta_ids = prompt_field_values(prompt, "delta_id");
+                delta_ids.sort();
+                delta_ids.dedup();
+                let content = format!(
+                    r#"{{"context_compact":{{"offload":{},"summary":"offload the long context and retain the memory lookup task"}}}}"#,
+                    serde_json::to_string(&delta_ids).unwrap()
+                );
+                Ok(llm(content, 7_500, false))
+            }
             7 => {
+                assert!(prompt.contains("context compacted successfully."));
+                Ok(llm(
+                    r#"{"free_talk":"","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试项目代号%"],"limit":5}}]}"#,
+                    2_500,
+                    false,
+                ))
+            }
+            8 => {
                 assert!(prompt.contains("Action result: memmgr"));
                 assert!(prompt.contains("type: durable"));
                 assert!(prompt.contains("op: sql"));
@@ -4374,28 +4598,19 @@ impl ModelClient for StoryReplayModel {
                     false,
                 ))
             }
-            8 => {
+            9 => {
                 assert!(prompt.contains("mode=force_shrink_required"));
                 let mut delta_ids = prompt_field_values(prompt, "delta_id");
                 delta_ids.sort();
                 delta_ids.dedup();
-                assert!(
-                    !delta_ids.is_empty(),
-                    "forced discard prompt should expose delta ids"
-                );
                 let content = format!(
-                    r#"{{"free_talk":"","context_compact":{{"discard":{},"offload":{},"summary":"offload important long story context, discard stale visible deltas, and keep active task state"}}}}"#,
-                    serde_json::to_string(&delta_ids).unwrap(),
+                    r#"{{"context_compact":{{"discard":{},"summary":"keep active task state after the memory lookup"}}}}"#,
                     serde_json::to_string(&delta_ids).unwrap()
                 );
                 Ok(llm(content, 7_650, false))
             }
-            9 => {
+            10 => {
                 assert!(prompt.contains("context compacted successfully."));
-                assert!(prompt.contains("CWD: "));
-                assert!(!prompt.contains("Action result: context_compact"));
-                assert!(!prompt.contains("scratch_id:"));
-                assert!(!prompt.contains("Context compact summary"));
                 assert!(!prompt.contains("mode=force_shrink_required"));
                 Ok(llm(
                     r#"{"status":"ALL_FINISHED","final_answer":"上下文已转存并压缩，可以继续。"}"#,
@@ -4457,7 +4672,7 @@ fn session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rend
     }
 
     assert_eq!(outputs, expected_outputs);
-    assert_eq!(model.calls, 9);
+    assert_eq!(model.calls, 10);
     assert!(
         model
             .prompts

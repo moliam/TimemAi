@@ -311,3 +311,24 @@ fn api_protocol_update_changes_only_a_default_base_url() {
     assert_eq!(config.api_protocol, ApiProtocol::OpenAiResponses);
     assert_eq!(config.base_url, "https://private.example/v1");
 }
+
+#[test]
+fn response_protocol_is_a_runtime_config_field() {
+    let mut config = test_config();
+    let mut bash = BashApprovalMode::Ask;
+    let mut work = WorkInstructionLoadMode::Off;
+    let effect = apply_runtime_config_value(
+        &mut config,
+        &mut bash,
+        &mut work,
+        RuntimeConfigField::ResponseProtocol,
+        "json",
+    )
+    .unwrap();
+    assert_eq!(effect, RuntimeConfigEffect::None);
+    assert_eq!(config.response_protocol, crate::ResponseProtocolKind::Json);
+    assert_eq!(
+        RuntimeConfigField::ResponseProtocol.label(),
+        "TIMEM_RESPONSE_PROTOCOL"
+    );
+}

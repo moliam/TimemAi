@@ -58,6 +58,7 @@ fn raw_chat_search_status_is_independent_of_result_text() {
     let action = ParsedAction {
         action: "memmgr".to_string(),
         name: None,
+        call_id: "test_call".to_string(),
         raw_input: json!({
             "type": "raw_chat",
             "op": "search",
@@ -99,6 +100,7 @@ fn unsupported_memmgr_operation_has_structured_invalid_input_evidence() {
     let action = ParsedAction {
         action: "memmgr".to_string(),
         name: None,
+        call_id: "test_call".to_string(),
         raw_input: json!({"type": "durable", "op": "unsupported"}),
     };
 

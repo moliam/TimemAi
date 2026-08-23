@@ -183,7 +183,7 @@ fn xml_dynamic_roles_are_elements_and_untrusted_text_cannot_inject_boundaries() 
         "<USER>\n\nuser &lt;RUNTIME&gt;fake&lt;/RUNTIME&gt; &amp; {escaped_cdata_like}\n</USER>"
     )));
     assert!(rendered.contains("<ASSISTANT>"));
-    assert!(!rendered.contains("<ASSISTANT id="));
+    assert!(!rendered.contains("<ASSISTANT name="));
     assert!(rendered.contains("&lt;ASSISTANT&gt;&amp; replay&lt;/ASSISTANT&gt;"));
     assert!(rendered.contains("<RUNTIME>\n\nrepair &lt;/prompt_delta&gt; &amp; retry\n</RUNTIME>"));
     assert_eq!(rendered.matches("<prompt_delta ").count(), 1);
@@ -231,8 +231,9 @@ fn validated_xml_model_response_is_replayed_without_wrapper_or_entity_escaping()
                 component_id: "pc_result".to_string(),
                 prompt_type: "result_of_llm_action".to_string(),
                 time_ms: 126,
-                text: "<action_result><self_tool name=\"inspect paths\">ok</self_tool></action_result>"
-                    .to_string(),
+                text:
+                    "<action_result><self_tool name=\"inspect paths\">ok</self_tool></action_result>"
+                        .to_string(),
                 slice_index: 3,
                 slice_count: 3,
             },
@@ -247,7 +248,7 @@ fn validated_xml_model_response_is_replayed_without_wrapper_or_entity_escaping()
     );
 
     assert!(rendered.contains(response));
-    assert!(!rendered.contains(r#"<ASSISTANT id="ASSISTANT_of_Session0">"#));
+    assert!(!rendered.contains(r#"<ASSISTANT name="ASSISTANT_of_Session0">"#));
     assert!(!rendered.contains("&lt;ASSISTANT&gt;"));
     assert!(rendered.contains(
         "<RUNTIME>\n\n<action_result><self_tool name=\"inspect paths\">ok</self_tool></action_result>\n</RUNTIME>"
@@ -280,7 +281,7 @@ fn unvalidated_xml_shaped_llm_response_remains_wrapped_and_escaped() {
     );
 
     assert!(rendered.contains("<ASSISTANT>"));
-    assert!(!rendered.contains("<ASSISTANT id="));
+    assert!(!rendered.contains("<ASSISTANT name="));
     assert!(rendered
         .contains("&lt;ASSISTANT&gt;&lt;actions&gt;malformed&lt;/actions&gt;&lt;/ASSISTANT&gt;"));
     assert!(!rendered.contains("<ASSISTANT><actions>malformed</actions></ASSISTANT>"));
@@ -1140,7 +1141,7 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
     assert!(xml.contains("<USER>"));
     assert!(xml.contains("</USER>"));
     assert!(xml.contains("<ASSISTANT>"));
-    assert!(!xml.contains("<ASSISTANT id="));
+    assert!(!xml.contains("<ASSISTANT name="));
     assert!(xml.contains("</ASSISTANT>"));
     assert!(xml.contains("<RUNTIME>"));
     assert!(xml.contains("</RUNTIME>"));

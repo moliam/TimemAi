@@ -8,14 +8,15 @@ import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
-import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole, WorkerRoleGroup, WorkerRoleLibrary } from "./protocol";
+import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, ModelEndpoint, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole, WorkerRoleGroup, WorkerRoleLibrary } from "./protocol";
 import { applyWorkerRoleMutation, isOptimisticWorkerRoleMutation, replayWorkerRoleMutations, WorkerRoleMutation } from "./worker_roles_ui";
 import { canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, wheelDeltaPixels } from "./scroll";
 import { activeModelRetryStatus, activityFromTopic, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, manualToolGenCommand, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
 import { safeMarkdownUrl } from "./markdown_security";
 import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
-import { commandSessionId, isModelSubmissionCommand, ModelServiceIssue, modelDisplayName, modelServiceIssue, sessionModelConfigurationIssue } from "./model_service_ui";
+import { commandSessionId, isModelSubmissionCommand, modelDisplayName, modelServiceIssue, NO_MODEL_ENDPOINTS_ISSUE, UNCONFIGURED_MODEL_LABEL } from "./model_service_ui";
+import { endpointDraftValid, endpointMatchesProfile, endpointNameForProfile, ModelEndpointDraft } from "./model_endpoints";
 import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens } from "./token_format";
 import { summarizeConsecutiveToolActivities, ToolActivitySummary } from "./activity_groups";
@@ -123,6 +124,9 @@ function TimemApp() {
   const [toolgenDialog, setToolgenDialog] = useState<{ sessionId: string; turnId: string } | null>(null);
   const [showMobileSessions, setShowMobileSessions] = useState(false);
   const [showRuntime, setShowRuntime] = useState(false);
+  const [endpointEditor, setEndpointEditor] = useState<ModelEndpoint | "new" | null>(null);
+  const [deleteEndpointCandidate, setDeleteEndpointCandidate] = useState<ModelEndpoint | null>(null);
+  const [revealedEndpointApiKeys, setRevealedEndpointApiKeys] = useState<Record<string, string>>({});
   const [showAppearance, setShowAppearance] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
   const [showNewSession, setShowNewSession] = useState(false);
@@ -160,7 +164,6 @@ function TimemApp() {
   const [pendingMemSwitch, setPendingMemSwitch] = useState(false);
   const [completedTurnsBySession, setCompletedTurnsBySession] = useState<Record<string, { key: string; successful: boolean }>>({});
   const [commandAcks, setCommandAcks] = useState<Record<string, Extract<WireEvent, { type: "command_ack" }>>>({});
-  const [modelServiceIssues, setModelServiceIssues] = useState<Record<string, ModelServiceIssue>>({});
   const consumeCommandAcks = useCallback((commandIds: ReadonlySet<string>) => {
     setCommandAcks((current) => Object.fromEntries(Object.entries(current).filter(([commandId]) => !commandIds.has(commandId))));
   }, []);
@@ -221,6 +224,7 @@ function TimemApp() {
   const closeRuntimePanel = useCallback((restoreFocus = true) => {
     setShowRuntime(false);
     setRevealedSessionApiKeys({});
+    setRevealedEndpointApiKeys({});
     if (restoreFocus) runtimeButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeAppearancePanel = useCallback((restoreFocus = true) => {
@@ -621,9 +625,6 @@ function TimemApp() {
             );
           } else if (isModelSubmissionCommand(completed?.command)) {
             const issue = modelServiceIssue(event.error || "The runtime rejected this model request.");
-            if (sessionId !== "system") {
-              setModelServiceIssues((current) => ({ ...current, [sessionId]: issue }));
-            }
             reportUiError(issue.title, issue.detail, sessionId);
           } else {
             reportUiError("Command rejected", event.error || "The runtime rejected this command.", sessionId);
@@ -654,7 +655,6 @@ function TimemApp() {
         if (!durableCommandIds.has(commandId)) pendingWorkerRoleMutationsRef.current.delete(commandId);
       }
       clearAllPendingCommands();
-      setModelServiceIssues({});
       setDecisions(decisionsFromSessions(event.snapshot.sessions));
       applySnapshot(event.snapshot);
       setSnapshotReady(true);
@@ -676,12 +676,6 @@ function TimemApp() {
     }
     if (event.type === "session_deleted") {
       removePendingKey(pendingDeleteSessionIdsRef, setPendingDeleteSessionIds, event.session_id);
-      setModelServiceIssues((current) => {
-        if (!(event.session_id in current)) return current;
-        const next = { ...current };
-        delete next[event.session_id];
-        return next;
-      });
       setDeleteSessionCandidate((current) => current?.session_id === event.session_id ? null : current);
       toolCountBySessionRef.current.delete(event.session_id);
       setExpandedSessionIds((current) => {
@@ -748,12 +742,6 @@ function TimemApp() {
     }
     if (event.type === "session_runtime_updated") {
       finishPendingSessionApiKeyCommand(event.session_id, undefined, true);
-      setModelServiceIssues((current) => {
-        if (!(event.session_id in current)) return current;
-        const next = { ...current };
-        delete next[event.session_id];
-        return next;
-      });
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? { ...session, runtime_profile: event.runtime_profile }
         : session));
@@ -761,12 +749,6 @@ function TimemApp() {
     }
     if (event.type === "session_runtime_config_updated") {
       removePendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, `${event.session_id}:${event.key}`);
-      setModelServiceIssues((current) => {
-        if (!(event.session_id in current)) return current;
-        const next = { ...current };
-        delete next[event.session_id];
-        return next;
-      });
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? { ...session, runtime_profile: event.runtime_profile, max_llm_input_tokens: event.runtime_profile.max_llm_input_tokens }
         : session));
@@ -847,6 +829,17 @@ function TimemApp() {
       setRevealedMcpSecrets((current) => ({ ...current, [event.server_id]: event.values }));
       return;
     }
+    if (event.type === "model_endpoints_updated") {
+      setServer((current) => current ? { ...current, model_endpoints: event.endpoints } : current);
+      setEndpointEditor(null);
+      setDeleteEndpointCandidate(null);
+      setRevealedEndpointApiKeys({});
+      return;
+    }
+    if (event.type === "model_endpoint_secret_revealed") {
+      setRevealedEndpointApiKeys((current) => ({ ...current, [event.endpoint_id]: event.api_key }));
+      return;
+    }
     if (event.type === "file_uploaded") {
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? { ...session, attachments: [...session.attachments, event.file] }
@@ -925,16 +918,7 @@ function TimemApp() {
         return workerState ? updateSessionWorkerState(withEvent, event.worker_id, workerState) : withEvent;
       }));
       if (kind === "model_request") {
-        setModelServiceIssues((current) => {
-          if (!(event.session_id in current)) return current;
-          const next = { ...current };
-          delete next[event.session_id];
-          return next;
-        });
         setDecisions((current) => clearDecisionsForWorker(current, event.session_id, event.worker_id));
-      } else if (kind === "model_error") {
-        const issue = modelServiceIssue(event.event.error);
-        setModelServiceIssues((current) => ({ ...current, [event.session_id]: issue }));
       }
       return;
     }
@@ -1093,6 +1077,14 @@ function TimemApp() {
 
   const sendTextForSession = useCallback((sessionId: string, text: string, commandId?: string, attachmentIds?: readonly string[], forceSupplement = false, roleIds: readonly string[] = [], forceNewTurn = false): boolean => {
     const targetSession = sessionsRef.current.find((session) => session.session_id === sessionId);
+    if (server && server.model_endpoints.length === 0) {
+      setShowAppearance(false);
+      setShowMcp(false);
+      setShowToolRepo(false);
+      setShowRuntime(false);
+      pushActivity({ id: clientId(), sessionId, tone: "notice", ...NO_MODEL_ENDPOINTS_ISSUE, createdAt: Date.now() });
+      return false;
+    }
     const decision = composerSendDecision(
       targetSession,
       text,
@@ -1116,7 +1108,7 @@ function TimemApp() {
       return false;
     }
     return decision.clearDraftOnSuccess;
-  }, [pendingMemSwitch, pushActivity, sendCommand]);
+  }, [pendingMemSwitch, pushActivity, sendCommand, server]);
   const sendText = useCallback((text: string, commandId?: string) => activeSession
     ? sendTextForSession(activeSession.session_id, text, commandId)
     : false, [activeSession, sendTextForSession]);
@@ -1228,13 +1220,23 @@ function TimemApp() {
   const connectionLabel = runtimeConnectionLabel(connected, snapshotReady, runtimeEverConnected, reconnectAttempt);
   const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem directory";
   const newSessionLabel = runtimeLocked ? "Session controls are temporarily locked" : "New session";
-  const headerModelLabel = modelDisplayName(activeSession);
-  const activeModelServiceIssue = activeSession
-    ? modelServiceIssues[activeSession.session_id] ?? sessionModelConfigurationIssue(activeSession)
-    : null;
+  const modelEndpointsUnavailable = !!server && server.model_endpoints.length === 0;
+  const headerModelLabel = endpointNameForProfile(server?.model_endpoints ?? [], activeSession?.runtime_profile) ?? UNCONFIGURED_MODEL_LABEL;
+  const openEndpointCreator = () => {
+    setShowAppearance(false);
+    setShowMcp(false);
+    setShowToolRepo(false);
+    setShowRuntime(true);
+    setEndpointEditor("new");
+  };
   const appearanceLabel = showAppearance ? "Close appearance settings" : "Open appearance settings";
   const runtimeLabel = showRuntime ? "Close runtime information" : "Open runtime information";
   const activeToolCount = activeSession?.tools.length ?? 0;
+  const activeMcpServerIds = new Set(activeSession?.mcp_server_ids ?? []);
+  const activeMcpServers = (server?.mcp_servers ?? []).filter((item) => activeMcpServerIds.has(item.config.id));
+  const connectedMcpCount = activeMcpServers.filter((item) => item.state === "connected").length;
+  const failedMcpCount = activeMcpServers.filter((item) => item.state !== "connected" && (item.state === "error" || !!item.error)).length;
+  const mcpLabel = `Manage MCP servers · ${connectedMcpCount} connected${failedMcpCount ? ` · ${failedMcpCount} failed` : ""}`;
   const selectedRoleIdsForSession = activeSession ? selectedRoleIds[activeSession.session_id] ?? [] : [];
   const toolRepoLabel = showToolRepo ? "Close ToolRepo" : `Open ToolRepo · ${activeToolCount} reusable tools`;
   const mobileSessionsLabel = showMobileSessions ? "Close session navigation" : "Open session navigation";
@@ -1248,6 +1250,7 @@ function TimemApp() {
           {sessions.map((session) => {
             const renamingSession = pendingRenameSessionIds.has(session.session_id);
             const deletingSession = pendingDeleteSessionIds.has(session.session_id);
+            const sessionEndpointName = endpointNameForProfile(server?.model_endpoints ?? [], session.runtime_profile) ?? UNCONFIGURED_MODEL_LABEL;
             return <div key={session.session_id} className="session-group"><div className={`session-row ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""} ${renamingSession ? "renaming-session" : ""}`} aria-busy={renamingSession || deletingSession || undefined}>
             <button type="button" className={`session-expand ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}` : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={expandedSessionIds.has(session.session_id)} disabled={runtimeLocked} onClick={() => setExpandedSessionIds((current) => {
               const next = new Set(current);
@@ -1267,7 +1270,7 @@ function TimemApp() {
                 if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); }
               }}
             />: <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.current_dir} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
-              {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span><span className="session-sub"><span className="session-detail session-cwd" title={session.current_dir}><FolderOpen size={11} aria-hidden="true"/><span className="path-tail">{workspacePathLabel(session.current_dir)}</span></span>{renamingSession ? <span className="session-detail session-pending">Saving name...</span> : <span className="session-detail session-profile" title={modelDisplayName(session)}><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{modelDisplayName(session)}</span></span>}</span></span><span className="sr-only">Session state: {session.state}</span>
+              {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span><span className="session-sub"><span className="session-detail session-cwd" title={session.current_dir}><FolderOpen size={11} aria-hidden="true"/><span className="path-tail">{workspacePathLabel(session.current_dir)}</span></span>{renamingSession ? <span className="session-detail session-pending">Saving name...</span> : <span className="session-detail session-profile" title={sessionEndpointName}><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{sessionEndpointName}</span></span>}</span></span><span className="sr-only">Session state: {session.state}</span>
             </button>}
             <button type="button" className={`session-delete ${deletingSession ? "deleting" : ""}`} title={`Delete ${session.display_name}`} aria-label={`Delete ${session.display_name}`} disabled={runtimeLocked || deletingSession} onClick={() => { setDeleteSessionCandidate(session); closeMobileSidebar(false); }}>{deletingSession ? <LoaderCircle size={14}/> : <Trash2 size={14}/>}</button>
           </div>{expandedSessionIds.has(session.session_id) && <div className="worker-list" aria-label={`Workers for ${session.display_name}: ${session.workers.length} worker${session.workers.length === 1 ? "" : "s"}`}>{[...session.workers].sort((left, right) => left.ordinal - right.ordinal).map((worker) => <div className="worker-row" key={worker.worker_id} title={`${worker.worker_id} · ${worker.context_id}`}><span className={`worker-state-dot ${worker.state}`} aria-hidden="true"/><span className="worker-name">{worker.display_name || `ID${worker.ordinal}`}</span><span className="worker-state">{worker.state}</span></div>)}</div>}</div>;
@@ -1280,12 +1283,11 @@ function TimemApp() {
       </aside>
       <main className="chat-shell">
         <header className="chat-header">
-          <div className="header-identity"><button type="button" ref={runtimeButtonRef} className={`header-model ${showRuntime ? "selected" : ""}`} title={runtimeLabel} aria-label={`${runtimeLabel}: ${headerModelLabel}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowMcp(false); setShowToolRepo(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true); }}><span title={headerModelLabel}>{headerModelLabel}</span><ChevronDown size={12} aria-hidden="true"/></button><HeaderContextUsage session={activeSession}/></div>
+          <div className="header-identity"><div className="header-model-guide-anchor"><button type="button" ref={runtimeButtonRef} className={`header-model ${showRuntime ? "selected" : ""}`} title={runtimeLabel} aria-label={`${runtimeLabel}: ${headerModelLabel}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowMcp(false); setShowToolRepo(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true); }}><span title={headerModelLabel}>{headerModelLabel}</span><ChevronDown size={12} aria-hidden="true"/></button>{modelEndpointsUnavailable && !showRuntime && <div className="endpoint-guide-bubble" role="status"><strong>没有接入点可用</strong><span>先在这里新增并配置模型接入点。</span><button type="button" onClick={openEndpointCreator}><Plus size={13}/> 新增接入点</button></div>}</div><HeaderContextUsage session={activeSession}/><button type="button" ref={mcpButtonRef} title={mcpLabel} aria-label={mcpLabel} className={`icon-button mcp-button ${connectedMcpCount > 0 ? "enabled" : ""} ${failedMcpCount > 0 ? "has-failures" : ""} ${showMcp ? "selected" : ""}`} aria-expanded={showMcp} aria-controls="mcp-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowToolRepo(false); if (showMcp) closeMcpPanel(); else setShowMcp(true); }}><Plug size={16}/>{connectedMcpCount > 0 && <span className="mcp-count mcp-count-connected" aria-hidden="true">{connectedMcpCount}</span>}{failedMcpCount > 0 && <span className="mcp-count mcp-count-failed" aria-hidden="true">{failedMcpCount}</span>}</button></div>
           <div className="header-actions">
             <button type="button" ref={mobileSessionButtonRef} title={mobileSessionsLabel} aria-label={mobileSessionsLabel} className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
             <button type="button" title="Open worker roles" aria-label="Open worker roles" className="icon-button mobile-role-button" aria-expanded={showRoles} aria-controls="worker-role-panel" onClick={() => setShowRoles(true)}><BriefcaseBusiness size={17}/></button>
             <button type="button" ref={appearanceButtonRef} title={appearanceLabel} aria-label={appearanceLabel} className={`icon-button ${showAppearance ? "selected" : ""}`} aria-expanded={showAppearance} aria-controls="appearance-panel" onClick={() => { setShowRuntime(false); setShowMcp(false); setShowToolRepo(false); if (showAppearance) closeAppearancePanel(); else setShowAppearance(true); }}><Palette size={17}/></button>
-            <button type="button" ref={mcpButtonRef} title="Manage MCP servers" aria-label="Manage MCP servers" className={`icon-button mcp-button ${showMcp ? "selected" : ""}`} aria-expanded={showMcp} aria-controls="mcp-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowToolRepo(false); if (showMcp) closeMcpPanel(); else setShowMcp(true); }}><Plug size={17}/>{(activeSession?.mcp_server_ids.length ?? 0) > 0 && <span className="mcp-enabled-dot" aria-hidden="true"/>}</button>
             <button type="button" ref={toolRepoButtonRef} title={toolRepoLabel} aria-label={toolRepoLabel} className={`icon-button toolrepo-header-button ${showToolRepo ? "selected" : ""} ${toolCountPulseSessionId === activeSession?.session_id ? "count-pulse" : ""}`} aria-expanded={showToolRepo} aria-controls="toolrepo-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowMcp(false); if (showToolRepo) closeToolRepoPanel(); else setShowToolRepo(true); }}><Wrench size={17}/><span className="toolrepo-header-count" aria-hidden="true">{activeToolCount}</span></button>
           </div>
         </header>
@@ -1313,56 +1315,21 @@ function TimemApp() {
           <strong>{runtimeDisconnectedTitle}</strong>
           <span>{runtimeDisconnectedDetail}</span>
         </div>}
-        {activeModelServiceIssue && <div className="model-config-banner" role="alert">
-          <KeyRound size={15} aria-hidden="true"/>
-          <span><strong>{activeModelServiceIssue.title}.</strong> {activeModelServiceIssue.detail}</span>
-          <button type="button" onClick={() => { setShowAppearance(false); setShowMcp(false); setShowToolRepo(false); setShowRuntime(true); }}>Open Runtime settings</button>
-        </div>}
-                {showRuntime && <RuntimePanel panelRef={runtimePanelRef} server={server} session={activeSession} pendingKeys={new Set(activeSession ? Array.from(pendingRuntimeKeys).filter((key) => key.startsWith(`${activeSession.session_id}:`)).map((key) => key.slice(activeSession.session_id.length + 1)) : [])} credentialPending={!!activeSession && (pendingSessionCredentialIds.has(activeSession.session_id) || pendingSessionCredentialIds.has(`reveal:${activeSession.session_id}`))} onApiKeyUpdate={(apiKey) => {
-          if (!activeSession) return;
-          if (!connected || !snapshotReady) {
-            reportUiError(
-              "API key update unavailable",
-              "Wait for Timem Web to reconnect before saving this Session credential.",
-              activeSession.session_id,
-            );
-            return;
-          }
-          if (!addPendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, activeSession.session_id)) return;
-          const sessionId = activeSession.session_id;
-          const commandId = clientId("credential");
-          pendingSessionApiKeyValuesRef.current.set(sessionId, apiKey);
-          const timeoutId = window.setTimeout(() => {
-            if (!finishPendingSessionApiKeyCommand(sessionId, commandId)) return;
-            reportUiError(
-              "API key update timed out",
-              "The runtime did not confirm the credential update. Your input was kept; check the connection and try again.",
-              sessionId,
-            );
-          }, SESSION_API_KEY_SAVE_TIMEOUT_MS);
-          pendingSessionApiKeyCommandsRef.current.set(commandId, { sessionId, timeoutId });
-          pendingSessionApiKeyCommandIdsRef.current.set(sessionId, commandId);
-          if (!sendCommand({ type: "session_api_key_update", session_id: sessionId, api_key: apiKey }, commandId)) {
-            finishPendingSessionApiKeyCommand(sessionId, commandId);
-            reportUiError("API key update failed", "Reconnect to Timem Web before saving this Session credential.", sessionId);
-          }
-        }} revealedApiKey={activeSession ? revealedSessionApiKeys[activeSession.session_id] : undefined} onApiKeyReveal={() => {
-          if (!activeSession) return;
-          const key = `reveal:${activeSession.session_id}`;
-          if (!connected || !addPendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, key)) return;
-          if (!sendCommand({ type: "session_api_key_reveal", session_id: activeSession.session_id })) {
-            removePendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, key);
-            reportUiError("API key reveal failed", "Reconnect to Timem Web before revealing this Session credential.", activeSession.session_id);
-          }
-        }} onUpdate={(key, value) => {
-          if (!activeSession) return;
-          const pendingKey = `${activeSession.session_id}:${key}`;
-          if (!addPendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, pendingKey)) return;
-          if (!sendCommand({ type: "session_runtime_update", session_id: activeSession.session_id, key, value })) {
-            removePendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, pendingKey);
-            reportUiError("Runtime update failed", "Reconnect to Timem Web before applying this Session configuration.", activeSession.session_id);
-          }
-        }}/>}
+        {showRuntime && <ModelEndpointPanel
+          panelRef={runtimePanelRef}
+          server={server}
+          session={activeSession}
+          endpointEditor={endpointEditor}
+          revealedEndpointApiKeys={revealedEndpointApiKeys}
+          onEdit={setEndpointEditor}
+          onDelete={setDeleteEndpointCandidate}
+          onApply={(endpointId) => {
+            if (!activeSession || activeSession.state === "working") return;
+            sendCommand({ type: "model_endpoint_apply", session_id: activeSession.session_id, endpoint_id: endpointId });
+          }}
+          onReveal={(endpointId) => sendCommand({ type: "model_endpoint_secret_reveal", endpoint_id: endpointId })}
+          onSave={(endpoint) => sendCommand({ type: "model_endpoint_upsert", endpoint })}
+        />}
         <TimemThread
           activeSession={activeSession}
           sessions={sessions}
@@ -1525,6 +1492,7 @@ function TimemApp() {
           reportUiError("Create session failed", "Reconnect to Timem Web before creating a new session.", "system");
         }
       }} />}
+      {deleteEndpointCandidate && <ModelEndpointDeleteDialog endpoint={deleteEndpointCandidate} onClose={() => setDeleteEndpointCandidate(null)} onConfirm={() => sendCommand({ type: "model_endpoint_delete", endpoint_id: deleteEndpointCandidate.id })}/>}
       {deleteSessionCandidate && <SessionDeleteDialog session={deleteSessionCandidate} pending={pendingDeleteSessionIds.has(deleteSessionCandidate.session_id)} onClose={() => {
         if (!pendingDeleteSessionIdsRef.current.has(deleteSessionCandidate.session_id)) setDeleteSessionCandidate(null);
       }} onConfirm={() => {
@@ -3190,10 +3158,11 @@ function McpPanel({ panelRef, servers, session, pendingKeys, revealedSecrets, on
         const active = enabled.has(server.config.id);
         const pending = Array.from(pendingKeys).some((key) => key.endsWith(`:${server.config.id}`));
         const connectionState = !active ? "disabled" : server.state === "connected" ? "connected" : server.state === "error" || !!server.error ? "failed" : "connecting";
-        const connectionLabel = connectionState === "connected" ? "Connected" : connectionState === "failed" ? "Enabled, connection failed" : connectionState === "connecting" ? "Enabled, connecting" : "Disabled";
+        const connectionLabel = connectionState === "connected" ? `${server.tools.length} tools` : connectionState === "failed" ? "⚠️无法连接" : connectionState === "connecting" ? "连接中…" : "";
+        const connectionTitle = connectionState === "failed" && server.error ? `${connectionLabel}：${server.error}` : connectionLabel || "未启用";
         return <article className={`mcp-server ${connectionState}`} key={server.config.id}>
-          <div className="mcp-server-main"><div><strong>{server.config.name}</strong><small>{mcpEndpoint(server.config)}</small></div><button type="button" role="switch" aria-checked={active} aria-label={`${active ? "Disable" : "Enable"} ${server.config.name} for this session`} className={`mcp-session-toggle ${connectionState}`} title={`${connectionLabel} · click to ${active ? "disable" : "enable"}`} disabled={!session || pending} onClick={() => session && onCommand(`toggle:${server.config.id}`, { type: "mcp_session_toggle", session_id: session.session_id, server_id: server.config.id, enabled: !active })}><span className="mcp-port-glyph" aria-hidden="true"><span className="mcp-port-node left"/><span className="mcp-port-link"/><span className="mcp-port-node right"/>{connectionState === "failed" && <X className="mcp-port-failure" size={10}/>}</span></button></div>
-          <div className="mcp-server-meta"><span>{mcpTransportLabel(server.config.transport)}</span><span>{connectionLabel}</span><span>{server.tools.length} tool{server.tools.length === 1 ? "" : "s"}</span>{server.error && <span className="mcp-error" title={server.error}>{server.error}</span>}</div>
+          <div className="mcp-server-main"><strong>{server.config.name}</strong><button type="button" role="switch" aria-checked={active} aria-label={`${active ? "Disable" : "Enable"} ${server.config.name} for this session`} className={`mcp-session-toggle ${connectionState}`} title={`${connectionTitle} · click to ${active ? "disable" : "enable"}`} disabled={!session || pending} onClick={() => session && onCommand(`toggle:${server.config.id}`, { type: "mcp_session_toggle", session_id: session.session_id, server_id: server.config.id, enabled: !active })}><span className="mcp-session-toggle-thumb" aria-hidden="true"/></button></div>
+          {active && <div className={`mcp-server-meta ${connectionState}`} title={connectionState === "failed" ? server.error ?? undefined : undefined}><span>{connectionLabel}</span></div>}
           <div className="mcp-server-actions"><button type="button" title="Reconnect and refresh tools" aria-label={`Reconnect ${server.config.name}`} disabled={!session || pending} onClick={() => session && onCommand(`reconnect:${server.config.id}`, { type: "mcp_server_reconnect", session_id: session.session_id, server_id: server.config.id })}><RefreshCw size={13}/></button><button type="button" title="Edit server" aria-label={`Edit ${server.config.name}`} disabled={pending} onClick={() => setEditing(server.config)}><Pencil size={13}/></button><button type="button" className="danger" title="Delete server" aria-label={`Delete ${server.config.name}`} disabled={pending} onClick={() => window.confirm(`Delete MCP server “${server.config.name}”? This removes it from every session in the current mem.`) && onCommand(`delete:${server.config.id}`, { type: "mcp_server_delete", server_id: server.config.id })}><Trash2 size={13}/></button></div>
         </article>;
       })}</div>
@@ -3246,7 +3215,6 @@ function McpEditor({ config, pending, revealPending, revealedSecrets, onReveal, 
 }
 
 function nonemptyLines(value: string) { return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean); }
-function mcpEndpoint(config: McpServerConfig) { return config.transport.type === "stdio" ? config.transport.command : config.transport.url; }
 function parseMapLines(value: string) { return Object.fromEntries(value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => { const index = line.indexOf("="); return index < 0 ? [line, ""] : [line.slice(0, index).trim(), line.slice(index + 1)]; }).filter(([key]) => key)); }
 function mapLines(value: Record<string, string>) { return Object.entries(value).map(([key, item]) => `${key}=${item}`).join("\n"); }
 
@@ -3335,7 +3303,43 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function RuntimePanel({ panelRef, server, session, pendingKeys, credentialPending, revealedApiKey, onUpdate, onApiKeyUpdate, onApiKeyReveal }: {
+function ModelEndpointPanel({ panelRef, server, session, endpointEditor, revealedEndpointApiKeys, onEdit, onDelete, onApply, onReveal, onSave }: {
+  panelRef: MutableRefObject<HTMLElement | null>;
+  server: Snapshot["server"] | null;
+  session?: Session;
+  endpointEditor: ModelEndpoint | "new" | null;
+  revealedEndpointApiKeys: Record<string, string>;
+  onEdit: (endpoint: ModelEndpoint | "new" | null) => void;
+  onDelete: (endpoint: ModelEndpoint) => void;
+  onApply: (endpointId: string) => void;
+  onReveal: (endpointId: string) => void;
+  onSave: (endpoint: ModelEndpointDraft) => void;
+}) {
+  const endpoints = server?.model_endpoints ?? [];
+  const selected = endpoints.find((endpoint) => endpointMatchesProfile(endpoint, session?.runtime_profile));
+  return <section id="runtime-panel" ref={panelRef} className="runtime-card endpoint-menu" tabIndex={-1}>
+    <div className="endpoint-menu-heading"><div><span className="eyebrow">MODEL ENDPOINTS</span><strong>{session ? `用于 ${session.display_name}` : "选择 Session 后应用"}</strong></div><button type="button" className="secondary compact" onClick={() => onEdit("new")}><Plus size={14}/> 新增接入点</button></div>
+    <div className="endpoint-list">{endpoints.length === 0 ? <div className="endpoint-empty">还没有可用接入点。新增后，它会在所有 Session 中共用。</div> : endpoints.map((endpoint) => {
+      const active = selected?.id === endpoint.id;
+      return <div className={`endpoint-row ${active ? "active" : ""}`} key={endpoint.id}>
+        <button type="button" className="endpoint-select" disabled={!session || session.state === "working"} onClick={() => onApply(endpoint.id)}><span><strong>{endpoint.name}</strong>{active && <Check size={13}/>}</span><small>{endpoint.model} · {endpoint.api_protocol}</small><small title={endpoint.base_url}>{endpoint.base_url}</small></button>
+        <div className="endpoint-actions"><button type="button" title={`Edit ${endpoint.name}`} aria-label={`Edit ${endpoint.name}`} onClick={() => { onEdit(endpoint); if (endpoint.api_key_configured && revealedEndpointApiKeys[endpoint.id] === undefined) onReveal(endpoint.id); }}><Pencil size={14}/></button><button type="button" title={`Delete ${endpoint.name}`} aria-label={`Delete ${endpoint.name}`} onClick={() => onDelete(endpoint)}><Trash2 size={14}/></button></div>
+      </div>;
+    })}</div>
+    {session?.state === "working" && <p className="endpoint-note">当前 Session 工作中，结束或停止任务后才能切换接入点。</p>}
+    {endpointEditor && <ModelEndpointEditor endpoint={endpointEditor === "new" ? undefined : endpointEditor} revealedApiKey={endpointEditor === "new" ? "" : revealedEndpointApiKeys[endpointEditor.id]} onClose={() => onEdit(null)} onSave={onSave}/>}
+  </section>;
+}
+
+function ModelEndpointEditor({ endpoint, revealedApiKey, onClose, onSave }: { endpoint?: ModelEndpoint; revealedApiKey?: string; onClose: () => void; onSave: (endpoint: ModelEndpointDraft) => void }) {
+  const [draft, setDraft] = useState<ModelEndpointDraft>(() => ({ id: endpoint?.id, name: endpoint?.name ?? "", model: endpoint?.model ?? "", api_protocol: endpoint?.api_protocol ?? "openai-compatible", response_protocol: endpoint?.response_protocol ?? "xml", base_url: endpoint?.base_url ?? "", api_key: revealedApiKey }));
+  useEffect(() => { if (revealedApiKey !== undefined) setDraft((current) => ({ ...current, api_key: revealedApiKey })); }, [revealedApiKey]);
+  const save = () => { if (endpointDraftValid(draft)) onSave(draft); };
+  return <div className="endpoint-editor"><div className="endpoint-editor-heading"><strong>{endpoint ? "编辑接入点" : "新增接入点"}</strong><button type="button" aria-label="Close endpoint editor" onClick={onClose}><X size={14}/></button></div><div className="endpoint-editor-grid"><label>名称<input autoFocus value={draft.name} placeholder="例如：生产环境 GPT" onChange={(event) => setDraft({ ...draft, name: event.target.value })}/></label><label>模型<input value={draft.model} placeholder="gpt-4.1" onChange={(event) => setDraft({ ...draft, model: event.target.value })}/></label><label>API 协议<select value={draft.api_protocol} onChange={(event) => setDraft({ ...draft, api_protocol: event.target.value })}><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select></label><label>响应协议<select value={draft.response_protocol} onChange={(event) => setDraft({ ...draft, response_protocol: event.target.value })}><option value="xml">xml</option><option value="json">json</option></select></label><label className="wide">Base URL<input value={draft.base_url} placeholder="https://api.example.com/v1" onChange={(event) => setDraft({ ...draft, base_url: event.target.value })}/></label><label className="wide">API Key<input type="password" autoComplete="new-password" value={draft.api_key ?? ""} placeholder={endpoint?.api_key_configured && revealedApiKey === undefined ? "正在读取…" : "可留空"} onChange={(event) => setDraft({ ...draft, api_key: event.target.value })}/></label></div><div className="endpoint-editor-buttons"><button type="button" className="secondary compact" onClick={onClose}>取消</button><button type="button" className="primary compact" disabled={!endpointDraftValid(draft)} onClick={save}>保存接入点</button></div></div>;
+}
+
+
+function RuntimeSettingsPanel({ panelRef, server, session, pendingKeys, credentialPending, revealedApiKey, onUpdate, onApiKeyUpdate, onApiKeyReveal }: {
   panelRef: MutableRefObject<HTMLElement | null>;
   server: Snapshot["server"] | null;
   session?: Session;
@@ -3461,6 +3465,10 @@ function NewSessionDialog({ workspaces, runtimeDefaults, creating, memSwitching,
   const statusId = "new-session-dialog-status";
   const describedBy = creating ? `${descriptionId} ${statusId}` : descriptionId;
   return <div className="modal-backdrop" role="presentation" aria-label="Dismiss create session" onClick={closeIfIdle}><section className="decision-modal session-modal" role="dialog" aria-modal="true" aria-label="Create session" aria-describedby={describedBy} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">NEW SESSION</span><h2>Start a session</h2></div><button type="button" className="icon-button" title="Close create session" aria-label="Close create session" disabled={creating} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>Choose a workspace and optional runtime overrides for this session.</p>{creating && <p id={statusId} className="mem-validation" role="status" aria-live="polite">Creating session…</p>}<div className="session-modal-scroll"><label>Display name<input autoFocus value={displayName} placeholder="Optional name" disabled={creating} onChange={(event) => setDisplayName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); } }}/></label><label>Workspace<select value={workspaceDir} disabled={creating || workspaces.length === 0} onChange={(event) => setWorkspaceDir(event.target.value)}>{workspaces.length === 0 ? <option value="">No workspace available</option> : workspaces.map((workspace) => <option value={workspace} key={workspace} title={workspace}>{tailPath(workspace, 64)}</option>)}</select></label>{workspaces.length === 0 && <p className="mem-hint">No workspace is available from the runtime snapshot. Reconnect Timem Web or check the host workspace configuration.</p>}<details className="session-runtime-overrides"><summary>Runtime environment</summary><div className="session-runtime-grid">{SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => <label key={key}><span>{label}<small>{key}</small></span><div className="session-runtime-control">{kind === "api_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "default"}</option><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select> : kind === "response_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "xml"}</option><option value="xml">xml</option><option value="json">json</option></select> : kind === "bash_approval" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "ask"}</option><option value="ask">ask</option><option value="approve">approve</option></select> : kind === "work_instructions" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "silent"}</option><option value="silent">silent</option><option value="ask">ask</option><option value="off">off</option></select> : kind === "boolean" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "false"}</option><option value="true">true</option><option value="false">false</option></select> : <input type={kind} value={env[key] ?? ""} min={kind === "number" ? 1 : undefined} disabled={creating} autoComplete={kind === "password" ? "new-password" : undefined} placeholder={kind === "password" ? "Optional session-only key" : `Inherit · ${runtimeDefaults[key] ?? "default"}`} onChange={(event) => updateEnv(key, event.target.value)}/>} {env[key] !== undefined && <button type="button" className="session-runtime-reset" title={`Reset ${label} to inherited value`} aria-label={`Reset ${label} to inherited value`} disabled={creating} onClick={() => resetEnv(key)}>Reset</button>}</div></label>)}</div></details></div><div className="decision-actions"><button type="button" className="secondary" disabled={creating} onClick={closeIfIdle}>Cancel</button><button type="button" className={`primary ${creating ? "sending" : ""}`} disabled={!canCreateSession} onClick={submit}>{creating ? <LoaderCircle size={16}/> : <Plus size={16}/>} {creating ? "Creating…" : "Create session"}</button></div></section></div>;
+}
+
+function ModelEndpointDeleteDialog({ endpoint, onClose, onConfirm }: { endpoint: ModelEndpoint; onClose: () => void; onConfirm: () => void }) {
+  return <div className="modal-backdrop" role="presentation" onClick={onClose}><section className="decision-modal session-delete-dialog" role="dialog" aria-modal="true" aria-label={`Delete ${endpoint.name}`} onClick={(event) => event.stopPropagation()}><div className="modal-titlebar"><div><span className="eyebrow">DELETE ENDPOINT</span><h2>Delete “{endpoint.name}”?</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={16}/></button></div><p>This removes the shared endpoint from every Session dropdown. Existing Session settings are not changed.</p><div className="decision-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="button" className="danger" onClick={onConfirm}><Trash2 size={15}/> Delete endpoint</button></div></section></div>;
 }
 
 function SessionDeleteDialog({ session, pending, onClose, onConfirm }: {

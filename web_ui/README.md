@@ -47,3 +47,7 @@ windows, rendering contracts, and long-history behavior.
 
 Read [`module_boundary.md`](module_boundary.md) before changing Web/core
 responsibilities.
+
+## Shared model endpoints
+
+The model label in the chat header opens a mem-scoped endpoint list shared by all Sessions. Users can add, edit, delete, and select endpoints. Selecting one applies its model, API/response protocols, Base URL, and API key to the current idle Session. Endpoint API keys are stored in the host memory directory with private file permissions and are redacted from snapshots and browser-persistent command queues.

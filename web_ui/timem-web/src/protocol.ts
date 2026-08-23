@@ -191,6 +191,16 @@ export type Decision = {
   detail: string;
 };
 
+export type ModelEndpoint = {
+  id: string;
+  name: string;
+  model: string;
+  api_protocol: string;
+  response_protocol: string;
+  base_url: string;
+  api_key_configured: boolean;
+};
+
 export type Snapshot = {
   server: {
     version: string;
@@ -208,6 +218,7 @@ export type Snapshot = {
     session_env_defaults: Record<string, string>;
     workspace_dirs: string[];
     mcp_servers: McpServerReport[];
+    model_endpoints: ModelEndpoint[];
   };
   sessions: Session[];
   role_library: WorkerRoleLibrary;
@@ -241,7 +252,9 @@ export type WireEvent =
   | { type: "tool_repo_search_result"; session_id: string; query: string; tools: ToolSummary[] }
   | { type: "tool_repo_detail"; session_id: string; detail: ToolDetail }
   | { type: "mcp_updated"; session_id?: string | null; servers: McpServerReport[]; enabled_server_ids: string[] }
-  | { type: "mcp_server_secrets_revealed"; server_id: string; values: Record<string, string> };
+  | { type: "mcp_server_secrets_revealed"; server_id: string; values: Record<string, string> }
+  | { type: "model_endpoints_updated"; endpoints: ModelEndpoint[] }
+  | { type: "model_endpoint_secret_revealed"; endpoint_id: string; api_key: string };
 
 export type ClientCommand =
   | { type: "session_create"; display_name?: string; workspace_dir?: string; env?: Record<string, string> }
@@ -269,6 +282,10 @@ export type ClientCommand =
   | { type: "tool_repo_open_terminal"; session_id: string; tool_id: string }
   | { type: "runtime_update"; key: string; value: string }
   | { type: "session_runtime_update"; session_id: string; key: string; value: string }
+  | { type: "model_endpoint_upsert"; endpoint: { id?: string; name: string; model: string; api_protocol: string; response_protocol: string; base_url: string; api_key?: string } }
+  | { type: "model_endpoint_delete"; endpoint_id: string }
+  | { type: "model_endpoint_apply"; session_id: string; endpoint_id: string }
+  | { type: "model_endpoint_secret_reveal"; endpoint_id: string }
   | { type: "mcp_server_upsert"; session_id: string; config: McpServerConfig }
   | { type: "mcp_server_delete"; server_id: string }
   | { type: "mcp_session_toggle"; session_id: string; server_id: string; enabled: boolean }
