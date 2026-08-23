@@ -1091,6 +1091,10 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain("const scrollItems = useMemo(() => visibleItems.filter");
     expect(source).toContain('className="turn-persistent-toolgen" aria-label="ToolGen result"');
     expect(source).toContain("scrollItems.map((item, index)");
+    expect(source).toContain("const visibleItems = timelineItems;");
+    expect(source).not.toContain("MAX_RENDERED_TURN_EVENTS");
+    expect(source).not.toContain("earlier work updates are retained by the host but not rendered");
+    expect(styles).not.toContain(".turn-events-omitted");
     expect(styles).toContain(".turn-persistent-toolgen");
     expect(source).toContain('title="Scroll to latest work update"');
     expect(source).toContain('aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`}');

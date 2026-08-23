@@ -196,6 +196,34 @@ struct ImmediateFinalPromptCaptureModel {
     prompts: Arc<Mutex<Vec<String>>>,
 }
 
+struct BackgroundThenFinalModel {
+    calls: u32,
+}
+
+impl ModelClient for BackgroundThenFinalModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &std::path::Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls += 1;
+        let content = if self.calls == 1 {
+            r#"{"status":"working","working_still_action":[{"run_bash":{"cmd":"sleep 0.35; printf idle_done","background":true}}]}"#
+        } else {
+            r#"{"status":"ALL_FINISHED","final_answer":"BACKGROUND_STARTED"}"#
+        };
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: content.to_string(),
+            model_name: "test-model".to_string(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        })
+    }
+}
+
 impl ModelClient for ImmediateFinalPromptCaptureModel {
     fn call_model(
         &mut self,
@@ -262,6 +290,65 @@ impl ModelClient for SupplementReplayModel {
             truncated: false,
         })
     }
+}
+
+#[test]
+fn idle_worker_emits_terminal_topic_when_background_bash_exits_after_turn_finish() {
+    let dir = tmp_dir("idle_background_exit_topic");
+    let mut core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.set_bash_approval_mode(crate::BashApprovalMode::Approve);
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "idle_background_exit_topic", 1),
+        BackgroundThenFinalModel { calls: 0 },
+    );
+    let handle = worker.handle();
+    let _lifecycle = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("worker lifecycle");
+    handle
+        .run_turn("start background work", None)
+        .expect("turn should enqueue");
+
+    let mut action_id = None;
+    let mut turn_finished = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match worker.events().recv_timeout(Duration::from_millis(500)) {
+            Ok(CoreSessionWorkerEvent::Topics(events)) => {
+                for event in events {
+                    if event.payload["status"] == "background_running" {
+                        action_id = event.payload["action_id"].as_str().map(str::to_string);
+                    }
+                    if turn_finished
+                        && event.payload["status"] == "completed"
+                        && event.payload["action_id"].as_str() == action_id.as_deref()
+                    {
+                        assert_eq!(event.payload["exit_status"], "0");
+                        assert_eq!(event.payload["action"], "run_bash");
+                        let _ = std::fs::remove_dir_all(dir);
+                        return;
+                    }
+                }
+            }
+            Ok(CoreSessionWorkerEvent::TurnFinished { outcome }) => {
+                assert!(!outcome.running_jobs.is_empty());
+                turn_finished = true;
+            }
+            Ok(_) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    panic!("idle worker did not publish the background process terminal topic");
 }
 
 #[test]

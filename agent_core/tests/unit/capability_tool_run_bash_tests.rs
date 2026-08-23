@@ -1281,6 +1281,114 @@ fn bash_validation_rejects_empty_and_allows_long_commands() {
 }
 
 #[test]
+fn shell_lifecycle_validation_rejects_unmanaged_background_without_wait() {
+    for command in [
+        "sleep 30 &",
+        "nohup sleep 30 >/tmp/timem-nohup.log 2>&1 &",
+        "sleep 30 & echo started",
+    ] {
+        assert_eq!(
+            validate_bash_lifecycle(command, false),
+            Err("unmanaged_background_process".to_string()),
+            "{command}"
+        );
+        assert!(validate_bash_lifecycle(command, true).is_ok(), "{command}");
+    }
+    assert!(
+        validate_bash_lifecycle(r#"tail -f /dev/null & child=$!; wait "$child""#, false).is_ok()
+    );
+}
+
+#[test]
+fn shell_lifecycle_validation_rejects_explicit_detach() {
+    for command in [
+        "setsid sleep 30",
+        "command setsid sleep 30",
+        "nohup setsid sleep 30",
+        "env FOO=bar setsid sleep 30",
+        "sudo -n -- setsid sleep 30",
+        "disown",
+        "daemon server",
+    ] {
+        assert_eq!(
+            validate_bash_lifecycle(command, true),
+            Err("explicit_process_detach".to_string()),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn shell_lifecycle_validation_allows_managed_background_and_ampersand_syntax() {
+    for command in [
+        "sleep 30 &",
+        "nohup sleep 30 >/tmp/timem-nohup.log 2>&1 &",
+        "printf 'literal & text'",
+        "printf ok && printf done",
+        "printf err >&2",
+        "printf both &>/tmp/timem-output",
+        "printf ok |& cat",
+        r#"tail -f /dev/null & child=$!; printf '%s' "$child"; wait "$child""#,
+    ] {
+        assert!(validate_bash_lifecycle(command, true).is_ok(), "{command}");
+    }
+    for command in [
+        "printf 'literal & text'",
+        "printf ok && printf done",
+        "printf err >&2",
+        "printf both &>/tmp/timem-output",
+        "printf ok |& cat",
+    ] {
+        assert!(validate_bash_lifecycle(command, false).is_ok(), "{command}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn watcher_waits_for_managed_process_group_after_launcher_exits() {
+    let dir = tmp_memory_dir("managed_process_group_lifecycle");
+    let store = FileShellJobStore::new(&dir);
+    let started = store.spawn_background_outcome(
+        "sleep 0.8 &",
+        &dir,
+        "group-session",
+        "group-turn",
+        "group-call",
+        false,
+    );
+    let pid = started
+        .bash_result
+        .and_then(|evidence| evidence.pid)
+        .expect("managed launcher pid");
+
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        crate::os::process_identity(pid).is_none(),
+        "launcher should exit before its background child"
+    );
+    assert!(crate::os::process_group_running(pid));
+    let (running, updates) = store.refresh_for_session("group-session");
+    assert_eq!(running.len(), 1, "the process group must remain tracked");
+    assert!(updates.is_empty());
+
+    let group_deadline = Instant::now() + Duration::from_secs(3);
+    let update = loop {
+        let (_, updates) = store.refresh_for_session("group-session");
+        if let Some(update) = updates.into_iter().next() {
+            break update;
+        }
+        assert!(
+            Instant::now() < group_deadline,
+            "managed process group did not finish"
+        );
+        thread::sleep(Duration::from_millis(30));
+    };
+    assert_eq!(update.status, "0");
+    assert!(!crate::os::process_group_running(pid));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn bash_validation_blocks_recursive_force_root_delete_variants() {
     for command in [
         "rm -rf /",

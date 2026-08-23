@@ -8273,9 +8273,61 @@ fn stale_work_instruction_reply_during_new_active_turn_is_ignored() {
 }
 
 #[test]
+fn background_exit_event_is_appended_to_its_original_turn() {
+    let state = routing_test_state();
+    let first = start_web_turn(&state, "session_a", "start background work").unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.active_turn_id = None;
+        session.turns.push(WebTurn {
+            turn_id: "turn_newer".to_string(),
+            state: "working".to_string(),
+            created_at_ms: now_ms(),
+            user_entries: Vec::new(),
+            events: Vec::new(),
+            final_answer: None,
+            completion: None,
+        });
+        session.active_turn_id = Some("turn_newer".to_string());
+    }
+
+    let reference = append_turn_event(
+        &state,
+        "session_a",
+        Some(&first.turn_id),
+        "core_topic",
+        json!({"payload": {"action_id": "call_bg", "status": "completed"}}),
+    )
+    .expect("original turn event");
+    assert_eq!(reference.turn_id, first.turn_id);
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions["session_a"];
+    assert_eq!(session.active_turn_id.as_deref(), Some("turn_newer"));
+    assert_eq!(
+        session
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == first.turn_id)
+            .unwrap()
+            .events
+            .len(),
+        1
+    );
+    assert!(session
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == "turn_newer")
+        .unwrap()
+        .events
+        .is_empty());
+}
+
+#[test]
 fn active_turn_event_windows_are_bounded_and_session_isolated() {
     const SESSION_COUNT: usize = 5;
-    const EVENTS_PER_SESSION: usize = MAX_TURN_EVENTS + 75;
+    const EVENTS_PER_SESSION: usize = 575;
     let state = routing_test_state();
     {
         let mut sessions = state.sessions.lock().unwrap();
@@ -8316,10 +8368,11 @@ fn active_turn_event_windows_are_bounded_and_session_isolated() {
     for ordinal in 0..SESSION_COUNT {
         let session_id = format!("bounded_{ordinal}");
         let turn = sessions[&session_id].turns.last().unwrap();
-        assert_eq!(turn.events.len(), MAX_TURN_EVENTS);
+        assert_eq!(turn.events.len(), EVENTS_PER_SESSION);
+        assert_eq!(turn.events.first().unwrap().payload["sequence"], 0);
         assert_eq!(
-            turn.events.first().unwrap().payload["sequence"],
-            EVENTS_PER_SESSION - MAX_TURN_EVENTS
+            turn.events.last().unwrap().payload["sequence"],
+            EVENTS_PER_SESSION - 1
         );
         assert!(turn
             .events

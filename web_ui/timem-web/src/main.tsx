@@ -1866,7 +1866,6 @@ function ToolRepoPanel({ panelRef, onClose, session, searchQuery, searchPending,
   </aside>;
 }
 
-const MAX_RENDERED_TURN_EVENTS = 200;
 const EMPTY_DECISIONS: Decision[] = [];
 
 const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, restartMarkers, decisionsByTurn, sessionInteractionLocked, pendingDecisionKeys, pendingToolGenTurnIds, toolGenSessionBusy, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
@@ -2752,7 +2751,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
  })), [sessionId, turn.turn_id, turn.user_entries]);
  const timelineItems = useMemo(() => [...lifecycleItems, ...supplementItems]
  .sort((left, right) => left.createdAt - right.createdAt), [lifecycleItems, supplementItems]);
- const visibleItems = useMemo(() => timelineItems.slice(-MAX_RENDERED_TURN_EVENTS), [timelineItems]);
+ const visibleItems = timelineItems;
  const processActivities = useMemo(() => timelineItems
  .map(({ activity }) => activity)
  .filter((activity): activity is Activity => activity !== null), [timelineItems]);
@@ -2776,7 +2775,6 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
  () => new Map(toolActivityRuns.map((run) => [run.startIndex, run.summary])),
  [toolActivityRuns],
  );
- const omitted = timelineItems.length - visibleItems.length;
  const hasVisibleProcess = processActivities.length > 0 || supplementItems.length > 0 || decisions.length > 0 || turn.state === "working";
   const interruptedByUser = turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
   const [showWorkStream, setShowWorkStream] = useState(() => turn.state === "working");
@@ -2863,7 +2861,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
           followLatest.current = isNearScrollBottom({ scrollTop: event.currentTarget.scrollTop, scrollHeight: event.currentTarget.scrollHeight, clientHeight: event.currentTarget.clientHeight }, 36);
           if (followLatest.current) setPendingUpdates(0);
         }}>
-          <div className="turn-work-content" ref={workContentRef}> {omitted > 0 && <div className="turn-events-omitted">{omitted} earlier work updates are retained by the host but not rendered.</div>} {scrollItems.map((item, index) => { const { activity } = item; if (activity?.tone === "action") { const summary = toolActivityRunByStartIndex.get(index); return summary ? <ToolActivityGroup key={`tool-activity-group-${item.key}`} summary={summary}/> : null; } return activity ? <ActivityView key={item.key} activity={activity}/> : null; })} {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
+          <div className="turn-work-content" ref={workContentRef}> {scrollItems.map((item, index) => { const { activity } = item; if (activity?.tone === "action") { const summary = toolActivityRunByStartIndex.get(index); return summary ? <ToolActivityGroup key={`tool-activity-group-${item.key}`} summary={summary}/> : null; } return activity ? <ActivityView key={item.key} activity={activity}/> : null; })} {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
           {turn.state === "working" && <LiveTurnUsage turn={turn}/>}
           {visibleItems.length === 0 && decisions.length === 0 && turn.state === "working" && <div className={`working-indicator${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite"><span className="pulse"/>{isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"}</div>} </div>
         </div>

@@ -1570,13 +1570,42 @@ impl AgentCore {
         &mut self,
         session_id: &str,
     ) -> Vec<RunningShellJob> {
+        self.refresh_running_shell_jobs_for_session_with_runtime(session_id, None)
+    }
+
+    fn refresh_running_shell_jobs_for_session_with_runtime(
+        &mut self,
+        session_id: &str,
+        runtime: Option<&mut dyn ActionRuntime>,
+    ) -> Vec<RunningShellJob> {
         let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
-        self.submit_running_job_updates(updates);
+        self.submit_running_job_updates_with_runtime(updates, runtime);
         running
     }
 
-    fn submit_running_job_updates_for_session(&mut self, session_id: &str) {
+    fn submit_running_job_updates_for_session(
+        &mut self,
+        session_id: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) {
         let (_, updates) = self.shell_jobs.refresh_for_session(session_id);
+        self.submit_running_job_updates_with_runtime(updates, Some(runtime));
+    }
+
+    fn submit_running_job_updates_with_runtime(
+        &mut self,
+        updates: Vec<ShellJobExitUpdate>,
+        runtime: Option<&mut dyn ActionRuntime>,
+    ) {
+        if let Some(runtime) = runtime {
+            let events = updates
+                .iter()
+                .map(host::running_shell_job_exit_topic_event)
+                .collect::<Vec<_>>();
+            if !events.is_empty() {
+                runtime.on_core_topic_events(&events);
+            }
+        }
         self.submit_running_job_updates(updates);
     }
 
@@ -1607,9 +1636,7 @@ impl AgentCore {
         );
     }
 
-    fn still_running_cmds_context(&mut self, session_id: &str) -> Option<String> {
-        let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
-        self.submit_running_job_updates(updates);
+    fn still_running_cmds_context_from(&self, running: Vec<RunningShellJob>) -> Option<String> {
         if running.is_empty() {
             return None;
         }
@@ -1636,8 +1663,26 @@ impl AgentCore {
     }
 
     pub fn build_model_request_prompt(&mut self, current_prompt: &str) -> String {
+        self.build_model_request_prompt_inner(current_prompt, None)
+    }
+
+    pub(crate) fn build_model_request_prompt_with_runtime(
+        &mut self,
+        current_prompt: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) -> String {
+        self.build_model_request_prompt_inner(current_prompt, Some(runtime))
+    }
+
+    fn build_model_request_prompt_inner(
+        &mut self,
+        current_prompt: &str,
+        runtime: Option<&mut dyn ActionRuntime>,
+    ) -> String {
         let session_id = self.current_session_id();
-        let still_running = self.still_running_cmds_context(&session_id);
+        let (running, updates) = self.shell_jobs.refresh_for_session(&session_id);
+        self.submit_running_job_updates_with_runtime(updates, runtime);
+        let still_running = self.still_running_cmds_context_from(running);
         if still_running.is_none() && !self.context_compact_required {
             return current_prompt.to_string();
         }
@@ -2848,7 +2893,7 @@ impl AgentCore {
                     calls: native_calls,
                 });
             }
-            self.submit_running_job_updates_for_session(&self.current_session_id());
+            self.submit_running_job_updates_for_session(&self.current_session_id(), runtime);
             self.append_delta_with_action_output_budget(slices);
             self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {
@@ -2889,7 +2934,7 @@ impl AgentCore {
                 });
                 slices.clear();
             }
-            self.submit_running_job_updates_for_session(&self.current_session_id());
+            self.submit_running_job_updates_for_session(&self.current_session_id(), runtime);
             self.append_delta_with_action_output_budget(slices);
             self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {

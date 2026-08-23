@@ -5,8 +5,6 @@ export const MAX_RENDERED_MESSAGES = 1000;
 // the browser so scrolling upward actually reveals the page just requested,
 // while the thread component still renders only its visible window.
 export const MAX_CLIENT_TURNS = 1200;
-export const MAX_CLIENT_TURN_EVENTS = 500;
-export const MAX_RESTORED_TURN_EVENTS = 80;
 
 const USAGE_FIELDS = ["llm_calls", "repair_calls", "tool_calls", "mem_reads", "mem_writes", "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "cache_created_tokens", "shrunk_tokens"] as const;
 
@@ -27,14 +25,6 @@ export function applySessionRuntimeProfile(
     runtime_profile: runtimeProfile,
     max_llm_input_tokens: runtimeProfile.max_llm_input_tokens,
   };
-}
-
-export function trimTurnEvents<T>(events: T[]) {
-  return events.length > MAX_CLIENT_TURN_EVENTS ? events.slice(-MAX_CLIENT_TURN_EVENTS) : events;
-}
-
-function trimRestoredTurnEvents<T>(events: T[]) {
-  return events.length > MAX_RESTORED_TURN_EVENTS ? events.slice(-MAX_RESTORED_TURN_EVENTS) : events;
 }
 
 export function trimTurns<T>(turns: T[]) {
@@ -421,11 +411,13 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
     }
     if (lifecycle === "finish") {
       const indexes = pendingStarts.get(key);
-      const index = indexes?.shift();
+      const index = indexes?.[0];
       if (index !== undefined) {
         const started = visible[index];
         const elapsedMs = event.created_at_ms - started.created_at_ms;
         visible[index] = elapsedMs >= 0 ? withActionElapsed(event, elapsedMs) : event;
+        const status = typeof topicEvent.payload.status === "string" ? topicEvent.payload.status : "";
+        if (status !== "background_running") indexes?.shift();
       }
       else visible.push(event);
       if (indexes?.length === 0) pendingStarts.delete(key);
@@ -456,7 +448,7 @@ export function boundSessionHistory(session: Session): Session {
     messages: trimMessages(session.messages),
     turns: trimTurns(session.turns).map((turn) => ({
       ...turn,
-      events: turn.state === "restored" ? trimRestoredTurnEvents(turn.events) : trimTurnEvents(turn.events),
+      events: turn.events,
     })),
   };
 }
@@ -476,7 +468,7 @@ export function removePendingAttachment(session: Session, attachmentId: string):
 }
 
 export function upsertTurn(session: Session, incoming: WebTurn): Session {
-  const boundedIncoming = { ...incoming, events: trimTurnEvents(incoming.events) };
+  const boundedIncoming = incoming;
   const turns = trimTurns(session.turns.some((turn) => turn.turn_id === incoming.turn_id)
     ? session.turns.map((turn) => turn.turn_id === incoming.turn_id ? boundedIncoming : turn)
     : [...session.turns, boundedIncoming]);
@@ -532,7 +524,7 @@ export function applyChatMessageDeleted(
 export function prependHistoryRecords(session: Session, records: ChatHistoryRecord[]): Session {
   const historicalTurns = turnsFromHistoryRecords(records).map((turn) => ({
     ...turn,
-    events: trimRestoredTurnEvents(turn.events),
+    events: turn.events,
   }));
   const existingTurnIds = new Set(session.turns.map((turn) => turn.turn_id));
   const earlier = historicalTurns.filter((turn) => !existingTurnIds.has(turn.turn_id));
@@ -638,7 +630,7 @@ export function appendTurnEvent(session: Session, turnId: string | null | undefi
   turns[turnIndex] = {
     ...target,
     final_answer: finalAnswerFromTurnEvent(session, event) ?? target.final_answer,
-    events: trimTurnEvents([...target.events, event]),
+    events: [...target.events, event],
   };
   return {
     ...session,

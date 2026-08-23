@@ -5834,6 +5834,34 @@ fn run_bash_rejects_old_timeout_sec_field() {
 }
 
 #[test]
+fn run_bash_unmanaged_background_is_rejected_and_reported_to_the_model() {
+    let dir = tmp_dir("bash_unmanaged_background");
+    let marker = dir.join("must_not_exist");
+    let mut core = test_core("STATIC", profile("qwen-plus"), dir.clone());
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("start background work safely", None);
+    let command = format!("sleep 1 & printf escaped > {}", marker.display());
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(format!(
+            r#"{{"working_still_action":[{{"run_bash":{{"cmd":{},"timeout_ms":5000}}}}]}}"#,
+            serde_json::to_string(&command).unwrap()
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("检测到命令可能创建脱离 Runtime 管理的后台进程"));
+    assert!(prompt.contains("run_bash(background=true)"));
+    assert!(!marker.exists());
+    assert!(core.running_shell_jobs_for_session("default").is_empty());
+}
+
+#[test]
 fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("bash_background"));
     core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -6238,7 +6266,7 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(format!(
-            r#"{{"working_still_action":[{{"run_bash":{{"cmd":"kill {}","timeout_ms":1000}}}}]}}"#,
+            r#"{{"working_still_action":[{{"run_bash":{{"cmd":"kill -- -{}","timeout_ms":1000}}}}]}}"#,
             pid
         )),
         model_name: "qwen-plus".to_string(),

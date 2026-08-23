@@ -55,6 +55,7 @@ pub enum CoreNotification {
     },
     Action {
         action: String,
+        action_id: String,
         input: Value,
         kind: CoreActionKind,
         active: bool,
@@ -103,6 +104,7 @@ pub fn notifications_from_envelope(envelope: &ParsedEnvelope) -> Vec<CoreNotific
 pub fn notification_from_action(action: &ParsedAction) -> CoreNotification {
     CoreNotification::Action {
         action: action.action.clone(),
+        action_id: action.call_id.clone(),
         input: action.raw_input.clone(),
         kind: action_kind(action),
         active: action_active(action),

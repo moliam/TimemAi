@@ -1981,7 +1981,7 @@ fn session_turn_run_bash_poll_mode_waits_until_check_succeeds() {
     let mut model = ReplayModel::new([
         Ok(llm(
             format!(
-                r#"{{"status":"working","free_talk":"等待 CI 完成。","working_still_action":[{{"run_bash":{{"cmd":{},"timeout_ms":1000}}}},{{"run_bash":{{"loop_cmd":{},"interval_ms":100,"loop_timeout_ms":3000,"once_timeout_ms":1000}}}}]}}"#,
+                r#"{{"status":"working","free_talk":"等待 CI 完成。","working_still_action":[{{"run_bash":{{"cmd":{},"background":true}}}},{{"run_bash":{{"loop_cmd":{},"interval_ms":100,"loop_timeout_ms":3000,"once_timeout_ms":1000}}}}]}}"#,
                 serde_json::to_string(&bootstrap_command).unwrap(),
                 serde_json::to_string(&check_command).unwrap()
             ),

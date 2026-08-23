@@ -1517,7 +1517,17 @@ discard/offload/compact references prompt deltas whose RUNTIME section recorded
 a still-running job pid, runtime refreshes those jobs at prompt-build time and
 adds a `RUNNING JOB LIST` snapshot only for pids that are still running. The
 model inspects or stops those jobs through ordinary `run_bash` commands such as
-`ps -p <pid>` or `kill <pid>`.
+`ps -p <pid>` or, for a managed process group, `kill -- -<pid>`.
+
+Normal and polling commands reject unquoted shell background operators such as
+`cmd &` and direct the model to use `background=true`. All modes reject explicit
+process-group escape commands such as `setsid`, `disown`, and daemon launchers.
+This validation runs before approval and again after approval. Managed Bash jobs
+are completed only after both the launcher has exited and its Runtime-created
+process group is empty, so an in-group child cannot be mistaken for a completed
+task merely because the outer Bash process exited. This is a cooperative local
+process boundary, not arbitrary daemon discovery: indirect daemonization inside
+an opaque program and remote jobs still require a structured task handle.
 
 Waiting on external state is a structured `run_bash` mode, not a separate tool.
 The model uses `loop_cmd` with `interval_ms`; core repeatedly runs that check

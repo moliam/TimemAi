@@ -134,6 +134,7 @@ struct ShellJobWatcherState {
 struct WatchedShellChild {
     child: Child,
     status_file: PathBuf,
+    launcher_status: Option<String>,
 }
 
 impl ShellJobWatcher {
@@ -150,7 +151,14 @@ impl ShellJobWatcher {
     fn register(&self, pid: u32, child: Child, status_file: PathBuf) {
         self.ensure_started();
         if let Ok(mut jobs) = self.state.jobs.lock() {
-            jobs.insert(pid, WatchedShellChild { child, status_file });
+            jobs.insert(
+                pid,
+                WatchedShellChild {
+                    child,
+                    status_file,
+                    launcher_status: None,
+                },
+            );
             self.state.changed.notify_one();
         }
     }
@@ -171,14 +179,13 @@ impl ShellJobWatcher {
         let Some(watched) = jobs.get_mut(&pid) else {
             return;
         };
-        let status = match watched.child.try_wait() {
-            Ok(Some(status)) => Some(exit_status_text(&status)),
-            Ok(None) => None,
-            Err(_) => Some("unknown".to_string()),
-        };
-        if let Some(status) = status {
+        refresh_watched_shell_child(pid, watched);
+        if watched_shell_child_finished(pid, watched) {
             if let Some(watched) = jobs.remove(&pid) {
-                write_status_if_empty(&watched.status_file, &status);
+                write_status_if_empty(
+                    &watched.status_file,
+                    watched.launcher_status.as_deref().unwrap_or("unknown"),
+                );
             }
         }
     }
@@ -197,6 +204,30 @@ impl ShellJobWatcher {
     }
 }
 
+fn watched_shell_child_finished(pid: u32, watched: &WatchedShellChild) -> bool {
+    watched
+        .launcher_status
+        .as_deref()
+        .is_some_and(|status| status.starts_with("signal:"))
+        || (watched.launcher_status.is_some() && !crate::os::process_group_running(pid))
+}
+
+fn refresh_watched_shell_child(pid: u32, watched: &mut WatchedShellChild) {
+    if watched.launcher_status.is_some() {
+        return;
+    }
+    watched.launcher_status = match watched.child.try_wait() {
+        Ok(Some(status)) => {
+            if exit_signal(&status).is_some() {
+                crate::os::kill_process_group(pid);
+            }
+            Some(exit_status_text(&status))
+        }
+        Ok(None) => None,
+        Err(_) => Some("unknown".to_string()),
+    };
+}
+
 fn shell_job_watcher_loop(state: Arc<ShellJobWatcherState>) {
     let mut jobs = match state.jobs.lock() {
         Ok(jobs) => jobs,
@@ -212,15 +243,17 @@ fn shell_job_watcher_loop(state: Arc<ShellJobWatcherState>) {
 
         let mut finished = Vec::new();
         for (pid, watched) in jobs.iter_mut() {
-            match watched.child.try_wait() {
-                Ok(Some(status)) => finished.push((*pid, exit_status_text(&status))),
-                Ok(None) => {}
-                Err(_) => finished.push((*pid, "unknown".to_string())),
+            refresh_watched_shell_child(*pid, watched);
+            if watched_shell_child_finished(*pid, watched) {
+                finished.push(*pid);
             }
         }
-        for (pid, status) in finished {
+        for pid in finished {
             if let Some(watched) = jobs.remove(&pid) {
-                write_status_if_empty(&watched.status_file, &status);
+                write_status_if_empty(
+                    &watched.status_file,
+                    watched.launcher_status.as_deref().unwrap_or("unknown"),
+                );
             }
         }
 
@@ -823,6 +856,166 @@ fn validate_bash_safety(command: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_bash_lifecycle(command: &str, background: bool) -> Result<(), String> {
+    if !background && contains_unmanaged_shell_background(command) && !contains_shell_wait(command)
+    {
+        return Err("unmanaged_background_process".to_string());
+    }
+    if contains_explicit_process_detach(command) {
+        return Err("explicit_process_detach".to_string());
+    }
+    Ok(())
+}
+
+fn contains_unmanaged_shell_background(command: &str) -> bool {
+    let chars = command.chars().collect::<Vec<_>>();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !in_single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            index += 1;
+            continue;
+        }
+        if ch != '&' || in_single || in_double {
+            index += 1;
+            continue;
+        }
+        let previous = index.checked_sub(1).and_then(|i| chars.get(i)).copied();
+        let next = chars.get(index + 1).copied();
+        if previous == Some('&')
+            || next == Some('&')
+            || previous == Some('>')
+            || previous == Some('<')
+            || previous == Some('|')
+            || next == Some('>')
+        {
+            index += 1;
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn contains_shell_wait(command: &str) -> bool {
+    let words = shell_words_for_safety_scan(command);
+    let mut index = 0;
+    while index < words.len() {
+        if !is_command_separator(&words[index]) {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        if shell_executable_index(&words, index)
+            .is_some_and(|executable| words[executable] == "wait")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn contains_explicit_process_detach(command: &str) -> bool {
+    let words = shell_words_for_safety_scan(command);
+    let mut index = 0;
+    while index < words.len() {
+        if !is_command_separator(&words[index]) {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let Some(executable) = shell_executable_index(&words, index) else {
+            continue;
+        };
+        if matches!(
+            words[executable].as_str(),
+            "setsid" | "disown" | "daemon" | "daemonize" | "start-stop-daemon"
+        ) {
+            return true;
+        }
+        index = executable + 1;
+    }
+    false
+}
+
+fn shell_executable_index(words: &[String], mut index: usize) -> Option<usize> {
+    while index < words.len() && !is_command_separator(&words[index]) {
+        if is_assignment_word(&words[index])
+            || matches!(
+                words[index].as_str(),
+                "command" | "builtin" | "exec" | "nohup"
+            )
+        {
+            index += 1;
+            continue;
+        }
+        if words[index] == "env" {
+            index += 1;
+            while index < words.len() && !is_command_separator(&words[index]) {
+                let word = words[index].as_str();
+                if is_assignment_word(word) {
+                    index += 1;
+                    continue;
+                }
+                if word == "--" {
+                    index += 1;
+                    break;
+                }
+                if !word.starts_with('-') || word == "-" {
+                    break;
+                }
+                index += 1;
+                if matches!(
+                    word,
+                    "-u" | "--unset" | "-C" | "--chdir" | "-S" | "--split-string"
+                ) {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if words[index] == "sudo" {
+            index += 1;
+            while index < words.len() && !is_command_separator(&words[index]) {
+                let word = words[index].as_str();
+                if word == "--" {
+                    index += 1;
+                    break;
+                }
+                if !word.starts_with('-') || word == "-" {
+                    break;
+                }
+                index += 1;
+                if matches!(word, "-u" | "-g" | "-h" | "-p" | "-C" | "-T") {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        return Some(index);
+    }
+    None
+}
+
 fn shell_words_for_safety_scan(command: &str) -> Vec<String> {
     let mut words = vec![";".to_string()];
     let mut current = String::new();
@@ -1155,6 +1348,14 @@ pub(crate) fn execute_run_bash_with_tail(
             message,
         ));
     }
+    if let Err(reason) = validate_bash_lifecycle(command_to_run, background) {
+        let message = bash_validation_message(&reason);
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), message),
+            "InvalidInput",
+            message,
+        ));
+    }
     if !background && is_regular_command && timeout_ms <= 0 {
         let reason =
             "timeout_ms must be a positive integer. Choose a wait budget that matches the command.";
@@ -1317,6 +1518,19 @@ pub(crate) fn execute_approved_bash_with_tail(
 ) -> ActionOutcome {
     let clean = command.trim();
     if let Err(reason) = validate_bash_request(clean) {
+        let message = bash_validation_message(&reason);
+        let mut outcome = bash_finished_error_outcome(
+            bash_action_not_executed(Some(clean), message),
+            "InvalidInput",
+            message,
+        );
+        outcome.text.push_str(&format!(
+            "\napproval_id: {}\napproval_status: approved_by_user",
+            request.approval_id
+        ));
+        return outcome;
+    }
+    if let Err(reason) = validate_bash_lifecycle(clean, background) {
         let message = bash_validation_message(&reason);
         let mut outcome = bash_finished_error_outcome(
             bash_action_not_executed(Some(clean), message),
@@ -1937,6 +2151,12 @@ fn bash_validation_message(reason: &str) -> &'static str {
         "command_required" => "No shell command was provided.",
         "dangerous_recursive_root_delete" => {
             "The shell command was blocked by Timem safety policy because it may recursively delete the filesystem root."
+        }
+        "unmanaged_background_process" => {
+            "检测到命令可能创建脱离 Runtime 管理的后台进程。请改用 run_bash(background=true)。"
+        }
+        "explicit_process_detach" => {
+            "检测到命令可能创建脱离 Runtime 管理的后台进程。请改用 run_bash(background=true)，并移除 setsid、disown 或 daemon 等主动脱离方式。"
         }
         _ => "The shell command request did not pass runtime validation.",
     }

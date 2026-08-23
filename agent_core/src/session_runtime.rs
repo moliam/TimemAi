@@ -360,7 +360,9 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     }
                 }
                 rounds += 1;
-                let prompt = core.build_model_request_prompt(prompt);
+                let mut action_runtime = TurnActionRuntime::new(ui);
+                let prompt =
+                    core.build_model_request_prompt_with_runtime(prompt, &mut action_runtime);
                 let interaction_request = core.model_interaction_request(prompt);
                 ui.on_model_interaction_request(rounds, &interaction_request);
                 match call_model_with_system_retries(
@@ -632,8 +634,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
         }
         _ => unreachable!("session turn loop must produce exactly one outcome kind"),
     };
-    outcome =
-        outcome.with_running_jobs(core.refresh_running_shell_jobs_for_session(request.session));
+    let mut action_runtime = TurnActionRuntime::new(ui);
+    outcome = outcome.with_running_jobs(core.refresh_running_shell_jobs_for_session_with_runtime(
+        request.session,
+        Some(&mut action_runtime),
+    ));
     if outcome.stop_reason == Some(TurnStopReason::CancelledByUser) {
         core.mark_user_interrupted_work();
     }

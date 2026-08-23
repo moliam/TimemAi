@@ -70,7 +70,6 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 const SESSION_HISTORY_PAGE_LIMIT: usize = 200;
 const MAX_SESSION_MESSAGES: usize = 2_000;
 const MAX_SESSION_TURNS: usize = 200;
-const MAX_TURN_EVENTS: usize = 500;
 const MAX_TURN_USER_ENTRIES: usize = 200;
 const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SESSION_UPLOADS: usize = 20;
@@ -6923,9 +6922,21 @@ fn append_active_turn_event(
     source: &str,
     payload: Value,
 ) -> Option<ActiveTurnEventRef> {
+    append_turn_event(state, session_id, None, source, payload)
+}
+
+fn append_turn_event(
+    state: &AppState,
+    session_id: &str,
+    target_turn_id: Option<&str>,
+    source: &str,
+    payload: Value,
+) -> Option<ActiveTurnEventRef> {
     let mut sessions = state.sessions.lock().ok()?;
     let session = sessions.get_mut(session_id)?;
-    let active_turn_id = current_turn_id(session).map(str::to_string)?;
+    let active_turn_id = target_turn_id
+        .map(str::to_string)
+        .or_else(|| current_turn_id(session).map(str::to_string))?;
     let turn = session
         .turns
         .iter_mut()
@@ -6937,10 +6948,6 @@ fn append_active_turn_event(
         payload,
         created_at_ms: now_ms(),
     });
-    if turn.events.len() > MAX_TURN_EVENTS {
-        let excess = turn.events.len() - MAX_TURN_EVENTS;
-        turn.events.drain(..excess);
-    }
     let history_event = turn
         .events
         .last()
@@ -7854,7 +7861,14 @@ fn handle_scoped_worker_event(
                 let turn_ref = if event.topic.name == agent_core::CORE_TOPIC_LIFECYCLE {
                     None
                 } else {
-                    append_active_turn_event(state, session_id, "core_topic", wire_payload.clone())
+                    let target_turn_id = event.payload["turn_id"].as_str();
+                    append_turn_event(
+                        state,
+                        session_id,
+                        target_turn_id,
+                        "core_topic",
+                        wire_payload.clone(),
+                    )
                 };
                 publish_core_semantic(
                     state,
