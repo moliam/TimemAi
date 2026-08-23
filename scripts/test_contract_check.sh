@@ -376,7 +376,7 @@ for pattern in "${web_ui_matrix_required[@]}"; do
 done
 
 web_ui_required_test_names=(
-  "rapid_submit_during_an_active_turn_is_treated_as_a_supplement"
+  "turn_submit_during_an_active_turn_cannot_merge_into_the_current_turn"
   "repeated_user_sends_during_an_active_turn_are_ordered_supplements"
   "active_turn_supplement_consumes_pending_attachments_into_the_same_turn"
   "failed_active_turn_supplement_does_not_drop_pending_attachments"
@@ -402,7 +402,7 @@ web_ui_required_test_names=(
   "does not send while cancellation is still in flight"
   "keeps draft text and releases the pending guard when cancellation blocks a reserved send"
   "sends a new task after a cancelled active turn is marked finished"
-  "keeps rapid repeated sends during a working turn as separate supplements"
+  "keeps rapid ordinary sends during a working turn as separate next-turn submissions"
   "keeps a human click storm bounded and session scoped"
   "lets users remove pending attachments without losing access to long file names"
   "keeps working-turn input visually consistent with a normal send"
