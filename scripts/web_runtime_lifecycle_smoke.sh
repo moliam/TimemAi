@@ -52,6 +52,14 @@ wait_for_url() {
   return 1
 }
 
+assert_token_shape() {
+  local token="$1"
+  if [[ ! "$token" =~ ^[[:xdigit:]]{16}$ ]]; then
+    echo "Web runtime token must be exactly 16 hexadecimal characters" >&2
+    exit 1
+  fi
+}
+
 stop_host() {
   local stopped_pid="$host_pid"
   kill -TERM "$stopped_pid"
@@ -70,6 +78,7 @@ first_authority="${first_url#http://}"
 first_authority="${first_authority%%/*}"
 first_port="${first_authority##*:}"
 first_token="${first_url##*token=}"
+assert_token_shape "$first_token"
 curl_common=(
   --fail
   --silent
@@ -100,6 +109,7 @@ second_log="$test_root/second.log"
 host_pid=$!
 second_url="$(wait_for_url "$second_log")"
 second_token="${second_url##*token=}"
+assert_token_shape "$second_token"
 if [ "$first_token" = "$second_token" ]; then
   echo "a restarted runtime must rotate its access token" >&2
   exit 1

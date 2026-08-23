@@ -3207,10 +3207,16 @@ fn restored_interaction_cache_keeps_only_explicit_session_overrides() {
 }
 
 #[test]
-fn generated_local_access_token_has_expected_entropy_shape() {
-    let token = generate_token().unwrap();
-    assert_eq!(token.len(), 64);
-    assert!(token.chars().all(|character| character.is_ascii_hexdigit()));
+fn generated_local_access_token_is_sixteen_hex_characters_and_rotates() {
+    let tokens = (0..32)
+        .map(|_| generate_token().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+
+    assert_eq!(tokens.len(), 32);
+    assert!(tokens.iter().all(|token| token.len() == 16));
+    assert!(tokens
+        .iter()
+        .all(|token| token.chars().all(|character| character.is_ascii_hexdigit())));
 }
 
 #[test]

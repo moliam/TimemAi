@@ -9055,8 +9055,10 @@ fn unique_web_id(prefix: &str) -> String {
     format!("{prefix}_{}_{}", now_ms(), sequence)
 }
 
+const ACCESS_TOKEN_BYTES: usize = 8;
+
 fn generate_token() -> Result<String, String> {
-    let mut bytes = [0_u8; 32];
+    let mut bytes = [0_u8; ACCESS_TOKEN_BYTES];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut file| file.read_exact(&mut bytes))
         .map_err(|error| format!("secure_access_token_generation_failed:{error}"))?;
