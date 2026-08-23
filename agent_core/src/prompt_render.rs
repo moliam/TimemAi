@@ -189,10 +189,11 @@ pub(crate) fn render_xml_bash_result_with_retention(
         .pid
         .map(|pid| format!(" pid=\"{pid}\""))
         .unwrap_or_default();
-    let timed_out = evidence
-        .timed_out
-        .then_some(" timed_out=\"true\"")
-        .unwrap_or_default();
+    let timed_out = if evidence.timed_out {
+        " timed_out=\"true\""
+    } else {
+        ""
+    };
     let pid_kind = evidence
         .pid_kind
         .as_deref()
