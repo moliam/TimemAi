@@ -2,12 +2,10 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::OnceLock;
-use std::thread;
-use std::time::Duration;
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 mod linux;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 mod macos;
 
 pub const BASH_EXECUTABLE: &str = "/bin/bash";
@@ -71,20 +69,20 @@ pub fn graphical_session_available() -> bool {
 }
 
 pub fn configure_child_process_group(command: &mut Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    #[cfg(target_os = "macos")]
+    macos::configure_child_process_group(command);
+    #[cfg(target_os = "linux")]
+    linux::configure_child_process_group(command);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = command;
 }
 
 pub fn exit_signal(status: &ExitStatus) -> Option<i32> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        status.signal()
-    }
-    #[cfg(not(unix))]
+    #[cfg(target_os = "macos")]
+    return macos::exit_signal(status);
+    #[cfg(target_os = "linux")]
+    return linux::exit_signal(status);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = status;
         None
@@ -92,20 +90,11 @@ pub fn exit_signal(status: &ExitStatus) -> Option<i32> {
 }
 
 pub fn process_is_alive(pid: u64) -> Option<bool> {
-    #[cfg(unix)]
-    {
-        let pid = i32::try_from(pid).ok().filter(|pid| *pid > 0)?;
-        let result = unsafe { libc::kill(pid, 0) };
-        if result == 0 {
-            return Some(true);
-        }
-        match std::io::Error::last_os_error().raw_os_error() {
-            Some(libc::ESRCH) => Some(false),
-            Some(libc::EPERM) => Some(true),
-            _ => None,
-        }
-    }
-    #[cfg(not(unix))]
+    #[cfg(target_os = "macos")]
+    return macos::process_is_alive(pid);
+    #[cfg(target_os = "linux")]
+    return linux::process_is_alive(pid);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = pid;
         None
@@ -120,15 +109,11 @@ pub fn process_running(pid: u32) -> bool {
 /// is reused. Callers must treat `None` as "identity unavailable", not as a
 /// positive match.
 pub fn process_identity(pid: u32) -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        linux::process_identity(pid)
-    }
     #[cfg(target_os = "macos")]
-    {
-        macos::process_identity(pid)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    return macos::process_identity(pid);
+    #[cfg(target_os = "linux")]
+    return linux::process_identity(pid);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = pid;
         None
@@ -136,132 +121,64 @@ pub fn process_identity(pid: u32) -> Option<String> {
 }
 
 pub fn child_process_running(pid: u32) -> bool {
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    return macos::child_process_running(pid);
+    #[cfg(target_os = "linux")]
+    return linux::child_process_running(pid);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let mut status = 0;
-        let wait = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
-        if wait == pid as libc::pid_t {
-            return false;
-        }
-        if wait == 0 {
-            return true;
-        }
-        if let Ok(output) = Command::new("/bin/ps")
-            .args(["-o", "stat=", "-p"])
-            .arg(pid.to_string())
-            .output()
-        {
-            if !output.status.success() {
-                return false;
-            }
-            let state = String::from_utf8_lossy(&output.stdout);
-            let state = state.trim();
-            return !state.is_empty() && !state.contains('Z');
-        }
+        process_running(pid)
     }
-    process_running(pid)
 }
 
 pub fn is_runtime_child_process_group(pid: u32) -> bool {
-    if pid <= 1 || pid == std::process::id() {
-        return false;
-    }
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    return macos::is_runtime_child_process_group(pid);
+    #[cfg(target_os = "linux")]
+    return linux::is_runtime_child_process_group(pid);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
-        let pid = pid as libc::pid_t;
-        let pgid = unsafe { libc::getpgid(pid) };
-        pgid == pid && pgid != unsafe { libc::getpgrp() }
-    }
-    #[cfg(not(unix))]
-    {
-        true
+        pid > 1 && pid != std::process::id()
     }
 }
 
 pub fn runtime_child_pid_kind() -> &'static str {
-    #[cfg(unix)]
-    {
-        "runtime_child_process_group"
-    }
-    #[cfg(not(unix))]
+    #[cfg(target_os = "macos")]
+    return macos::runtime_child_pid_kind();
+    #[cfg(target_os = "linux")]
+    return linux::runtime_child_pid_kind();
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         "runtime_child_process"
     }
 }
 
 pub fn terminate_process(pid: u32) {
-    #[cfg(unix)]
-    {
-        terminate_process_unix(pid);
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-    }
+    #[cfg(target_os = "macos")]
+    macos::terminate_process(pid);
+    #[cfg(target_os = "linux")]
+    linux::terminate_process(pid);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = pid;
 }
 
 pub fn kill_process_group(pid: u32) {
-    #[cfg(unix)]
-    {
-        let pid = pid as libc::pid_t;
-        if pid > 1 && pid != unsafe { libc::getpgrp() } {
-            let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-    }
-}
-
-#[cfg(unix)]
-fn terminate_process_unix(pid: u32) {
-    let pid = pid as libc::pid_t;
-    let pgid = unsafe { libc::getpgid(pid) };
-    if pgid < 0 {
-        return;
-    }
-    if pgid == pid && pgid != unsafe { libc::getpgrp() } {
-        signal_process_group(pgid, libc::SIGTERM);
-        thread::sleep(Duration::from_millis(100));
-        if process_group_running(pgid as u32) {
-            signal_process_group(pgid, libc::SIGKILL);
-        }
-        return;
-    }
-    signal_process(pid, libc::SIGTERM);
-    thread::sleep(Duration::from_millis(100));
-    if process_running(pid as u32) {
-        signal_process(pid, libc::SIGKILL);
-    }
+    #[cfg(target_os = "macos")]
+    macos::kill_process_group(pid);
+    #[cfg(target_os = "linux")]
+    linux::kill_process_group(pid);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let _ = pid;
 }
 
 pub fn process_group_running(group_leader_pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        if group_leader_pid <= 1 || group_leader_pid as libc::pid_t == unsafe { libc::getpgrp() } {
-            return false;
-        }
-        let result = unsafe { libc::kill(-(group_leader_pid as libc::pid_t), 0) };
-        result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-    }
-    #[cfg(not(unix))]
+    #[cfg(target_os = "macos")]
+    return macos::process_group_running(group_leader_pid);
+    #[cfg(target_os = "linux")]
+    return linux::process_group_running(group_leader_pid);
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         process_running(group_leader_pid)
-    }
-}
-
-#[cfg(unix)]
-fn signal_process(pid: libc::pid_t, signal: libc::c_int) {
-    if pid > 1 && pid != unsafe { libc::getpid() } {
-        let _ = unsafe { libc::kill(pid, signal) };
-    }
-}
-
-#[cfg(unix)]
-fn signal_process_group(pgid: libc::pid_t, signal: libc::c_int) {
-    if pgid > 1 && pgid != unsafe { libc::getpgrp() } {
-        let _ = unsafe { libc::kill(-pgid, signal) };
     }
 }
 
