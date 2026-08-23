@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activeModelRetryStatus, activityFromTopic, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnTimelinePlacement, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
+import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnTimelinePlacement, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -975,6 +975,29 @@ describe("web topic view model", () => {
     const afterCwd = applyCoreTopicToSession(current, unknownContextCwd, assistantMessage);
     expect(afterCwd).toBe(current);
     expect(afterCwd.current_dir).toBe("/work");
+  });
+
+  it("synchronizes the context meter denominator when a runtime profile is updated", () => {
+    const current = session("session_1");
+    const runtimeProfile: NonNullable<Session["runtime_profile"]> = {
+      model: "gpt-4.1",
+      api_protocol: "openai-compatible",
+      response_protocol: "xml",
+      base_url: "https://api.example.test/v1",
+      timeout_secs: 60,
+      max_llm_input_tokens: 1_000_000,
+      max_llm_output_tokens: 50_000,
+      max_rounds: "50",
+      bash_approval: "ask",
+      work_instructions: "silent",
+      api_key_configured: true,
+    };
+
+    const updated = applySessionRuntimeProfile(current, runtimeProfile);
+
+    expect(updated.runtime_profile).toBe(runtimeProfile);
+    expect(updated.max_llm_input_tokens).toBe(1_000_000);
+    expect(current.max_llm_input_tokens).toBe(100_000);
   });
 
   it("accepts lifecycle topics that introduce a new scoped worker and context", () => {
