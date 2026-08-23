@@ -615,7 +615,7 @@ proc run_config_base_url_update_after_idle_smoke {} {
         "选择要修改的配置" \
         "timeout waiting for /config menu before base-url update" \
         "unexpected EOF waiting for /config menu before base-url update"
-    send "\033\[B\033\[B\r"
+    send "\033\[B\033\[B\033\[B\r"
     wait_for_text \
         "TIMEM_BASE_URL value prompt" \
         "TIMEM_BASE_URL 当前值" \
