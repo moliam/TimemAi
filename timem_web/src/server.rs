@@ -1043,7 +1043,7 @@ impl Drop for AcceptedCommandLane {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ModelEndpointInput {
     #[serde(default)]
     id: Option<String>,
@@ -3518,11 +3518,31 @@ fn handle_command_with_id(
             )?;
         }
         ClientCommand::ModelEndpointUpsert { endpoint } => {
-            upsert_model_endpoint(state, endpoint)?;
+            let previous_endpoint = endpoint
+                .id
+                .as_deref()
+                .map(|endpoint_id| model_endpoint_config_if_exists(state, endpoint_id))
+                .transpose()?
+                .flatten();
+            let endpoint_id = upsert_model_endpoint(state, endpoint)?;
+            let updated_endpoint = model_endpoint_config(state, &endpoint_id)?;
             let event = WireEvent::ModelEndpointsUpdated {
                 endpoints: model_endpoint_reports(state)?,
             };
             publish_semantic(state, event.clone())?;
+            if let Some(previous_endpoint) = previous_endpoint {
+                for (session_id, runtime_profile) in
+                    sync_endpoint_token_limits(state, &previous_endpoint, &updated_endpoint)?
+                {
+                    publish_semantic(
+                        state,
+                        WireEvent::SessionRuntimeUpdated {
+                            session_id,
+                            runtime_profile,
+                        },
+                    )?;
+                }
+            }
             return Ok(Some(event));
         }
         ClientCommand::ModelEndpointDelete { endpoint_id } => {
@@ -5767,7 +5787,7 @@ fn model_endpoint_reports(state: &AppState) -> Result<Vec<ModelEndpointReport>, 
         .collect())
 }
 
-fn upsert_model_endpoint(state: &AppState, input: ModelEndpointInput) -> Result<(), String> {
+fn upsert_model_endpoint(state: &AppState, input: ModelEndpointInput) -> Result<String, String> {
     let mut mem = state
         .mem
         .lock()
@@ -5788,6 +5808,7 @@ fn upsert_model_endpoint(state: &AppState, input: ModelEndpointInput) -> Result<
     {
         return Err("model_endpoint_name_conflict".to_string());
     }
+    let endpoint_id = endpoint.id.clone();
     if let Some(index) = existing_index {
         mem.model_endpoints[index] = endpoint;
     } else {
@@ -5795,7 +5816,101 @@ fn upsert_model_endpoint(state: &AppState, input: ModelEndpointInput) -> Result<
     }
     mem.model_endpoints
         .sort_by(|left, right| left.name.cmp(&right.name));
-    save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints)
+    save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints)?;
+    Ok(endpoint_id)
+}
+
+fn model_endpoint_config_if_exists(
+    state: &AppState,
+    endpoint_id: &str,
+) -> Result<Option<ModelEndpointConfig>, String> {
+    Ok(state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?
+        .model_endpoints
+        .iter()
+        .find(|item| item.id == endpoint_id)
+        .cloned())
+}
+
+fn model_endpoint_config(
+    state: &AppState,
+    endpoint_id: &str,
+) -> Result<ModelEndpointConfig, String> {
+    state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?
+        .model_endpoints
+        .iter()
+        .find(|item| item.id == endpoint_id)
+        .cloned()
+        .ok_or_else(|| "model_endpoint_not_found".to_string())
+}
+
+fn session_uses_model_endpoint(session: &WebSession, endpoint: &ModelEndpointConfig) -> bool {
+    let config = &session.runtime.settings.config;
+    config.model == endpoint.model
+        && config.api_protocol.label() == endpoint.api_protocol
+        && config.response_protocol.name() == endpoint.response_protocol
+        && config.base_url == endpoint.base_url
+        && config.max_llm_input_tokens == endpoint.max_llm_input_tokens
+        && config.max_llm_output_tokens == endpoint.max_llm_output_tokens
+        && config.api_key == endpoint.api_key
+}
+
+fn sync_endpoint_token_limits(
+    state: &AppState,
+    previous: &ModelEndpointConfig,
+    updated: &ModelEndpointConfig,
+) -> Result<Vec<(String, WebSessionRuntimeProfile)>, String> {
+    if previous.max_llm_input_tokens == updated.max_llm_input_tokens
+        && previous.max_llm_output_tokens == updated.max_llm_output_tokens
+    {
+        return Ok(Vec::new());
+    }
+    let session_ids = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        sessions
+            .iter()
+            .filter(|(_, session)| session_uses_model_endpoint(session, previous))
+            .map(|(session_id, _)| session_id.clone())
+            .collect::<Vec<_>>()
+    };
+    let mut updates = Vec::with_capacity(session_ids.len());
+    for session_id in session_ids {
+        let mut runtime_profile = None;
+        if previous.max_llm_input_tokens != updated.max_llm_input_tokens {
+            runtime_profile = Some(
+                update_session_runtime_setting(
+                    state,
+                    &session_id,
+                    "TIMEM_MAX_LLM_INPUT",
+                    &updated.max_llm_input_tokens.to_string(),
+                )?
+                .1,
+            );
+        }
+        if previous.max_llm_output_tokens != updated.max_llm_output_tokens {
+            runtime_profile = Some(
+                update_session_runtime_setting(
+                    state,
+                    &session_id,
+                    "TIMEM_MAX_LLM_OUTPUT",
+                    &updated.max_llm_output_tokens.to_string(),
+                )?
+                .1,
+            );
+        }
+        if let Some(runtime_profile) = runtime_profile {
+            updates.push((session_id, runtime_profile));
+        }
+    }
+    Ok(updates)
 }
 
 fn delete_model_endpoint(state: &AppState, endpoint_id: &str) -> Result<(), String> {

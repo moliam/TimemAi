@@ -9994,6 +9994,43 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         }) if endpoint_id == "endpoint-one" && api_key == "secret-endpoint-key"
     ));
 
+    let mut endpoint_events = state.events.subscribe();
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointUpsert {
+            endpoint: ModelEndpointInput {
+                id: Some("endpoint-one".to_string()),
+                name: "Production".to_string(),
+                model: "gpt-4.1".to_string(),
+                api_protocol: "openai-compatible".to_string(),
+                response_protocol: "xml".to_string(),
+                base_url: "https://api.example.test/v1".to_string(),
+                max_llm_input_tokens: 1_000_000,
+                max_llm_output_tokens: 50_000,
+                api_key: None,
+            },
+        },
+    )
+    .unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(session.max_llm_input_tokens, 1_000_000);
+        assert_eq!(session.runtime_profile.max_llm_input_tokens, 1_000_000);
+        assert_eq!(session.runtime_profile.max_llm_output_tokens, 50_000);
+    }
+    let endpoint_update_events = drain_wire_events(&mut endpoint_events);
+    assert!(endpoint_update_events.iter().any(|event| matches!(
+        event,
+        WireEvent::SessionRuntimeUpdated {
+            session_id: updated_session_id,
+            runtime_profile,
+        } if updated_session_id == &session_id
+            && runtime_profile.max_llm_input_tokens == 1_000_000
+            && runtime_profile.max_llm_output_tokens == 50_000
+    )));
+
     handle_command(
         &state,
         TEST_PORT,

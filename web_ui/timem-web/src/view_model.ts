@@ -18,6 +18,17 @@ export function normalizeCopiedUserMessageText(text: string): string {
   return text.replace(/(?:\r?\n)+$/, "");
 }
 
+export function applySessionRuntimeProfile(
+  session: Session,
+  runtimeProfile: NonNullable<Session["runtime_profile"]>,
+): Session {
+  return {
+    ...session,
+    runtime_profile: runtimeProfile,
+    max_llm_input_tokens: runtimeProfile.max_llm_input_tokens,
+  };
+}
+
 export function trimTurnEvents<T>(events: T[]) {
   return events.length > MAX_CLIENT_TURN_EVENTS ? events.slice(-MAX_CLIENT_TURN_EVENTS) : events;
 }
