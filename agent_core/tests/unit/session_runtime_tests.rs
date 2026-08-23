@@ -229,14 +229,16 @@ impl TurnUi for DelayBeforeFirstModelUi {
     }
 }
 
-struct CancelAfterDelayUi {
+struct CancelWhenFilesReadyUi {
     started: Instant,
-    delay: Duration,
+    ready_files: [std::path::PathBuf; 2],
+    hard_timeout: Duration,
 }
 
-impl TurnUi for CancelAfterDelayUi {
+impl TurnUi for CancelWhenFilesReadyUi {
     fn is_cancel_requested(&mut self) -> bool {
-        self.started.elapsed() >= self.delay
+        self.ready_files.iter().all(|path| path.is_file())
+            || self.started.elapsed() >= self.hard_timeout
     }
 }
 
@@ -2147,9 +2149,10 @@ fn session_turn_cancels_parallel_long_running_bash_actions() {
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
     let started = Instant::now();
-    let mut ui = CancelAfterDelayUi {
+    let mut ui = CancelWhenFilesReadyUi {
         started,
-        delay: Duration::from_millis(150),
+        ready_files: [pid_a.clone(), pid_b.clone()],
+        hard_timeout: Duration::from_secs(5),
     };
     let command_a = format!(
         "tail -f /dev/null & echo $! > {}; wait",
@@ -2218,9 +2221,10 @@ fn session_turn_stop_after_one_parallel_action_completed_cancels_the_running_act
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
     let started = Instant::now();
-    let mut ui = CancelAfterDelayUi {
+    let mut ui = CancelWhenFilesReadyUi {
         started,
-        delay: Duration::from_millis(200),
+        ready_files: [completed_marker.clone(), running_pid.clone()],
+        hard_timeout: Duration::from_secs(5),
     };
     let completed_command = format!("printf uploaded > {}", shell_quote(&completed_marker));
     let running_command = format!(
