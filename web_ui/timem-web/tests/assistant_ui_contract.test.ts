@@ -1294,6 +1294,10 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('model_endpoint_delete');
     expect(source).toContain('model_endpoint_apply');
     expect(source).toContain('model_endpoint_secret_reveal');
+    expect(source).toContain('最大上下文窗口');
+    expect(source).toContain('最大输出');
+    expect(source).toContain('MODEL_CONTEXT_WINDOW_OPTIONS');
+    expect(source).toContain('MODEL_OUTPUT_TOKEN_OPTIONS');
     expect(source).toContain('event.type === "model_endpoint_secret_revealed"');
     expect(source).toContain('api_key_configured');
     expect(source).toContain('className="endpoint-api-key"');
