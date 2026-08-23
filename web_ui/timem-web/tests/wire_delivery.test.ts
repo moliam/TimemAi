@@ -49,6 +49,7 @@ describe("production wire delivery contract", () => {
     { type: "history_page", session_id: "session-a", records: [], has_more: false },
     { type: "session_api_key_revealed", session_id: "session-a", api_key: "secret" },
     { type: "mcp_server_secrets_revealed", server_id: "mcp-a", values: {} },
+    { type: "model_endpoint_secret_revealed", endpoint_id: "endpoint-a", api_key: "secret" },
     { type: "tool_repo_search_result", session_id: "session-a", query: "q", tools: [] },
     { type: "tool_repo_detail", session_id: "session-a", detail: {} },
   ] as WireEvent[])("continues reducing direct $type responses in semantic mode", (event) => {

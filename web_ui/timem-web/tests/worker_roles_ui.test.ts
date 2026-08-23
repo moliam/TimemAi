@@ -58,4 +58,18 @@ describe("optimistic worker role UI", () => {
     expect(source).toContain("replayWorkerRoleMutations(event.library, pendingWorkerRoleMutationsRef.current.values())");
   });
 
+  it("provides a coherent expanded editor for role descriptions and user messages", () => {
+    const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+    const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+
+    expect(source).toContain('aria-label="展开编辑 Role 描述"');
+    expect(source).toContain('aria-label="展开编辑用户信息"');
+    expect(source).toContain('完成编辑不会自动保存或发送');
+    expect(source).toContain('onCancel={() => { setDescription(descriptionBeforeExpand);');
+    expect(source).toContain('setSessionDraft(current, activeSessionId, composerDraftBeforeExpand)');
+    expect(styles).toContain('.worker-role-description-field textarea { padding-right: 40px; resize: none; }');
+    expect(styles).toContain('.composer-text-field textarea { display: block; padding-right: 35px; resize: none; }');
+    expect(styles).toContain('.expanded-text-editor > textarea');
+  });
+
 });

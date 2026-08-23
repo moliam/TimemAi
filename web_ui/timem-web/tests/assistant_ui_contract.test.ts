@@ -56,6 +56,18 @@ describe("user message bubble styling", () => {
     expect(styles).toContain(':root[data-theme="light"] .turn-user-entry .markdown-body pre { border-color: #9fc6e3; background: #17324d; }');
     expect(styles).toContain(':root[data-theme="light"] .turn-user-entry .markdown-body :is(h1, h2, h3, h4, h5, h6) { color: #17324d; }');
   });
+
+  it("keeps the composer surface neutral with a blue gradient border and coordinated actions", () => {
+    expect(styles).toContain('.composer { border: 1px solid transparent; border-radius: 24px; background: linear-gradient(#212121, #212121) padding-box, linear-gradient(135deg, #39556a 0%, #78a9ca 48%, #466b84 100%) border-box;');
+    expect(styles).toContain(':root[data-theme="light"] .composer { border-color: transparent; background: linear-gradient(#fff, #fff) padding-box, linear-gradient(135deg, #bdd5e6 0%, #669fc5 48%, #a7c8df 100%) border-box; }');
+    expect(styles).toContain('.composer:focus-within { background: linear-gradient(#212121, #212121) padding-box, linear-gradient(135deg, #4c7390 0%, #9bc9e7 48%, #5b87a5 100%) border-box;');
+    expect(styles).toContain('.attach-button { border-color: transparent; background: transparent; color: #9bb9cd; }');
+    expect(styles).toContain('.send-button { border-radius: 50%; background: #b9dcf5; color: #142431;');
+    expect(styles).toContain('.composer-text-field > .text-field-expand { top: 1px; right: 0; background: transparent; color: #9bb9cd; }');
+    expect(styles).toContain(':root[data-theme="light"] .composer-text-field > .text-field-expand { background: transparent; color: #527894; }');
+    expect(styles).toContain('.send-button:disabled:hover { background: #b9dcf5; }');
+    expect(styles).toContain(':root[data-theme="light"] .attach-button:disabled:hover { background: transparent; color: #527894; }');
+  });
 });
 
 describe("user message selection copying", () => {
@@ -1285,9 +1297,18 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('event.type === "model_endpoint_secret_revealed"');
     expect(source).toContain('api_key_configured');
     expect(source).toContain('className="endpoint-api-key"');
+    expect(source).toContain('const [showApiKey, setShowApiKey] = useState(false);');
+    expect(source).toContain('<input type={showApiKey ? "text" : "password"} autoComplete="new-password" spellCheck={false} value={apiKey}');
+    expect(source).toContain('const apiKeyVisibilityLabel = showApiKey ? "隐藏 API Key" : "显示 API Key";');
+    expect(source).toContain('className="endpoint-api-key-actions"');
     expect(source).toContain('idle: "复制 API Key"');
-    expect(source).toContain('<input type="text" autoComplete="off" value={apiKey}');
-    expect(styles).toContain('.endpoint-api-key button.copy-success');
+    expect(source).toContain('{copyState === "copied" ? <CheckCheck size={12}/> : <Copy size={12}/>}');
+    expect(source).toContain('{showApiKey ? <EyeOff size={13}/> : <Eye size={13}/>}');
+    expect(source).toContain('useEffect(() => setShowApiKey(false), [endpoint?.id]);');
+    expect(styles).toContain('.endpoint-editor-grid .endpoint-api-key input { padding-right: 56px; }');
+    expect(styles).toContain('.endpoint-api-key-actions { position: absolute;');
+    expect(styles).toContain('.endpoint-api-key-actions button { width: 22px; height: 22px;');
+    expect(styles).toContain(':root[data-theme="light"] .endpoint-api-key-actions button { background: transparent;');
     expect(source).toContain('endpointMatchesProfile');
     expect(styles).toContain('.endpoint-menu');
     expect(styles).toContain('.endpoint-actions');
