@@ -522,7 +522,7 @@ pub fn observation_events_from_core_topic_events(
     for event in events {
         if let Some(model_response) = event.as_model_response() {
             let free_talk = model_response.free_talk.trim();
-            if !free_talk.is_empty() {
+            if model_response.continue_work && !free_talk.is_empty() {
                 observations.push(ObservationEvent::Persistent(format!("💡 {free_talk}")));
             }
             if event.payload.get("global").is_some() {
