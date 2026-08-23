@@ -12,6 +12,7 @@ const DIRECT_EVENT_TYPES: ReadonlySet<WireEvent["type"]> = new Set([
   "runtime_notice",
   "history_page",
   "mcp_server_secrets_revealed",
+  "model_endpoint_secret_revealed",
   "session_api_key_revealed",
   "tool_repo_detail",
   "tool_repo_search_result",

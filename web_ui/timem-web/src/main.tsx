@@ -2,8 +2,9 @@ import { AssistantRuntimeProvider, ThreadMessageLike, ThreadPrimitive, useExtern
 import { closestCenter, DndContext, DragEndEvent, DragOverlay, DragOverEvent, KeyboardSensor, PointerSensor, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ArrowDown, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, FolderOpen, Gauge, GripVertical, KeyRound, LoaderCircle, Menu, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, Trash2, Wrench, X } from "lucide-react";
+import { ArrowDown, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, FolderOpen, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, Trash2, Wrench, X } from "lucide-react";
 import { Children, CSSProperties, Dispatch, isValidElement, memo, MutableRefObject, ReactNode, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
@@ -1607,6 +1608,34 @@ function WorkerRoleDropGroup({ id, roleIds, className, children }: {
   </section>;
 }
 
+function ExpandedTextEditor({ title, eyebrow, value, placeholder, maxLength, disabled, onChange, onClose, onCancel }: {
+  title: string;
+  eyebrow: string;
+  value: string;
+  placeholder: string;
+  maxLength?: number;
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onCancel: () => void;
+}) {
+  return createPortal(<div className="expanded-text-backdrop" role="presentation">
+    <section className="expanded-text-editor" role="dialog" aria-modal="true" aria-label={title} onKeyDown={(event) => {
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
+    }}>
+      <header>
+        <div><span className="eyebrow">{eyebrow}</span><h2>{title}</h2><p>修改会同步回原输入框；完成编辑不会自动保存或发送。</p></div>
+        <button type="button" className="expanded-text-collapse" title="收起编辑器" aria-label="收起编辑器" onClick={onClose}><Minimize2 size={16}/></button>
+      </header>
+      <textarea autoFocus value={value} maxLength={maxLength} disabled={disabled} placeholder={placeholder} onChange={(event) => onChange(event.target.value)}/>
+      <footer>
+        <span>{maxLength ? `${value.length.toLocaleString()} / ${maxLength.toLocaleString()}` : `${value.length.toLocaleString()} 字符`}</span>
+        <div><button type="button" className="secondary" onClick={onCancel}>取消修改</button><button type="button" className="primary" onClick={onClose}>完成编辑</button></div>
+      </footer>
+    </section>
+  </div>, document.body);
+}
+
 function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOpen, onClose, onSelect, onCommand }: {
   session?: Session;
   library: WorkerRoleLibrary;
@@ -1625,11 +1654,13 @@ function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOp
   const [editingGroupId, setEditingGroupId] = useState("");
   const [editingGroupName, setEditingGroupName] = useState("");
   const [draggedRoleId, setDraggedRoleId] = useState("");
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
+  const [descriptionBeforeExpand, setDescriptionBeforeExpand] = useState("");
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
-  const resetEditor = () => { setEditingId(null); setName(""); setDescription(""); };
+  const resetEditor = () => { setEditingId(null); setName(""); setDescription(""); setDescriptionExpanded(false); };
   useEffect(() => { resetEditor(); setDeleteConfirmId(""); setEditingGroupId(""); }, [session?.session_id]);
 
   const submit = () => {
@@ -1717,8 +1748,9 @@ function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOp
     {session && <form className={`worker-role-editor ${editingId ? "editing" : "creating"}`} onSubmit={(event) => { event.preventDefault(); submit(); }}>
       <strong>{editingId ? "编辑 Role" : "新建 Role"}</strong>
       <input value={name} maxLength={80} disabled={disabled} placeholder="称呼，例如：严谨审查员" aria-label="Role name" onChange={(event) => setName(event.target.value)}/>
-      <textarea value={description} maxLength={16384} disabled={disabled} placeholder="描述工作要求、步骤和约束…" aria-label="Role description" onChange={(event) => setDescription(event.target.value)}/>
+      <div className="expandable-text-field worker-role-description-field"><textarea value={description} maxLength={16384} disabled={disabled} placeholder="描述工作要求、步骤和约束…" aria-label="Role description" onChange={(event) => setDescription(event.target.value)}/><button type="button" className="text-field-expand" title="展开编辑 Role 描述" aria-label="展开编辑 Role 描述" disabled={disabled} onClick={() => { setDescriptionBeforeExpand(description); setDescriptionExpanded(true); }}><Maximize2 size={13}/></button></div>
       <div><button type="submit" className="worker-role-primary-action" disabled={disabled || !name.trim() || !description.trim()}>{editingId ? "保存" : "创建"}</button>{editingId && <button type="button" onClick={resetEditor}>取消</button>}</div>
+      {descriptionExpanded && <ExpandedTextEditor eyebrow="ROLE DESCRIPTION" title={editingId ? `编辑 ${name.trim() || "Role"} 的描述` : "编写 Role 描述"} value={description} maxLength={16384} disabled={disabled} placeholder="描述工作要求、步骤和约束…" onChange={setDescription} onClose={() => setDescriptionExpanded(false)} onCancel={() => { setDescription(descriptionBeforeExpand); setDescriptionExpanded(false); }}/>}
     </form>}
   </aside>;
 }
@@ -1979,6 +2011,8 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
   const restoredSessionIdRef = useRef<string | undefined>(undefined);
   const followThreadLatest = useRef(true);
   const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
+  const [composerExpanded, setComposerExpanded] = useState(false);
+  const [composerDraftBeforeExpand, setComposerDraftBeforeExpand] = useState("");
   const [queuedMessagesBySession, setQueuedMessagesBySession] = useState<Record<string, QueuedMessage[]>>({});
   const queuedMessagesBySessionRef = useRef<Record<string, QueuedMessage[]>>(queuedMessagesBySession);
   const [expandedQueueSessionIds, setExpandedQueueSessionIds] = useState<Set<string>>(() => new Set());
@@ -2635,7 +2669,7 @@ const toggleQueuedMessages = () => {
           return <div className="pending-attachment" key={attachment.id} title={attachment.name}><Paperclip size={13}/><span className="pending-attachment-name">{attachment.name}</span><small>{formatBytes(attachment.bytes)}</small><button type="button" title={removeLabel} aria-label={removeLabel} aria-busy={removing || undefined} disabled={removing || sessionInteractionLocked} onClick={() => onRemoveAttachment(attachment.id)}>{removing ? "…" : <X size={13}/>}</button></div>;
         })}</div>}
         <form className="composer" onSubmit={(event) => { event.preventDefault(); submitDraft(); }}>
-          <textarea
+          <div className="expandable-text-field composer-text-field"><textarea
             ref={composerTextareaRef}
             value={draft}
             placeholder={!activeSession ? "Create a session to start…" : sessionInteractionLocked ? sessionInteractionLockReason : activeSession.state === "working" ? "继续输入…" : "Ask Timem to investigate, write, or work with you."}
@@ -2656,7 +2690,8 @@ const toggleQueuedMessages = () => {
  submitDraft();
  }
  }}
- />
+ /><button type="button" className="text-field-expand" title="展开编辑用户信息" aria-label="展开编辑用户信息" disabled={!activeSession || sessionInteractionLocked} onClick={() => { setComposerDraftBeforeExpand(draft); setComposerExpanded(true); }}><Maximize2 size={14}/></button></div>
+          {composerExpanded && activeSession && <ExpandedTextEditor eyebrow="MESSAGE" title="编辑用户信息" value={draft} disabled={sessionInteractionLocked} placeholder={activeSession.state === "working" ? "继续输入…" : "Ask Timem to investigate, write, or work with you."} onChange={(value) => setDraftsBySession((current) => setSessionDraft(current, activeSessionId, value))} onClose={() => setComposerExpanded(false)} onCancel={() => { setDraftsBySession((current) => setSessionDraft(current, activeSessionId, composerDraftBeforeExpand)); setComposerExpanded(false); }}/>}
           {selectedRoles.length > 0 && activeSession && <div className="composer-role" title={selectedRoles.map((role) => `${role.name}: ${role.description}`).join("\n")}><BriefcaseBusiness size={14}/><span>本条将使用 <strong>{selectedRoles.map((role) => role.name).join("、")}</strong></span><button type="button" title="Clear roles for this message" aria-label="Clear selected roles" onClick={() => onRolesConsumed(activeSession.session_id)}><X size={13}/></button></div>}
           <div className="composer-actions"><div className="composer-paths">{activeSession && <span className="composer-cwd-inline" title={activeSession.current_dir}><b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span></span>}{activeSession?.debug_dir && <span className="composer-cwd-inline composer-debug-inline" title={activeSession.debug_dir}><b>DEBUG:</b><span>{activeSession.debug_dir}</span></span>}</div><span id={composerHintId} className="sr-only" role="status" aria-live="polite">{composerHint}</span><div className="composer-buttons"><button className={`attach-button ${uploadingAttachment ? "uploading" : ""}`} type="button" title={attachTitle} aria-label={attachLabel} disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onClick={() => fileInput.current?.click()}>{uploadingAttachment ? <LoaderCircle size={17}/> : <Paperclip size={17}/>}</button><input ref={fileInput} className="file-input" type="file" disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/>{showStopAction ? <button className={`stop-button ${isCancelling ? "sending" : ""}`} type="button" title={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} aria-label={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} disabled={isCancelling || sessionInteractionLocked} onClick={() => void cancelActiveSessionTurn()}>{isCancelling ? <LoaderCircle size={17}/> : <CircleStop size={17}/>} {isCancelling ? "Stopping…" : "Stop"}</button> : <button className={`send-button ${submittingDraft ? "sending" : ""}`} type="submit" title={effectiveSendLabel} aria-label={effectiveSendLabel} disabled={!activeSession || !hasDraftText || submittingDraft || uploadingAttachment || sessionInteractionLocked}>{submittingDraft ? <LoaderCircle size={17}/> : <Send size={17}/>}</button>}</div></div>
         </form>
@@ -3333,15 +3368,18 @@ function ModelEndpointPanel({ panelRef, server, session, endpointEditor, reveale
 
 function ModelEndpointEditor({ endpoint, revealedApiKey, onClose, onSave }: { endpoint?: ModelEndpoint; revealedApiKey?: string; onClose: () => void; onSave: (endpoint: ModelEndpointDraft) => void }) {
   const [draft, setDraft] = useState<ModelEndpointDraft>(() => ({ id: endpoint?.id, name: endpoint?.name ?? "", model: endpoint?.model ?? "", api_protocol: endpoint?.api_protocol ?? "openai-compatible", response_protocol: endpoint?.response_protocol ?? "xml", base_url: endpoint?.base_url ?? "", api_key: revealedApiKey }));
+  const [showApiKey, setShowApiKey] = useState(false);
   useEffect(() => { if (revealedApiKey !== undefined) setDraft((current) => ({ ...current, api_key: revealedApiKey })); }, [revealedApiKey]);
+  useEffect(() => setShowApiKey(false), [endpoint?.id]);
   const apiKey = draft.api_key ?? "";
   const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(apiKey, {
     idle: "复制 API Key",
     copied: "API Key 已复制",
     failed: "API Key 复制失败",
   });
+  const apiKeyVisibilityLabel = showApiKey ? "隐藏 API Key" : "显示 API Key";
   const save = () => { if (endpointDraftValid(draft)) onSave(draft); };
-  return <div className="endpoint-editor"><div className="endpoint-editor-heading"><strong>{endpoint ? "编辑接入点" : "新增接入点"}</strong><button type="button" aria-label="Close endpoint editor" onClick={onClose}><X size={14}/></button></div><div className="endpoint-editor-grid"><label>名称<input autoFocus value={draft.name} placeholder="例如：生产环境 GPT" onChange={(event) => setDraft({ ...draft, name: event.target.value })}/></label><label>模型<input value={draft.model} placeholder="gpt-4.1" onChange={(event) => setDraft({ ...draft, model: event.target.value })}/></label><label>API 协议<select value={draft.api_protocol} onChange={(event) => setDraft({ ...draft, api_protocol: event.target.value })}><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select></label><label>响应协议<select value={draft.response_protocol} onChange={(event) => setDraft({ ...draft, response_protocol: event.target.value })}><option value="xml">xml</option><option value="json">json</option></select></label><label className="wide">Base URL<input value={draft.base_url} placeholder="https://api.example.com/v1" onChange={(event) => setDraft({ ...draft, base_url: event.target.value })}/></label><label className="wide">API Key<div className="endpoint-api-key"><input type="text" autoComplete="off" value={apiKey} placeholder={endpoint?.api_key_configured && revealedApiKey === undefined ? "正在读取…" : "可留空"} onChange={(event) => setDraft({ ...draft, api_key: event.target.value })}/><button type="button" className={copyClass} title={copyLabel} aria-label={copyLabel} disabled={!apiKey} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={14}/> : <Copy size={14}/>}</button></div></label></div><div className="endpoint-editor-buttons"><button type="button" className="secondary compact" onClick={onClose}>取消</button><button type="button" className="primary compact" disabled={!endpointDraftValid(draft)} onClick={save}>保存接入点</button></div></div>;
+  return <div className="endpoint-editor"><div className="endpoint-editor-heading"><strong>{endpoint ? "编辑接入点" : "新增接入点"}</strong><button type="button" aria-label="Close endpoint editor" onClick={onClose}><X size={14}/></button></div><div className="endpoint-editor-grid"><label>名称<input autoFocus value={draft.name} placeholder="例如：生产环境 GPT" onChange={(event) => setDraft({ ...draft, name: event.target.value })}/></label><label>模型<input value={draft.model} placeholder="gpt-4.1" onChange={(event) => setDraft({ ...draft, model: event.target.value })}/></label><label>API 协议<select value={draft.api_protocol} onChange={(event) => setDraft({ ...draft, api_protocol: event.target.value })}><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select></label><label>响应协议<select value={draft.response_protocol} onChange={(event) => setDraft({ ...draft, response_protocol: event.target.value })}><option value="xml">xml</option><option value="json">json</option></select></label><label className="wide">Base URL<input value={draft.base_url} placeholder="https://api.example.com/v1" onChange={(event) => setDraft({ ...draft, base_url: event.target.value })}/></label><label className="wide">API Key<div className="endpoint-api-key"><input type={showApiKey ? "text" : "password"} autoComplete="new-password" spellCheck={false} value={apiKey} placeholder={endpoint?.api_key_configured && revealedApiKey === undefined ? "正在读取…" : "可留空"} onChange={(event) => setDraft({ ...draft, api_key: event.target.value })}/><div className="endpoint-api-key-actions"><button type="button" className={copyClass} title={copyLabel} aria-label={copyLabel} disabled={!apiKey} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={12}/> : <Copy size={12}/>}</button><button type="button" title={apiKeyVisibilityLabel} aria-label={apiKeyVisibilityLabel} onClick={() => setShowApiKey((visible) => !visible)}>{showApiKey ? <EyeOff size={13}/> : <Eye size={13}/>}</button></div></div></label></div><div className="endpoint-editor-buttons"><button type="button" className="secondary compact" onClick={onClose}>取消</button><button type="button" className="primary compact" disabled={!endpointDraftValid(draft)} onClick={save}>保存接入点</button></div></div>;
 }
 
 
