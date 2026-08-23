@@ -1155,7 +1155,9 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('className="session-name" title={session.display_name}');
     expect(source).toContain('className="session-detail session-cwd" title={session.current_dir}><FolderOpen size={11} aria-hidden="true"/><span className="path-tail">{workspacePathLabel(session.current_dir)}</span>');
     expect(source).toContain('className="session-sub"><span className="session-detail session-cwd"');
-    expect(source).toContain('className="session-detail session-profile" title={modelDisplayName(session)}');
+    expect(source).toContain('const sessionEndpointName = endpointNameForProfile(server?.model_endpoints ?? [], session.runtime_profile) ?? UNCONFIGURED_MODEL_LABEL;');
+    expect(source).toContain('className="session-detail session-profile" title={sessionEndpointName}');
+    expect(source).not.toContain('className="session-detail session-profile" title={modelDisplayName(session)}');
     expect(source).toContain('className="session-working-icon" size={15} aria-label="Session working"');
     expect(source).not.toContain('className="session-state">busy</span>');
     expect(styles).not.toContain(".session-state");
@@ -1252,7 +1254,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('aria-label={`Reset ${label} to inherited value`}');
     expect(source).toContain('onClick={() => resetEnv(key)}>Reset</button>');
     expect(source).toContain('onCreate={(command) => {');
-    expect(source).toContain('modelDisplayName(session)');
+    expect(source).toContain('endpointNameForProfile(server?.model_endpoints ?? [], session.runtime_profile)');
     expect(styles).toContain('.session-runtime-grid');
     expect(styles).toContain('.session-runtime-control');
     expect(styles).toContain('.session-runtime-reset');
@@ -1260,62 +1262,36 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(styles).toContain('.session-profile');
   });
 
-  it("keeps model configuration and service failures visible with actionable guidance", () => {
-    expect(source).toContain("const [modelServiceIssues, setModelServiceIssues]");
-    expect(source).toContain("modelServiceIssues[activeSession.session_id] ?? sessionModelConfigurationIssue(activeSession)");
-    expect(source).toContain('className="model-config-banner" role="alert"');
-    expect(source).toContain("{activeModelServiceIssue.title}");
-    expect(source).toContain("{activeModelServiceIssue.detail}");
-    expect(source).toContain("Open Runtime settings");
-    expect(source).toContain("setModelServiceIssues((current) => ({ ...current, [sessionId]: issue }))");
-    expect(source).toContain("setModelServiceIssues((current) => ({ ...current, [event.session_id]: issue }))");
+  it("keeps model failures in the task stream without a duplicate workspace banner", () => {
     expect(source).toContain("commandSessionId(completed?.command)");
     expect(source).toContain("isModelSubmissionCommand(completed?.command)");
+    expect(source).toContain("reportUiError(issue.title, issue.detail, sessionId)");
     expect(source).toContain('kind === "model_error"');
-    expect(styles).toContain(".model-config-banner");
+    expect(source).not.toContain('className="model-config-banner" role="alert"');
+    expect(source).not.toContain("activeModelServiceIssue");
+    expect(source).not.toContain("modelServiceIssues");
+    expect(styles).not.toContain(".model-config-banner");
   });
 
-  it("lets an existing session edit, reveal, and clear its API key without snapshot leakage", () => {
-    expect(source).toContain('Session API key');
-    expect(source).toContain('aria-label="API key for current session"');
-    expect(source).toContain('type={showApiKey ? "text" : "password"}');
-    expect(source).toContain('autoComplete="new-password"');
-    expect(source).toContain('session_api_key_update');
-    expect(source).toContain('session_api_key_reveal');
-    expect(source).toContain('event.type === "session_api_key_revealed"');
-    expect(source).toContain('setRevealedSessionApiKeys({});');
-    expect(source).toContain('showApiKey ? <EyeOff size={15}/> : <Eye size={15}/>');
-    expect(source).toContain('setShowApiKey(false);');
-    expect(source).toContain('shouldAutoRevealSessionApiKey({ sessionId, configured: keyConfigured');
-    expect(source).toContain('placeholder={credentialPending && keyConfigured ? "Loading API key…" : "Enter API key"}');
-    expect(source).toContain('<small>{session ? session.display_name : "Create or select a session first"}</small>');
-    expect(source).not.toContain('keyConfigured ? "configured" : "not configured"');
-    expect(source).not.toContain('placeholder={keyConfigured ? "API key configured"');
-    expect(source).toContain('event.type === "session_runtime_updated"');
+  it("manages shared model endpoints without leaking API keys into snapshots", () => {
+    expect(source).toContain('MODEL ENDPOINTS');
+    expect(source).toContain('新增接入点');
+    expect(source).toContain('model_endpoint_upsert');
+    expect(source).toContain('model_endpoint_delete');
+    expect(source).toContain('model_endpoint_apply');
+    expect(source).toContain('model_endpoint_secret_reveal');
+    expect(source).toContain('event.type === "model_endpoint_secret_revealed"');
     expect(source).toContain('api_key_configured');
-    expect(source).not.toContain('previousCredentialPending.current && !credentialPending && revealedApiKey === undefined');
-    expect(source).toContain('const commandId = clientId("credential")');
-    expect(source).toContain('pendingSessionApiKeyCommandsRef.current.set(commandId, { sessionId, timeoutId })');
-    expect(source).toContain('finishPendingSessionApiKeyCommand(');
-    expect(source).toContain('event.status === "committed"');
-    expect(source).toContain('"API key update rejected"');
-    expect(source).toContain('"API key update timed out"');
-    expect(source).toContain('if (!connected || !snapshotReady)');
-    expect(source).toContain('"API key update unavailable"');
-    expect(source).toContain('SESSION_API_KEY_SAVE_TIMEOUT_MS');
-    expect(source).toContain('cancelAllPendingSessionApiKeyCommands(');
-    expect(source).toContain('Your input was kept; reconnect and try again.');
-    expect(source).not.toContain('onApiKeyUpdate("")}>Clear</button>');
-    expect(source).toContain('disabled={!session || credentialPending} readOnly={sessionWorking}');
-    expect(source).toContain('disabled={!session || credentialPending} onClick={toggleApiKey}');
-    expect(source).toContain('API key is read-only while working; you can still reveal and copy it.');
-    expect(source).toContain('Finish or stop the active task before changing credentials.');
-    expect(styles).toContain('.session-credential-settings');
-    expect(styles).toContain('.session-credential-control');
-    expect(protocolSource).toContain('api_key_configured: boolean');
-    expect(protocolSource).toContain('{ type: "session_api_key_update"; session_id: string; api_key: string }');
-    expect(protocolSource).toContain('{ type: "session_api_key_reveal"; session_id: string }');
-    expect(protocolSource).not.toContain('runtime_profile: {\n    api_key: string');
+    expect(source).toContain('type="password"');
+    expect(source).toContain('autoComplete="new-password"');
+    expect(source).toContain('endpointMatchesProfile');
+    expect(styles).toContain('.endpoint-menu');
+    expect(styles).toContain('.endpoint-actions');
+    expect(source).toContain('没有接入点可用');
+    expect(source).toContain('className="endpoint-guide-bubble"');
+    expect(source).toContain('setEndpointEditor("new")');
+    expect(source).toContain("...NO_MODEL_ENDPOINTS_ISSUE");
+    expect(styles).toContain('.endpoint-guide-bubble');
   });
 
   it("dismisses the runtime configuration card on outside click or Escape", () => {
@@ -1780,8 +1756,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain("File upload failed");
     expect(source).toContain("const params = new URLSearchParams({ session_id: activeSession.session_id });");
     expect(source).toContain('if (token) params.set("token", token);');
-    expect(source).toContain("Runtime update failed");
-    expect(source).toContain("Reconnect to Timem Web before applying this Session configuration.");
+    expect(source).toContain("model_endpoint_apply");
+    expect(source).toContain("model_endpoint_delete");
     expect(source).toContain("Decision reply failed");
     expect(source).toContain("Reconnect to Timem Web before replying to this runtime request.");
     expect(source).toContain("Create session failed");
@@ -1852,7 +1828,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).not.toContain("assistantName={activeSession?.display_name");
     expect(source).not.toContain('<span className="eyebrow">SESSION');
     expect(source).not.toContain('activeSession?.display_name ?? "Starting Timem…"');
-    expect(source).toContain('const headerModelLabel = modelDisplayName(activeSession);');
+    expect(source).toContain('const headerModelLabel = endpointNameForProfile(server?.model_endpoints ?? [], activeSession?.runtime_profile) ?? UNCONFIGURED_MODEL_LABEL;');
+    expect(source).not.toContain('?.name ?? modelDisplayName(activeSession)');
     expect(source).toContain('className={`header-model ${showRuntime ? "selected" : ""}`}');
     expect(source).toContain('<span title={headerModelLabel}>{headerModelLabel}</span><ChevronDown');
     expect(source).not.toContain('<Settings size={17}/>');
@@ -1952,7 +1929,7 @@ it("uses an explicit session-created event and session-scoped inline decisions",
   });
 
   it("manages session-scoped MCP servers with accessible and responsive controls", () => {
-    expect(source).toContain('aria-label="Manage MCP servers"');
+    expect(source).toContain('const mcpLabel = `Manage MCP servers · ${connectedMcpCount} connected${failedMcpCount ? ` · ${failedMcpCount} failed` : ""}`;');
     expect(source).toContain('aria-label="MCP servers" tabIndex={-1}');
     expect(source).toContain('<h2><strong className="mcp-session-name">{session?.display_name ?? "Current session"}</strong> \'s Capabilities</h2>');
     expect(source).not.toContain('Capabilities of current session');
@@ -1970,9 +1947,16 @@ it("uses an explicit session-created event and session-scoped inline decisions",
     expect(source).toContain('role="switch" aria-checked={active}');
     expect(source).toContain('const connectionState = !active ? "disabled" : server.state === "connected" ? "connected" : server.state === "error" || !!server.error ? "failed" : "connecting";');
     expect(source).toContain('className={`mcp-session-toggle ${connectionState}`}');
-    expect(source).toContain('className="mcp-port-glyph"');
-    expect(source).toContain('className="mcp-port-node left"');
-    expect(source).toContain('connectionState === "failed" && <X className="mcp-port-failure"');
+    expect(source).toContain('connectionState === "connected" ? `${server.tools.length} tools` : connectionState === "failed" ? "⚠️无法连接"');
+    expect(source).toContain('{active && <div className={`mcp-server-meta ${connectionState}`}');
+    expect(source).not.toContain('<small>{mcpEndpoint(server.config)}</small>');
+    expect(source).not.toContain('function mcpEndpoint(');
+    expect(source).toContain('className={`mcp-server-meta ${connectionState}`}');
+    expect(source).not.toContain('Enabled, connection failed');
+    expect(source).not.toContain('<span>{mcpTransportLabel(server.config.transport)}</span>');
+    expect(source).not.toContain('className="mcp-error"');
+    expect(source).toContain('className="mcp-session-toggle-thumb"');
+    expect(source).not.toContain('className="mcp-port-glyph"');
     expect(source).not.toContain('className="mcp-toggle-label"');
     expect(source).toContain('const pendingMcpKeysRef = useRef<Set<string>>(new Set());');
     expect(source).toContain('!addPendingKey(pendingMcpKeysRef, setPendingMcpKeys, key)');
@@ -1985,9 +1969,28 @@ it("uses an explicit session-created event and session-scoped inline decisions",
     expect(styles).toContain(':root[data-theme="light"] .mcp-panel');
     expect(styles).toContain('.mcp-panel { position: fixed; inset: 58px 8px 8px;');
     expect(styles).toContain('.mcp-button > svg { transform: rotate(90deg); }');
-    expect(styles).toContain('.mcp-port-node { position: absolute; z-index: 2; top: 2px; width: 12px; height: 12px;');
-    expect(styles).toContain('.mcp-session-toggle.connected .mcp-port-node { background: #63b5f2;');
-    expect(styles).toContain('.mcp-session-toggle.failed .mcp-port-link { border-color: #bd6e68; }');
+    expect(styles).toContain('.header-identity { min-width: 0; display: flex; align-items: center; gap: 7px; overflow: visible;');
+    expect(styles).toContain('.mcp-count { position: absolute; z-index: 2;');
+    expect(source).toContain('const connectedMcpCount = activeMcpServers.filter((item) => item.state === "connected").length;');
+    expect(source).toContain('const failedMcpCount = activeMcpServers.filter((item) => item.state !== "connected" && (item.state === "error" || !!item.error)).length;');
+    expect(source).toContain('connectedMcpCount > 0 ? "enabled" : ""');
+    expect(source).toContain('className="mcp-count mcp-count-connected"');
+    expect(source).toContain('className="mcp-count mcp-count-failed"');
+    expect(source.indexOf('ref={mcpButtonRef}')).toBeLessThan(source.indexOf('<div className="header-actions">'));
+    expect(source).not.toContain('className="mcp-enabled-dot"');
+    expect(styles).toContain('.mcp-button.enabled { border-color: #3975a7; background: #174b78; color: #e8f5ff;');
+    expect(styles).toContain('.mcp-button.enabled.selected { border-color: #71afe0; background: #23689f;');
+    expect(styles).toContain('.mcp-count-connected { top: -6px; right: -7px; background: #3487e8; }');
+    expect(styles).toContain('.mcp-count-failed { right: -7px; bottom: -6px; background: #d89b2b; color: #fff; }');
+    expect(styles).toContain('.mcp-panel { position: absolute; z-index: 10; top: 62px; left: 24px;');
+    expect(styles).toContain(':root[data-theme="light"] .mcp-button.enabled { border-color: #7aafd4; background: #dceffc; color: #165b8d;');
+    expect(styles).toContain('.mcp-session-toggle { position: relative; width: 32px; height: 18px;');
+    expect(styles).toContain('.mcp-session-toggle[aria-checked="true"] { border-color: #2563eb; background: #3b82f6; }');
+    expect(styles).toContain('.mcp-session-toggle-thumb { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px;');
+    expect(styles).toContain('.mcp-session-toggle[aria-checked="true"] .mcp-session-toggle-thumb { transform: translateX(14px); background: #fff; }');
+    expect(styles).toContain('.mcp-session-toggle.failed[aria-checked="true"] { border-color: #626d72; background: #50585c; box-shadow: none; }');
+    expect(styles).toContain(':root[data-theme="light"] .mcp-session-toggle { border-color: #aebcc2; background: #cad2d5; }');
+    expect(styles).toContain(':root[data-theme="light"] .mcp-session-toggle.failed[aria-checked="true"] { border-color: #aeb8bc; background: #c7ced1; box-shadow: none; }');
     expect(styles).toContain('grid-template-columns: repeat(3, minmax(0, 1fr))');
   });
 

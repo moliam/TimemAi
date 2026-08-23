@@ -55,3 +55,15 @@ pub(super) fn os_release_value(content: &str, key: &str) -> Option<String> {
         super::non_empty_one_line(&value)
     })
 }
+
+#[allow(dead_code)]
+pub(super) fn process_identity(pid: u32) -> Option<String> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name is parenthesized and may contain spaces or `)`, so split
+    // only after its final closing parenthesis. Linux proc(5) field 22 is the
+    // process start time in clock ticks since boot; after removing pid+comm it
+    // is index 19 in the remaining field list beginning with state (field 3).
+    let tail = stat.rsplit_once(") ")?.1;
+    let start_ticks = tail.split_whitespace().nth(19)?;
+    Some(format!("linux-start-ticks:{start_ticks}"))
+}

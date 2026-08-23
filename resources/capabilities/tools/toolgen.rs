@@ -29,6 +29,7 @@ pub(crate) fn execute_action(core: &mut AgentCore, action: &ParsedAction) -> Act
                 draft_path: draft_path.trim().into(),
             },
             action_name: action.name.clone(),
+            action_call_id: action.call_id.clone(),
             continuation: None,
         });
     }

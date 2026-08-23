@@ -2,6 +2,9 @@ pub mod json_suite;
 pub mod xml_suite;
 
 use serde_json::Value;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::capability::CapabilityRegistry;
 
@@ -171,10 +174,26 @@ impl ResponseProtocolKind {
     }
 }
 
+static INLINE_TOOL_CALL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn generated_inline_tool_call_id() -> String {
+    let seq = INLINE_TOOL_CALL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let mut hasher = DefaultHasher::new();
+    std::process::id().hash(&mut hasher);
+    now.hash(&mut hasher);
+    seq.hash(&mut hasher);
+    format!("{:06x}", hasher.finish() & 0x00ff_ffff)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedAction {
     pub action: String,
     pub name: Option<String>,
+    pub call_id: String,
     pub raw_input: Value,
 }
 impl ParsedAction {
@@ -382,6 +401,7 @@ fn validate_parsed_action(
     Ok(ParsedAction {
         action: name,
         name: None,
+        call_id: generated_inline_tool_call_id(),
         raw_input: input,
     })
 }

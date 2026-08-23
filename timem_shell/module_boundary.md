@@ -143,8 +143,8 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 - Registered tool job lifecycle management. For command-bound registered tools,
   core owns job ids/status/output files and cancel semantics. For `run_bash`,
   core owns the session running-pid set for background jobs and timed-out
-  normal commands, one-time job-exit updates, and running-job snapshots after
-  large context shrink/compact. Shell may display the resulting core topics or
+  normal commands, one-time job-exit updates, PID-reuse-safe process identities, and a request-scoped
+  `STILL RUNNING` table before every model call while commands remain active. Shell may display the resulting core topics or
   action evidence, but must not manage those jobs itself.
 - Long-command process waiting and cancellation. Shell may prompt the user for
   a decision, but core owns the process lifecycle and resulting prompt evidence.

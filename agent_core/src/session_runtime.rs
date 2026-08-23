@@ -32,6 +32,35 @@ struct TurnReminderSchedules {
     turn_id: String,
 }
 
+const PROGRESS_UPDATE_REMINDER_ROUNDS: u32 = 6;
+const PROGRESS_UPDATE_REMINDER: &str = "Has been 6 rounds since last time you updates progress to user (that is, some useful remarks besides tool call).  Pay attention to good user experience, make user well informed.";
+
+#[derive(Default)]
+struct TurnProgressReminder {
+    consecutive_tool_only_rounds: u32,
+    last_emitted_period: u32,
+}
+
+impl TurnProgressReminder {
+    fn observe(&mut self, has_tool_call: bool, has_free_talk: bool) {
+        if has_tool_call && !has_free_talk {
+            self.consecutive_tool_only_rounds = self.consecutive_tool_only_rounds.saturating_add(1);
+            return;
+        }
+        self.consecutive_tool_only_rounds = 0;
+        self.last_emitted_period = 0;
+    }
+
+    fn take_due(&mut self) -> Option<&'static str> {
+        let period = self.consecutive_tool_only_rounds / PROGRESS_UPDATE_REMINDER_ROUNDS;
+        if period == 0 || period <= self.last_emitted_period {
+            return None;
+        }
+        self.last_emitted_period = period;
+        Some(PROGRESS_UPDATE_REMINDER)
+    }
+}
+
 impl TurnReminderSchedules {
     fn new(turn_id: &str, config: &crate::ReminderTipsConfig) -> Self {
         let mut time = Vec::new();
@@ -221,6 +250,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
     core.set_response_protocol(config.response_protocol);
     let turn_id = format!("turn_{}", epoch_millis());
     let mut reminders = TurnReminderSchedules::new(&turn_id, core.reminder_tips_config());
+    let mut progress_reminder = TurnProgressReminder::default();
     if let Some(interval) = focus_reminder_interval {
         reminders.override_first_time_interval(interval);
     }
@@ -282,6 +312,19 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 // before the first model request, even when runtime preparation
                 // has already crossed a time boundary.
                 if rounds > 0 {
+                    if let Some(reminder) = progress_reminder.take_due() {
+                        core.submit_prompt_component(
+                            PromptComponentRole::system(),
+                            "turn_progress_reminder",
+                            reminder,
+                            "turn_runtime",
+                        );
+                        step = CoreStep::NeedModel {
+                            prompt: core.build_next_prompt(),
+                            rounds_remaining: core.remaining_rounds(),
+                        };
+                        continue;
+                    }
                     let active_elapsed = start.elapsed().saturating_sub(user_wait_this_turn);
                     let time_reminders = reminders.take_due_time(active_elapsed);
                     if !time_reminders.is_empty() {
@@ -317,7 +360,8 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     }
                 }
                 rounds += 1;
-                let interaction_request = core.model_interaction_request(prompt.clone());
+                let prompt = core.build_model_request_prompt(prompt);
+                let interaction_request = core.model_interaction_request(prompt);
                 ui.on_model_interaction_request(rounds, &interaction_request);
                 match call_model_with_system_retries(
                     model_client,
@@ -383,7 +427,9 @@ fn run_session_turn_with_model_client_and_reminder_override(
                             }
                         }
                         latest_usage = Some(response.response.usage.clone());
-                        ui.on_model_interaction_response(rounds, &response.response);
+                        if !core.should_suppress_model_response(&response.response) {
+                            ui.on_model_interaction_response(rounds, &response.response);
+                        }
                         let continue_supplements_after_final_answer =
                             ui.continue_supplements_after_final_answer();
                         let mut action_runtime = TurnActionRuntime::new(ui);
@@ -394,6 +440,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
                             &turn_id,
                             &mut action_runtime,
                         );
+                        if let Some((has_tool_call, has_free_talk)) =
+                            action_runtime.take_model_response_progress()
+                        {
+                            progress_reminder.observe(has_tool_call, has_free_talk);
+                        }
                         user_wait_this_turn =
                             user_wait_this_turn.saturating_add(action_runtime.user_wait());
                         if !is_terminal_stop(&step)
@@ -601,6 +652,7 @@ struct TurnActionRuntime<'a> {
     ui: &'a mut dyn TurnUi,
     pending_supplements: Vec<String>,
     user_wait: Duration,
+    model_response_progress: Option<(bool, bool)>,
 }
 
 impl<'a> TurnActionRuntime<'a> {
@@ -609,6 +661,7 @@ impl<'a> TurnActionRuntime<'a> {
             ui,
             pending_supplements: Vec::new(),
             user_wait: Duration::ZERO,
+            model_response_progress: None,
         }
     }
 
@@ -618,6 +671,10 @@ impl<'a> TurnActionRuntime<'a> {
 
     fn user_wait(&self) -> Duration {
         self.user_wait
+    }
+
+    fn take_model_response_progress(&mut self) -> Option<(bool, bool)> {
+        self.model_response_progress.take()
     }
 }
 
@@ -630,7 +687,13 @@ impl ActionRuntime for TurnActionRuntime<'_> {
         self.ui.on_core_topic_events(events);
     }
 
-    fn on_model_response_parsed(&mut self, tool_count: usize) {
+    fn on_model_response_parsed(
+        &mut self,
+        tool_count: usize,
+        has_free_talk: bool,
+        has_tool_call: bool,
+    ) {
+        self.model_response_progress = Some((has_tool_call, has_free_talk));
         self.ui.on_model_response_parsed(tool_count);
     }
 

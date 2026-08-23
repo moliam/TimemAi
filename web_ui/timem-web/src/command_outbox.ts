@@ -20,6 +20,7 @@ const BEST_EFFORT_COMMANDS = new Set<ClientCommand["type"]>([
   "tool_repo_detail",
   "tool_repo_open_terminal",
   "mcp_server_secrets_reveal",
+  "model_endpoint_secret_reveal",
 ]);
 
 const CLIENT_COMMAND_TYPES = new Set<ClientCommand["type"]>([
@@ -27,7 +28,8 @@ const CLIENT_COMMAND_TYPES = new Set<ClientCommand["type"]>([
   "worker_role_create", "worker_role_update", "worker_role_delete",
   "turn_submit", "turn_supplement", "turn_cancel", "attachment_remove", "history_page", "tool_repo_search", "tool_repo_detail",
   "tool_repo_rename", "tool_repo_open_terminal", "runtime_update", "session_runtime_update", "mcp_server_upsert",
-  "mcp_server_delete", "mcp_session_toggle", "mcp_server_reconnect", "mcp_server_secrets_reveal", "mem_switch", "topic_reply",
+  "mcp_server_delete", "mcp_session_toggle", "mcp_server_reconnect", "mcp_server_secrets_reveal",
+  "model_endpoint_upsert", "model_endpoint_delete", "model_endpoint_apply", "model_endpoint_secret_reveal", "mem_switch", "topic_reply",
 ]);
 
 export function reliableStorageScope(origin: string, memSpaceDir: string) {
@@ -48,6 +50,7 @@ export function commandMayPersist(command: ClientCommand) {
   // the in-memory outbox across reconnects, but must never be written to browser storage.
   return command.type !== "session_api_key_update"
     && command.type !== "mcp_server_upsert"
+    && command.type !== "model_endpoint_upsert"
     && !(command.type === "session_create" && Object.keys(command.env ?? {}).length > 0);
 }
 

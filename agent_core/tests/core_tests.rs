@@ -657,7 +657,7 @@ fn extracted_fields_replay_keeps_the_complete_accepted_xml_response() {
 
     let replay_delta = xml_prompt_delta_containing(&prompt, response);
     assert!(replay_delta.contains(response));
-    assert!(!replay_delta.contains(r#"<ASSISTANT id="Session Assistant">"#));
+    assert!(!replay_delta.contains(r#"<ASSISTANT name="Session Assistant">"#));
     assert_eq!(replay_delta.matches("<ASSISTANT>").count(), 1);
     assert_eq!(replay_delta.matches("&lt;ASSISTANT&gt;").count(), 0);
     assert!(prompt.contains(
@@ -1041,7 +1041,7 @@ discard-after"#;
         replay_delta.contains(r#"<self_tool name="inspect runtime parameters" type="params"/>"#)
     );
     assert!(!replay_delta.contains(r#"<self_tool name="inspect runtime paths" type="path"/>"#));
-    assert!(!replay_delta.contains(r#"<ASSISTANT id=""#));
+    assert!(!replay_delta.contains(r#"<ASSISTANT name=""#));
     assert!(!replay_delta.contains("&lt;ASSISTANT&gt;"));
     assert!(!replay_delta.contains("discard-before"));
     assert!(!replay_delta.contains("between-roots"));
@@ -1080,7 +1080,7 @@ fn long_validated_xml_response_is_reassembled_without_slice_separators() {
     assert!(replay_delta.contains(&response));
     assert_eq!(replay_delta.matches("<ASSISTANT>").count(), 1);
     assert_eq!(replay_delta.matches("</ASSISTANT>").count(), 1);
-    assert!(!replay_delta.contains(r#"<ASSISTANT id=""#));
+    assert!(!replay_delta.contains(r#"<ASSISTANT name=""#));
     assert!(!replay_delta.contains("&lt;ASSISTANT&gt;"));
 }
 
@@ -1110,7 +1110,7 @@ fn malformed_xml_repair_output_remains_wrapped_and_escaped() {
 
     let repair_delta = xml_prompt_delta_containing(&prompt, "malformed");
     assert!(repair_delta.contains("<ASSISTANT>"));
-    assert!(!repair_delta.contains("<ASSISTANT id="));
+    assert!(!repair_delta.contains("<ASSISTANT name="));
     assert!(repair_delta.contains("&lt;ASSISTANT&gt;"));
     assert!(repair_delta.contains("&lt;/prompt_delta&gt;"));
     assert!(repair_delta.contains("&lt;RUNTIME&gt;"));
@@ -1534,6 +1534,19 @@ fn runtime_host_configuration_sync_is_core_owned() {
     };
     assert!(prompt.contains("max_llm_input_tokens=3000"));
 
+    let compact_ids = field_values(&prompt, "delta_id");
+    let compact_response = format!(
+        r#"{{"context_compact":{{"discard":{},"summary":"retain runtime configuration test state"}}}}"#,
+        serde_json::to_string(&compact_ids).unwrap()
+    );
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(compact_response),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    assert!(matches!(step, CoreStep::NeedModel { .. }));
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(r#"{"working_still_action":[{"run_bash":{"cmd":"printf configured"}}]}"#),
@@ -1610,7 +1623,7 @@ fn one_runtime_increment_can_contain_multiple_slices_in_one_delta() {
     assert_eq!(delta_ids, vec!["pd_1", "pd_2"]);
     assert_eq!(prompt.matches("<prompt_delta ").count(), 2);
     assert_eq!(prompt.matches("</prompt_delta>").count(), 2);
-    assert!(!prompt.contains(r#"<ASSISTANT id="TIMEM_ASSISTANT">"#));
+    assert!(!prompt.contains(r#"<ASSISTANT name="TIMEM_ASSISTANT">"#));
     assert!(prompt.contains("先分析"));
     assert!(prompt.contains("<ASSISTANT><free_talk>先分析</free_talk><finish_confirm>"));
     assert!(prompt.contains("</finish_confirm><final_answer>结论</final_answer></ASSISTANT>"));
@@ -5832,7 +5845,7 @@ fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
     };
     assert!(prompt.contains("now keeps running in background"));
     assert!(prompt.contains("pid="));
-    assert!(!prompt.contains("RUNNING JOB LIST:"));
+    assert!(!prompt.contains("### STILL RUNNING"));
 
     std::thread::sleep(std::time::Duration::from_millis(250));
     let step = core.apply_model_response(LlmResponse {
@@ -5857,7 +5870,7 @@ fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
 }
 
 #[test]
-fn running_job_list_is_injected_when_discard_references_running_job_delta() {
+fn still_running_table_survives_discard_of_the_original_action_delta() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5885,7 +5898,7 @@ fn running_job_list_is_injected_when_discard_references_running_job_delta() {
         prompt.contains("now keeps running in background"),
         "{prompt}"
     );
-    assert!(!prompt.contains("RUNNING JOB LIST:"), "{prompt}");
+    assert!(!prompt.contains("### STILL RUNNING"), "{prompt}");
     let running_delta_id = field_values(&prompt, "delta_id")
         .into_iter()
         .last()
@@ -5912,6 +5925,7 @@ fn running_job_list_is_injected_when_discard_references_running_job_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
+    let prompt = core.build_model_request_prompt(&prompt);
     assert!(
         prompt.contains("context compacted successfully."),
         "{prompt}"
@@ -5920,9 +5934,14 @@ fn running_job_list_is_injected_when_discard_references_running_job_delta() {
         !prompt.contains("Action result: context_compact"),
         "{prompt}"
     );
-    assert!(prompt.contains("RUNNING JOB LIST:"), "{prompt}");
-    assert!(prompt.contains("background job"), "{prompt}");
-    assert!(prompt.contains("cmd=sleep 5; printf late"), "{prompt}");
+    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(prompt.contains("created by tool_call id"), "{prompt}");
+    assert!(
+        prompt
+            .lines()
+            .any(|line| line.contains("| `") && line.contains("` |")),
+        "{prompt}"
+    );
 
     #[cfg(unix)]
     {
@@ -5936,7 +5955,7 @@ fn running_job_list_is_injected_when_discard_references_running_job_delta() {
 }
 
 #[test]
-fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
+fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_delta() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5985,6 +6004,7 @@ fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
+    let prompt = core.build_model_request_prompt(&prompt);
     assert!(
         prompt.contains("context compacted successfully."),
         "{prompt}"
@@ -5993,7 +6013,7 @@ fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
         !prompt.contains("Action result: context_compact"),
         "{prompt}"
     );
-    assert!(!prompt.contains("RUNNING JOB LIST:"), "{prompt}");
+    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
 
     #[cfg(unix)]
     {
@@ -6007,7 +6027,7 @@ fn running_job_list_is_not_injected_when_discard_refs_unrelated_delta() {
 }
 
 #[test]
-fn running_job_list_is_injected_when_offload_references_running_job_delta() {
+fn still_running_table_survives_offload_of_the_original_action_delta() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -6056,12 +6076,19 @@ fn running_job_list_is_injected_when_offload_references_running_job_delta() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(!prompt.contains("scratch_id:"), "{prompt}");
+    let prompt = core.build_model_request_prompt(&prompt);
     assert!(
         prompt.contains("context compacted successfully."),
         "{prompt}"
     );
-    assert!(prompt.contains("RUNNING JOB LIST:"), "{prompt}");
-    assert!(prompt.contains("cmd=sleep 5; printf late"), "{prompt}");
+    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(prompt.contains("created by tool_call id"), "{prompt}");
+    assert!(
+        prompt
+            .lines()
+            .any(|line| line.contains("| `") && line.contains("` |")),
+        "{prompt}"
+    );
 
     #[cfg(unix)]
     {
@@ -6075,7 +6102,7 @@ fn running_job_list_is_injected_when_offload_references_running_job_delta() {
 }
 
 #[test]
-fn running_job_list_is_injected_when_compact_references_running_job_delta() {
+fn still_running_table_survives_xml_style_compaction_of_the_original_action_delta() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -6126,6 +6153,7 @@ fn running_job_list_is_injected_when_compact_references_running_job_delta() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
+    let prompt = core.build_model_request_prompt(&prompt);
     assert!(
         prompt.contains("context compacted successfully."),
         "{prompt}"
@@ -6134,8 +6162,14 @@ fn running_job_list_is_injected_when_compact_references_running_job_delta() {
         !prompt.contains("Action result: context_compact"),
         "{prompt}"
     );
-    assert!(prompt.contains("RUNNING JOB LIST:"), "{prompt}");
-    assert!(prompt.contains("cmd=sleep 5; printf late"), "{prompt}");
+    assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert!(prompt.contains("created by tool_call id"), "{prompt}");
+    assert!(
+        prompt
+            .lines()
+            .any(|line| line.contains("| `") && line.contains("` |")),
+        "{prompt}"
+    );
 
     #[cfg(unix)]
     {
@@ -7276,7 +7310,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     let assistant = example
         .find("<ASSISTANT>")
         .expect("ASSISTANT entry should be in delta");
-    assert!(!example.contains("<ASSISTANT id="));
+    assert!(!example.contains("<ASSISTANT name="));
     let runtime = example
         .find("<RUNTIME>")
         .expect("RUNTIME entry should be in delta");

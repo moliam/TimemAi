@@ -2279,6 +2279,7 @@ fn config_field_row_kind(field: ConfigField) -> timem_shell::RuntimeConfigRowKin
     match field {
         RuntimeConfigField::Model => timem_shell::RuntimeConfigRowKind::Model,
         RuntimeConfigField::ApiProtocol => timem_shell::RuntimeConfigRowKind::ApiProtocol,
+        RuntimeConfigField::ResponseProtocol => timem_shell::RuntimeConfigRowKind::ResponseProtocol,
         RuntimeConfigField::BaseUrl => timem_shell::RuntimeConfigRowKind::BaseUrl,
         RuntimeConfigField::MaxInput => timem_shell::RuntimeConfigRowKind::MaxLlmInput,
         RuntimeConfigField::MaxOutput => timem_shell::RuntimeConfigRowKind::MaxLlmOutput,
@@ -3642,6 +3643,7 @@ fn config_row_description(kind: timem_shell::RuntimeConfigRowKind) -> &'static s
     match kind {
         timem_shell::RuntimeConfigRowKind::Model => "模型名称",
         timem_shell::RuntimeConfigRowKind::ApiProtocol => "API 提交网络包格式",
+        timem_shell::RuntimeConfigRowKind::ResponseProtocol => "模型响应协议格式",
         timem_shell::RuntimeConfigRowKind::BaseUrl => "模型服务 base URL",
         timem_shell::RuntimeConfigRowKind::MaxLlmInput => "最大输入 token",
         timem_shell::RuntimeConfigRowKind::MaxLlmOutput => "最大输出 token",

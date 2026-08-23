@@ -1,25 +1,26 @@
 use super::{
     active_elapsed_secs, apply_config_value, boxed_config_table_at_width,
-    cache_shell_session_runtime, cli_help_text, config_field_value, consume_turn_cancel_request,
-    display_width, load_or_create_shell_session, merge_queued_input, model_service_config_from_env,
-    new_shell_session, next_paste_recovery_choice, normalize_newlines, paste_marker_ranges,
-    paste_marker_segments, paste_recovery_return_edit_clear_lines,
-    paste_recovery_summary_from_markers, pasted_line_count, prev_paste_recovery_choice,
-    push_thinking_queue_bytes, queued_input_drain_from_bytes, queued_text_to_questions,
-    random_spinner_tick, raw_multiline_paste_display, raw_multiline_paste_needs_confirmation,
-    read_approval_key, read_approval_key_until, read_menu_key, read_paste_recovery_key,
-    reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
-    render_approval_choices, render_config_apply_report, render_config_menu,
-    render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
-    render_paste_recovery_choices, render_paste_recovery_prompt, render_queued_user_line,
-    render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
-    render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
-    render_stale_context_prompt, render_startup_banner, render_startup_status_block,
-    render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
-    render_work_instructions_load_choices, render_work_instructions_load_prompt,
-    render_workspace_command_report, render_workspace_delete_choices, render_workspace_menu,
-    rendered_terminal_rows, resolve_paste_markers, resolve_work_instruction_context_for_turn,
-    runtime_help_text, sanitize_user_input, shell_session_effective_env, shell_session_env_values,
+    cache_shell_session_runtime, cli_help_text, config_field_row_kind, config_field_value,
+    consume_turn_cancel_request, display_width, load_or_create_shell_session, merge_queued_input,
+    model_service_config_from_env, new_shell_session, next_paste_recovery_choice,
+    normalize_newlines, paste_marker_ranges, paste_marker_segments,
+    paste_recovery_return_edit_clear_lines, paste_recovery_summary_from_markers, pasted_line_count,
+    prev_paste_recovery_choice, push_thinking_queue_bytes, queued_input_drain_from_bytes,
+    queued_text_to_questions, random_spinner_tick, raw_multiline_paste_display,
+    raw_multiline_paste_needs_confirmation, read_approval_key, read_approval_key_until,
+    read_menu_key, read_paste_recovery_key, reedline_keyboard_protocol_enter_sequence,
+    reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_apply_report,
+    render_config_menu, render_expand_output_choices, render_expand_output_prompt,
+    render_note_box_at_width, render_paste_recovery_choices, render_paste_recovery_prompt,
+    render_queued_user_line, render_raw_multiline_paste_submit_choices,
+    render_raw_multiline_paste_submit_prompt, render_round_limit_choices,
+    render_round_limit_prompt, render_stale_context_choices, render_stale_context_prompt,
+    render_startup_banner, render_startup_status_block, render_submitted_user_line_rewrite,
+    render_user_approval_prompt, render_user_input_prompt, render_work_instructions_load_choices,
+    render_work_instructions_load_prompt, render_workspace_command_report,
+    render_workspace_delete_choices, render_workspace_menu, rendered_terminal_rows,
+    resolve_paste_markers, resolve_work_instruction_context_for_turn, runtime_help_text,
+    sanitize_user_input, shell_session_effective_env, shell_session_env_values,
     shell_session_profile, shell_session_work_dir, startup_control_hint, strip_ansi,
     strip_paste_markers, submitted_input_rows, take_shell_resume_notice,
     thinking_queue_terminal_mode, timem_reedline_keybindings, utf8_expected_len,
@@ -561,6 +562,50 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
     assert_eq!(config.max_llm_input_tokens, 120_000);
     assert_eq!(bash, BashApprovalMode::Approve);
     assert_eq!(work, WorkInstructionLoadMode::Off);
+}
+
+#[test]
+fn config_response_protocol_update_is_supported_by_terminal_host() {
+    let mut config = ModelServiceConfig {
+        interaction: Default::default(),
+        api_protocol: ApiProtocol::OpenAiCompatible,
+        api_key: "secret".to_string(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+        timeout_secs: 120,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        response_protocol: ResponseProtocolKind::Xml,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+    };
+    let mut core = AgentCore::new(
+        "STATIC",
+        CoreProfile {
+            model: config.model.clone(),
+        },
+        std::env::temp_dir().join(format!(
+            "timem_config_response_protocol_test_{}",
+            epoch_millis()
+        )),
+    );
+    let mut bash = BashApprovalMode::Ask;
+    let mut work = WorkInstructionLoadMode::Silent;
+
+    apply_config_value(
+        &mut config,
+        &mut core,
+        &mut bash,
+        &mut work,
+        ConfigField::ResponseProtocol,
+        "json",
+    )
+    .unwrap();
+
+    assert_eq!(config.response_protocol, ResponseProtocolKind::Json);
+    assert_eq!(
+        config_field_row_kind(ConfigField::ResponseProtocol),
+        timem_shell::RuntimeConfigRowKind::ResponseProtocol
+    );
 }
 
 #[test]

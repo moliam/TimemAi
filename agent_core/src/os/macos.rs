@@ -37,3 +37,28 @@ pub(super) fn terminal_command(path: &Path) -> (OsString, Vec<OsString>) {
 pub(super) fn graphical_session_available() -> bool {
     true
 }
+
+pub(super) fn process_identity(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if read != size {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    Some(format!(
+        "macos-start-time:{}:{}",
+        info.pbi_start_tvsec, info.pbi_start_tvusec
+    ))
+}

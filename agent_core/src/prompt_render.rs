@@ -11,6 +11,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 pub(crate) const RESPONSE_TRAILER: &str =
     "Please continue the work and respond as protocol requires in user's language:";
 pub(crate) const NATIVE_RESPONSE_TRAILER: &str = "Continue the work in the user's language. Call API tools when more evidence or actions are needed; otherwise give the final user-facing answer:";
+pub(crate) const CONTEXT_COMPACT_REQUIRED_TRAILER: &str =
+    "Context too long, please compress first:";
 const NATIVE_PROTOCOL_SECTION: &str = "## Native Tool Calling\n\nCapabilities are provided through the model API. Call them through the API tool-call channel. You may request independent calls together. Text accompanying calls is a user-visible progress note. A response with no tool calls is the final user-facing answer. `context_compact` is an ordinary runtime capability and is exclusive with other calls in the same response.";
 const NATIVE_RESPONSE_MODE_INSTRUCTION: &str = "Use the API's native tool-call channel for runtime capabilities. Ordinary response text is user-visible; text without tool calls finishes the loop.";
 const INLINE_RESPONSE_MODE_INSTRUCTION: &str =
@@ -32,7 +34,11 @@ pub(crate) fn formatted_response_trailer(
 
 pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, Option<String>) {
     let trimmed = rendered_prompt.trim_end();
-    for trailer in [RESPONSE_TRAILER, NATIVE_RESPONSE_TRAILER] {
+    for trailer in [
+        RESPONSE_TRAILER,
+        NATIVE_RESPONSE_TRAILER,
+        CONTEXT_COMPACT_REQUIRED_TRAILER,
+    ] {
         let marker = format!("\n\n{trailer}");
         if let Some(trailer_start) = trimmed.strip_suffix(&marker).map(str::len) {
             let prefix = trimmed[..trailer_start].trim_end();

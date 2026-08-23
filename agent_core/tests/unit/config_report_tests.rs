@@ -42,11 +42,11 @@ fn config_report_is_ui_neutral_and_groups_effective_values() {
         RuntimeConfigReportItem::Section(RuntimeConfigSection::Model)
     ));
     assert!(matches!(
-        report.items[4],
+        report.items[5],
         RuntimeConfigReportItem::Section(RuntimeConfigSection::Runtime)
     ));
     assert!(matches!(
-        report.items[9],
+        report.items[10],
         RuntimeConfigReportItem::Section(RuntimeConfigSection::Data)
     ));
     assert!(report.items.iter().any(|item| matches!(
@@ -63,6 +63,13 @@ fn config_report_is_ui_neutral_and_groups_effective_values() {
         item,
         RuntimeConfigReportItem::Row(row)
             if row.key == "TIMEM_WORK_INSTRUCTIONS" && row.value == "silent"
+    )));
+    assert!(report.items.iter().any(|item| matches!(
+        item,
+        RuntimeConfigReportItem::Row(row)
+            if row.kind == RuntimeConfigRowKind::ResponseProtocol
+                && row.key == "TIMEM_RESPONSE_PROTOCOL"
+                && row.value == "json"
     )));
     assert!(report.items.iter().any(|item| matches!(
         item,

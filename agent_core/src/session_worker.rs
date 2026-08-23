@@ -1764,6 +1764,11 @@ fn apply_worker_runtime_update(
                     core.set_self_tool_runtime_param(field.label(), config.api_protocol.label());
                 }
             }
+            RuntimeConfigField::ResponseProtocol => {
+                config.response_protocol = crate::ResponseProtocolKind::from_name(&value);
+                core.set_response_protocol(config.response_protocol);
+                core.set_self_tool_runtime_param(field.label(), config.response_protocol.name());
+            }
             RuntimeConfigField::BaseUrl => {
                 config.base_url = value;
                 core.set_self_tool_runtime_param(field.label(), config.base_url.clone());

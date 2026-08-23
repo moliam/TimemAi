@@ -38,6 +38,10 @@ pub struct ShellJobRecord {
     pub turn_id: String,
     pub pid: u32,
     #[serde(default)]
+    pub process_identity: Option<String>,
+    #[serde(default)]
+    pub tool_call_id: String,
+    #[serde(default)]
     pub owner_id: Option<String>,
     pub command: String,
     #[serde(default)]
@@ -57,6 +61,7 @@ fn default_shell_job_kind() -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningShellJob {
     pub pid: u32,
+    pub tool_call_id: String,
     pub kind: String,
     pub command: String,
     pub cwd: String,
@@ -68,6 +73,7 @@ pub struct RunningShellJob {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellJobExitUpdate {
     pub pid: u32,
+    pub tool_call_id: String,
     pub kind: String,
     pub command: String,
     pub cwd: String,
@@ -257,6 +263,13 @@ impl FileShellJobStore {
         self.long_running_prompt_after = duration.max(Duration::from_millis(1));
     }
 
+    #[cfg(test)]
+    pub(crate) fn forget_watched_job_for_tests(&self, pid: u32) {
+        if let Ok(mut jobs) = self.watcher.state.jobs.lock() {
+            jobs.remove(&pid);
+        }
+    }
+
     pub fn spawn_background(
         &self,
         command: &str,
@@ -264,8 +277,15 @@ impl FileShellJobStore {
         session_id: &str,
         turn_id: &str,
     ) -> String {
-        self.spawn_background_outcome(command, cwd, session_id, turn_id, false)
-            .text
+        self.spawn_background_outcome(
+            command,
+            cwd,
+            session_id,
+            turn_id,
+            "unknown_tool_call",
+            false,
+        )
+        .text
     }
 
     pub(crate) fn spawn_background_outcome(
@@ -274,6 +294,7 @@ impl FileShellJobStore {
         cwd: &Path,
         session_id: &str,
         turn_id: &str,
+        tool_call_id: &str,
         tail_out: bool,
     ) -> ActionOutcome {
         let clean = command.trim();
@@ -286,18 +307,25 @@ impl FileShellJobStore {
                 reason,
             );
         }
-        let record =
-            match self.spawn_record(clean, cwd, "background", session_id, turn_id, tail_out) {
-                Ok(record) => record,
-                Err(_) => {
-                    let reason = "The background command could not be started by the local shell.";
-                    return bash_finished_error_outcome(
-                        bash_action_not_executed(Some(clean), reason),
-                        "SpawnFailed",
-                        reason,
-                    );
-                }
-            };
+        let record = match self.spawn_record(
+            clean,
+            cwd,
+            "background",
+            session_id,
+            turn_id,
+            tool_call_id,
+            tail_out,
+        ) {
+            Ok(record) => record,
+            Err(_) => {
+                let reason = "The background command could not be started by the local shell.";
+                return bash_finished_error_outcome(
+                    bash_action_not_executed(Some(clean), reason),
+                    "SpawnFailed",
+                    reason,
+                );
+            }
+        };
         let _ = self.append(&record);
         ActionOutcome::background_running(format!(
             "Action result: run_bash\npid={}, now keeps running in background",
@@ -315,6 +343,7 @@ impl FileShellJobStore {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_record(
         &self,
         clean: &str,
@@ -322,6 +351,7 @@ impl FileShellJobStore {
         kind: &str,
         session_id: &str,
         turn_id: &str,
+        tool_call_id: &str,
         tail_out: bool,
     ) -> std::io::Result<ShellJobRecord> {
         fs::create_dir_all(&self.dir)?;
@@ -365,6 +395,8 @@ impl FileShellJobStore {
             session_id: session_id.trim().to_string(),
             turn_id: turn_id.trim().to_string(),
             pid,
+            process_identity: crate::os::process_identity(pid),
+            tool_call_id: tool_call_id.trim().to_string(),
             owner_id: Some(crate::runtime_process_owner_id().to_string()),
             command: clean.to_string(),
             cwd: cwd.to_string_lossy().to_string(),
@@ -385,7 +417,14 @@ impl FileShellJobStore {
         runtime: &mut dyn ActionRuntime,
     ) -> String {
         self.run_with_timeout_outcome(
-            command, cwd, timeout_ms, session_id, turn_id, false, runtime,
+            command,
+            cwd,
+            timeout_ms,
+            session_id,
+            turn_id,
+            "unknown_tool_call",
+            false,
+            runtime,
         )
         .text
     }
@@ -398,11 +437,19 @@ impl FileShellJobStore {
         timeout_ms: i64,
         session_id: &str,
         turn_id: &str,
+        tool_call_id: &str,
         tail_out: bool,
         runtime: &mut dyn ActionRuntime,
     ) -> ActionOutcome {
         self.run_with_timeout_structured(
-            command, cwd, timeout_ms, session_id, turn_id, tail_out, runtime,
+            command,
+            cwd,
+            timeout_ms,
+            session_id,
+            turn_id,
+            tool_call_id,
+            tail_out,
+            runtime,
         )
         .to_action_outcome("run_bash")
     }
@@ -415,6 +462,7 @@ impl FileShellJobStore {
         timeout_ms: i64,
         session_id: &str,
         turn_id: &str,
+        tool_call_id: &str,
         tail_out: bool,
         runtime: &mut dyn ActionRuntime,
     ) -> BashCommandOutput {
@@ -422,8 +470,15 @@ impl FileShellJobStore {
         if timeout_ms <= 0 {
             return bash_error(clean, "invalid_timeout");
         }
-        let Ok(record) = self.spawn_record(clean, cwd, "timeout", session_id, turn_id, tail_out)
-        else {
+        let Ok(record) = self.spawn_record(
+            clean,
+            cwd,
+            "timeout",
+            session_id,
+            turn_id,
+            tool_call_id,
+            tail_out,
+        ) else {
             return bash_error(clean, "command_failed");
         };
         let started = Instant::now();
@@ -634,6 +689,7 @@ impl FileShellJobStore {
             }
             return ShellJobRefresh::Running(RunningShellJob {
                 pid: record.pid,
+                tool_call_id: record.tool_call_id.clone(),
                 kind: record.kind,
                 command: record.command,
                 cwd: record.cwd,
@@ -646,8 +702,16 @@ impl FileShellJobStore {
             write_status_if_empty(Path::new(&record.status_file), "exited");
             return self.exit_update_once_unlocked(record);
         }
+        let identity_matches = record.process_identity.as_deref().is_some_and(|expected| {
+            crate::os::process_identity(record.pid).as_deref() == Some(expected)
+        });
+        if !identity_matches {
+            write_status_if_empty(Path::new(&record.status_file), "pid_identity_changed");
+            return self.exit_update_once_unlocked(record);
+        }
         ShellJobRefresh::Running(RunningShellJob {
             pid: record.pid,
+            tool_call_id: record.tool_call_id.clone(),
             kind: record.kind,
             command: record.command,
             cwd: record.cwd,
@@ -671,6 +735,7 @@ impl FileShellJobStore {
         let output = normalized_shell_output(&combined_shell_output(&stdout, &stderr));
         ShellJobRefresh::Exited(ShellJobExitUpdate {
             pid: record.pid,
+            tool_call_id: record.tool_call_id,
             kind: record.kind,
             command: record.command,
             cwd: record.cwd,
@@ -1003,6 +1068,7 @@ pub(crate) fn execute_run_bash_action(
     let turn_id = core.current_action_turn_id();
     let cwd = core.current_prompt_cwd().to_path_buf();
     let tail_out = action.input_bool("tail_out");
+    let tool_call_id = action.call_id.as_str();
     execute_run_bash_with_tail(
         &command_to_run,
         &cwd,
@@ -1014,6 +1080,7 @@ pub(crate) fn execute_run_bash_action(
         &core.shell_jobs,
         &session_id,
         &turn_id,
+        tool_call_id,
         is_regular_command,
         tail_out,
         runtime,
@@ -1047,6 +1114,7 @@ pub(crate) fn execute_run_bash(
         shell_jobs,
         session_id,
         turn_id,
+        "unknown_tool_call",
         is_regular_command,
         false,
         runtime,
@@ -1065,6 +1133,7 @@ pub(crate) fn execute_run_bash_with_tail(
     shell_jobs: &FileShellJobStore,
     session_id: &str,
     turn_id: &str,
+    tool_call_id: &str,
     is_regular_command: bool,
     tail_out: bool,
     runtime: &mut dyn ActionRuntime,
@@ -1153,10 +1222,12 @@ pub(crate) fn execute_run_bash_with_tail(
                 once_timeout_ms,
                 session_id: session_id.to_string(),
                 turn_id: turn_id.to_string(),
+                tool_call_id: tool_call_id.to_string(),
                 cwd: cwd.to_path_buf(),
                 tail_out,
             },
             action_name: None,
+            action_call_id: tool_call_id.to_string(),
             continuation: None,
         });
     }
@@ -1166,6 +1237,7 @@ pub(crate) fn execute_run_bash_with_tail(
             cwd,
             session_id,
             turn_id,
+            tool_call_id,
             tail_out,
         ));
     }
@@ -1186,6 +1258,7 @@ pub(crate) fn execute_run_bash_with_tail(
         timeout_ms,
         session_id,
         turn_id,
+        tool_call_id,
         tail_out,
         runtime,
     ))
@@ -1216,6 +1289,7 @@ pub(crate) fn execute_approved_bash(
         once_timeout_ms,
         session_id,
         turn_id,
+        "unknown_tool_call",
         is_regular_command,
         false,
         request,
@@ -1234,6 +1308,7 @@ pub(crate) fn execute_approved_bash_with_tail(
     once_timeout_ms: u64,
     session_id: &str,
     turn_id: &str,
+    tool_call_id: &str,
     _is_regular_command: bool,
     tail_out: bool,
     request: &ApprovalRequest,
@@ -1255,7 +1330,7 @@ pub(crate) fn execute_approved_bash_with_tail(
         return outcome;
     }
     let mut outcome = if background {
-        shell_jobs.spawn_background_outcome(clean, cwd, session_id, turn_id, tail_out)
+        shell_jobs.spawn_background_outcome(clean, cwd, session_id, turn_id, tool_call_id, tail_out)
     } else if let Some(interval_ms) = interval_ms {
         execute_polling_bash_outcome_with_tail(
             clean,
@@ -1268,7 +1343,14 @@ pub(crate) fn execute_approved_bash_with_tail(
         )
     } else {
         shell_jobs.run_with_timeout_outcome(
-            clean, cwd, timeout_ms, session_id, turn_id, tail_out, runtime,
+            clean,
+            cwd,
+            timeout_ms,
+            session_id,
+            turn_id,
+            tool_call_id,
+            tail_out,
+            runtime,
         )
     };
     outcome.text.push_str(&format!(

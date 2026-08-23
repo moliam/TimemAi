@@ -8,12 +8,16 @@ export type ModelServiceIssue = {
   detail: string;
 };
 
+export const NO_MODEL_ENDPOINTS_ISSUE: ModelServiceIssue = {
+  title: "没有接入点可用",
+  detail: "请先新增并配置一个模型接入点，再发送消息。",
+};
+
 export function modelDisplayName(
   session: Pick<Session, "runtime_profile"> | undefined,
 ): string {
   const profile = session?.runtime_profile;
-  if (!profile?.api_key_configured) return UNCONFIGURED_MODEL_LABEL;
-  return profile.model.trim() || UNCONFIGURED_MODEL_LABEL;
+  return profile?.model.trim() || UNCONFIGURED_MODEL_LABEL;
 }
 
 
@@ -24,13 +28,7 @@ export function sessionModelConfigurationIssue(
   if (!profile || !profile.model.trim()) {
     return {
       title: "Model not configured",
-      detail: "Open Runtime settings, configure a model and Base URL, then save a Session API key before sending a message.",
-    };
-  }
-  if (!profile.api_key_configured) {
-    return {
-      title: "API key required",
-      detail: "Open Runtime settings, enter the Session API key, and save it before sending a message.",
+      detail: "Open Runtime settings and configure a model and Base URL before sending a message.",
     };
   }
   return null;
@@ -56,8 +54,8 @@ export function modelServiceIssue(rawError: unknown): ModelServiceIssue {
     || lower.includes("api key required")
   ) {
     return {
-      title: "API key required",
-      detail: "Open Runtime settings, enter the Session API key, and save it before sending another message.",
+      title: "Endpoint authentication not configured",
+      detail: "This endpoint has no API key. If the target service requires authentication, edit the endpoint and add one; otherwise verify the service response.",
     };
   }
 

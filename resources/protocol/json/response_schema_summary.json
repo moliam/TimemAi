@@ -7,7 +7,7 @@
     "working_still_action?": "object or array; action section for work that still needs tool execution. The JSON content may be a single action object, a direct array of action objects, or an outer workflow array containing inner arrays and single action objects. context_compact is an exclusive action: when used, it must be the only action in the response."
   },
   "action_object_spec": {
-    "shape": "object with exactly one key. The key is the tool name exactly as listed in the Available tool capabilities catalog; the value is the tool parameter object. Example: {\"memmgr\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%<search text>%\"],\"limit\":5}}. Do not use action/args fields."
+    "shape": "object with exactly one key. The key is the tool name exactly as listed in the Available tool capabilities catalog; the value is the tool parameter object. Example: {\"memmgr\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%<search text>%\"],\"limit\":5}}. Do not use action/args fields. Inline JSON has no provider-native tool call id, so runtime assigns a unique six-character hash tool_call id to every parsed action and uses it in results and still-running command reminders."
   },
   "action_group_spec": {
     "workflow": "Use arrays only. A direct array of action objects is one parallel group. An outer array may contain inner arrays and single action objects; entries execute in array order, inner arrays execute in parallel."
