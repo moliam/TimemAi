@@ -21,6 +21,7 @@ fn explicit_config_root_has_priority() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn macos_policy_uses_application_support_and_native_open() {
     assert_eq!(
@@ -38,6 +39,7 @@ fn macos_policy_uses_application_support_and_native_open() {
     assert_eq!(args[1], "Terminal");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn linux_policy_uses_xdg_paths_and_parses_os_release() {
     assert_eq!(
