@@ -2884,12 +2884,8 @@ fn handle_command(
     handle_command_with_id(state, port, None, command)
 }
 
-fn assistant_speaker_name_for_session(display_name: &str) -> String {
-    let normalized = display_name
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("ASSISTANT_of_{normalized}")
+fn assistant_speaker_name() -> String {
+    "ASSISTANT".to_string()
 }
 
 fn handle_command_with_id(
@@ -2941,7 +2937,7 @@ fn handle_command_with_id(
                         .collect::<Vec<_>>(),
                 )
             };
-            let assistant_speaker_name = assistant_speaker_name_for_session(&display_name);
+            let assistant_speaker_name = assistant_speaker_name();
             for (worker_id, worker_display_name) in workers {
                 let handle = session_worker_handle(state, &session_id, Some(&worker_id))?;
                 let updated_display_name = if worker_id == primary_worker_id {
@@ -5259,7 +5255,7 @@ fn attach_worker_to_session_context(
     parent_worker_id: Option<String>,
     primary: bool,
 ) -> Result<String, String> {
-    let (runtime, current_dir, mcp_server_ids, session_display_name) = {
+    let (runtime, current_dir, mcp_server_ids) = {
         let sessions = state
             .sessions
             .lock()
@@ -5288,7 +5284,6 @@ fn attach_worker_to_session_context(
             session.runtime.clone(),
             PathBuf::from(&context.current_dir),
             session.mcp_server_ids.clone(),
-            session.display_name.clone(),
         )
     };
 
@@ -5347,7 +5342,7 @@ fn attach_worker_to_session_context(
             context_id.to_string(),
             display_name,
             parent_worker_id,
-            Some(assistant_speaker_name_for_session(&session_display_name)),
+            Some(assistant_speaker_name()),
         )?;
     let identity = state
         .manager
