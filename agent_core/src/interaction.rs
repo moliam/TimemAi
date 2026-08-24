@@ -113,6 +113,9 @@ pub struct NativeToolResult {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NativeExchange {
+    /// Prompt delta that was open when this provider-native exchange was created.
+    /// The exchange is projected immediately after that delta in model input order.
+    pub delta_id: String,
     pub assistant_text: String,
     pub calls: Vec<NativeToolCall>,
     pub results: Vec<NativeToolResult>,

@@ -176,8 +176,12 @@ pub fn stable_text_fingerprint(text: &str) -> String {
 
 fn prompt_delta_segment_starts(text: &str) -> Vec<usize> {
     let mut starts = Vec::new();
-    for boundaries in KNOWN_PROMPT_BOUNDARIES {
-        let marker = boundaries.delta_start_marker();
+    let mut markers = KNOWN_PROMPT_BOUNDARIES
+        .iter()
+        .map(|boundaries| boundaries.delta_start_marker())
+        .collect::<Vec<_>>();
+    markers.push("[BEGIN DELTA]");
+    for marker in markers {
         if text.starts_with(marker) {
             starts.push(0);
         }

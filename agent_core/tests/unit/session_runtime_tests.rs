@@ -91,8 +91,20 @@ fn prompt_field_values(prompt: &str, field: &str) -> Vec<String> {
     let prefix = format!("{field}: ");
     prompt
         .lines()
-        .filter_map(|line| line.strip_prefix(&prefix))
-        .map(ToString::to_string)
+        .filter_map(|line| {
+            if let Some(value) = line.strip_prefix(&prefix) {
+                return Some(value.to_string());
+            }
+            if line.starts_with("[BEGIN DELTA ") {
+                if let Some(rest) = line.split_once(&prefix).map(|(_, rest)| rest) {
+                    let value = rest.split([',', ']']).next().unwrap_or_default().trim();
+                    if !value.is_empty() {
+                        return Some(value.to_string());
+                    }
+                }
+            }
+            None
+        })
         .collect()
 }
 
@@ -698,12 +710,12 @@ fn session_turn_injects_progress_reminder_after_six_tool_only_rounds() {
         .find(PROGRESS_UPDATE_REMINDER)
         .expect("progress reminder");
     let reminder_delta_start = reminder_prompt[..reminder_offset]
-        .rfind("[BEGIN DELTA]")
+        .rfind("[BEGIN DELTA ")
         .expect("reminder delta start");
-    let reminder_delta_end = reminder_prompt[reminder_delta_start..]
-        .find("[END DELTA]")
-        .map(|offset| reminder_delta_start + offset)
-        .expect("reminder delta end");
+    let reminder_delta_end = reminder_prompt[reminder_offset..]
+        .find("[BEGIN DELTA ")
+        .map(|offset| reminder_offset + offset)
+        .unwrap_or(reminder_prompt.len());
     let reminder_delta = &reminder_prompt[reminder_delta_start..reminder_delta_end];
     assert!(
         !reminder_delta.contains("The following are results of the actions generated in response:")
@@ -4913,14 +4925,13 @@ impl ModelClient for NativeRoundTripModel {
                     .content
                     .contains("Rust 42");
         } else {
-            self.observed_previous_turn_tool_history = request.native_exchanges.is_empty()
-                && request.rendered_prompt.contains("Tool calls:")
-                && !request
-                    .rendered_prompt
-                    .to_ascii_lowercase()
-                    .contains("native")
-                && request.rendered_prompt.contains("call_count")
-                && request.rendered_prompt.contains("Rust 42")
+            self.observed_previous_turn_tool_history = request.native_exchanges.len() == 1
+                && request.native_exchanges[0].delta_id == "pd_1"
+                && request.native_exchanges[0].calls[0].id == "call_count"
+                && request.native_exchanges[0].results[0]
+                    .content
+                    .contains("Rust 42")
+                && !request.rendered_prompt.contains("Tool calls:")
                 && request.rendered_prompt.contains("再说一次结果");
         }
         Ok(LlmResponse {

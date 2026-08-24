@@ -1281,7 +1281,7 @@ pub struct AgentCore {
     resolved_tool_call_mode: ToolCallMode,
     native_parallel_tool_calls: bool,
     native_exchanges: Vec<NativeExchange>,
-    pending_native_exchange: Option<(String, Vec<NativeToolCall>, Vec<String>)>,
+    pending_native_exchange: Option<(String, String, Vec<NativeToolCall>, Vec<String>)>,
 }
 impl AgentCore {
     pub fn new(
@@ -2823,13 +2823,9 @@ impl AgentCore {
                 Some(&parsed),
                 Some(&final_text),
             ));
-            // Native exchanges are kept as structured provider messages only while
-            // the current turn is still running. Before the final assistant reply is
-            // replayed, materialize those exchanges into prompt deltas so the next
-            // user turn preserves both their chronology and their evidence.
-            if self.resolved_tool_call_mode == ToolCallMode::Native {
-                self.materialize_native_exchanges();
-            }
+            // Keep native exchanges structured across turn boundaries. Their
+            // delta_id places them on the same append-only context timeline, so
+            // provider projection stays byte-stable and cacheable.
             self.defer_next_turn_slices(slices);
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
@@ -2857,8 +2853,12 @@ impl AgentCore {
                 Ok(result_lines) => result_lines,
                 Err((result_lines, pending)) => {
                     if !native_calls.is_empty() {
-                        self.pending_native_exchange =
-                            Some((response.content.clone(), native_calls, result_lines));
+                        self.pending_native_exchange = Some((
+                            self.current_native_delta_id(),
+                            response.content.clone(),
+                            native_calls,
+                            result_lines,
+                        ));
                     } else if !result_lines.is_empty() {
                         slices.push((
                             "result_of_llm_action".to_string(),
@@ -2879,6 +2879,7 @@ impl AgentCore {
             }
             if !native_calls.is_empty() {
                 self.native_exchanges.push(NativeExchange {
+                    delta_id: self.current_native_delta_id(),
                     assistant_text: response.content.clone(),
                     results: native_calls
                         .iter()
@@ -2920,6 +2921,7 @@ impl AgentCore {
                         })
                 };
                 self.native_exchanges.push(NativeExchange {
+                    delta_id: self.current_native_delta_id(),
                     assistant_text: response.content.clone(),
                     results: native_calls
                         .iter()
@@ -3027,6 +3029,13 @@ impl AgentCore {
         }
     }
 
+    fn current_native_delta_id(&self) -> String {
+        self.deltas
+            .last()
+            .map(|delta| delta.delta_id.clone())
+            .unwrap_or_else(|| "pd_0".to_string())
+    }
+
     fn materialize_native_exchanges(&mut self) {
         let exchanges = std::mem::take(&mut self.native_exchanges);
         for exchange in exchanges {
@@ -3067,7 +3076,9 @@ impl AgentCore {
     }
 
     fn complete_pending_native_exchange(&mut self, new_results: Vec<String>) -> bool {
-        let Some((assistant_text, calls, mut results)) = self.pending_native_exchange.take() else {
+        let Some((delta_id, assistant_text, calls, mut results)) =
+            self.pending_native_exchange.take()
+        else {
             return false;
         };
         results.extend(new_results);
@@ -3090,6 +3101,7 @@ impl AgentCore {
             })
             .collect();
         self.native_exchanges.push(NativeExchange {
+            delta_id,
             assistant_text,
             calls,
             results: tool_results,
@@ -3598,7 +3610,7 @@ impl AgentCore {
             Ok(results) => results,
             Err((partial, pending)) => {
                 self.pending_approval = Some(pending.clone());
-                if let Some((_, _, results)) = self.pending_native_exchange.as_mut() {
+                if let Some((_, _, _, results)) = self.pending_native_exchange.as_mut() {
                     results.extend(partial);
                 } else {
                     self.append_delta_with_action_output_budget(vec![(
@@ -4327,10 +4339,9 @@ Runtime tool_call ids:",
         if !self.context_compact_required && estimated_prompt_tokens < force_threshold {
             return None;
         }
-        if self.resolved_tool_call_mode == ToolCallMode::Native && !self.native_exchanges.is_empty()
-        {
-            self.materialize_native_exchanges();
-        }
+        // Native exchanges remain structured and keep their original delta
+        // ownership. Forced compaction may remove complete delta closures
+        // without rewriting provider-native history into text.
         let slices = self.render_prompt_slices();
         if slices.is_empty() {
             return None;
@@ -5214,6 +5225,13 @@ Runtime tool_call ids:",
                     matched_slice_ids.insert(slice.slice_id.clone());
                     sections.push(format_prompt_slice_for_scratch(&slice, spec));
                 }
+                for exchange in self
+                    .native_exchanges
+                    .iter()
+                    .filter(|exchange| exchange.delta_id == delta.delta_id)
+                {
+                    sections.push(format_native_exchange_for_scratch(exchange));
+                }
                 sections.push(format!("[END SCRATCH OFFLOAD DELTA {}]", delta.delta_id));
                 continue;
             }
@@ -5291,6 +5309,8 @@ Runtime tool_call ids:",
         if !delta_id_set.is_empty() {
             self.deltas
                 .retain(|delta| !delta_id_set.contains(&delta.delta_id));
+            self.native_exchanges
+                .retain(|exchange| !delta_id_set.contains(&exchange.delta_id));
         }
         let removed_delta_count = before_delta_count.saturating_sub(self.deltas.len());
 
@@ -6564,6 +6584,39 @@ fn format_prompt_slice_for_scratch(
         slice.time_ms,
         prompt_type_role_for_scratch(&slice.prompt_type, spec),
         slice.text
+    )
+}
+
+fn format_native_exchange_for_scratch(exchange: &NativeExchange) -> String {
+    let calls = exchange
+        .calls
+        .iter()
+        .map(|call| {
+            json!({
+                "id": call.id,
+                "name": call.name,
+                "arguments": call.arguments,
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = exchange
+        .results
+        .iter()
+        .map(|result| {
+            json!({
+                "tool_call_id": result.call_id,
+                "name": result.name,
+                "content": result.content,
+                "is_error": result.is_error,
+            })
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "[BEGIN SCRATCH OFFLOAD NATIVE EXCHANGE]\ndelta_id: {}\nassistant_text: {}\ncalls: {}\nresults: {}\n[END SCRATCH OFFLOAD NATIVE EXCHANGE]",
+        exchange.delta_id,
+        exchange.assistant_text,
+        serde_json::to_string(&calls).unwrap_or_default(),
+        serde_json::to_string(&results).unwrap_or_default(),
     )
 }
 

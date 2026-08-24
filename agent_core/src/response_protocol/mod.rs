@@ -94,7 +94,7 @@ impl PromptBoundarySpec {
     pub fn render_delta_open(self, delta_id: &str, time_ms: i64) -> String {
         match self.delta_boundary {
             PromptDeltaBoundary::Bracketed => {
-                format!("[BEGIN DELTA]\ndelta_id: {delta_id}\ntime: {time_ms}\n")
+                format!("[BEGIN DELTA delta_id: {delta_id}, time_ms: {time_ms}]\n")
             }
             PromptDeltaBoundary::XmlElement => {
                 format!("<prompt_delta id=\"{delta_id}\" time_ms=\"{time_ms}\">\n")
@@ -104,26 +104,38 @@ impl PromptBoundarySpec {
 
     pub fn delta_close(self) -> &'static str {
         match self.delta_boundary {
-            PromptDeltaBoundary::Bracketed => "[END DELTA]",
+            PromptDeltaBoundary::Bracketed => "",
             PromptDeltaBoundary::XmlElement => "</prompt_delta>",
         }
     }
 
     pub fn delta_start_marker(self) -> &'static str {
         match self.delta_boundary {
-            PromptDeltaBoundary::Bracketed => "[BEGIN DELTA]",
+            PromptDeltaBoundary::Bracketed => "[BEGIN DELTA ",
             PromptDeltaBoundary::XmlElement => "<prompt_delta ",
         }
     }
 
     pub fn parse_delta_id(self, segment: &str) -> Option<String> {
         match self.delta_boundary {
-            PromptDeltaBoundary::Bracketed => segment.lines().find_map(|line| {
-                line.strip_prefix("delta_id:")
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string)
-            }),
+            PromptDeltaBoundary::Bracketed => {
+                let first_line = segment.lines().next().unwrap_or_default();
+                if let Some(rest) = first_line.strip_prefix(self.delta_start_marker()) {
+                    let rest = rest.strip_prefix("delta_id:")?.trim_start();
+                    let (id, _) = rest.split_once(',')?;
+                    let id = id.trim();
+                    return (!id.is_empty()).then(|| id.to_string());
+                }
+                if first_line == "[BEGIN DELTA]" {
+                    return segment.lines().find_map(|line| {
+                        line.strip_prefix("delta_id:")
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string)
+                    });
+                }
+                None
+            }
             PromptDeltaBoundary::XmlElement => {
                 let first_line = segment.lines().next().unwrap_or_default();
                 let rest = first_line.strip_prefix(self.delta_start_marker())?;
