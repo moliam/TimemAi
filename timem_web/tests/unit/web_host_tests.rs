@@ -7128,6 +7128,7 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
                     input_schema: json!({"type": "object"}),
                 }],
                 native_exchanges: vec![agent_core::NativeExchange {
+                    delta_id: "pd_1".to_string(),
                     assistant_text: "previous".to_string(),
                     calls: vec![agent_core::NativeToolCall {
                         id: "call_previous".to_string(),

@@ -492,16 +492,15 @@ fn scored(content: impl Into<String>) -> String {
 }
 
 fn first_field_value(prompt: &str, field: &str) -> String {
-    let prefix = format!("{field}: ");
-    prompt
-        .lines()
-        .find_map(|line| line.strip_prefix(&prefix))
-        .unwrap_or("")
-        .to_string()
+    field_values(prompt, field)
+        .into_iter()
+        .next()
+        .unwrap_or_default()
 }
 
 fn field_values(prompt: &str, field: &str) -> Vec<String> {
     let line_prefix = format!("{field}:");
+    let inline_prefix = format!("{field}: ");
     let xml_attribute = format!("{field}=\"");
 
     prompt
@@ -509,6 +508,15 @@ fn field_values(prompt: &str, field: &str) -> Vec<String> {
         .filter_map(|line| {
             if let Some(value) = line.strip_prefix(&line_prefix) {
                 return Some(value.trim().to_string());
+            }
+
+            if line.starts_with("[BEGIN DELTA ") {
+                if let Some(rest) = line.split_once(&inline_prefix).map(|(_, rest)| rest) {
+                    let value = rest.split([',', ']']).next().unwrap_or_default().trim();
+                    if !value.is_empty() {
+                        return Some(value.to_string());
+                    }
+                }
             }
 
             if line.starts_with("<prompt_delta ") {
@@ -541,12 +549,12 @@ fn prompt_is_append_only_and_segmented() {
     };
     assert!(first.contains("[BEGIN SYSTEM PROMPT]"));
     assert!(!first.contains("________"));
-    assert!(first.contains("[END SYSTEM PROMPT]\n[BEGIN DELTA]"));
-    assert!(first.contains("delta_id: pd_"));
+    assert!(first.contains("[END SYSTEM PROMPT]\n[BEGIN DELTA "));
+    assert!(first.contains("[BEGIN DELTA delta_id: pd_"));
     assert!(first.contains("## USER"));
     assert!(!first.contains("slice_id: ps_"));
     assert!(!first.contains("prompt_type: user_question"));
-    assert!(first.contains("\ntime: "));
+    assert!(first.contains(", time_ms: "));
     assert!(!first.contains("{\"segment_type\""));
 
     let final_step = core.apply_model_response(LlmResponse {
@@ -1577,11 +1585,10 @@ fn one_prompt_delta_can_render_to_multiple_slices() {
         other => panic!("unexpected step: {other:?}"),
     };
 
-    assert!(prompt.contains("[BEGIN DELTA]"));
-    assert!(prompt.contains("delta_id: pd_1"));
+    assert!(prompt.contains("[BEGIN DELTA delta_id: pd_1, time_ms: "));
     assert!(!prompt.contains("slice_id: ps_"));
     assert!(!prompt.contains("prompt_type: user_question"));
-    assert_eq!(prompt.matches("[BEGIN DELTA]").count(), 1);
+    assert_eq!(prompt.matches("[BEGIN DELTA ").count(), 1);
     assert!(prompt.contains("## USER"));
 }
 
@@ -7289,13 +7296,12 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(json_prompt.contains("organized as JSON"));
     assert!(json_prompt.contains("\"working_still_action\""));
     assert!(json_prompt.contains("\"ALL_FINISHED\""));
-    assert!(json_prompt.contains("[BEGIN DELTA]\ndelta_id: pd_1\ntime: 123"));
-    assert!(json_prompt.contains("[END DELTA]"));
+    assert!(json_prompt.contains("[BEGIN DELTA delta_id: pd_1, time_ms: 123]"));
+    assert!(!json_prompt.contains("[END DELTA]"));
     assert!(!json_prompt.contains("<prompt_delta "));
     assert!(!json_prompt.contains("</prompt_delta>"));
-    assert!(
-        json_prompt.contains("Each dynamic delta is enclosed by `[BEGIN DELTA]` and `[END DELTA]`")
-    );
+    assert!(json_prompt
+        .contains("A dynamic delta starts with `[BEGIN DELTA delta_id: <id>, time_ms: <time>]`"));
     assert!(!json_prompt.contains("Each `<prompt_delta>` is an outer dynamic container"));
     assert!(!json_prompt.contains("{{PROMPT_DELTA_EXAMPLE}}"));
     assert!(!json_prompt.contains("{{CURRENT_PROTOCOL_LANG}}"));

@@ -58,7 +58,7 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
     assert!(rendered.contains("Response Protocol"));
     assert!(rendered.contains("memmgr"));
     assert!(rendered.contains("hello"));
-    assert!(rendered.contains("[BEGIN DELTA]"));
+    assert!(rendered.contains("[BEGIN DELTA "));
     assert!(rendered.contains("## USER"));
     assert!(rendered.contains("## RUNTIME"));
     assert!(!rendered.contains("## ACTIONS"));
@@ -126,7 +126,7 @@ fn xml_protocol_uses_xml_style_prompt_delta_boundaries() {
 
     assert!(rendered.contains("<prompt_delta id=\"pd_xml_14\" time_ms=\"123\">"));
     assert!(rendered.contains("</prompt_delta>"));
-    assert!(!rendered.contains("[BEGIN DELTA]"));
+    assert!(!rendered.contains("[BEGIN DELTA "));
     assert!(!rendered.contains("delta_id: pd_xml_14"));
 }
 
@@ -1094,10 +1094,10 @@ fn prompt_renderer_injects_only_the_active_protocol_context_structure() {
         "startup",
     );
 
-    assert!(json.contains("[BEGIN DELTA]"));
+    assert!(json.contains("[BEGIN DELTA "));
     assert!(!json.contains("<prompt_delta>"));
     assert!(xml.contains("<prompt_delta>"));
-    assert!(!xml.contains("[BEGIN DELTA]"));
+    assert!(!xml.contains("[BEGIN DELTA "));
     assert!(!json.contains("{{PROMPT_CONTEXT_STRUCTURE}}"));
     assert!(!xml.contains("{{PROMPT_CONTEXT_STRUCTURE}}"));
 }
@@ -1120,8 +1120,8 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
         "startup",
     );
 
-    assert!(json.contains("[BEGIN DELTA]\ndelta_id: pd_1\ntime: 123"));
-    assert!(json.contains("[END DELTA]"));
+    assert!(json.contains("[BEGIN DELTA delta_id: pd_1, time_ms: 123]"));
+    assert!(!json.contains("[END DELTA]"));
     assert!(!json.contains("<prompt_delta "));
     assert!(!json.contains("</prompt_delta>"));
     assert!(json.contains("## USER"));
@@ -1135,7 +1135,7 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
 
     assert!(xml.contains(r#"<prompt_delta id="pd_1" time_ms="123">"#));
     assert!(xml.contains("</prompt_delta>"));
-    assert!(!xml.contains("[BEGIN DELTA]"));
+    assert!(!xml.contains("[BEGIN DELTA "));
     assert!(!xml.contains("[END DELTA]"));
     assert!(!xml.contains("delta_id: pd_1"));
     assert!(xml.contains("<USER>"));

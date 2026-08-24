@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn forced_compaction_materializes_native_history_and_restricts_model_request() {
+fn forced_compaction_preserves_native_history_and_restricts_model_request() {
     let mut core = test_core("forced_native_compaction_gate");
     core.set_max_llm_input_tokens(3_000);
     core.set_interaction_profile(&InteractionProfile {
@@ -20,6 +20,7 @@ fn forced_compaction_materializes_native_history_and_restricts_model_request() {
     });
     core.append_delta(vec![("user_question".to_string(), "keep task".to_string())]);
     core.native_exchanges.push(NativeExchange {
+        delta_id: "pd_1".to_string(),
         assistant_text: "old tool work".to_string(),
         calls: vec![NativeToolCall {
             id: "call_old".to_string(),
@@ -39,9 +40,10 @@ fn forced_compaction_materializes_native_history_and_restricts_model_request() {
     core.append_in_turn_shrink_review_if_needed();
 
     assert!(core.context_compact_required);
-    assert!(core.native_exchanges.is_empty());
+    assert_eq!(core.native_exchanges.len(), 1);
+    assert_eq!(core.native_exchanges[0].delta_id, "pd_1");
     let prompt = core.render_prompt();
-    assert!(prompt.contains("old tool work"));
+    assert!(!prompt.contains("old tool work"));
     assert!(prompt.contains("mode=force_shrink_required"));
     let request_prompt = core.build_model_request_prompt(&prompt);
     assert!(request_prompt.ends_with("Context too long, please compress first:"));
@@ -52,7 +54,7 @@ fn forced_compaction_materializes_native_history_and_restricts_model_request() {
 }
 
 #[test]
-fn native_final_materializes_tool_history_before_final_replay() {
+fn native_final_keeps_structured_tool_history_before_final_replay() {
     let mut core = test_core("native_final_history");
     core.set_interaction_profile(&InteractionProfile {
         api_protocol: "openai_compatible".to_string(),
@@ -73,6 +75,7 @@ fn native_final_materializes_tool_history_before_final_replay() {
         "inspect the project".to_string(),
     )]);
     core.native_exchanges.push(NativeExchange {
+        delta_id: "pd_1".to_string(),
         assistant_text: "I will inspect it.".to_string(),
         calls: vec![NativeToolCall {
             id: "call_read".to_string(),
@@ -97,15 +100,12 @@ fn native_final_materializes_tool_history_before_final_replay() {
     });
 
     assert!(matches!(step, CoreStep::Final(_)));
-    assert!(core.native_exchanges.is_empty());
+    assert_eq!(core.native_exchanges.len(), 1);
+    assert_eq!(core.native_exchanges[0].delta_id, "pd_1");
     let prompt = core.build_next_prompt();
-    let tool_pos = prompt.find("Tool calls:").unwrap();
-    let result_pos = prompt.find("PROJECT-EVIDENCE-42").unwrap();
-    let final_pos = prompt
-        .rfind("Final answer based on PROJECT-EVIDENCE-42")
-        .unwrap();
-    assert!(tool_pos < result_pos);
-    assert!(result_pos < final_pos);
+    assert!(!prompt.contains("Tool calls:"));
+    assert!(prompt.contains("Final answer based on PROJECT-EVIDENCE-42"));
+    assert_eq!(prompt.matches("PROJECT-EVIDENCE-42").count(), 1);
     assert_eq!(
         prompt
             .matches("Final answer based on PROJECT-EVIDENCE-42")
@@ -119,16 +119,80 @@ fn native_final_materializes_tool_history_before_final_replay() {
     )]);
     let next_prompt = core.render_prompt();
     let next_request = core.model_interaction_request(next_prompt.clone());
-    assert!(next_request.native_exchanges.is_empty());
-    assert!(next_prompt.contains("Tool calls:"));
+    assert_eq!(next_request.native_exchanges.len(), 1);
+    assert_eq!(next_request.native_exchanges[0].delta_id, "pd_1");
+    assert!(!next_prompt.contains("Tool calls:"));
     assert!(!next_prompt.to_ascii_lowercase().contains("native"));
-    assert!(next_prompt.contains("PROJECT-EVIDENCE-42"));
+    assert_eq!(next_prompt.matches("PROJECT-EVIDENCE-42").count(), 1);
     assert!(
         next_prompt
             .find("Final answer based on PROJECT-EVIDENCE-42")
             .unwrap()
             < next_prompt.rfind("what did you find?").unwrap()
     );
+}
+
+#[test]
+fn native_exchange_is_discarded_with_its_owning_delta() {
+    let mut core = test_core("native_delta_discard");
+    core.append_delta(vec![("user_question".to_string(), "Q1".to_string())]);
+    core.append_delta(vec![("user_question".to_string(), "Q2".to_string())]);
+    for (delta_id, call_id) in [("pd_1", "call_1"), ("pd_2", "call_2")] {
+        core.native_exchanges.push(NativeExchange {
+            delta_id: delta_id.to_string(),
+            assistant_text: format!("work {call_id}"),
+            calls: vec![NativeToolCall {
+                id: call_id.to_string(),
+                name: "readfile".to_string(),
+                arguments: serde_json::json!({"path": format!("{call_id}.txt")}),
+                raw_arguments: format!(r#"{{"path":"{call_id}.txt"}}"#),
+            }],
+            results: vec![NativeToolResult {
+                call_id: call_id.to_string(),
+                name: "readfile".to_string(),
+                content: format!("result {call_id}"),
+                is_error: false,
+            }],
+        });
+    }
+    let result = core.apply_prompt_shrink(
+        "context compacted successfully.",
+        &["pd_1".to_string()],
+        &[],
+    );
+    assert!(result.contains("context compacted successfully."));
+    assert_eq!(core.native_exchanges.len(), 1);
+    assert_eq!(core.native_exchanges[0].delta_id, "pd_2");
+    assert_eq!(core.native_exchanges[0].calls[0].id, "call_2");
+}
+
+#[test]
+fn native_exchange_is_included_when_owning_delta_is_offloaded() {
+    let mut core = test_core("native_delta_offload");
+    core.append_delta(vec![("user_question".to_string(), "Q1".to_string())]);
+    core.native_exchanges.push(NativeExchange {
+        delta_id: "pd_1".to_string(),
+        assistant_text: "inspect evidence".to_string(),
+        calls: vec![NativeToolCall {
+            id: "call_1".to_string(),
+            name: "readfile".to_string(),
+            arguments: serde_json::json!({"path":"evidence.txt"}),
+            raw_arguments: r#"{"path":"evidence.txt"}"#.to_string(),
+        }],
+        results: vec![NativeToolResult {
+            call_id: "call_1".to_string(),
+            name: "readfile".to_string(),
+            content: "EVIDENCE-42".to_string(),
+            is_error: false,
+        }],
+    });
+    let offload = core
+        .collect_prompt_context_for_scratch(&["pd_1".to_string()], &[])
+        .expect("owning delta should be offloadable");
+    assert_eq!(offload.delta_ids, vec!["pd_1"]);
+    assert!(offload.content.contains("assistant_text: inspect evidence"));
+    assert!(offload.content.contains(r#""tool_call_id":"call_1""#));
+    assert!(offload.content.contains("EVIDENCE-42"));
 }
 
 #[test]

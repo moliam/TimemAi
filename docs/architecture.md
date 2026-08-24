@@ -877,9 +877,7 @@ growth between model request N and model request N+1. The model-visible prompt
 keeps `delta_id` as the stable maintenance handle:
 
 ```text
-[BEGIN DELTA]
-delta_id: pd_1
-time: 1782200000000
+[BEGIN DELTA delta_id: pd_1, time_ms: 1782200000000]
 
 ## USER
 new user input or mid-turn supplement
@@ -894,8 +892,6 @@ Action result: run_bash
 ...
 
 runtime notes such as response repair, compaction result, or work instructions
-
-[END DELTA]
 ```
 
 Runtime assigns normal dynamic delta ids as a simple monotonic sequence:
@@ -986,7 +982,8 @@ Prompt rendering uses explicit segments:
 
 ```text
 JSON suite: [BEGIN SYSTEM PROMPT] ... [END SYSTEM PROMPT]
-            [BEGIN DELTA] ... [END DELTA]
+            [BEGIN DELTA delta_id: pd_1, time_ms: ...] ...
+            (continues until the next BEGIN DELTA or input end)
 
 XML suite:  <Timem System Prompt> ... </Timem System Prompt>
             <prompt_delta id="pd_1" time_ms="1782200000000"> ... </prompt_delta>
@@ -1000,6 +997,11 @@ Important invariants:
   response suite's boundary markers.
 - Every rendered dynamic delta has `delta_id` so runtime shrink review can refer
   to exact logical deltas.
+- JSON Delta boundaries are start-only. `USER`, assistant, `RUNTIME`, and
+  provider-native assistant/tool-call/tool-result messages inherit the currently
+  open Delta until the next `[BEGIN DELTA ...]` marker or the end of model input.
+  Native exchanges therefore remain attached to their owning `delta_id` and are
+  interleaved at that point in provider payloads rather than appended at the tail.
 - Valid model-visible role blocks are `## USER`, the current assistant/session-worker
   heading represented as `## {{ASSSISTANT_ID}}` in prompt examples, and
   `## RUNTIME`. Runtime replaces the assistant placeholder with the actual worker
@@ -1326,9 +1328,7 @@ seen.
 Example:
 
 ```text
-[BEGIN DELTA]
-delta_id: pd_4
-time: 1782200001000
+[BEGIN DELTA delta_id: pd_4, time_ms: 1782200001000]
 
 ## RUNTIME
 The following are results of {{ASSSISTANT_ID}} newly initiated actions:
@@ -1341,7 +1341,6 @@ rows:
   role: user
   content: ...
 time: 1782200001000
-[END DELTA]
 ```
 
 The model then receives another prompt containing this result and decides

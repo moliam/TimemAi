@@ -545,9 +545,7 @@ fn render_prompt_context_structure(
 `<ASSISTANT>`, and `<RUNTIME>` entries in chronological order. Static system \
 content is separate in `<Timem System Prompt>`."
     } else {
-        "Each dynamic delta is enclosed by `[BEGIN DELTA]` and `[END DELTA]`, with \
-USER, ASSISTANT, and RUNTIME entries rendered as headings in chronological order. \
-Static system content is enclosed separately by the system-prompt boundaries."
+        "A dynamic delta starts with `[BEGIN DELTA delta_id: <id>, time_ms: <time>]` and extends through every following provider-native message until the next BEGIN DELTA marker or the end of the current model input. USER, ASSISTANT, RUNTIME, and native tool-call/result messages inherit the currently open delta in chronological order. There is no END DELTA marker. Static system content is enclosed separately by the system-prompt boundaries."
     }
 }
 

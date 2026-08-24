@@ -486,33 +486,67 @@ fn render_llm_prompt_dump(session_id: &str, request: Option<&LlmRequestDumpEntry
         .as_ref()
         .filter(|interaction| interaction.is_native() && !interaction.native_exchanges.is_empty())
     {
-        out.push_str("-------------------- NATIVE EXCHANGES ----------------------\n");
-        out.push_str(&render_native_exchanges_json(interaction));
-        out.push('\n');
+        out.push_str("---------------- MODEL INPUT CONTINUATION ------------------\n");
+        out.push_str(
+            "The following native messages are sent after the rendered prompt, in this order.\n",
+        );
+        render_native_exchange_timeline(&mut out, interaction);
     }
     out.push_str("====================== END REQUEST =========================\n");
     out
 }
 
-fn render_native_exchanges_json(request: &agent_core::ModelInteractionRequest) -> String {
-    let exchanges = request
-        .native_exchanges
-        .iter()
-        .map(|exchange| {
-            serde_json::json!({
-                "assistant_text": exchange.assistant_text,
-                "calls": exchange.calls,
-                "results": exchange.results.iter().map(|result| serde_json::json!({
-                    "call_id": result.call_id,
-                    "name": result.name,
-                    "content": result.content,
-                    "is_error": result.is_error,
-                })).collect::<Vec<_>>(),
+fn render_native_exchange_timeline(
+    out: &mut String,
+    request: &agent_core::ModelInteractionRequest,
+) {
+    for (exchange_index, exchange) in request.native_exchanges.iter().enumerate() {
+        out.push_str(&format!(
+            "\n-------------------- EXCHANGE {} · ASSISTANT --------------------\n",
+            exchange_index + 1
+        ));
+        out.push_str("## ASSISTANT\n\n");
+        if !exchange.assistant_text.trim().is_empty() {
+            out.push_str(exchange.assistant_text.trim());
+            out.push_str("\n\n");
+        }
+        out.push_str("Tool calls:\n");
+        let calls = exchange
+            .calls
+            .iter()
+            .map(|call| {
+                serde_json::json!({
+                    "tool_call_id": call.id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                })
             })
-        })
-        .collect::<Vec<_>>();
-    serde_json::to_string_pretty(&serde_json::json!({"native_exchanges": exchanges}))
-        .unwrap_or_else(|error| format!("{{\"dump_error\":{error:?}}}"))
+            .collect::<Vec<_>>();
+        out.push_str(
+            &serde_json::to_string_pretty(&calls)
+                .unwrap_or_else(|error| format!("{{\"dump_error\":{error:?}}}")),
+        );
+        out.push_str("\n\n## RUNTIME\n");
+        if exchange.results.is_empty() {
+            out.push_str("\n(no tool call results)\n");
+            continue;
+        }
+        for (result_index, result) in exchange.results.iter().enumerate() {
+            if result_index > 0 {
+                out.push_str("\n");
+            }
+            out.push_str(&format!(
+                "\ntool_call_id: {}\nAction result: {}\nstatus: {}\n",
+                result.call_id,
+                result.name,
+                if result.is_error { "error" } else { "ok" },
+            ));
+            if !result.content.trim().is_empty() {
+                out.push_str(result.content.trim());
+                out.push('\n');
+            }
+        }
+    }
 }
 
 fn render_tool_schema_dump(session_id: &str, request: Option<&LlmRequestDumpEntry>) -> String {
@@ -1588,6 +1622,7 @@ mod tests {
                 },
             ],
             native_exchanges: vec![agent_core::NativeExchange {
+                delta_id: "pd_1".to_string(),
                 assistant_text: "checking".to_string(),
                 calls: vec![agent_core::NativeToolCall {
                     id: "call_previous".to_string(),
@@ -1653,6 +1688,94 @@ mod tests {
         }
         store.cleanup().unwrap();
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn native_prompt_dump_renders_tool_results_as_runtime_in_model_input_order() {
+        let _guard = debug_store_test_guard();
+        let store = DebugStore::create().unwrap();
+        let session_dir = store.session_dir("session_native_timeline").unwrap();
+        let request = agent_core::ModelInteractionRequest {
+            rendered_prompt: "rendered prompt before native messages".to_string(),
+            static_tool_count: 0,
+            tools: Vec::new(),
+            native_exchanges: vec![
+                agent_core::NativeExchange {
+                    delta_id: "pd_1".to_string(),
+                    assistant_text: "I will inspect the file.".to_string(),
+                    calls: vec![agent_core::NativeToolCall {
+                        id: "call_read".to_string(),
+                        name: "readfile".to_string(),
+                        arguments: serde_json::json!({"path": "README.md"}),
+                        raw_arguments: r#"{"path":"README.md"}"#.to_string(),
+                    }],
+                    results: vec![agent_core::NativeToolResult {
+                        call_id: "call_read".to_string(),
+                        name: "readfile".to_string(),
+                        content: "README content".to_string(),
+                        is_error: false,
+                    }],
+                },
+                agent_core::NativeExchange {
+                    delta_id: "pd_1".to_string(),
+                    assistant_text: "Now I will run the checks.".to_string(),
+                    calls: vec![agent_core::NativeToolCall {
+                        id: "call_test".to_string(),
+                        name: "run_bash".to_string(),
+                        arguments: serde_json::json!({"cmd": "cargo test"}),
+                        raw_arguments: r#"{"cmd":"cargo test"}"#.to_string(),
+                    }],
+                    results: vec![agent_core::NativeToolResult {
+                        call_id: "call_test".to_string(),
+                        name: "run_bash".to_string(),
+                        content: "tests passed".to_string(),
+                        is_error: false,
+                    }],
+                },
+            ],
+            resolved_mode: agent_core::ToolCallMode::Native,
+            parallel_tool_calls: false,
+            tool_choice: agent_core::NativeToolChoice::Auto,
+        };
+        store
+            .record_prompt(
+                "session_native_timeline",
+                "worker_0",
+                3,
+                &request.rendered_prompt,
+                Some(&request),
+            )
+            .unwrap();
+
+        let dump = fs::read_to_string(session_dir.join("llm_prompt.dump")).unwrap();
+        assert!(dump.contains("MODEL INPUT CONTINUATION"), "{dump}");
+        assert!(!dump.contains("NATIVE EXCHANGES"), "{dump}");
+        let prompt = dump.find("rendered prompt before native messages").unwrap();
+        let assistant_1 = dump.find("EXCHANGE 1 · ASSISTANT").unwrap();
+        let call_1 = dump.find("call_read").unwrap();
+        let runtime_1 = dump[prompt..]
+            .find("## RUNTIME")
+            .map(|index| prompt + index)
+            .unwrap();
+        let result_1 = dump.find("README content").unwrap();
+        let assistant_2 = dump.find("EXCHANGE 2 · ASSISTANT").unwrap();
+        let call_2 = dump.find("call_test").unwrap();
+        let runtime_2 = dump[assistant_2..]
+            .find("## RUNTIME")
+            .map(|index| assistant_2 + index)
+            .unwrap();
+        let result_2 = dump.find("tests passed").unwrap();
+        assert!(prompt < assistant_1);
+        assert!(assistant_1 < call_1);
+        assert!(call_1 < runtime_1);
+        assert!(runtime_1 < result_1);
+        assert!(result_1 < assistant_2);
+        assert!(assistant_2 < call_2);
+        assert!(call_2 < runtime_2);
+        assert!(runtime_2 < result_2);
+        assert!(dump.contains("Action result: readfile"));
+        assert!(dump.contains("Action result: run_bash"));
+        store.cleanup().unwrap();
     }
 
     #[test]

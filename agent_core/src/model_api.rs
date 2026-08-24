@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
 
+use crate::response_protocol::KNOWN_PROMPT_BOUNDARIES;
+
 use crate::{
     plan_prompt_cache, redact_value, stable_text_fingerprint, CacheControl, CoreProfile,
     LlmResponse, ModelInteractionRequest, NativeToolCall, PromptBlock, PromptBlockRole,
@@ -391,81 +393,145 @@ fn mark_anthropic_static_tool_prefix(tools: &mut [Value], static_tool_count: usi
     }
 }
 
+fn prompt_delta_id(text: &str) -> Option<String> {
+    KNOWN_PROMPT_BOUNDARIES
+        .iter()
+        .find_map(|boundaries| boundaries.parse_delta_id(text))
+}
+
+fn exchanges_for_delta<'a>(
+    interaction: &'a ModelInteractionRequest,
+    delta_id: &'a str,
+) -> impl Iterator<Item = &'a crate::NativeExchange> + 'a {
+    interaction
+        .native_exchanges
+        .iter()
+        .filter(move |exchange| exchange.delta_id == delta_id)
+}
+
+fn openai_chat_exchange_messages(exchange: &crate::NativeExchange) -> Vec<Value> {
+    let mut messages = vec![
+        json!({"role":"assistant","content":optional_text(&exchange.assistant_text),"tool_calls":exchange.calls.iter().map(|call| json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.raw_arguments}})).collect::<Vec<_>>()}),
+    ];
+    messages.extend(exchange.results.iter().map(
+        |result| json!({"role":"tool","tool_call_id":result.call_id,"content":result.content}),
+    ));
+    messages
+}
+
 fn append_openai_chat_exchanges(messages: &mut Vec<Value>, interaction: &ModelInteractionRequest) {
-    for exchange in &interaction.native_exchanges {
-        messages.push(json!({
-            "role": "assistant",
-            "content": optional_text(&exchange.assistant_text),
-            "tool_calls": exchange.calls.iter().map(|call| json!({
-                "id": call.id,
-                "type": "function",
-                "function": {"name": call.name, "arguments": call.raw_arguments},
-            })).collect::<Vec<_>>(),
-        }));
-        for result in &exchange.results {
-            messages.push(json!({
-                "role": "tool",
-                "tool_call_id": result.call_id,
-                "content": result.content,
-            }));
+    let original = std::mem::take(messages);
+    let mut ordered = Vec::new();
+    let mut tail = Vec::new();
+    for message in original {
+        let text = message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if text.trim() == crate::prompt_render::NATIVE_RESPONSE_TRAILER {
+            tail.push(message);
+            continue;
+        }
+        let delta_id = prompt_delta_id(text);
+        ordered.push(message);
+        if let Some(delta_id) = delta_id {
+            for exchange in exchanges_for_delta(interaction, &delta_id) {
+                ordered.extend(openai_chat_exchange_messages(exchange));
+            }
         }
     }
+    ordered.extend(tail);
+    *messages = ordered;
+}
+
+fn openai_responses_exchange_items(exchange: &crate::NativeExchange) -> Vec<Value> {
+    let mut items = Vec::new();
+    if !exchange.assistant_text.trim().is_empty() {
+        items.push(json!({"role":"assistant","content":[{"type":"output_text","text":exchange.assistant_text}]}));
+    }
+    items.extend(exchange.calls.iter().map(|call| json!({"type":"function_call","call_id":call.id,"name":call.name,"arguments":call.raw_arguments})));
+    items.extend(exchange.results.iter().map(|result| json!({"type":"function_call_output","call_id":result.call_id,"output":result.content})));
+    items
 }
 
 fn append_openai_responses_exchanges(
     input: &mut Vec<Value>,
     interaction: &ModelInteractionRequest,
 ) {
-    for exchange in &interaction.native_exchanges {
-        if !exchange.assistant_text.trim().is_empty() {
-            input.push(json!({
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": exchange.assistant_text}],
-            }));
+    let blocks = plan_prompt_cache(&interaction.rendered_prompt);
+    let mut ordered = Vec::new();
+    let mut tail = Vec::new();
+    for block in blocks
+        .into_iter()
+        .filter(|block| block.role == PromptBlockRole::User)
+    {
+        let delta_id = prompt_delta_id(&block.text);
+        let is_tail = block.text.trim() == crate::prompt_render::NATIVE_RESPONSE_TRAILER;
+        let item = json!({"role":"user","content":[{"type":"input_text","text":block.text}]});
+        if is_tail {
+            tail.push(item);
+            continue;
         }
-        input.extend(exchange.calls.iter().map(|call| {
-            json!({
-                "type": "function_call",
-                "call_id": call.id,
-                "name": call.name,
-                "arguments": call.raw_arguments,
-            })
-        }));
-        input.extend(exchange.results.iter().map(|result| {
-            json!({
-                "type": "function_call_output",
-                "call_id": result.call_id,
-                "output": result.content,
-            })
-        }));
+        ordered.push(item);
+        if let Some(delta_id) = delta_id {
+            for exchange in exchanges_for_delta(interaction, &delta_id) {
+                ordered.extend(openai_responses_exchange_items(exchange));
+            }
+        }
     }
+    ordered.extend(tail);
+    *input = ordered;
+}
+
+fn anthropic_exchange_messages(exchange: &crate::NativeExchange) -> Vec<Value> {
+    let mut assistant_content = Vec::new();
+    if !exchange.assistant_text.trim().is_empty() {
+        assistant_content.push(json!({"type":"text","text":exchange.assistant_text}));
+    }
+    assistant_content.extend(exchange.calls.iter().map(
+        |call| json!({"type":"tool_use","id":call.id,"name":call.name,"input":call.arguments}),
+    ));
+    vec![
+        json!({"role":"assistant","content":assistant_content}),
+        json!({"role":"user","content":exchange.results.iter().map(|result| json!({"type":"tool_result","tool_use_id":result.call_id,"content":result.content,"is_error":result.is_error})).collect::<Vec<_>>()}),
+    ]
 }
 
 fn append_anthropic_exchanges(messages: &mut Vec<Value>, interaction: &ModelInteractionRequest) {
-    for exchange in &interaction.native_exchanges {
-        let mut assistant_content = Vec::new();
-        if !exchange.assistant_text.trim().is_empty() {
-            assistant_content.push(json!({"type": "text", "text": exchange.assistant_text}));
+    let Some(initial_content) = messages
+        .first()
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .cloned()
+    else {
+        return;
+    };
+    let mut ordered = Vec::new();
+    let mut pending = Vec::new();
+    let mut tail = Vec::new();
+    for block in initial_content {
+        let text = block
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if text.trim() == crate::prompt_render::NATIVE_RESPONSE_TRAILER {
+            tail.push(block);
+            continue;
         }
-        assistant_content.extend(exchange.calls.iter().map(|call| {
-            json!({
-                "type": "tool_use",
-                "id": call.id,
-                "name": call.name,
-                "input": call.arguments,
-            })
-        }));
-        messages.push(json!({"role": "assistant", "content": assistant_content}));
-        messages.push(json!({
-            "role": "user",
-            "content": exchange.results.iter().map(|result| json!({
-                "type": "tool_result",
-                "tool_use_id": result.call_id,
-                "content": result.content,
-                "is_error": result.is_error,
-            })).collect::<Vec<_>>(),
-        }));
+        let delta_id = prompt_delta_id(text);
+        pending.push(block);
+        if let Some(delta_id) = delta_id {
+            ordered.push(json!({"role":"user","content":std::mem::take(&mut pending)}));
+            for exchange in exchanges_for_delta(interaction, &delta_id) {
+                ordered.extend(anthropic_exchange_messages(exchange));
+            }
+        }
     }
+    pending.extend(tail);
+    if !pending.is_empty() {
+        ordered.push(json!({"role":"user","content":pending}));
+    }
+    *messages = ordered;
 }
 
 fn optional_text(text: &str) -> Value {

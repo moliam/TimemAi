@@ -1,5 +1,5 @@
 use super::*;
-use crate::{NativeToolChoice, ToolCallMode};
+use crate::{NativeExchange, NativeToolChoice, NativeToolResult, ToolCallMode};
 
 fn config(api_protocol: ApiProtocol) -> ModelServiceConfig {
     ModelServiceConfig {
@@ -976,4 +976,68 @@ fn openai_compatible_sse_assembles_parallel_tool_arguments_by_index() {
     assert_eq!(response.tool_calls.len(), 2);
     assert_eq!(response.tool_calls[0].arguments["lang"], "Rust");
     assert_eq!(response.tool_calls[1].arguments["lang"], "Go");
+}
+
+#[test]
+fn native_exchanges_follow_owning_delta_order_for_all_providers() {
+    let rendered_prompt = concat!(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n",
+        "[BEGIN DELTA delta_id: pd_1, time_ms: 1]\n\n## USER\nQ1\n",
+        "[BEGIN DELTA delta_id: pd_2, time_ms: 2]\n\n## USER\nQ2\n\n",
+        "Continue the work in the user's language. Call API tools when more evidence or actions are needed; otherwise give the final user-facing answer:"
+    ).to_string();
+    let exchange = |delta_id: &str, call_id: &str, result: &str| NativeExchange {
+        delta_id: delta_id.to_string(),
+        assistant_text: format!("work {call_id}"),
+        calls: vec![NativeToolCall {
+            id: call_id.to_string(),
+            name: "demo".to_string(),
+            arguments: json!({"id": call_id}),
+            raw_arguments: format!(r#"{{"id":"{call_id}"}}"#),
+        }],
+        results: vec![NativeToolResult {
+            call_id: call_id.to_string(),
+            name: "demo".to_string(),
+            content: result.to_string(),
+            is_error: false,
+        }],
+    };
+    let request = ModelInteractionRequest {
+        rendered_prompt,
+        static_tool_count: 0,
+        tools: Vec::new(),
+        native_exchanges: vec![
+            exchange("pd_1", "call_1", "R1"),
+            exchange("pd_2", "call_2", "R2"),
+        ],
+        resolved_mode: ToolCallMode::Native,
+        parallel_tool_calls: false,
+        tool_choice: NativeToolChoice::Auto,
+    };
+    for protocol in [
+        ApiProtocol::OpenAiCompatible,
+        ApiProtocol::OpenAiResponses,
+        ApiProtocol::Anthropic,
+    ] {
+        let body = prepare_model_interaction_http_request(&config(protocol), &request)
+            .model_request
+            .body;
+        let text = body.to_string();
+        assert!(
+            text.find("Q1").unwrap() < text.find("call_1").unwrap(),
+            "{protocol:?}: {text}"
+        );
+        assert!(
+            text.find("R1").unwrap() < text.find("Q2").unwrap(),
+            "{protocol:?}: {text}"
+        );
+        assert!(
+            text.find("Q2").unwrap() < text.find("call_2").unwrap(),
+            "{protocol:?}: {text}"
+        );
+        assert!(
+            text.find("R2").unwrap() < text.find("Continue the work").unwrap(),
+            "{protocol:?}: {text}"
+        );
+    }
 }
