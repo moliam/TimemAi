@@ -4,6 +4,9 @@
 
 ### Changed
 
+- Refined the Web composer and Session navigation: Session names are smaller,
+  cwd is shown only below the composer text area, and a subtle divider separates
+  the text area from the cwd/actions row.
 - Added a centralized `agent_core::os` abstraction with initial macOS and Linux
   implementations for host/version detection, shell paths, default config
   directories, browser and terminal launch commands, and process-group
