@@ -364,7 +364,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 let prompt =
                     core.build_model_request_prompt_with_runtime(prompt, &mut action_runtime);
                 let interaction_request = core.model_interaction_request(prompt);
-                ui.on_model_interaction_request(rounds, &interaction_request);
+                let api_payload =
+                    crate::prepare_model_interaction_http_request(config, &interaction_request)
+                        .model_request
+                        .body;
+                ui.on_model_api_request(rounds, &interaction_request, &api_payload);
                 match call_model_with_system_retries(
                     model_client,
                     config,

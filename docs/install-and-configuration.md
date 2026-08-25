@@ -150,7 +150,7 @@ restored if the runtime later switches back to inline mode.
 Common values:
 
 ```bash
-export TIMEM_SPACE=.test_mem
+export TIMEM_SPACE=/absolute/path/to/mem
 export TIMEM_DATA_DIR=/path/to/data
 export TIMEM_BASH_APPROVAL=approve
 export TIMEM_WORK_INSTRUCTIONS=silent
@@ -169,32 +169,109 @@ export TIMEM_WORK_INSTRUCTIONS=silent
 
 ## Runtime Data
 
-New environments use a hidden data root by default:
+By default, Timem stores MEM data in the user's home directory:
 
 ```text
-.timem_data/<space>/
+~/.timem/mem/
   audit/api_audit.json
   audit/action_audit.json
-  memory/
+  memory.jsonl
+  scratch_notes.jsonl
   sessions/
+    <session-id>/
+      session.json
+      raw_chat_history.jsonl
+  session_groups.json
+  worker_roles.json
+  web_events.ndjson
   shell_history.txt
 ```
 
-If an unconfigured existing environment already has a recognizable Timem
-layout under `data/` (Timem workspace, Session index, or audit files) and does
-not yet have `.timem_data/`, Timem continues using it so upgrades do not hide
-or split existing Sessions. An unrelated directory merely named `data` is not
-treated as Timem storage. `TIMEM_DATA_DIR` always takes precedence.
+The directory is created automatically on first startup. Session metadata is
+stored per Session rather than in one shared mutable index. Existing
+`sessions/index.jsonl` stores are repaired if necessary, migrated automatically
+to `sessions/<session-id>/session.json`, and retained as `index.v1.jsonl` for
+manual recovery.
 
-Use a fixed data root if you do not want data under the current directory:
+Writes use narrow lock domains: each Session owns one data lock for its metadata
+and history; Session groups, Roles, tool jobs, and audit data use separate locks.
+Independent Sessions therefore do not wait on each other's metadata or chat
+writes. Cross-collection group changes always acquire MEM state before Session
+state and release in-memory locks before filesystem or worker operations.
+
+`--space` and `TIMEM_SPACE` select another MEM directory. Their value must be
+an absolute path, and the path itself is the MEM directory; Timem does not add
+an extra `memory` component:
 
 ```bash
-export TIMEM_DATA_DIR=/path/to/data
-export TIMEM_SPACE=my_project
+timem --space /absolute/path/to/project-mem
+export TIMEM_SPACE=/absolute/path/to/project-mem
 ```
 
-Env files are independent from runtime data. Private env files are
-user-managed and are not touched by install or uninstall scripts.
+Relative paths such as `--space .test_mem` are rejected.
+
+When `timem-web` resolves the MEM directory to the system default
+`~/.timem/mem` and no `--port` is supplied, it tries port `13764` first. If that
+port is unavailable, it continues through the existing automatic port range
+(`12345`–`23456`). A custom MEM uses the rotating automatic selection order,
+and an explicit `--port` always has priority over either automatic strategy.
+
+`TIMEM_DATA_DIR` remains the root for non-MEM runtime configuration such as the
+workspace registry and capability overlays. Its default remains `.timem_data`
+in the launch directory. Env files are independent from runtime data and are
+not touched by install or uninstall scripts.
+
+### Timem Web lifecycle diagnostics
+
+`timem-web` enables a small process-lifecycle recorder by default. Its purpose is
+to preserve evidence for a later investigation when the Web host exits
+unexpectedly, without continuously logging model or browser traffic.
+
+Files are stored under:
+
+```text
+<TIMEM_DATA_DIR>/diagnostics/timem-web/
+  current-run.json
+  last-exit.json
+  last-panic.txt
+  previous-abnormal-exit.json
+```
+
+The recorder has fixed bounds:
+
+- at most 64 recent lifecycle events are kept in memory;
+- disk checkpoints occur only at process start, configuration completion,
+  listener binding, graceful exit, or panic;
+- files are atomically replaced rather than appended, so storage does not grow
+  with uptime or request count;
+- panic messages are limited to 4 KiB and backtraces to 128 KiB;
+- Unix directories and files use owner-only `0700` and `0600` permissions.
+
+`current-run.json` contains the process version, PID, operating system,
+architecture, option names, and the latest low-frequency milestone. Argument
+values are not stored. In particular, API keys, URLs, paths, prompts, model
+replies, Web access tokens, HTTP header values, and tool inputs/outputs are not
+part of the default lifecycle report.
+
+On a graceful exit, `last-exit.json` records the actual selected trigger:
+`ctrl_c`, `sigterm`, `sighup`, `parent_process_exited`, `server_completed`, or
+`help_requested`. It also records whether runtime cleanup completed. A startup
+or runtime error is recorded separately as `startup_or_runtime_error`, with a
+bounded best-effort redaction of common credential shapes.
+
+A Rust panic produces `last-panic.txt` with its thread, source location, recent
+lifecycle milestones, and a forced backtrace. Backtrace capture occurs only on
+panic. If the process cannot run cleanup—for example after SIGKILL, host reboot,
+or some OOM terminations—`current-run.json` remains. The next start moves that
+record to `previous-abnormal-exit.json` with `exact_cause: unknown`. This proves
+only that the prior process did not complete its exit protocol; it does **not**
+by itself prove a panic, OOM, or any particular external signal.
+
+For an unexpected exit, preserve these files before reproducing again. Start
+with `last-exit.json`, `last-panic.txt`, and `previous-abnormal-exit.json`.
+Review their contents before sharing them. The separate `--debug` mode remains
+opt-in and may contain prompts, model replies, and tool data; it is intended for
+model-interaction diagnosis rather than ordinary process-exit diagnosis.
 
 ## Interactive Notes
 
@@ -211,7 +288,14 @@ Shell:
 
 Web:
 
+- When creating a Session, choose a registered Workspace or enter an existing
+  absolute directory on the Timem host. The selected directory becomes that
+  Session's CWD.
 - Sessions can use different model/API/runtime settings.
+- The sidebar supports persistent Session groups. Groups can be created,
+  renamed, reordered, collapsed, and deleted; deleting a group moves its
+  Sessions to **Unsorted** without deleting them. A Session can be moved between
+  groups while other Sessions continue working.
 - Attachments are stored under the active data space and passed to the active
   turn.
 - Stop cancels all workers in the active Session; the next send starts from the

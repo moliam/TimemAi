@@ -1303,12 +1303,21 @@ describe("web topic view model", () => {
     const activity = activityFromTopic(topic("core.context.compact", {
       estimated_before_tokens: 82_000,
       estimated_after_tokens: 14_000,
+      estimated_text_before_tokens: 12_000,
+      estimated_text_after_tokens: 4_000,
+      estimated_native_before_tokens: 70_000,
+      estimated_native_after_tokens: 10_000,
     }));
     expect(activity).toMatchObject({
       kind: "context_compact",
       tone: "notice",
+      title: "Dynamic context compacted",
       before_tokens: 82_000,
       after_tokens: 14_000,
+      text_before_tokens: 12_000,
+      text_after_tokens: 4_000,
+      native_before_tokens: 70_000,
+      native_after_tokens: 10_000,
     });
   });
 

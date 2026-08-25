@@ -1,26 +1,32 @@
-use crate::debug_session::DebugStore;
 use crate::event_journal::{EventJournal, JournalInstanceInfo};
+use crate::session_groups::{
+    load_session_groups, normalize_session_group_name, save_session_groups, SessionGroup,
+    MAX_SESSION_GROUPS,
+};
 use crate::worker_roles::{
     load_role_library, load_roles, normalize_group_name, normalize_role_fields,
     recover_role_library, role_library_path, roles_path_for_history, save_role_library, WorkerRole,
     WorkerRoleGroup, WorkerRoleLibrary, MAX_ROLE_FILE_BYTES, MAX_WORKER_ROLES,
     MAX_WORKER_ROLE_GROUPS,
 };
+use crate::{debug_session::DebugStore, lifecycle_diagnostics::LifecycleDiagnostics};
 use agent_core::mcp::{McpRuntime, McpServerConfig, McpServerReport, McpStore, McpTool};
 use agent_core::session_store::{
     ChatCommandDeliveryState, ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole,
     SessionResumeNotice, SessionStore, StoredSession, StoredSessionProfile, StoredSessionState,
 };
 use agent_core::{
-    apply_runtime_config_value, combine_additional_contexts, default_data_root,
-    load_workspace_dirs_from_path, model_service_config_from_sources_allow_missing_api_key,
+    apply_runtime_config_value, combine_additional_contexts, create_memory_dir, default_data_root,
+    default_memory_dir, load_workspace_dirs_from_path,
+    model_service_config_from_sources_allow_missing_api_key, resolve_memory_dir,
     runtime_config_menu_report, validate_api_key, work_instruction_load_report,
     work_instruction_load_request, work_instruction_mode_from_sources, AgentCore, BashApprovalMode,
     CoreSessionWorkerEvent, CoreSessionWorkerManager, CoreSessionWorkerWorkspace, HostDecision,
     HostDecisionRequest, ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind,
     RuntimeDataLayout, SessionToolRepo, ToolDetail, ToolGenRequest, ToolSummary, TopicReply,
-    WorkInstructionLoadMode, CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
-    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    WorkInstructionLoadMode, CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE,
+    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
+    CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, self_tool::SelfToolPaths, shell_exec::FileShellJobStore,
@@ -65,6 +71,7 @@ include!(concat!(env!("OUT_DIR"), "/embedded_web_assets.rs"));
 const STATIC_PROMPT: &str = include_str!("../../resources/system_prompt/system_prompt.md");
 const PORT_START: u16 = 12_345;
 const PORT_END: u16 = 23_456;
+const DEFAULT_MEM_PREFERRED_PORT: u16 = 13_764;
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(40);
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 const SESSION_HISTORY_PAGE_LIMIT: usize = 200;
@@ -404,16 +411,24 @@ struct WebMemState {
     mcp_reports: BTreeMap<String, McpServerReport>,
     model_endpoints: Vec<ModelEndpointConfig>,
     role_library: WorkerRoleLibrary,
+    session_groups: Vec<SessionGroup>,
 }
 
 impl WebMemState {
     fn new(data_dir: PathBuf, space: String) -> Result<Self, String> {
-        validate_web_space_name(&space)?;
-        let layout = RuntimeDataLayout::new(data_dir, space.clone());
+        let layout = if Path::new(&space).is_absolute() {
+            let memory_dir = validate_web_mem_directory(Path::new(&space))?;
+            create_memory_dir(&memory_dir)?;
+            RuntimeDataLayout::from_memory_dir(data_dir, &memory_dir)
+        } else {
+            validate_web_space_name(&space)?;
+            RuntimeDataLayout::new(data_dir, space.clone())
+        };
         let mcp_store = McpStore::new(layout.memory_dir());
         let mcp_configs = load_mcp_configs_resilient(&mcp_store)?;
         let role_library = load_role_library_resilient(&role_library_path(&layout.memory_dir()))?;
         let model_endpoints = load_model_endpoints_resilient(&layout.memory_dir())?;
+        let session_groups = load_session_groups(&layout.memory_dir())?;
         Ok(Self {
             space,
             session_store: SessionStore::new(layout.memory_dir()),
@@ -423,22 +438,15 @@ impl WebMemState {
             mcp_reports: BTreeMap::new(),
             model_endpoints,
             role_library,
+            session_groups,
             layout,
         })
     }
 
     fn from_directory(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = validate_web_mem_directory(path.as_ref())?;
-        let space = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| "mem_path_invalid".to_string())?
-            .to_string();
-        let data_dir = path
-            .parent()
-            .ok_or_else(|| "mem_path_invalid".to_string())?
-            .to_path_buf();
-        Self::new(data_dir, space)
+        let data_dir = default_data_root();
+        Self::new(data_dir, path.display().to_string())
     }
 
     fn info(&self) -> WebMemInfo {
@@ -466,6 +474,8 @@ struct ModelEndpointConfig {
     #[serde(default = "default_endpoint_max_output_tokens")]
     max_llm_output_tokens: u32,
     api_key: String,
+    #[serde(default)]
+    http_headers: BTreeMap<String, String>,
 }
 
 fn default_endpoint_max_input_tokens() -> u32 {
@@ -487,6 +497,7 @@ struct ModelEndpointReport {
     max_llm_input_tokens: u32,
     max_llm_output_tokens: u32,
     api_key_configured: bool,
+    http_headers: BTreeMap<String, String>,
 }
 
 impl From<&ModelEndpointConfig> for ModelEndpointReport {
@@ -501,6 +512,11 @@ impl From<&ModelEndpointConfig> for ModelEndpointReport {
             max_llm_input_tokens: endpoint.max_llm_input_tokens,
             max_llm_output_tokens: endpoint.max_llm_output_tokens,
             api_key_configured: !endpoint.api_key.is_empty(),
+            http_headers: endpoint
+                .http_headers
+                .keys()
+                .map(|name| (name.clone(), "****".to_string()))
+                .collect(),
         }
     }
 }
@@ -639,6 +655,7 @@ struct RuntimeSettings {
 struct WebSession {
     session_id: String,
     display_name: String,
+    group_id: Option<String>,
     ordinal: u32,
     state: String,
     current_dir: String,
@@ -820,6 +837,13 @@ enum WireEvent {
     SessionDeleted {
         session_id: String,
     },
+    SessionGroupsUpdated {
+        groups: Vec<SessionGroup>,
+    },
+    SessionGroupChanged {
+        session_id: String,
+        group_id: Option<String>,
+    },
     WorkerRoleLibraryUpdated {
         library: WorkerRoleLibrary,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -935,6 +959,7 @@ enum WireEvent {
     ModelEndpointSecretRevealed {
         endpoint_id: String,
         api_key: String,
+        http_headers: BTreeMap<String, String>,
     },
 }
 
@@ -951,6 +976,7 @@ struct WebSnapshot {
     server: ServerInfo,
     sessions: Vec<WebSession>,
     role_library: WorkerRoleLibrary,
+    session_groups: Vec<SessionGroup>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1055,6 +1081,8 @@ struct ModelEndpointInput {
     max_llm_output_tokens: u32,
     #[serde(default)]
     api_key: Option<String>,
+    #[serde(default)]
+    http_headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1069,6 +1097,23 @@ enum ClientCommand {
     SessionRename {
         session_id: String,
         display_name: String,
+    },
+    SessionGroupCreate {
+        name: String,
+    },
+    SessionGroupUpdate {
+        group_id: String,
+        name: String,
+    },
+    SessionGroupDelete {
+        group_id: String,
+    },
+    SessionGroupsReorder {
+        groups: Vec<SessionGroup>,
+    },
+    SessionGroupMove {
+        session_id: String,
+        group_id: Option<String>,
     },
     SessionApiKeyUpdate {
         session_id: String,
@@ -1254,6 +1299,11 @@ impl ClientCommand {
             | Self::WorkerRoleGroupUpdate { .. }
             | Self::WorkerRoleGroupDelete { .. }
             | Self::WorkerRoleLibraryReorder { .. } => Some("global".to_string()),
+            Self::SessionGroupCreate { .. }
+            | Self::SessionGroupUpdate { .. }
+            | Self::SessionGroupDelete { .. }
+            | Self::SessionGroupsReorder { .. }
+            | Self::SessionGroupMove { .. } => Some("session-groups".to_string()),
             Self::SessionCreate { .. } => Some("session:create".to_string()),
             Self::McpServerUpsert { config, .. } => Some(format!("mcp:{}", config.id)),
             Self::SessionRename { session_id, .. }
@@ -1319,16 +1369,41 @@ impl ClientCommand {
     }
 }
 
-pub async fn run_from_env() -> Result<(), String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebExitReason {
+    HelpRequested,
+    CtrlC,
+    Sigterm,
+    Sighup,
+    ParentProcessExited,
+    ServerCompleted,
+}
+
+impl WebExitReason {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::HelpRequested => "help_requested",
+            Self::CtrlC => "ctrl_c",
+            Self::Sigterm => "sigterm",
+            Self::Sighup => "sighup",
+            Self::ParentProcessExited => "parent_process_exited",
+            Self::ServerCompleted => "server_completed",
+        }
+    }
+}
+
+pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitReason, String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help();
-        return Ok(());
+        return Ok(WebExitReason::HelpRequested);
     }
 
     let launch = WebLaunchOptions::parse(&args)?;
+    diagnostics.checkpoint("configuration_parsed", serde_json::Value::Null);
     let launch_parent = LaunchParent::capture();
     let template = WorkerTemplate::from_environment(&launch)?;
+    let prefer_default_mem_port = uses_system_default_mem(&template.initial_space);
     println!("Starting Timem Web and restoring the selected workspace...");
     let token = generate_token()?;
     let manager = Arc::new(Mutex::new(CoreSessionWorkerManager::new()));
@@ -1396,13 +1471,23 @@ pub async fn run_from_env() -> Result<(), String> {
     }
     spawn_event_bridge(state.clone());
 
-    let listener = bind_web_listener(launch.port, launch.public_access)
+    let listener = bind_web_listener(launch.port, launch.public_access, prefer_default_mem_port)
         .await
         .map_err(|error| friendly_bind_error(error, launch.port))?;
     let port = listener
         .local_addr()
         .map_err(|error| error.to_string())?
         .port();
+    // Register signal streams before publishing any readiness milestone so an
+    // immediate terminal/service stop cannot fall through to the OS default.
+    let shutdown_monitor = ShutdownSignalMonitor::capture(launch_parent);
+    diagnostics.checkpoint(
+        "listener_bound",
+        serde_json::json!({
+            "port": port,
+            "public_access": launch.public_access,
+        }),
+    );
     let app = build_router(state.clone(), port);
     let local_url = format!("http://127.0.0.1:{port}/?token={token}");
     let public_url = launch
@@ -1452,12 +1537,24 @@ pub async fn run_from_env() -> Result<(), String> {
         web_bind_host(launch.public_access),
         web_shutdown_signal_names().join("/")
     );
+    let shutdown_reason = Arc::new(Mutex::new(None));
     let serve_result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(launch_parent))
+        .with_graceful_shutdown(shutdown_signal(
+            shutdown_monitor,
+            Arc::clone(&shutdown_reason),
+            diagnostics.clone(),
+        ))
         .await
         .map_err(|error| error.to_string());
     serve_result?;
-    cleanup_guard.cleanup()
+    diagnostics.event("graceful_shutdown_cleanup_started", serde_json::Value::Null);
+    cleanup_guard.cleanup()?;
+    diagnostics.event("graceful_shutdown_completed", serde_json::Value::Null);
+    let reason = shutdown_reason
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or(WebExitReason::ServerCompleted);
+    Ok(reason)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1486,16 +1583,66 @@ impl LaunchParent {
     }
 }
 
-async fn shutdown_signal(launch_parent: LaunchParent) {
+struct ShutdownSignalMonitor {
+    launch_parent: LaunchParent,
     #[cfg(unix)]
-    {
-        shutdown_signal_unix(launch_parent).await;
+    interrupt: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    terminate: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    hangup: Option<tokio::signal::unix::Signal>,
+}
+
+impl ShutdownSignalMonitor {
+    fn capture(launch_parent: LaunchParent) -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            Self {
+                launch_parent,
+                interrupt: signal(SignalKind::interrupt()).ok(),
+                terminate: signal(SignalKind::terminate()).ok(),
+                hangup: signal(SignalKind::hangup()).ok(),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            Self { launch_parent }
+        }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = launch_parent;
-        let _ = tokio::signal::ctrl_c().await;
+
+    async fn detect(mut self) -> WebExitReason {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = recv_optional_signal(&mut self.interrupt) => WebExitReason::CtrlC,
+                _ = recv_optional_signal(&mut self.terminate) => WebExitReason::Sigterm,
+                _ = recv_optional_signal(&mut self.hangup) => WebExitReason::Sighup,
+                _ = wait_for_launch_parent_exit(self.launch_parent.pid) => WebExitReason::ParentProcessExited,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self.launch_parent;
+            let _ = tokio::signal::ctrl_c().await;
+            WebExitReason::CtrlC
+        }
     }
+}
+
+async fn shutdown_signal(
+    monitor: ShutdownSignalMonitor,
+    selected_reason: Arc<Mutex<Option<WebExitReason>>>,
+    diagnostics: LifecycleDiagnostics,
+) {
+    let reason = monitor.detect().await;
+    diagnostics.event(
+        "shutdown_trigger_received",
+        serde_json::json!({"reason": reason.label()}),
+    );
+    *selected_reason
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason);
 }
 
 fn web_shutdown_signal_names() -> &'static [&'static str] {
@@ -1506,20 +1653,6 @@ fn web_shutdown_signal_names() -> &'static [&'static str] {
     #[cfg(not(unix))]
     {
         &["Ctrl+C"]
-    }
-}
-
-#[cfg(unix)]
-async fn shutdown_signal_unix(launch_parent: LaunchParent) {
-    use tokio::signal::unix::{signal, SignalKind};
-
-    let mut terminate = signal(SignalKind::terminate()).ok();
-    let mut hangup = signal(SignalKind::hangup()).ok();
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {},
-        _ = recv_optional_signal(&mut terminate) => {},
-        _ = recv_optional_signal(&mut hangup) => {},
-        _ = wait_for_launch_parent_exit(launch_parent.pid) => {},
     }
 }
 
@@ -1609,8 +1742,7 @@ fn shutdown_web_runtime(state: &AppState) -> Result<(), String> {
     }
 
     let fallback_memory_dir =
-        RuntimeDataLayout::new(&state.template.data_dir, &state.template.initial_space)
-            .memory_dir();
+        web_layout_for_space(&state.template.data_dir, &state.template.initial_space).memory_dir();
     let memory_dir = match state.mem.lock() {
         Ok(mem) => {
             mem.mcp_runtime.disconnect_all();
@@ -1912,6 +2044,35 @@ fn ensure_unique_worker_role_group_name(
     Ok(())
 }
 
+fn ensure_unique_session_group_name(
+    groups: &[SessionGroup],
+    name: &str,
+    except_id: Option<&str>,
+) -> Result<(), String> {
+    if groups
+        .iter()
+        .any(|group| Some(group.id.as_str()) != except_id && group.name.eq_ignore_ascii_case(name))
+    {
+        return Err("session_group_name_duplicate".to_string());
+    }
+    Ok(())
+}
+
+fn mutate_session_groups(
+    state: &AppState,
+    mutation: impl FnOnce(&mut Vec<SessionGroup>) -> Result<(), String>,
+) -> Result<Vec<SessionGroup>, String> {
+    let mut mem = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?;
+    let mut groups = mem.session_groups.clone();
+    mutation(&mut groups)?;
+    save_session_groups(&mem.layout.memory_dir(), &groups)?;
+    mem.session_groups = groups.clone();
+    Ok(groups)
+}
+
 fn mutate_worker_role_library(
     state: &AppState,
     session_id: &str,
@@ -2056,24 +2217,7 @@ fn existing_instance_launcher_is_alive(info: &JournalInstanceInfo) -> bool {
         // Backward-compatible metadata cannot distinguish launcher state.
         return true;
     };
-    process_id_is_alive(parent_pid)
-}
-
-#[cfg(unix)]
-fn process_id_is_alive(pid: u32) -> bool {
-    let Ok(pid) = libc::pid_t::try_from(pid) else {
-        return false;
-    };
-    if pid <= 1 {
-        return false;
-    }
-    let result = unsafe { libc::kill(pid, 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
-#[cfg(not(unix))]
-fn process_id_is_alive(_pid: u32) -> bool {
-    true
+    agent_core::os::process_may_be_alive(parent_pid)
 }
 
 async fn existing_web_instance_is_healthy(
@@ -2144,9 +2288,9 @@ Timem Web instances are never reused; each launch must own its own process and r
 
 fn friendly_journal_error(error: String, data_dir: &std::path::Path, space: &str) -> String {
     if error == "event_journal_in_use" {
-        let space_dir = absolute_path(RuntimeDataLayout::new(data_dir, space).space_dir());
+        let space_dir = absolute_path(web_layout_for_space(data_dir, space).space_dir());
         format!(
-            "Timem Web is already running on this memory space.\n\n  data dir: {}\n  space:    {}\n  location:  {}\n\nOptions:\n  - Use a different space:   timem-web --space <name>\n  - Use a different data dir: timem-web --data-dir <path>\n  - Or stop the other Timem Web instance first.",
+            "Timem Web is already running on this memory space.\n\n  data dir: {}\n  space:    {}\n  location:  {}\n\nOptions:\n  - Use a different MEM: timem-web --space /absolute/path/to/mem\n  - Or stop the other Timem Web instance first.",
             data_dir.display(),
             space,
             space_dir.display(),
@@ -2158,9 +2302,9 @@ fn friendly_journal_error(error: String, data_dir: &std::path::Path, space: &str
 
 fn friendly_memory_space_error(error: String, data_dir: &std::path::Path, space: &str) -> String {
     if error == "mem_guard_timeout" {
-        let space_dir = absolute_path(RuntimeDataLayout::new(data_dir, space).space_dir());
+        let space_dir = absolute_path(web_layout_for_space(data_dir, space).space_dir());
         format!(
-            "The selected Timem workspace is still locked by another running operation.\n\n  data dir: {}\n  space:    {}\n  location: {}\n\nTimem automatically recovers locks left by processes that have exited. If this message persists, another Timem process is still using this workspace. Close that process and retry, or start with a different workspace:\n\n  cargo run -p timem_web -- --space <another-name>\n\nYou can also select another data directory with --data-dir <path>. Do not delete the lock while another Timem process is running.",
+            "The selected Timem workspace is still locked by another running operation.\n\n  data dir: {}\n  space:    {}\n  location: {}\n\nTimem automatically recovers locks left by processes that have exited. If this message persists, another Timem process is still using this workspace. Close that process and retry, or start with a different workspace:\n\n  cargo run -p timem_web -- --space /absolute/path/to/another-mem\n\n`--space` must be an absolute MEM directory path. Do not delete the lock while another Timem process is running.",
             data_dir.display(),
             space,
             space_dir.display(),
@@ -2982,6 +3126,137 @@ fn handle_command_with_id(
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
         }
+        ClientCommand::SessionGroupCreate { name } => {
+            let name = normalize_session_group_name(&name)?;
+            let groups = mutate_session_groups(state, |groups| {
+                if groups.len() >= MAX_SESSION_GROUPS {
+                    return Err("session_group_limit_reached".to_string());
+                }
+                ensure_unique_session_group_name(groups, &name, None)?;
+                groups.push(SessionGroup {
+                    id: unique_web_id("session_group"),
+                    name,
+                });
+                Ok(())
+            })?;
+            let event = WireEvent::SessionGroupsUpdated { groups };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
+        }
+        ClientCommand::SessionGroupUpdate { group_id, name } => {
+            let name = normalize_session_group_name(&name)?;
+            let groups = mutate_session_groups(state, |groups| {
+                ensure_unique_session_group_name(groups, &name, Some(&group_id))?;
+                let group = groups
+                    .iter_mut()
+                    .find(|group| group.id == group_id)
+                    .ok_or_else(|| "session_group_not_found".to_string())?;
+                group.name = name;
+                Ok(())
+            })?;
+            let event = WireEvent::SessionGroupsUpdated { groups };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
+        }
+        ClientCommand::SessionGroupDelete { group_id } => {
+            let affected = {
+                // Cross-collection lock order is always MEM then Sessions.
+                // No disk or worker operation occurs while both are held.
+                let mut mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut groups = mem.session_groups.clone();
+                let before = groups.len();
+                groups.retain(|group| group.id != group_id);
+                if before == groups.len() {
+                    return Err("session_group_not_found".to_string());
+                }
+                save_session_groups(&mem.layout.memory_dir(), &groups)?;
+                mem.session_groups = groups;
+                let mut sessions = state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session_store_poisoned")?;
+                sessions
+                    .values_mut()
+                    .filter_map(|session| {
+                        if session.group_id.as_deref() == Some(group_id.as_str()) {
+                            session.group_id = None;
+                            Some(session.session_id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for session_id in &affected {
+                persist_web_session(state, session_id)?;
+            }
+            let groups = current_mem_state(state)?.session_groups;
+            let event = WireEvent::SessionGroupsUpdated { groups };
+            publish_semantic(state, event.clone())?;
+            for session_id in affected {
+                publish_semantic(
+                    state,
+                    WireEvent::SessionGroupChanged {
+                        session_id,
+                        group_id: None,
+                    },
+                )?;
+            }
+            return Ok(Some(event));
+        }
+        ClientCommand::SessionGroupsReorder { groups } => {
+            let updated = mutate_session_groups(state, |current| {
+                let current_ids = current
+                    .iter()
+                    .map(|group| group.id.as_str())
+                    .collect::<BTreeSet<_>>();
+                let supplied_ids = groups
+                    .iter()
+                    .map(|group| group.id.as_str())
+                    .collect::<BTreeSet<_>>();
+                if current_ids != supplied_ids || supplied_ids.len() != groups.len() {
+                    return Err("session_group_set_mismatch".to_string());
+                }
+                *current = groups;
+                Ok(())
+            })?;
+            let event = WireEvent::SessionGroupsUpdated { groups: updated };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
+        }
+        ClientCommand::SessionGroupMove {
+            session_id,
+            group_id,
+        } => {
+            {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                if let Some(group_id) = group_id.as_deref() {
+                    if !mem.session_groups.iter().any(|group| group.id == group_id) {
+                        return Err("session_group_not_found".to_string());
+                    }
+                }
+                state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session_store_poisoned")?
+                    .get_mut(&session_id)
+                    .ok_or_else(|| "session_not_found".to_string())?
+                    .group_id = group_id.clone();
+            }
+            persist_web_session(state, &session_id)?;
+            let event = WireEvent::SessionGroupChanged {
+                session_id,
+                group_id,
+            };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
+        }
         ClientCommand::SessionApiKeyUpdate {
             session_id,
             api_key,
@@ -3566,9 +3841,11 @@ fn handle_command_with_id(
             )?;
         }
         ClientCommand::ModelEndpointSecretReveal { endpoint_id } => {
+            let (api_key, http_headers) = model_endpoint_secrets(state, &endpoint_id)?;
             return Ok(Some(WireEvent::ModelEndpointSecretRevealed {
-                api_key: model_endpoint_api_key(state, &endpoint_id)?,
                 endpoint_id,
+                api_key,
+                http_headers,
             }));
         }
         ClientCommand::McpServerUpsert { session_id, config } => {
@@ -4246,6 +4523,7 @@ fn create_session(
             session_id.clone(),
             WebSession {
                 session_id: session_id.clone(),
+                group_id: None,
                 display_name: display_name
                     .clone()
                     .filter(|name| !name.trim().is_empty())
@@ -4565,6 +4843,7 @@ fn restore_stored_session(
             stored.session_id.clone(),
             WebSession {
                 session_id: stored.session_id.clone(),
+                group_id: stored.group_id.clone(),
                 display_name: stored.display_name.clone(),
                 ordinal,
                 state: match stored.state {
@@ -4757,7 +5036,7 @@ fn persist_restored_session_runtime_cache(
                 .runtime
                 .env_overrides
                 .iter()
-                .filter(|(key, _)| key.as_str() != "TIMEM_API_KEY")
+                .filter(|(key, _)| !matches!(key.as_str(), "TIMEM_API_KEY" | "TIMEM_HTTP_HEADERS"))
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
         )
@@ -5011,7 +5290,7 @@ fn stored_session_from_web_session(state: &AppState, session: &WebSession) -> St
                 .runtime
                 .env_overrides
                 .iter()
-                .filter(|(key, _)| key.as_str() != "TIMEM_API_KEY")
+                .filter(|(key, _)| !matches!(key.as_str(), "TIMEM_API_KEY" | "TIMEM_HTTP_HEADERS"))
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
         ),
@@ -5037,6 +5316,7 @@ fn stored_session_from_web_session(state: &AppState, session: &WebSession) -> St
             .unwrap_or_else(|_| PathBuf::from(""))
             .display()
             .to_string(),
+        group_id: session.group_id.clone(),
     }
 }
 
@@ -5708,6 +5988,18 @@ fn normalize_model_endpoint_input(
         validate_api_key(&api_key)
             .map_err(|error| format!("invalid_model_endpoint_api_key:{error}"))?;
     }
+    let mut http_headers = input.http_headers;
+    if let Some(existing) = existing {
+        for (name, value) in &mut http_headers {
+            if value == "****" {
+                if let Some(previous) = existing.http_headers.get(name) {
+                    *value = previous.clone();
+                }
+            }
+        }
+    }
+    agent_core::validate_model_http_headers(&http_headers)
+        .map_err(|error| format!("invalid_model_endpoint_headers:{error}"))?;
     let max_llm_input_tokens = input.max_llm_input_tokens;
     let max_llm_output_tokens = input.max_llm_output_tokens;
     if ![100_000, 200_000, 1_000_000].contains(&max_llm_input_tokens) {
@@ -5751,6 +6043,7 @@ fn normalize_model_endpoint_input(
         max_llm_input_tokens,
         max_llm_output_tokens,
         api_key,
+        http_headers,
     })
 }
 
@@ -5761,6 +6054,7 @@ fn testable_endpoint_validation_settings() -> RuntimeSettings {
             model: "model".to_string(),
             base_url: "http://127.0.0.1".to_string(),
             api_key: String::new(),
+            http_headers: Default::default(),
             timeout_secs: 60,
             max_llm_output_tokens: 4_096,
             max_llm_input_tokens: 32_000,
@@ -5857,6 +6151,7 @@ fn session_uses_model_endpoint(session: &WebSession, endpoint: &ModelEndpointCon
         && config.max_llm_input_tokens == endpoint.max_llm_input_tokens
         && config.max_llm_output_tokens == endpoint.max_llm_output_tokens
         && config.api_key == endpoint.api_key
+        && config.http_headers == endpoint.http_headers
 }
 
 fn sync_endpoint_token_limits(
@@ -5925,7 +6220,10 @@ fn delete_model_endpoint(state: &AppState, endpoint_id: &str) -> Result<(), Stri
     save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints)
 }
 
-fn model_endpoint_api_key(state: &AppState, endpoint_id: &str) -> Result<String, String> {
+fn model_endpoint_secrets(
+    state: &AppState,
+    endpoint_id: &str,
+) -> Result<(String, BTreeMap<String, String>), String> {
     state
         .mem
         .lock()
@@ -5933,7 +6231,7 @@ fn model_endpoint_api_key(state: &AppState, endpoint_id: &str) -> Result<String,
         .model_endpoints
         .iter()
         .find(|item| item.id == endpoint_id)
-        .map(|item| item.api_key.clone())
+        .map(|item| (item.api_key.clone(), item.http_headers.clone()))
         .ok_or_else(|| "model_endpoint_not_found".to_string())
 }
 
@@ -5971,7 +6269,52 @@ fn apply_model_endpoint(
     for (key, value) in fields {
         update_session_runtime_setting(state, session_id, key, &value)?;
     }
+    update_session_http_headers(state, session_id, endpoint.http_headers)?;
     update_session_api_key(state, session_id, endpoint.api_key)
+}
+
+fn update_session_http_headers(
+    state: &AppState,
+    session_id: &str,
+    http_headers: BTreeMap<String, String>,
+) -> Result<WebSessionRuntimeProfile, String> {
+    agent_core::validate_model_http_headers(&http_headers)
+        .map_err(|error| format!("invalid_model_endpoint_headers:{error}"))?;
+    if session_has_active_turn(state, session_id)? {
+        return Err("session_http_headers_update_while_working".to_string());
+    }
+    let worker_ids = session_worker_ids(state, session_id)?;
+    {
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        for worker_id in &worker_ids {
+            manager
+                .handle(worker_id)
+                .ok_or_else(|| "session_worker_not_found".to_string())?
+                .update_http_headers(http_headers.clone())?;
+        }
+    }
+    let runtime_profile = {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        session.runtime.settings.config.http_headers = http_headers.clone();
+        session.runtime.env.insert(
+            "TIMEM_HTTP_HEADERS".to_string(),
+            serde_json::to_string(&http_headers).map_err(|e| e.to_string())?,
+        );
+        session.runtime_profile =
+            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile.clone()
+    };
+    persist_web_session(state, session_id)?;
+    Ok(runtime_profile)
 }
 
 fn update_session_api_key(
@@ -6925,6 +7268,37 @@ fn append_active_turn_event(
     append_turn_event(state, session_id, None, source, payload)
 }
 
+fn core_topic_target_turn_id(
+    state: &AppState,
+    session_id: &str,
+    payload: &Value,
+) -> Option<String> {
+    let sessions = state.sessions.lock().ok()?;
+    let session = sessions.get(session_id)?;
+    if let Some(turn_id) = payload["payload"]["turn_id"].as_str() {
+        if session.turns.iter().any(|turn| turn.turn_id == turn_id) {
+            return Some(turn_id.to_string());
+        }
+    }
+    if payload["topic"]["name"].as_str() != Some(CORE_TOPIC_ACTION)
+        || payload["payload"]["event"].as_str() != Some("finish")
+    {
+        return None;
+    }
+    let action_id = payload["payload"]["action_id"].as_str()?.trim();
+    if action_id.is_empty() {
+        return None;
+    }
+    session.turns.iter().rev().find_map(|turn| {
+        turn.events.iter().rev().find_map(|event| {
+            (event.source == "core_topic"
+                && event.payload["topic"]["name"].as_str() == Some(CORE_TOPIC_ACTION)
+                && event.payload["payload"]["action_id"].as_str() == Some(action_id))
+            .then(|| turn.turn_id.clone())
+        })
+    })
+}
+
 fn append_turn_event(
     state: &AppState,
     session_id: &str,
@@ -7081,7 +7455,7 @@ fn chat_history_kind_for_source(source: &str, payload: &Value) -> ChatHistoryEve
             .and_then(|topic| topic.get("name"))
             .and_then(Value::as_str)
             .unwrap_or_default();
-        if topic_name == "core.action" {
+        if topic_name == CORE_TOPIC_ACTION {
             return ChatHistoryEventKind::Action;
         }
         if topic_name == CORE_TOPIC_MODEL_REPAIR {
@@ -7090,7 +7464,7 @@ fn chat_history_kind_for_source(source: &str, payload: &Value) -> ChatHistoryEve
         if topic_name == "core.context_compact" {
             return ChatHistoryEventKind::ContextCompact;
         }
-        if topic_name == "core.model.response" {
+        if topic_name == CORE_TOPIC_MODEL_RESPONSE {
             return ChatHistoryEventKind::Progress;
         }
     }
@@ -7683,7 +8057,7 @@ fn handle_scoped_worker_event(
                         }
                     }
                 }
-                if event.topic.name == "core.action"
+                if event.topic.name == CORE_TOPIC_ACTION
                     && event.payload.get("event").and_then(Value::as_str) == Some("finish")
                 {
                     if let Some(debug) = state.debug.as_ref() {
@@ -7861,11 +8235,12 @@ fn handle_scoped_worker_event(
                 let turn_ref = if event.topic.name == agent_core::CORE_TOPIC_LIFECYCLE {
                     None
                 } else {
-                    let target_turn_id = event.payload["turn_id"].as_str();
+                    let target_turn_id =
+                        core_topic_target_turn_id(state, session_id, &wire_payload);
                     append_turn_event(
                         state,
                         session_id,
-                        target_turn_id,
+                        target_turn_id.as_deref(),
                         "core_topic",
                         wire_payload.clone(),
                     )
@@ -7886,6 +8261,7 @@ fn handle_scoped_worker_event(
             prompt,
             interaction_profile,
             interaction_request,
+            api_payload,
         } => {
             if let Some(debug) = state.debug.as_ref() {
                 if let Some(profile) = interaction_profile.as_ref() {
@@ -7903,6 +8279,7 @@ fn handle_scoped_worker_event(
                     round,
                     &prompt,
                     interaction_request.as_deref(),
+                    api_payload.as_deref(),
                 ) {
                     eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
                 }
@@ -7940,9 +8317,14 @@ fn handle_scoped_worker_event(
             runtime_phase,
         } => {
             if let Some(debug) = state.debug.as_ref() {
-                if let Err(error) =
-                    debug.record_llm_response(session_id, worker_id, round, &content, &tool_calls)
-                {
+                if let Err(error) = debug.record_llm_response(
+                    session_id,
+                    worker_id,
+                    round,
+                    &usage,
+                    &content,
+                    &tool_calls,
+                ) {
                     eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
                 }
             }
@@ -8285,8 +8667,8 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             space_dir: String::new(),
             memory_dir: String::new(),
         });
-    let role_library = current_mem_state(state)
-        .map(|mem| mem.role_library)
+    let (role_library, session_groups) = current_mem_state(state)
+        .map(|mem| (mem.role_library, mem.session_groups))
         .unwrap_or_default();
     WebSnapshot {
         server: ServerInfo {
@@ -8306,6 +8688,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
         },
         sessions,
         role_library,
+        session_groups,
     }
 }
 
@@ -8331,6 +8714,14 @@ fn validate_web_space_name(space: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn web_layout_for_space(data_dir: &Path, space: &str) -> RuntimeDataLayout {
+    if Path::new(space).is_absolute() {
+        RuntimeDataLayout::from_memory_dir(data_dir, PathBuf::from(space))
+    } else {
+        RuntimeDataLayout::new(data_dir, space.to_string())
+    }
+}
+
 fn validate_web_mem_directory(path: &Path) -> Result<PathBuf, String> {
     if path.as_os_str().is_empty() {
         return Err("mem_path_empty".to_string());
@@ -8349,11 +8740,6 @@ fn validate_web_mem_directory(path: &Path) -> Result<PathBuf, String> {
     if path.as_os_str().to_string_lossy().len() > 4096 {
         return Err("mem_path_invalid".to_string());
     }
-    let space = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| "mem_path_invalid".to_string())?;
-    validate_web_space_name(space).map_err(|_| "mem_path_invalid".to_string())?;
     Ok(path.to_path_buf())
 }
 
@@ -8422,11 +8808,11 @@ impl WorkerTemplate {
         for key in RETIRED_SESSION_ENV_KEYS {
             env.remove(*key);
         }
-        let space = launch
+        let configured_space = launch
             .space
-            .clone()
-            .or_else(|| env.get("TIMEM_SPACE").cloned())
-            .unwrap_or_else(|| ".test_mem".to_string());
+            .as_deref()
+            .or_else(|| env.get("TIMEM_SPACE").map(String::as_str));
+        let space = resolve_memory_dir(configured_space)?.display().to_string();
         let data_dir = launch
             .data_dir
             .clone()
@@ -8434,8 +8820,9 @@ impl WorkerTemplate {
             .unwrap_or_else(default_data_root);
         let reminder_tips_config =
             agent_core::load_reminder_tips_config(&agent_core::default_config_root());
-        let session_store =
-            SessionStore::new(RuntimeDataLayout::new(&data_dir, &space).memory_dir());
+        let memory_dir = PathBuf::from(&space);
+        create_memory_dir(&memory_dir)?;
+        let session_store = SessionStore::new(&memory_dir);
         if let Ok(sessions) = session_store.list_sessions() {
             if let Some(stored) = sessions.into_iter().find(|session| {
                 !session.session_id.trim().is_empty() && Path::new(&session.current_dir).is_dir()
@@ -8726,6 +9113,10 @@ impl WorkerTemplate {
     fn resolve_workspace(&self, requested: Option<&str>) -> Result<PathBuf, String> {
         let selected = match requested {
             Some(path) => {
+                let path = Path::new(path);
+                if !path.is_absolute() {
+                    return Err("workspace_must_be_absolute".to_string());
+                }
                 std::fs::canonicalize(path).map_err(|_| "workspace_not_found".to_string())?
             }
             None => std::fs::canonicalize(&self.current_dir)
@@ -8734,17 +9125,7 @@ impl WorkerTemplate {
         if !selected.is_dir() {
             return Err("workspace_not_directory".to_string());
         }
-        let mut allowed = self.workspace_dirs.clone();
-        allowed.push(self.current_dir.clone());
-        if allowed.iter().any(|candidate| {
-            std::fs::canonicalize(candidate)
-                .map(|candidate| candidate == selected)
-                .unwrap_or(false)
-        }) {
-            Ok(selected)
-        } else {
-            Err("workspace_not_registered".to_string())
-        }
+        Ok(selected)
     }
 }
 
@@ -8761,6 +9142,7 @@ const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_RESPONSE_PROTOCOL",
     "TIMEM_BASE_URL",
     "TIMEM_API_KEY",
+    "TIMEM_HTTP_HEADERS",
     "TIMEM_TIMEOUT",
     "TIMEM_MAX_LLM_INPUT",
     "TIMEM_MAX_LLM_OUTPUT",
@@ -8939,6 +9321,10 @@ fn session_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
 fn session_cached_env_values(settings: &RuntimeSettings) -> BTreeMap<String, String> {
     let mut env = session_env_values(settings);
     env.insert("TIMEM_API_KEY".to_string(), settings.config.api_key.clone());
+    env.insert(
+        "TIMEM_HTTP_HEADERS".to_string(),
+        serde_json::to_string(&settings.config.http_headers).unwrap_or_else(|_| "{}".to_string()),
+    );
     env
 }
 
@@ -9090,6 +9476,7 @@ impl WebLaunchOptions {
             parallel_tool_calls: None,
             api_protocol: self.api_protocol.clone(),
             api_key: self.api_key.clone(),
+            http_headers: None,
             model: self.model.clone(),
             base_url: self.base_url.clone(),
             timeout_secs: self.timeout_secs,
@@ -9152,18 +9539,36 @@ fn open_directory_in_terminal(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn uses_system_default_mem(memory_dir: &str) -> bool {
+    default_memory_dir().is_ok_and(|default| Path::new(memory_dir) == default)
+}
+
+fn automatic_web_port_candidates(prefer_default_mem_port: bool, offset: u16) -> Vec<u16> {
+    let port_count = PORT_END - PORT_START + 1;
+    let mut ports = Vec::with_capacity(usize::from(port_count));
+    if prefer_default_mem_port {
+        ports.push(DEFAULT_MEM_PREFERRED_PORT);
+    }
+    ports.extend(
+        (0..port_count)
+            .map(|index| PORT_START + ((offset + index) % port_count))
+            .filter(|port| !prefer_default_mem_port || *port != DEFAULT_MEM_PREFERRED_PORT),
+    );
+    ports
+}
+
 async fn bind_web_listener(
     requested_port: Option<u16>,
     public_access: bool,
+    prefer_default_mem_port: bool,
 ) -> Result<TcpListener, String> {
     let explicitly_requested = requested_port.is_some();
     let ports = match requested_port {
         Some(port) => vec![port],
         None => {
-            let offset = (now_ms() % u128::from(PORT_END - PORT_START + 1)) as u16;
-            (0..=PORT_END - PORT_START)
-                .map(|index| PORT_START + ((offset + index) % (PORT_END - PORT_START + 1)))
-                .collect()
+            let port_count = PORT_END - PORT_START + 1;
+            let offset = (now_ms() % u128::from(port_count)) as u16;
+            automatic_web_port_candidates(prefer_default_mem_port, offset)
         }
     };
     let bind_ip = if public_access {
@@ -9246,7 +9651,7 @@ fn nonempty_text(text: String, label: &str) -> Result<String, String> {
 }
 
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default auto-select\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <name>               memory/audit space\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --data-dir <path>            data root\n  --timeout <seconds>          model request timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
+    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default ~/.timem/mem\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --data-dir <path>            data root\n  --timeout <seconds>          model request timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
 }
 
 fn public_access_url(configured_host: Option<&str>, port: u16, token: &str) -> Option<String> {

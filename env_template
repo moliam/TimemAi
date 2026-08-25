@@ -32,10 +32,10 @@
 # Model name.
 # export TIMEM_MODEL=qwen-plus
 
-# Memory/audit space name.
-# export TIMEM_SPACE=.test_mem
+# Absolute MEM directory path. If unset, Timem uses ~/.timem/mem and creates it.
+# export TIMEM_SPACE=/absolute/path/to/mem
 
-# Runtime data root for memory, audit logs, and shell history.
+# Runtime root for workspace configuration and capability overlays.
 # Default for a new environment: .timem_data
 # export TIMEM_DATA_DIR=.timem_data
 

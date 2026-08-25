@@ -100,7 +100,7 @@ export TIMEM_API_KEY=your_api_key_here
 export TIMEM_MODEL=qwen-plus
 export TIMEM_API_PROTOCOL=openai-compatible
 export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-export TIMEM_SPACE=.test_mem
+export TIMEM_SPACE=/absolute/path/to/mem
 ```
 
 The environment file can be stored elsewhere:
@@ -108,6 +108,13 @@ The environment file can be stored elsewhere:
 ```bash
 source /path/to/your/env
 ```
+
+MEM data defaults to `~/.timem/mem`; Timem creates that directory on first
+startup. To use another MEM, pass an absolute directory path through
+`--space /absolute/path/to/mem` or `TIMEM_SPACE`. Relative `--space` paths are
+rejected. A MEM can hold many Sessions: each Session keeps its own metadata and
+history files and uses a Session-scoped lock, so unrelated Sessions can read,
+write, and run concurrently without rewriting one global Session index.
 
 Use `timem --help` or `timem-web --help` to inspect available startup
 options. After the first successful configuration, Timem caches the effective
@@ -151,8 +158,10 @@ a separate next turn. The current final answer stays visible before the queued t
 ## Timem Web Details
 
 The Web UI provides session switching, Markdown rendering, live work updates,
-attachments, runtime status, context usage, and per-session MCP tools in the
-browser. Open the plug control in the header to add a local stdio, remote
+attachments, runtime status, context usage, persistent Session groups, and
+per-session MCP tools in the browser. Session groups can be created, renamed,
+reordered, collapsed, or deleted. Drag a Session by its handle into another group
+or **Unsorted**; deleting a group leaves its Sessions intact under **Unsorted**. Open the plug control in the header to add a local stdio, remote
 Streamable HTTP, or legacy SSE MCP server and choose which Sessions may use it.
 Timem Web can start without a model API key so configuration remains available
 in the browser. Click the current model name to edit the selected Session. A
@@ -179,8 +188,11 @@ timem-web --public
 ```
 
 Open the complete URL printed in the terminal, including `?token=...`, from
-your local browser. The port is selected automatically. To choose a fixed
-port or advertised host:
+your local browser. With the default MEM directory (`~/.timem/mem`), automatic
+selection tries port `13764` first and falls back to another port in the
+supported range if it is occupied. A custom MEM keeps the rotating automatic
+selection strategy. An explicit `--port` always takes priority. To choose a
+fixed port or advertised host:
 
 ```bash
 timem-web --public --port 20699 --public-host 10.125.112.83
@@ -190,6 +202,13 @@ Public mode does not open a browser on the server. HTTP access may show a
 browser "Not secure" warning because it uses plain HTTP; the access token is
 still required. For production exposure, place Timem behind HTTPS and an
 appropriate network access control layer.
+
+Timem Web keeps a bounded, low-overhead lifecycle diagnostic under
+`<TIMEM_DATA_DIR>/diagnostics/timem-web/`. It records process milestones and the
+actual graceful-shutdown trigger without storing prompts, replies, API keys, or
+HTTP header values. After an unexpected exit, see
+[Install and configuration](docs/install-and-configuration.md#timem-web-lifecycle-diagnostics)
+for the files to inspect.
 
 ## More Documentation
 

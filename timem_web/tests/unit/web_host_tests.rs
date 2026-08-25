@@ -555,6 +555,7 @@ fn command_dedup_terminal_result_survives_restart_without_persisting_secrets() {
         durable_command_result(&WireEvent::ModelEndpointSecretRevealed {
             endpoint_id: "endpoint_a".to_string(),
             api_key: "secret".to_string(),
+            http_headers: Default::default(),
         })
         .is_none()
     );
@@ -720,6 +721,7 @@ fn corrupt_session_index_record_is_backed_up_while_valid_sessions_remain_usable(
             .join("sessions/session-valid/raw_chat_history.jsonl")
             .display()
             .to_string(),
+        group_id: None,
     };
     let valid_line = serde_json::to_string(&valid).unwrap();
     let original = format!("{valid_line}\nnot-json\n");
@@ -1933,6 +1935,19 @@ async fn browser_command_queue_is_bounded_under_click_flood() {
 }
 
 #[test]
+fn web_absolute_mem_layout_uses_the_selected_directory_directly() {
+    let data_dir = PathBuf::from("/tmp/timem-config");
+    let memory_dir = PathBuf::from("/tmp/timem selected mem");
+    let layout = web_layout_for_space(&data_dir, memory_dir.to_str().unwrap());
+
+    assert_eq!(layout.memory_dir(), memory_dir);
+    assert_eq!(
+        layout.api_audit_file(),
+        PathBuf::from("/tmp/timem selected mem/audit/api_audit.json")
+    );
+}
+
+#[test]
 fn parses_basic_web_launch_options() {
     let options = WebLaunchOptions::parse(&[
         "--port".to_string(),
@@ -3133,9 +3148,13 @@ fn web_startup_can_bootstrap_model_service_config_from_latest_session_cache() {
     template.current_dir = root.clone();
     template.workspace_dirs = vec![root.clone()];
     template.data_dir = data_dir.clone();
-    template.initial_space = space.to_string();
+    template.initial_space = data_dir.join(space).display().to_string();
     state.template = Arc::new(template);
-    set_test_mem(&state, data_dir.clone(), space);
+    set_test_mem(
+        &state,
+        data_dir.clone(),
+        &data_dir.join(space).display().to_string(),
+    );
     state.sessions.lock().unwrap().clear();
 
     create_session(
@@ -3168,7 +3187,7 @@ fn web_startup_can_bootstrap_model_service_config_from_latest_session_cache() {
 
     let launch = WebLaunchOptions {
         data_dir: Some(data_dir.display().to_string()),
-        space: Some(space.to_string()),
+        space: Some(data_dir.join(space).display().to_string()),
         ..WebLaunchOptions::default()
     };
     let restored_template = WorkerTemplate::from_environment(&launch).unwrap();
@@ -3287,6 +3306,7 @@ fn workspace_snapshot_deduplicates_registered_current_directory() {
                 model: "test-model".to_string(),
                 base_url: "http://127.0.0.1".to_string(),
                 api_key: "test".to_string(),
+                http_headers: Default::default(),
                 timeout_secs: 1,
                 max_llm_output_tokens: 1_024,
                 max_llm_input_tokens: 10_000,
@@ -3359,6 +3379,75 @@ fn session_create_returns_the_complete_session_to_the_requesting_browser() {
         .lock()
         .unwrap()
         .contains_key(&session.session_id));
+}
+
+#[test]
+fn session_create_accepts_an_unregistered_absolute_workspace_directory() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(format!("timem_web_select_workspace_{}", now_ms()));
+    let registered = root.join("registered");
+    let selected = root.join("selected elsewhere");
+    std::fs::create_dir_all(&registered).unwrap();
+    std::fs::create_dir_all(&selected).unwrap();
+    let mut template = (*state.template).clone();
+    template.current_dir = registered.clone();
+    template.workspace_dirs = vec![registered];
+    template.data_dir = root.join("data");
+    state.template = Arc::new(template);
+    set_test_mem(&state, root.join("data"), ".test_mem");
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionCreate {
+            display_name: Some("Selected workspace".to_string()),
+            workspace_dir: Some(selected.display().to_string()),
+            env: BTreeMap::new(),
+        },
+    )
+    .unwrap()
+    .expect("session creation must succeed for an explicitly selected directory");
+
+    let WireEvent::SessionCreated { session } = event else {
+        panic!("expected SessionCreated")
+    };
+    assert_eq!(
+        PathBuf::from(session.current_dir).canonicalize().unwrap(),
+        selected.canonicalize().unwrap()
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn session_workspace_selection_rejects_relative_missing_and_file_paths() {
+    let root = std::env::temp_dir().join(format!("timem_web_invalid_workspace_{}", now_ms()));
+    std::fs::create_dir_all(&root).unwrap();
+    let file = root.join("not-a-directory.txt");
+    std::fs::write(&file, "test").unwrap();
+    let state = routing_test_state();
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs.clear();
+
+    assert_eq!(
+        template
+            .resolve_workspace(Some("relative/path"))
+            .unwrap_err(),
+        "workspace_must_be_absolute"
+    );
+    assert_eq!(
+        template
+            .resolve_workspace(Some(root.join("missing").to_str().unwrap()))
+            .unwrap_err(),
+        "workspace_not_found"
+    );
+    assert_eq!(
+        template
+            .resolve_workspace(Some(file.to_str().unwrap()))
+            .unwrap_err(),
+        "workspace_not_directory"
+    );
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -3928,6 +4017,7 @@ fn missing_workspace_session_is_detached_once_without_deleting_history() {
             state: StoredSessionState::Ready,
             last_turn_id: Some("turn_before_workspace_removal".to_string()),
             raw_chat_history_path: history_path.display().to_string(),
+            group_id: None,
         })
         .unwrap();
 
@@ -4883,6 +4973,114 @@ fn history_page_command_skips_malformed_records_without_breaking_cursor() {
 }
 
 #[test]
+fn session_group_validation_rejects_case_insensitive_duplicate_names() {
+    let groups = vec![
+        SessionGroup {
+            id: "group-a".to_string(),
+            name: "Work".to_string(),
+        },
+        SessionGroup {
+            id: "group-b".to_string(),
+            name: "work".to_string(),
+        },
+    ];
+    assert_eq!(
+        crate::session_groups::validate_session_groups(&groups).unwrap_err(),
+        "session_group_name_duplicate"
+    );
+}
+
+#[test]
+fn session_groups_create_move_persist_and_delete_without_deleting_sessions() {
+    let state = routing_test_state();
+    let workspace = std::env::temp_dir().join(unique_web_id("session_group_workspace"));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session_id = create_session(
+        &state,
+        Some("Grouped work".to_string()),
+        Some(workspace.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+
+    let Some(WireEvent::SessionGroupsUpdated { groups }) = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupCreate {
+            name: "Projects".to_string(),
+        },
+    )
+    .unwrap() else {
+        panic!("expected session groups update");
+    };
+    assert_eq!(groups.len(), 1);
+    let group_id = groups[0].id.clone();
+
+    let moved = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupMove {
+            session_id: session_id.clone(),
+            group_id: Some(group_id.clone()),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        moved,
+        Some(WireEvent::SessionGroupChanged {
+            session_id: ref moved_session_id,
+            group_id: Some(ref persisted_group_id),
+        }) if moved_session_id == &session_id && persisted_group_id == &group_id
+    ));
+    assert_eq!(
+        current_session_store(&state)
+            .unwrap()
+            .load_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .group_id
+            .as_deref(),
+        Some(group_id.as_str())
+    );
+    let snapshot = snapshot_for(&state, TEST_PORT);
+    assert_eq!(snapshot.session_groups, groups);
+    assert_eq!(
+        snapshot
+            .sessions
+            .iter()
+            .find(|session| session.session_id == session_id)
+            .unwrap()
+            .group_id
+            .as_deref(),
+        Some(group_id.as_str())
+    );
+
+    let deleted = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupDelete {
+            group_id: group_id.clone(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        deleted,
+        Some(WireEvent::SessionGroupsUpdated { ref groups }) if groups.is_empty()
+    ));
+    assert!(state.sessions.lock().unwrap().contains_key(&session_id));
+    assert_eq!(
+        current_session_store(&state)
+            .unwrap()
+            .load_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .group_id,
+        None
+    );
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
 fn snapshot_reports_the_active_mem_space_and_paths() {
     let state = routing_test_state();
     let snapshot = snapshot_for(&state, TEST_PORT);
@@ -4903,9 +5101,13 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
     template.current_dir = data_dir.clone();
     template.workspace_dirs = vec![data_dir.clone()];
     template.data_dir = data_dir.clone();
-    template.initial_space = "alpha".to_string();
+    template.initial_space = data_dir.join("alpha").display().to_string();
     state.template = Arc::new(template);
-    set_test_mem(&state, data_dir.clone(), "alpha");
+    set_test_mem(
+        &state,
+        data_dir.clone(),
+        &data_dir.join("alpha").display().to_string(),
+    );
     state.sessions.lock().unwrap().clear();
 
     let alpha_session = create_session(
@@ -4917,13 +5119,21 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
     .unwrap();
     start_web_turn(&state, &alpha_session, "alpha task").unwrap();
 
-    set_test_mem(&state, data_dir.clone(), "beta");
+    set_test_mem(
+        &state,
+        data_dir.clone(),
+        &data_dir.join("beta").display().to_string(),
+    );
     state.sessions.lock().unwrap().clear();
     let beta_session =
         create_session(&state, Some("Beta work".to_string()), None, BTreeMap::new()).unwrap();
     start_web_turn(&state, &beta_session, "beta task").unwrap();
 
-    set_test_mem(&state, data_dir.clone(), "alpha");
+    set_test_mem(
+        &state,
+        data_dir.clone(),
+        &data_dir.join("alpha").display().to_string(),
+    );
     state.sessions.lock().unwrap().clear();
     restore_stored_sessions(&state).unwrap();
     assert!(state.sessions.lock().unwrap().contains_key(&alpha_session));
@@ -4943,7 +5153,13 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
     let WireEvent::Hello { snapshot, .. } = events.try_recv().unwrap() else {
         panic!("expected hello snapshot after mem switch")
     };
-    assert_eq!(snapshot.server.mem.space, "beta");
+    assert_eq!(
+        snapshot.server.mem.space,
+        std::fs::canonicalize(data_dir.join("beta"))
+            .unwrap()
+            .display()
+            .to_string()
+    );
     assert!(snapshot
         .sessions
         .iter()
@@ -4972,10 +5188,7 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
     let journal_path = state.event_journal.lock().unwrap().path().to_path_buf();
     assert_eq!(
         journal_path,
-        data_dir
-            .join("beta")
-            .join("memory")
-            .join("web_events.ndjson"),
+        data_dir.join("beta").join("web_events.ndjson"),
         "switching mem must also switch the durable semantic-event journal"
     );
 }
@@ -5153,6 +5366,7 @@ fn routing_test_state() -> AppState {
         model: "test-model".to_string(),
         base_url: "http://127.0.0.1".to_string(),
         api_key: "test".to_string(),
+        http_headers: Default::default(),
         timeout_secs: 1,
         max_llm_output_tokens: 1_024,
         max_llm_input_tokens: 10_000,
@@ -5219,6 +5433,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
     let settings = test_runtime_settings();
     WebSession {
         session_id: session_id.to_string(),
+        group_id: None,
         display_name,
         ordinal,
         state: "ready".to_string(),
@@ -5284,6 +5499,7 @@ fn test_runtime_settings() -> RuntimeSettings {
             model: "model".to_string(),
             base_url: "http://127.0.0.1:9".to_string(),
             api_key: "test".to_string(),
+            http_headers: Default::default(),
             timeout_secs: 1,
             max_llm_output_tokens: 1_024,
             max_llm_input_tokens: 10_000,
@@ -5520,6 +5736,7 @@ fn barrier_synchronized_sessions_keep_request_action_final_and_completion_scoped
                         prompt: String::new(),
                         interaction_profile: None,
                         interaction_request: None,
+                        api_payload: None,
                     },
                 );
                 after_request.wait();
@@ -5633,6 +5850,7 @@ fn one_session_aggregates_primary_and_subworker_state_without_cross_finishing() 
             prompt: String::new(),
             interaction_profile: None,
             interaction_request: None,
+            api_payload: None,
         },
     );
     handle_scoped_worker_event(
@@ -5645,6 +5863,7 @@ fn one_session_aggregates_primary_and_subworker_state_without_cross_finishing() 
             prompt: String::new(),
             interaction_profile: None,
             interaction_request: None,
+            api_payload: None,
         },
     );
     handle_scoped_worker_event(
@@ -5730,6 +5949,7 @@ fn primary_turn_finish_clears_stale_working_workers_and_session_spinner() {
             prompt: String::new(),
             interaction_profile: None,
             interaction_request: None,
+            api_payload: None,
         },
     );
     handle_scoped_worker_event(
@@ -5898,6 +6118,7 @@ fn stopped_primary_turn_removes_its_stale_reported_working_count() {
             prompt: String::new(),
             interaction_profile: None,
             interaction_request: None,
+            api_payload: None,
         },
     );
     handle_scoped_worker_event(
@@ -5980,6 +6201,7 @@ fn stopped_primary_turn_preserves_a_reported_active_subworker() {
             prompt: String::new(),
             interaction_profile: None,
             interaction_request: None,
+            api_payload: None,
         },
     );
     handle_scoped_worker_event(
@@ -6081,6 +6303,7 @@ fn primary_turn_finish_preserves_explicitly_reported_active_subworker() {
             prompt: String::new(),
             interaction_profile: None,
             interaction_request: None,
+            api_payload: None,
         },
     );
     handle_scoped_worker_event(
@@ -6161,6 +6384,7 @@ fn primary_turn_finish_ignores_other_sessions_global_worker_count() {
             prompt: String::new(),
             interaction_profile: None,
             interaction_request: None,
+            api_payload: None,
         },
     );
     handle_scoped_worker_event(
@@ -7147,6 +7371,13 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
                 parallel_tool_calls: true,
                 tool_choice: agent_core::NativeToolChoice::Auto,
             })),
+            api_payload: Some(Box::new(json!({
+                "messages": [
+                    {"role": "user", "content": "debug prompt"},
+                    {"role": "assistant", "content": "previous", "tool_calls": [{"id": "call_previous", "type": "function", "function": {"name": "self_tool", "arguments": "{\"type\":\"cwd\"}"}}]},
+                    {"role": "tool", "tool_call_id": "call_previous", "content": "CWD: /work"}
+                ]
+            }))),
         },
     );
     handle_worker_event(
@@ -7239,6 +7470,10 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
             interaction_request: Some(Box::new(agent_core::ModelInteractionRequest::inline(
                 "inline retry prompt",
             ))),
+            api_payload: Some(Box::new(json!({
+                "system": "inline system",
+                "messages": [{"role": "user", "content": "inline retry prompt"}]
+            }))),
         },
     );
     handle_worker_event(
@@ -7271,23 +7506,17 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
     assert!(statistics.contains("badge-inline"), "{statistics}");
 
     let prompt_dump =
-        std::fs::read_to_string(debug_root.join(session_id).join("llm_prompt.dump")).unwrap();
-    assert!(
-        prompt_dump.contains("scope: latest_request_only"),
-        "{prompt_dump}"
-    );
-    assert!(
-        prompt_dump.contains("tool_call_mode: inline"),
-        "{prompt_dump}"
-    );
+        std::fs::read_to_string(debug_root.join(session_id).join("llm_prompt.html")).unwrap();
+    assert!(prompt_dump.contains("inline system"), "{prompt_dump}");
     assert!(prompt_dump.contains("inline retry prompt"), "{prompt_dump}");
+    assert!(
+        prompt_dump.find("inline system").unwrap()
+            < prompt_dump.find("inline retry prompt").unwrap(),
+        "{prompt_dump}"
+    );
     assert!(!prompt_dump.contains("call_previous"), "{prompt_dump}");
     assert!(!prompt_dump.contains("CWD: /work"), "{prompt_dump}");
-    assert_eq!(prompt_dump.matches("request_sequence:").count(), 1);
-    assert!(
-        prompt_dump.contains(&format!("worker_id: {}", test_worker_id(session_id))),
-        "{prompt_dump}"
-    );
+    assert!(!prompt_dump.contains("worker_id"), "{prompt_dump}");
 
     let tool_schema_dump =
         std::fs::read_to_string(debug_root.join(session_id).join("tool_schema.dump")).unwrap();
@@ -8293,14 +8522,35 @@ fn background_exit_event_is_appended_to_its_original_turn() {
         session.active_turn_id = Some("turn_newer".to_string());
     }
 
-    let reference = append_turn_event(
+    append_turn_event(
         &state,
         "session_a",
         Some(&first.turn_id),
         "core_topic",
-        json!({"payload": {"action_id": "call_bg", "status": "completed"}}),
+        json!({
+            "topic": {"name": "core.action"},
+            "payload": {
+                "action_id": "call_bg",
+                "event": "finish",
+                "status": "background_running"
+            }
+        }),
     )
-    .expect("original turn event");
+    .expect("background launch event");
+    let terminal = json!({
+        "topic": {"name": "core.action"},
+        "payload": {
+            "action_id": "call_bg",
+            "event": "finish",
+            "status": "completed",
+            "turn_id": "action_turn_internal_id"
+        }
+    });
+    let target = core_topic_target_turn_id(&state, "session_a", &terminal)
+        .expect("action id should recover the original web turn");
+    assert_eq!(target, first.turn_id);
+    let reference = append_turn_event(&state, "session_a", Some(&target), "core_topic", terminal)
+        .expect("original turn terminal event");
     assert_eq!(reference.turn_id, first.turn_id);
 
     let sessions = state.sessions.lock().unwrap();
@@ -8314,7 +8564,7 @@ fn background_exit_event_is_appended_to_its_original_turn() {
             .unwrap()
             .events
             .len(),
-        1
+        2
     );
     assert!(session
         .turns
@@ -9528,7 +9778,7 @@ fn friendly_journal_error_replaces_in_use_with_actionable_message() {
     assert!(msg.contains("/tmp/timem_test_data"));
     assert!(msg.contains(".test_mem"));
     assert!(msg.contains("--space"));
-    assert!(msg.contains("--data-dir"));
+    assert!(msg.contains("/absolute/path/to/mem"));
     assert!(!msg.contains("event_journal_in_use"));
     let passthrough = friendly_journal_error("other_error".to_string(), &data_dir, ".test_mem");
     assert_eq!(passthrough, "other_error");
@@ -9798,6 +10048,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
             max_llm_input_tokens: 100_000,
             max_llm_output_tokens: 10_000,
             api_key: format!("secret-{index:05}"),
+            http_headers: Default::default(),
         }
     }
 
@@ -9830,7 +10081,9 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
             .map(|_| {
                 let started = std::time::Instant::now();
                 assert_eq!(
-                    model_endpoint_api_key(&state, &format!("endpoint-{:05}", count - 1)).unwrap(),
+                    model_endpoint_secrets(&state, &format!("endpoint-{:05}", count - 1))
+                        .unwrap()
+                        .0,
                     format!("secret-{:05}", count - 1)
                 );
                 started.elapsed()
@@ -9850,6 +10103,10 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                 max_llm_input_tokens: 100_000,
                 max_llm_output_tokens: 10_000,
                 api_key: None,
+                http_headers: BTreeMap::from([
+                    ("Authorization".to_string(), "****".to_string()),
+                    ("X-Tenant".to_string(), "****".to_string()),
+                ]),
             },
         )
         .unwrap();
@@ -9899,6 +10156,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                         max_llm_input_tokens: 100_000,
                         max_llm_output_tokens: 10_000,
                         api_key: None,
+                        http_headers: Default::default(),
                     },
                 )
                 .unwrap();
@@ -9936,6 +10194,33 @@ fn legacy_model_endpoints_load_with_default_token_limits() {
 }
 
 #[test]
+fn model_endpoint_headers_accept_safe_special_values_and_reject_injection() {
+    let valid = BTreeMap::from([
+        (
+            "X-Signature_1".to_string(),
+            "quoted=\"yes\"; path=C:\\tmp; city=东京".to_string(),
+        ),
+        ("X-Api.Key".to_string(), "a+b/c==".to_string()),
+    ]);
+    assert_eq!(agent_core::validate_model_http_headers(&valid), Ok(()));
+    assert!(agent_core::validate_model_http_headers(&BTreeMap::from([(
+        "Bad Header".to_string(),
+        "value".to_string()
+    )]))
+    .is_err());
+    assert!(agent_core::validate_model_http_headers(&BTreeMap::from([(
+        "X-Test".to_string(),
+        "ok\r\nInjected: yes".to_string()
+    )]))
+    .is_err());
+    assert!(agent_core::validate_model_http_headers(&BTreeMap::from([(
+        "X-Test".to_string(),
+        "bad\0value".to_string()
+    )]))
+    .is_err());
+}
+
+#[test]
 fn model_endpoint_rejects_token_limits_outside_supported_lists() {
     let invalid_input = ModelEndpointInput {
         id: None,
@@ -9947,6 +10232,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         max_llm_input_tokens: 128_000,
         max_llm_output_tokens: 10_000,
         api_key: None,
+        http_headers: Default::default(),
     };
     assert_eq!(
         normalize_model_endpoint_input(None, invalid_input).unwrap_err(),
@@ -9963,6 +10249,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         max_llm_input_tokens: 200_000,
         max_llm_output_tokens: 8_000,
         api_key: None,
+        http_headers: Default::default(),
     };
     assert_eq!(
         normalize_model_endpoint_input(None, invalid_output).unwrap_err(),
@@ -9991,6 +10278,10 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 max_llm_input_tokens: 100_000,
                 max_llm_output_tokens: 10_000,
                 api_key: Some("secret-endpoint-key".to_string()),
+                http_headers: BTreeMap::from([
+                    ("X-Tenant".to_string(), "tenant\"one\\东京".to_string()),
+                    ("Authorization".to_string(), "Basic special==".to_string()),
+                ]),
             },
         },
     )
@@ -10000,8 +10291,10 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     assert!(serialized.contains("Production"));
     assert!(serialized.contains("api_key_configured"));
     assert!(!serialized.contains("secret-endpoint-key"));
+    assert!(!serialized.contains("tenant\"one"));
+    assert!(serialized.contains("\"X-Tenant\":\"****\""));
     assert_eq!(
-        model_endpoint_api_key(&state, "endpoint-one").unwrap(),
+        model_endpoint_secrets(&state, "endpoint-one").unwrap().0,
         "secret-endpoint-key"
     );
     let applied = apply_model_endpoint(&state, &session_id, "endpoint-one").unwrap();
@@ -10045,7 +10338,9 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         Some(WireEvent::ModelEndpointSecretRevealed {
             ref endpoint_id,
             ref api_key,
+            ref http_headers,
         }) if endpoint_id == "endpoint-one" && api_key == "secret-endpoint-key"
+            && http_headers.get("X-Tenant").map(String::as_str) == Some("tenant\"one\\东京")
     ));
 
     let mut endpoint_events = state.events.subscribe();
@@ -10063,6 +10358,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 max_llm_input_tokens: 1_000_000,
                 max_llm_output_tokens: 50_000,
                 api_key: None,
+                http_headers: Default::default(),
             },
         },
     )
@@ -10099,12 +10395,13 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 max_llm_input_tokens: 1_000_000,
                 max_llm_output_tokens: 50_000,
                 api_key: None,
+                http_headers: Default::default(),
             },
         },
     )
     .unwrap();
     assert_eq!(
-        model_endpoint_api_key(&state, "endpoint-one").unwrap(),
+        model_endpoint_secrets(&state, "endpoint-one").unwrap().0,
         "secret-endpoint-key"
     );
     let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
@@ -10131,4 +10428,69 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     };
     manager.shutdown_all().unwrap();
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn default_mem_auto_port_candidates_prefer_13764_once() {
+    let offset = 777;
+    let candidates = automatic_web_port_candidates(true, offset);
+    assert_eq!(
+        candidates.first().copied(),
+        Some(DEFAULT_MEM_PREFERRED_PORT)
+    );
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|port| **port == DEFAULT_MEM_PREFERRED_PORT)
+            .count(),
+        1
+    );
+    assert_eq!(candidates.len(), usize::from(PORT_END - PORT_START + 1));
+    assert!(candidates
+        .iter()
+        .all(|port| (PORT_START..=PORT_END).contains(port)));
+}
+
+#[test]
+fn non_default_mem_auto_port_candidates_keep_rotating_pool_order() {
+    let offset = 777;
+    let candidates = automatic_web_port_candidates(false, offset);
+    assert_eq!(candidates.first().copied(), Some(PORT_START + offset));
+    assert_eq!(candidates.len(), usize::from(PORT_END - PORT_START + 1));
+}
+
+#[test]
+fn system_default_mem_detection_uses_the_resolved_path() {
+    let default = agent_core::default_memory_dir().unwrap();
+    assert!(uses_system_default_mem(default.to_str().unwrap()));
+    assert!(!uses_system_default_mem(
+        default.with_file_name("different-mem").to_str().unwrap()
+    ));
+}
+
+#[tokio::test]
+async fn occupied_default_mem_preferred_port_falls_back_to_another_supported_port() {
+    let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, DEFAULT_MEM_PREFERRED_PORT))
+        .await
+        .unwrap();
+    let selected = bind_web_listener(None, false, true).await.unwrap();
+    let selected_port = selected.local_addr().unwrap().port();
+    assert_ne!(selected_port, DEFAULT_MEM_PREFERRED_PORT);
+    assert!((PORT_START..=PORT_END).contains(&selected_port));
+    drop(selected);
+    drop(occupied);
+}
+
+#[tokio::test]
+async fn explicit_port_remains_higher_priority_than_default_mem_preference() {
+    let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let explicit_port = probe.local_addr().unwrap().port();
+    drop(probe);
+    if !(PORT_START..=PORT_END).contains(&explicit_port) {
+        return;
+    }
+    let selected = bind_web_listener(Some(explicit_port), false, true)
+        .await
+        .unwrap();
+    assert_eq!(selected.local_addr().unwrap().port(), explicit_port);
 }

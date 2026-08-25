@@ -82,6 +82,7 @@ fn auto_config(model: &str) -> ModelServiceConfig {
         model: model.to_string(),
         base_url: "https://gateway.example.test/v1/?secret=redacted".to_string(),
         api_key: "not-a-real-key".to_string(),
+        http_headers: Default::default(),
         timeout_secs: 1,
         max_llm_output_tokens: 128,
         max_llm_input_tokens: 4096,

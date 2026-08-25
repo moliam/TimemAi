@@ -107,7 +107,8 @@ pub use context_policy::{
     StaleContextPolicy, DEFAULT_STALE_CONTEXT_IDLE, DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD,
 };
 pub use data_layout::{
-    default_data_root, layout_for_space, workspace_config_file, RuntimeDataLayout,
+    create_memory_dir, default_data_root, default_memory_dir, layout_for_space, resolve_memory_dir,
+    workspace_config_file, RuntimeDataLayout,
 };
 pub use host::{
     context_compact_topic_event, core_initialized_topic_event,
@@ -142,9 +143,9 @@ pub use model_api::{
     model_prompt_blocks, model_request_audit_event, model_response_audit_event, parse_api_protocol,
     parse_model_response, parse_openai_compatible_cache_mode, plan_structured_output,
     prepare_model_http_request, prepare_model_interaction_http_request, prepare_model_request,
-    prompt_cache_plan_audit, without_openai_compatible_cache_control, ApiProtocol,
-    ModelCacheControl, ModelHttpResponseInterpretation, ModelPromptBlock, ModelPromptRole,
-    ModelServiceConfig, OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
+    prompt_cache_plan_audit, validate_model_http_headers, without_openai_compatible_cache_control,
+    ApiProtocol, ModelCacheControl, ModelHttpResponseInterpretation, ModelPromptBlock,
+    ModelPromptRole, ModelServiceConfig, OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
     PreparedModelHttpRequest, PreparedModelRequest, StructuredOutputHint,
 };
 pub use model_service_config::{
@@ -797,7 +798,7 @@ fn process_is_alive(pid: u64) -> Option<bool> {
     os::process_is_alive(pid)
 }
 
-pub(crate) fn atomic_write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn atomic_write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -2200,30 +2201,37 @@ impl AgentCore {
             self.capabilities.skill_count(),
         )
     }
-    pub fn dynamic_context_summary(&self) -> CoreDynamicContextSummary {
-        let mut delta_ids = BTreeSet::new();
+    fn dynamic_context_token_estimate(&self) -> DynamicContextTokenEstimate {
+        let mut visible_delta_ids = BTreeSet::new();
         let mut visible_slice_count = 0usize;
-        let mut estimated_tokens = 0_u32;
+        let mut text_tokens = 0_u32;
         for delta in &self.deltas {
-            let hidden = delta.hidden_slice_ids.iter().collect::<HashSet<_>>();
-            let mut delta_visible = false;
-            for slice in &delta.slices {
-                if hidden.contains(&slice.slice_id) {
-                    continue;
-                }
-                delta_visible = true;
+            for slice in prompt_render::render_delta_slices(delta) {
+                visible_delta_ids.insert(delta.delta_id.clone());
                 visible_slice_count += 1;
-                estimated_tokens =
-                    estimated_tokens.saturating_add(estimate_prompt_tokens(&slice.text));
-            }
-            if delta_visible {
-                delta_ids.insert(delta.delta_id.clone());
+                text_tokens = text_tokens.saturating_add(estimate_prompt_tokens(&slice.text));
             }
         }
-        CoreDynamicContextSummary {
-            visible_delta_count: delta_ids.len(),
+        let native_tokens = self
+            .native_exchanges
+            .iter()
+            .filter(|exchange| visible_delta_ids.contains(&exchange.delta_id))
+            .map(estimate_native_exchange_tokens)
+            .fold(0_u32, u32::saturating_add);
+        DynamicContextTokenEstimate {
+            visible_delta_count: visible_delta_ids.len(),
             visible_slice_count,
-            estimated_tokens,
+            text_tokens,
+            native_tokens,
+        }
+    }
+
+    pub fn dynamic_context_summary(&self) -> CoreDynamicContextSummary {
+        let estimate = self.dynamic_context_token_estimate();
+        CoreDynamicContextSummary {
+            visible_delta_count: estimate.visible_delta_count,
+            visible_slice_count: estimate.visible_slice_count,
+            estimated_tokens: estimate.total_tokens(),
         }
     }
     pub fn dynamic_context_estimated_tokens(&self) -> u32 {
@@ -2729,7 +2737,7 @@ impl AgentCore {
         for compact in &parsed.context_compacts {
             let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
             if missing.is_empty() {
-                let estimated_before_tokens = self.dynamic_context_summary().estimated_tokens;
+                let estimated_before = self.dynamic_context_token_estimate();
                 let offload_record = if compact.offload_delta_ids.is_empty() {
                     None
                 } else {
@@ -2770,17 +2778,26 @@ impl AgentCore {
                     &compact.delta_ids,
                     &compact.slice_ids,
                 );
-                let estimated_after_tokens = self
-                    .dynamic_context_summary()
-                    .estimated_tokens
-                    .saturating_add(estimate_prompt_tokens(&compact.summary));
+                let estimated_after = self.dynamic_context_token_estimate();
+                let summary_tokens = estimate_prompt_tokens(&compact.summary);
+                let compact_report = host::CoreContextCompactTopic {
+                    estimated_before_tokens: estimated_before.total_tokens(),
+                    estimated_after_tokens: estimated_after
+                        .total_tokens()
+                        .saturating_add(summary_tokens),
+                    estimated_text_before_tokens: estimated_before.text_tokens,
+                    estimated_text_after_tokens: estimated_after
+                        .text_tokens
+                        .saturating_add(summary_tokens),
+                    estimated_native_before_tokens: estimated_before.native_tokens,
+                    estimated_native_after_tokens: estimated_after.native_tokens,
+                    discarded_delta_ids: compact.discard_delta_ids.clone(),
+                    offloaded_delta_ids: compact.offload_delta_ids.clone(),
+                    scratch_id: offload_record.as_ref().map(|record| record.id.clone()),
+                };
                 runtime.on_core_topic_events(&[host::context_compact_topic_event(
                     self.current_session_id(),
-                    estimated_before_tokens,
-                    estimated_after_tokens,
-                    &compact.discard_delta_ids,
-                    &compact.offload_delta_ids,
-                    offload_record.as_ref().map(|record| record.id.as_str()),
+                    &compact_report,
                 )]);
                 compacted_successfully = true;
             } else {
@@ -5296,15 +5313,7 @@ Runtime tool_call ids:",
             .iter()
             .map(|delta| delta.delta_id.clone())
             .collect::<HashSet<_>>();
-        let mut shrunk_tokens_estimate = 0u32;
-        for delta in &self.deltas {
-            if delta_id_set.contains(&delta.delta_id) {
-                for slice in prompt_render::render_delta_slices(delta) {
-                    shrunk_tokens_estimate =
-                        shrunk_tokens_estimate.saturating_add(estimate_prompt_tokens(&slice.text));
-                }
-            }
-        }
+        let estimated_before_tokens = self.dynamic_context_token_estimate().total_tokens();
         let before_delta_count = self.deltas.len();
         if !delta_id_set.is_empty() {
             self.deltas
@@ -5323,8 +5332,6 @@ Runtime tool_call ids:",
                     if slice_id_set.contains(&slice.slice_id) {
                         matched_slice_ids.insert(slice.slice_id.clone());
                         if !delta.hidden_slice_ids.contains(&slice.slice_id) {
-                            shrunk_tokens_estimate = shrunk_tokens_estimate
-                                .saturating_add(estimate_prompt_tokens(&slice.text));
                             delta.hidden_slice_ids.push(slice.slice_id);
                             hidden_slice_count += 1;
                         }
@@ -5344,6 +5351,8 @@ Runtime tool_call ids:",
         missing.sort();
         missing.dedup();
 
+        let shrunk_tokens_estimate = estimated_before_tokens
+            .saturating_sub(self.dynamic_context_token_estimate().total_tokens());
         self.current_stats.shrunk_tokens = self
             .current_stats
             .shrunk_tokens
@@ -6397,6 +6406,52 @@ fn work_instruction_context_block(supporting_context: &str) -> Option<(usize, us
     } else {
         None
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DynamicContextTokenEstimate {
+    visible_delta_count: usize,
+    visible_slice_count: usize,
+    text_tokens: u32,
+    native_tokens: u32,
+}
+
+impl DynamicContextTokenEstimate {
+    fn total_tokens(self) -> u32 {
+        self.text_tokens.saturating_add(self.native_tokens)
+    }
+}
+
+fn estimate_native_exchange_tokens(exchange: &NativeExchange) -> u32 {
+    let calls = exchange
+        .calls
+        .iter()
+        .map(|call| {
+            json!({
+                "id": call.id,
+                "name": call.name,
+                "arguments": call.raw_arguments,
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = exchange
+        .results
+        .iter()
+        .map(|result| {
+            json!({
+                "tool_call_id": result.call_id,
+                "name": result.name,
+                "content": result.content,
+                "is_error": result.is_error,
+            })
+        })
+        .collect::<Vec<_>>();
+    let normalized = json!({
+        "assistant": exchange.assistant_text,
+        "tool_calls": calls,
+        "tool_results": results,
+    });
+    estimate_prompt_tokens(&normalized.to_string())
 }
 
 fn estimate_prompt_tokens(text: &str) -> u32 {

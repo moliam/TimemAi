@@ -83,6 +83,24 @@ fn curl_config_escape_keeps_values_single_config_entries() {
 }
 
 #[test]
+fn curl_config_escapes_custom_header_special_characters() {
+    let key_file = LocalLLMKeyFile {
+        api_key: "sk-test-secret".to_string(),
+        available_models: vec!["qwen-test".to_string()],
+    };
+    let mut config = key_file.to_model_service_config("qwen-test");
+    config.http_headers.insert(
+        "X-Signature".to_string(),
+        "quoted=\"yes\"; path=C:\\tmp; city=东京".to_string(),
+    );
+    let request = prepare_model_http_request(&config, "hello");
+    let body = serde_json::to_string(&request.model_request.body).unwrap();
+    let curl_config = build_curl_config(&request, &body);
+    assert!(curl_config
+        .contains("header = \"X-Signature: quoted=\\\"yes\\\"; path=C:\\\\tmp; city=东京\""));
+}
+
+#[test]
 fn curl_config_stdin_sends_headers_and_body_without_argv_payload() {
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(listener) => listener,

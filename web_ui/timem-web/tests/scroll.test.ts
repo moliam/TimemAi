@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, wheelDeltaPixels } from "../src/scroll";
+import { adjacentUserMessageIndex, canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, wheelDeltaPixels } from "../src/scroll";
 
 describe("progressive history scroll anchoring", () => {
   it("keeps the same content under the viewport after older content is prepended", () => {
@@ -48,5 +48,26 @@ describe("composer wheel ownership", () => {
     expect(wheelDeltaPixels(12, 0, 140)).toBe(12);
     expect(wheelDeltaPixels(3, 1, 140)).toBe(48);
     expect(wheelDeltaPixels(-1, 2, 140)).toBe(-140);
+  });
+});
+
+
+describe("user message navigation", () => {
+  const anchorTops = [-420, -18, 164, 740];
+
+  it("selects the closest prior and next user message around the viewport top", () => {
+    expect(adjacentUserMessageIndex(anchorTops, 0, "previous")).toBe(1);
+    expect(adjacentUserMessageIndex(anchorTops, 0, "next")).toBe(2);
+  });
+
+  it("skips the message already aligned with the viewport top", () => {
+    expect(adjacentUserMessageIndex([-120, 2, 260], 0, "previous")).toBe(0);
+    expect(adjacentUserMessageIndex([-120, 2, 260], 0, "next")).toBe(2);
+  });
+
+  it("reports boundaries when no user message exists in that direction", () => {
+    expect(adjacentUserMessageIndex([12, 240], 0, "previous")).toBe(-1);
+    expect(adjacentUserMessageIndex([-400, -20], 0, "next")).toBe(-1);
+    expect(adjacentUserMessageIndex([], 0, "next")).toBe(-1);
   });
 });

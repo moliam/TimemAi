@@ -70,10 +70,12 @@ export type ToolDetail = {
 export type WorkerRole = { id: string; name: string; description: string };
 export type WorkerRoleGroup = { id: string; name: string; role_ids: string[] };
 export type WorkerRoleLibrary = { roles: WorkerRole[]; groups: WorkerRoleGroup[] };
+export type SessionGroup = { id: string; name: string };
 
 export type Session = {
   session_id: string;
   display_name: string;
+  group_id?: string | null;
   ordinal: number;
   state: "ready" | "working" | "error" | "stopped" | string;
   current_dir: string;
@@ -133,6 +135,7 @@ export type SessionWorker = {
   worker_id: string;
   context_id: string;
   display_name: string;
+  group_id?: string | null;
   ordinal: number;
   state: "ready" | "working" | "error" | "stopped" | string;
   parent_worker_id?: string | null;
@@ -181,6 +184,10 @@ export type Activity = {
   toolgen_phase?: string;
   before_tokens?: number;
   after_tokens?: number;
+  text_before_tokens?: number;
+  text_after_tokens?: number;
+  native_before_tokens?: number;
+  native_after_tokens?: number;
   createdAt: number;
 };
 
@@ -201,6 +208,7 @@ export type ModelEndpoint = {
   max_llm_input_tokens: number;
   max_llm_output_tokens: number;
   api_key_configured: boolean;
+  http_headers: Record<string, string>;
 };
 
 export type Snapshot = {
@@ -224,6 +232,7 @@ export type Snapshot = {
   };
   sessions: Session[];
   role_library: WorkerRoleLibrary;
+  session_groups: SessionGroup[];
 };
 
 export type WireEvent =
@@ -233,6 +242,8 @@ export type WireEvent =
   | { type: "session_created"; session: Session }
   | { type: "session_renamed"; session_id: string; display_name: string }
   | { type: "session_deleted"; session_id: string }
+  | { type: "session_groups_updated"; groups: SessionGroup[] }
+  | { type: "session_group_changed"; session_id: string; group_id?: string | null }
   | { type: "worker_roles_updated"; session_id: string; roles: WorkerRole[] }
   | { type: "worker_role_library_updated"; library: WorkerRoleLibrary; command_id?: string }
   | { type: "chat_message_deleted"; session_id: string; turn_id: string; role: "user" | "assistant"; role_index: number }
@@ -256,11 +267,16 @@ export type WireEvent =
   | { type: "mcp_updated"; session_id?: string | null; servers: McpServerReport[]; enabled_server_ids: string[] }
   | { type: "mcp_server_secrets_revealed"; server_id: string; values: Record<string, string> }
   | { type: "model_endpoints_updated"; endpoints: ModelEndpoint[] }
-  | { type: "model_endpoint_secret_revealed"; endpoint_id: string; api_key: string };
+  | { type: "model_endpoint_secret_revealed"; endpoint_id: string; api_key: string; http_headers: Record<string, string> };
 
 export type ClientCommand =
   | { type: "session_create"; display_name?: string; workspace_dir?: string; env?: Record<string, string> }
   | { type: "session_rename"; session_id: string; display_name: string }
+  | { type: "session_group_create"; name: string }
+  | { type: "session_group_update"; group_id: string; name: string }
+  | { type: "session_group_delete"; group_id: string }
+  | { type: "session_groups_reorder"; groups: SessionGroup[] }
+  | { type: "session_group_move"; session_id: string; group_id?: string | null }
   | { type: "session_api_key_update"; session_id: string; api_key: string }
   | { type: "session_api_key_reveal"; session_id: string }
   | { type: "session_stop"; session_id: string }
@@ -284,7 +300,7 @@ export type ClientCommand =
   | { type: "tool_repo_open_terminal"; session_id: string; tool_id: string }
   | { type: "runtime_update"; key: string; value: string }
   | { type: "session_runtime_update"; session_id: string; key: string; value: string }
-  | { type: "model_endpoint_upsert"; endpoint: { id?: string; name: string; model: string; api_protocol: string; response_protocol: string; base_url: string; max_llm_input_tokens: number; max_llm_output_tokens: number; api_key?: string } }
+  | { type: "model_endpoint_upsert"; endpoint: { id?: string; name: string; model: string; api_protocol: string; response_protocol: string; base_url: string; max_llm_input_tokens: number; max_llm_output_tokens: number; api_key?: string; http_headers: Record<string, string> } }
   | { type: "model_endpoint_delete"; endpoint_id: string }
   | { type: "model_endpoint_apply"; session_id: string; endpoint_id: string }
   | { type: "model_endpoint_secret_reveal"; endpoint_id: string }

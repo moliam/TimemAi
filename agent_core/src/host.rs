@@ -387,6 +387,10 @@ pub struct CoreModelRepairTopic {
 pub struct CoreContextCompactTopic {
     pub estimated_before_tokens: u32,
     pub estimated_after_tokens: u32,
+    pub estimated_text_before_tokens: u32,
+    pub estimated_text_after_tokens: u32,
+    pub estimated_native_before_tokens: u32,
+    pub estimated_native_after_tokens: u32,
     pub discarded_delta_ids: Vec<String>,
     pub offloaded_delta_ids: Vec<String>,
     pub scratch_id: Option<String>,
@@ -723,6 +727,18 @@ impl CoreTopicEvent {
         Some(CoreContextCompactTopic {
             estimated_before_tokens: self.payload["estimated_before_tokens"].as_u64()? as u32,
             estimated_after_tokens: self.payload["estimated_after_tokens"].as_u64()? as u32,
+            estimated_text_before_tokens: self.payload["estimated_text_before_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32,
+            estimated_text_after_tokens: self.payload["estimated_text_after_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32,
+            estimated_native_before_tokens: self.payload["estimated_native_before_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32,
+            estimated_native_after_tokens: self.payload["estimated_native_after_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32,
             discarded_delta_ids: string_array_payload(&self.payload["discarded_delta_ids"]),
             offloaded_delta_ids: string_array_payload(&self.payload["offloaded_delta_ids"]),
             scratch_id: self.payload["scratch_id"].as_str().map(str::to_string),
@@ -878,11 +894,7 @@ pub fn model_repair_topic_event(
 
 pub fn context_compact_topic_event(
     session_id: impl Into<String>,
-    estimated_before_tokens: u32,
-    estimated_after_tokens: u32,
-    discarded_delta_ids: &[String],
-    offloaded_delta_ids: &[String],
-    scratch_id: Option<&str>,
+    report: &CoreContextCompactTopic,
 ) -> CoreTopicEvent {
     CoreTopicEvent::new(
         session_id,
@@ -894,11 +906,15 @@ pub fn context_compact_topic_event(
         ),
         CoreSessionState::Running,
         json!({
-            "estimated_before_tokens": estimated_before_tokens,
-            "estimated_after_tokens": estimated_after_tokens,
-            "discarded_delta_ids": discarded_delta_ids,
-            "offloaded_delta_ids": offloaded_delta_ids,
-            "scratch_id": scratch_id,
+            "estimated_before_tokens": report.estimated_before_tokens,
+            "estimated_after_tokens": report.estimated_after_tokens,
+            "estimated_text_before_tokens": report.estimated_text_before_tokens,
+            "estimated_text_after_tokens": report.estimated_text_after_tokens,
+            "estimated_native_before_tokens": report.estimated_native_before_tokens,
+            "estimated_native_after_tokens": report.estimated_native_after_tokens,
+            "discarded_delta_ids": report.discarded_delta_ids,
+            "offloaded_delta_ids": report.offloaded_delta_ids,
+            "scratch_id": report.scratch_id,
         }),
     )
 }
@@ -1789,6 +1805,17 @@ pub trait TurnUi {
         request: &crate::ModelInteractionRequest,
     ) {
         self.on_model_request(round, &request.rendered_prompt);
+    }
+
+    /// Reports the exact request body prepared for the model API. Hosts may use
+    /// this for opt-in diagnostics; transport and payload semantics remain Core-owned.
+    fn on_model_api_request(
+        &mut self,
+        round: u32,
+        request: &crate::ModelInteractionRequest,
+        _api_payload: &serde_json::Value,
+    ) {
+        self.on_model_interaction_request(round, request);
     }
 
     fn on_model_request_completed(&mut self, _latency: Duration) {}

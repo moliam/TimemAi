@@ -133,6 +133,52 @@ fn native_final_keeps_structured_tool_history_before_final_replay() {
 }
 
 #[test]
+fn dynamic_context_estimate_and_shrink_stats_include_native_exchanges() {
+    let mut core = test_core("native_dynamic_token_estimate");
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "small text delta".to_string(),
+    )]);
+    core.native_exchanges.push(NativeExchange {
+        delta_id: "pd_1".to_string(),
+        assistant_text: "inspect the large result".to_string(),
+        calls: vec![NativeToolCall {
+            id: "call_large".to_string(),
+            name: "readfile".to_string(),
+            arguments: serde_json::json!({"path":"large.txt"}),
+            raw_arguments: r#"{"path":"large.txt"}"#.to_string(),
+        }],
+        results: vec![NativeToolResult {
+            call_id: "call_large".to_string(),
+            name: "readfile".to_string(),
+            content: "NATIVE-EVIDENCE-".repeat(1_000),
+            is_error: false,
+        }],
+    });
+
+    let before = core.dynamic_context_token_estimate();
+    assert!(before.text_tokens > 0);
+    assert!(before.native_tokens > before.text_tokens);
+    assert_eq!(
+        core.dynamic_context_summary().estimated_tokens,
+        before.total_tokens()
+    );
+
+    let result = core.apply_prompt_shrink(
+        "context compacted successfully.",
+        &["pd_1".to_string()],
+        &[],
+    );
+
+    assert_eq!(core.dynamic_context_summary().estimated_tokens, 0);
+    assert_eq!(core.current_stats.shrunk_tokens, before.total_tokens());
+    assert!(result.contains(&format!(
+        "shrunk_tokens_estimate: {}",
+        before.total_tokens()
+    )));
+}
+
+#[test]
 fn native_exchange_is_discarded_with_its_owning_delta() {
     let mut core = test_core("native_delta_discard");
     core.append_delta(vec![("user_question".to_string(), "Q1".to_string())]);

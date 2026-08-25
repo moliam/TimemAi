@@ -146,6 +146,7 @@ fn test_config() -> ModelServiceConfig {
         model: "test-model".to_string(),
         base_url: "http://127.0.0.1/v1".to_string(),
         api_key: "dummy".to_string(),
+        http_headers: Default::default(),
         timeout_secs: 10,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
@@ -560,6 +561,7 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
                 prompt,
                 interaction_profile,
                 interaction_request,
+                api_payload,
             } => {
                 assert_eq!(round, 1);
                 let profile = interaction_profile
@@ -569,6 +571,12 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
                 let request = interaction_request
                     .expect("model request event should retain the structured API request");
                 assert_eq!(request.rendered_prompt, prompt);
+                let api_payload =
+                    api_payload.expect("model request should carry exact API payload");
+                assert_eq!(api_payload["model"], "test-model");
+                assert!(
+                    api_payload.get("messages").is_some() || api_payload.get("input").is_some()
+                );
                 handle.add_user_supplement("补充：最终答案必须使用 SUPPLEMENT_WORKER_OK。");
                 break;
             }

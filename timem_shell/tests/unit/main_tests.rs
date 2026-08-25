@@ -482,6 +482,7 @@ fn workspace_path_normalization_canonicalizes_existing_paths() {
 fn config_menu_renders_effective_values_and_can_apply_updates() {
     let mut config = ModelServiceConfig {
         interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -568,6 +569,7 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
 fn config_response_protocol_update_is_supported_by_terminal_host() {
     let mut config = ModelServiceConfig {
         interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -612,6 +614,7 @@ fn config_response_protocol_update_is_supported_by_terminal_host() {
 fn config_protocol_update_keeps_endpoint_defaults_consistent() {
     let mut config = ModelServiceConfig {
         interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -671,6 +674,7 @@ fn config_protocol_update_keeps_endpoint_defaults_consistent() {
 fn config_protocol_update_preserves_explicit_endpoint() {
     let mut config = ModelServiceConfig {
         interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
@@ -735,6 +739,7 @@ fn random_spinner_tick_maps_to_valid_icon_slot() {
 fn startup_banner_lists_env_overrides_on_separate_lines() {
     let config = ModelServiceConfig {
         interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -878,6 +883,7 @@ fn config_table_uses_window_width_ratio_and_wraps_long_values() {
 fn startup_banner_highlights_values_outside_protocol_defaults() {
     let default_config = ModelServiceConfig {
         interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -901,6 +907,7 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
 
     let override_config = ModelServiceConfig {
         interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
@@ -937,6 +944,7 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
 fn startup_banner_highlights_custom_model_and_base_url() {
     let config = ModelServiceConfig {
         interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
@@ -1016,6 +1024,12 @@ fn cli_help_lists_all_env_backed_options() {
     assert!(help.contains(
             "  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay"
         ));
+    assert!(help.contains(
+        "--space <absolute-path>        env TIMEM_SPACE; MEM directory, default ~/.timem/mem"
+    ));
+    assert!(help.contains("timem --space /absolute/path/to/mem"));
+    assert!(!help.contains("--space <name>"));
+    assert!(!help.contains("default .test_mem"));
 }
 
 #[test]
@@ -2055,6 +2069,7 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
     let store = SessionStore::new(root.join("memory"));
     let config = ModelServiceConfig {
         interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2068,6 +2083,7 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
     let stored = StoredSession {
         session_id: "web_session_1".to_string(),
         display_name: "Recovered Web".to_string(),
+        group_id: None,
         created_at_ms: 1,
         updated_at_ms: 2,
         current_dir: workspace.display().to_string(),
@@ -2126,6 +2142,7 @@ fn shell_start_recovers_valid_session_from_partially_corrupt_index() {
     fs::create_dir_all(store.sessions_dir()).unwrap();
     let config = ModelServiceConfig {
         interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2139,6 +2156,7 @@ fn shell_start_recovers_valid_session_from_partially_corrupt_index() {
     let stored = StoredSession {
         session_id: "shell_recovered".to_string(),
         display_name: "Recovered".to_string(),
+        group_id: None,
         created_at_ms: 1,
         updated_at_ms: 2,
         current_dir: workspace.display().to_string(),
@@ -2189,6 +2207,7 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
     let store = SessionStore::new(root.join("memory"));
     let config = ModelServiceConfig {
         interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2203,6 +2222,7 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
         .upsert_session(&StoredSession {
             session_id: "web_session_cwd".to_string(),
             display_name: "Recovered Web".to_string(),
+            group_id: None,
             created_at_ms: 1,
             updated_at_ms: 2,
             current_dir: restored_dir.display().to_string(),
@@ -2267,6 +2287,7 @@ fn shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence() {
     let session = StoredSession {
         session_id: "web_session_env".to_string(),
         display_name: "Recovered Web".to_string(),
+        group_id: None,
         created_at_ms: 1,
         updated_at_ms: 2,
         current_dir: workspace.display().to_string(),
@@ -2333,6 +2354,7 @@ fn shell_resume_selects_the_most_recent_valid_session() {
     let store = SessionStore::new(root.join("memory"));
     let config = ModelServiceConfig {
         interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "launch-secret".to_string(),
         model: "launch-model".to_string(),
@@ -2387,6 +2409,7 @@ fn shell_runtime_config_changes_are_cached_before_another_turn_runs() {
     let store = SessionStore::new(root.join("memory"));
     let mut config = ModelServiceConfig {
         interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "cached-secret".to_string(),
         model: "old-model".to_string(),
@@ -2436,6 +2459,7 @@ fn shell_can_resume_web_style_session_history() {
     let session_id = "web_session_handoff";
     let config = ModelServiceConfig {
         interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2450,6 +2474,7 @@ fn shell_can_resume_web_style_session_history() {
         .upsert_session(&StoredSession {
             session_id: session_id.to_string(),
             display_name: "Session0".to_string(),
+            group_id: None,
             created_at_ms: 1,
             updated_at_ms: 4,
             current_dir: workspace.display().to_string(),

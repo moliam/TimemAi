@@ -1,7 +1,8 @@
 use crate::{
     default_api_protocol, default_base_url, default_model, parse_api_protocol,
-    parse_openai_compatible_cache_mode, parse_token_count, ApiProtocol, ModelServiceConfig,
-    OpenAiCompatibleCacheMode, OpenAiCompatibleOptions, ParallelToolCalls, ToolCallMode,
+    parse_openai_compatible_cache_mode, parse_token_count, validate_model_http_headers,
+    ApiProtocol, ModelServiceConfig, OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
+    ParallelToolCalls, ToolCallMode,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -12,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct ModelServiceConfigSource {
     pub api_protocol: Option<String>,
     pub api_key: Option<String>,
+    pub http_headers: Option<std::collections::BTreeMap<String, String>>,
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub timeout_secs: Option<u64>,
@@ -90,6 +92,7 @@ impl LocalLLMKeyFile {
             model: model.to_string(),
             base_url: default_base_url(&ApiProtocol::OpenAiCompatible).to_string(),
             api_key: self.api_key.clone(),
+            http_headers: Default::default(),
             timeout_secs: 120,
             max_llm_output_tokens: 512,
             max_llm_input_tokens: 100_000,
@@ -158,6 +161,18 @@ fn model_service_config_from_sources_with_key_policy(
     } else {
         validate_api_key(&api_key)?;
     }
+    let http_headers = match source.http_headers.clone() {
+        Some(headers) => headers,
+        None => env
+            .get("TIMEM_HTTP_HEADERS")
+            .map(|value| {
+                serde_json::from_str(value)
+                    .map_err(|error| format!("invalid_TIMEM_HTTP_HEADERS:{error}"))
+            })
+            .transpose()?
+            .unwrap_or_default(),
+    };
+    validate_model_http_headers(&http_headers)?;
     let timeout_secs = source
         .timeout_secs
         .or_else(|| env.get("TIMEM_TIMEOUT").and_then(|v| v.parse().ok()))
@@ -223,6 +238,7 @@ fn model_service_config_from_sources_with_key_policy(
         model,
         base_url,
         api_key,
+        http_headers,
         timeout_secs,
         max_llm_output_tokens,
         max_llm_input_tokens,

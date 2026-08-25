@@ -27,13 +27,13 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use timem_shell::{
     append_audit, apply_workspace_command_to_path, bash_approval_mode_from_sources,
-    capabilities_dir_from_sources, combine_additional_contexts, default_config_root,
-    default_data_root, estimate_prompt_context_tokens, format_token_count, host_start_audit_event,
-    layout_for_space, load_reminder_tips_config, load_workspace_dirs_from_path, local_time_label,
-    model_service_config_from_env, observation_events_from_core_topic_events,
+    capabilities_dir_from_sources, combine_additional_contexts, create_memory_dir,
+    default_config_root, default_data_root, estimate_prompt_context_tokens, format_token_count,
+    host_start_audit_event, load_reminder_tips_config, load_workspace_dirs_from_path,
+    local_time_label, model_service_config_from_env, observation_events_from_core_topic_events,
     observation_panel_width_for_terminal, parse_cli_args, render_final_response_at,
     render_prof_report_data, render_shell_status_bar, render_thinking_view_at,
-    render_turn_outcome_text, run_session_turn, runtime_active_elapsed_secs,
+    render_turn_outcome_text, resolve_memory_dir, run_session_turn, runtime_active_elapsed_secs,
     runtime_profile_report, shell_status_message_from_core_topic, stale_context_decision_request,
     topic_event_status_hint, work_instruction_load_report, work_instruction_load_request,
     work_instruction_load_topic_event, work_instruction_mode_from_sources, workspace_config_file,
@@ -80,16 +80,26 @@ fn main() {
         std::env::set_var("TIMEM_DATA_DIR", data_dir);
     }
     let env: HashMap<String, String> = std::env::vars().collect();
-    let space = options
+    let configured_space = options
         .space
-        .clone()
-        .or_else(|| env.get("TIMEM_SPACE").cloned())
-        .unwrap_or_else(|| ".test_mem".to_string());
+        .as_deref()
+        .or_else(|| env.get("TIMEM_SPACE").map(String::as_str));
+    let memory_dir = match resolve_memory_dir(configured_space) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("[config_error] {error}");
+            std::process::exit(2);
+        }
+    };
+    if let Err(error) = create_memory_dir(&memory_dir) {
+        eprintln!("[config_error] {error}");
+        std::process::exit(2);
+    }
+    let space = memory_dir.display().to_string();
     let data_root = default_data_root();
-    let layout = layout_for_space(&space);
+    let layout = agent_core::RuntimeDataLayout::from_memory_dir(&data_root, &memory_dir);
     let audit_file = layout.api_audit_file();
     let action_audit_file = layout.action_audit_file();
-    let memory_dir = layout.memory_dir();
     let session_store = SessionStore::new(&memory_dir);
     let restored_session = load_resumable_shell_session(&session_store);
     let session_env = restored_session
@@ -586,6 +596,7 @@ fn new_shell_session(
     StoredSession {
         session_id: session_id.clone(),
         display_name: "ShellSession".to_string(),
+        group_id: None,
         created_at_ms: now_ms_i64(),
         updated_at_ms: now_ms_i64(),
         current_dir: current_dir.display().to_string(),
@@ -3898,7 +3909,7 @@ fn print_help() {
 }
 
 fn cli_help_text() -> &'static str {
-    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override the restored Session cache; the Session cache overrides process env defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it for initial configuration:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n  export TIMEM_SPACE=.test_mem\n\nCommand line override example:\n  timem --data-dir .timem_data --space .test_mem --model qwen-plus\n\nOptions:\n  --space <name>                 env TIMEM_SPACE; memory/audit space, default .test_mem\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; model API format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; inline parser: json|xml, default xml\n  --tool-call-mode <mode>        env TIMEM_TOOL_CALL_MODE; auto|native|inline, default auto\n  --parallel-tool-calls <mode>   env TIMEM_PARALLEL_TOOL_CALLS; auto|true|false, default auto\n  --base-url <url>               env TIMEM_BASE_URL; model API base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; data/config/memory/audit root, default .timem_data for new environments\n  --timeout <seconds>            env TIMEM_TIMEOUT; model request timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|20K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 20K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type another question and press Enter to queue a separate next turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai-compatible\n  Tool calling: auto (native when detected, otherwise inline)\n  Response protocol: xml (inline mode only)\n\nAPI key fallback env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
+    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override the restored Session cache; the Session cache overrides process env defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it for initial configuration:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n  export TIMEM_SPACE=/absolute/path/to/mem\n\nCommand line override example:\n  timem --space /absolute/path/to/mem --model qwen-plus\n\nOptions:\n  --space <absolute-path>        env TIMEM_SPACE; MEM directory, default ~/.timem/mem\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; model API format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; inline parser: json|xml, default xml\n  --tool-call-mode <mode>        env TIMEM_TOOL_CALL_MODE; auto|native|inline, default auto\n  --parallel-tool-calls <mode>   env TIMEM_PARALLEL_TOOL_CALLS; auto|true|false, default auto\n  --base-url <url>               env TIMEM_BASE_URL; model API base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --data-dir <path>              env TIMEM_DATA_DIR; workspace/config root, default .timem_data\n  --timeout <seconds>            env TIMEM_TIMEOUT; model request timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|20K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 20K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type another question and press Enter to queue a separate next turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai-compatible\n  Tool calling: auto (native when detected, otherwise inline)\n  Response protocol: xml (inline mode only)\n\nAPI key fallback env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
 fn runtime_help_text() -> &'static str {

@@ -5,6 +5,7 @@ const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8")
 const appearanceSource = readFileSync(new URL("../src/appearance.ts", import.meta.url), "utf8");
 const preloadSource = readFileSync(new URL("../src/preload.ts", import.meta.url), "utf8");
 const viewModelSource = readFileSync(new URL("../src/view_model.ts", import.meta.url), "utf8");
+const toolStatusSource = readFileSync(new URL("../src/tool_status.ts", import.meta.url), "utf8");
 const protocolSource = readFileSync(new URL("../src/protocol.ts", import.meta.url), "utf8");
 const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
 const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
@@ -37,6 +38,21 @@ describe("per-message worker role selection", () => {
     expect(source).toContain('className="turn-entry-roles"');
     expect(source).toContain("entry.worker_roles");
     expect(styles).toContain(".turn-entry-roles");
+  });
+
+
+  it("allows every role group, including ungrouped roles, to collapse", () => {
+    expect(source).toContain('const [collapsedRoleGroupIds, setCollapsedRoleGroupIds] = useState<Set<string>>(() => new Set());');
+    expect(source).toContain('const toggleRoleGroup = (groupId: string)');
+    expect(source).toContain('className="worker-role-group-toggle" aria-expanded={!collapsed}');
+    expect(source).toContain('aria-controls={`worker-role-group-list-${group.id}`}');
+    expect(source).toContain('toggleRoleGroup("ungrouped")');
+    expect(source).toContain('!collapsed && <div id={`worker-role-group-list-${group.id}`}');
+    expect(styles).toContain('.worker-role-panel .worker-role-group-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }');
+    expect(styles).toContain('.worker-role-group.collapsed { gap: 0; border-color: #292d2d; background: #191b1b; }');
+    expect(styles).toContain('.worker-role-ungrouped { border-color: #2a2e2d; background: transparent; box-shadow: none; }');
+    expect(styles).toContain(':root[data-theme="light"] .worker-role-ungrouped { border-color: #e1e5e3; background: transparent; box-shadow: none; }');
+    expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-role-group-toggle { border-color: transparent; background: transparent; color: #52615d; }');
   });
 });
 
@@ -136,6 +152,52 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("followThreadLatest.current = isNearScrollBottom");
     expect(source).toContain("viewport.scrollTop = viewport.scrollHeight");
     expect(source).toContain("[activeSessionId, latestTurn?.turn_id]");
+  });
+
+  it("keeps the new-session action understated and makes session group names easier to scan", () => {
+    expect(styles).toContain('.new-session { justify-content: flex-start; border: 0; border-radius: 8px; background: transparent; color: #ececec; font-size: 12px; }');
+    expect(styles).toContain('font-size: 12px; font-weight: 720; letter-spacing: .025em; }');
+  });
+
+  it("submits session group editors as forms and keeps empty groups visible as drop targets", () => {
+    expect(source).toContain('<form className="session-group-editor" onSubmit=');
+    expect(source).toContain('<form className="session-group-editor inline" onSubmit=');
+    expect(source).toContain('type="submit" disabled={!sessionGroupEditor.name.trim()}');
+    expect(source).toContain('sessionGroups.map((group) => ({ id: group.id, group, sessions:');
+    expect(source).toContain('{ id: "__ungrouped", group: undefined, sessions: ungroupedSessions }');
+    expect(source).toContain('bucketSessions.length === 0 && <div className="session-group-drop-hint">拖动 Session 到这里</div>');
+  });
+
+  it("supports dragging sessions between session groups like roles", () => {
+    expect(source).toContain('function SortableSession(');
+    expect(source).toContain('function SessionDropGroup(');
+    expect(source).toContain('id: `session-group:${id}`');
+    expect(source).toContain('className="session-drag"');
+    expect(source).toContain('onDragEnd={finishSessionDrag}');
+    expect(source).toContain('type: "session_group_move", session_id: sessionId, group_id: targetGroupId');
+    expect(styles).toContain('.session-group.drop-target .session-group-list');
+    expect(styles).toContain('.session-row.dragging');
+    expect(styles).toContain('.session-drag {');
+  });
+
+  it("keeps previous and next user-message navigation beside the thread", () => {
+    expect(source).toContain('className="turn-user-frame" data-user-message-anchor');
+    expect(source).not.toMatch(/className=\{`turn-user-entry \.\{entry\.kind\}`\} data-user-message-anchor/);
+    expect(source).toContain('className="user-message-navigation" aria-label="用户消息导航"');
+    expect(source).toContain('title="上一条用户消息" aria-label="上一条用户消息"');
+    expect(source).toContain('title="下一条用户消息" aria-label="下一条用户消息"');
+    expect(source).toContain('disabled={!userMessageNavigation.previous}');
+    expect(source).toContain('disabled={!userMessageNavigation.next}');
+    expect(source).toContain('adjacentUserMessageIndex');
+    expect(source).toContain('followThreadLatest.current = false;');
+    expect(source).toContain('const durationMs = 180;');
+    expect(source).toContain('requestAnimationFrame(animate)');
+    expect(source).toContain('const eased = 1 - Math.pow(1 - progress, 3);');
+    expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 42px); right: max(10px, calc((100% - 900px) / 2));');
+    expect(styles).toContain('.user-message-navigation button { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0;');
+    expect(styles).toContain('background: #263746;');
+    expect(styles).toContain(':root[data-theme="light"] .user-message-navigation button { background: #d9edff;');
+    expect(styles).toContain('@media (max-width: 720px) { .user-message-navigation { right: 6px; }');
   });
 
   it("prioritizes a focused multiline composer before scrolling the chat viewport", () => {
@@ -443,7 +505,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const statusId = "new-session-dialog-status";');
     expect(source).toContain('const describedBy = creating ? `${descriptionId} ${statusId}` : descriptionId;');
     expect(source).toContain('aria-label="Create session" aria-describedby={describedBy}');
-    expect(source).toContain('<p id={descriptionId}>Choose a workspace and optional runtime overrides for this session.</p>');
+    expect(source).toContain('<p id={descriptionId}>Select a known workspace or enter an existing absolute directory for this session.</p>');
     expect(source).toContain('{creating && <p id={statusId} className="mem-validation" role="status" aria-live="polite">Creating session…</p>}');
     expect(source).toContain('onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}');
     expect(source).toContain('onClose={() => { if (!creatingSessionRef.current) closeNewSessionDialog(); }}');
@@ -671,7 +733,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("function toolInvocationPreview");
     expect(source).toContain("activity.detail?.split");
     expect(source).toContain("const detail = activity.detail?.trim();"); expect(source).toContain("const code = activity.code?.trim();"); expect(source).toContain("const hasExpandableDetail = !!detail || !!code;");
-    expect(source).toContain('const running = status === "running" || status === "background_running";');
+    expect(source).toContain("const running = isToolActivityRunning(status);");
     expect(source).toContain("const [open, setOpen] = useState(false);");
     expect(source).toContain('if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""} ${running ? "running" : "settled"}`} aria-busy={running || undefined}>');
     expect(source).toContain("const toolName = toolDisplayName(activity.tool_name || activity.title);");
@@ -689,8 +751,9 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".tool-activity summary:focus-visible { background: #1f1f1f; box-shadow: inset 2px 0 0 #4d8fd7; }");
     expect(styles).toContain(':root[data-theme="light"] .tool-activity summary:focus-visible { background: #edf4f7; box-shadow: inset 2px 0 0 #2c7bbf; }');
     expect(source).toContain("toolDisplayName(activity.tool_name || activity.title)");
-    expect(source).toContain('if (status === "background_running") return "background running";');
-    expect(source).toContain('if (status === "timeout") return "timed out";');
+    expect(source).toContain('from "./tool_status"');
+    expect(toolStatusSource).toContain('if (status === TOOL_STATUS_BACKGROUND_RUNNING) return "background running";');
+    expect(toolStatusSource).toContain('if (status === "timeout") return "timed out";');
     expect(styles).toContain(".tool-activity-static");
     expect(styles).toContain("grid-template-columns: 16px max-content max-content minmax(0, 1fr);");
     expect(viewModelSource).toContain('if (name === "run_bash") return "Bash";');
@@ -1248,10 +1311,11 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('activeModelRetryStatus, activityFromTopic');
     expect(source).toContain('sessionCreateDecision');
     expect(source).toContain("const canCreateSession = createDecision.kind === \"send\";");
-    expect(source).toContain("disabled={creating || workspaces.length === 0}");
-    expect(source).toContain('workspaces.map((workspace) => <option value={workspace} key={workspace} title={workspace}>{tailPath(workspace, 64)}</option>)');
-    expect(source).toContain("No workspace available");
-    expect(source).toContain("No workspace is available from the runtime snapshot.");
+    expect(source).toContain('value={workspaceDir} disabled={creating} placeholder="/absolute/path/to/workspace"');
+    expect(source).toContain('workspaces.map((workspace) => <option value={workspace} key={workspace}>{tailPath(workspace, 64)}</option>)');
+    expect(source).toContain('list="new-session-workspaces"');
+    expect(source).toContain('placeholder="/absolute/path/to/workspace"');
+    expect(source).toContain('Choose a suggested workspace or type an absolute directory path that exists on the Timem host.');
     expect(source).toContain("disabled={!canCreateSession}");
     expect(source).not.toContain("New agent");
   });
@@ -1312,13 +1376,24 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('idle: "复制 API Key"');
     expect(source).toContain('{copyState === "copied" ? <CheckCheck size={12}/> : <Copy size={12}/>}');
     expect(source).toContain('{showApiKey ? <EyeOff size={13}/> : <Eye size={13}/>}');
-    expect(source).toContain('useEffect(() => setShowApiKey(false), [endpoint?.id]);');
+    expect(source).toContain('setShowApiKey(false); setShowHeaders(!endpoint);');
+    expect(source).toContain('className="wide endpoint-structured-headers"');
+    expect(styles).toContain('.endpoint-editor-grid > .wide { grid-column: 1 / -1; }');
+    expect(source).toContain('StructuredKeyValueEditor label="Headers"');
+    expect(source).toContain('无需输入 JSON 或多行格式文本');
+    expect(source).toContain('添加 Header');
+    expect(source).toContain('aria-label={`删除 ${label}`}');
     expect(styles).toContain('.endpoint-editor-grid .endpoint-api-key input { padding-right: 56px; }');
     expect(styles).toContain('.endpoint-api-key-actions { position: absolute;');
     expect(styles).toContain('.endpoint-api-key-actions button { width: 22px; height: 22px;');
     expect(styles).toContain(':root[data-theme="light"] .endpoint-api-key-actions button { background: transparent;');
     expect(source).toContain('endpointMatchesProfile');
     expect(styles).toContain('.endpoint-menu');
+    expect(source).toContain('className={`runtime-card endpoint-menu ${endpointEditor ? "editing" : ""}`}');
+    expect(source).toContain('{endpointEditor ? <ModelEndpointEditor');
+    expect(styles).toContain('.endpoint-menu { position: absolute; z-index: 8; top: 62px; left: 24px; width: min(520px, calc(100vw - 32px));');
+    expect(styles).toContain('.endpoint-menu.editing { padding: 16px; }');
+    expect(styles).toContain('.endpoint-menu.editing .endpoint-editor { margin-top: 0; border-top: 0; padding-top: 0; }');
     expect(styles).toContain('.endpoint-actions');
     expect(source).toContain('没有接入点可用');
     expect(source).toContain('className="endpoint-guide-bubble"');
@@ -1389,9 +1464,14 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
   it("renders context compaction as a compact status pill with a reduced-motion fallback", () => {
     expect(source).toContain("<ContextCompactNotice");
     expect(source).toContain('<Gauge size={13}/>');
+    expect(source).toContain('<span>Dynamic context</span>');
+    expect(source).toContain('Text ${formatTokens(activity.text_before_tokens)');
+    expect(source).toContain('Native ${formatTokens(activity.native_before_tokens)');
+    expect(source).toContain('aria-label={label} title={breakdown}');
     expect(styles).toContain(".context-compact-notice");
     expect(styles).toContain("width: fit-content");
-    expect(styles).toContain("grid-template-columns: 22px auto 72px");
+    expect(styles).toContain("grid-template-columns: 22px minmax(0, auto) 72px");
+    expect(styles).toContain(".compact-copy small");
     expect(styles).toContain("border-radius: 999px");
     expect(styles).toContain(".compact-meter { position: relative; width: 72px; height: 3px;");
     expect(styles).toContain("prefers-reduced-motion: reduce");
@@ -1995,7 +2075,13 @@ it("uses an explicit session-created event and session-scoped inline decisions",
     expect(source).toContain('!addPendingKey(pendingMcpKeysRef, setPendingMcpKeys, key)');
     expect(source).toContain('removePendingKey(pendingMcpKeysRef, setPendingMcpKeys, key)');
     expect(source).toContain('pendingMcpKeysRef.current.clear();');
-    expect(source).toContain("One argument per line. Spaces stay inside that argument.");
+    expect(source).toContain('StructuredListEditor label="Arguments"');
+    expect(source).toContain('StructuredKeyValueEditor label="Environment"');
+    expect(source).toContain('StructuredKeyValueEditor label="Headers"');
+    expect(source).not.toContain('Arguments<textarea');
+    expect(source).not.toContain('aria-label="Headers" rows={3}');
+    expect(styles).toContain('.structured-field-row { min-width: 0; display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.4fr) 28px;');
+    expect(styles).toContain('@media (max-width: 520px)');
     expect(protocolSource).toContain('type: "mcp_updated"');
     expect(protocolSource).toContain('| { type: "sse"; url: string; headers: Record<string, string> };');
     expect(protocolSource).toContain('mcp_server_ids: string[]');

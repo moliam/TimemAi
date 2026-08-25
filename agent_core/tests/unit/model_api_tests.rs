@@ -7,6 +7,7 @@ fn config(api_protocol: ApiProtocol) -> ModelServiceConfig {
         model: "test-model".to_string(),
         base_url: "https://example.invalid/v1".to_string(),
         api_key: "dummy".to_string(),
+        http_headers: Default::default(),
         timeout_secs: 1,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
@@ -34,6 +35,34 @@ fn model_service_defaults_are_protocol_based() {
 
     assert_eq!(default_api_protocol(), ApiProtocol::OpenAiCompatible);
     assert_eq!(default_model(), "qwen-plus");
+}
+
+#[test]
+fn custom_model_headers_override_protocol_defaults_case_insensitively() {
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config
+        .http_headers
+        .insert("authorization".to_string(), "Basic custom".to_string());
+    config
+        .http_headers
+        .insert("X-Tenant".to_string(), "tenant-one".to_string());
+    let request = prepare_model_http_request(&config, "hello");
+    assert!(request
+        .headers
+        .iter()
+        .any(|(name, value)| name == "Authorization" && value == "Basic custom"));
+    assert!(request
+        .headers
+        .iter()
+        .any(|(name, value)| name == "X-Tenant" && value == "tenant-one"));
+    assert_eq!(
+        request
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .count(),
+        1
+    );
 }
 
 #[test]

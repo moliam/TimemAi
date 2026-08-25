@@ -1,4 +1,5 @@
 import { Activity, ChatHistoryRecord, ChatMessage, ClientCommand, clientId, CoreTopicEvent, Decision, Session, TurnCompletion, WebTurn, WebTurnEvent } from "./protocol";
+import { humanizeToolStatus, TOOL_STATUS_BACKGROUND_RUNNING } from "./tool_status";
 
 export const MAX_RENDERED_MESSAGES = 1000;
 // The host delivers restored history in 200-turn pages.  Keep several pages in
@@ -417,7 +418,7 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
         const elapsedMs = event.created_at_ms - started.created_at_ms;
         visible[index] = elapsedMs >= 0 ? withActionElapsed(event, elapsedMs) : event;
         const status = typeof topicEvent.payload.status === "string" ? topicEvent.payload.status : "";
-        if (status !== "background_running") indexes?.shift();
+        if (status !== TOOL_STATUS_BACKGROUND_RUNNING) indexes?.shift();
       }
       else visible.push(event);
       if (indexes?.length === 0) pendingStarts.delete(key);
@@ -1033,7 +1034,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
     case "core.action": {
       const action = label(payload.action) || "action";
       const status = label(payload.status) || label(payload.event) || "running";
-      const statusText = displayToolStatus(status);
+      const statusText = humanizeToolStatus(status);
       const input = payload.input && typeof payload.input === "object" ? payload.input as Record<string, unknown> : undefined;
       const kind = payload.kind && typeof payload.kind === "object" ? payload.kind as Record<string, unknown> : undefined;
       const command = action === "run_bash"
@@ -1057,15 +1058,23 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
     case "core.context.compact": {
       const before = typeof payload.estimated_before_tokens === "number" ? payload.estimated_before_tokens : undefined;
       const after = typeof payload.estimated_after_tokens === "number" ? payload.estimated_after_tokens : undefined;
+      const textBefore = typeof payload.estimated_text_before_tokens === "number" ? payload.estimated_text_before_tokens : undefined;
+      const textAfter = typeof payload.estimated_text_after_tokens === "number" ? payload.estimated_text_after_tokens : undefined;
+      const nativeBefore = typeof payload.estimated_native_before_tokens === "number" ? payload.estimated_native_before_tokens : undefined;
+      const nativeAfter = typeof payload.estimated_native_after_tokens === "number" ? payload.estimated_native_after_tokens : undefined;
       return {
         id: clientId(),
         sessionId: event.session_id,
         tone: "notice",
         kind: "context_compact",
-        title: "Context compacted",
-        detail: `${before ?? "?"} tokens → ${after ?? "?"} tokens`,
+        title: "Dynamic context compacted",
+        detail: `Dynamic context ${before ?? "?"} tokens → ${after ?? "?"} tokens`,
         before_tokens: before,
         after_tokens: after,
+        text_before_tokens: textBefore,
+        text_after_tokens: textAfter,
+        native_before_tokens: nativeBefore,
+        native_after_tokens: nativeAfter,
         createdAt: Date.now(),
       };
     }
@@ -1110,12 +1119,6 @@ export function toolDisplayName(name: string) {
   if (name === "capmgr") return "CapMgr";
   if (name === "self_tool") return "Self Tool";
   return name;
-}
-
-function displayToolStatus(status: string) {
-  if (status === "background_running") return "background running";
-  if (status === "timeout") return "timed out";
-  return status.replaceAll("_", " ");
 }
 
 function formatToolArguments(input: Record<string, unknown> | undefined) {
