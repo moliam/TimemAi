@@ -168,18 +168,18 @@ fn mcp_action_runs_through_protocol_registry_and_executor() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("mcp.demo.echo"), "{prompt}");
+    assert!(prompt.contains("mcp_demo_mcp__echo"), "{prompt}");
     let dynamic_heading = prompt
         .find("MCP update: the following MCP capabilities are enabled")
         .expect("MCP catalog must be stored in a prompt delta");
     assert!(
-        !prompt[..dynamic_heading].contains("mcp.demo.echo"),
+        !prompt[..dynamic_heading].contains("mcp_demo_mcp__echo"),
         "{prompt}"
     );
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"mcp.demo.echo":{"value":"hello"}}]}"#),
+        content: scored(r#"{"working_still_action":[{"mcp_demo_mcp__echo":{"value":"hello"}}]}"#),
         model_name: "model".to_string(),
         usage: usage(),
         truncated: false,
@@ -213,8 +213,8 @@ fn mcp_action_runs_through_protocol_registry_and_executor() {
         .find("[END SYSTEM PROMPT]")
         .or_else(|| disabled_prompt.find("</Timem System Prompt>"))
         .expect("static prompt boundary");
-    assert!(!disabled_prompt[..static_end].contains("mcp.demo.echo"));
-    assert!(!disabled_prompt[..static_end].contains("mcp.demo.echo"));
+    assert!(!disabled_prompt[..static_end].contains("mcp_demo_mcp__echo"));
+    assert!(!disabled_prompt[..static_end].contains("mcp_demo_mcp__echo"));
 }
 
 #[test]
@@ -244,7 +244,7 @@ fn native_mode_puts_builtin_descriptions_in_static_and_mcp_descriptions_in_api_f
             server_id: "demo".to_string(),
             server_name: "Demo MCP".to_string(),
             name: "echo".to_string(),
-            action_name: "mcp.demo.echo".to_string(),
+            action_name: "mcp_demo_mcp__echo".to_string(),
             description: "Echo a value".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -289,7 +289,7 @@ fn native_mode_puts_builtin_descriptions_in_static_and_mcp_descriptions_in_api_f
         "{prompt}"
     );
     assert!(!prompt.contains("\"input_schema\""), "{prompt}");
-    assert!(!prompt.contains("mcp.demo.echo"), "{prompt}");
+    assert!(!prompt.contains("mcp_demo_mcp__echo"), "{prompt}");
     assert!(!prompt.contains("MCP update:"), "{prompt}");
 
     let request = core.model_interaction_request(prompt.clone());
@@ -299,16 +299,16 @@ fn native_mode_puts_builtin_descriptions_in_static_and_mcp_descriptions_in_api_f
         .any(|tool| tool.name == "run_bash"));
     assert!(request.tools[..request.static_tool_count]
         .iter()
-        .all(|tool| !tool.name.starts_with("mcp.")));
+        .all(|tool| !tool.name.starts_with("mcp_")));
     assert!(request.tools[..request.static_tool_count]
         .iter()
         .all(|tool| !tool.description.is_empty()));
     assert!(request.tools[request.static_tool_count..]
         .iter()
-        .any(|tool| tool.name == "mcp.demo.echo"));
+        .any(|tool| tool.name == "mcp_demo_mcp__echo"));
     let mcp_tool = request.tools[request.static_tool_count..]
         .iter()
-        .find(|tool| tool.name == "mcp.demo.echo")
+        .find(|tool| tool.name == "mcp_demo_mcp__echo")
         .unwrap();
     assert!(mcp_tool
         .description
@@ -325,7 +325,7 @@ fn native_mode_puts_builtin_descriptions_in_static_and_mcp_descriptions_in_api_f
             server_id: "demo".to_string(),
             server_name: "Demo MCP".to_string(),
             name: "search".to_string(),
-            action_name: "mcp.demo.search".to_string(),
+            action_name: "mcp_demo_mcp__search".to_string(),
             description: "Search dynamically".to_string(),
             input_schema: json!({"type": "object", "properties": {}}),
         }],
@@ -338,15 +338,15 @@ fn native_mode_puts_builtin_descriptions_in_static_and_mcp_descriptions_in_api_f
         &prompt[..static_end],
         "MCP changes must not invalidate the native builtin static prefix"
     );
-    assert!(!updated_prompt.contains("mcp.demo.search"));
+    assert!(!updated_prompt.contains("mcp_demo_mcp__search"));
     assert!(!updated_prompt.contains("MCP update:"));
     let updated_request = core.model_interaction_request(updated_prompt.clone());
     assert!(updated_request.tools[updated_request.static_tool_count..]
         .iter()
-        .any(|tool| tool.name == "mcp.demo.search"));
+        .any(|tool| tool.name == "mcp_demo_mcp__search"));
     assert!(!updated_request.tools[updated_request.static_tool_count..]
         .iter()
-        .any(|tool| tool.name == "mcp.demo.echo"));
+        .any(|tool| tool.name == "mcp_demo_mcp__echo"));
 
     let mut inline_profile = native_profile;
     inline_profile.resolved_mode = agent_core::ToolCallMode::Inline;
@@ -358,7 +358,10 @@ fn native_mode_puts_builtin_descriptions_in_static_and_mcp_descriptions_in_api_f
         .starts_with("<Timem System Prompt>\n"));
     let inline_prompt = core.build_next_prompt();
     assert!(inline_prompt.contains("run_bash"), "{inline_prompt}");
-    assert!(inline_prompt.contains("mcp.demo.search"), "{inline_prompt}");
+    assert!(
+        inline_prompt.contains("mcp_demo_mcp__search"),
+        "{inline_prompt}"
+    );
     assert!(inline_prompt.contains("MCP update:"), "{inline_prompt}");
 }
 
@@ -391,7 +394,7 @@ fn mcp_server_error_becomes_action_evidence_instead_of_protocol_repair() {
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"mcp.failing.fail":{}}]}"#),
+        content: scored(r#"{"working_still_action":[{"mcp_failing_mcp__fail":{}}]}"#),
         model_name: "model".to_string(),
         usage: usage(),
         truncated: false,
@@ -441,7 +444,7 @@ fn unresponsive_mcp_tool_times_out_as_action_evidence_and_agent_continues() {
     let started = Instant::now();
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"mcp.unresponsive.wait":{}}]}"#),
+        content: scored(r#"{"working_still_action":[{"mcp_unresponsive_mcp__wait":{}}]}"#),
         model_name: "model".to_string(),
         usage: usage(),
         truncated: false,
@@ -2275,7 +2278,7 @@ fn response_context_compact_does_not_append_redundant_mcp_summary() {
             server_id: "demo".to_string(),
             server_name: "Demo MCP".to_string(),
             name: "echo".to_string(),
-            action_name: "mcp.demo.echo".to_string(),
+            action_name: "mcp_demo_mcp__echo".to_string(),
             description: "Echo input".to_string(),
             input_schema: json!({ "type": "object", "properties": {} }),
         }],

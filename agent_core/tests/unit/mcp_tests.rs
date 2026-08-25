@@ -43,7 +43,10 @@ fn stdio_client_initializes_discovers_and_calls_tool() {
         Some("Always inspect metadata before using this server.")
     );
     assert_eq!(capabilities.tools.len(), 1);
-    assert_eq!(capabilities.tools[0].action_name, "mcp.demo.echo-value");
+    assert_eq!(
+        capabilities.tools[0].action_name,
+        "mcp_demo_server__echo_value"
+    );
     assert_eq!(capabilities.tools[0].input_schema["required"][0], "value");
 
     let result = runtime
@@ -121,7 +124,7 @@ fn legacy_sse_client_discovers_and_calls_tool() {
         capabilities.instructions.as_deref(),
         Some("Use the legacy workflow before calling tools.")
     );
-    assert_eq!(capabilities.tools[0].action_name, "mcp.legacy.echo");
+    assert_eq!(capabilities.tools[0].action_name, "mcp_legacy_sse__echo");
     let result = runtime
         .call_tool(&config, "echo", &json!({ "value": "hello" }))
         .unwrap();
@@ -280,10 +283,22 @@ fn store_round_trips_server_definitions() {
 }
 
 #[test]
-fn action_names_are_stable_and_namespaced() {
+fn action_names_are_stable_namespaced_and_native_api_safe() {
+    let action_name = mcp_action_name("Git Hub Server", "search/issues");
+    assert_eq!(action_name, "mcp_git_hub_server__search_issues");
+    assert!(action_name
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_'));
+
+    let normalized = mcp_action_name("中文 server", "read.file / 版本");
+    assert_eq!(normalized, "mcp_server__read_file");
+    assert!(normalized
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_'));
+
     assert_eq!(
-        mcp_action_name("Git Hub", "search/issues"),
-        "mcp.git_hub.search_issues"
+        mcp_action_name("Blocking On Connect", "echo-value"),
+        "mcp_blocking_on_connect__echo_value"
     );
 }
 
@@ -296,6 +311,9 @@ fn server_config_rejects_ambiguous_ids_and_header_injection() {
         runtime.connect(&config).unwrap_err(),
         "mcp_server_id_must_be_canonical"
     );
+
+    config.id = "remote-server".to_string();
+    assert!(runtime.connect(&config).is_ok());
 
     config.id = "remote".to_string();
     config.transport = McpTransportConfig::StreamableHttp {
@@ -322,7 +340,7 @@ esac; done"#,
     );
     assert_eq!(
         runtime.connect(&config).unwrap_err(),
-        "mcp_tool_action_name_collision:mcp.demo.same_name"
+        "mcp_tool_action_name_collision:mcp_demo_server__same_name"
     );
 }
 
@@ -400,7 +418,7 @@ fn dynamic_tool_is_prompt_visible_and_protocol_parser_keeps_arguments_generic() 
         server_id: "demo".to_string(),
         server_name: "Demo server".to_string(),
         name: "echo-value".to_string(),
-        action_name: "mcp.demo.echo-value".to_string(),
+        action_name: "mcp_demo_server__echo_value".to_string(),
         description: "Echo a value from MCP".to_string(),
         input_schema: json!({
             "type": "object",
@@ -421,25 +439,25 @@ fn dynamic_tool_is_prompt_visible_and_protocol_parser_keeps_arguments_generic() 
         .unwrap();
     assert!(registry
         .render_tool_catalog_markdown()
-        .contains("mcp.demo.echo-value"));
+        .contains("mcp_demo_server__echo_value"));
     assert!(registry
         .render_mcp_tool_catalog_markdown_for_protocol("XML")
-        .contains("mcp.demo.echo-value"));
+        .contains("mcp_demo_server__echo_value"));
     assert!(!registry
         .enrich_static_prompt("STATIC\n{{TOOL_CATALOG}}")
-        .contains("mcp.demo.echo-value"));
+        .contains("mcp_demo_server__echo_value"));
     let builtin_tools = registry.native_builtin_tool_definitions();
     let dynamic_tools = registry.native_dynamic_tool_definitions();
     assert!(builtin_tools.iter().any(|tool| tool.name == "self_tool"));
     assert!(builtin_tools
         .iter()
-        .all(|tool| !tool.name.starts_with("mcp.")));
+        .all(|tool| !tool.name.starts_with("mcp_")));
     assert_eq!(
         dynamic_tools
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["mcp.demo.echo-value"]
+        vec!["mcp_demo_server__echo_value"]
     );
     assert_eq!(dynamic_tools[0].input_schema["additionalProperties"], false);
     assert_eq!(
@@ -450,12 +468,12 @@ fn dynamic_tool_is_prompt_visible_and_protocol_parser_keeps_arguments_generic() 
         2
     );
 
-    let response = r#"<ASSISTANT><actions><mcp.demo.echo-value name="echo protocol-like value"><value><![CDATA[literal </ASSISTANT> and ```xml <ASSISTANT> text]]></value><nested><json>{"action":"not-a-call"}</json></nested></mcp.demo.echo-value></actions></ASSISTANT>"#;
+    let response = r#"<ASSISTANT><actions><mcp_demo_server__echo_value name="echo protocol-like value"><value><![CDATA[literal </ASSISTANT> and ```xml <ASSISTANT> text]]></value><nested><json>{"action":"not-a-call"}</json></nested></mcp_demo_server__echo_value></actions></ASSISTANT>"#;
     let parsed = crate::response_protocol::ResponseProtocolKind::Xml
         .suite()
         .parse(response, &registry);
     assert_eq!(parsed.repair_issue, None);
-    assert_eq!(parsed.next_actions[0].action, "mcp.demo.echo-value");
+    assert_eq!(parsed.next_actions[0].action, "mcp_demo_server__echo_value");
     assert_eq!(
         parsed.next_actions[0].raw_input["value"],
         "literal </ASSISTANT> and ```xml <ASSISTANT> text"
@@ -465,6 +483,6 @@ fn dynamic_tool_is_prompt_visible_and_protocol_parser_keeps_arguments_generic() 
         r#"{"action":"not-a-call"}"#
     );
     assert!(registry
-        .validate_action_input("mcp.demo.echo-value", &json!({}))
+        .validate_action_input("mcp_demo_server__echo_value", &json!({}))
         .is_ok());
 }

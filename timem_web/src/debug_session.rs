@@ -1808,7 +1808,7 @@ mod tests {
                     }),
                 },
                 agent_core::ToolDefinition {
-                    name: "mcp.demo.echo".to_string(),
+                    name: "mcp_demo__echo".to_string(),
                     description: "Dynamic MCP echo".to_string(),
                     input_schema: serde_json::json!({"type": "object"}),
                 },
@@ -1863,7 +1863,7 @@ mod tests {
         assert!(dump.contains("CWD: /workspace"));
         assert!(!dump.contains("ignored-model"));
         assert!(!dump.contains("ignored"));
-        assert!(!dump.contains("mcp.demo.echo"));
+        assert!(!dump.contains("mcp_demo__echo"));
         let system = dump.find("second prompt").unwrap();
         let assistant = dump.find("checking").unwrap();
         let tool = dump.find("CWD: /workspace").unwrap();
@@ -1872,7 +1872,7 @@ mod tests {
         assert!(tool_schema.contains("request_sequence: 2"));
         assert!(tool_schema.contains("tool_call_mode: native"));
         assert!(tool_schema.contains("tool_definitions: 2"));
-        assert!(tool_schema.contains("mcp.demo.echo"));
+        assert!(tool_schema.contains("mcp_demo__echo"));
         assert!(tool_schema.contains("Dynamic MCP echo"));
         assert!(tool_schema.contains("\"additionalProperties\": false"));
         assert!(tool_schema.contains("\"enum\": ["));

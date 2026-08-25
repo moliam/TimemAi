@@ -891,7 +891,7 @@ fn native_request() -> ModelInteractionRequest {
 fn native_tool_wires_are_provider_specific_and_parallel_is_explicit() {
     let mut request = native_request();
     request.tools.push(ToolDefinition {
-        name: "mcp.demo.search".to_string(),
+        name: "mcp_demo__search".to_string(),
         description: "Dynamic MCP search.".to_string(),
         input_schema: json!({"type": "object"}),
     });
@@ -950,7 +950,7 @@ fn native_tool_wires_are_provider_specific_and_parallel_is_explicit() {
 fn anthropic_native_cache_breakpoint_ends_at_static_builtin_tool_prefix() {
     let mut request = native_request();
     request.tools.push(ToolDefinition {
-        name: "mcp.demo.search".to_string(),
+        name: "mcp_demo__search".to_string(),
         description: "Dynamic MCP search.".to_string(),
         input_schema: json!({"type": "object"}),
     });
@@ -959,7 +959,7 @@ fn anthropic_native_cache_breakpoint_ends_at_static_builtin_tool_prefix() {
     let tools = prepared.model_request.body["tools"].as_array().unwrap();
     assert_eq!(tools[0]["name"], "count_lines");
     assert_eq!(tools[0]["cache_control"], json!({"type": "ephemeral"}));
-    assert_eq!(tools[1]["name"], "mcp.demo.search");
+    assert_eq!(tools[1]["name"], "mcp_demo__search");
     assert_eq!(tools[1]["description"], "Dynamic MCP search.");
     assert!(tools[1].get("input_schema").is_some());
     assert!(tools[1].get("cache_control").is_none());

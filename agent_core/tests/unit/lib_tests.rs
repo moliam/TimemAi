@@ -1021,7 +1021,7 @@ fn action_topic_pid_requires_managed_running_bash_evidence() {
 fn test_mcp_tool(action_name: &str, description: &str) -> mcp::McpTool {
     mcp::McpTool {
         server_id: "test_server".to_string(),
-        server_name: "Test MCP".to_string(),
+        server_name: "Test".to_string(),
         name: action_name.to_string(),
         action_name: action_name.to_string(),
         description: description.to_string(),
@@ -1040,7 +1040,7 @@ fn test_mcp_server() -> mcp::McpServerConfig {
 }
 
 fn test_filesystem_mcp_tool() -> mcp::McpTool {
-    let mut tool = test_mcp_tool("mcp.filesystem.echo", "Echo");
+    let mut tool = test_mcp_tool("mcp_filesystem_mcp__echo", "Echo");
     tool.server_id = "filesystem".to_string();
     tool.server_name = "Filesystem MCP".to_string();
     tool
@@ -1049,7 +1049,7 @@ fn test_filesystem_mcp_tool() -> mcp::McpTool {
 #[test]
 fn mcp_capability_update_is_injected_only_when_tool_content_changes() {
     let mut core = test_core("mcp_deferred_update");
-    let original = test_mcp_tool("mcp.test.echo", "Original description");
+    let original = test_mcp_tool("mcp_test__echo", "Original description");
     core.configure_mcp(
         CapabilityRegistry::builtin(),
         mcp::McpRuntime::default(),
@@ -1077,16 +1077,16 @@ fn mcp_capability_update_is_injected_only_when_tool_content_changes() {
             mcp::McpRuntime::default(),
             Vec::new(),
             vec![
-                test_mcp_tool("mcp.test.echo", "Updated description"),
-                test_mcp_tool("mcp.test.search", "Search description"),
+                test_mcp_tool("mcp_test__echo", "Updated description"),
+                test_mcp_tool("mcp_test__search", "Search description"),
             ],
         )
         .unwrap());
     assert!(core.pending_prompt_components.is_empty());
     let prompt = core.build_next_prompt();
     assert!(prompt.contains("<RUNTIME>"));
-    assert!(prompt.contains("MCP update: newly available actions: mcp.test.search."));
-    assert!(prompt.contains("MCP update: updated action definitions: mcp.test.echo."));
+    assert!(prompt.contains("MCP update: newly available actions: mcp_test__search."));
+    assert!(prompt.contains("MCP update: updated action definitions: mcp_test__echo."));
 
     assert!(core
         .apply_mcp_update(
@@ -1097,9 +1097,8 @@ fn mcp_capability_update_is_injected_only_when_tool_content_changes() {
         )
         .unwrap());
     let prompt = core.build_next_prompt();
-    assert!(
-        prompt.contains("MCP update: actions no longer available: mcp.test.echo, mcp.test.search.")
-    );
+    assert!(prompt
+        .contains("MCP update: actions no longer available: mcp_test__echo, mcp_test__search."));
 }
 
 #[test]
@@ -1219,7 +1218,7 @@ fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
         CapabilityRegistry::builtin(),
         mcp::McpRuntime::default(),
         Vec::new(),
-        vec![test_mcp_tool("mcp.test.echo", "Echo")],
+        vec![test_mcp_tool("mcp_test__echo", "Echo")],
     )
     .unwrap();
     core.append_delta(vec![("user_question".to_string(), "old one".to_string())]);
@@ -1262,7 +1261,7 @@ fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
         1,
         "compacting the active catalog must persist exactly one replacement catalog: {prompt}"
     );
-    assert!(prompt.contains("mcp.test.echo"));
+    assert!(prompt.contains("mcp_test__echo"));
 }
 
 #[test]

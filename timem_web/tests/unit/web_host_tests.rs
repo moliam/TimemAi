@@ -2066,7 +2066,7 @@ fn mcp_definition_is_mem_scoped_and_session_enablement_is_isolated() {
     }
     assert_eq!(
         mcp_reports(&state.mem.lock().unwrap())[0].tools[0].action_name,
-        "mcp.demo.echo"
+        "mcp_demo_mcp__echo"
     );
     assert_eq!(
         mcp_reports(&state.mem.lock().unwrap())[0]

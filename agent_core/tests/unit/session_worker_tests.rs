@@ -4096,7 +4096,7 @@ fn queued_mcp_update_is_applied_before_the_next_user_turn_prompt() {
                 server_id: "demo".to_string(),
                 server_name: "Demo".to_string(),
                 name: "echo".to_string(),
-                action_name: "mcp.demo.echo".to_string(),
+                action_name: "mcp_demo__echo".to_string(),
                 description: "Echo input".to_string(),
                 input_schema: serde_json::json!({ "type": "object", "properties": {} }),
             }],
@@ -4112,7 +4112,7 @@ fn queued_mcp_update_is_applied_before_the_next_user_turn_prompt() {
         }
     }
     let prompt = captured.lock().unwrap().clone();
-    assert!(prompt.contains("mcp.demo.echo"));
+    assert!(prompt.contains("mcp_demo__echo"));
     let dynamic_heading = prompt
         .find("MCP update: the following MCP capabilities are enabled")
         .expect("MCP catalog should be in a persistent dynamic delta");
@@ -4121,8 +4121,8 @@ fn queued_mcp_update_is_applied_before_the_next_user_turn_prompt() {
         .or_else(|| prompt.find("</Timem System Prompt>"))
         .expect("static prompt boundary");
     assert!(static_end < dynamic_heading);
-    assert!(!prompt[..static_end].contains("mcp.demo.echo"));
-    assert!(prompt.contains("MCP update: newly available actions: mcp.demo.echo."));
+    assert!(!prompt[..static_end].contains("mcp_demo__echo"));
+    assert!(prompt.contains("MCP update: newly available actions: mcp_demo__echo."));
     assert!(prompt.contains("## USER\n\nUse the new capability."));
 
     worker.shutdown().unwrap();
