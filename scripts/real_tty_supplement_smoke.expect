@@ -8,7 +8,12 @@ set timeout 60
 set repo_root [file normalize [file join [file dirname [info script]] ".."]]
 set binary [file join $repo_root "target" "release" "timem-native-rs"]
 set model_server_script [file join $repo_root "scripts" "fake_openai_server.py"]
-set memory_dir [file join "/private/tmp" "timem_tty_supplement_smoke_[pid]"]
+if {[info exists env(TMPDIR)] && $env(TMPDIR) ne ""} {
+    set temp_root $env(TMPDIR)
+} else {
+    set temp_root "/tmp"
+}
+set memory_dir [file join $temp_root "timem_tty_supplement_smoke_[pid]"]
 set port 0
 
 if {![file executable $binary]} {
