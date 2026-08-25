@@ -998,7 +998,7 @@ export function activeModelRetryStatus(turn: WebTurn): ActiveModelRetryStatus | 
   for (const event of turn.events) {
     if (event.source === "worker_activity") {
       const kind = event.payload.kind;
-      if (kind === "model_response") {
+      if (kind === "model_request" || kind === "model_response") {
         status = null;
         continue;
       }
