@@ -2,7 +2,7 @@ import { AssistantRuntimeProvider, ThreadMessageLike, ThreadPrimitive, useExtern
 import { closestCenter, DndContext, DragEndEvent, DragOverlay, DragOverEvent, KeyboardSensor, PointerSensor, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ArrowDown, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, FolderOpen, FolderPlus, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, Trash2, Wrench, X } from "lucide-react";
+import { ArrowDown, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, Folder, FolderOpen, FolderPlus, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, TriangleAlert, Trash2, Wrench, X } from "lucide-react";
 import { Children, CSSProperties, Dispatch, isValidElement, memo, MutableRefObject, ReactNode, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
@@ -185,6 +185,8 @@ function TimemApp() {
   const [showNewSession, setShowNewSession] = useState(false);
   const [showMemSwitch, setShowMemSwitch] = useState(false);
   const [deleteSessionCandidate, setDeleteSessionCandidate] = useState<Session | null>(null);
+  const [sessionDeleteMode, setSessionDeleteMode] = useState(false);
+  const [selectedDeleteSessionId, setSelectedDeleteSessionId] = useState("");
   const [deleteMessageCandidate, setDeleteMessageCandidate] = useState<ChatMessageDeleteCandidate | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState("");
   const [expandedSessionIds, setExpandedSessionIds] = useState<Set<string>>(() => new Set());
@@ -1320,6 +1322,12 @@ function TimemApp() {
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
+  useEffect(() => {
+    if (selectedDeleteSessionId && !sessions.some((session) => session.session_id === selectedDeleteSessionId)) {
+      setSelectedDeleteSessionId("");
+    }
+    if (sessionDeleteMode && sessions.length === 0) setSessionDeleteMode(false);
+  }, [selectedDeleteSessionId, sessionDeleteMode, sessions]);
   const draggedSession = sessions.find((session) => session.session_id === draggedSessionId);
   const finishSessionDrag = (event: DragEndEvent) => {
     setDraggedSessionId("");
@@ -1355,31 +1363,43 @@ function TimemApp() {
     setSessionGroups(groups);
     if (!sendCommand({ type: "session_groups_reorder", groups })) setSessionGroups(sessionGroups);
   };
+  const cancelSessionDeleteMode = () => {
+    setSessionDeleteMode(false);
+    setSelectedDeleteSessionId("");
+  };
+  const confirmSelectedSessionDelete = () => {
+    const session = sessions.find((candidate) => candidate.session_id === selectedDeleteSessionId);
+    if (!session) return;
+    setDeleteSessionCandidate(session);
+    cancelSessionDeleteMode();
+    closeMobileSidebar(false);
+  };
   return <AssistantRuntimeProvider runtime={runtime}>
     <div className="app-shell">
       {showMobileSessions && <button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => closeMobileSidebar()}/>}
       <aside id="session-navigation" ref={mobileSidebarRef} className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`} aria-label="Session navigation" tabIndex={-1}>
         <div className="brand"><img src="/timem_logo.png" alt="Timem logo" className="brand-logo"/><span>TIMEM</span><button type="button" className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => closeMobileSidebar()}><X size={17}/></button></div>
-        <div className="session-create-actions"><button type="button" ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/> New session</button><button type="button" className="new-session-group" title="New session group" aria-label="New session group" disabled={runtimeLocked} onClick={() => setSessionGroupEditor({ name: "" })}><FolderPlus size={16}/></button></div>
+        <div className="session-create-actions"><button type="button" ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/> New session</button></div>
+        <div className={`session-management-actions ${sessionDeleteMode ? "deleting" : ""}`}><button type="button" className="new-session-group" title="New session group" aria-label="New session group" disabled={runtimeLocked || sessionDeleteMode} onClick={() => setSessionGroupEditor({ name: "" })}><FolderPlus size={16}/></button><div>{sessionDeleteMode && <button type="button" className="session-delete-cancel" title="取消删除 Session" aria-label="取消删除 Session" onClick={cancelSessionDeleteMode}><X size={14} strokeWidth={3}/></button>}<button type="button" className={`session-delete-manage ${sessionDeleteMode ? "confirm" : ""}`} title={sessionDeleteMode ? selectedDeleteSessionId ? "确认删除选中的 Session" : "请选择要删除的 Session" : "选择要删除的 Session"} aria-label={sessionDeleteMode ? selectedDeleteSessionId ? "确认删除选中的 Session" : "请选择要删除的 Session" : "选择要删除的 Session"} disabled={runtimeLocked || sessions.length === 0 || (sessionDeleteMode && !selectedDeleteSessionId)} onClick={() => { if (!sessionDeleteMode) { setSessionGroupEditor(null); setRenamingSessionId(""); setRenameDraft(""); setSessionDeleteMode(true); setSelectedDeleteSessionId(""); } else confirmSelectedSessionDelete(); }}>{sessionDeleteMode ? <Check size={15} strokeWidth={3}/> : <Trash2 size={15}/>}</button></div></div>
         {sessionGroupEditor && !sessionGroupEditor.id && <form className="session-group-editor" onSubmit={(event) => { event.preventDefault(); saveSessionGroup(); }}><input autoFocus value={sessionGroupEditor.name} placeholder="Group name" aria-label="New session group name" onChange={(event) => setSessionGroupEditor({ name: event.target.value })} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setSessionGroupEditor(null); } }}/><button type="submit" disabled={!sessionGroupEditor.name.trim()}><Check size={13}/></button><button type="button" onClick={() => setSessionGroupEditor(null)}><X size={13}/></button></form>}
         <DndContext sensors={sessionDragSensors} collisionDetection={closestCenter} onDragStart={(event) => setDraggedSessionId(String(event.active.id).replace(/^session:/, ""))} onDragCancel={() => setDraggedSessionId("")} onDragEnd={finishSessionDrag}>
           <nav className="session-list" aria-label="Sessions">
             {sessionBuckets.map(({ id: bucketId, group: bucket, sessions: bucketSessions }) => {
               const collapsed = collapsedSessionGroupIds.has(bucketId);
               return <SessionDropGroup id={bucketId} sessionIds={bucketSessions.map((session) => session.session_id)} className="session-group" key={bucketId}>
-                <div className="session-group-heading"><button type="button" className="session-group-toggle" aria-expanded={!collapsed} onClick={() => setCollapsedSessionGroupIds((current) => { const next = new Set(current); if (next.has(bucketId)) next.delete(bucketId); else next.add(bucketId); return next; })}><ChevronRight size={12}/><span>{bucket?.name ?? "Unsorted"}</span><small>{bucketSessions.length}</small></button>{bucket && <div className="session-group-actions">{sessionGroupEditor?.id === bucket.id ? <form className="session-group-editor inline" onSubmit={(event) => { event.preventDefault(); saveSessionGroup(); }}><input autoFocus value={sessionGroupEditor.name} aria-label={`Rename ${bucket.name}`} onChange={(event) => setSessionGroupEditor({ id: bucket.id, name: event.target.value })} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setSessionGroupEditor(null); } }}/><button type="submit" disabled={!sessionGroupEditor.name.trim()}><Check size={12}/></button><button type="button" onClick={() => setSessionGroupEditor(null)}><X size={12}/></button></form> : <><button type="button" title="Move group up" aria-label={`Move ${bucket.name} up`} disabled={sessionGroups[0]?.id === bucket.id} onClick={() => moveSessionGroup(bucket.id, -1)}><ChevronUp size={12}/></button><button type="button" title="Move group down" aria-label={`Move ${bucket.name} down`} disabled={sessionGroups.at(-1)?.id === bucket.id} onClick={() => moveSessionGroup(bucket.id, 1)}><ChevronDown size={12}/></button><button type="button" title={`Rename ${bucket.name}`} aria-label={`Rename ${bucket.name}`} onClick={() => setSessionGroupEditor({ id: bucket.id, name: bucket.name })}><Pencil size={12}/></button><button type="button" className={sessionGroupDeleteConfirmId === bucket.id ? "confirming" : ""} title={sessionGroupDeleteConfirmId === bucket.id ? "Click again to delete; sessions become unsorted" : `Delete ${bucket.name}`} aria-label={`Delete ${bucket.name}`} onClick={() => { if (sessionGroupDeleteConfirmId === bucket.id) { sendCommand({ type: "session_group_delete", group_id: bucket.id }); setSessionGroupDeleteConfirmId(""); } else setSessionGroupDeleteConfirmId(bucket.id); }}><Trash2 size={12}/></button></>}</div>}</div>
+                <div className="session-group-heading"><button type="button" className="session-group-toggle" aria-expanded={!collapsed} onClick={() => setCollapsedSessionGroupIds((current) => { const next = new Set(current); if (next.has(bucketId)) next.delete(bucketId); else next.add(bucketId); return next; })}><ChevronRight className="session-group-chevron" size={12}/><Folder className="session-group-folder" size={14}/><span>{bucket?.name ?? "Unsorted"}</span><small>{bucketSessions.length}</small></button>{bucket && <div className="session-group-actions">{sessionGroupEditor?.id === bucket.id ? <form className="session-group-editor inline" onSubmit={(event) => { event.preventDefault(); saveSessionGroup(); }}><input autoFocus value={sessionGroupEditor.name} aria-label={`Rename ${bucket.name}`} onChange={(event) => setSessionGroupEditor({ id: bucket.id, name: event.target.value })} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setSessionGroupEditor(null); } }}/><button type="submit" disabled={!sessionGroupEditor.name.trim()}><Check size={12}/></button><button type="button" onClick={() => setSessionGroupEditor(null)}><X size={12}/></button></form> : <><button type="button" title="Move group up" aria-label={`Move ${bucket.name} up`} disabled={sessionDeleteMode || sessionGroups[0]?.id === bucket.id} onClick={() => moveSessionGroup(bucket.id, -1)}><ChevronUp size={12}/></button><button type="button" title="Move group down" aria-label={`Move ${bucket.name} down`} disabled={sessionDeleteMode || sessionGroups.at(-1)?.id === bucket.id} onClick={() => moveSessionGroup(bucket.id, 1)}><ChevronDown size={12}/></button><button type="button" title={`Rename ${bucket.name}`} aria-label={`Rename ${bucket.name}`} disabled={sessionDeleteMode} onClick={() => setSessionGroupEditor({ id: bucket.id, name: bucket.name })}><Pencil size={12}/></button><button type="button" className={sessionGroupDeleteConfirmId === bucket.id ? "confirming" : ""} disabled={sessionDeleteMode} title={sessionGroupDeleteConfirmId === bucket.id ? "Click again to delete; sessions become unsorted" : `Delete ${bucket.name}`} aria-label={`Delete ${bucket.name}`} onClick={() => { if (sessionGroupDeleteConfirmId === bucket.id) { sendCommand({ type: "session_group_delete", group_id: bucket.id }); setSessionGroupDeleteConfirmId(""); } else setSessionGroupDeleteConfirmId(bucket.id); }}><Trash2 size={12}/></button></>}</div>}</div>
                 {!collapsed && <div className="session-group-list">{bucketSessions.map((session) => {
                   const renamingSession = pendingRenameSessionIds.has(session.session_id);
                   const deletingSession = pendingDeleteSessionIds.has(session.session_id);
                   const sessionEndpointName = endpointNameForProfile(server?.model_endpoints ?? [], session.runtime_profile) ?? UNCONFIGURED_MODEL_LABEL;
-                  return <SortableSession id={session.session_id} disabled={runtimeLocked} key={session.session_id}>{({ setNodeRef, style, attributes, listeners, isDragging }) => <>
-                    <div ref={setNodeRef} style={style} className={`session-row ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""} ${renamingSession ? "renaming-session" : ""} ${isDragging ? "dragging" : ""}`} aria-busy={renamingSession || deletingSession || undefined}>
-                      <button type="button" className="session-drag" disabled={runtimeLocked} title={`拖动 ${session.display_name} 到其他分组`} aria-label={`拖动 ${session.display_name} 到其他分组`} {...attributes} {...listeners}><GripVertical size={13}/></button>
-                      <button type="button" className={`session-expand ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}` : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={expandedSessionIds.has(session.session_id)} disabled={runtimeLocked} onClick={() => setExpandedSessionIds((current) => { const next = new Set(current); if (next.has(session.session_id)) next.delete(session.session_id); else next.add(session.session_id); return next; })}><ChevronRight size={13}/></button>
-                      {renamingSessionId === session.session_id ? <input className="session-rename-input" autoFocus value={renameDraft} aria-label={`Rename ${session.display_name}`} disabled={runtimeLocked} onChange={(event) => setRenameDraft(event.target.value)} onBlur={() => finishRename(session.session_id)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); } if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); } }}/>: <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.display_name} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
-                        {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span><span className="session-sub">{renamingSession ? <span className="session-detail session-pending">Saving name...</span> : <span className="session-detail session-profile" title={sessionEndpointName}><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{sessionEndpointName}</span></span>}</span></span><span className="sr-only">Session state: {session.state}</span>
+                  return <SortableSession id={session.session_id} disabled={runtimeLocked || sessionDeleteMode} key={session.session_id}>{({ setNodeRef, style, attributes, listeners, isDragging }) => <>
+                    <div ref={setNodeRef} style={style} className={`session-row ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""} ${renamingSession ? "renaming-session" : ""} ${sessionDeleteMode ? "delete-selecting" : ""} ${selectedDeleteSessionId === session.session_id ? "delete-selected" : ""} ${isDragging ? "dragging" : ""}`} aria-busy={renamingSession || deletingSession || undefined}>
+                      <button type="button" className="session-drag" disabled={runtimeLocked || sessionDeleteMode} title={`拖动 ${session.display_name} 到其他分组`} aria-label={`拖动 ${session.display_name} 到其他分组`} {...attributes} {...listeners}><GripVertical size={13}/></button>
+                      <button type="button" className={`session-expand ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}` : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={expandedSessionIds.has(session.session_id)} disabled={runtimeLocked || sessionDeleteMode} onClick={() => setExpandedSessionIds((current) => { const next = new Set(current); if (next.has(session.session_id)) next.delete(session.session_id); else next.add(session.session_id); return next; })}><ChevronRight size={13}/></button>
+                      {renamingSessionId === session.session_id ? <input className="session-rename-input" autoFocus value={renameDraft} aria-label={`Rename ${session.display_name}`} disabled={runtimeLocked} onChange={(event) => setRenameDraft(event.target.value)} onBlur={() => finishRename(session.session_id)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); } if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); } }}/>: <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.display_name} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { if (sessionDeleteMode) { setSelectedDeleteSessionId((current) => current === session.session_id ? "" : session.session_id); return; } setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
+                        {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && !sessionDeleteMode && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span><span className="session-sub">{renamingSession ? <span className="session-detail session-pending">Saving name...</span> : <span className="session-detail session-profile" title={sessionEndpointName}><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{sessionEndpointName}</span></span>}</span></span><span className="sr-only">Session state: {session.state}</span>
                       </button>}
-                      <button type="button" className={`session-delete ${deletingSession ? "deleting" : ""}`} title={`Delete ${session.display_name}`} aria-label={`Delete ${session.display_name}`} disabled={runtimeLocked || deletingSession} onClick={() => { setDeleteSessionCandidate(session); closeMobileSidebar(false); }}>{deletingSession ? <LoaderCircle size={14}/> : <Trash2 size={14}/>}</button>
+                      {sessionDeleteMode && <button type="button" className={`session-delete-select ${selectedDeleteSessionId === session.session_id ? "selected" : ""}`} title={`选择删除 ${session.display_name}`} aria-label={`选择删除 ${session.display_name}`} aria-pressed={selectedDeleteSessionId === session.session_id} disabled={runtimeLocked || deletingSession} onClick={() => setSelectedDeleteSessionId((current) => current === session.session_id ? "" : session.session_id)}>{deletingSession ? <LoaderCircle size={14}/> : selectedDeleteSessionId === session.session_id ? <Check size={14}/> : null}</button>}
                     </div>
                     {expandedSessionIds.has(session.session_id) && <div className="worker-list" aria-label={`Workers for ${session.display_name}: ${session.workers.length} worker${session.workers.length === 1 ? "" : "s"}`}>{[...session.workers].sort((left, right) => left.ordinal - right.ordinal).map((worker) => <div className="worker-row" key={worker.worker_id} title={`${worker.worker_id} · ${worker.context_id}`}><span className={`worker-state-dot ${worker.state}`} aria-hidden="true"/><span className="worker-name">{worker.display_name || `ID${worker.ordinal}`}</span><span className="worker-state">{worker.state}</span></div>)}</div>}
                   </>}</SortableSession>;
@@ -1396,7 +1416,7 @@ function TimemApp() {
       </aside>
       <main className="chat-shell">
         <header className="chat-header">
-          <div className="header-identity"><div className="header-model-guide-anchor"><button type="button" ref={runtimeButtonRef} className={`header-model ${showRuntime ? "selected" : ""}`} title={runtimeLabel} aria-label={`${runtimeLabel}: ${headerModelLabel}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowMcp(false); setShowToolRepo(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true); }}><span title={headerModelLabel}>{headerModelLabel}</span><ChevronDown size={12} aria-hidden="true"/></button>{modelEndpointsUnavailable && !showRuntime && <div className="endpoint-guide-bubble" role="status"><strong>没有接入点可用</strong><span>先在这里新增并配置模型接入点。</span><button type="button" onClick={openEndpointCreator}><Plus size={13}/> 新增接入点</button></div>}</div><HeaderContextUsage session={activeSession}/><button type="button" ref={mcpButtonRef} title={mcpLabel} aria-label={mcpLabel} className={`icon-button mcp-button ${connectedMcpCount > 0 ? "enabled" : ""} ${failedMcpCount > 0 ? "has-failures" : ""} ${showMcp ? "selected" : ""}`} aria-expanded={showMcp} aria-controls="mcp-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowToolRepo(false); if (showMcp) closeMcpPanel(); else setShowMcp(true); }}><Plug size={16}/>{connectedMcpCount > 0 && <span className="mcp-count mcp-count-connected" aria-hidden="true">{connectedMcpCount}</span>}{failedMcpCount > 0 && <span className="mcp-count mcp-count-failed" aria-hidden="true">{failedMcpCount}</span>}</button></div>
+          <div className="header-identity"><div className="header-model-guide-anchor"><button type="button" ref={runtimeButtonRef} className={`header-model ${showRuntime ? "selected" : ""}`} title={runtimeLabel} aria-label={`${runtimeLabel}: ${headerModelLabel}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowMcp(false); setShowToolRepo(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true); }}><span title={headerModelLabel}>{headerModelLabel}</span><ChevronDown size={12} aria-hidden="true"/></button>{modelEndpointsUnavailable && !showRuntime && <div className="endpoint-guide-bubble" role="status"><span className="endpoint-guide-icon" aria-hidden="true"><Sparkles size={14}/></span><div className="endpoint-guide-copy"><strong>尚未配置模型接入点</strong><span>添加一个接入点，即可开始使用当前 Session。</span></div><button type="button" onClick={openEndpointCreator}><Plus size={13}/><span>立即配置</span></button></div>}</div><HeaderContextUsage session={activeSession}/><button type="button" ref={mcpButtonRef} title={mcpLabel} aria-label={mcpLabel} className={`icon-button mcp-button ${connectedMcpCount > 0 ? "enabled" : ""} ${failedMcpCount > 0 ? "has-failures" : ""} ${showMcp ? "selected" : ""}`} aria-expanded={showMcp} aria-controls="mcp-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowToolRepo(false); if (showMcp) closeMcpPanel(); else setShowMcp(true); }}><Plug size={16}/>{connectedMcpCount > 0 && <span className="mcp-count mcp-count-connected" aria-hidden="true">{connectedMcpCount}</span>}{failedMcpCount > 0 && <span className="mcp-failure-indicator" aria-hidden="true"><TriangleAlert size={9}/></span>}</button></div>
           <div className="header-actions">
             <button type="button" ref={mobileSessionButtonRef} title={mobileSessionsLabel} aria-label={mobileSessionsLabel} className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
             <button type="button" title="Open worker roles" aria-label="Open worker roles" className="icon-button mobile-role-button" aria-expanded={showRoles} aria-controls="worker-role-panel" onClick={() => setShowRoles(true)}><BriefcaseBusiness size={17}/></button>
@@ -1762,7 +1782,8 @@ function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOp
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [deleteConfirmId, setDeleteConfirmId] = useState("");
+  const [roleDeleteMode, setRoleDeleteMode] = useState(false);
+  const [selectedDeleteRoleId, setSelectedDeleteRoleId] = useState("");
   const [newGroupName, setNewGroupName] = useState("");
   const [editingGroupId, setEditingGroupId] = useState("");
   const [editingGroupName, setEditingGroupName] = useState("");
@@ -1775,11 +1796,17 @@ function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOp
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
   const resetEditor = () => { setEditingId(null); setName(""); setDescription(""); setDescriptionExpanded(false); };
-  useEffect(() => { resetEditor(); setDeleteConfirmId(""); setEditingGroupId(""); }, [session?.session_id]);
+  useEffect(() => { resetEditor(); setRoleDeleteMode(false); setSelectedDeleteRoleId(""); setEditingGroupId(""); }, [session?.session_id]);
   useEffect(() => {
     const validGroupIds = new Set(["ungrouped", ...library.groups.map((group) => group.id)]);
     setCollapsedRoleGroupIds((current) => new Set(Array.from(current).filter((id) => validGroupIds.has(id))));
   }, [library.groups]);
+  useEffect(() => {
+    if (selectedDeleteRoleId && !library.roles.some((role) => role.id === selectedDeleteRoleId)) {
+      setSelectedDeleteRoleId("");
+    }
+    if (roleDeleteMode && library.roles.length === 0) setRoleDeleteMode(false);
+  }, [library.roles, roleDeleteMode, selectedDeleteRoleId]);
   const toggleRoleGroup = (groupId: string) => setCollapsedRoleGroupIds((current) => {
     const next = new Set(current);
     if (next.has(groupId)) next.delete(groupId); else next.add(groupId);
@@ -1826,21 +1853,18 @@ function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOp
     if (roleById.has(overId)) reorderRole(roleId, groupForRole(overId), overId);
   };
 
-  const roleItem = (role: WorkerRole) => <SortableWorkerRole id={role.id} disabled={disabled} key={role.id}>{({ setNodeRef, style, attributes, listeners, isDragging }) =>
-    <article ref={setNodeRef} style={style} className={`worker-role-item ${selectedRoleIds.includes(role.id) ? "selected" : ""} ${isDragging ? "dragging" : ""}`}>
-      <button type="button" className="worker-role-drag" disabled={disabled} title={`拖动 ${role.name}`} aria-label={`拖动 ${role.name}`} {...attributes} {...listeners}><GripVertical size={13}/></button>
-      <label title={`Use ${role.name} for the next message`}><input type="checkbox" checked={selectedRoleIds.includes(role.id)} disabled={disabled} onChange={() => onSelect(role.id)}/><span><strong>{role.name}</strong><small>{role.description}</small></span></label>
-      <div className="worker-role-actions"><button type="button" className="worker-role-action worker-role-edit" disabled={disabled} title={`Edit ${role.name}`} aria-label={`Edit ${role.name}`} onClick={() => { setEditingId(role.id); setName(role.name); setDescription(role.description); setDeleteConfirmId(""); }}><Pencil size={12}/></button><button type="button" className={`worker-role-action worker-role-delete ${deleteConfirmId === role.id ? "confirm-delete" : ""}`} disabled={disabled} title={deleteConfirmId === role.id ? `Confirm delete ${role.name}` : `Delete ${role.name}`} aria-label={deleteConfirmId === role.id ? `Confirm delete ${role.name}` : `Delete ${role.name}`} onClick={() => {
-        if (deleteConfirmId !== role.id) { setDeleteConfirmId(role.id); return; }
-        if (session && onCommand({ type: "worker_role_delete", session_id: session.session_id, role_id: role.id })) setDeleteConfirmId("");
-      }}>{deleteConfirmId === role.id ? <Check size={12}/> : <Trash2 size={12}/>}</button></div>
+  const roleItem = (role: WorkerRole) => <SortableWorkerRole id={role.id} disabled={disabled || roleDeleteMode} key={role.id}>{({ setNodeRef, style, attributes, listeners, isDragging }) =>
+    <article ref={setNodeRef} style={style} className={`worker-role-item ${!roleDeleteMode && selectedRoleIds.includes(role.id) ? "selected" : ""} ${roleDeleteMode ? "delete-selecting" : ""} ${selectedDeleteRoleId === role.id ? "delete-selected" : ""} ${isDragging ? "dragging" : ""}`}>
+      <button type="button" className="worker-role-drag" disabled={disabled || roleDeleteMode} title={`拖动 ${role.name}`} aria-label={`拖动 ${role.name}`} {...attributes} {...listeners}><GripVertical size={13}/></button>
+      <label title={roleDeleteMode ? `选择删除 ${role.name}` : `Use ${role.name} for the next message`}><input type="checkbox" checked={roleDeleteMode ? selectedDeleteRoleId === role.id : selectedRoleIds.includes(role.id)} disabled={disabled} onChange={() => roleDeleteMode ? setSelectedDeleteRoleId((current) => current === role.id ? "" : role.id) : onSelect(role.id)}/><span><strong>{role.name}</strong><small>{role.description}</small></span></label>
+      {!roleDeleteMode && <div className="worker-role-actions"><button type="button" className="worker-role-action worker-role-edit" disabled={disabled} title={`Edit ${role.name}`} aria-label={`Edit ${role.name}`} onClick={() => { setEditingId(role.id); setName(role.name); setDescription(role.description); }}><Pencil size={12}/></button></div>}
     </article>
   }</SortableWorkerRole>;
 
   const draggedRole = roleById.get(draggedRoleId);
   return <aside id="worker-role-panel" className={`worker-role-panel ${mobileOpen ? "mobile-open" : ""}`} aria-label="Worker roles">
-    <header><span><BriefcaseBusiness size={16}/> Roles</span><div><button type="button" className="worker-role-close" title="Close roles" aria-label="Close roles" onClick={onClose}><X size={15}/></button></div></header>
-    <p className="worker-role-help">拖动 Role 可排序或归入分组。</p>
+    <header><span><BriefcaseBusiness size={16}/> Roles</span><div>{roleDeleteMode && <button type="button" className="worker-role-delete-cancel" title="取消删除 Role" aria-label="取消删除 Role" onClick={() => { setRoleDeleteMode(false); setSelectedDeleteRoleId(""); }}><X size={14} strokeWidth={3}/></button>}<button type="button" className={`worker-role-delete-manage ${roleDeleteMode ? "confirm" : ""}`} title={roleDeleteMode ? selectedDeleteRoleId ? "确认删除选中的 Role" : "请选择要删除的 Role" : "选择要删除的 Role"} aria-label={roleDeleteMode ? selectedDeleteRoleId ? "确认删除选中的 Role" : "请选择要删除的 Role" : "选择要删除的 Role"} disabled={disabled || library.roles.length === 0 || (roleDeleteMode && !selectedDeleteRoleId)} onClick={() => { if (!roleDeleteMode) { resetEditor(); setRoleDeleteMode(true); setSelectedDeleteRoleId(""); return; } if (session && selectedDeleteRoleId && onCommand({ type: "worker_role_delete", session_id: session.session_id, role_id: selectedDeleteRoleId })) { setRoleDeleteMode(false); setSelectedDeleteRoleId(""); } }}>{roleDeleteMode ? <Check size={14} strokeWidth={3}/> : <Trash2 size={14}/>}</button><button type="button" className="worker-role-close" title="Close roles" aria-label="Close roles" onClick={onClose}><X size={15}/></button></div></header>
+    <p className={`worker-role-help ${roleDeleteMode ? "delete-mode" : ""}`}>{roleDeleteMode ? "勾选一个 Role，然后点击顶部对勾确认删除。" : "拖动 Role 可排序或归入分组。"}</p>
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={(event) => setDraggedRoleId(String(event.active.id))} onDragCancel={() => setDraggedRoleId("")} onDragEnd={finishRoleDrag}>
       <div className="worker-role-list">
         {library.groups.map((group) => {
@@ -1851,7 +1875,7 @@ function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOp
                 if (event.key === "Escape") setEditingGroupId("");
                 if (event.key === "Enter" && session && editingGroupName.trim() && onCommand({ type: "worker_role_group_update", session_id: session.session_id, group_id: group.id, name: editingGroupName })) setEditingGroupId("");
               }}/> : <button type="button" className="worker-role-group-toggle" aria-expanded={!collapsed} aria-controls={`worker-role-group-list-${group.id}`} title={collapsed ? `展开 ${group.name}` : `折叠 ${group.name}`} onClick={() => toggleRoleGroup(group.id)}><ChevronRight size={12}/><strong>{group.name}</strong><small>{group.role_ids.length}</small></button>}
-              <div><button type="button" className="worker-role-action worker-role-edit" disabled={disabled} title={`Rename ${group.name}`} aria-label={`Rename ${group.name}`} onClick={() => { setEditingGroupId(group.id); setEditingGroupName(group.name); }}><Pencil size={11}/></button><button type="button" className="worker-role-action worker-role-delete" disabled={disabled} title={`Delete ${group.name}`} aria-label={`Delete ${group.name}`} onClick={() => session && onCommand({ type: "worker_role_group_delete", session_id: session.session_id, group_id: group.id })}><Trash2 size={11}/></button></div>
+              <div><button type="button" className="worker-role-action worker-role-edit" disabled={disabled || roleDeleteMode} title={`Rename ${group.name}`} aria-label={`Rename ${group.name}`} onClick={() => { setEditingGroupId(group.id); setEditingGroupName(group.name); }}><Pencil size={11}/></button><button type="button" className="worker-role-action worker-role-delete" disabled={disabled || roleDeleteMode} title={`Delete ${group.name}`} aria-label={`Delete ${group.name}`} onClick={() => session && onCommand({ type: "worker_role_group_delete", session_id: session.session_id, group_id: group.id })}><Trash2 size={11}/></button></div>
             </header>
             {!collapsed && <div id={`worker-role-group-list-${group.id}`} className="worker-role-group-list">{group.role_ids.map((id) => roleById.get(id)).filter((role): role is WorkerRole => !!role).map(roleItem)}{group.role_ids.length === 0 && <span className="worker-role-drop-hint">拖动 Role 到这里</span>}</div>}
           </WorkerRoleDropGroup>;
@@ -1867,11 +1891,11 @@ function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOp
         {draggedRole && <article className="worker-role-item worker-role-overlay" aria-hidden="true"><span className="worker-role-drag"><GripVertical size={13}/></span><span><strong>{draggedRole.name}</strong><small>{draggedRole.description}</small></span></article>}
       </DragOverlay>
     </DndContext>
-    {session && <form className="worker-role-group-editor" onSubmit={(event) => { event.preventDefault(); if (newGroupName.trim() && onCommand({ type: "worker_role_group_create", session_id: session.session_id, name: newGroupName })) setNewGroupName(""); }}>
+    {session && !roleDeleteMode && <form className="worker-role-group-editor" onSubmit={(event) => { event.preventDefault(); if (newGroupName.trim() && onCommand({ type: "worker_role_group_create", session_id: session.session_id, name: newGroupName })) setNewGroupName(""); }}>
       <input value={newGroupName} maxLength={80} disabled={disabled} placeholder="新分组名称" aria-label="Role group name" onChange={(event) => setNewGroupName(event.target.value)}/>
       <button type="submit" className="worker-role-group-create" disabled={disabled || !newGroupName.trim()}><Plus size={12}/> 分组</button>
     </form>}
-    {session && <form className={`worker-role-editor ${editingId ? "editing" : "creating"}`} onSubmit={(event) => { event.preventDefault(); submit(); }}>
+    {session && !roleDeleteMode && <form className={`worker-role-editor ${editingId ? "editing" : "creating"}`} onSubmit={(event) => { event.preventDefault(); submit(); }}>
       <strong>{editingId ? "编辑 Role" : "新建 Role"}</strong>
       <input value={name} maxLength={80} disabled={disabled} placeholder="称呼，例如：严谨审查员" aria-label="Role name" onChange={(event) => setName(event.target.value)}/>
       <div className="expandable-text-field worker-role-description-field"><textarea value={description} maxLength={16384} disabled={disabled} placeholder="描述工作要求、步骤和约束…" aria-label="Role description" onChange={(event) => setDescription(event.target.value)}/><button type="button" className="text-field-expand" title="展开编辑 Role 描述" aria-label="展开编辑 Role 描述" disabled={disabled} onClick={() => { setDescriptionBeforeExpand(description); setDescriptionExpanded(true); }}><Maximize2 size={13}/></button></div>
@@ -2267,7 +2291,7 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
   const liveSessionIds = useMemo(() => new Set(sessionIds), [liveSessionKey]);
   const welcomeTitle = activeSession ? "Ready when you are." : "Create a session to start.";
   const welcomeText = activeSession ? "Ask Timem to investigate, write, or work with you." : "Use New session to choose a workspace and runtime profile.";
-  const [userMessageNavigation, setUserMessageNavigation] = useState({ previous: false, next: false });
+  const [userMessageNavigation, setUserMessageNavigation] = useState({ previous: false, next: false, bottom: false });
   const userMessageNavigationOffset = 18;
   const userMessageNavigationAnimationRef = useRef<number | null>(null);
 
@@ -2279,17 +2303,23 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
   const updateUserMessageNavigation = useCallback(() => {
     const viewport = viewportRef.current;
     if (!viewport) {
-      setUserMessageNavigation((current) => current.previous || current.next ? { previous: false, next: false } : current);
+      setUserMessageNavigation((current) => current.previous || current.next || current.bottom ? { previous: false, next: false, bottom: false } : current);
       return;
     }
     const viewportTop = viewport.getBoundingClientRect().top;
     const navigationTop = viewportTop + userMessageNavigationOffset;
     const anchorTops = userMessageAnchors().map((anchor) => anchor.getBoundingClientRect().top);
+    const nextUserMessageAvailable = adjacentUserMessageIndex(anchorTops, navigationTop, "next") >= 0;
     const next = {
       previous: adjacentUserMessageIndex(anchorTops, navigationTop, "previous") >= 0,
-      next: adjacentUserMessageIndex(anchorTops, navigationTop, "next") >= 0,
+      next: nextUserMessageAvailable,
+      bottom: !nextUserMessageAvailable && !isNearScrollBottom({
+        scrollTop: viewport.scrollTop,
+        scrollHeight: viewport.scrollHeight,
+        clientHeight: viewport.clientHeight,
+      }),
     };
-    setUserMessageNavigation((current) => current.previous === next.previous && current.next === next.next ? current : next);
+    setUserMessageNavigation((current) => current.previous === next.previous && current.next === next.next && current.bottom === next.bottom ? current : next);
   }, [userMessageAnchors, userMessageNavigationOffset]);
 
   const navigateUserMessage = useCallback((direction: UserMessageNavigationDirection) => {
@@ -2326,6 +2356,20 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
     };
     userMessageNavigationAnimationRef.current = requestAnimationFrame(animate);
   }, [updateUserMessageNavigation, userMessageAnchors, userMessageNavigationOffset]);
+
+  const navigateToThreadBottom = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    if (userMessageNavigationAnimationRef.current !== null) {
+      cancelAnimationFrame(userMessageNavigationAnimationRef.current);
+      userMessageNavigationAnimationRef.current = null;
+    }
+    followThreadLatest.current = true;
+    viewport.scrollTo({
+      top: viewport.scrollHeight,
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+    });
+  }, []);
 
   useEffect(() => () => {
     if (userMessageNavigationAnimationRef.current !== null) cancelAnimationFrame(userMessageNavigationAnimationRef.current);
@@ -2828,7 +2872,6 @@ const toggleQueuedMessages = () => {
         onRequestMessageDelete={onRequestMessageDelete}
       />
       <ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">
-        <ThreadPrimitive.ScrollToBottom asChild><button type="button" className="scroll-to-bottom" title="Scroll to latest message" aria-label="Scroll to latest message"><ArrowDown size={16} aria-hidden="true"/></button></ThreadPrimitive.ScrollToBottom>
         {!!activeSession && displayQueuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`} aria-label={`${displayQueuedMessages.length} queued message${displayQueuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span>{queuePanelCollapsed ? <div className={`queued-message-summary ${firstQueuedMessage?.deliveryError ? "delivery-error" : ""}`} title={firstQueuedMessage?.deliveryError || firstQueuedMessage?.text}><p>{firstQueuedMessage?.text}</p>{firstQueuedMessage && firstQueuedMessage.attachmentIds.length > 0 && <small className="queued-message-summary-attachments"><Paperclip size={10}/>{firstQueuedMessage.attachmentIds.length}</small>}<small className="queued-message-summary-count">{displayQueuedMessages.length} 条</small></div> : <small title={queuedMessagesPause?.reason}>{queuedMessagesPause ? `自动发送已停止${queuedMessagesPause.reason ? `：${queuedMessagesPause.reason}` : ""}` : "上一条正常完成后自动发送"}</small>}<div className="queued-message-header-actions"><label className="queued-auto-send-control"><span>自动发送</span><button type="button" role="switch" className="queued-auto-send-switch" aria-checked={!queuedMessagesPause} aria-label={queuedMessagesPause ? "开启自动发送" : "停止自动发送"} title={queuedMessagesPause ? "开启自动发送" : "停止自动发送"} onClick={() => { if (!activeSessionId) return; if (queuedMessagesPause) resumeQueuedMessages(activeSessionId); else pauseQueuedMessages(activeSessionId, "用户关闭了自动发送", "user"); }}><span className="queued-auto-send-thumb"/></button></label>{!queuePanelCollapsed && hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${displayQueuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}<button type="button" className="queued-message-panel-toggle" aria-expanded={!queuePanelCollapsed} aria-controls={`queued-message-items-${activeSession.session_id}`} title={queuePanelCollapsed ? "展开待发送队列" : "折叠待发送队列为一行"} onClick={toggleQueuedMessagePanel}>{queuePanelCollapsed ? <ChevronDown size={14}/> : <ChevronUp size={14}/>}<span>{queuePanelCollapsed ? "展开" : "折叠"}</span></button></div></header>{!queuePanelCollapsed && <DndContext
           sensors={queueDragSensors}
           collisionDetection={closestCenter}
@@ -2899,7 +2942,7 @@ const toggleQueuedMessages = () => {
     </ThreadPrimitive.Viewport>
     <nav className="user-message-navigation" aria-label="用户消息导航">
       <button type="button" title="上一条用户消息" aria-label="上一条用户消息" disabled={!userMessageNavigation.previous} onClick={() => navigateUserMessage("previous")}><ChevronUp size={17} aria-hidden="true"/></button>
-      <button type="button" title="下一条用户消息" aria-label="下一条用户消息" disabled={!userMessageNavigation.next} onClick={() => navigateUserMessage("next")}><ChevronDown size={17} aria-hidden="true"/></button>
+      <button type="button" title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} aria-label={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} disabled={!userMessageNavigation.next && !userMessageNavigation.bottom} onClick={() => { if (userMessageNavigation.next) navigateUserMessage("next"); else navigateToThreadBottom(); }}><ChevronDown size={17} aria-hidden="true"/></button>
     </nav>
   </ThreadPrimitive.Root>;
 }
@@ -3375,7 +3418,20 @@ function McpPanel({ panelRef, servers, session, pendingKeys, revealedSecrets, on
   onCommand: (key: string, command: ClientCommand) => void;
 }) {
   const [editing, setEditing] = useState<McpServerConfig | null>(null);
+  const [deleteMode, setDeleteMode] = useState(false);
+  const [selectedDeleteServerId, setSelectedDeleteServerId] = useState("");
   const enabled = new Set(session?.mcp_server_ids ?? []);
+  useEffect(() => {
+    if (selectedDeleteServerId && !servers.some((server) => server.config.id === selectedDeleteServerId)) setSelectedDeleteServerId("");
+    if (deleteMode && servers.length === 0) setDeleteMode(false);
+  }, [deleteMode, selectedDeleteServerId, servers]);
+  const cancelDeleteMode = () => { setDeleteMode(false); setSelectedDeleteServerId(""); };
+  const confirmSelectedDelete = () => {
+    const server = servers.find((candidate) => candidate.config.id === selectedDeleteServerId);
+    if (!server || !window.confirm(`Delete MCP server “${server.config.name}”? This removes it from every session in the current mem.`)) return;
+    onCommand(`delete:${server.config.id}`, { type: "mcp_server_delete", server_id: server.config.id });
+    cancelDeleteMode();
+  };
   const startNew = () => setEditing({
     id: "",
     name: "",
@@ -3384,7 +3440,7 @@ function McpPanel({ panelRef, servers, session, pendingKeys, revealedSecrets, on
     request_timeout_ms: 30000,
   });
   return <section id="mcp-panel" ref={panelRef} className="mcp-panel" role="dialog" aria-modal="false" aria-label="MCP servers" tabIndex={-1}>
-    <header><div><span className="eyebrow">MCP</span><h2><strong className="mcp-session-name">{session?.display_name ?? "Current session"}</strong> 's Capabilities</h2></div><button type="button" className="icon-button" title="Close MCP panel" aria-label="Close MCP panel" onClick={onClose}><X size={16}/></button></header>
+    <header><div><span className="eyebrow">MCP</span><h2><strong className="mcp-session-name">{session?.display_name ?? "Current session"}</strong> 's Capabilities</h2></div><div className="mcp-panel-header-actions">{!editing && deleteMode && <button type="button" className="mcp-delete-cancel" title="取消删除 MCP" aria-label="取消删除 MCP" onClick={cancelDeleteMode}><X size={14} strokeWidth={3}/></button>}{!editing && <button type="button" className={`mcp-delete-manage ${deleteMode ? "confirm" : ""}`} title={deleteMode ? selectedDeleteServerId ? "确认删除选中的 MCP" : "请选择要删除的 MCP" : "选择要删除的 MCP"} aria-label={deleteMode ? selectedDeleteServerId ? "确认删除选中的 MCP" : "请选择要删除的 MCP" : "选择要删除的 MCP"} disabled={servers.length === 0 || (deleteMode && (!selectedDeleteServerId || pendingKeys.has(`delete:${selectedDeleteServerId}`)))} onClick={() => { if (!deleteMode) { setDeleteMode(true); setSelectedDeleteServerId(""); } else confirmSelectedDelete(); }}>{deleteMode ? <Check size={14} strokeWidth={3}/> : <Trash2 size={14}/>}</button>}<button type="button" className="icon-button" title="Close MCP panel" aria-label="Close MCP panel" onClick={onClose}><X size={16}/></button></div></header>
     {editing ? <McpEditor config={editing} pending={pendingKeys.has(`save:${editing.id || "new"}`)} revealPending={!!editing.id && pendingKeys.has(`reveal:${editing.id}`)} revealedSecrets={editing.id ? revealedSecrets[editing.id] : undefined} onReveal={() => editing.id && onCommand(`reveal:${editing.id}`, { type: "mcp_server_secrets_reveal", server_id: editing.id })} onCancel={() => setEditing(null)} onSave={(config) => {
       if (!session) return;
       const key = `save:${config.id || "new"}`;
@@ -3397,13 +3453,13 @@ function McpPanel({ panelRef, servers, session, pendingKeys, revealedSecrets, on
         const connectionState = !active ? "disabled" : server.state === "connected" ? "connected" : server.state === "error" || !!server.error ? "failed" : "connecting";
         const connectionLabel = connectionState === "connected" ? `${server.tools.length} tools` : connectionState === "failed" ? "⚠️无法连接" : connectionState === "connecting" ? "连接中…" : "";
         const connectionTitle = connectionState === "failed" && server.error ? `${connectionLabel}：${server.error}` : connectionLabel || "未启用";
-        return <article className={`mcp-server ${connectionState}`} key={server.config.id}>
-          <div className="mcp-server-main"><strong>{server.config.name}</strong><button type="button" role="switch" aria-checked={active} aria-label={`${active ? "Disable" : "Enable"} ${server.config.name} for this session`} className={`mcp-session-toggle ${connectionState}`} title={`${connectionTitle} · click to ${active ? "disable" : "enable"}`} disabled={!session || pending} onClick={() => session && onCommand(`toggle:${server.config.id}`, { type: "mcp_session_toggle", session_id: session.session_id, server_id: server.config.id, enabled: !active })}><span className="mcp-session-toggle-thumb" aria-hidden="true"/></button></div>
+        return <article className={`mcp-server ${connectionState} ${deleteMode ? "delete-selecting" : ""} ${selectedDeleteServerId === server.config.id ? "delete-selected" : ""}`} key={server.config.id}>
+          <div className="mcp-server-main"><strong>{server.config.name}</strong><button type="button" role="switch" aria-checked={active} aria-label={`${active ? "Disable" : "Enable"} ${server.config.name} for this session`} className={`mcp-session-toggle ${connectionState}`} title={deleteMode ? "MCP controls are disabled while selecting a server to delete" : `${connectionTitle} · click to ${active ? "disable" : "enable"}`} disabled={!session || pending || deleteMode} onClick={() => session && onCommand(`toggle:${server.config.id}`, { type: "mcp_session_toggle", session_id: session.session_id, server_id: server.config.id, enabled: !active })}><span className="mcp-session-toggle-thumb" aria-hidden="true"/></button></div>
           {active && <div className={`mcp-server-meta ${connectionState}`} title={connectionState === "failed" ? server.error ?? undefined : undefined}><span>{connectionLabel}</span></div>}
-          <div className="mcp-server-actions"><button type="button" title="Reconnect and refresh tools" aria-label={`Reconnect ${server.config.name}`} disabled={!session || pending} onClick={() => session && onCommand(`reconnect:${server.config.id}`, { type: "mcp_server_reconnect", session_id: session.session_id, server_id: server.config.id })}><RefreshCw size={13}/></button><button type="button" title="Edit server" aria-label={`Edit ${server.config.name}`} disabled={pending} onClick={() => setEditing(server.config)}><Pencil size={13}/></button><button type="button" className="danger" title="Delete server" aria-label={`Delete ${server.config.name}`} disabled={pending} onClick={() => window.confirm(`Delete MCP server “${server.config.name}”? This removes it from every session in the current mem.`) && onCommand(`delete:${server.config.id}`, { type: "mcp_server_delete", server_id: server.config.id })}><Trash2 size={13}/></button></div>
+          {deleteMode ? <button type="button" className={`mcp-delete-select ${selectedDeleteServerId === server.config.id ? "selected" : ""}`} title={`选择删除 ${server.config.name}`} aria-label={`选择删除 ${server.config.name}`} aria-pressed={selectedDeleteServerId === server.config.id} disabled={pending} onClick={() => setSelectedDeleteServerId((current) => current === server.config.id ? "" : server.config.id)}>{selectedDeleteServerId === server.config.id ? <Check size={13}/> : null}</button> : <div className="mcp-server-actions"><button type="button" title="Reconnect and refresh tools" aria-label={`Reconnect ${server.config.name}`} disabled={!session || pending} onClick={() => session && onCommand(`reconnect:${server.config.id}`, { type: "mcp_server_reconnect", session_id: session.session_id, server_id: server.config.id })}><RefreshCw size={13}/></button><button type="button" title="Edit server" aria-label={`Edit ${server.config.name}`} disabled={pending} onClick={() => setEditing(server.config)}><Pencil size={13}/></button></div>}
         </article>;
       })}</div>
-      <button type="button" className="mcp-add" disabled={!session} onClick={startNew}><Plus size={15}/> Add MCP server</button>
+      {!deleteMode && <button type="button" className="mcp-add" disabled={!session} onClick={startNew}><Plus size={15}/> Add MCP server</button>}
     </>}
   </section>;
 }
