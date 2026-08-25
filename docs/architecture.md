@@ -468,8 +468,10 @@ source of truth. At runtime, `agent_core` replaces it with a catalog generated f
 ### Dynamic MCP capabilities
 
 MCP server definitions are persisted under the active mem. A Session stores
-only the server ids enabled for that Session. UI edits update this desired set,
-but do not mutate a running context. External MCP discovery is never on the Web
+only the server ids enabled for that Session. New Sessions start with an empty
+MCP selection and do not inherit mem-level enabled definitions; users opt in per
+Session. UI edits update this desired set, but do not mutate a running context.
+External MCP discovery is never on the Web
 startup, Session restore, worker creation, or turn-submission critical path.
 Those paths apply only an exact connected cache and schedule missing discovery
 on a deduplicated background task. A successful discovery advances the

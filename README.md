@@ -163,7 +163,8 @@ per-session MCP tools in the browser. Session groups can be created, renamed,
 reordered, collapsed, or deleted. Drag a Session by its handle into another group
 or **Unsorted**; deleting a group leaves its Sessions intact under **Unsorted**. Open the plug control in the header to add a local stdio, remote
 Streamable HTTP, or legacy SSE MCP server and choose which Sessions may use it.
-Timem Web can start without a model API key so configuration remains available
+New Sessions start with no MCP servers selected, so MCP access is enabled
+explicitly per Session. Timem Web can start without a model API key so configuration remains available
 in the browser. Click the current model name to edit the selected Session. A
 Session must have a valid API key before Send can start model work; the New
 Session dialog also accepts Session-specific model service settings and caches
