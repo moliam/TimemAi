@@ -14,7 +14,7 @@ pub(crate) const NATIVE_RESPONSE_TRAILER: &str = "Continue the work in the user'
 pub(crate) const CONTEXT_COMPACT_REQUIRED_TRAILER: &str =
     "Context too long, please compress first:";
 const NATIVE_PROTOCOL_SECTION: &str = "## Tool Calling\n\nCapabilities are provided through the model API. Call them through the API tool-call channel. You may request independent calls together. Text accompanying calls is a user-visible progress note. A response with no tool calls is the final user-facing answer. `context_compact` is an ordinary runtime capability and is exclusive with other calls in the same response.";
-const NATIVE_RESPONSE_MODE_INSTRUCTION: &str = "Use the API tool-call channel for runtime capabilities. Ordinary response text is user-visible; text without tool calls finishes the loop.";
+const NATIVE_RESPONSE_MODE_INSTRUCTION: &str = "Use the API tool-call channel for runtime capabilities. Ordinary response text is user-visible, you should report to user your progress often, or answer questions while working; text without tool calls finishes the loop.";
 const INLINE_RESPONSE_MODE_INSTRUCTION: &str =
     "Your response MUST be exactly protocol-compliant in the response protocol below.";
 const INLINE_TOOL_CATALOG_SECTION_HEADING: &str = "## Actions\n\nGenerate actions to drive the runtime to do things for you. There are several builtin actions:\n\n### Available capabilities";

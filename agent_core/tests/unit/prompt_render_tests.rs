@@ -1185,6 +1185,29 @@ fn prompt_renderer_uses_protocol_native_tool_synopses() {
 }
 
 #[test]
+fn native_prompt_encourages_progress_updates_without_changing_finalization_semantics() {
+    let rendered = render_static_prompt_for_mode(
+        "{{RESPONSE_MODE_INSTRUCTION}}",
+        &CapabilityRegistry::builtin(),
+        &JsonSuiteV1,
+        "Ai7",
+        "startup",
+        ToolCallMode::Native,
+    );
+
+    assert!(
+        rendered.contains(
+            "you should report to user your progress often, or answer questions while working"
+        ),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("text without tool calls finishes the loop"),
+        "{rendered}"
+    );
+}
+
+#[test]
 fn native_prompt_contains_builtin_descriptions_without_schemas_or_dynamic_tools() {
     let rendered = render_static_prompt_for_mode(
         "{{TOOL_CATALOG_SECTION_HEADING}}\n\n{{TOOL_CATALOG}}\n\n{{RESPONSE_PROTOCOL_SECTION}}",
