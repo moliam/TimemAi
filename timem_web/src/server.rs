@@ -4561,12 +4561,9 @@ fn create_session(
             .max()
             .map(|value| value.saturating_add(1))
             .unwrap_or(0);
-        let mcp_server_ids = current_mem_state(state)?
-            .mcp_configs
-            .into_iter()
-            .filter(|config| config.enabled)
-            .map(|config| config.id)
-            .collect::<Vec<_>>();
+        // MCP definitions are mem-scoped, but enablement is Session-scoped.
+        // New Sessions start empty and users opt in explicitly from the MCP panel.
+        let mcp_server_ids = Vec::new();
         let (mcp_config_revision, applied_mcp_config_revision) =
             initial_mcp_revisions(&mcp_server_ids);
         sessions.insert(

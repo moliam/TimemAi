@@ -3381,6 +3381,59 @@ fn session_create_returns_the_complete_session_to_the_requesting_browser() {
 }
 
 #[test]
+fn new_session_does_not_inherit_mem_enabled_mcp_servers() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_new_session_mcp"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    state.template = Arc::new(template);
+    set_test_mem(&state, data_dir, "new_session_mcp_mem");
+    state.sessions.lock().unwrap().clear();
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.mcp_configs.push(McpServerConfig {
+            id: "available".to_string(),
+            name: "Available MCP".to_string(),
+            enabled: true,
+            transport: agent_core::mcp::McpTransportConfig::Stdio {
+                command: "/bin/false".to_string(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+            },
+            request_timeout_ms: 10,
+        });
+        mem.mcp_store.save(&mem.mcp_configs).unwrap();
+    }
+
+    let session_id = create_session(
+        &state,
+        Some("No inherited MCP".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert!(session.mcp_server_ids.is_empty());
+    assert_eq!(session.mcp_config_revision, 0);
+    assert_eq!(session.applied_mcp_config_revision, 0);
+    drop(sessions);
+
+    let stored = current_session_store(&state)
+        .unwrap()
+        .load_session(&session_id)
+        .unwrap()
+        .unwrap();
+    assert!(stored.mcp_server_ids.is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn session_create_accepts_an_unregistered_absolute_workspace_directory() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(format!("timem_web_select_workspace_{}", now_ms()));
@@ -4429,6 +4482,22 @@ fn session_create_and_restore_defer_unavailable_mcp_discovery_until_send() {
     .unwrap();
     assert!(started.elapsed() < Duration::from_secs(1));
     assert!(!marker.exists(), "worker creation must not connect to MCP");
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert!(session.mcp_server_ids.is_empty());
+        assert_eq!(
+            session.mcp_config_revision,
+            session.applied_mcp_config_revision
+        );
+    }
+
+    enable_mcp_for_session(&state, &session_id, true, Some("blocking-on-connect")).unwrap();
+    persist_web_session(&state, &session_id).unwrap();
+    assert!(
+        !marker.exists(),
+        "explicit Session enablement must not connect to MCP immediately"
+    );
     {
         let sessions = state.sessions.lock().unwrap();
         let session = &sessions[&session_id];
