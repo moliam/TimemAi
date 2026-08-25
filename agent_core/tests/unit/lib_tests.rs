@@ -1264,3 +1264,35 @@ fn multiple_successful_compacts_emit_one_minimal_runtime_confirmation() {
     );
     assert!(prompt.contains("mcp.test.echo"));
 }
+
+#[test]
+fn workspace_instance_lock_is_exclusive_per_mem_and_reopens_after_release() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let first_root = std::env::temp_dir().join(format!(
+        "timem-workspace-instance-lock-first-{}-{nonce}",
+        std::process::id()
+    ));
+    let second_root = std::env::temp_dir().join(format!(
+        "timem-workspace-instance-lock-second-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&first_root).unwrap();
+    fs::create_dir_all(&second_root).unwrap();
+
+    let first = WorkspaceInstanceLock::acquire(&first_root, "timem-shell").unwrap();
+    assert_eq!(
+        WorkspaceInstanceLock::acquire(&first_root, "timem-web").unwrap_err(),
+        "workspace_already_in_use"
+    );
+    let other = WorkspaceInstanceLock::acquire(&second_root, "timem-web").unwrap();
+    drop(other);
+    drop(first);
+    let reopened = WorkspaceInstanceLock::acquire(&first_root, "timem-web").unwrap();
+    drop(reopened);
+
+    let _ = fs::remove_dir_all(first_root);
+    let _ = fs::remove_dir_all(second_root);
+}

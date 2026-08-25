@@ -9,7 +9,7 @@ fn temp_data_root(label: &str) -> PathBuf {
 }
 
 #[test]
-fn arguments_record_only_option_names_and_resolve_data_root() {
+fn arguments_record_only_option_names_and_resolve_mem_root() {
     let args = vec![
         "--api-key".into(),
         "sk-secret".into(),
@@ -22,13 +22,12 @@ fn arguments_record_only_option_names_and_resolve_data_root() {
         vec!["--api-key", "--base-url", "--debug"]
     );
     assert_eq!(
-        data_root_from_args(&["--data-dir=/tmp/timem-diag".into()]),
-        PathBuf::from("/tmp/timem-diag")
+        memory_root_from_args(&["--space=/tmp/timem-mem".into()]).unwrap(),
+        PathBuf::from("/tmp/timem-mem")
     );
-    assert_eq!(
-        data_root_from_args(&["--data-dir".into(), "/tmp/other".into()]),
-        PathBuf::from("/tmp/other")
-    );
+    assert!(memory_root_from_args(&["--data-dir=/tmp/removed".into()])
+        .unwrap_err()
+        .contains("unsupported_option:--data-dir"));
 }
 
 #[test]
@@ -49,11 +48,10 @@ fn event_ring_is_strictly_bounded_and_keeps_newest_entries() {
 fn checkpoint_updates_the_bounded_running_snapshot() {
     let data_root = temp_data_root("checkpoint");
     let diagnostics = LifecycleDiagnostics::install_in(&data_root, &[], false).unwrap();
-    let root = diagnostics.root().unwrap().to_path_buf();
     diagnostics.checkpoint("configuration_parsed", serde_json::Value::Null);
     diagnostics.checkpoint("listener_bound", serde_json::json!({"port": 15001}));
     let current: serde_json::Value =
-        serde_json::from_slice(&fs::read(root.join(CURRENT_RUN_FILE)).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(&diagnostics.inner.current_path).unwrap()).unwrap();
     let events = current["recent_lifecycle_events"].as_array().unwrap();
     assert_eq!(events.last().unwrap()["name"], "listener_bound");
     assert_eq!(events.last().unwrap()["details"]["port"], 15001);
@@ -70,7 +68,7 @@ fn clean_finish_persists_reason_events_and_removes_running_marker() {
     let root = diagnostics.root().unwrap().to_path_buf();
     diagnostics.event("listener_bound", serde_json::json!({"port": 15001}));
     diagnostics.finish("ctrl_c", true, None);
-    assert!(!root.join(CURRENT_RUN_FILE).exists());
+    assert!(!diagnostics.inner.current_path.exists());
     let exit: serde_json::Value =
         serde_json::from_slice(&fs::read(root.join(LAST_EXIT_FILE)).unwrap()).unwrap();
     assert_eq!(exit["exit_reason"], "ctrl_c");
@@ -87,18 +85,55 @@ fn clean_finish_persists_reason_events_and_removes_running_marker() {
 }
 
 #[test]
-fn interrupted_run_is_promoted_without_claiming_a_specific_cause() {
-    let data_root = temp_data_root("abnormal");
+fn live_run_markers_are_not_promoted_or_overwritten() {
+    let data_root = temp_data_root("concurrent-live");
     let first = LifecycleDiagnostics::install_in(&data_root, &[], false).unwrap();
-    let root = first.root().unwrap().to_path_buf();
-    drop(first);
-    assert!(root.join(CURRENT_RUN_FILE).exists());
+    let first_path = first.inner.current_path.clone();
     let second = LifecycleDiagnostics::install_in(&data_root, &[], false).unwrap();
+    let second_path = second.inner.current_path.clone();
+
+    assert_ne!(first_path, second_path);
+    assert!(first_path.is_file());
+    assert!(second_path.is_file());
+    assert!(!first.inner.root.join(PREVIOUS_ABNORMAL_FILE).exists());
+
+    second.finish("second_complete", true, None);
+    assert!(
+        first_path.is_file(),
+        "one run must not remove another marker"
+    );
+    assert!(!second_path.exists());
+    first.finish("first_complete", true, None);
+    assert!(!first_path.exists());
+    fs::remove_dir_all(data_root).unwrap();
+}
+
+#[test]
+fn definitely_stale_run_is_promoted_without_claiming_a_specific_cause() {
+    let data_root = temp_data_root("abnormal");
+    let root = data_root.join(DIAGNOSTICS_DIR);
+    create_private_dir(&root).unwrap();
+    create_private_dir(&root.join(CURRENT_RUNS_DIR)).unwrap();
+    create_private_dir(&root.join(RUN_ARCHIVE_DIR)).unwrap();
+    let stale = root.join(CURRENT_RUNS_DIR).join("stale.json");
+    atomic_json_write(
+        &stale,
+        &serde_json::json!({
+            "schema_version": 1,
+            "run_id": "dead-run",
+            "pid": std::process::id(),
+            "process_identity": "deliberately-not-the-current-process"
+        }),
+    )
+    .unwrap();
+
+    let diagnostics = LifecycleDiagnostics::install_in(&data_root, &[], false).unwrap();
     let previous: serde_json::Value =
         serde_json::from_slice(&fs::read(root.join(PREVIOUS_ABNORMAL_FILE)).unwrap()).unwrap();
     assert_eq!(previous["status"], "abnormal_exit_detected_on_next_start");
     assert_eq!(previous["exact_cause"], "unknown");
-    second.finish("test_complete", true, None);
+    assert!(!stale.exists());
+    diagnostics.finish("test_complete", true, None);
     fs::remove_dir_all(data_root).unwrap();
 }
 
@@ -107,7 +142,13 @@ fn corrupt_running_marker_is_salvaged_as_unknown_abnormal_exit() {
     let data_root = temp_data_root("corrupt-current");
     let root = data_root.join(DIAGNOSTICS_DIR);
     create_private_dir(&root).unwrap();
-    fs::write(root.join(CURRENT_RUN_FILE), b"{not valid json").unwrap();
+    create_private_dir(&root.join(CURRENT_RUNS_DIR)).unwrap();
+    create_private_dir(&root.join(RUN_ARCHIVE_DIR)).unwrap();
+    fs::write(
+        root.join(CURRENT_RUNS_DIR).join("corrupt.json"),
+        b"{not valid json",
+    )
+    .unwrap();
 
     let diagnostics = LifecycleDiagnostics::install_in(&data_root, &[], false).unwrap();
     let previous: serde_json::Value =
@@ -201,7 +242,7 @@ fn artifacts_are_owner_only_and_atomic_writes_leave_no_temp_files() {
         0o700
     );
     assert_eq!(
-        fs::metadata(root.join(CURRENT_RUN_FILE))
+        fs::metadata(&diagnostics.inner.current_path)
             .unwrap()
             .permissions()
             .mode()

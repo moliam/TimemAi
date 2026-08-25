@@ -35,10 +35,6 @@
 # Absolute MEM directory path. If unset, Timem uses ~/.timem/mem and creates it.
 # export TIMEM_SPACE=/absolute/path/to/mem
 
-# Runtime root for workspace configuration and capability overlays.
-# Default for a new environment: .timem_data
-# export TIMEM_DATA_DIR=.timem_data
-
 # Model API request timeout in seconds.
 # export TIMEM_TIMEOUT=120
 

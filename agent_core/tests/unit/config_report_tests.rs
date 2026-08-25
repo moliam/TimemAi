@@ -20,7 +20,6 @@ fn config() -> ModelServiceConfig {
 fn input() -> RuntimeConfigReportInput {
     RuntimeConfigReportInput {
         space: ".test_mem".to_string(),
-        data_dir: "/tmp/timem/data".to_string(),
         api_audit_path: "/tmp/timem/data/.test_mem/audit/api_audit.json".to_string(),
         action_audit_path: "/tmp/timem/data/.test_mem/audit/action_audit.json".to_string(),
         bash_approval_mode: BashApprovalMode::Approve,

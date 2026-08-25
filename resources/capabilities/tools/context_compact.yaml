@@ -8,7 +8,7 @@ prompt_synopsis: |
 description: |
   Maintain long-running context by discarding stale dynamic prompt deltas and/or
   offloading important but bulky deltas to scratch memory. Preserve the active
-  task, progress, evidence, important user-provided work-env information, and next steps in summary. This action
+  task, progress, evidence, important user-provided work-env information(connections, variable, paths, etc....), and next steps in summary. This action
   is exclusive: do not request another capability in the same response.
 prompt_input: |
   Use only runtime-provided dynamic delta ids. Provide at least one id in

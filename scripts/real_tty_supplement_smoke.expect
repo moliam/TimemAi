@@ -8,7 +8,7 @@ set timeout 60
 set repo_root [file normalize [file join [file dirname [info script]] ".."]]
 set binary [file join $repo_root "target" "release" "timem-native-rs"]
 set model_server_script [file join $repo_root "scripts" "fake_openai_server.py"]
-set data_dir [file join "/private/tmp" "timem_tty_supplement_smoke_[pid]"]
+set memory_dir [file join "/private/tmp" "timem_tty_supplement_smoke_[pid]"]
 set port 0
 
 if {![file executable $binary]} {
@@ -102,8 +102,7 @@ spawn env \
     TIMEM_API_PROTOCOL=openai-compatible \
     TIMEM_BASE_URL=http://127.0.0.1:$port/v1 \
     TIMEM_MODEL=fake-supplement-model \
-    TIMEM_DATA_DIR=$data_dir \
-    $binary --space .tty_supplement_smoke
+    $binary --space $memory_dir
 expect {
     -re "\033\\\[\\?2004h" {}
     timeout {

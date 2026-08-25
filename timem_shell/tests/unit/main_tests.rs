@@ -753,7 +753,6 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
     let banner = render_startup_banner(
         ".xxx_mem",
         &config,
-        std::path::Path::new("/data"),
         std::path::Path::new("/api_audit.json"),
         std::path::Path::new("/action_audit.json"),
         BashApprovalMode::Approve,
@@ -797,8 +796,6 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
     assert!(banner.contains("100K"));
     assert!(banner.contains("TIMEM_BASH_APPROVAL"));
     assert!(banner.contains("approve"));
-    assert!(banner.contains("TIMEM_DATA_DIR"));
-    assert!(banner.contains("/data"));
     assert!(banner.contains("local_audit"));
     assert!(banner.contains("api_audit.json"));
     assert!(banner.contains("payload 记录"));
@@ -818,12 +815,10 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
     let runtime_idx = banner.find("TIMEM_MAX_LLM_INPUT").unwrap();
     let bash_idx = banner.find("TIMEM_BASH_APPROVAL").unwrap();
     let space_idx = banner.find("TIMEM_SPACE").unwrap();
-    let data_idx = banner.find("TIMEM_DATA_DIR").unwrap();
     assert!(model_idx < protocol_idx);
     assert!(protocol_idx < runtime_idx);
     assert!(runtime_idx < bash_idx);
     assert!(bash_idx < space_idx);
-    assert!(space_idx < data_idx);
 }
 
 #[test]
@@ -897,7 +892,6 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
     let default_banner = render_startup_banner(
         ".test_mem",
         &default_config,
-        std::path::Path::new("data"),
         std::path::Path::new(".test_mem/audit/api_audit.json"),
         std::path::Path::new(".test_mem/audit/action_audit.json"),
         BashApprovalMode::Ask,
@@ -921,7 +915,6 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
     let override_banner = render_startup_banner(
         ".test_mem",
         &override_config,
-        std::path::Path::new("data"),
         std::path::Path::new(".test_mem/audit/api_audit.json"),
         std::path::Path::new(".test_mem/audit/action_audit.json"),
         BashApprovalMode::Ask,
@@ -958,7 +951,6 @@ fn startup_banner_highlights_custom_model_and_base_url() {
     let banner = render_startup_banner(
         ".test_mem",
         &config,
-        std::path::Path::new("data"),
         std::path::Path::new(".test_mem/audit/api_audit.json"),
         std::path::Path::new(".test_mem/audit/action_audit.json"),
         BashApprovalMode::Ask,
@@ -988,8 +980,6 @@ fn cli_help_lists_all_env_backed_options() {
         "TIMEM_MODEL",
         "--api-key",
         "TIMEM_API_KEY",
-        "--data-dir",
-        "TIMEM_DATA_DIR",
         "--timeout",
         "TIMEM_TIMEOUT",
         "--max-llm-output",
@@ -1093,7 +1083,6 @@ fn env_template_exports_values_for_plain_source() {
         "TIMEM_BASE_URL",
         "TIMEM_MODEL",
         "TIMEM_SPACE",
-        "TIMEM_DATA_DIR",
         "TIMEM_TIMEOUT",
         "TIMEM_MAX_LLM_OUTPUT",
         "TIMEM_MAX_LLM_INPUT",

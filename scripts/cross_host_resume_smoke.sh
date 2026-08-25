@@ -22,31 +22,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
-data_dir="$tmp_dir/data"
+memory_dir="$tmp_dir/mem"
 workspace="$tmp_dir/workspace"
-space=".cross_host_resume"
 session_id="web_session_handoff"
-history_path="$data_dir/$space/memory/sessions/$session_id/raw_chat_history.jsonl"
+history_path="$memory_dir/sessions/$session_id/raw_chat_history.jsonl"
 prompt_capture="$tmp_dir/model_prompt.txt"
 model_server_log="$tmp_dir/fake_model_server.log"
 shell_output="$tmp_dir/shell_once.json"
 
 mkdir -p "$workspace"
 
-DATA_DIR="$data_dir" \
+MEMORY_DIR="$memory_dir" \
 WORKSPACE="$workspace" \
-SPACE="$space" \
 SESSION_ID="$session_id" \
 python3 - <<'PY'
 import json
 import os
 from pathlib import Path
 
-data_dir = Path(os.environ["DATA_DIR"])
+memory_dir = Path(os.environ["MEMORY_DIR"])
 workspace = Path(os.environ["WORKSPACE"])
-space = os.environ["SPACE"]
 session_id = os.environ["SESSION_ID"]
-memory_dir = data_dir / space / "memory"
 sessions_dir = memory_dir / "sessions"
 history_path = sessions_dir / session_id / "raw_chat_history.jsonl"
 history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -131,7 +127,6 @@ if ! grep -q 'fake_model_server_ready:' "$model_server_log"; then
 fi
 port="$(sed -n 's/^fake_model_server_ready://p' "$model_server_log" | tail -n 1)"
 
-TIMEM_DATA_DIR="$data_dir" \
 TIMEM_API_KEY=dummy \
 TIMEM_API_PROTOCOL=openai-compatible \
 TIMEM_RESPONSE_PROTOCOL=xml \
@@ -140,7 +135,7 @@ TIMEM_MODEL=fake-cross-host-model \
 TIMEM_BASH_APPROVAL=approve \
 TIMEM_WORK_INSTRUCTIONS=off \
 "$binary" \
-  --space "$space" \
+  --space "$memory_dir" \
   --once-json "CROSS_HOST_RESUME_SMOKE" \
   >"$shell_output"
 
