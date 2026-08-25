@@ -628,6 +628,59 @@ describe("web topic view model", () => {
     expect((events[0].payload.payload as Record<string, unknown>).status).toBe("completed");
   });
 
+  it("settles a restored background action when its start event was trimmed", () => {
+    const events = coalesceActionLifecycle([
+      actionEvent("turn_event_1787626168440_155", "finish", "background_running", { cmd: "cargo test -p timem_web", tail_out: true, timeout_ms: 300000 }, "call_TNTIyS9Gv3eSjDujSijCLyUD"),
+      actionEvent("turn_event_1787626188091_162", "finish", "failed", { cmd: "cargo test -p timem_web" }, "call_TNTIyS9Gv3eSjDujSijCLyUD"),
+    ]);
+    expect(events).toHaveLength(1);
+    expect(events[0].event_id).toBe("turn_event_1787626188091_162");
+    expect((events[0].payload.payload as Record<string, unknown>).status).toBe("failed");
+  });
+
+  it("does not guess that legacy background events without action ids belong together", () => {
+    const events = coalesceActionLifecycle([
+      actionEvent("event_legacy_background", "finish", "background_running", { cmd: "cargo test" }),
+      actionEvent("event_legacy_terminal", "finish", "failed", { cmd: "cargo test" }),
+    ]);
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => (event.payload.payload as Record<string, unknown>).status)).toEqual(["background_running", "failed"]);
+  });
+
+  it("does not settle one trimmed background action with another action id", () => {
+    const events = coalesceActionLifecycle([
+      actionEvent("event_background_a", "finish", "background_running", { cmd: "cargo test" }, "call_a"),
+      actionEvent("event_terminal_b", "finish", "failed", { cmd: "cargo test" }, "call_b"),
+    ]);
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => (event.payload.payload as Record<string, unknown>).action_id)).toEqual(["call_a", "call_b"]);
+    expect(events.map((event) => (event.payload.payload as Record<string, unknown>).status)).toEqual(["background_running", "failed"]);
+  });
+
+  it("settles a trimmed background action after compacted history reconstruction", () => {
+    const actionId = "call_compacted_background";
+    const actionTopic = (status: string, input: Record<string, unknown>) => ({
+      session_id: "session_1",
+      context_id: "context_1",
+      worker_id: "worker_session_1",
+      topic: { name: "core.action", attributes: { event: "finish", action_id: actionId } },
+      state: { name: "running" },
+      payload: { action: "run_bash", action_id: actionId, event: "finish", status, input },
+    });
+    const records: ChatHistoryRecord[] = [
+      { type: "event", role: "system", turn_id: "turn_compacted", created_at_ms: 10, kind: "action", content: "background", source: "core_topic", payload: actionTopic("background_running", { cmd: "cargo test", timeout_ms: 300000 }) },
+      { type: "event", role: "system", turn_id: "turn_compacted", created_at_ms: 20, kind: "context_compact", content: "compacted", source: "core_topic", payload: topic("core.context.compact", { estimated_before_tokens: 180000, estimated_after_tokens: 20000 }) },
+      { type: "event", role: "system", turn_id: "turn_compacted", created_at_ms: 30, kind: "action", content: "failed", source: "core_topic", payload: actionTopic("failed", { cmd: "cargo test" }) },
+    ];
+
+    const [restored] = turnsFromHistoryRecords(records);
+    const visible = coalesceActionLifecycle(restored.events);
+
+    expect(visible).toHaveLength(2);
+    expect((visible[0].payload.payload as Record<string, unknown>).status).toBe("failed");
+    expect((visible[1].payload.topic as Record<string, unknown>).name).toBe("core.context.compact");
+  });
+
   it("replaces the ToolGen start row with one terminal failure row", () => {
     const toolgenEvent = (id: string, phase: string): WebTurnEvent => ({
       event_id: id,

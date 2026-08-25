@@ -384,6 +384,7 @@ function toolgenLifecycle(event: WebTurnEvent) {
 export function coalesceActionLifecycle(events: WebTurnEvent[]) {
   const visible: WebTurnEvent[] = [];
   const pendingStarts = new Map<string, number[]>();
+  const pendingBackgroundFinishes = new Map<string, number[]>();
   const pendingToolGen = new Set<string>();
   for (const event of events) {
     const toolgen = toolgenLifecycle(event);
@@ -411,17 +412,35 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
       continue;
     }
     if (lifecycle === "finish") {
-      const indexes = pendingStarts.get(key);
-      const index = indexes?.[0];
-      if (index !== undefined) {
-        const started = visible[index];
+      const status = typeof topicEvent.payload.status === "string" ? topicEvent.payload.status : "";
+      const startIndexes = pendingStarts.get(key);
+      const startIndex = startIndexes?.[0];
+      if (startIndex !== undefined) {
+        const started = visible[startIndex];
         const elapsedMs = event.created_at_ms - started.created_at_ms;
-        visible[index] = elapsedMs >= 0 ? withActionElapsed(event, elapsedMs) : event;
-        const status = typeof topicEvent.payload.status === "string" ? topicEvent.payload.status : "";
-        if (status !== TOOL_STATUS_BACKGROUND_RUNNING) indexes?.shift();
+        visible[startIndex] = elapsedMs >= 0 ? withActionElapsed(event, elapsedMs) : event;
+        if (status !== TOOL_STATUS_BACKGROUND_RUNNING) startIndexes?.shift();
+      } else {
+        // A trimmed history may no longer contain the action start. Only a
+        // structured action id is unique enough to settle its background row;
+        // legacy action+input keys can collide across repeated commands.
+        const canSettleTrimmedBackground = key.startsWith("id:");
+        const backgroundIndexes = canSettleTrimmedBackground
+          ? pendingBackgroundFinishes.get(key)
+          : undefined;
+        const backgroundIndex = backgroundIndexes?.[0];
+        if (status !== TOOL_STATUS_BACKGROUND_RUNNING && backgroundIndex !== undefined) {
+          visible[backgroundIndex] = event;
+          backgroundIndexes?.shift();
+        } else {
+          const index = visible.push(event) - 1;
+          if (canSettleTrimmedBackground && status === TOOL_STATUS_BACKGROUND_RUNNING) {
+            pendingBackgroundFinishes.set(key, [...(backgroundIndexes ?? []), index]);
+          }
+        }
+        if (backgroundIndexes?.length === 0) pendingBackgroundFinishes.delete(key);
       }
-      else visible.push(event);
-      if (indexes?.length === 0) pendingStarts.delete(key);
+      if (startIndexes?.length === 0) pendingStarts.delete(key);
       continue;
     }
     visible.push(event);
