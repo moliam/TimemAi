@@ -1715,6 +1715,12 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain(".runtime-pending-status");
   });
 
+  it("defaults OpenAI-compatible endpoint streaming on while preserving saved endpoint choices", () => {
+    expect(source).toContain('stream: endpoint?.stream ?? true');
+    expect(source).toContain('setDraft({ ...draft, api_protocol, stream: api_protocol === "openai-compatible" });');
+    expect(source).toContain('disabled={draft.api_protocol !== "openai-compatible"}');
+  });
+
   it("uses select controls for runtime settings with predefined values", () => {
     expect(source).toContain("function runtimeSelectOptions(key: string): readonly string[] | null");
     expect(source).toContain('case "TIMEM_BASH_APPROVAL":');
