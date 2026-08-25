@@ -1040,6 +1040,61 @@ fn session_turn_retries_transient_model_api_errors_and_reports_status() {
 }
 
 #[test]
+fn session_turn_resets_system_retry_attempts_for_each_model_request() {
+    let dir = tmp_dir("retry_attempts_reset_per_model_request");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_response_protocol(crate::ResponseProtocolKind::Json);
+    let mut config = test_config();
+    let mut ui = RetryRecordingUi::default();
+    let mut model = ReplayModel::new([
+        Err("model_http_503: first request unavailable".to_string()),
+        Ok(llm(
+            r#"{"status":"CONTINUE","free_talk":"继续处理。"}"#,
+            1_000,
+            false,
+        )),
+        Err("model_timeout: second request timed out".to_string()),
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"两个请求均重试成功。"}"#,
+            1_100,
+            false,
+        )),
+    ]);
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "hello",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "两个请求均重试成功。");
+    assert_eq!(model.prompts.len(), 4);
+    assert_eq!(
+        ui.retries.iter().map(|retry| retry.0).collect::<Vec<_>>(),
+        vec![1, 1]
+    );
+    let events = read_audit_events(&audit);
+    let retry_attempts = events
+        .iter()
+        .filter(|event| event["type"] == "model_retry")
+        .map(|event| event["attempt"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(retry_attempts, vec![1, 1]);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn session_turn_repairs_empty_model_content() {
     let dir = tmp_dir("repair_empty_model_content");
     let audit = dir.join("audit.json");

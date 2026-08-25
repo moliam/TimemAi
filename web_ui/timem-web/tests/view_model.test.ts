@@ -1296,6 +1296,18 @@ describe("web topic view model", () => {
     ];
     expect(activeModelRetryStatus(recovered)).toBeNull();
 
+    const nextRequestStarted = turn("next-request-started", "working");
+    nextRequestStarted.events = [
+      recovered.events[0],
+      {
+        event_id: "next-request",
+        source: "worker_activity",
+        created_at_ms: 3,
+        payload: { kind: "model_request", round: 2 },
+      },
+    ];
+    expect(activeModelRetryStatus(nextRequestStarted)).toBeNull();
+
     const completed = {
       ...recovered,
       state: "finished",
