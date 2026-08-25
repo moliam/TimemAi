@@ -3531,6 +3531,87 @@ fn cancelled_turn_injects_one_runtime_note_before_next_user_and_runtime_context(
 }
 
 #[test]
+fn cancelled_turn_json_prompt_renders_interruption_as_runtime_note_not_action_result() {
+    let dir = tmp_dir("cancel_next_json_runtime_note");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(
+        include_str!("../../../resources/system_prompt/system_prompt.md"),
+        test_profile(),
+        &dir,
+    );
+    let mut config = test_config();
+    config.response_protocol = crate::ResponseProtocolKind::Json;
+
+    let mut cancel_ui = CancelImmediately;
+    let cancelled = run_session_turn(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "old interrupted work",
+            session: "interrupt_json_runtime_note_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut cancel_ui,
+        None,
+    );
+    assert_eq!(cancelled.stop_reason, Some(TurnStopReason::CancelledByUser));
+
+    let mut model = ReplayModel::new([Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"done"}"#,
+        1_000,
+        false,
+    ))]);
+    let completed = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "继续",
+            session: "interrupt_json_runtime_note_session",
+            audit_file: &audit,
+            runtime: "timem_web",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+    assert_eq!(completed.stop_reason, None);
+    assert_eq!(model.prompts.len(), 1);
+
+    let prompt = &model.prompts[0];
+    let note_text = "NOTE: User interrupted the above work. Continue it based on the user's new input's intent. If not sure, ask the user.";
+    let note = prompt.find(note_text).expect("interruption note");
+    let new_user = prompt[note..]
+        .find("继续")
+        .map(|offset| note + offset)
+        .expect("new user input after interruption note");
+    assert!(prompt[..note].contains("old interrupted work"), "{prompt}");
+    assert!(note < new_user, "{prompt}");
+    assert_eq!(prompt.matches(note_text).count(), 1);
+
+    let note_delta_start = prompt[..note]
+        .rfind("[BEGIN DELTA ")
+        .expect("interruption delta start");
+    let note_delta_end = prompt[note..]
+        .find("[BEGIN DELTA ")
+        .map(|offset| note + offset)
+        .unwrap_or(prompt.len());
+    let note_delta = &prompt[note_delta_start..note_delta_end];
+    assert!(note_delta.contains("## RUNTIME"), "{note_delta}");
+    assert!(note_delta.contains("## USER"), "{note_delta}");
+    assert!(
+        !note_delta.contains("The following are results of the actions generated in response:"),
+        "{note_delta}"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn model_error_does_not_inject_user_interruption_note_on_next_turn() {
     let dir = tmp_dir("model_error_no_interruption_note");
     let audit = dir.join("audit.json");

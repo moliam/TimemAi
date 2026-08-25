@@ -186,8 +186,21 @@ By default, Timem stores MEM data in the user's home directory:
   shell_history.txt
 ```
 
-The directory is created automatically on first startup. Session metadata is
-stored per Session rather than in one shared mutable index. If one
+The directory is created automatically on first startup. Each MEM has a temporary-data
+retention setting: 1, 5, 10 days, or unlimited (default: 5 days). Timem applies the
+moving cutoff when the MEM opens, immediately after the setting changes, and once per
+hour while Timem Web is running. Only these temporary data are covered:
+
+- raw-chat event kinds `action`, `action_result`, `context_compact`, and `repair`;
+- finished shell-job records and their stdout/stderr/status files;
+- API audit events in `audit/api_audit.json` and its JSONL sidecar.
+
+User/assistant messages and all other history event kinds are never removed by this
+setting. Running shell jobs are retained regardless of age. Unlimited mode skips all
+retention cleanup. Cleanup uses the same MEM lock domains as writers, installs rewritten
+files atomically, retains records exactly on the cutoff boundary, and is safe to repeat.
+
+Session metadata is stored per Session rather than in one shared mutable index. If one
 `sessions/<session-id>/session.json` is malformed or carries a mismatched ID,
 Timem quarantines that file beside the Session directory and restores the other
 healthy Sessions. Existing `sessions/index.jsonl` stores are repaired if
@@ -344,3 +357,16 @@ If Rust was installed only for Timem, remove it separately:
 ```bash
 rustup self uninstall
 ```
+
+## MEM 历史记录保留
+
+Timem Web 左下角的 **Memory** 卡片用于打开当前 MEM 的设置；卡片右侧的独立切换按钮仅用于切换 MEM 目录。
+
+每个 MEM 可以单独设置 Session 聊天历史的保留期限：
+
+- 最近 1 天
+- 最近 5 天（默认）
+- 最近 10 天
+- 不限
+
+设置保存在当前 MEM 的 `mem_settings.json` 中。选择有限期限后，Timem 会立即删除早于期限的 Session 聊天历史，并在以后启动或切换到该 MEM 时再次应用该策略。该操作不会删除 Session、ToolRepo 工具、角色、MCP 或模型接入点。为避免与正在写入的历史冲突，存在运行中任务时不能修改保留期限。

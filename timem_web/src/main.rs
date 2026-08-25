@@ -5,6 +5,29 @@ mod server;
 mod session_groups;
 mod worker_roles;
 
+use std::time::{Duration, Instant};
+
+const WORKSPACE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(3);
+const WORKSPACE_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+fn acquire_workspace_instance_lock(
+    memory_root: &std::path::Path,
+) -> Result<agent_core::WorkspaceInstanceLock, String> {
+    let deadline = Instant::now() + WORKSPACE_HANDOFF_TIMEOUT;
+    loop {
+        match agent_core::WorkspaceInstanceLock::acquire(memory_root, "timem-web") {
+            Ok(lock) => return Ok(lock),
+            Err(error) if error == "workspace_already_in_use" && Instant::now() < deadline => {
+                std::thread::sleep(
+                    WORKSPACE_HANDOFF_POLL_INTERVAL
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let memory_root = match lifecycle_diagnostics::memory_root_from_args(&args) {
@@ -23,7 +46,7 @@ fn main() {
             eprintln!("\nTimem Web could not start.\n\n{error}\n");
             std::process::exit(2);
         }
-        match agent_core::WorkspaceInstanceLock::acquire(&memory_root, "timem-web") {
+        match acquire_workspace_instance_lock(&memory_root) {
             Ok(lock) => Some(lock),
             Err(error) => {
                 let message = server::friendly_workspace_instance_error(

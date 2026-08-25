@@ -1,6 +1,58 @@
 use super::*;
 
 #[test]
+fn native_interruption_note_is_not_rendered_as_an_action_result() {
+    let mut core = test_core("native_interruption_runtime_note");
+    core.set_interaction_profile(&InteractionProfile {
+        api_protocol: "openai_compatible".to_string(),
+        model: "test".to_string(),
+        gateway: "test".to_string(),
+        requested_mode: ToolCallMode::Native,
+        resolved_mode: ToolCallMode::Native,
+        active_prompt_protocol: "json".to_string(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: CapabilityProbeSource::Explicit,
+        reason: "test".to_string(),
+        probe_latency_ms: None,
+        observed_tool_calls: 1,
+    });
+
+    let _ = core.begin_turn("old interrupted work", None);
+    core.mark_user_interrupted_work();
+    let prompt = match core.begin_turn("继续", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+
+    let note_text = "NOTE: User interrupted the above work. Continue it based on the user's new input's intent. If not sure, ask the user.";
+    let note = prompt.find(note_text).expect("interruption note");
+    let new_user = prompt[note..]
+        .find("继续")
+        .map(|offset| note + offset)
+        .expect("new user input after interruption note");
+    assert!(prompt[..note].contains("old interrupted work"), "{prompt}");
+    assert!(note < new_user, "{prompt}");
+    assert_eq!(prompt.matches(note_text).count(), 1);
+    assert!(prompt.ends_with(prompt_render::NATIVE_RESPONSE_TRAILER));
+
+    let note_delta_start = prompt[..note]
+        .rfind("[BEGIN DELTA ")
+        .expect("interruption delta start");
+    let note_delta_end = prompt[note..]
+        .find("[BEGIN DELTA ")
+        .map(|offset| note + offset)
+        .unwrap_or(prompt.len());
+    let note_delta = &prompt[note_delta_start..note_delta_end];
+    assert!(note_delta.contains("## RUNTIME"), "{note_delta}");
+    assert!(note_delta.contains("## USER"), "{note_delta}");
+    assert!(
+        !note_delta.contains("The following are results of the actions generated in response:"),
+        "{note_delta}"
+    );
+}
+
+#[test]
 fn forced_compaction_preserves_native_history_and_restricts_model_request() {
     let mut core = test_core("forced_native_compaction_gate");
     core.set_max_llm_input_tokens(3_000);
@@ -285,6 +337,125 @@ fn forced_compaction_ignores_non_compact_output_then_unlocks_after_success() {
     });
     assert!(matches!(completed, CoreStep::NeedModel { .. }));
     assert!(!core.context_compact_required);
+}
+
+#[test]
+fn native_context_compact_persists_summary_after_discarding_all_old_deltas() {
+    let mut core = test_core("native_compact_summary_all");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.set_interaction_profile(&InteractionProfile {
+        api_protocol: "openai_compatible".to_string(),
+        model: "test".to_string(),
+        gateway: "test".to_string(),
+        requested_mode: ToolCallMode::Native,
+        resolved_mode: ToolCallMode::Native,
+        active_prompt_protocol: "json".to_string(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: CapabilityProbeSource::Explicit,
+        reason: "test".to_string(),
+        probe_latency_ms: None,
+        observed_tool_calls: 1,
+    });
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "OLD NATIVE CONTEXT".to_string(),
+    )]);
+    let old_delta_id = core.deltas[0].delta_id.clone();
+    let summary = "NATIVE COMPACT SUMMARY MUST SURVIVE";
+    let arguments = serde_json::json!({
+        "discard": [old_delta_id],
+        "summary": summary,
+    });
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            id: "call_compact_all".to_string(),
+            name: "context_compact".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("native context compact should continue with a model request")
+    };
+
+    assert!(!prompt.contains("OLD NATIVE CONTEXT"));
+    assert_eq!(prompt.matches(summary).count(), 1);
+    assert!(prompt.contains("context compacted successfully."));
+    assert_eq!(core.deltas.len(), 1, "summary must live in a fresh delta");
+    assert_ne!(core.deltas[0].delta_id, old_delta_id);
+    assert!(core.native_exchanges.is_empty());
+    let request = core.model_interaction_request(prompt);
+    assert_eq!(request.rendered_prompt.matches(summary).count(), 1);
+    assert!(request.native_exchanges.is_empty());
+    assert_eq!(core.build_next_prompt().matches(summary).count(), 1);
+}
+
+#[test]
+fn native_context_compact_summary_does_not_depend_on_discarded_owning_delta() {
+    let mut core = test_core("native_compact_summary_owner");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    core.set_interaction_profile(&InteractionProfile {
+        api_protocol: "openai_compatible".to_string(),
+        model: "test".to_string(),
+        gateway: "test".to_string(),
+        requested_mode: ToolCallMode::Native,
+        resolved_mode: ToolCallMode::Native,
+        active_prompt_protocol: "json".to_string(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: CapabilityProbeSource::Explicit,
+        reason: "test".to_string(),
+        probe_latency_ms: None,
+        observed_tool_calls: 1,
+    });
+    core.append_delta(vec![("user_question".to_string(), "KEEP ME".to_string())]);
+    core.append_delta(vec![(
+        "result_of_llm_action".to_string(),
+        "DISCARD OWNING DELTA".to_string(),
+    )]);
+    let owning_delta_id = core.deltas[1].delta_id.clone();
+    let summary = "SUMMARY HAS AN INDEPENDENT NEW OWNER";
+    let arguments = serde_json::json!({
+        "discard": [owning_delta_id],
+        "summary": summary,
+    });
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![NativeToolCall {
+            id: "call_compact_owner".to_string(),
+            name: "context_compact".to_string(),
+            raw_arguments: arguments.to_string(),
+            arguments,
+        }],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("native context compact should continue with a model request")
+    };
+
+    assert!(prompt.contains("KEEP ME"));
+    assert!(!prompt.contains("DISCARD OWNING DELTA"));
+    assert_eq!(prompt.matches(summary).count(), 1);
+    assert!(core
+        .deltas
+        .iter()
+        .any(|delta| delta.delta_id != owning_delta_id
+            && delta.slices.iter().any(|slice| slice.text == summary)));
+    assert!(core.native_exchanges.is_empty());
+    let next_prompt = core.build_next_prompt();
+    assert_eq!(next_prompt.matches(summary).count(), 1);
+    let request = core.model_interaction_request(next_prompt);
+    assert_eq!(request.rendered_prompt.matches(summary).count(), 1);
+    assert!(request.native_exchanges.is_empty());
 }
 
 #[test]

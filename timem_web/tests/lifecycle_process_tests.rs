@@ -224,7 +224,7 @@ fn startup_configuration_failure_records_bounded_error_without_secret_values() {
     let root = temporary_root("startup-error");
     let mem = root.join("mem");
     fs::create_dir_all(&mem).unwrap();
-    let secret = "sk-process-test-private";
+    let secret = "process-test-private-credential";
     let output = Command::new(env!("CARGO_BIN_EXE_timem-web"))
         .args([
             "--space",

@@ -73,7 +73,10 @@ const PORT_END: u16 = 23_456;
 const DEFAULT_MEM_PREFERRED_PORT: u16 = 13_764;
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(40);
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+const TEMPORARY_RETENTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SESSION_HISTORY_PAGE_LIMIT: usize = 200;
+const DEFAULT_MEM_TEMPORARY_RETENTION_DAYS: u16 = 5;
+const MILLIS_PER_DAY: i64 = 24 * 60 * 60 * 1_000;
 const MAX_SESSION_MESSAGES: usize = 2_000;
 const MAX_SESSION_TURNS: usize = 200;
 const MAX_TURN_USER_ENTRIES: usize = 200;
@@ -411,6 +414,7 @@ struct WebMemState {
     model_endpoints: Vec<ModelEndpointConfig>,
     role_library: WorkerRoleLibrary,
     session_groups: Vec<SessionGroup>,
+    settings: WebMemSettings,
 }
 
 impl WebMemState {
@@ -428,9 +432,17 @@ impl WebMemState {
         let role_library = load_role_library_resilient(&role_library_path(&layout.memory_dir()))?;
         let model_endpoints = load_model_endpoints_resilient(&layout.memory_dir())?;
         let session_groups = load_session_groups(&layout.memory_dir())?;
+        let settings = load_web_mem_settings(&layout.memory_dir())?;
+        let session_store = SessionStore::new(layout.memory_dir());
+        apply_temporary_retention(
+            &layout,
+            &session_store,
+            settings.temporary_retention_days,
+            now_ms_i64(),
+        )?;
         Ok(Self {
             space,
-            session_store: SessionStore::new(layout.memory_dir()),
+            session_store,
             mcp_store,
             mcp_runtime: McpRuntime::default(),
             mcp_configs,
@@ -438,6 +450,7 @@ impl WebMemState {
             model_endpoints,
             role_library,
             session_groups,
+            settings,
             layout,
         })
     }
@@ -455,8 +468,127 @@ impl WebMemState {
             memory_dir: absolute_path(self.layout.memory_dir())
                 .display()
                 .to_string(),
+            temporary_retention_days: self.settings.temporary_retention_days,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WebMemSettings {
+    #[serde(
+        default = "default_mem_temporary_retention_days",
+        alias = "history_retention_days"
+    )]
+    temporary_retention_days: Option<u16>,
+}
+
+impl Default for WebMemSettings {
+    fn default() -> Self {
+        Self {
+            temporary_retention_days: default_mem_temporary_retention_days(),
+        }
+    }
+}
+
+fn default_mem_temporary_retention_days() -> Option<u16> {
+    Some(DEFAULT_MEM_TEMPORARY_RETENTION_DAYS)
+}
+
+fn validate_mem_temporary_retention_days(days: Option<u16>) -> Result<(), String> {
+    if matches!(days, None | Some(1 | 5 | 10)) {
+        Ok(())
+    } else {
+        Err("mem_temporary_retention_days_invalid".to_string())
+    }
+}
+
+fn web_mem_settings_path(memory_dir: &Path) -> PathBuf {
+    memory_dir.join("mem_settings.json")
+}
+
+fn load_web_mem_settings(memory_dir: &Path) -> Result<WebMemSettings, String> {
+    let path = web_mem_settings_path(memory_dir);
+    let settings = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice::<WebMemSettings>(&bytes)
+            .map_err(|_| "mem_settings_parse_failed".to_string())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => WebMemSettings::default(),
+        Err(_) => return Err("mem_settings_read_failed".to_string()),
+    };
+    validate_mem_temporary_retention_days(settings.temporary_retention_days)?;
+    Ok(settings)
+}
+
+fn save_web_mem_settings(memory_dir: &Path, settings: &WebMemSettings) -> Result<(), String> {
+    validate_mem_temporary_retention_days(settings.temporary_retention_days)?;
+    let mut payload = serde_json::to_vec_pretty(settings)
+        .map_err(|_| "mem_settings_serialize_failed".to_string())?;
+    payload.push(b'\n');
+    agent_core::atomic_write_file(&web_mem_settings_path(memory_dir), &payload)
+        .map_err(|_| "mem_settings_write_failed".to_string())
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TemporaryRetentionResult {
+    history_events: usize,
+    shell_jobs: usize,
+    api_audit_events: usize,
+}
+
+fn apply_temporary_retention(
+    layout: &RuntimeDataLayout,
+    store: &SessionStore,
+    days: Option<u16>,
+    now_ms: i64,
+) -> Result<TemporaryRetentionResult, String> {
+    let Some(days) = days else {
+        return Ok(TemporaryRetentionResult::default());
+    };
+    validate_mem_temporary_retention_days(Some(days))?;
+    let cutoff_ms = now_ms.saturating_sub(i64::from(days).saturating_mul(MILLIS_PER_DAY));
+    let mut result = TemporaryRetentionResult::default();
+    for session in store.list_sessions_resilient()?.sessions {
+        result.history_events = result.history_events.saturating_add(
+            store.prune_temporary_history_events_before(&session.session_id, cutoff_ms)?,
+        );
+    }
+    result.shell_jobs = FileShellJobStore::new(&layout.memory_dir())
+        .prune_finished_before(cutoff_ms)
+        .map_err(|_| "shell_job_retention_failed".to_string())?;
+    result.api_audit_events =
+        agent_core::prune_api_audit_before(&layout.api_audit_file(), cutoff_ms, now_ms)
+            .map_err(|_| "api_audit_retention_failed".to_string())?;
+    Ok(result)
+}
+
+fn apply_current_mem_temporary_retention(
+    state: &AppState,
+    now_ms: i64,
+) -> Result<TemporaryRetentionResult, String> {
+    let (layout, store, days) = {
+        let mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        (
+            mem.layout.clone(),
+            mem.session_store.clone(),
+            mem.settings.temporary_retention_days,
+        )
+    };
+    apply_temporary_retention(&layout, &store, days, now_ms)
+}
+
+fn spawn_temporary_retention_loop(state: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(TEMPORARY_RETENTION_INTERVAL);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if let Err(error) = apply_current_mem_temporary_retention(&state, now_ms_i64()) {
+                eprintln!("[timem_web_warning] temporary_retention_failed error={error}");
+            }
+        }
+    });
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -471,6 +603,8 @@ struct ModelEndpointConfig {
     max_llm_input_tokens: u32,
     #[serde(default = "default_endpoint_max_output_tokens")]
     max_llm_output_tokens: u32,
+    #[serde(default)]
+    stream: bool,
     api_key: String,
     #[serde(default)]
     http_headers: BTreeMap<String, String>,
@@ -494,6 +628,7 @@ struct ModelEndpointReport {
     base_url: String,
     max_llm_input_tokens: u32,
     max_llm_output_tokens: u32,
+    stream: bool,
     api_key_configured: bool,
     http_headers: BTreeMap<String, String>,
 }
@@ -509,6 +644,7 @@ impl From<&ModelEndpointConfig> for ModelEndpointReport {
             base_url: endpoint.base_url.clone(),
             max_llm_input_tokens: endpoint.max_llm_input_tokens,
             max_llm_output_tokens: endpoint.max_llm_output_tokens,
+            stream: endpoint.stream,
             api_key_configured: !endpoint.api_key.is_empty(),
             http_headers: endpoint
                 .http_headers
@@ -745,6 +881,7 @@ struct WebSessionRuntimeProfile {
     timeout_secs: u64,
     max_llm_input_tokens: u32,
     max_llm_output_tokens: u32,
+    stream: bool,
     max_rounds: String,
     bash_approval: String,
     work_instructions: String,
@@ -915,6 +1052,9 @@ enum WireEvent {
         value: String,
         session_env_defaults: BTreeMap<String, String>,
     },
+    MemSettingsUpdated {
+        temporary_retention_days: Option<u16>,
+    },
     FileUploaded {
         session_id: String,
         file: WebAttachment,
@@ -998,6 +1138,7 @@ struct WebMemInfo {
     data_dir: String,
     space_dir: String,
     memory_dir: String,
+    temporary_retention_days: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1077,6 +1218,8 @@ struct ModelEndpointInput {
     base_url: String,
     max_llm_input_tokens: u32,
     max_llm_output_tokens: u32,
+    #[serde(default)]
+    stream: bool,
     #[serde(default)]
     api_key: Option<String>,
     #[serde(default)]
@@ -1274,6 +1417,9 @@ enum ClientCommand {
         #[serde(alias = "space")]
         path: String,
     },
+    MemTemporaryRetentionUpdate {
+        days: Option<u16>,
+    },
 }
 
 impl ClientCommand {
@@ -1287,6 +1433,7 @@ impl ClientCommand {
             | Self::ModelEndpointSecretReveal { .. } => None,
             Self::RuntimeUpdate { .. }
             | Self::MemSwitch { .. }
+            | Self::MemTemporaryRetentionUpdate { .. }
             | Self::McpServerDelete { .. }
             | Self::ModelEndpointUpsert { .. }
             | Self::ModelEndpointDelete { .. }
@@ -1328,6 +1475,7 @@ impl ClientCommand {
             self,
             Self::RuntimeUpdate { .. }
                 | Self::MemSwitch { .. }
+                | Self::MemTemporaryRetentionUpdate { .. }
                 | Self::McpServerDelete { .. }
                 | Self::ModelEndpointUpsert { .. }
                 | Self::ModelEndpointDelete { .. }
@@ -1471,6 +1619,7 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         let _ = default_session;
     }
     spawn_event_bridge(state.clone());
+    spawn_temporary_retention_loop(state.clone());
 
     let listener = bind_web_listener(launch.port, launch.public_access, prefer_default_mem_port)
         .await
@@ -3856,7 +4005,7 @@ fn handle_command_with_id(
             publish_semantic(state, event.clone())?;
             if let Some(previous_endpoint) = previous_endpoint {
                 for (session_id, runtime_profile) in
-                    sync_endpoint_token_limits(state, &previous_endpoint, &updated_endpoint)?
+                    sync_endpoint_runtime_fields(state, &previous_endpoint, &updated_endpoint)?
                 {
                     publish_semantic(
                         state,
@@ -3950,6 +4099,37 @@ fn handle_command_with_id(
                 values: mcp_server_secret_values(state, &server_id)?,
                 server_id,
             }));
+        }
+        ClientCommand::MemTemporaryRetentionUpdate { days } => {
+            validate_mem_temporary_retention_days(days)?;
+            let (memory_dir, layout, store, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.temporary_retention_days = days;
+                (
+                    mem.layout.memory_dir(),
+                    mem.layout.clone(),
+                    mem.session_store.clone(),
+                    settings,
+                )
+            };
+            // Apply first: a failed cleanup must not persist a setting that the
+            // running process did not successfully enforce.
+            apply_temporary_retention(&layout, &store, days, now_ms_i64())?;
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings;
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: days,
+            };
+            publish_semantic(state, event.clone())?;
+            return Ok(Some(event));
         }
         ClientCommand::MemSwitch { path } => {
             let mut epoch = state
@@ -6078,6 +6258,9 @@ fn normalize_model_endpoint_input(
     }
     agent_core::validate_model_http_headers(&http_headers)
         .map_err(|error| format!("invalid_model_endpoint_headers:{error}"))?;
+    if input.stream && api_protocol != "openai-compatible" {
+        return Err("model_endpoint_stream_requires_openai_compatible".to_string());
+    }
     let max_llm_input_tokens = input.max_llm_input_tokens;
     let max_llm_output_tokens = input.max_llm_output_tokens;
     if ![100_000, 200_000, 1_000_000].contains(&max_llm_input_tokens) {
@@ -6120,6 +6303,7 @@ fn normalize_model_endpoint_input(
         base_url,
         max_llm_input_tokens,
         max_llm_output_tokens,
+        stream: input.stream,
         api_key,
         http_headers,
     })
@@ -6228,17 +6412,19 @@ fn session_uses_model_endpoint(session: &WebSession, endpoint: &ModelEndpointCon
         && config.base_url == endpoint.base_url
         && config.max_llm_input_tokens == endpoint.max_llm_input_tokens
         && config.max_llm_output_tokens == endpoint.max_llm_output_tokens
+        && config.openai_compatible.stream == endpoint.stream
         && config.api_key == endpoint.api_key
         && config.http_headers == endpoint.http_headers
 }
 
-fn sync_endpoint_token_limits(
+fn sync_endpoint_runtime_fields(
     state: &AppState,
     previous: &ModelEndpointConfig,
     updated: &ModelEndpointConfig,
 ) -> Result<Vec<(String, WebSessionRuntimeProfile)>, String> {
     if previous.max_llm_input_tokens == updated.max_llm_input_tokens
         && previous.max_llm_output_tokens == updated.max_llm_output_tokens
+        && previous.stream == updated.stream
     {
         return Ok(Vec::new());
     }
@@ -6274,6 +6460,17 @@ fn sync_endpoint_token_limits(
                     &session_id,
                     "TIMEM_MAX_LLM_OUTPUT",
                     &updated.max_llm_output_tokens.to_string(),
+                )?
+                .1,
+            );
+        }
+        if previous.stream != updated.stream {
+            runtime_profile = Some(
+                update_session_runtime_setting(
+                    state,
+                    &session_id,
+                    "TIMEM_STREAM",
+                    &updated.stream.to_string(),
                 )?
                 .1,
             );
@@ -6343,6 +6540,7 @@ fn apply_model_endpoint(
             "TIMEM_MAX_LLM_OUTPUT",
             endpoint.max_llm_output_tokens.to_string(),
         ),
+        ("TIMEM_STREAM", endpoint.stream.to_string()),
     ];
     for (key, value) in fields {
         update_session_runtime_setting(state, session_id, key, &value)?;
@@ -6490,6 +6688,71 @@ fn update_session_runtime_setting(
                 .runtime
                 .env
                 .insert(key.to_string(), normalized_value.clone());
+            session
+                .runtime
+                .env_overrides
+                .insert(key.to_string(), normalized_value.clone());
+            session.runtime_profile =
+                WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+            session.runtime_profile.clone()
+        };
+        persist_web_session(state, session_id)?;
+        return Ok((normalized_value, runtime_profile));
+    }
+    const OPENAI_COMPATIBLE_KEYS: [&str; 4] = [
+        "TIMEM_ENABLE_THINKING",
+        "TIMEM_REASONING_EFFORT",
+        "TIMEM_STREAM",
+        "TIMEM_OPENAI_CACHE_MODE",
+    ];
+    if OPENAI_COMPATIBLE_KEYS.contains(&key) {
+        let worker_ids = session_worker_ids(state, session_id)?;
+        let mut settings = {
+            let sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            sessions
+                .get(session_id)
+                .ok_or_else(|| "session_not_found".to_string())?
+                .runtime
+                .settings
+                .clone()
+        };
+        agent_core::apply_openai_compatible_env_value(
+            &mut settings.config.openai_compatible,
+            key,
+            value,
+        )?;
+        let normalized_value = session_cached_env_values(&settings)
+            .get(key)
+            .cloned()
+            .ok_or_else(|| "missing_session_runtime_config_value".to_string())?;
+        {
+            let manager = state
+                .manager
+                .lock()
+                .map_err(|_| "worker_manager_poisoned".to_string())?;
+            for worker_id in &worker_ids {
+                manager
+                    .handle(worker_id)
+                    .ok_or_else(|| "session_worker_not_found".to_string())?
+                    .update_openai_compatible_config(key.to_string(), normalized_value.clone())?;
+            }
+        }
+        let runtime_profile = {
+            let mut sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| "session_not_found".to_string())?;
+            session.runtime.settings = settings;
+            session
+                .runtime
+                .env
+                .extend(session_cached_env_values(&session.runtime.settings));
             session
                 .runtime
                 .env_overrides
@@ -8744,6 +9007,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             data_dir: String::new(),
             space_dir: String::new(),
             memory_dir: String::new(),
+            temporary_retention_days: default_mem_temporary_retention_days(),
         });
     let (role_library, session_groups) = current_mem_state(state)
         .map(|mem| (mem.role_library, mem.session_groups))
@@ -9300,6 +9564,7 @@ impl WebSessionRuntimeProfile {
             timeout_secs: settings.config.timeout_secs,
             max_llm_input_tokens: settings.config.max_llm_input_tokens,
             max_llm_output_tokens: settings.config.max_llm_output_tokens,
+            stream: settings.config.openai_compatible.stream,
             max_rounds: round_budget_value(settings.max_rounds),
             bash_approval: agent_core::bash_approval_mode_label(settings.bash_approval_mode)
                 .to_string(),
@@ -9727,7 +9992,7 @@ fn nonempty_text(text: String, label: &str) -> Result<String, String> {
 }
 
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default ~/.timem/mem\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model request timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
+    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default ~/.timem/mem\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
 }
 
 fn public_access_url(configured_host: Option<&str>, port: u16, token: &str) -> Option<String> {

@@ -331,6 +331,10 @@ enum PendingRuntimeUpdate {
         field: crate::RuntimeConfigField,
         value: String,
     },
+    OpenAiCompatible {
+        key: String,
+        value: String,
+    },
     MaxRounds(u32),
 }
 
@@ -679,6 +683,20 @@ impl CoreSessionWorkerHandle {
         }
         self.enqueue_runtime_update(
             PendingRuntimeUpdate::Config { field, value },
+            CoreSessionWorkerCommand::RuntimeConfigUpdated,
+        )
+    }
+
+    pub fn update_openai_compatible_config(
+        &self,
+        key: String,
+        value: String,
+    ) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.enqueue_runtime_update(
+            PendingRuntimeUpdate::OpenAiCompatible { key, value },
             CoreSessionWorkerCommand::RuntimeConfigUpdated,
         )
     }
@@ -1853,6 +1871,13 @@ fn apply_worker_runtime_update(
                 core.set_self_tool_runtime_param(field.label(), value);
             }
         },
+        PendingRuntimeUpdate::OpenAiCompatible { key, value } => {
+            if crate::apply_openai_compatible_env_value(&mut config.openai_compatible, &key, &value)
+                .unwrap_or(false)
+            {
+                core.set_self_tool_runtime_param(&key, value);
+            }
+        }
         PendingRuntimeUpdate::MaxRounds(max_rounds) => core.set_max_rounds(max_rounds),
     }
     core.notify_runtime_config_changed();

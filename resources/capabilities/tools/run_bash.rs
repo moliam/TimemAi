@@ -650,6 +650,85 @@ impl FileShellJobStore {
         (running, exited)
     }
 
+    /// Removes finished shell-job records and their output artifacts older than
+    /// `cutoff_ms`. Running jobs are retained regardless of age.
+    pub fn prune_finished_before(&self, cutoff_ms: i64) -> std::io::Result<usize> {
+        self.guard
+            .with_write(|| self.prune_finished_before_unlocked(cutoff_ms))
+            .map_err(std::io::Error::other)?
+    }
+
+    fn prune_finished_before_unlocked(&self, cutoff_ms: i64) -> std::io::Result<usize> {
+        if !self.index_file.exists() {
+            return Ok(0);
+        }
+        let input = fs::File::open(&self.index_file)?;
+        let temporary = self.dir.join(format!(
+            ".jobs.jsonl.retention.tmp-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options.open(&temporary)?;
+        let mut removed_records = Vec::new();
+        let result = (|| -> std::io::Result<()> {
+            for line in BufReader::new(input).lines() {
+                let line = line?;
+                let parsed = serde_json::from_str::<ShellJobRecord>(&line).ok();
+                let remove = parsed.as_ref().is_some_and(|record| {
+                    record.created_at_ms < cutoff_ms && self.record_finished(record)
+                });
+                if remove {
+                    let record = parsed.expect("checked above");
+                    if self.remove_shell_job_artifacts(&record).is_ok() {
+                        removed_records.push(record);
+                        continue;
+                    }
+                }
+                writeln!(output, "{line}")?;
+            }
+            output.sync_all()?;
+            fs::rename(&temporary, &self.index_file)
+        })();
+        if let Err(error) = result {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        Ok(removed_records.len())
+    }
+
+    fn remove_shell_job_artifacts(&self, record: &ShellJobRecord) -> std::io::Result<()> {
+        let paths = [
+            PathBuf::from(&record.output_file),
+            PathBuf::from(&record.stderr_file),
+            PathBuf::from(&record.status_file),
+            PathBuf::from(format!("{}.notified", record.status_file)),
+        ];
+        if paths
+            .iter()
+            .any(|path| path.parent() != Some(self.dir.as_path()))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "shell job artifact escaped the shell_jobs directory",
+            ));
+        }
+        for path in paths {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
     pub fn running_job_list_context(&self, session_id: &str) -> Option<String> {
         let jobs = self.running_for_session(session_id);
         if jobs.is_empty() {

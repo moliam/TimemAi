@@ -84,7 +84,7 @@ describe("reliable command outbox", () => {
 
 describe("model endpoint command delivery", () => {
   it("keeps endpoint API keys out of persistent browser storage", () => {
-    const command = { type: "model_endpoint_upsert", endpoint: { name: "prod", model: "gpt", api_protocol: "openai-compatible", response_protocol: "xml", base_url: "https://api.example", max_llm_input_tokens: 200_000, max_llm_output_tokens: 20_000, api_key: "secret" } } as const;
+    const command = { type: "model_endpoint_upsert", endpoint: { name: "prod", model: "gpt", api_protocol: "openai-compatible", response_protocol: "xml", base_url: "https://api.example", max_llm_input_tokens: 200_000, max_llm_output_tokens: 20_000, stream: true, api_key: "secret" } } as const;
     expect(commandNeedsReliableDelivery(command)).toBe(true);
     expect(commandMayPersist(command)).toBe(false);
   });

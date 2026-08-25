@@ -16,6 +16,7 @@ fn append_audit_writes_json_document() {
     assert_eq!(events.len(), 2);
     assert_eq!(events[0]["type"], "turn_final");
     assert_eq!(events[1]["type"], "llm_request");
+    assert!(events.iter().all(|event| event["time_ms"].is_i64()));
     let _ = std::fs::remove_file(path);
 }
 
@@ -37,7 +38,7 @@ fn model_input_overflow_recovery_event_keeps_delta_and_size_evidence() {
 }
 
 #[test]
-fn append_audit_migrates_legacy_jsonl_to_json_document() {
+fn append_audit_migrates_legacy_jsonl_without_applying_retention_policy() {
     let mut path = std::env::temp_dir();
     path.push(format!(
         "timem_core_legacy_audit_{}.json",
@@ -54,7 +55,9 @@ fn append_audit_migrates_legacy_jsonl_to_json_document() {
     let events = doc["events"].as_array().unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[0]["type"], "turn_start");
+    assert!(events[0].get("time_ms").is_none());
     assert_eq!(events[1]["type"], "turn_final");
+    assert!(events[1]["time_ms"].is_i64());
     assert!(!text.lines().next().unwrap().starts_with(r#"{"type""#));
     let _ = std::fs::remove_file(path);
 }
@@ -71,11 +74,12 @@ fn append_audit_uses_jsonl_sidecar_for_large_documents_and_read_merges_events() 
     let _ = std::fs::remove_file(&sidecar);
 
     let large_text = "x".repeat(AUDIT_SIDECAR_THRESHOLD_BYTES as usize);
+    let now_ms = audit_now_ms();
     std::fs::write(
         &path,
         serde_json::to_string(&json!({
             "version": 1,
-            "events": [{"type":"seed", "payload": large_text}]
+            "events": [{"type":"seed", "payload": large_text, "time_ms": now_ms}]
         }))
         .unwrap(),
     )
@@ -211,4 +215,101 @@ fn action_related_audit_event_builders_are_structured() {
         .as_str()
         .unwrap()
         .contains("## RUNTIME\nAi1's previous response"));
+}
+
+#[test]
+fn timestamp_audit_event_preserves_past_times_and_normalizes_invalid_values() {
+    let now_ms = 200_000;
+    let fresh_ms = now_ms - 1;
+    assert_eq!(
+        timestamp_audit_event(&json!({"type":"fresh", "time_ms":fresh_ms}), now_ms)["time_ms"],
+        fresh_ms
+    );
+    assert_eq!(
+        timestamp_audit_event(&json!({"type":"old", "time_ms":1}), now_ms)["time_ms"],
+        1
+    );
+    assert_eq!(
+        timestamp_audit_event(&json!({"type":"future", "time_ms":now_ms + 1}), now_ms)["time_ms"],
+        now_ms
+    );
+    let scalar = timestamp_audit_event(&json!("legacy"), now_ms);
+    assert_eq!(scalar["time_ms"], now_ms);
+    assert_eq!(scalar["event"], "legacy");
+}
+
+#[test]
+fn api_audit_retention_uses_the_requested_rolling_cutoff_across_json_and_jsonl() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_core_audit_retention_{}_{}",
+        std::process::id(),
+        audit_now_ms()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("api_audit.json");
+    let sidecar = audit_sidecar_path(&path);
+    let now_ms = 300_000;
+    let cutoff_ms = 200_000;
+
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "events": [
+                {"type":"base_old", "time_ms":cutoff_ms - 1},
+                {"type":"base_boundary", "time_ms":cutoff_ms},
+                {"type":"base_missing"}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut sidecar_bytes = Vec::new();
+    sidecar_bytes.extend_from_slice(
+        format!(
+            "{{\"type\":\"sidecar_fresh\",\"time_ms\":{}}}\n",
+            now_ms - 1
+        )
+        .as_bytes(),
+    );
+    sidecar_bytes.extend_from_slice(b"not json\n");
+    sidecar_bytes.extend_from_slice(b"\xff\xfe\n");
+    sidecar_bytes.extend_from_slice(
+        format!(
+            "{{\"type\":\"sidecar_future\",\"time_ms\":{}}}\n",
+            now_ms + 1
+        )
+        .as_bytes(),
+    );
+    sidecar_bytes.extend_from_slice(b"{\"type\":\"sidecar_missing\"}\n");
+    std::fs::write(&sidecar, sidecar_bytes).unwrap();
+
+    assert_eq!(prune_api_audit_before(&path, cutoff_ms, now_ms).unwrap(), 6);
+    assert_eq!(
+        prune_api_audit_before(&path, cutoff_ms, now_ms).unwrap(),
+        0,
+        "repeating the same rolling cleanup must be idempotent"
+    );
+
+    let doc = read_audit_doc(&path).unwrap();
+    let types = doc["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(types, vec!["base_boundary", "sidecar_fresh"]);
+    let sidecar_text = std::fs::read_to_string(&sidecar).unwrap();
+    assert!(sidecar_text.contains("sidecar_fresh"));
+    assert!(!sidecar_text.contains("sidecar_future"));
+    assert!(!sidecar_text.contains("sidecar_missing"));
+    assert!(!root
+        .join(format!(
+            ".api_audit.jsonl.retention.tmp-{}-{}",
+            std::process::id(),
+            now_ms
+        ))
+        .exists());
+
+    let _ = std::fs::remove_dir_all(root);
 }
