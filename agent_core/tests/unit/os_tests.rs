@@ -83,3 +83,45 @@ fn linux_policy_uses_xdg_paths_and_parses_os_release() {
         Some("Example Linux 1".to_string())
     );
 }
+
+#[test]
+fn process_liveness_helpers_are_conservative_and_consistent() {
+    let current_pid = std::process::id();
+    assert_eq!(process_is_alive(u64::from(current_pid)), Some(true));
+    assert!(process_may_be_alive(current_pid));
+    assert!(!process_is_definitely_dead(current_pid));
+
+    // PID zero is never a live user process on supported Unix hosts. On an
+    // unsupported platform the optional primitive may be unknown, while the
+    // ownership helper must still remain conservative.
+    if let Some(alive) = process_is_alive(0) {
+        assert!(!alive);
+        assert!(process_is_definitely_dead(0));
+    } else {
+        assert!(process_may_be_alive(0));
+        assert!(!process_is_definitely_dead(0));
+    }
+}
+
+#[test]
+fn current_process_file_is_owned_by_the_effective_user_when_supported() {
+    let path = std::env::temp_dir().join(format!(
+        "timem-owner-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after Unix epoch")
+            .as_nanos()
+    ));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .expect("create current-user-owned test file");
+    #[cfg(unix)]
+    assert!(path_owned_by_current_user(&path));
+    #[cfg(not(unix))]
+    assert!(!path_owned_by_current_user(&path));
+    drop(file);
+    std::fs::remove_file(path).expect("remove ownership test file");
+}

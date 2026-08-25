@@ -686,6 +686,46 @@ fn concurrent_session_store_instances_never_expose_partial_or_lose_index_records
 }
 
 #[test]
+fn legacy_index_migrates_to_session_scoped_metadata_files() {
+    let root = tmp_dir("session_metadata_v2_migration");
+    let store = SessionStore::new(&root);
+    fs::create_dir_all(store.sessions_dir()).unwrap();
+    let first = new_stored_session(
+        "session_first",
+        "First",
+        "/tmp/project-a",
+        profile(),
+        store.history_path_for_session("session_first"),
+    );
+    let second = new_stored_session(
+        "session_second",
+        "Second",
+        "/tmp/project-b",
+        profile(),
+        store.history_path_for_session("session_second"),
+    );
+    fs::write(
+        store.index_path(),
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let recovery = store.list_sessions_resilient().unwrap();
+    assert_eq!(recovery.sessions.len(), 2);
+    assert!(store.layout_marker_path().is_file());
+    assert!(!store.index_path().exists());
+    assert!(store.sessions_dir().join("index.v1.jsonl").is_file());
+    assert!(store.metadata_path_for_session("session_first").is_file());
+    assert!(store.metadata_path_for_session("session_second").is_file());
+    assert_eq!(store.load_session("session_first").unwrap(), Some(first));
+    assert_eq!(store.load_session("session_second").unwrap(), Some(second));
+}
+
+#[test]
 fn deleting_a_session_removes_its_index_entry_and_persisted_data() {
     let root = tmp_dir("delete_session");
     let store = SessionStore::new(&root);
@@ -806,7 +846,7 @@ fn session_index_permissions_protect_cached_environment() {
         .permissions()
         .mode()
         & 0o777;
-    let index_mode = std::fs::metadata(store.index_path())
+    let index_mode = std::fs::metadata(store.metadata_path_for_session("session_secure"))
         .unwrap()
         .permissions()
         .mode()

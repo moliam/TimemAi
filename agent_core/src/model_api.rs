@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 use crate::response_protocol::KNOWN_PROMPT_BOUNDARIES;
-
 use crate::{
     plan_prompt_cache, redact_value, stable_text_fingerprint, CacheControl, CoreProfile,
     LlmResponse, ModelInteractionRequest, NativeToolCall, PromptBlock, PromptBlockRole,
@@ -66,6 +66,7 @@ pub struct ModelServiceConfig {
     pub model: String,
     pub base_url: String,
     pub api_key: String,
+    pub http_headers: BTreeMap<String, String>,
     pub timeout_secs: u64,
     pub max_llm_output_tokens: u32,
     pub max_llm_input_tokens: u32,
@@ -542,6 +543,45 @@ fn optional_text(text: &str) -> Value {
     }
 }
 
+pub fn validate_model_http_headers(headers: &BTreeMap<String, String>) -> Result<(), String> {
+    if headers.len() > 32 {
+        return Err("too_many_model_http_headers".to_string());
+    }
+    let mut normalized_names = std::collections::BTreeSet::new();
+    for (name, value) in headers {
+        let valid_name = !name.is_empty()
+            && name.len() <= 128
+            && name.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'!' | b'#'
+                            | b'$'
+                            | b'%'
+                            | b'&'
+                            | b'\''
+                            | b'*'
+                            | b'+'
+                            | b'-'
+                            | b'.'
+                            | b'^'
+                            | b'_'
+                            | b'`'
+                            | b'|'
+                            | b'~'
+                    )
+            });
+        let valid_value = value.len() <= 8 * 1024
+            && !value.chars().any(|ch| {
+                ch == '\r' || ch == '\n' || ch == '\0' || (ch.is_control() && ch != '\t')
+            });
+        if !valid_name || !valid_value || !normalized_names.insert(name.to_ascii_lowercase()) {
+            return Err("invalid_model_http_header".to_string());
+        }
+    }
+    Ok(())
+}
+
 fn model_http_headers(config: &ModelServiceConfig) -> Vec<(String, String)> {
     let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
     match config.api_protocol {
@@ -554,6 +594,16 @@ fn model_http_headers(config: &ModelServiceConfig) -> Vec<(String, String)> {
         ApiProtocol::Anthropic => {
             headers.push(("x-api-key".to_string(), config.api_key.clone()));
             headers.push(("anthropic-version".to_string(), "2023-06-01".to_string()));
+        }
+    }
+    for (name, value) in &config.http_headers {
+        if let Some((_, existing_value)) = headers
+            .iter_mut()
+            .find(|(existing_name, _)| existing_name.eq_ignore_ascii_case(name))
+        {
+            *existing_value = value.clone();
+        } else {
+            headers.push((name.clone(), value.clone()));
         }
     }
     headers

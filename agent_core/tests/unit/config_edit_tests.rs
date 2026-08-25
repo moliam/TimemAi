@@ -6,6 +6,7 @@ fn test_config() -> ModelServiceConfig {
         interaction: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
+        http_headers: Default::default(),
         model: "qwen-plus".to_string(),
         base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
         timeout_secs: 120,

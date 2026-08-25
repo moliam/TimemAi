@@ -8,6 +8,7 @@ export type ModelEndpoint = {
   max_llm_input_tokens: number;
   max_llm_output_tokens: number;
   api_key_configured: boolean;
+  http_headers: Record<string, string>;
 };
 
 export type ModelEndpointDraft = {
@@ -20,6 +21,7 @@ export type ModelEndpointDraft = {
   max_llm_input_tokens: number;
   max_llm_output_tokens: number;
   api_key?: string;
+  http_headers: Record<string, string>;
 };
 
 type ModelEndpointProfile = {
@@ -59,6 +61,7 @@ export function endpointDraftValid(draft: ModelEndpointDraft): boolean {
     && !!draft.api_protocol.trim()
     && !!draft.response_protocol.trim()
     && !!draft.base_url.trim()
+    && Object.keys(draft.http_headers ?? {}).every((name) => !!name.trim())
     && MODEL_CONTEXT_WINDOW_OPTIONS.includes(draft.max_llm_input_tokens as typeof MODEL_CONTEXT_WINDOW_OPTIONS[number])
     && MODEL_OUTPUT_TOKEN_OPTIONS.includes(draft.max_llm_output_tokens as typeof MODEL_OUTPUT_TOKEN_OPTIONS[number]);
 }

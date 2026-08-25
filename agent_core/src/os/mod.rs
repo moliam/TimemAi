@@ -105,6 +105,36 @@ pub fn process_running(pid: u32) -> bool {
     process_is_alive(u64::from(pid)).unwrap_or(false)
 }
 
+/// Conservative liveness check for ownership/lock decisions. Unsupported
+/// platforms return true so callers never steal resources from a process that
+/// may still be alive.
+pub fn process_may_be_alive(pid: u32) -> bool {
+    process_is_alive(u64::from(pid)).unwrap_or(true)
+}
+
+/// Returns true only when the platform can positively establish that the
+/// process does not exist.
+pub fn process_is_definitely_dead(pid: u32) -> bool {
+    matches!(process_is_alive(u64::from(pid)), Some(false))
+}
+
+/// Returns whether a filesystem entry is owned by the effective user. Unknown
+/// platforms fail closed because this is used before deleting stale artifacts.
+pub fn path_owned_by_current_user(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::symlink_metadata(path)
+            .map(|metadata| metadata.uid() == unsafe { libc::geteuid() })
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 /// Returns a kernel-derived identity that changes when an operating-system PID
 /// is reused. Callers must treat `None` as "identity unavailable", not as a
 /// positive match.

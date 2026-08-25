@@ -28,6 +28,8 @@ pub struct StoredSession {
     pub state: StoredSessionState,
     pub last_turn_id: Option<String>,
     pub raw_chat_history_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -197,6 +199,16 @@ impl SessionStore {
         self.sessions_dir().join("index.jsonl")
     }
 
+    pub fn layout_marker_path(&self) -> PathBuf {
+        self.sessions_dir().join(".metadata-v2")
+    }
+
+    pub fn metadata_path_for_session(&self, session_id: &str) -> PathBuf {
+        self.sessions_dir()
+            .join(sanitize_session_path_component(session_id))
+            .join("session.json")
+    }
+
     pub fn history_path_for_session(&self, session_id: &str) -> PathBuf {
         self.sessions_dir()
             .join(sanitize_session_path_component(session_id))
@@ -204,57 +216,119 @@ impl SessionStore {
     }
 
     pub fn upsert_session(&self, session: &StoredSession) -> Result<(), String> {
+        validate_session_id(&session.session_id)?;
+        self.ensure_metadata_v2()?;
+        let path = self.metadata_path_for_session(&session.session_id);
+        let guard = MemGuard::for_memory_domain(
+            &self.root,
+            format!(
+                "session-data-{}",
+                sanitize_session_path_component(&session.session_id)
+            ),
+        );
+        guard.with_write(|| {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|_| "session_dir_create_failed".to_string())?;
+                restrict_session_path_permissions(parent, true)?;
+            }
+            let mut payload = serde_json::to_vec_pretty(session)
+                .map_err(|_| "session_record_serialize_failed".to_string())?;
+            payload.push(b'\n');
+            crate::atomic_write_file(&path, &payload)
+                .map_err(|_| "session_metadata_write_failed".to_string())?;
+            restrict_session_path_permissions(&path, false)
+        })?
+    }
+
+    fn ensure_metadata_v2(&self) -> Result<(), String> {
+        if self.layout_marker_path().exists() {
+            return Ok(());
+        }
         let _index_lock = self
             .index_lock
             .lock()
             .map_err(|_| "session_index_lock_poisoned".to_string())?;
         self.guard.with_write(|| {
-            fs::create_dir_all(self.sessions_dir()).map_err(|_| "session_dir_create_failed")?;
-            restrict_session_path_permissions(&self.sessions_dir(), true)?;
-            let mut sessions = self.list_sessions_unlocked()?;
-            if let Some(existing) = sessions
-                .iter_mut()
-                .find(|existing| existing.session_id == session.session_id)
-            {
-                *existing = session.clone();
-            } else {
-                sessions.push(session.clone());
+            if self.layout_marker_path().exists() {
+                return Ok(());
             }
-            sessions.sort_by_key(|session| (session.updated_at_ms, session.session_id.clone()));
-            self.write_sessions_unlocked(&sessions)
+            fs::create_dir_all(self.sessions_dir())
+                .map_err(|_| "session_dir_create_failed".to_string())?;
+            restrict_session_path_permissions(&self.sessions_dir(), true)?;
+            let sessions = self.list_legacy_sessions_unlocked()?;
+            for session in sessions {
+                let path = self.metadata_path_for_session(&session.session_id);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|_| "session_dir_create_failed".to_string())?;
+                    restrict_session_path_permissions(parent, true)?;
+                }
+                let mut payload = serde_json::to_vec_pretty(&session)
+                    .map_err(|_| "session_record_serialize_failed".to_string())?;
+                payload.push(b'\n');
+                crate::atomic_write_file(&path, &payload)
+                    .map_err(|_| "session_metadata_write_failed".to_string())?;
+                restrict_session_path_permissions(&path, false)?;
+            }
+            crate::atomic_write_file(&self.layout_marker_path(), b"2\n")
+                .map_err(|_| "session_layout_marker_write_failed".to_string())?;
+            restrict_session_path_permissions(&self.layout_marker_path(), false)?;
+            if self.index_path().exists() {
+                let archived = self.sessions_dir().join("index.v1.jsonl");
+                if !archived.exists() {
+                    fs::rename(self.index_path(), archived)
+                        .map_err(|_| "session_index_archive_failed".to_string())?;
+                } else {
+                    fs::remove_file(self.index_path())
+                        .map_err(|_| "session_index_archive_failed".to_string())?;
+                }
+            }
+            Ok(())
         })?
     }
-
     pub fn list_sessions(&self) -> Result<Vec<StoredSession>, String> {
-        self.list_sessions_unlocked()
+        if self.layout_marker_path().exists() {
+            self.list_metadata_sessions_unlocked()
+        } else {
+            self.list_legacy_sessions_unlocked()
+        }
     }
 
     /// Loads the restore index and repairs malformed JSONL records without
     /// discarding valid sessions. The exact original file is retained beside
     /// the index before the repaired replacement is installed.
     pub fn list_sessions_resilient(&self) -> Result<SessionIndexRecovery, String> {
-        match self.list_sessions() {
-            Ok(sessions) => Ok(SessionIndexRecovery {
+        if self.layout_marker_path().exists() {
+            return self.list_sessions().map(|sessions| SessionIndexRecovery {
                 sessions,
                 invalid_records: 0,
                 backup_path: None,
-            }),
+            });
+        }
+        let recovery = match self.list_legacy_sessions_unlocked() {
+            Ok(sessions) => SessionIndexRecovery {
+                sessions,
+                invalid_records: 0,
+                backup_path: None,
+            },
             Err(error) if error == "session_record_parse_failed" => {
                 let _index_lock = self
                     .index_lock
                     .lock()
                     .map_err(|_| "session_index_lock_poisoned".to_string())?;
                 self.guard
-                    .with_write(|| self.repair_session_index_unlocked())?
+                    .with_write(|| self.repair_session_index_unlocked())??
             }
-            Err(error) => Err(error),
-        }
+            Err(error) => return Err(error),
+        };
+        self.ensure_metadata_v2()?;
+        Ok(recovery)
     }
 
     fn repair_session_index_unlocked(&self) -> Result<SessionIndexRecovery, String> {
         // Another process may have repaired the index while this caller waited
         // for the cross-process memory guard.
-        if let Ok(sessions) = self.list_sessions_unlocked() {
+        if let Ok(sessions) = self.list_legacy_sessions_unlocked() {
             return Ok(SessionIndexRecovery {
                 sessions,
                 invalid_records: 0,
@@ -318,7 +392,43 @@ impl SessionStore {
         })
     }
 
-    fn list_sessions_unlocked(&self) -> Result<Vec<StoredSession>, String> {
+    fn list_metadata_sessions_unlocked(&self) -> Result<Vec<StoredSession>, String> {
+        let mut sessions = Vec::new();
+        let entries = match fs::read_dir(self.sessions_dir()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(sessions),
+            Err(_) => return Err("session_dir_read_failed".to_string()),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|_| "session_dir_read_failed".to_string())?;
+            let file_type = entry
+                .file_type()
+                .map_err(|_| "session_dir_read_failed".to_string())?;
+            if !file_type.is_dir() || entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let path = entry.path().join("session.json");
+            if !path.exists() {
+                continue;
+            }
+            let bytes = fs::read(&path).map_err(|_| "session_metadata_read_failed".to_string())?;
+            let session = serde_json::from_slice::<StoredSession>(&bytes)
+                .map_err(|_| "session_metadata_parse_failed".to_string())?;
+            if self.metadata_path_for_session(&session.session_id) != path {
+                return Err("session_metadata_id_mismatch".to_string());
+            }
+            sessions.push(session);
+        }
+        sessions.sort_by(|left, right| {
+            right
+                .updated_at_ms
+                .cmp(&left.updated_at_ms)
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
+        Ok(sessions)
+    }
+
+    fn list_legacy_sessions_unlocked(&self) -> Result<Vec<StoredSession>, String> {
         let path = self.index_path();
         if !path.exists() {
             return Ok(Vec::new());
@@ -355,8 +465,19 @@ impl SessionStore {
     }
 
     pub fn load_session(&self, session_id: &str) -> Result<Option<StoredSession>, String> {
+        if self.layout_marker_path().exists() {
+            validate_session_id(session_id)?;
+            let path = self.metadata_path_for_session(session_id);
+            return match fs::read(path) {
+                Ok(bytes) => serde_json::from_slice(&bytes)
+                    .map(Some)
+                    .map_err(|_| "session_metadata_parse_failed".to_string()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(_) => Err("session_metadata_read_failed".to_string()),
+            };
+        }
         Ok(self
-            .list_sessions()?
+            .list_legacy_sessions_unlocked()?
             .into_iter()
             .find(|session| session.session_id == session_id))
     }
@@ -364,22 +485,28 @@ impl SessionStore {
     /// Removes a Session from the active restore index while preserving its
     /// history and Session-scoped files for manual recovery or inspection.
     pub fn detach_session(&self, session_id: &str) -> Result<(), String> {
-        let _index_lock = self
-            .index_lock
-            .lock()
-            .map_err(|_| "session_index_lock_poisoned".to_string())?;
-        self.guard.with_write(|| {
-            let mut sessions = self.list_sessions_unlocked()?;
-            let original_len = sessions.len();
-            sessions.retain(|session| session.session_id != session_id);
-            if sessions.len() == original_len {
-                return Err("session_not_found".to_string());
+        self.ensure_metadata_v2()?;
+        validate_session_id(session_id)?;
+        let path = self.metadata_path_for_session(session_id);
+        let guard = MemGuard::for_memory_domain(
+            &self.root,
+            format!(
+                "session-data-{}",
+                sanitize_session_path_component(session_id)
+            ),
+        );
+        guard.with_write(|| match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err("session_not_found".to_string())
             }
-            self.write_sessions_unlocked(&sessions)
+            Err(_) => Err("session_metadata_remove_failed".to_string()),
         })?
     }
 
     pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
+        self.ensure_metadata_v2()?;
+        validate_session_id(session_id)?;
         let history_path = self.history_path_for_session(session_id);
         let session_dir = history_path
             .parent()
@@ -393,43 +520,25 @@ impl SessionStore {
                 .unwrap_or_default()
                 .as_nanos()
         ));
-        let history_guard = MemGuard::for_memory_domain(
+        let session_guard = MemGuard::for_memory_domain(
             &self.root,
             format!(
-                "session-history-{}",
+                "session-data-{}",
                 sanitize_session_path_component(session_id)
             ),
         );
-
-        let renamed = history_guard.with_write(|| {
-            {
-                let _index_lock = self
-                    .index_lock
-                    .lock()
-                    .map_err(|_| "session_index_lock_poisoned".to_string())?;
-                self.guard.with_write(|| {
-                    let mut sessions = self.list_sessions_unlocked()?;
-                    let original_len = sessions.len();
-                    sessions.retain(|session| session.session_id != session_id);
-                    if sessions.len() == original_len {
-                        return Err("session_not_found".to_string());
-                    }
-                    self.write_sessions_unlocked(&sessions)
-                })??;
+        let renamed = session_guard.with_write(|| {
+            if !self.metadata_path_for_session(session_id).exists() {
+                return Err("session_not_found".to_string());
             }
-
             self.history_indexes
                 .lock()
-                .map_err(|_| "chat_history_index_poisoned")?
+                .map_err(|_| "chat_history_index_poisoned".to_string())?
                 .remove(&history_path);
-            if !session_dir.exists() {
-                return Ok(false);
-            }
             fs::rename(session_dir, &deleted_dir)
                 .map_err(|_| "session_data_remove_failed".to_string())?;
             Ok::<_, String>(true)
         })??;
-
         if renamed {
             fs::remove_dir_all(deleted_dir)
                 .map_err(|_| "session_data_remove_failed".to_string())?;
@@ -480,7 +589,7 @@ impl SessionStore {
         MemGuard::for_memory_domain(
             &self.root,
             format!(
-                "session-history-{}",
+                "session-data-{}",
                 sanitize_session_path_component(session_id)
             ),
         )
@@ -523,7 +632,7 @@ impl SessionStore {
         MemGuard::for_memory_domain(
             &self.root,
             format!(
-                "session-history-{}",
+                "session-data-{}",
                 sanitize_session_path_component(session_id)
             ),
         )
@@ -976,7 +1085,19 @@ pub fn new_stored_session(
         state: StoredSessionState::Ready,
         last_turn_id: None,
         raw_chat_history_path: history_path.as_ref().display().to_string(),
+        group_id: None,
     }
+}
+
+fn validate_session_id(value: &str) -> Result<(), String> {
+    let valid = !value.is_empty()
+        && value.len() <= 160
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'));
+    valid
+        .then_some(())
+        .ok_or_else(|| "session_id_invalid".to_string())
 }
 
 fn sanitize_session_path_component(value: &str) -> String {

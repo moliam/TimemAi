@@ -1,5 +1,6 @@
 import { Activity } from "./protocol";
 import { toolDisplayName } from "./view_model";
+import { isToolActivityFailed, isToolActivityRunning } from "./tool_status";
 
 export type ToolActivityGroupStatus = "running" | "failed" | "completed";
 
@@ -15,9 +16,6 @@ export type ToolActivitySummary = {
   activities: Activity[];
 };
 
-const RUNNING_STATUSES = new Set(["running", "background_running"]);
-const FAILED_STATUSES = new Set(["error", "failed", "timeout", "cancelled", "cancelled_by_user"]);
-
 export function summarizeToolActivities(activities: Activity[]): ToolActivitySummary | null {
   const tools = activities.filter((activity) => activity.tone === "action");
   if (tools.length === 0) return null;
@@ -29,9 +27,9 @@ export function summarizeToolActivities(activities: Activity[]): ToolActivitySum
   }
 
   const statuses = tools.map((activity) => activity.tool_status || "running");
-  const status = statuses.some((value) => RUNNING_STATUSES.has(value))
+  const status = statuses.some(isToolActivityRunning)
     ? "running"
-    : statuses.some((value) => FAILED_STATUSES.has(value))
+    : statuses.some(isToolActivityFailed)
       ? "failed"
       : "completed";
 

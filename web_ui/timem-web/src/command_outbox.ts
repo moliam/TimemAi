@@ -24,7 +24,7 @@ const BEST_EFFORT_COMMANDS = new Set<ClientCommand["type"]>([
 ]);
 
 const CLIENT_COMMAND_TYPES = new Set<ClientCommand["type"]>([
-  "session_create", "session_rename", "session_api_key_update", "session_api_key_reveal", "session_stop", "session_delete", "chat_message_delete",
+  "session_create", "session_rename", "session_group_create", "session_group_update", "session_group_delete", "session_groups_reorder", "session_group_move", "session_api_key_update", "session_api_key_reveal", "session_stop", "session_delete", "chat_message_delete",
   "worker_role_create", "worker_role_update", "worker_role_delete",
   "turn_submit", "turn_supplement", "turn_cancel", "attachment_remove", "history_page", "tool_repo_search", "tool_repo_detail",
   "tool_repo_rename", "tool_repo_open_terminal", "runtime_update", "session_runtime_update", "mcp_server_upsert",

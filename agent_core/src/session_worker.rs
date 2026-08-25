@@ -243,6 +243,7 @@ pub enum CoreSessionWorkerEvent {
         prompt: String,
         interaction_profile: Option<crate::InteractionProfile>,
         interaction_request: Option<Box<crate::ModelInteractionRequest>>,
+        api_payload: Option<Box<serde_json::Value>>,
     },
     ModelRequestCompleted {
         latency: Duration,
@@ -299,6 +300,9 @@ enum CoreSessionWorkerCommand {
     MaxRoundsUpdated,
     UpdateApiKey {
         api_key: String,
+    },
+    UpdateHttpHeaders {
+        http_headers: BTreeMap<String, String>,
     },
     UpdateMcp {
         base_capabilities: crate::capability::CapabilityRegistry,
@@ -712,6 +716,18 @@ impl CoreSessionWorkerHandle {
         }
         self.command_tx
             .send(CoreSessionWorkerCommand::UpdateApiKey { api_key })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn update_http_headers(
+        &self,
+        http_headers: BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.command_tx
+            .send(CoreSessionWorkerCommand::UpdateHttpHeaders { http_headers })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
@@ -1317,6 +1333,7 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::RuntimeConfigUpdated
                     | CoreSessionWorkerCommand::MaxRoundsUpdated
                     | CoreSessionWorkerCommand::UpdateApiKey { .. }
+                    | CoreSessionWorkerCommand::UpdateHttpHeaders { .. }
                     | CoreSessionWorkerCommand::UpdateMcp { .. }
                         if shutdown_requested.load(Ordering::SeqCst) =>
                     {
@@ -1521,6 +1538,10 @@ impl CoreSessionWorker {
                     }
                     CoreSessionWorkerCommand::UpdateApiKey { api_key } => {
                         config.api_key = api_key;
+                        core.notify_runtime_config_changed();
+                    }
+                    CoreSessionWorkerCommand::UpdateHttpHeaders { http_headers } => {
+                        config.http_headers = http_headers;
                         core.notify_runtime_config_changed();
                     }
                     CoreSessionWorkerCommand::UpdateMcp {
@@ -1877,16 +1898,18 @@ impl TurnUi for WorkerTurnUi {
         self.continue_supplements_after_final_answer
     }
 
-    fn on_model_interaction_request(
+    fn on_model_api_request(
         &mut self,
         round: u32,
         request: &crate::ModelInteractionRequest,
+        api_payload: &serde_json::Value,
     ) {
         let _ = self.event_tx.send(CoreSessionWorkerEvent::ModelRequest {
             round,
             prompt: request.rendered_prompt.clone(),
             interaction_profile: self.interaction_profile.clone(),
             interaction_request: Some(Box::new(request.clone())),
+            api_payload: Some(Box::new(api_payload.clone())),
         });
     }
 

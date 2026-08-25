@@ -32,6 +32,7 @@ fn test_config() -> ModelServiceConfig {
         interaction: Default::default(),
         model: "test-model".to_string(),
         api_key: "dummy".to_string(),
+        http_headers: Default::default(),
         base_url: "http://127.0.0.1:9/v1".to_string(),
         api_protocol: crate::ApiProtocol::OpenAiCompatible,
         timeout_secs: 1,

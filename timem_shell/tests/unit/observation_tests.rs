@@ -504,6 +504,52 @@ fn action_finish_topic_updates_existing_bash_line() {
 }
 
 #[test]
+fn background_exit_updates_the_same_action_id_after_the_running_label_changed() {
+    let kind = CoreActionKind::Bash {
+        command: "sleep 0.1".to_string(),
+        mode: "background".to_string(),
+        interval_ms: None,
+        timeout_ms: None,
+        loop_timeout_ms: None,
+        once_timeout_ms: None,
+    };
+    let with_id = |mut event: CoreTopicEvent, status: &str| {
+        event.topic.attributes["action_id"] = json!("call_background_1");
+        event.payload["action_id"] = json!("call_background_1");
+        event.payload["status"] = json!(status);
+        event
+    };
+    let start = with_id(action_topic("run_bash", kind.clone(), true), "running");
+    let launched = with_id(
+        action_topic_with_status(
+            "run_bash",
+            kind.clone(),
+            false,
+            "finish",
+            "background_running",
+        ),
+        "background_running",
+    );
+    let exited = with_id(
+        action_topic_with_status("run_bash", kind, false, "finish", "completed"),
+        "completed",
+    );
+
+    let mut panel = ObservationPanel::new(8, 80);
+    panel.apply_all(observation_events_from_core_topic_events(&[start]));
+    panel.apply_all(observation_events_from_core_topic_events(&[launched]));
+    assert!(strip_ansi(&render_observation_panel(&panel)).contains("后台执行"));
+    panel.apply_all(observation_events_from_core_topic_events(&[exited]));
+
+    let rendered = render_observation_panel(&panel);
+    let plain = strip_ansi(&rendered);
+    assert!(plain.contains("[✔] sleep 0.1"), "{plain}");
+    assert_eq!(plain.matches("sleep 0.1").count(), 1, "{plain}");
+    assert!(!plain.contains("后台执行 pid="), "{plain}");
+    assert!(!rendered.contains("\x1b[38;5;245m"), "{rendered:?}");
+}
+
+#[test]
 fn background_action_and_exit_status_render_user_facing_state() {
     let background_kind = CoreActionKind::Bash {
         command: "sleep 30".to_string(),

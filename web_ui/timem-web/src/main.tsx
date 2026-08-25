@@ -2,19 +2,19 @@ import { AssistantRuntimeProvider, ThreadMessageLike, ThreadPrimitive, useExtern
 import { closestCenter, DndContext, DragEndEvent, DragOverlay, DragOverEvent, KeyboardSensor, PointerSensor, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ArrowDown, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, FolderOpen, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, Trash2, Wrench, X } from "lucide-react";
+import { ArrowDown, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, FolderOpen, FolderPlus, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, Trash2, Wrench, X } from "lucide-react";
 import { Children, CSSProperties, Dispatch, isValidElement, memo, MutableRefObject, ReactNode, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
-import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, ModelEndpoint, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole, WorkerRoleGroup, WorkerRoleLibrary } from "./protocol";
+import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, ModelEndpoint, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole, WorkerRoleGroup, WorkerRoleLibrary, SessionGroup } from "./protocol";
 import { applyWorkerRoleMutation, isOptimisticWorkerRoleMutation, replayWorkerRoleMutations, WorkerRoleMutation } from "./worker_roles_ui";
-import { canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, wheelDeltaPixels } from "./scroll";
+import { adjacentUserMessageIndex, canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, UserMessageNavigationDirection, wheelDeltaPixels } from "./scroll";
 import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, manualToolGenCommand, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
 import { safeMarkdownUrl } from "./markdown_security";
-import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
+import { createMcpTransportDrafts, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
 import { commandSessionId, isModelSubmissionCommand, modelDisplayName, modelServiceIssue, NO_MODEL_ENDPOINTS_ISSUE, UNCONFIGURED_MODEL_LABEL } from "./model_service_ui";
 import { endpointDraftValid, endpointMatchesProfile, endpointNameForProfile, MODEL_CONTEXT_WINDOW_OPTIONS, MODEL_OUTPUT_TOKEN_OPTIONS, ModelEndpointDraft } from "./model_endpoints";
@@ -26,6 +26,7 @@ import { acceptOutboxCommand, addCommandToOutbox, commandMayPersist, commandNeed
 import { classifyEventSequence, loadEventCursor, resolveHelloEventCursor, saveEventCursor } from "./event_cursor";
 import { enablesSemanticDelivery, shouldReduceTopLevelWireEvent } from "./wire_delivery";
 import { clipboardImageFiles } from "./clipboard_images";
+import { humanizeToolStatus, isToolActivityRunning, TOOL_STATUS_RUNNING } from "./tool_status";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
@@ -98,11 +99,61 @@ function makeMessage(role: ChatMessage["role"], text: string, id?: string): Chat
   return { id: id ?? `${role}-${clientId()}`, role, text, created_at_ms: Date.now() };
 }
 
+type SortableSessionRenderState = {
+  setNodeRef: (node: HTMLElement | null) => void;
+  style: CSSProperties;
+  attributes: ReturnType<typeof useSortable>["attributes"];
+  listeners: ReturnType<typeof useSortable>["listeners"];
+  isDragging: boolean;
+};
+
+function SortableSession({ id, disabled, children }: {
+  id: string;
+  disabled: boolean;
+  children: (state: SortableSessionRenderState) => ReactNode;
+}) {
+  const sortable = useSortable({
+    id: `session:${id}`,
+    disabled,
+    transition: { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" },
+  });
+  return children({
+    setNodeRef: sortable.setNodeRef,
+    style: {
+      transform: CSS.Transform.toString(sortable.transform),
+      transition: sortable.transition,
+      zIndex: sortable.isDragging ? 4 : undefined,
+    },
+    attributes: sortable.attributes,
+    listeners: sortable.listeners,
+    isDragging: sortable.isDragging,
+  });
+}
+
+function SessionDropGroup({ id, sessionIds, className, children }: {
+  id: string;
+  sessionIds: string[];
+  className: string;
+  children: ReactNode;
+}) {
+  const droppable = useDroppable({ id: `session-group:${id}` });
+  return <section ref={droppable.setNodeRef} className={`${className} ${droppable.isOver ? "drop-target" : ""}`}>
+    <SortableContext items={sessionIds.map((sessionId) => `session:${sessionId}`)} strategy={verticalListSortingStrategy}>
+      {children}
+    </SortableContext>
+  </section>;
+}
+
 function TimemApp() {
   useDialogFocusTrap();
   const [appearance, setAppearance] = useState<Appearance>(loadAppearance);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [roleLibrary, setRoleLibrary] = useState<WorkerRoleLibrary>({ roles: [], groups: [] });
+  const [sessionGroups, setSessionGroups] = useState<SessionGroup[]>([]);
+  const [collapsedSessionGroupIds, setCollapsedSessionGroupIds] = useState<Set<string>>(() => new Set());
+  const [sessionGroupEditor, setSessionGroupEditor] = useState<{ id?: string; name: string } | null>(null);
+  const [sessionGroupDeleteConfirmId, setSessionGroupDeleteConfirmId] = useState("");
+  const [draggedSessionId, setDraggedSessionId] = useState("");
   const authoritativeRoleLibraryRef = useRef<WorkerRoleLibrary>({ roles: [], groups: [] });
   const pendingWorkerRoleMutationsRef = useRef<Map<string, WorkerRoleMutation>>(new Map());
   const [activeSessionId, setActiveSessionId] = useState("");
@@ -128,6 +179,7 @@ function TimemApp() {
   const [endpointEditor, setEndpointEditor] = useState<ModelEndpoint | "new" | null>(null);
   const [deleteEndpointCandidate, setDeleteEndpointCandidate] = useState<ModelEndpoint | null>(null);
   const [revealedEndpointApiKeys, setRevealedEndpointApiKeys] = useState<Record<string, string>>({});
+  const [revealedEndpointHeaders, setRevealedEndpointHeaders] = useState<Record<string, Record<string, string>>>({});
   const [showAppearance, setShowAppearance] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
   const [showNewSession, setShowNewSession] = useState(false);
@@ -226,6 +278,7 @@ function TimemApp() {
     setShowRuntime(false);
     setRevealedSessionApiKeys({});
     setRevealedEndpointApiKeys({});
+    setRevealedEndpointHeaders({});
     if (restoreFocus) runtimeButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeAppearancePanel = useCallback((restoreFocus = true) => {
@@ -541,6 +594,7 @@ function TimemApp() {
     authoritativeRoleLibraryRef.current = authoritativeRoleLibrary;
     const visibleRoleLibrary = replayWorkerRoleMutations(authoritativeRoleLibrary, pendingWorkerRoleMutationsRef.current.values());
     setRoleLibrary(visibleRoleLibrary);
+    setSessionGroups(snapshot.session_groups ?? []);
     setSessions(snapshot.sessions.map((session) => boundSessionHistory({ ...session, roles: visibleRoleLibrary.roles })));
     setActiveSessionId((current) => resolveActiveSessionId(current, snapshot.sessions));
   }, []);
@@ -692,6 +746,18 @@ function TimemApp() {
       });
       return;
     }
+    if (event.type === "session_groups_updated") {
+      setSessionGroups(event.groups);
+      setSessionGroupEditor(null);
+      setSessionGroupDeleteConfirmId("");
+      return;
+    }
+    if (event.type === "session_group_changed") {
+      setSessions((current) => current.map((session) => session.session_id === event.session_id
+        ? { ...session, group_id: event.group_id ?? null }
+        : session));
+      return;
+    }
     if (event.type === "worker_roles_updated") {
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? { ...session, roles: event.roles }
@@ -835,10 +901,12 @@ function TimemApp() {
       setEndpointEditor(null);
       setDeleteEndpointCandidate(null);
       setRevealedEndpointApiKeys({});
+      setRevealedEndpointHeaders({});
       return;
     }
     if (event.type === "model_endpoint_secret_revealed") {
       setRevealedEndpointApiKeys((current) => ({ ...current, [event.endpoint_id]: event.api_key }));
+      setRevealedEndpointHeaders((current) => ({ ...current, [event.endpoint_id]: event.http_headers }));
       return;
     }
     if (event.type === "file_uploaded") {
@@ -1241,42 +1309,86 @@ function TimemApp() {
   const selectedRoleIdsForSession = activeSession ? selectedRoleIds[activeSession.session_id] ?? [] : [];
   const toolRepoLabel = showToolRepo ? "Close ToolRepo" : `Open ToolRepo · ${activeToolCount} reusable tools`;
   const mobileSessionsLabel = showMobileSessions ? "Close session navigation" : "Open session navigation";
+  const knownSessionGroupIds = new Set(sessionGroups.map((group) => group.id));
+  const sessionBucketId = (session: Session) => session.group_id && knownSessionGroupIds.has(session.group_id) ? session.group_id : "__ungrouped";
+  const ungroupedSessions = sessions.filter((session) => sessionBucketId(session) === "__ungrouped");
+  const sessionBuckets = [
+    ...sessionGroups.map((group) => ({ id: group.id, group, sessions: sessions.filter((session) => session.group_id === group.id) })),
+    { id: "__ungrouped", group: undefined, sessions: ungroupedSessions },
+  ];
+  const sessionDragSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  const draggedSession = sessions.find((session) => session.session_id === draggedSessionId);
+  const finishSessionDrag = (event: DragEndEvent) => {
+    setDraggedSessionId("");
+    const sessionId = String(event.active.id).replace(/^session:/, "");
+    const overId = event.over ? String(event.over.id) : "";
+    if (!overId) return;
+    let targetGroupId: string | null | undefined;
+    if (overId.startsWith("session-group:")) {
+      const bucketId = overId.slice("session-group:".length);
+      targetGroupId = bucketId === "__ungrouped" ? null : bucketId;
+    } else if (overId.startsWith("session:")) {
+      const targetSession = sessions.find((session) => session.session_id === overId.slice("session:".length));
+      if (targetSession) targetGroupId = sessionBucketId(targetSession) === "__ungrouped" ? null : sessionBucketId(targetSession);
+    }
+    const session = sessions.find((candidate) => candidate.session_id === sessionId);
+    if (!session || targetGroupId === undefined || (session.group_id ?? null) === targetGroupId) return;
+    sendCommand({ type: "session_group_move", session_id: sessionId, group_id: targetGroupId });
+  };
+  const saveSessionGroup = (editor = sessionGroupEditor) => {
+    const name = editor?.name.trim();
+    if (!editor || !name || runtimeLocked) return;
+    const command: ClientCommand = editor.id
+      ? { type: "session_group_update", group_id: editor.id, name }
+      : { type: "session_group_create", name };
+    if (sendCommand(command)) setSessionGroupEditor(null);
+  };
+  const moveSessionGroup = (groupId: string, offset: number) => {
+    const index = sessionGroups.findIndex((group) => group.id === groupId);
+    const target = index + offset;
+    if (index < 0 || target < 0 || target >= sessionGroups.length) return;
+    const groups = [...sessionGroups];
+    [groups[index], groups[target]] = [groups[target], groups[index]];
+    setSessionGroups(groups);
+    if (!sendCommand({ type: "session_groups_reorder", groups })) setSessionGroups(sessionGroups);
+  };
   return <AssistantRuntimeProvider runtime={runtime}>
     <div className="app-shell">
       {showMobileSessions && <button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => closeMobileSidebar()}/>}
       <aside id="session-navigation" ref={mobileSidebarRef} className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`} aria-label="Session navigation" tabIndex={-1}>
         <div className="brand"><img src="/timem_logo.png" alt="Timem logo" className="brand-logo"/><span>TIMEM</span><button type="button" className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => closeMobileSidebar()}><X size={17}/></button></div>
-        <button type="button" ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/> New session</button>
-        <nav className="session-list" aria-label="Sessions">
-          {sessions.map((session) => {
-            const renamingSession = pendingRenameSessionIds.has(session.session_id);
-            const deletingSession = pendingDeleteSessionIds.has(session.session_id);
-            const sessionEndpointName = endpointNameForProfile(server?.model_endpoints ?? [], session.runtime_profile) ?? UNCONFIGURED_MODEL_LABEL;
-            return <div key={session.session_id} className="session-group"><div className={`session-row ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""} ${renamingSession ? "renaming-session" : ""}`} aria-busy={renamingSession || deletingSession || undefined}>
-            <button type="button" className={`session-expand ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}` : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={expandedSessionIds.has(session.session_id)} disabled={runtimeLocked} onClick={() => setExpandedSessionIds((current) => {
-              const next = new Set(current);
-              if (next.has(session.session_id)) next.delete(session.session_id); else next.add(session.session_id);
-              return next;
-            })}><ChevronRight size={13}/></button>
-            {renamingSessionId === session.session_id ? <input
-              className="session-rename-input"
-              autoFocus
-              value={renameDraft}
-              aria-label={`Rename ${session.display_name}`}
-              disabled={runtimeLocked}
-              onChange={(event) => setRenameDraft(event.target.value)}
-              onBlur={() => finishRename(session.session_id)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); }
-                if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); }
-              }}
-            />: <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.current_dir} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
-              {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span><span className="session-sub"><span className="session-detail session-cwd" title={session.current_dir}><FolderOpen size={11} aria-hidden="true"/><span className="path-tail">{workspacePathLabel(session.current_dir)}</span></span>{renamingSession ? <span className="session-detail session-pending">Saving name...</span> : <span className="session-detail session-profile" title={sessionEndpointName}><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{sessionEndpointName}</span></span>}</span></span><span className="sr-only">Session state: {session.state}</span>
-            </button>}
-            <button type="button" className={`session-delete ${deletingSession ? "deleting" : ""}`} title={`Delete ${session.display_name}`} aria-label={`Delete ${session.display_name}`} disabled={runtimeLocked || deletingSession} onClick={() => { setDeleteSessionCandidate(session); closeMobileSidebar(false); }}>{deletingSession ? <LoaderCircle size={14}/> : <Trash2 size={14}/>}</button>
-          </div>{expandedSessionIds.has(session.session_id) && <div className="worker-list" aria-label={`Workers for ${session.display_name}: ${session.workers.length} worker${session.workers.length === 1 ? "" : "s"}`}>{[...session.workers].sort((left, right) => left.ordinal - right.ordinal).map((worker) => <div className="worker-row" key={worker.worker_id} title={`${worker.worker_id} · ${worker.context_id}`}><span className={`worker-state-dot ${worker.state}`} aria-hidden="true"/><span className="worker-name">{worker.display_name || `ID${worker.ordinal}`}</span><span className="worker-state">{worker.state}</span></div>)}</div>}</div>;
-          })}
-        </nav>
+        <div className="session-create-actions"><button type="button" ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/> New session</button><button type="button" className="new-session-group" title="New session group" aria-label="New session group" disabled={runtimeLocked} onClick={() => setSessionGroupEditor({ name: "" })}><FolderPlus size={16}/></button></div>
+        {sessionGroupEditor && !sessionGroupEditor.id && <form className="session-group-editor" onSubmit={(event) => { event.preventDefault(); saveSessionGroup(); }}><input autoFocus value={sessionGroupEditor.name} placeholder="Group name" aria-label="New session group name" onChange={(event) => setSessionGroupEditor({ name: event.target.value })} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setSessionGroupEditor(null); } }}/><button type="submit" disabled={!sessionGroupEditor.name.trim()}><Check size={13}/></button><button type="button" onClick={() => setSessionGroupEditor(null)}><X size={13}/></button></form>}
+        <DndContext sensors={sessionDragSensors} collisionDetection={closestCenter} onDragStart={(event) => setDraggedSessionId(String(event.active.id).replace(/^session:/, ""))} onDragCancel={() => setDraggedSessionId("")} onDragEnd={finishSessionDrag}>
+          <nav className="session-list" aria-label="Sessions">
+            {sessionBuckets.map(({ id: bucketId, group: bucket, sessions: bucketSessions }) => {
+              const collapsed = collapsedSessionGroupIds.has(bucketId);
+              return <SessionDropGroup id={bucketId} sessionIds={bucketSessions.map((session) => session.session_id)} className="session-group" key={bucketId}>
+                <div className="session-group-heading"><button type="button" className="session-group-toggle" aria-expanded={!collapsed} onClick={() => setCollapsedSessionGroupIds((current) => { const next = new Set(current); if (next.has(bucketId)) next.delete(bucketId); else next.add(bucketId); return next; })}><ChevronRight size={12}/><span>{bucket?.name ?? "Unsorted"}</span><small>{bucketSessions.length}</small></button>{bucket && <div className="session-group-actions">{sessionGroupEditor?.id === bucket.id ? <form className="session-group-editor inline" onSubmit={(event) => { event.preventDefault(); saveSessionGroup(); }}><input autoFocus value={sessionGroupEditor.name} aria-label={`Rename ${bucket.name}`} onChange={(event) => setSessionGroupEditor({ id: bucket.id, name: event.target.value })} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setSessionGroupEditor(null); } }}/><button type="submit" disabled={!sessionGroupEditor.name.trim()}><Check size={12}/></button><button type="button" onClick={() => setSessionGroupEditor(null)}><X size={12}/></button></form> : <><button type="button" title="Move group up" aria-label={`Move ${bucket.name} up`} disabled={sessionGroups[0]?.id === bucket.id} onClick={() => moveSessionGroup(bucket.id, -1)}><ChevronUp size={12}/></button><button type="button" title="Move group down" aria-label={`Move ${bucket.name} down`} disabled={sessionGroups.at(-1)?.id === bucket.id} onClick={() => moveSessionGroup(bucket.id, 1)}><ChevronDown size={12}/></button><button type="button" title={`Rename ${bucket.name}`} aria-label={`Rename ${bucket.name}`} onClick={() => setSessionGroupEditor({ id: bucket.id, name: bucket.name })}><Pencil size={12}/></button><button type="button" className={sessionGroupDeleteConfirmId === bucket.id ? "confirming" : ""} title={sessionGroupDeleteConfirmId === bucket.id ? "Click again to delete; sessions become unsorted" : `Delete ${bucket.name}`} aria-label={`Delete ${bucket.name}`} onClick={() => { if (sessionGroupDeleteConfirmId === bucket.id) { sendCommand({ type: "session_group_delete", group_id: bucket.id }); setSessionGroupDeleteConfirmId(""); } else setSessionGroupDeleteConfirmId(bucket.id); }}><Trash2 size={12}/></button></>}</div>}</div>
+                {!collapsed && <div className="session-group-list">{bucketSessions.map((session) => {
+                  const renamingSession = pendingRenameSessionIds.has(session.session_id);
+                  const deletingSession = pendingDeleteSessionIds.has(session.session_id);
+                  const sessionEndpointName = endpointNameForProfile(server?.model_endpoints ?? [], session.runtime_profile) ?? UNCONFIGURED_MODEL_LABEL;
+                  return <SortableSession id={session.session_id} disabled={runtimeLocked} key={session.session_id}>{({ setNodeRef, style, attributes, listeners, isDragging }) => <>
+                    <div ref={setNodeRef} style={style} className={`session-row ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""} ${renamingSession ? "renaming-session" : ""} ${isDragging ? "dragging" : ""}`} aria-busy={renamingSession || deletingSession || undefined}>
+                      <button type="button" className="session-drag" disabled={runtimeLocked} title={`拖动 ${session.display_name} 到其他分组`} aria-label={`拖动 ${session.display_name} 到其他分组`} {...attributes} {...listeners}><GripVertical size={13}/></button>
+                      <button type="button" className={`session-expand ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}` : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={expandedSessionIds.has(session.session_id)} disabled={runtimeLocked} onClick={() => setExpandedSessionIds((current) => { const next = new Set(current); if (next.has(session.session_id)) next.delete(session.session_id); else next.add(session.session_id); return next; })}><ChevronRight size={13}/></button>
+                      {renamingSessionId === session.session_id ? <input className="session-rename-input" autoFocus value={renameDraft} aria-label={`Rename ${session.display_name}`} disabled={runtimeLocked} onChange={(event) => setRenameDraft(event.target.value)} onBlur={() => finishRename(session.session_id)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); } if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); } }}/>: <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.current_dir} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
+                        {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span><span className="session-sub"><span className="session-detail session-cwd" title={session.current_dir}><FolderOpen size={11} aria-hidden="true"/><span className="path-tail">{workspacePathLabel(session.current_dir)}</span></span>{renamingSession ? <span className="session-detail session-pending">Saving name...</span> : <span className="session-detail session-profile" title={sessionEndpointName}><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{sessionEndpointName}</span></span>}</span></span><span className="sr-only">Session state: {session.state}</span>
+                      </button>}
+                      <button type="button" className={`session-delete ${deletingSession ? "deleting" : ""}`} title={`Delete ${session.display_name}`} aria-label={`Delete ${session.display_name}`} disabled={runtimeLocked || deletingSession} onClick={() => { setDeleteSessionCandidate(session); closeMobileSidebar(false); }}>{deletingSession ? <LoaderCircle size={14}/> : <Trash2 size={14}/>}</button>
+                    </div>
+                    {expandedSessionIds.has(session.session_id) && <div className="worker-list" aria-label={`Workers for ${session.display_name}: ${session.workers.length} worker${session.workers.length === 1 ? "" : "s"}`}>{[...session.workers].sort((left, right) => left.ordinal - right.ordinal).map((worker) => <div className="worker-row" key={worker.worker_id} title={`${worker.worker_id} · ${worker.context_id}`}><span className={`worker-state-dot ${worker.state}`} aria-hidden="true"/><span className="worker-name">{worker.display_name || `ID${worker.ordinal}`}</span><span className="worker-state">{worker.state}</span></div>)}</div>}
+                  </>}</SortableSession>;
+                })}{bucketSessions.length === 0 && <div className="session-group-drop-hint">拖动 Session 到这里</div>}</div>}
+              </SessionDropGroup>;
+            })}
+          </nav>
+          <DragOverlay dropAnimation={prefersReducedMotion() ? null : { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" }}>{draggedSession && <div className="session-row session-overlay" aria-hidden="true"><span className="session-drag"><GripVertical size={13}/></span><span className="session-name">{draggedSession.display_name}</span></div>}</DragOverlay>
+        </DndContext>
         <div className="sidebar-footer">
           <div className="connection-row" role="status" aria-live="polite" title={connectionLabel}><span className={`connection ${connected ? "online" : "offline"}`}/><span className="connection-label">{connectionLabel}</span></div>
           <button type="button" ref={memSwitchButtonRef} className="mem-card" title={server?.mem?.space_dir ?? memSwitchTitle} aria-label={memSwitchTitle} disabled={!runtimeReady || pendingMemSwitch} onClick={() => setShowMemSwitch(true)}><span className="mem-card-icon" aria-hidden="true"><Database size={15}/></span><span className="mem-card-copy"><strong>Memory</strong><small dir="rtl">{pendingMemSwitch ? "Switching…" : server?.mem?.space_dir ?? "…"}</small></span><ChevronRight size={14} aria-hidden="true"/></button>
@@ -1322,6 +1434,7 @@ function TimemApp() {
           session={activeSession}
           endpointEditor={endpointEditor}
           revealedEndpointApiKeys={revealedEndpointApiKeys}
+          revealedEndpointHeaders={revealedEndpointHeaders}
           onEdit={setEndpointEditor}
           onDelete={setDeleteEndpointCandidate}
           onApply={(endpointId) => {
@@ -1654,6 +1767,7 @@ function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOp
   const [editingGroupId, setEditingGroupId] = useState("");
   const [editingGroupName, setEditingGroupName] = useState("");
   const [draggedRoleId, setDraggedRoleId] = useState("");
+  const [collapsedRoleGroupIds, setCollapsedRoleGroupIds] = useState<Set<string>>(() => new Set());
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [descriptionBeforeExpand, setDescriptionBeforeExpand] = useState("");
   const sensors = useSensors(
@@ -1662,6 +1776,15 @@ function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOp
   );
   const resetEditor = () => { setEditingId(null); setName(""); setDescription(""); setDescriptionExpanded(false); };
   useEffect(() => { resetEditor(); setDeleteConfirmId(""); setEditingGroupId(""); }, [session?.session_id]);
+  useEffect(() => {
+    const validGroupIds = new Set(["ungrouped", ...library.groups.map((group) => group.id)]);
+    setCollapsedRoleGroupIds((current) => new Set(Array.from(current).filter((id) => validGroupIds.has(id))));
+  }, [library.groups]);
+  const toggleRoleGroup = (groupId: string) => setCollapsedRoleGroupIds((current) => {
+    const next = new Set(current);
+    if (next.has(groupId)) next.delete(groupId); else next.add(groupId);
+    return next;
+  });
 
   const submit = () => {
     if (!session || !name.trim() || !description.trim()) return;
@@ -1720,19 +1843,22 @@ function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOp
     <p className="worker-role-help">拖动 Role 可排序或归入分组。</p>
     <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={(event) => setDraggedRoleId(String(event.active.id))} onDragCancel={() => setDraggedRoleId("")} onDragEnd={finishRoleDrag}>
       <div className="worker-role-list">
-        {library.groups.map((group) => <WorkerRoleDropGroup id={`role-group:${group.id}`} roleIds={group.role_ids} className="worker-role-group" key={group.id}>
-          <header>
-            {editingGroupId === group.id ? <input autoFocus value={editingGroupName} maxLength={80} aria-label={`Rename group ${group.name}`} onChange={(event) => setEditingGroupName(event.target.value)} onKeyDown={(event) => {
-              if (event.key === "Escape") setEditingGroupId("");
-              if (event.key === "Enter" && session && editingGroupName.trim() && onCommand({ type: "worker_role_group_update", session_id: session.session_id, group_id: group.id, name: editingGroupName })) setEditingGroupId("");
-            }}/> : <strong>{group.name}</strong>}
-            <div><button type="button" className="worker-role-action worker-role-edit" disabled={disabled} title={`Rename ${group.name}`} aria-label={`Rename ${group.name}`} onClick={() => { setEditingGroupId(group.id); setEditingGroupName(group.name); }}><Pencil size={11}/></button><button type="button" className="worker-role-action worker-role-delete" disabled={disabled} title={`Delete ${group.name}`} aria-label={`Delete ${group.name}`} onClick={() => session && onCommand({ type: "worker_role_group_delete", session_id: session.session_id, group_id: group.id })}><Trash2 size={11}/></button></div>
-          </header>
-          <div className="worker-role-group-list">{group.role_ids.map((id) => roleById.get(id)).filter((role): role is WorkerRole => !!role).map(roleItem)}{group.role_ids.length === 0 && <span className="worker-role-drop-hint">拖动 Role 到这里</span>}</div>
-        </WorkerRoleDropGroup>)}
-        <WorkerRoleDropGroup id="role-group:ungrouped" roleIds={ungroupedRoles.map((role) => role.id)} className="worker-role-group worker-role-ungrouped">
-          <header><strong>未分组</strong></header>
-          <div className="worker-role-group-list">{ungroupedRoles.map(roleItem)}{ungroupedRoles.length === 0 && library.roles.length > 0 && <span className="worker-role-drop-hint">所有 Role 已归组</span>}</div>
+        {library.groups.map((group) => {
+          const collapsed = collapsedRoleGroupIds.has(group.id);
+          return <WorkerRoleDropGroup id={`role-group:${group.id}`} roleIds={group.role_ids} className={`worker-role-group ${collapsed ? "collapsed" : ""}`} key={group.id}>
+            <header>
+              {editingGroupId === group.id ? <input autoFocus value={editingGroupName} maxLength={80} aria-label={`Rename group ${group.name}`} onChange={(event) => setEditingGroupName(event.target.value)} onKeyDown={(event) => {
+                if (event.key === "Escape") setEditingGroupId("");
+                if (event.key === "Enter" && session && editingGroupName.trim() && onCommand({ type: "worker_role_group_update", session_id: session.session_id, group_id: group.id, name: editingGroupName })) setEditingGroupId("");
+              }}/> : <button type="button" className="worker-role-group-toggle" aria-expanded={!collapsed} aria-controls={`worker-role-group-list-${group.id}`} title={collapsed ? `展开 ${group.name}` : `折叠 ${group.name}`} onClick={() => toggleRoleGroup(group.id)}><ChevronRight size={12}/><strong>{group.name}</strong><small>{group.role_ids.length}</small></button>}
+              <div><button type="button" className="worker-role-action worker-role-edit" disabled={disabled} title={`Rename ${group.name}`} aria-label={`Rename ${group.name}`} onClick={() => { setEditingGroupId(group.id); setEditingGroupName(group.name); }}><Pencil size={11}/></button><button type="button" className="worker-role-action worker-role-delete" disabled={disabled} title={`Delete ${group.name}`} aria-label={`Delete ${group.name}`} onClick={() => session && onCommand({ type: "worker_role_group_delete", session_id: session.session_id, group_id: group.id })}><Trash2 size={11}/></button></div>
+            </header>
+            {!collapsed && <div id={`worker-role-group-list-${group.id}`} className="worker-role-group-list">{group.role_ids.map((id) => roleById.get(id)).filter((role): role is WorkerRole => !!role).map(roleItem)}{group.role_ids.length === 0 && <span className="worker-role-drop-hint">拖动 Role 到这里</span>}</div>}
+          </WorkerRoleDropGroup>;
+        })}
+        <WorkerRoleDropGroup id="role-group:ungrouped" roleIds={ungroupedRoles.map((role) => role.id)} className={`worker-role-group worker-role-ungrouped ${collapsedRoleGroupIds.has("ungrouped") ? "collapsed" : ""}`}>
+          <header><button type="button" className="worker-role-group-toggle" aria-expanded={!collapsedRoleGroupIds.has("ungrouped")} aria-controls="worker-role-group-list-ungrouped" title={collapsedRoleGroupIds.has("ungrouped") ? "展开未分组" : "折叠未分组"} onClick={() => toggleRoleGroup("ungrouped")}><ChevronRight size={12}/><strong>未分组</strong><small>{ungroupedRoles.length}</small></button></header>
+          {!collapsedRoleGroupIds.has("ungrouped") && <div id="worker-role-group-list-ungrouped" className="worker-role-group-list">{ungroupedRoles.map(roleItem)}{ungroupedRoles.length === 0 && library.roles.length > 0 && <span className="worker-role-drop-hint">所有 Role 已归组</span>}</div>}
         </WorkerRoleDropGroup>
         {library.roles.length === 0 && <div className="worker-role-empty">还没有 Role。创建一个，供所有 Session 使用。</div>}
         {!session && <div className="worker-role-empty">Select a session to manage roles.</div>}
@@ -2141,6 +2267,80 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
   const liveSessionIds = useMemo(() => new Set(sessionIds), [liveSessionKey]);
   const welcomeTitle = activeSession ? "Ready when you are." : "Create a session to start.";
   const welcomeText = activeSession ? "Ask Timem to investigate, write, or work with you." : "Use New session to choose a workspace and runtime profile.";
+  const [userMessageNavigation, setUserMessageNavigation] = useState({ previous: false, next: false });
+  const userMessageNavigationOffset = 18;
+  const userMessageNavigationAnimationRef = useRef<number | null>(null);
+
+  const userMessageAnchors = useCallback(() => {
+    const viewport = viewportRef.current;
+    return viewport ? Array.from(viewport.querySelectorAll<HTMLElement>("[data-user-message-anchor]")) : [];
+  }, []);
+
+  const updateUserMessageNavigation = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) {
+      setUserMessageNavigation((current) => current.previous || current.next ? { previous: false, next: false } : current);
+      return;
+    }
+    const viewportTop = viewport.getBoundingClientRect().top;
+    const navigationTop = viewportTop + userMessageNavigationOffset;
+    const anchorTops = userMessageAnchors().map((anchor) => anchor.getBoundingClientRect().top);
+    const next = {
+      previous: adjacentUserMessageIndex(anchorTops, navigationTop, "previous") >= 0,
+      next: adjacentUserMessageIndex(anchorTops, navigationTop, "next") >= 0,
+    };
+    setUserMessageNavigation((current) => current.previous === next.previous && current.next === next.next ? current : next);
+  }, [userMessageAnchors, userMessageNavigationOffset]);
+
+  const navigateUserMessage = useCallback((direction: UserMessageNavigationDirection) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const anchors = userMessageAnchors();
+    const viewportTop = viewport.getBoundingClientRect().top;
+    const navigationTop = viewportTop + userMessageNavigationOffset;
+    const index = adjacentUserMessageIndex(anchors.map((anchor) => anchor.getBoundingClientRect().top), navigationTop, direction);
+    const target = anchors[index];
+    if (!target) return;
+    followThreadLatest.current = false;
+    const targetTop = viewport.scrollTop + target.getBoundingClientRect().top - viewportTop - userMessageNavigationOffset;
+    if (userMessageNavigationAnimationRef.current !== null) cancelAnimationFrame(userMessageNavigationAnimationRef.current);
+    if (prefersReducedMotion()) {
+      viewport.scrollTop = targetTop;
+      updateUserMessageNavigation();
+      return;
+    }
+    const startTop = viewport.scrollTop;
+    const distance = targetTop - startTop;
+    const startedAt = performance.now();
+    const durationMs = 180;
+    const animate = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / durationMs);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      viewport.scrollTop = startTop + distance * eased;
+      if (progress < 1) {
+        userMessageNavigationAnimationRef.current = requestAnimationFrame(animate);
+      } else {
+        userMessageNavigationAnimationRef.current = null;
+        updateUserMessageNavigation();
+      }
+    };
+    userMessageNavigationAnimationRef.current = requestAnimationFrame(animate);
+  }, [updateUserMessageNavigation, userMessageAnchors, userMessageNavigationOffset]);
+
+  useEffect(() => () => {
+    if (userMessageNavigationAnimationRef.current !== null) cancelAnimationFrame(userMessageNavigationAnimationRef.current);
+  }, []);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    updateUserMessageNavigation();
+    const mutationObserver = new MutationObserver(updateUserMessageNavigation);
+    mutationObserver.observe(viewport, { childList: true, subtree: true });
+    const resizeObserver = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(updateUserMessageNavigation);
+    resizeObserver?.observe(viewport);
+    return () => { mutationObserver.disconnect(); resizeObserver?.disconnect(); };
+  }, [activeSessionId, updateUserMessageNavigation]);
 
   useEffect(() => {
     const textarea = composerTextareaRef.current;
@@ -2607,6 +2807,7 @@ const toggleQueuedMessages = () => {
           scrollTop: event.currentTarget.scrollTop,
           followLatest: followThreadLatest.current,
         });
+        updateUserMessageNavigation();
       }}
     >
       {(activeSession?.turns.length ?? 0) === 0 &&
@@ -2696,6 +2897,10 @@ const toggleQueuedMessages = () => {
         </form>
       </ThreadPrimitive.ViewportFooter>
     </ThreadPrimitive.Viewport>
+    <nav className="user-message-navigation" aria-label="用户消息导航">
+      <button type="button" title="上一条用户消息" aria-label="上一条用户消息" disabled={!userMessageNavigation.previous} onClick={() => navigateUserMessage("previous")}><ChevronUp size={17} aria-hidden="true"/></button>
+      <button type="button" title="下一条用户消息" aria-label="下一条用户消息" disabled={!userMessageNavigation.next} onClick={() => navigateUserMessage("next")}><ChevronDown size={17} aria-hidden="true"/></button>
+    </nav>
   </ThreadPrimitive.Root>;
 }
 
@@ -2838,7 +3043,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
   };
 
   return <article className={`turn-interaction ${turn.state === "working" ? "active" : "completed"}`} data-turn-id={turn.turn_id}>
-    {!!turn.user_entries.filter((e) => e.kind !== "approval").length && <section className="turn-user-frame">
+    {!!turn.user_entries.filter((e) => e.kind !== "approval").length && <section className="turn-user-frame" data-user-message-anchor>
       <div className="turn-user-content">{turn.user_entries.map((entry, roleIndex) => ({ entry, roleIndex })).filter(({ entry }) => entry.kind !== "approval").map(({ entry, roleIndex }) => <div className={`turn-user-entry ${entry.kind}`} key={`${entry.created_at_ms}-${roleIndex}`} onCopy={(event) => {
         const selection = window.getSelection();
         if (!selection || selection.rangeCount === 0 || selection.isCollapsed || !selection.anchorNode || !selection.focusNode) return;
@@ -2976,8 +3181,8 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
 }
 
 function ToolActivity({ activity }: { activity: Activity }) {
-  const status = activity.tool_status || "running";
-  const running = status === "running" || status === "background_running";
+  const status = activity.tool_status || TOOL_STATUS_RUNNING;
+  const running = isToolActivityRunning(status);
   const bashActivity = activity.tool_name === "run_bash";
   const [open, setOpen] = useState(false);
   const invocationPreview = toolInvocationPreview(activity);
@@ -3015,12 +3220,6 @@ function toolInvocationPreview(activity: Activity) {
   return activity.detail?.split("\n", 1)[0]?.trim();
 }
 
-function humanizeToolStatus(status: string) {
-  if (status === "background_running") return "background running";
-  if (status === "timeout") return "timed out";
-  return status.replaceAll("_", " ");
-}
-
 function activityFromTurnEvent(event: WebTurnEvent, sessionId: string): Activity | null {
  if (event.source === "ui_activity") {
   const activity = event.payload as unknown as Activity;
@@ -3053,9 +3252,14 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
   const before = activity.before_tokens;
   const after = activity.after_tokens;
   const ratio = before && after !== undefined ? Math.max(6, Math.min(100, (after / before) * 100)) : 36;
-  return <section className="context-compact-notice" aria-label="Context compacted">
+  const hasBreakdown = activity.text_before_tokens !== undefined || activity.native_before_tokens !== undefined;
+  const breakdown = hasBreakdown
+    ? `Text ${formatTokens(activity.text_before_tokens) ?? "?"} → ${formatTokens(activity.text_after_tokens) ?? "?"}; Native ${formatTokens(activity.native_before_tokens) ?? "?"} → ${formatTokens(activity.native_after_tokens) ?? "?"}`
+    : undefined;
+  const label = `Dynamic context compacted: ${formatTokens(before) ?? "unknown"} to ${formatTokens(after) ?? "unknown"}${breakdown ? `. ${breakdown}` : ""}`;
+  return <section className="context-compact-notice" aria-label={label} title={breakdown}>
     <div className="compact-icon"><Gauge size={13}/></div>
-    <div className="compact-copy"><span>Context compacted</span><strong>{formatTokens(before) ?? "?"} → {formatTokens(after) ?? "?"}</strong></div>
+    <div className="compact-copy"><span>Dynamic context</span><strong>{formatTokens(before) ?? "?"} → {formatTokens(after) ?? "?"}</strong>{breakdown && <small>{breakdown}</small>}</div>
     <div className="compact-meter" aria-hidden="true"><span className="compact-before"/><span className="compact-after" style={{ width: `${ratio}%` }}/></div>
   </section>;
 }
@@ -3204,20 +3408,83 @@ function McpPanel({ panelRef, servers, session, pendingKeys, revealedSecrets, on
   </section>;
 }
 
+type StructuredRow = { id: string; key: string; value: string };
+type ListRow = { id: string; value: string };
+
+function structuredRows(value: Record<string, string>): StructuredRow[] {
+  return Object.entries(value).map(([key, item]) => ({ id: clientId(), key, value: item }));
+}
+
+function structuredRecord(rows: StructuredRow[]): Record<string, string> {
+  return Object.fromEntries(rows.map((row) => [row.key.trim(), row.value]).filter(([key]) => key));
+}
+
+function hasDuplicateStructuredKeys(rows: StructuredRow[]) {
+  const keys = rows.map((row) => row.key.trim().toLowerCase()).filter(Boolean);
+  return new Set(keys).size !== keys.length;
+}
+
+function StructuredKeyValueEditor({ label, description, rows, keyLabel = "Key", valueLabel = "Value", keyPlaceholder, valuePlaceholder, addLabel, showValues = true, revealAction, onChange }: {
+  label: string;
+  description?: string;
+  rows: StructuredRow[];
+  keyLabel?: string;
+  valueLabel?: string;
+  keyPlaceholder: string;
+  valuePlaceholder: string;
+  addLabel: string;
+  showValues?: boolean;
+  revealAction?: ReactNode;
+  onChange: (rows: StructuredRow[]) => void;
+}) {
+  const duplicateKeys = hasDuplicateStructuredKeys(rows);
+  const update = (id: string, patch: Partial<StructuredRow>) => onChange(rows.map((row) => row.id === id ? { ...row, ...patch } : row));
+  return <section className="structured-field" aria-label={label}>
+    <div className="structured-field-heading"><div><strong>{label}</strong>{description && <small>{description}</small>}</div>{revealAction}</div>
+    <div className="structured-field-list">{rows.map((row) => <div className="structured-field-row" key={row.id}>
+      <label><span>{keyLabel}</span><input value={row.key} placeholder={keyPlaceholder} spellCheck={false} onChange={(event) => update(row.id, { key: event.target.value })}/></label>
+      <label><span>{valueLabel}</span><input type={showValues ? "text" : "password"} value={row.value} placeholder={valuePlaceholder} autoComplete="off" spellCheck={false} onChange={(event) => update(row.id, { value: event.target.value })}/></label>
+      <button type="button" className="structured-field-delete" title={`删除这一项 ${label}`} aria-label={`删除 ${label}`} onClick={() => onChange(rows.filter((item) => item.id !== row.id))}><Trash2 size={14}/></button>
+    </div>)}</div>
+    {duplicateKeys && <small className="structured-field-error" role="alert">{keyLabel} 不能重复。</small>}
+    <button type="button" className="structured-field-add" onClick={() => onChange([...rows, { id: clientId(), key: "", value: "" }])}><Plus size={14}/> {addLabel}</button>
+  </section>;
+}
+
+function StructuredListEditor({ label, description, rows, placeholder, addLabel, onChange }: { label: string; description?: string; rows: ListRow[]; placeholder: string; addLabel: string; onChange: (rows: ListRow[]) => void }) {
+  const update = (id: string, value: string) => onChange(rows.map((row) => row.id === id ? { ...row, value } : row));
+  return <section className="structured-field structured-list-field" aria-label={label}>
+    <div className="structured-field-heading"><div><strong>{label}</strong>{description && <small>{description}</small>}</div></div>
+    <div className="structured-field-list">{rows.map((row, index) => <div className="structured-list-row" key={row.id}>
+      <span className="structured-list-index" aria-hidden="true">{index + 1}</span><input aria-label={`${label} ${index + 1}`} value={row.value} placeholder={placeholder} spellCheck={false} onChange={(event) => update(row.id, event.target.value)}/>
+      <button type="button" className="structured-field-delete" title={`删除第 ${index + 1} 项`} aria-label={`删除 ${label} ${index + 1}`} onClick={() => onChange(rows.filter((item) => item.id !== row.id))}><Trash2 size={14}/></button>
+    </div>)}</div>
+    <button type="button" className="structured-field-add" onClick={() => onChange([...rows, { id: clientId(), value: "" }])}><Plus size={14}/> {addLabel}</button>
+  </section>;
+}
+
 function McpEditor({ config, pending, revealPending, revealedSecrets, onReveal, onCancel, onSave }: { config: McpServerConfig; pending: boolean; revealPending: boolean; revealedSecrets?: Record<string, string>; onReveal: () => void; onCancel: () => void; onSave: (config: McpServerConfig) => void }) {
   const [draft, setDraft] = useState(config);
   const [transportType, setTransportType] = useState<McpTransport["type"]>(config.transport.type);
   const [transportDrafts, setTransportDrafts] = useState(() => createMcpTransportDrafts(config.transport));
+  const [argumentRows, setArgumentRows] = useState<ListRow[]>(() => createMcpTransportDrafts(config.transport).stdio.args.map((value) => ({ id: clientId(), value })));
+  const [envRows, setEnvRows] = useState<StructuredRow[]>(() => structuredRows(createMcpTransportDrafts(config.transport).stdio.env));
+  const [httpHeaderRows, setHttpHeaderRows] = useState<StructuredRow[]>(() => structuredRows(createMcpTransportDrafts(config.transport).streamable_http.headers));
+  const [sseHeaderRows, setSseHeaderRows] = useState<StructuredRow[]>(() => structuredRows(createMcpTransportDrafts(config.transport).sse.headers));
   const [showSecrets, setShowSecrets] = useState(false);
-  const transport = transportDrafts[transportType];
-  const valid = draft.name.trim() && (transport.type === "stdio" ? transport.command.trim() : transport.url.trim());
+  const baseTransport = transportDrafts[transportType];
+  const transport: McpTransport = baseTransport.type === "stdio"
+    ? { ...baseTransport, args: argumentRows.map((row) => row.value).filter((value) => value.length > 0), env: structuredRecord(envRows) }
+    : baseTransport.type === "streamable_http"
+      ? { ...baseTransport, headers: structuredRecord(httpHeaderRows) }
+      : { ...baseTransport, headers: structuredRecord(sseHeaderRows) };
+  const activeMapRows = transport.type === "stdio" ? envRows : transport.type === "streamable_http" ? httpHeaderRows : sseHeaderRows;
+  const valid = draft.name.trim() && (transport.type === "stdio" ? transport.command.trim() : transport.url.trim()) && !hasDuplicateStructuredKeys(activeMapRows);
   useEffect(() => {
     if (!revealedSecrets) return;
-    setTransportDrafts((current) => ({
-      stdio: { ...current.stdio, env: mergeMcpSecrets(current.stdio.env, revealedSecrets) },
-      streamable_http: { ...current.streamable_http, headers: mergeMcpSecrets(current.streamable_http.headers, revealedSecrets) },
-      sse: { ...current.sse, headers: mergeMcpSecrets(current.sse.headers, revealedSecrets) },
-    }));
+    setEnvRows((rows) => structuredRows(mergeMcpSecrets(structuredRecord(rows), revealedSecrets)));
+    setHttpHeaderRows((rows) => structuredRows(mergeMcpSecrets(structuredRecord(rows), revealedSecrets)));
+    setSseHeaderRows((rows) => structuredRows(mergeMcpSecrets(structuredRecord(rows), revealedSecrets)));
     setShowSecrets(true);
   }, [revealedSecrets]);
   const toggleSecrets = () => {
@@ -3225,6 +3492,7 @@ function McpEditor({ config, pending, revealPending, revealedSecrets, onReveal, 
     else if (revealedSecrets) setShowSecrets(true);
     else onReveal();
   };
+  const revealAction = draft.id ? <button type="button" className="structured-field-visibility" title={showSecrets ? "Hide values" : "Reveal sensitive values"} aria-label={showSecrets ? "Hide values" : "Reveal sensitive values"} disabled={revealPending} onClick={toggleSecrets}>{showSecrets ? <EyeOff size={14}/> : <Eye size={14}/>}</button> : undefined;
   return <form className="mcp-editor" onSubmit={(event) => {
     event.preventDefault();
     if (!valid) return;
@@ -3236,20 +3504,16 @@ function McpEditor({ config, pending, revealPending, revealedSecrets, onReveal, 
     {draft.id && <label>Server ID<input value={draft.id} disabled/></label>}
     {transport.type === "stdio" ? <>
       <label>Command<input value={transport.command} placeholder="npx" onChange={(event) => setTransportDrafts((current) => ({ ...current, stdio: { ...current.stdio, command: event.target.value } }))}/></label>
-      <label>Arguments<textarea rows={3} value={transport.args.join("\n")} placeholder={"-y\n@modelcontextprotocol/server-filesystem\n/path"} onChange={(event) => setTransportDrafts((current) => ({ ...current, stdio: { ...current.stdio, args: nonemptyLines(event.target.value) } }))}/><small>One argument per line. Spaces stay inside that argument.</small></label>
-      <div className="mcp-secret-field"><div className="mcp-secret-heading"><span>Environment</span>{draft.id && <button type="button" className="icon-button" title={showSecrets ? "Hide sensitive environment values" : "Reveal sensitive environment values"} aria-label={showSecrets ? "Hide sensitive environment values" : "Reveal sensitive environment values"} disabled={revealPending} onClick={toggleSecrets}>{showSecrets ? <EyeOff size={14}/> : <Eye size={14}/>}</button>}</div><textarea aria-label="Environment" rows={3} value={mapLines(showSecrets ? transport.env : maskSensitiveMcpValues(transport.env))} placeholder="KEY=value" onChange={(event) => setTransportDrafts((current) => ({ ...current, stdio: { ...current.stdio, env: parseMapLines(event.target.value) } }))}/></div>
+      <StructuredListEditor label="Arguments" description="每个命令参数单独一项，不需要手动编排多行格式。" rows={argumentRows} placeholder="例如：-y 或 @modelcontextprotocol/server-filesystem" addLabel="添加参数" onChange={setArgumentRows}/>
+      <StructuredKeyValueEditor label="Environment" description="环境变量使用独立的 Key / Value 输入。" rows={envRows} keyPlaceholder="例如：GITHUB_TOKEN" valuePlaceholder="Environment value" addLabel="添加环境变量" showValues={showSecrets || !draft.id} revealAction={revealAction} onChange={setEnvRows}/>
     </> : <>
       <label>{transport.type === "sse" ? "SSE URL" : "MCP endpoint URL"}<input value={transport.url} placeholder={transport.type === "sse" ? "https://example.com/sse" : "https://example.com/mcp"} onChange={(event) => setTransportDrafts((current) => ({ ...current, [transport.type]: { ...current[transport.type], url: event.target.value } }))}/></label>
-      <div className="mcp-secret-field"><div className="mcp-secret-heading"><span>Headers</span>{draft.id && <button type="button" className="icon-button" title={showSecrets ? "Hide sensitive headers" : "Reveal sensitive headers"} aria-label={showSecrets ? "Hide sensitive headers" : "Reveal sensitive headers"} disabled={revealPending} onClick={toggleSecrets}>{showSecrets ? <EyeOff size={14}/> : <Eye size={14}/>}</button>}</div><textarea aria-label="Headers" rows={3} value={mapLines(showSecrets ? transport.headers : maskSensitiveMcpValues(transport.headers))} placeholder="Authorization=Bearer ${MCP_TOKEN}" onChange={(event) => setTransportDrafts((current) => ({ ...current, [transport.type]: { ...current[transport.type], headers: parseMapLines(event.target.value) } }))}/><small>One header per line as Name=value. Environment references use ${"${NAME}"}.</small></div>
+      <StructuredKeyValueEditor label="Headers" description={`每个 Header 单独填写；Value 中可使用 ${"${NAME}"} 引用环境变量。`} rows={transport.type === "streamable_http" ? httpHeaderRows : sseHeaderRows} keyLabel="Name" keyPlaceholder="例如：Authorization" valuePlaceholder={`例如：Bearer ${"${MCP_TOKEN}"}`} addLabel="添加 Header" showValues={showSecrets || !draft.id} revealAction={revealAction} onChange={transport.type === "streamable_http" ? setHttpHeaderRows : setSseHeaderRows}/>
     </>}
     <label>Request timeout (ms)<input type="number" min={1} value={draft.request_timeout_ms} onChange={(event) => setDraft({ ...draft, request_timeout_ms: Math.max(1, Number(event.target.value) || 1) })}/></label>
     <div className="mcp-editor-actions"><button type="button" className="secondary" disabled={pending} onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={!valid || pending}>{pending ? <LoaderCircle size={14}/> : <Plug size={14}/>} Save and connect</button></div>
   </form>;
 }
-
-function nonemptyLines(value: string) { return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean); }
-function parseMapLines(value: string) { return Object.fromEntries(value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => { const index = line.indexOf("="); return index < 0 ? [line, ""] : [line.slice(0, index).trim(), line.slice(index + 1)]; }).filter(([key]) => key)); }
-function mapLines(value: Record<string, string>) { return Object.entries(value).map(([key, item]) => `${key}=${item}`).join("\n"); }
 
 function AppearancePanel({ panelRef, appearance, onChange, onClose }: { panelRef: MutableRefObject<HTMLElement | null>; appearance: Appearance; onChange: (appearance: Appearance) => void; onClose: () => void }) {
   const update = <K extends keyof Appearance>(key: K, value: Appearance[K]) => onChange({ ...appearance, [key]: value });
@@ -3336,13 +3600,14 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function ModelEndpointPanel({ panelRef, server, session, endpointEditor, revealedEndpointApiKeys, onEdit, onDelete, onApply, onReveal, onSave }: {
+function ModelEndpointPanel({ panelRef, server, session, endpointEditor, revealedEndpointApiKeys, revealedEndpointHeaders, onEdit, onDelete, onApply, onReveal, onSave }: {
   panelRef: MutableRefObject<HTMLElement | null>;
   server: Snapshot["server"] | null;
-  session?: Session;
-  endpointEditor: ModelEndpoint | "new" | null;
+  session: Session | undefined;
+  endpointEditor: "new" | ModelEndpoint | null;
   revealedEndpointApiKeys: Record<string, string>;
-  onEdit: (endpoint: ModelEndpoint | "new" | null) => void;
+  revealedEndpointHeaders: Record<string, Record<string, string>>;
+  onEdit: (endpoint: "new" | ModelEndpoint | null) => void;
   onDelete: (endpoint: ModelEndpoint) => void;
   onApply: (endpointId: string) => void;
   onReveal: (endpointId: string) => void;
@@ -3350,36 +3615,48 @@ function ModelEndpointPanel({ panelRef, server, session, endpointEditor, reveale
 }) {
   const endpoints = server?.model_endpoints ?? [];
   const selected = endpoints.find((endpoint) => endpointMatchesProfile(endpoint, session?.runtime_profile));
-  return <section id="runtime-panel" ref={panelRef} className="runtime-card endpoint-menu" tabIndex={-1}>
-    <div className="endpoint-menu-heading"><div><span className="eyebrow">MODEL ENDPOINTS</span><strong>{session ? `用于 ${session.display_name}` : "选择 Session 后应用"}</strong></div><button type="button" className="secondary compact" onClick={() => onEdit("new")}><Plus size={14}/> 新增接入点</button></div>
-    <div className="endpoint-list">{endpoints.length === 0 ? <div className="endpoint-empty">还没有可用接入点。新增后，它会在所有 Session 中共用。</div> : endpoints.map((endpoint) => {
-      const active = selected?.id === endpoint.id;
-      return <div className={`endpoint-row ${active ? "active" : ""}`} key={endpoint.id}>
-        <button type="button" className="endpoint-select" disabled={!session || session.state === "working"} onClick={() => onApply(endpoint.id)}><span><strong>{endpoint.name}</strong>{active && <Check size={13}/>}</span><small>{endpoint.model} · {endpoint.api_protocol} · {endpoint.max_llm_input_tokens === 1_000_000 ? "1M" : `${endpoint.max_llm_input_tokens / 1_000}K`} / {endpoint.max_llm_output_tokens / 1_000}K</small><small title={endpoint.base_url}>{endpoint.base_url}</small></button>
-        <div className="endpoint-actions"><button type="button" title={`Edit ${endpoint.name}`} aria-label={`Edit ${endpoint.name}`} onClick={() => { onEdit(endpoint); if (endpoint.api_key_configured && revealedEndpointApiKeys[endpoint.id] === undefined) onReveal(endpoint.id); }}><Pencil size={14}/></button><button type="button" title={`Delete ${endpoint.name}`} aria-label={`Delete ${endpoint.name}`} onClick={() => onDelete(endpoint)}><Trash2 size={14}/></button></div>
-      </div>;
-    })}</div>
-    {session?.state === "working" && <p className="endpoint-note">当前 Session 工作中，结束或停止任务后才能切换接入点。</p>}
-    {endpointEditor && <ModelEndpointEditor endpoint={endpointEditor === "new" ? undefined : endpointEditor} revealedApiKey={endpointEditor === "new" ? "" : revealedEndpointApiKeys[endpointEditor.id]} onClose={() => onEdit(null)} onSave={onSave}/>}
+  return <section id="runtime-panel" ref={panelRef} className={`runtime-card endpoint-menu ${endpointEditor ? "editing" : ""}`} tabIndex={-1}>
+    {endpointEditor ? <ModelEndpointEditor endpoint={endpointEditor === "new" ? undefined : endpointEditor} revealedApiKey={endpointEditor === "new" ? "" : revealedEndpointApiKeys[endpointEditor.id]} revealedHeaders={endpointEditor === "new" ? {} : revealedEndpointHeaders[endpointEditor.id]} onClose={() => onEdit(null)} onSave={onSave}/> : <>
+      <div className="endpoint-menu-heading"><div><span className="eyebrow">MODEL ENDPOINTS</span><strong>{session ? `用于 ${session.display_name}` : "选择 Session 后应用"}</strong></div><button type="button" className="secondary compact" onClick={() => onEdit("new")}><Plus size={14}/> 新增接入点</button></div>
+      <div className="endpoint-list">{endpoints.length === 0 ? <div className="endpoint-empty">还没有可用接入点。新增后，它会在所有 Session 中共用。</div> : endpoints.map((endpoint) => {
+        const active = selected?.id === endpoint.id;
+        return <div className={`endpoint-row ${active ? "active" : ""}`} key={endpoint.id}>
+          <button type="button" className="endpoint-select" disabled={!session || session.state === "working"} onClick={() => onApply(endpoint.id)}><span><strong>{endpoint.name}</strong>{active && <Check size={13}/>}</span><small>{endpoint.model} · {endpoint.api_protocol} · {endpoint.max_llm_input_tokens === 1_000_000 ? "1M" : `${endpoint.max_llm_input_tokens / 1_000}K`} / {endpoint.max_llm_output_tokens / 1_000}K</small><small title={endpoint.base_url}>{endpoint.base_url}</small></button>
+          <div className="endpoint-actions"><button type="button" title={`Edit ${endpoint.name}`} aria-label={`Edit ${endpoint.name}`} onClick={() => { onEdit(endpoint); if ((endpoint.api_key_configured || Object.keys(endpoint.http_headers).length > 0) && revealedEndpointApiKeys[endpoint.id] === undefined) onReveal(endpoint.id); }}><Pencil size={14}/></button><button type="button" title={`Delete ${endpoint.name}`} aria-label={`Delete ${endpoint.name}`} onClick={() => onDelete(endpoint)}><Trash2 size={14}/></button></div>
+        </div>;
+      })}</div>
+      {session?.state === "working" && <p className="endpoint-note">当前 Session 工作中，结束或停止任务后才能切换接入点。</p>}
+    </>}
   </section>;
 }
 
-function ModelEndpointEditor({ endpoint, revealedApiKey, onClose, onSave }: { endpoint?: ModelEndpoint; revealedApiKey?: string; onClose: () => void; onSave: (endpoint: ModelEndpointDraft) => void }) {
-  const [draft, setDraft] = useState<ModelEndpointDraft>(() => ({ id: endpoint?.id, name: endpoint?.name ?? "", model: endpoint?.model ?? "", api_protocol: endpoint?.api_protocol ?? "openai-compatible", response_protocol: endpoint?.response_protocol ?? "xml", base_url: endpoint?.base_url ?? "", max_llm_input_tokens: endpoint?.max_llm_input_tokens ?? 100_000, max_llm_output_tokens: endpoint?.max_llm_output_tokens ?? 10_000, api_key: revealedApiKey }));
+function ModelEndpointEditor({ endpoint, revealedApiKey, revealedHeaders, onClose, onSave }: { endpoint?: ModelEndpoint; revealedApiKey?: string; revealedHeaders?: Record<string, string>; onClose: () => void; onSave: (endpoint: ModelEndpointDraft) => void }) {
+  const [draft, setDraft] = useState<ModelEndpointDraft>(() => ({ id: endpoint?.id, name: endpoint?.name ?? "", model: endpoint?.model ?? "", api_protocol: endpoint?.api_protocol ?? "openai-compatible", response_protocol: endpoint?.response_protocol ?? "xml", base_url: endpoint?.base_url ?? "", max_llm_input_tokens: endpoint?.max_llm_input_tokens ?? 100_000, max_llm_output_tokens: endpoint?.max_llm_output_tokens ?? 10_000, api_key: revealedApiKey, http_headers: endpoint?.http_headers ?? {} }));
+  const [headerRows, setHeaderRows] = useState<StructuredRow[]>(() => structuredRows(endpoint?.http_headers ?? {}));
   const [showApiKey, setShowApiKey] = useState(false);
+  const [showHeaders, setShowHeaders] = useState(!endpoint);
   useEffect(() => { if (revealedApiKey !== undefined) setDraft((current) => ({ ...current, api_key: revealedApiKey })); }, [revealedApiKey]);
-  useEffect(() => setShowApiKey(false), [endpoint?.id]);
+  useEffect(() => {
+    if (!revealedHeaders) return;
+    setHeaderRows((rows) => rows.map((row) => ({ ...row, value: revealedHeaders[row.key] ?? row.value })));
+  }, [revealedHeaders]);
+  useEffect(() => { setShowApiKey(false); setShowHeaders(!endpoint); }, [endpoint?.id]);
   const apiKey = draft.api_key ?? "";
-  const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(apiKey, {
-    idle: "复制 API Key",
-    copied: "API Key 已复制",
-    failed: "API Key 复制失败",
-  });
+  const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(apiKey, { idle: "复制 API Key", copied: "API Key 已复制", failed: "API Key 复制失败" });
   const apiKeyVisibilityLabel = showApiKey ? "隐藏 API Key" : "显示 API Key";
-  const save = () => { if (endpointDraftValid(draft)) onSave(draft); };
-  return <div className="endpoint-editor"><div className="endpoint-editor-heading"><strong>{endpoint ? "编辑接入点" : "新增接入点"}</strong><button type="button" aria-label="Close endpoint editor" onClick={onClose}><X size={14}/></button></div><div className="endpoint-editor-grid"><label>名称<input autoFocus value={draft.name} placeholder="例如：生产环境 GPT" onChange={(event) => setDraft({ ...draft, name: event.target.value })}/></label><label>模型<input value={draft.model} placeholder="gpt-4.1" onChange={(event) => setDraft({ ...draft, model: event.target.value })}/></label><label>API 协议<select value={draft.api_protocol} onChange={(event) => setDraft({ ...draft, api_protocol: event.target.value })}><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select></label><label>响应协议<select value={draft.response_protocol} onChange={(event) => setDraft({ ...draft, response_protocol: event.target.value })}><option value="xml">xml</option><option value="json">json</option></select></label><label className="wide">Base URL<input value={draft.base_url} placeholder="https://api.example.com/v1" onChange={(event) => setDraft({ ...draft, base_url: event.target.value })}/></label><label>最大上下文窗口<select value={draft.max_llm_input_tokens} onChange={(event) => setDraft({ ...draft, max_llm_input_tokens: Number(event.target.value) })}>{MODEL_CONTEXT_WINDOW_OPTIONS.map((tokens) => <option key={tokens} value={tokens}>{tokens === 1_000_000 ? "1M" : `${tokens / 1_000}K`}</option>)}</select></label><label>最大输出<select value={draft.max_llm_output_tokens} onChange={(event) => setDraft({ ...draft, max_llm_output_tokens: Number(event.target.value) })}>{MODEL_OUTPUT_TOKEN_OPTIONS.map((tokens) => <option key={tokens} value={tokens}>{tokens / 1_000}K</option>)}</select></label><label className="wide">API Key<div className="endpoint-api-key"><input type={showApiKey ? "text" : "password"} autoComplete="new-password" spellCheck={false} value={apiKey} placeholder={endpoint?.api_key_configured && revealedApiKey === undefined ? "正在读取…" : "可留空"} onChange={(event) => setDraft({ ...draft, api_key: event.target.value })}/><div className="endpoint-api-key-actions"><button type="button" className={copyClass} title={copyLabel} aria-label={copyLabel} disabled={!apiKey} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={12}/> : <Copy size={12}/>}</button><button type="button" title={apiKeyVisibilityLabel} aria-label={apiKeyVisibilityLabel} onClick={() => setShowApiKey((visible) => !visible)}>{showApiKey ? <EyeOff size={13}/> : <Eye size={13}/>}</button></div></div></label></div><div className="endpoint-editor-buttons"><button type="button" className="secondary compact" onClick={onClose}>取消</button><button type="button" className="primary compact" disabled={!endpointDraftValid(draft)} onClick={save}>保存接入点</button></div></div>;
+  const headers = structuredRecord(headerRows);
+  const endpointDraft = { ...draft, http_headers: headers };
+  const duplicateHeaderNames = hasDuplicateStructuredKeys(headerRows);
+  const save = () => { if (!duplicateHeaderNames && endpointDraftValid(endpointDraft)) onSave(endpointDraft); };
+  return <div className="endpoint-editor"><div className="endpoint-editor-heading"><strong>{endpoint ? "编辑接入点" : "新增接入点"}</strong><button type="button" aria-label="Close endpoint editor" onClick={onClose}><X size={14}/></button></div><div className="endpoint-editor-grid">
+    <label>名称<input autoFocus value={draft.name} placeholder="例如：生产环境 GPT" onChange={(event) => setDraft({ ...draft, name: event.target.value })}/></label><label>模型<input value={draft.model} placeholder="gpt-4.1" onChange={(event) => setDraft({ ...draft, model: event.target.value })}/></label>
+    <label>API 协议<select value={draft.api_protocol} onChange={(event) => setDraft({ ...draft, api_protocol: event.target.value })}><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select></label><label>响应协议<select value={draft.response_protocol} onChange={(event) => setDraft({ ...draft, response_protocol: event.target.value })}><option value="xml">xml</option><option value="json">json</option></select></label>
+    <label className="wide">Base URL<input value={draft.base_url} placeholder="https://api.example.com/v1" onChange={(event) => setDraft({ ...draft, base_url: event.target.value })}/></label>
+    <label>最大上下文窗口<select value={draft.max_llm_input_tokens} onChange={(event) => setDraft({ ...draft, max_llm_input_tokens: Number(event.target.value) })}>{MODEL_CONTEXT_WINDOW_OPTIONS.map((tokens) => <option key={tokens} value={tokens}>{tokens === 1_000_000 ? "1M" : `${tokens / 1_000}K`}</option>)}</select></label><label>最大输出<select value={draft.max_llm_output_tokens} onChange={(event) => setDraft({ ...draft, max_llm_output_tokens: Number(event.target.value) })}>{MODEL_OUTPUT_TOKEN_OPTIONS.map((tokens) => <option key={tokens} value={tokens}>{tokens / 1_000}K</option>)}</select></label>
+    <label className="wide">API Key<div className="endpoint-api-key"><input type={showApiKey ? "text" : "password"} autoComplete="new-password" spellCheck={false} value={apiKey} placeholder={endpoint?.api_key_configured && revealedApiKey === undefined ? "正在读取…" : "可留空"} onChange={(event) => setDraft({ ...draft, api_key: event.target.value })}/><div className="endpoint-api-key-actions"><button type="button" className={copyClass} title={copyLabel} aria-label={copyLabel} disabled={!apiKey} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={12}/> : <Copy size={12}/>}</button><button type="button" title={apiKeyVisibilityLabel} aria-label={apiKeyVisibilityLabel} onClick={() => setShowApiKey((visible) => !visible)}>{showApiKey ? <EyeOff size={13}/> : <Eye size={13}/>}</button></div></div></label>
+    <div className="wide endpoint-structured-headers"><StructuredKeyValueEditor label="Headers" description="可选。每个 HTTP Header 单独填写，无需输入 JSON 或多行格式文本。" rows={headerRows} keyLabel="Name" keyPlaceholder="Header name" valuePlaceholder="Header value" addLabel="添加 Header" showValues={showHeaders} revealAction={headerRows.length > 0 ? <button type="button" className="structured-field-visibility" title={showHeaders ? "隐藏 Header Value" : "显示 Header Value"} aria-label={showHeaders ? "隐藏 Header Value" : "显示 Header Value"} onClick={() => setShowHeaders((visible) => !visible)}>{showHeaders ? <EyeOff size={14}/> : <Eye size={14}/>}</button> : undefined} onChange={(rows) => { setShowHeaders(true); setHeaderRows(rows); }}/></div>
+  </div><div className="endpoint-editor-buttons"><button type="button" className="secondary compact" onClick={onClose}>取消</button><button type="button" className="primary compact" disabled={duplicateHeaderNames || !endpointDraftValid(endpointDraft)} onClick={save}>保存接入点</button></div></div>;
 }
-
 
 function RuntimeSettingsPanel({ panelRef, server, session, pendingKeys, credentialPending, revealedApiKey, onUpdate, onApiKeyUpdate, onApiKeyReveal }: {
   panelRef: MutableRefObject<HTMLElement | null>;
@@ -3506,8 +3783,9 @@ function NewSessionDialog({ workspaces, runtimeDefaults, creating, memSwitching,
   const descriptionId = "new-session-dialog-description";
   const statusId = "new-session-dialog-status";
   const describedBy = creating ? `${descriptionId} ${statusId}` : descriptionId;
-  return <div className="modal-backdrop" role="presentation" aria-label="Dismiss create session" onClick={closeIfIdle}><section className="decision-modal session-modal" role="dialog" aria-modal="true" aria-label="Create session" aria-describedby={describedBy} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">NEW SESSION</span><h2>Start a session</h2></div><button type="button" className="icon-button" title="Close create session" aria-label="Close create session" disabled={creating} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>Choose a workspace and optional runtime overrides for this session.</p>{creating && <p id={statusId} className="mem-validation" role="status" aria-live="polite">Creating session…</p>}<div className="session-modal-scroll"><label>Display name<input autoFocus value={displayName} placeholder="Optional name" disabled={creating} onChange={(event) => setDisplayName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); } }}/></label><label>Workspace<select value={workspaceDir} disabled={creating || workspaces.length === 0} onChange={(event) => setWorkspaceDir(event.target.value)}>{workspaces.length === 0 ? <option value="">No workspace available</option> : workspaces.map((workspace) => <option value={workspace} key={workspace} title={workspace}>{tailPath(workspace, 64)}</option>)}</select></label>{workspaces.length === 0 && <p className="mem-hint">No workspace is available from the runtime snapshot. Reconnect Timem Web or check the host workspace configuration.</p>}<details className="session-runtime-overrides"><summary>Runtime environment</summary><div className="session-runtime-grid">{SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => <label key={key}><span>{label}<small>{key}</small></span><div className="session-runtime-control">{kind === "api_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "default"}</option><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select> : kind === "response_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "xml"}</option><option value="xml">xml</option><option value="json">json</option></select> : kind === "bash_approval" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "ask"}</option><option value="ask">ask</option><option value="approve">approve</option></select> : kind === "work_instructions" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "silent"}</option><option value="silent">silent</option><option value="ask">ask</option><option value="off">off</option></select> : kind === "boolean" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "false"}</option><option value="true">true</option><option value="false">false</option></select> : <input type={kind} value={env[key] ?? ""} min={kind === "number" ? 1 : undefined} disabled={creating} autoComplete={kind === "password" ? "new-password" : undefined} placeholder={kind === "password" ? "Optional session-only key" : `Inherit · ${runtimeDefaults[key] ?? "default"}`} onChange={(event) => updateEnv(key, event.target.value)}/>} {env[key] !== undefined && <button type="button" className="session-runtime-reset" title={`Reset ${label} to inherited value`} aria-label={`Reset ${label} to inherited value`} disabled={creating} onClick={() => resetEnv(key)}>Reset</button>}</div></label>)}</div></details></div><div className="decision-actions"><button type="button" className="secondary" disabled={creating} onClick={closeIfIdle}>Cancel</button><button type="button" className={`primary ${creating ? "sending" : ""}`} disabled={!canCreateSession} onClick={submit}>{creating ? <LoaderCircle size={16}/> : <Plus size={16}/>} {creating ? "Creating…" : "Create session"}</button></div></section></div>;
+  return <div className="modal-backdrop" role="presentation" aria-label="Dismiss create session" onClick={closeIfIdle}><section className="decision-modal session-modal" role="dialog" aria-modal="true" aria-label="Create session" aria-describedby={describedBy} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">NEW SESSION</span><h2>Start a session</h2></div><button type="button" className="icon-button" title="Close create session" aria-label="Close create session" disabled={creating} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>Select a known workspace or enter an existing absolute directory for this session.</p>{creating && <p id={statusId} className="mem-validation" role="status" aria-live="polite">Creating session…</p>}<div className="session-modal-scroll"><label>Display name<input autoFocus value={displayName} placeholder="Optional name" disabled={creating} onChange={(event) => setDisplayName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); } }}/></label><label>Workspace directory<input type="text" list="new-session-workspaces" value={workspaceDir} disabled={creating} placeholder="/absolute/path/to/workspace" autoComplete="off" onChange={(event) => setWorkspaceDir(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); } }}/><datalist id="new-session-workspaces">{workspaces.map((workspace) => <option value={workspace} key={workspace}>{tailPath(workspace, 64)}</option>)}</datalist></label><p className="mem-hint">Choose a suggested workspace or type an absolute directory path that exists on the Timem host.</p><details className="session-runtime-overrides"><summary>Runtime environment</summary><div className="session-runtime-grid">{SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => <label key={key}><span>{label}<small>{key}</small></span><div className="session-runtime-control">{kind === "api_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "default"}</option><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select> : kind === "response_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "xml"}</option><option value="xml">xml</option><option value="json">json</option></select> : kind === "bash_approval" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "ask"}</option><option value="ask">ask</option><option value="approve">approve</option></select> : kind === "work_instructions" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "silent"}</option><option value="silent">silent</option><option value="ask">ask</option><option value="off">off</option></select> : kind === "boolean" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "false"}</option><option value="true">true</option><option value="false">false</option></select> : <input type={kind} value={env[key] ?? ""} min={kind === "number" ? 1 : undefined} disabled={creating} autoComplete={kind === "password" ? "new-password" : undefined} placeholder={kind === "password" ? "Optional session-only key" : `Inherit · ${runtimeDefaults[key] ?? "default"}`} onChange={(event) => updateEnv(key, event.target.value)}/>} {env[key] !== undefined && <button type="button" className="session-runtime-reset" title={`Reset ${label} to inherited value`} aria-label={`Reset ${label} to inherited value`} disabled={creating} onClick={() => resetEnv(key)}>Reset</button>}</div></label>)}</div></details></div><div className="decision-actions"><button type="button" className="secondary" disabled={creating} onClick={closeIfIdle}>Cancel</button><button type="button" className={`primary ${creating ? "sending" : ""}`} disabled={!canCreateSession} onClick={submit}>{creating ? <LoaderCircle size={16}/> : <Plus size={16}/>} {creating ? "Creating…" : "Create session"}</button></div></section></div>;
 }
+
 
 function ModelEndpointDeleteDialog({ endpoint, onClose, onConfirm }: { endpoint: ModelEndpoint; onClose: () => void; onConfirm: () => void }) {
   return <div className="modal-backdrop" role="presentation" onClick={onClose}><section className="decision-modal session-delete-dialog" role="dialog" aria-modal="true" aria-label={`Delete ${endpoint.name}`} onClick={(event) => event.stopPropagation()}><div className="modal-titlebar"><div><span className="eyebrow">DELETE ENDPOINT</span><h2>Delete “{endpoint.name}”?</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={16}/></button></div><p>This removes the shared endpoint from every Session dropdown. Existing Session settings are not changed.</p><div className="decision-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="button" className="danger" onClick={onConfirm}><Trash2 size={15}/> Delete endpoint</button></div></section></div>;

@@ -41,9 +41,8 @@ struct LlmRequestDumpEntry {
     sequence: u64,
     worker_id: String,
     round: u32,
-    generated_at_ms: u128,
-    prompt: String,
     interaction_request: Option<agent_core::ModelInteractionRequest>,
+    api_payload: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -83,6 +82,9 @@ struct EndpointDebug {
     tools_per_response: [u64; 11],
     repairs: BTreeMap<String, u64>,
     runtime_root_repair_help: u64,
+    prompt_tokens: u64,
+    cached_tokens: u64,
+    cache_created_tokens: u64,
 }
 
 #[derive(Debug, Default)]
@@ -106,6 +108,13 @@ impl DebugStore {
         #[cfg(not(unix))]
         let temporary_root = std::env::temp_dir();
 
+        Self::create_in(&temporary_root, !cfg!(test))
+    }
+
+    fn create_in(temporary_root: &Path, reap_stale: bool) -> Result<Self, String> {
+        if reap_stale {
+            cleanup_stale_debug_roots(temporary_root)?;
+        }
         let store_id = NEXT_DEBUG_STORE_ID.fetch_add(1, Ordering::Relaxed);
         let root = temporary_root.join(format!("timem-debug-{}-{store_id}", std::process::id()));
         if root.exists() {
@@ -158,8 +167,9 @@ impl DebugStore {
         session_id: &str,
         worker_id: &str,
         round: u32,
-        prompt: &str,
+        _prompt: &str,
         interaction_request: Option<&agent_core::ModelInteractionRequest>,
+        api_payload: Option<&serde_json::Value>,
     ) -> Result<(), String> {
         self.session_dir(session_id)?;
         {
@@ -193,9 +203,8 @@ impl DebugStore {
                 sequence: stats.request_sequence,
                 worker_id: worker_id.to_string(),
                 round,
-                generated_at_ms,
-                prompt: prompt.to_string(),
                 interaction_request: interaction_request.cloned(),
+                api_payload: api_payload.cloned(),
             });
             stats.updated_at_ms = generated_at_ms;
         }
@@ -208,6 +217,7 @@ impl DebugStore {
         session_id: &str,
         worker_id: &str,
         round: u32,
+        usage: &agent_core::UsageStats,
         content: &str,
         tool_calls: &[agent_core::NativeToolCall],
     ) -> Result<(), String> {
@@ -236,6 +246,16 @@ impl DebugStore {
                 tool_calls: tool_calls.to_vec(),
             });
             stats.responses.truncate(MAX_LLM_RESPONSE_DUMP_ENTRIES);
+            let endpoint = endpoint_for_worker(stats, worker_id);
+            endpoint.prompt_tokens = endpoint
+                .prompt_tokens
+                .saturating_add(u64::from(usage.prompt_tokens));
+            endpoint.cached_tokens = endpoint
+                .cached_tokens
+                .saturating_add(u64::from(usage.cached_tokens));
+            endpoint.cache_created_tokens = endpoint
+                .cache_created_tokens
+                .saturating_add(u64::from(usage.cache_created_tokens));
             stats.updated_at_ms = received_at_ms;
         }
         self.render_llm_responses(session_id)
@@ -405,11 +425,11 @@ impl DebugStore {
                 .get(session_id)
                 .ok_or_else(|| "debug_session_not_found".to_string())?;
             (
-                render_llm_prompt_dump(session_id, stats.latest_request.as_ref()),
+                render_llm_prompt_html(session_id, stats.latest_request.as_ref()),
                 render_tool_schema_dump(session_id, stats.latest_request.as_ref()),
             )
         };
-        atomic_private_write(&dir.join("llm_prompt.dump"), prompt_body.as_bytes())?;
+        atomic_private_write(&dir.join("llm_prompt.html"), prompt_body.as_bytes())?;
         atomic_private_write(&dir.join("tool_schema.dump"), tool_schema_body.as_bytes())
     }
 
@@ -446,107 +466,97 @@ fn take_in_flight_endpoint(stats: &mut SessionDebug, worker_id: &str) -> Option<
     stats.in_flight_by_worker.remove(worker_id)
 }
 
-fn render_llm_prompt_dump(session_id: &str, request: Option<&LlmRequestDumpEntry>) -> String {
+fn render_llm_prompt_html(_session_id: &str, request: Option<&LlmRequestDumpEntry>) -> String {
     let mut out = String::new();
-    out.push_str("TIMEM LLM PROMPT DUMP\n");
-    out.push_str(&format!("session_id: {session_id}\n"));
-    out.push_str("scope: latest_request_only\n");
-    let Some(request) = request else {
-        out.push_str("\n(no model requests recorded)\n");
-        return out;
-    };
-    out.push('\n');
-    out.push_str("============================================================\n");
-    out.push_str(&format!("request_sequence: {}\n", request.sequence));
-    out.push_str(&format!("worker_id: {}\n", request.worker_id));
-    out.push_str(&format!("round: {}\n", request.round));
-    out.push_str(&format!(
-        "generated_at: {}\n",
-        format_timestamp_ms(request.generated_at_ms)
-    ));
-    out.push_str(&format!("content_bytes: {}\n", request.prompt.len()));
-    if let Some(interaction) = request.interaction_request.as_ref() {
-        out.push_str(&format!(
-            "tool_call_mode: {}\nparallel_tool_calls: {}\ntool_choice: {:?}\nstatic_builtin_tool_definitions: {}\ndynamic_tool_definitions: {}\nnative_exchanges: {}\n",
-            interaction.resolved_mode.label(),
-            interaction.parallel_tool_calls,
-            interaction.tool_choice,
-            interaction.static_tool_count,
-            interaction.tools.len().saturating_sub(interaction.static_tool_count),
-            interaction.native_exchanges.len(),
-        ));
+    out.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
+    out.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
+    out.push_str("<title>LLM Prompt Payload</title><style>");
+    out.push_str(PROMPT_DUMP_CSS);
+    out.push_str("</style></head><body><main class=\"shell\"><h1>LLM Prompt Payload</h1><div class=\"timeline\">");
+    if let Some(payload) = request.and_then(|request| request.api_payload.as_ref()) {
+        for (index, entry) in api_payload_message_entries(payload).iter().enumerate() {
+            let entry = slim_prompt_payload_entry(entry);
+            out.push_str(
+                "<article class=\"message\"><div class=\"message-head\"><span class=\"ordinal\">",
+            );
+            out.push_str(&(index + 1).to_string());
+            out.push_str("</span><strong>");
+            html_text(&mut out, &payload_entry_role(&entry));
+            out.push_str("</strong></div><pre>");
+            let json = serde_json::to_string_pretty(&entry)
+                .unwrap_or_else(|error| format!("{{\"dump_error\":{error:?}}}"));
+            html_text(&mut out, &json);
+            out.push_str("</pre></article>");
+        }
     }
-    out.push_str("-------------------- RENDERED PROMPT -----------------------\n");
-    out.push_str(&request.prompt);
-    if !request.prompt.ends_with('\n') {
-        out.push('\n');
-    }
-    if let Some(interaction) = request
-        .interaction_request
-        .as_ref()
-        .filter(|interaction| interaction.is_native() && !interaction.native_exchanges.is_empty())
-    {
-        out.push_str("---------------- MODEL INPUT CONTINUATION ------------------\n");
-        out.push_str(
-            "The following native messages are sent after the rendered prompt, in this order.\n",
-        );
-        render_native_exchange_timeline(&mut out, interaction);
-    }
-    out.push_str("====================== END REQUEST =========================\n");
+    out.push_str("</div></main></body></html>");
     out
 }
 
-fn render_native_exchange_timeline(
-    out: &mut String,
-    request: &agent_core::ModelInteractionRequest,
-) {
-    for (exchange_index, exchange) in request.native_exchanges.iter().enumerate() {
-        out.push_str(&format!(
-            "\n-------------------- EXCHANGE {} · ASSISTANT --------------------\n",
-            exchange_index + 1
-        ));
-        out.push_str("## ASSISTANT\n\n");
-        if !exchange.assistant_text.trim().is_empty() {
-            out.push_str(exchange.assistant_text.trim());
-            out.push_str("\n\n");
-        }
-        out.push_str("Tool calls:\n");
-        let calls = exchange
-            .calls
-            .iter()
-            .map(|call| {
-                serde_json::json!({
-                    "tool_call_id": call.id,
-                    "name": call.name,
-                    "arguments": call.arguments,
-                })
-            })
-            .collect::<Vec<_>>();
-        out.push_str(
-            &serde_json::to_string_pretty(&calls)
-                .unwrap_or_else(|error| format!("{{\"dump_error\":{error:?}}}")),
-        );
-        out.push_str("\n\n## RUNTIME\n");
-        if exchange.results.is_empty() {
-            out.push_str("\n(no tool call results)\n");
-            continue;
-        }
-        for (result_index, result) in exchange.results.iter().enumerate() {
-            if result_index > 0 {
-                out.push_str("\n");
+fn api_payload_message_entries(payload: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut entries = Vec::new();
+    if let Some(system) = payload.get("system") {
+        entries.push(serde_json::json!({"role": "system", "content": system}));
+    }
+    if let Some(messages) = payload
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+    {
+        entries.extend(messages.iter().cloned());
+    } else if let Some(input) = payload.get("input") {
+        match input {
+            serde_json::Value::Array(items) => entries.extend(items.iter().cloned()),
+            serde_json::Value::String(text) => {
+                entries.push(serde_json::json!({"role": "user", "content": text}));
             }
-            out.push_str(&format!(
-                "\ntool_call_id: {}\nAction result: {}\nstatus: {}\n",
-                result.call_id,
-                result.name,
-                if result.is_error { "error" } else { "ok" },
-            ));
-            if !result.content.trim().is_empty() {
-                out.push_str(result.content.trim());
-                out.push('\n');
-            }
+            _ => entries.push(input.clone()),
         }
     }
+    entries
+}
+
+fn slim_prompt_payload_entry(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(slim_prompt_payload_entry).collect())
+        }
+        serde_json::Value::Object(object) => {
+            const IMPORTANT_FIELDS: &[&str] = &[
+                "role",
+                "type",
+                "content",
+                "text",
+                "id",
+                "name",
+                "input",
+                "tool_use_id",
+                "tool_call_id",
+                "tool_calls",
+                "function",
+                "arguments",
+                "call_id",
+                "output",
+                "is_error",
+            ];
+            let mut slim = serde_json::Map::new();
+            for field in IMPORTANT_FIELDS {
+                if let Some(field_value) = object.get(*field) {
+                    slim.insert((*field).to_string(), slim_prompt_payload_entry(field_value));
+                }
+            }
+            serde_json::Value::Object(slim)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn payload_entry_role(entry: &serde_json::Value) -> String {
+    entry
+        .get("role")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| entry.get("type").and_then(serde_json::Value::as_str))
+        .unwrap_or("item")
+        .to_string()
 }
 
 fn render_tool_schema_dump(session_id: &str, request: Option<&LlmRequestDumpEntry>) -> String {
@@ -725,7 +735,7 @@ fn render_statistics_html(session_id: &str, stats: &SessionDebug) -> String {
     if stats.endpoints.is_empty() {
         out.push_str("<div class=\"empty-state\">No model endpoint has been negotiated yet. This page refreshes when the first interaction profile arrives.</div>");
     } else {
-        out.push_str("<div class=\"table-wrap\"><table><thead><tr><th>Model</th><th>Gateway</th><th>Tool call</th><th>Requests</th><th>Successful</th><th>Failed</th><th>Success rate</th></tr></thead><tbody>");
+        out.push_str("<div class=\"table-wrap\"><table><thead><tr><th>Model</th><th>Gateway</th><th>Tool call</th><th>Requests</th><th>Successful</th><th>Failed</th><th>Success rate</th><th>KVC hit rate</th></tr></thead><tbody>");
         for (key, endpoint) in &stats.endpoints {
             out.push_str("<tr><td class=\"strong\">");
             html_text(&mut out, &key.model);
@@ -741,6 +751,11 @@ fn render_statistics_html(session_id: &str, stats: &SessionDebug) -> String {
             out.push_str(&endpoint.failures.to_string());
             out.push_str("</td><td>");
             out.push_str(&success_rate(endpoint.successes, endpoint.requests));
+            out.push_str("</td><td>");
+            out.push_str(&kvc_hit_rate(
+                endpoint.cached_tokens,
+                endpoint.prompt_tokens,
+            ));
             out.push_str("</td></tr>");
         }
         out.push_str("</tbody></table></div>");
@@ -811,6 +826,20 @@ fn render_endpoint_panel(
         "Success rate",
         success_rate(endpoint.successes, endpoint.requests),
         "completed / requested",
+    );
+    summary_card(
+        out,
+        "KVC hit rate",
+        kvc_hit_rate(endpoint.cached_tokens, endpoint.prompt_tokens),
+        "cache read / prompt input",
+    );
+    out.push_str("</div><div class=\"kvc-strip\">");
+    mini_kpi(out, "Prompt input", &format_tokens(endpoint.prompt_tokens));
+    mini_kpi(out, "KVC read", &format_tokens(endpoint.cached_tokens));
+    mini_kpi(
+        out,
+        "KVC create",
+        &format_tokens(endpoint.cache_created_tokens),
     );
     out.push_str("</div>");
     if let Some(profile) = endpoint.profile.as_ref() {
@@ -1005,6 +1034,21 @@ fn success_rate(successes: u64, requests: u64) -> String {
     }
 }
 
+fn kvc_hit_rate(cached_tokens: u64, prompt_tokens: u64) -> String {
+    if prompt_tokens == 0 {
+        "n/a".to_string()
+    } else {
+        format!(
+            "{:.1}%",
+            cached_tokens as f64 * 100.0 / prompt_tokens as f64
+        )
+    }
+}
+
+fn format_tokens(tokens: u64) -> String {
+    tokens.to_string()
+}
+
 fn endpoint_dom_id(key: &EndpointKey) -> String {
     // Stable FNV-1a keeps the selected tab attached to the same endpoint when
     // another endpoint is inserted earlier in the sorted overview.
@@ -1150,6 +1194,69 @@ fn safe_session_component(session_id: &str) -> Result<&str, String> {
     }
 }
 
+impl Drop for DebugStore {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            eprintln!("[timem_debug_cleanup_error] {error}");
+        }
+    }
+}
+
+fn cleanup_stale_debug_roots(temporary_root: &Path) -> Result<(), String> {
+    let entries = match fs::read_dir(temporary_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("debug_root_scan_failed:{error}")),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let Some(pid) = debug_root_owner_pid(&entry.file_name()) else {
+            continue;
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if !file_type.is_dir() || !debug_root_owned_by_current_user(&entry.path()) {
+            continue;
+        }
+        if process_is_definitely_dead(pid) {
+            match fs::remove_dir_all(entry.path()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("stale_debug_root_remove_failed:{error}")),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn debug_root_owner_pid(name: &std::ffi::OsStr) -> Option<u32> {
+    let name = name.to_str()?.strip_prefix("timem-debug-")?;
+    let mut parts = name.split('-');
+    let pid = parts.next()?.parse().ok()?;
+    match (parts.next(), parts.next()) {
+        (None, None) => Some(pid),
+        (Some(store_id), None)
+            if !store_id.is_empty() && store_id.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            Some(pid)
+        }
+        _ => None,
+    }
+}
+
+fn debug_root_owned_by_current_user(path: &Path) -> bool {
+    agent_core::os::path_owned_by_current_user(path)
+}
+
+fn process_is_definitely_dead(pid: u32) -> bool {
+    agent_core::os::process_is_definitely_dead(pid)
+}
+
 fn create_private_dir(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|error| format!("debug_dir_create_failed:{error}"))?;
     #[cfg(unix)]
@@ -1207,9 +1314,14 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
+const PROMPT_DUMP_CSS: &str = r#"
+:root{color-scheme:light dark;--bg:#f3f6fa;--panel:#fff;--text:#172033;--line:#dfe5ec;--blue:#2563eb;--code:#f7f9fc}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.shell{width:min(1180px,calc(100% - 32px));margin:0 auto;padding:32px 0 52px}h1{margin:0 0 18px;font-size:24px}.timeline{display:grid;gap:12px}.message{border:1px solid var(--line);border-radius:10px;overflow:hidden}.message-head{display:flex;align-items:center;gap:12px;padding:10px 13px;background:var(--code);text-transform:uppercase;font-size:11px;letter-spacing:.05em}.ordinal{display:grid;place-items:center;width:24px;height:24px;border-radius:50%;background:var(--blue);color:white}.message pre{margin:0;padding:15px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--panel);font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace}@media(prefers-color-scheme:dark){:root{--bg:#0d1118;--panel:#151b24;--text:#edf2f8;--line:#2a3442;--blue:#72a4ff;--code:#10161f}}
+"#;
+
 const STATISTICS_CSS: &str = r#"
 :root{color-scheme:light dark;--bg:#f3f6fa;--panel:#fff;--panel-2:#f8fafc;--text:#172033;--muted:#667085;--line:#dfe5ec;--blue:#2563eb;--green:#16845b;--red:#c33b4a;--shadow:0 10px 30px rgba(27,39,58,.07)}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.shell{width:min(1480px,calc(100% - 40px));margin:0 auto;padding:34px 0 52px}.page-head,.section-head,.endpoint-title{display:flex;align-items:flex-start;justify-content:space-between;gap:24px}.page-head{margin-bottom:24px}h1,h2,h3,p{margin:0}h1{font-size:30px;letter-spacing:-.03em}h2{font-size:20px}h3{font-size:17px}.subtitle,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.subtitle{margin-top:5px;color:var(--muted)}.eyebrow{color:var(--blue);font-size:11px;font-weight:750;letter-spacing:.13em;margin-bottom:6px}.freshness{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;padding-top:8px}.live-dot{width:8px;height:8px;border-radius:50%;background:#20b26b;box-shadow:0 0 0 4px rgba(32,178,107,.12)}.summary-grid,.endpoint-kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:18px}.summary-card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}.summary-card{padding:16px 18px}.summary-card p,.summary-card span{color:var(--muted);font-size:12px}.summary-card strong{display:block;font-size:24px;line-height:1.2;margin:5px 0 2px}.panel{padding:20px}.overview{margin-bottom:18px}.section-head{align-items:center;margin-bottom:16px}.section-head.compact{margin-bottom:14px}.time-range{color:var(--muted);font-size:12px}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:9px}table{width:100%;border-collapse:collapse}th,td{padding:11px 13px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}th:first-child,th:nth-child(2),th:nth-child(3),td:first-child,td:nth-child(2),td:nth-child(3){text-align:left}th{background:var(--panel-2);color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}tbody tr:last-child td{border-bottom:0}.strong{font-weight:700}.gateway{max-width:440px;overflow:hidden;text-overflow:ellipsis}.success{color:var(--green);font-weight:700}.failure{color:var(--red);font-weight:700}.badge{display:inline-flex;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:750;text-transform:uppercase;letter-spacing:.04em}.badge-native{background:#e7f7ef;color:#08764d}.badge-inline{background:#fff2d8;color:#955500}.badge-pending{background:#eef1f5;color:#667085}.tabs{display:flex;gap:8px;overflow:auto;padding:2px 0 12px}.tabs button{appearance:none;border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:9px;padding:9px 13px;font:inherit;font-weight:650;cursor:pointer;white-space:nowrap}.tabs button span{font-size:10px;text-transform:uppercase;margin-left:5px}.tabs button[aria-selected=true]{background:var(--text);border-color:var(--text);color:var(--panel)}.endpoint-panel{display:none}.endpoint-panel.active{display:block}.endpoint-title{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:12px}.endpoint-title .mono{color:var(--muted);margin-top:4px;overflow-wrap:anywhere}.endpoint-kpis{grid-template-columns:repeat(4,minmax(0,1fr))}.profile-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:11px;overflow:hidden;margin:0 0 12px}.profile-grid>div{background:var(--panel);padding:12px 14px;min-width:0}.profile-grid dt{color:var(--muted);font-size:11px;margin-bottom:3px}.profile-grid dd{margin:0;font-weight:650;overflow-wrap:anywhere}.metric-pair{display:grid;grid-template-columns:1fr 1fr;gap:12px}.metric-pair.lower{margin-top:12px}.metric-panel{min-width:0}.mini-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:16px}.mini-kpis div{background:var(--panel-2);border-radius:8px;padding:9px 10px}.mini-kpis span{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.04em}.mini-kpis strong{display:block;margin-top:3px}.bar-chart{display:grid;gap:8px}.bar-row{display:grid;grid-template-columns:minmax(72px,130px) 1fr 38px;gap:9px;align-items:center}.bar-label{color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bar-track{height:9px;background:var(--panel-2);border-radius:99px;overflow:hidden}.bar-track i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#4b83ec,#2563eb)}.bar-track.repair i{background:linear-gradient(90deg,#f09a4b,#d45b37)}.bar-row strong{text-align:right;font-size:11px}.empty-chart,.empty-state{padding:24px;text-align:center;color:var(--muted);background:var(--panel-2);border-radius:9px}.success-empty{color:var(--green)}.footnote,footer{color:var(--muted);font-size:11px}.footnote{margin-top:12px}footer{text-align:center;padding:24px 10px 0}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.shell{width:min(1480px,calc(100% - 40px));margin:0 auto;padding:34px 0 52px}.page-head,.section-head,.endpoint-title{display:flex;align-items:flex-start;justify-content:space-between;gap:24px}.page-head{margin-bottom:24px}h1,h2,h3,p{margin:0}h1{font-size:30px;letter-spacing:-.03em}h2{font-size:20px}h3{font-size:17px}.subtitle,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.subtitle{margin-top:5px;color:var(--muted)}.eyebrow{color:var(--blue);font-size:11px;font-weight:750;letter-spacing:.13em;margin-bottom:6px}.freshness{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12px;padding-top:8px}.live-dot{width:8px;height:8px;border-radius:50%;background:#20b26b;box-shadow:0 0 0 4px rgba(32,178,107,.12)}.summary-grid,.endpoint-kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px;margin-bottom:18px}.summary-card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}.summary-card{padding:16px 18px}.summary-card p,.summary-card span{color:var(--muted);font-size:12px}.summary-card strong{display:block;font-size:24px;line-height:1.2;margin:5px 0 2px}.panel{padding:20px}.overview{margin-bottom:18px}.section-head{align-items:center;margin-bottom:16px}.section-head.compact{margin-bottom:14px}.time-range{color:var(--muted);font-size:12px}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:9px}table{width:100%;border-collapse:collapse}th,td{padding:11px 13px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}th:first-child,th:nth-child(2),th:nth-child(3),td:first-child,td:nth-child(2),td:nth-child(3){text-align:left}th{background:var(--panel-2);color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.06em}tbody tr:last-child td{border-bottom:0}.strong{font-weight:700}.gateway{max-width:440px;overflow:hidden;text-overflow:ellipsis}.success{color:var(--green);font-weight:700}.failure{color:var(--red);font-weight:700}.badge{display:inline-flex;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:750;text-transform:uppercase;letter-spacing:.04em}.badge-native{background:#e7f7ef;color:#08764d}.badge-inline{background:#fff2d8;color:#955500}.badge-pending{background:#eef1f5;color:#667085}.tabs{display:flex;gap:8px;overflow:auto;padding:2px 0 12px}.tabs button{appearance:none;border:1px solid var(--line);background:var(--panel);color:var(--muted);border-radius:9px;padding:9px 13px;font:inherit;font-weight:650;cursor:pointer;white-space:nowrap}.tabs button span{font-size:10px;text-transform:uppercase;margin-left:5px}.tabs button[aria-selected=true]{background:var(--text);border-color:var(--text);color:var(--panel)}.endpoint-panel{display:none}.endpoint-panel.active{display:block}.endpoint-title{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px;margin-bottom:12px}.endpoint-title .mono{color:var(--muted);margin-top:4px;overflow-wrap:anywhere}.endpoint-kpis{grid-template-columns:repeat(5,minmax(0,1fr))}.kvc-strip{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0 0 12px}.kvc-strip>div{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px 12px}.kvc-strip span{display:block;color:var(--muted);font-size:10px;text-transform:uppercase}.kvc-strip strong{display:block;margin-top:3px}.profile-grid{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:11px;overflow:hidden;margin:0 0 12px}.profile-grid>div{background:var(--panel);padding:12px 14px;min-width:0}.profile-grid dt{color:var(--muted);font-size:11px;margin-bottom:3px}.profile-grid dd{margin:0;font-weight:650;overflow-wrap:anywhere}.metric-pair{display:grid;grid-template-columns:1fr 1fr;gap:12px}.metric-pair.lower{margin-top:12px}.metric-panel{min-width:0}.mini-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:16px}.mini-kpis div{background:var(--panel-2);border-radius:8px;padding:9px 10px}.mini-kpis span{display:block;color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.04em}.mini-kpis strong{display:block;margin-top:3px}.bar-chart{display:grid;gap:8px}.bar-row{display:grid;grid-template-columns:minmax(72px,130px) 1fr 38px;gap:9px;align-items:center}.bar-label{color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.bar-track{height:9px;background:var(--panel-2);border-radius:99px;overflow:hidden}.bar-track i{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#4b83ec,#2563eb)}.bar-track.repair i{background:linear-gradient(90deg,#f09a4b,#d45b37)}.bar-row strong{text-align:right;font-size:11px}.empty-chart,.empty-state{padding:24px;text-align:center;color:var(--muted);background:var(--panel-2);border-radius:9px}.success-empty{color:var(--green)}.footnote,footer{color:var(--muted);font-size:11px}.footnote{margin-top:12px}footer{text-align:center;padding:24px 10px 0}
 @media(max-width:980px){.summary-grid{grid-template-columns:repeat(3,1fr)}.profile-grid{grid-template-columns:repeat(3,1fr)}.metric-pair{grid-template-columns:1fr}}
 @media(max-width:640px){.shell{width:min(100% - 22px,1480px);padding-top:20px}.page-head{display:block}.freshness{margin-top:10px}.summary-grid,.endpoint-kpis{grid-template-columns:repeat(2,1fr)}.profile-grid{grid-template-columns:repeat(2,1fr)}.mini-kpis{grid-template-columns:repeat(2,1fr)}.summary-card strong{font-size:20px}.panel{padding:15px}}
 @media(prefers-color-scheme:dark){:root{--bg:#0d1118;--panel:#151b24;--panel-2:#10161f;--text:#edf2f8;--muted:#99a6b7;--line:#2a3442;--blue:#72a4ff;--shadow:none}.badge-native{background:#11392b;color:#7ee2b8}.badge-inline{background:#402f10;color:#f0c36d}}
@@ -1229,6 +1341,56 @@ mod tests {
         DEBUG_STORE_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn debug_store_drop_removes_its_root() {
+        let _guard = debug_store_test_guard();
+        let temporary_root = std::env::temp_dir().join(format!(
+            "timem-debug-drop-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        create_private_dir(&temporary_root).unwrap();
+        let root = {
+            let store = DebugStore::create_in(&temporary_root, false).unwrap();
+            let root = store.root().to_path_buf();
+            assert!(root.exists());
+            root
+        };
+        assert!(!root.exists());
+        fs::remove_dir(&temporary_root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn debug_store_creation_reaps_only_owned_dead_pid_roots() {
+        let _guard = debug_store_test_guard();
+        let temporary_root = std::env::temp_dir().join(format!(
+            "timem-debug-reap-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        create_private_dir(&temporary_root).unwrap();
+        let dead_pid = (2..=i32::MAX as u32)
+            .rev()
+            .find(|pid| process_is_definitely_dead(*pid))
+            .expect("a definitely unused pid is available");
+        let stale_legacy = temporary_root.join(format!("timem-debug-{dead_pid}"));
+        let stale_current = temporary_root.join(format!("timem-debug-{dead_pid}-7"));
+        let active = temporary_root.join(format!("timem-debug-{}-99", std::process::id()));
+        let malformed = temporary_root.join(format!("timem-debug-{dead_pid}-7-extra"));
+        for path in [&stale_legacy, &stale_current, &active, &malformed] {
+            create_private_dir(path).unwrap();
+        }
+
+        let store = DebugStore::create_in(&temporary_root, true).unwrap();
+        assert!(!stale_legacy.exists());
+        assert!(!stale_current.exists());
+        assert!(active.exists());
+        assert!(malformed.exists());
+        drop(store);
+        fs::remove_dir_all(&temporary_root).unwrap();
     }
 
     fn profile(
@@ -1285,11 +1447,12 @@ mod tests {
         let root = store.root().to_path_buf();
         let session_dir = store.session_dir("safe-session_1").unwrap();
 
-        let prompt = fs::read_to_string(session_dir.join("llm_prompt.dump")).unwrap();
+        let prompt = fs::read_to_string(session_dir.join("llm_prompt.html")).unwrap();
         let tool_schema = fs::read_to_string(session_dir.join("tool_schema.dump")).unwrap();
         let response = fs::read_to_string(session_dir.join("llm_response.dump")).unwrap();
         let statistics = fs::read_to_string(session_dir.join("statistics.html")).unwrap();
-        assert!(prompt.contains("(no model requests recorded)"));
+        assert!(prompt.contains("LLM Prompt Payload"));
+        assert_eq!(prompt.matches("class=\"message\"").count(), 0);
         assert!(tool_schema.contains("(no model requests recorded)"));
         assert!(response.contains("(no model responses recorded)"));
         assert!(statistics.contains("No model endpoint has been negotiated yet"));
@@ -1314,7 +1477,7 @@ mod tests {
             );
             for name in [
                 "statistics.html",
-                "llm_prompt.dump",
+                "llm_prompt.html",
                 "llm_response.dump",
                 "tool_schema.dump",
             ] {
@@ -1346,10 +1509,25 @@ mod tests {
             .record_interaction_profile(session, "worker_0", &native_profile)
             .unwrap();
         store
-            .record_prompt(session, "worker_0", 1, "successful", None)
+            .record_prompt(session, "worker_0", 1, "successful", None, None)
             .unwrap();
         store
             .record_llm_latency(session, "worker_0", Duration::from_millis(450))
+            .unwrap();
+        store
+            .record_llm_response(
+                session,
+                "worker_0",
+                1,
+                &agent_core::UsageStats {
+                    prompt_tokens: 10_000,
+                    cached_tokens: 6_000,
+                    cache_created_tokens: 2_000,
+                    ..agent_core::UsageStats::zero()
+                },
+                "ok",
+                &[],
+            )
             .unwrap();
         store
             .record_tools_per_response(session, "worker_0", 2)
@@ -1368,7 +1546,7 @@ mod tests {
             .record_runtime_root_repair_help(session, "worker_0")
             .unwrap();
         store
-            .record_prompt(session, "worker_0", 2, "failed", None)
+            .record_prompt(session, "worker_0", 2, "failed", None, None)
             .unwrap();
         store.record_model_failure(session, "worker_0").unwrap();
         store
@@ -1391,11 +1569,18 @@ mod tests {
             assert_eq!(endpoint.repairs["missing_or_invalid_response_root"], 1);
             assert_eq!(endpoint.repairs["unknown_protocol_error"], 1);
             assert_eq!(endpoint.runtime_root_repair_help, 1);
+            assert_eq!(endpoint.prompt_tokens, 10_000);
+            assert_eq!(endpoint.cached_tokens, 6_000);
+            assert_eq!(endpoint.cache_created_tokens, 2_000);
         }
         let html = fs::read_to_string(store.root().join(session).join("statistics.html")).unwrap();
         for marker in [
             "qwen-plus",
             "50.0%",
+            "60.0%",
+            "KVC hit rate",
+            "KVC read",
+            "KVC create",
             "Action on-CPU time",
             "LLM API latency",
             "<span>Unavailable</span><strong>1</strong>",
@@ -1436,7 +1621,7 @@ mod tests {
                     start.wait();
                     for round in 1..=REQUESTS_PER_WORKER {
                         store
-                            .record_prompt(session, &worker_id, round, &worker_id, None)
+                            .record_prompt(session, &worker_id, round, &worker_id, None, None)
                             .unwrap();
                         store
                             .record_llm_latency(
@@ -1446,7 +1631,14 @@ mod tests {
                             )
                             .unwrap();
                         store
-                            .record_llm_response(session, &worker_id, round, "ok", &[])
+                            .record_llm_response(
+                                session,
+                                &worker_id,
+                                round,
+                                &agent_core::UsageStats::zero(),
+                                "ok",
+                                &[],
+                            )
                             .unwrap();
                     }
                 })
@@ -1458,12 +1650,12 @@ mod tests {
 
         let session_dir = store.root().join(session);
         let html = fs::read_to_string(session_dir.join("statistics.html")).unwrap();
-        let prompt = fs::read_to_string(session_dir.join("llm_prompt.dump")).unwrap();
+        let prompt = fs::read_to_string(session_dir.join("llm_prompt.html")).unwrap();
         let response = fs::read_to_string(session_dir.join("llm_response.dump")).unwrap();
         assert!(html.ends_with("</html>"));
         assert!(html.contains("<strong>12</strong>"));
-        assert!(prompt.contains("scope: latest_request_only"));
-        assert_eq!(prompt.matches("request_sequence:").count(), 1);
+        assert!(prompt.ends_with("</html>"));
+        assert_eq!(prompt.matches("class=\"message\"").count(), 0);
         assert!(response.contains("retained_responses: 10"));
         let artifact_names = fs::read_dir(&session_dir)
             .unwrap()
@@ -1472,7 +1664,7 @@ mod tests {
         assert_eq!(
             artifact_names,
             [
-                "llm_prompt.dump",
+                "llm_prompt.html",
                 "llm_response.dump",
                 "statistics.html",
                 "tool_schema.dump",
@@ -1554,7 +1746,7 @@ mod tests {
             )
             .unwrap();
         store
-            .record_prompt(session, "worker_0", 1, "prompt", None)
+            .record_prompt(session, "worker_0", 1, "prompt", None, None)
             .unwrap();
         store
             .record_llm_latency(session, "worker_0", Duration::from_millis(125))
@@ -1571,7 +1763,7 @@ mod tests {
             )
             .unwrap();
         store
-            .record_prompt(session, "worker_0", 2, "prompt 2", None)
+            .record_prompt(session, "worker_0", 2, "prompt 2", None, None)
             .unwrap();
         store.record_model_failure(session, "worker_0").unwrap();
         let html = fs::read_to_string(store.root().join(session).join("statistics.html")).unwrap();
@@ -1600,7 +1792,7 @@ mod tests {
             )
             .unwrap();
         store
-            .record_prompt("session_test", "worker_0", 1, "first prompt", None)
+            .record_prompt("session_test", "worker_0", 1, "first prompt", None, None)
             .unwrap();
         let native_request = agent_core::ModelInteractionRequest {
             rendered_prompt: "second prompt".to_string(),
@@ -1648,21 +1840,34 @@ mod tests {
                 2,
                 "second prompt",
                 Some(&native_request),
+                Some(&serde_json::json!({
+                    "messages": [
+                        {"role": "system", "content": "second prompt"},
+                        {"role": "assistant", "content": "checking", "tool_calls": [{
+                            "id": "call_previous",
+                            "type": "function",
+                            "function": {"name": "self_tool", "arguments": "{\"type\":\"cwd\"}"}
+                        }]},
+                        {"role": "tool", "tool_call_id": "call_previous", "content": "CWD: /workspace"}
+                    ],
+                    "model": "ignored-model",
+                    "tools": [{"ignored": true}]
+                })),
             )
             .unwrap();
-        let dump = fs::read_to_string(session_dir.join("llm_prompt.dump")).unwrap();
+        let dump = fs::read_to_string(session_dir.join("llm_prompt.html")).unwrap();
         let tool_schema = fs::read_to_string(session_dir.join("tool_schema.dump")).unwrap();
-        assert!(dump.contains("scope: latest_request_only"));
-        assert!(dump.contains("request_sequence: 2"));
         assert!(dump.contains("second prompt"));
         assert!(!dump.contains("first prompt"));
-        assert_eq!(dump.matches("request_sequence:").count(), 1);
-        assert!(dump.contains("tool_call_mode: native"));
-        assert!(dump.contains("static_builtin_tool_definitions: 1"));
-        assert!(dump.contains("dynamic_tool_definitions: 1"));
-        assert!(!dump.contains("mcp.demo.echo"));
         assert!(dump.contains("call_previous"));
         assert!(dump.contains("CWD: /workspace"));
+        assert!(!dump.contains("ignored-model"));
+        assert!(!dump.contains("ignored"));
+        assert!(!dump.contains("mcp.demo.echo"));
+        let system = dump.find("second prompt").unwrap();
+        let assistant = dump.find("checking").unwrap();
+        let tool = dump.find("CWD: /workspace").unwrap();
+        assert!(system < assistant && assistant < tool);
         assert!(tool_schema.contains("scope: latest_request_only"));
         assert!(tool_schema.contains("request_sequence: 2"));
         assert!(tool_schema.contains("tool_call_mode: native"));
@@ -1744,37 +1949,35 @@ mod tests {
                 3,
                 &request.rendered_prompt,
                 Some(&request),
+                Some(&serde_json::json!({
+                    "messages": [
+                        {"role": "user", "content": "rendered prompt before native messages", "cache_control": {"type": "ephemeral"}},
+                        {"role": "assistant", "content": "I will inspect the file.", "tool_calls": [{"id": "call_read", "type": "function", "function": {"name": "readfile", "arguments": "{\"path\":\"README.md\"}"}}]},
+                        {"role": "tool", "tool_call_id": "call_read", "content": "README content"},
+                        {"role": "assistant", "content": "Now I will run the checks.", "tool_calls": [{"id": "call_test", "type": "function", "function": {"name": "run_bash", "arguments": "{\"cmd\":\"cargo test\"}"}}]},
+                        {"role": "tool", "tool_call_id": "call_test", "content": "tests passed"}
+                    ],
+                    "temperature": 0
+                })),
             )
             .unwrap();
 
-        let dump = fs::read_to_string(session_dir.join("llm_prompt.dump")).unwrap();
-        assert!(dump.contains("MODEL INPUT CONTINUATION"), "{dump}");
-        assert!(!dump.contains("NATIVE EXCHANGES"), "{dump}");
+        let dump = fs::read_to_string(session_dir.join("llm_prompt.html")).unwrap();
         let prompt = dump.find("rendered prompt before native messages").unwrap();
-        let assistant_1 = dump.find("EXCHANGE 1 · ASSISTANT").unwrap();
+        let assistant_1 = dump.find("I will inspect the file.").unwrap();
         let call_1 = dump.find("call_read").unwrap();
-        let runtime_1 = dump[prompt..]
-            .find("## RUNTIME")
-            .map(|index| prompt + index)
-            .unwrap();
         let result_1 = dump.find("README content").unwrap();
-        let assistant_2 = dump.find("EXCHANGE 2 · ASSISTANT").unwrap();
+        let assistant_2 = dump.find("Now I will run the checks.").unwrap();
         let call_2 = dump.find("call_test").unwrap();
-        let runtime_2 = dump[assistant_2..]
-            .find("## RUNTIME")
-            .map(|index| assistant_2 + index)
-            .unwrap();
         let result_2 = dump.find("tests passed").unwrap();
         assert!(prompt < assistant_1);
         assert!(assistant_1 < call_1);
-        assert!(call_1 < runtime_1);
-        assert!(runtime_1 < result_1);
+        assert!(call_1 < result_1);
         assert!(result_1 < assistant_2);
         assert!(assistant_2 < call_2);
-        assert!(call_2 < runtime_2);
-        assert!(runtime_2 < result_2);
-        assert!(dump.contains("Action result: readfile"));
-        assert!(dump.contains("Action result: run_bash"));
+        assert!(call_2 < result_2);
+        assert!(!dump.contains("cache_control"));
+        assert!(!dump.contains("temperature"));
         store.cleanup().unwrap();
     }
 
@@ -1791,17 +1994,59 @@ mod tests {
                 1,
                 "inline prompt",
                 Some(&request),
+                Some(&serde_json::json!({
+                    "system": [{"type": "text", "text": "static system", "cache_control": {"type": "ephemeral"}}],
+                    "messages": [{"role": "user", "content": [{"type": "text", "text": "inline prompt", "cache_control": {"type": "ephemeral"}}]}],
+                    "max_tokens": 4096
+                })),
             )
             .unwrap();
 
-        let dump = fs::read_to_string(session_dir.join("llm_prompt.dump")).unwrap();
+        let dump = fs::read_to_string(session_dir.join("llm_prompt.html")).unwrap();
         let tool_schema = fs::read_to_string(session_dir.join("tool_schema.dump")).unwrap();
-        assert!(dump.contains("tool_call_mode: inline"));
+        assert!(dump.contains("static system"));
         assert!(dump.contains("inline prompt"));
-        assert!(!dump.contains("NATIVE STRUCTURED INPUT"));
+        assert!(dump.find("static system").unwrap() < dump.find("inline prompt").unwrap());
+        assert!(!dump.contains("cache_control"));
+        assert!(!dump.contains("max_tokens"));
         assert!(tool_schema.contains("tool_call_mode: inline"));
         assert!(tool_schema.contains("no native API tools field"));
         store.cleanup().unwrap();
+    }
+
+    #[test]
+    fn responses_api_input_payload_keeps_item_order_and_drops_transport_details() {
+        let request = LlmRequestDumpEntry {
+            sequence: 1,
+            worker_id: "worker_0".to_string(),
+            round: 1,
+            interaction_request: None,
+            api_payload: Some(serde_json::json!({
+                "model": "ignored-model",
+                "input": [
+                    {"role": "user", "content": [{"type": "input_text", "text": "first", "cache_control": {"type": "ephemeral"}}]},
+                    {"type": "function_call", "call_id": "call_1", "name": "readfile", "arguments": "{\"path\":\"README.md\"}", "status": "completed"},
+                    {"type": "function_call_output", "call_id": "call_1", "output": "second"},
+                    {"role": "user", "content": [{"type": "input_text", "text": "third"}]}
+                ],
+                "parallel_tool_calls": true,
+                "max_output_tokens": 4096
+            })),
+        };
+
+        let html = render_llm_prompt_html("session_responses_input", Some(&request));
+        let first = html.find("first").unwrap();
+        let call = html.find("call_1").unwrap();
+        let second = html.find("second").unwrap();
+        let third = html.find("third").unwrap();
+        assert!(first < call && call < second && second < third);
+        assert!(html.contains("function_call"));
+        assert!(html.contains("function_call_output"));
+        assert!(!html.contains("ignored-model"));
+        assert!(!html.contains("cache_control"));
+        assert!(!html.contains("parallel_tool_calls"));
+        assert!(!html.contains("max_output_tokens"));
+        assert!(!html.contains("status"));
     }
 
     #[test]
@@ -1825,6 +2070,7 @@ mod tests {
                     "session_responses",
                     "worker_0",
                     index,
+                    &agent_core::UsageStats::zero(),
                     &format!("response-{index}"),
                     &tool_calls,
                 )

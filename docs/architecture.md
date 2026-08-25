@@ -58,7 +58,12 @@ Version 1.1 also defines a durable browser/Host/Core delivery boundary:
 - authoritative UI events are journaled per memory space with monotonic
   `event_seq` values and replayed from a client cursor after reconnect;
 - commands are FIFO within a Session while independent Sessions may work in
-  parallel, and memory-space changes use an epoch barrier;
+  parallel; Session-group mutations use their own lane, and memory-space
+  changes use an epoch barrier;
+- Session metadata is sharded as `sessions/<id>/session.json`; metadata and
+  history share one per-Session lock domain, while group definitions, Roles,
+  jobs, and audit state have independent lock domains. No ordinary Session
+  update rewrites a MEM-wide Session index;
 - API keys and MCP secrets remain request-scoped direct replies and never enter
   snapshots, semantic event journals, prompts, history, or audit.
 
@@ -1111,11 +1116,17 @@ outcomes and detailed latency/CPU/repair metrics by model, gateway, and resolved
 tool-call protocol. `TIMEM_PARALLEL_TOOL_CALLS` controls whether the
 resolved parallel flag is enabled; provider adapters always send it explicitly.
 
-Web debug request and response dumps retain the newest ten entries per session.
-Each entry records its worker and request sequence for correlation. Native-mode
-request dumps include tool definitions and prior tool exchanges; response dumps
-include both assistant text and the provider's structured tool calls, including
-the lossless raw argument representation.
+Web debug diagnostics retain the latest request as `llm_prompt.html` and the
+newest ten responses per session. Core supplies the request body produced by the
+provider adapter; the prompt HTML renders only its ordered `system`, `messages`,
+or `input` entries. It preserves prompt text and the role/type plus tool-call and
+tool-result correlation fields, while omitting transport/configuration details
+such as model selection, token limits, tool schemas, and cache-control markers.
+The separate tool-schema and response dumps retain request/worker correlation;
+response dumps include assistant text and structured tool calls with lossless raw
+arguments. `statistics.html` aggregates explicit response usage fields per
+endpoint and reports KVC hit rate as cached input tokens divided by prompt input
+tokens, alongside cache-read and cache-creation totals.
 
 Inline mode sends one response in the selected response protocol.
 `TIMEM_RESPONSE_PROTOCOL` selects `xml` (default) or `json`; native mode omits
@@ -1230,8 +1241,13 @@ offloaded deltas. If compaction targets the active persistent MCP catalog, Core
 appends exactly one replacement catalog delta using the currently applied tool
 definitions. It contains no endpoint, header, environment, or credential data.
 Pending Web MCP edits are excluded until the next new-turn
-boundary applies them. If any ref is missing, runtime returns a
-repairable action result and does not silently discard context.
+boundary applies them. Dynamic-context token accounting uses one provider-neutral
+estimator for both visible text slices and provider-native exchanges owned by each
+visible delta. Compact telemetry reports the combined total plus text/native
+breakdowns, and the same combined estimate updates `shrunk_tokens`; this keeps the
+reported reduction aligned with the history actually removed from model input.
+If any ref is missing, runtime returns a repairable action result and does not
+silently discard context.
 
 ### Action Object
 

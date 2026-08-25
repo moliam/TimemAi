@@ -37,3 +37,20 @@ export function wheelDeltaPixels(deltaY: number, deltaMode: number, clientHeight
   if (deltaMode === 2) return deltaY * Math.max(1, clientHeight);
   return deltaY;
 }
+
+export type UserMessageNavigationDirection = "previous" | "next";
+
+export function adjacentUserMessageIndex(
+  anchorTops: readonly number[],
+  referenceTop: number,
+  direction: UserMessageNavigationDirection,
+  epsilon = 4,
+) {
+  if (direction === "previous") {
+    for (let index = anchorTops.length - 1; index >= 0; index -= 1) {
+      if (anchorTops[index] < referenceTop - epsilon) return index;
+    }
+    return -1;
+  }
+  return anchorTops.findIndex((top) => top > referenceTop + epsilon);
+}

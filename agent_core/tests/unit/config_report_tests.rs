@@ -7,6 +7,7 @@ fn config() -> ModelServiceConfig {
         model: "qwen-plus".to_string(),
         base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
         api_key: "secret".to_string(),
+        http_headers: Default::default(),
         timeout_secs: 120,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
