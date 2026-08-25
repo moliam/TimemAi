@@ -13,7 +13,9 @@ const EVENT_LIMIT: usize = 64;
 const ERROR_LIMIT: usize = 4096;
 const BACKTRACE_LIMIT: usize = 128 * 1024;
 const DIAGNOSTICS_DIR: &str = "diagnostics/timem-web";
-const CURRENT_RUN_FILE: &str = "current-run.json";
+const CURRENT_RUNS_DIR: &str = "current-runs";
+const RUN_ARCHIVE_DIR: &str = "run-archive";
+const ARCHIVE_LIMIT: usize = 32;
 const LAST_EXIT_FILE: &str = "last-exit.json";
 const LAST_PANIC_FILE: &str = "last-panic.txt";
 const PREVIOUS_ABNORMAL_FILE: &str = "previous-abnormal-exit.json";
@@ -26,6 +28,7 @@ pub(crate) struct LifecycleDiagnostics {
 #[derive(Debug)]
 struct Inner {
     root: PathBuf,
+    current_path: PathBuf,
     run_id: String,
     started_at_ms: u128,
     argument_options: Vec<String>,
@@ -41,34 +44,39 @@ struct LifecycleEvent {
 }
 
 impl LifecycleDiagnostics {
-    pub(crate) fn install_from_env() -> Result<Self, String> {
-        let args = std::env::args().skip(1).collect::<Vec<_>>();
-        Self::install_in(&data_root_from_args(&args), &args, true)
+    pub(crate) fn install_for(memory_root: &Path, args: &[String]) -> Result<Self, String> {
+        Self::install_in(memory_root, args, true)
     }
 
     fn install_in(data_root: &Path, args: &[String], install_hook: bool) -> Result<Self, String> {
         let root = data_root.join(DIAGNOSTICS_DIR);
         create_private_dir(&root)?;
-        promote_interrupted_run(&root)?;
+        create_private_dir(&root.join(CURRENT_RUNS_DIR))?;
+        create_private_dir(&root.join(RUN_ARCHIVE_DIR))?;
+        promote_interrupted_runs(&root)?;
+        prune_run_archive(&root)?;
 
         let started_at_ms = now_ms();
-        let run_id = format!("{}-{started_at_ms}", std::process::id());
+        let run_id = format!("{}-{started_at_ms}-{}", std::process::id(), now_ns());
+        let current_path = root.join(CURRENT_RUNS_DIR).join(format!("{run_id}.json"));
         let current = serde_json::json!({
             "schema_version": 1,
             "status": "running",
             "run_id": run_id,
             "pid": std::process::id(),
+            "process_identity": agent_core::os::process_identity(std::process::id()),
             "version": env!("CARGO_PKG_VERSION"),
             "started_at_ms": started_at_ms,
             "argument_options": sanitized_option_names(args),
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
         });
-        atomic_json_write(&root.join(CURRENT_RUN_FILE), &current)?;
+        atomic_json_write(&current_path, &current)?;
 
         let diagnostics = Self {
             inner: Arc::new(Inner {
                 root,
+                current_path,
                 run_id,
                 started_at_ms,
                 argument_options: sanitized_option_names(args),
@@ -87,6 +95,7 @@ impl LifecycleDiagnostics {
         Self {
             inner: Arc::new(Inner {
                 root: PathBuf::new(),
+                current_path: PathBuf::new(),
                 run_id: "diagnostics-disabled".to_string(),
                 started_at_ms: now_ms(),
                 argument_options: Vec::new(),
@@ -117,6 +126,7 @@ impl LifecycleDiagnostics {
             "status": "running",
             "run_id": self.inner.run_id,
             "pid": std::process::id(),
+            "process_identity": agent_core::os::process_identity(std::process::id()),
             "version": env!("CARGO_PKG_VERSION"),
             "started_at_ms": self.inner.started_at_ms,
             "argument_options": self.inner.argument_options,
@@ -125,7 +135,7 @@ impl LifecycleDiagnostics {
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
         });
-        if let Err(error) = atomic_json_write(&self.inner.root.join(CURRENT_RUN_FILE), &current) {
+        if let Err(error) = atomic_json_write(&self.inner.current_path, &current) {
             eprintln!("[timem_web_diagnostics_checkpoint_error] {error}");
         }
     }
@@ -157,12 +167,18 @@ impl LifecycleDiagnostics {
             "error": error.map(redact_and_bound),
             "recent_lifecycle_events": events,
         });
-        if let Err(write_error) = atomic_json_write(&self.inner.root.join(LAST_EXIT_FILE), &record)
+        let archive_path = self
+            .inner
+            .root
+            .join(RUN_ARCHIVE_DIR)
+            .join(format!("{}-exit.json", self.inner.run_id));
+        if let Err(write_error) = atomic_json_write(&archive_path, &record)
+            .and_then(|_| atomic_json_write(&self.inner.root.join(LAST_EXIT_FILE), &record))
         {
             eprintln!("[timem_web_diagnostics_write_error] {write_error}");
             return;
         }
-        if let Err(remove_error) = remove_if_exists(&self.inner.root.join(CURRENT_RUN_FILE)) {
+        if let Err(remove_error) = remove_if_exists(&self.inner.current_path) {
             eprintln!("[timem_web_diagnostics_cleanup_error] {remove_error}");
             return;
         }
@@ -247,6 +263,11 @@ fn write_panic_report(inner: &Inner, info: &PanicHookInfo<'_>) -> Result<(), Str
         &events,
         &Backtrace::force_capture().to_string(),
     );
+    let archive_path = inner
+        .root
+        .join(RUN_ARCHIVE_DIR)
+        .join(format!("{}-panic.txt", inner.run_id));
+    atomic_private_write(&archive_path, report.as_bytes())?;
     atomic_private_write(&inner.root.join(LAST_PANIC_FILE), report.as_bytes())
 }
 
@@ -268,41 +289,113 @@ fn render_panic_report(
     )
 }
 
-fn promote_interrupted_run(root: &Path) -> Result<(), String> {
-    let current_path = root.join(CURRENT_RUN_FILE);
-    if !current_path.is_file() {
-        return Ok(());
+fn promote_interrupted_runs(root: &Path) -> Result<(), String> {
+    let current_root = root.join(CURRENT_RUNS_DIR);
+    let entries = fs::read_dir(&current_root)
+        .map_err(|error| format!("diagnostics_current_runs_read_failed:{error}"))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("diagnostics_current_run_read_failed:{error}"))?;
+        let path = entry.path();
+        if !entry
+            .file_type()
+            .map_err(|error| format!("diagnostics_current_run_type_failed:{error}"))?
+            .is_file()
+            || path.extension().and_then(|value| value.to_str()) != Some("json")
+        {
+            continue;
+        }
+        let parsed = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        if parsed.as_ref().is_some_and(marker_owner_may_still_be_alive) {
+            continue;
+        }
+        let mut record = parsed.unwrap_or_else(|| serde_json::json!({ "schema_version": 1 }));
+        if let Some(object) = record.as_object_mut() {
+            object.insert(
+                "status".to_string(),
+                serde_json::Value::String("abnormal_exit_detected_on_next_start".to_string()),
+            );
+            object.insert("detected_at_ms".to_string(), serde_json::json!(now_ms()));
+            object.insert(
+                "exact_cause".to_string(),
+                serde_json::Value::String("unknown".to_string()),
+            );
+        }
+        let run_id = record
+            .get("run_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("unknown-{}", now_ms()));
+        let archive = root
+            .join(RUN_ARCHIVE_DIR)
+            .join(format!("{run_id}-abnormal.json"));
+        atomic_json_write(&archive, &record)?;
+        atomic_json_write(&root.join(PREVIOUS_ABNORMAL_FILE), &record)?;
+        remove_if_exists(&path)?;
     }
-    let mut record = fs::read(&current_path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .unwrap_or_else(|| serde_json::json!({ "schema_version": 1 }));
-    if let Some(object) = record.as_object_mut() {
-        object.insert(
-            "status".to_string(),
-            serde_json::Value::String("abnormal_exit_detected_on_next_start".to_string()),
-        );
-        object.insert("detected_at_ms".to_string(), serde_json::json!(now_ms()));
-        object.insert(
-            "exact_cause".to_string(),
-            serde_json::Value::String("unknown".to_string()),
-        );
-    }
-    atomic_json_write(&root.join(PREVIOUS_ABNORMAL_FILE), &record)?;
-    remove_if_exists(&current_path)
+    Ok(())
 }
 
-fn data_root_from_args(args: &[String]) -> PathBuf {
+fn marker_owner_may_still_be_alive(record: &serde_json::Value) -> bool {
+    let Some(pid) = record
+        .get("pid")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok())
+    else {
+        return false;
+    };
+    if agent_core::os::process_is_definitely_dead(pid) {
+        return false;
+    }
+    match (
+        record
+            .get("process_identity")
+            .and_then(serde_json::Value::as_str),
+        agent_core::os::process_identity(pid),
+    ) {
+        (Some(recorded), Some(current)) => recorded == current,
+        _ => agent_core::os::process_may_be_alive(pid),
+    }
+}
+
+fn prune_run_archive(root: &Path) -> Result<(), String> {
+    let archive_root = root.join(RUN_ARCHIVE_DIR);
+    let mut entries = fs::read_dir(&archive_root)
+        .map_err(|error| format!("diagnostics_archive_read_failed:{error}"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| {
+        entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(UNIX_EPOCH)
+    });
+    let remove_count = entries.len().saturating_sub(ARCHIVE_LIMIT);
+    for entry in entries.into_iter().take(remove_count) {
+        remove_if_exists(&entry.path())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn memory_root_from_args(args: &[String]) -> Result<PathBuf, String> {
+    if std::env::var_os("TIMEM_DATA_DIR").is_some() {
+        return Err("unsupported_env:TIMEM_DATA_DIR; MEM is the complete workspace".to_string());
+    }
     for (index, argument) in args.iter().enumerate() {
-        if argument == "--data-dir" {
-            if let Some(value) = args.get(index + 1) {
-                return PathBuf::from(value);
-            }
-        } else if let Some(value) = argument.strip_prefix("--data-dir=") {
-            return PathBuf::from(value);
+        if argument == "--data-dir" || argument.starts_with("--data-dir=") {
+            return Err("unsupported_option:--data-dir; MEM is the complete workspace".to_string());
+        }
+        if argument == "--space" {
+            return agent_core::resolve_memory_dir(args.get(index + 1).map(String::as_str));
+        }
+        if let Some(value) = argument.strip_prefix("--space=") {
+            return agent_core::resolve_memory_dir(Some(value));
         }
     }
-    agent_core::default_data_root()
+    agent_core::resolve_memory_dir(std::env::var("TIMEM_SPACE").ok().as_deref())
 }
 
 fn sanitized_option_names(args: &[String]) -> Vec<String> {
@@ -391,6 +484,13 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+fn now_ns() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
 }
 
 #[cfg(test)]

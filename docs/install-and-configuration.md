@@ -151,7 +151,6 @@ Common values:
 
 ```bash
 export TIMEM_SPACE=/absolute/path/to/mem
-export TIMEM_DATA_DIR=/path/to/data
 export TIMEM_BASH_APPROVAL=approve
 export TIMEM_WORK_INSTRUCTIONS=silent
 ```
@@ -188,16 +187,22 @@ By default, Timem stores MEM data in the user's home directory:
 ```
 
 The directory is created automatically on first startup. Session metadata is
-stored per Session rather than in one shared mutable index. Existing
-`sessions/index.jsonl` stores are repaired if necessary, migrated automatically
+stored per Session rather than in one shared mutable index. If one
+`sessions/<session-id>/session.json` is malformed or carries a mismatched ID,
+Timem quarantines that file beside the Session directory and restores the other
+healthy Sessions. Existing `sessions/index.jsonl` stores are repaired if
+necessary, migrated automatically
 to `sessions/<session-id>/session.json`, and retained as `index.v1.jsonl` for
 manual recovery.
 
 Writes use narrow lock domains: each Session owns one data lock for its metadata
 and history; Session groups, Roles, tool jobs, and audit data use separate locks.
 Independent Sessions therefore do not wait on each other's metadata or chat
-writes. Cross-collection group changes always acquire MEM state before Session
-state and release in-memory locks before filesystem or worker operations.
+writes. Cross-collection group changes release in-memory locks before filesystem or
+worker operations. Group moves persist a candidate Session snapshot before
+committing memory. Group deletion persists affected Session metadata first,
+rolls those writes back if a later write fails, and removes the group definition
+only after all Session writes succeed.
 
 `--space` and `TIMEM_SPACE` select another MEM directory. Their value must be
 an absolute path, and the path itself is the MEM directory; Timem does not add
@@ -216,10 +221,18 @@ port is unavailable, it continues through the existing automatic port range
 (`12345`–`23456`). A custom MEM uses the rotating automatic selection order,
 and an explicit `--port` always has priority over either automatic strategy.
 
-`TIMEM_DATA_DIR` remains the root for non-MEM runtime configuration such as the
-workspace registry and capability overlays. Its default remains `.timem_data`
-in the launch directory. Env files are independent from runtime data and are
-not touched by install or uninstall scripts.
+The selected MEM is the complete workspace root. Workspace configuration,
+capability overlays, Sessions, memory, audit files, and Web diagnostics all live
+under that one directory. `TIMEM_DATA_DIR` and `--data-dir` are no longer
+supported and are rejected rather than silently splitting state across roots.
+Existing project-local `.timem_data`, `data`, and other legacy directories are
+not migrated or deleted automatically. Env files are independent from MEM data
+and are not touched by install or uninstall scripts.
+
+A MEM is exclusively owned by one running Timem host. A second Web or Shell
+process using the same MEM exits with an ownership error; choose another
+absolute `--space` to run concurrently. Different MEM directories remain
+independent and may run at the same time.
 
 ### Timem Web lifecycle diagnostics
 
@@ -230,8 +243,13 @@ unexpectedly, without continuously logging model or browser traffic.
 Files are stored under:
 
 ```text
-<TIMEM_DATA_DIR>/diagnostics/timem-web/
-  current-run.json
+<MEM>/diagnostics/timem-web/
+  current-runs/
+    <run-id>.json
+  run-archive/
+    <run-id>-exit.json
+    <run-id>-panic.txt
+    <run-id>-abnormal.json
   last-exit.json
   last-panic.txt
   previous-abnormal-exit.json
@@ -243,12 +261,16 @@ The recorder has fixed bounds:
 - disk checkpoints occur only at process start, configuration completion,
   listener binding, graceful exit, or panic;
 - files are atomically replaced rather than appended, so storage does not grow
-  with uptime or request count;
+  with uptime or request count; completed-run archives retain only a bounded
+  recent set;
 - panic messages are limited to 4 KiB and backtraces to 128 KiB;
 - Unix directories and files use owner-only `0700` and `0600` permissions.
 
-`current-run.json` contains the process version, PID, operating system,
-architecture, option names, and the latest low-frequency milestone. Argument
+Each `current-runs/<run-id>.json` contains the process version, PID,
+PID-reuse-resistant process identity where supported, operating system,
+architecture, option names, and the latest low-frequency milestone. Successive
+Web runs use separate files. A process removes only its own marker, and a new
+process promotes only markers whose owner is confirmed stale. Argument
 values are not stored. In particular, API keys, URLs, paths, prompts, model
 replies, Web access tokens, HTTP header values, and tool inputs/outputs are not
 part of the default lifecycle report.
@@ -262,8 +284,9 @@ bounded best-effort redaction of common credential shapes.
 A Rust panic produces `last-panic.txt` with its thread, source location, recent
 lifecycle milestones, and a forced backtrace. Backtrace capture occurs only on
 panic. If the process cannot run cleanup—for example after SIGKILL, host reboot,
-or some OOM terminations—`current-run.json` remains. The next start moves that
-record to `previous-abnormal-exit.json` with `exact_cause: unknown`. This proves
+or some OOM terminations—its file under `current-runs/` remains. A later start
+copies a confirmed-stale record to `run-archive/<run-id>-abnormal.json` and
+updates `previous-abnormal-exit.json` with `exact_cause: unknown`. This proves
 only that the prior process did not complete its exit protocol; it does **not**
 by itself prove a panic, OOM, or any particular external signal.
 
@@ -296,7 +319,7 @@ Web:
   renamed, reordered, collapsed, and deleted; deleting a group moves its
   Sessions to **Unsorted** without deleting them. A Session can be moved between
   groups while other Sessions continue working.
-- Attachments are stored under the active data space and passed to the active
+- Attachments are stored under the active MEM and passed to the active
   turn.
 - Stop cancels all workers in the active Session; the next send starts from the
   primary worker.

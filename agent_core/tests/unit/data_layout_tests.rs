@@ -37,53 +37,11 @@ fn builds_runtime_data_layout_paths() {
 }
 
 #[test]
-fn new_environment_uses_hidden_data_root() {
-    let root = unique_test_root("hidden_data_root");
-    std::fs::create_dir_all(&root).unwrap();
-
+fn default_data_root_is_the_default_mem_workspace() {
     assert_eq!(
-        default_unconfigured_data_root(&root),
-        PathBuf::from(".timem_data")
+        default_data_root(),
+        default_memory_dir().unwrap_or_else(|_| PathBuf::from(".timem_data"))
     );
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn existing_legacy_data_root_is_preserved_until_hidden_root_exists() {
-    let root = unique_test_root("legacy_data_root");
-    std::fs::create_dir_all(root.join("data")).unwrap();
-    assert_eq!(
-        default_unconfigured_data_root(&root),
-        PathBuf::from(".timem_data"),
-        "an unrelated directory named data is not a Timem legacy root"
-    );
-
-    std::fs::write(
-        root.join("data/workspace.json"),
-        r#"{"dirs":["/tmp/project"]}"#,
-    )
-    .unwrap();
-    assert_eq!(default_unconfigured_data_root(&root), PathBuf::from("data"));
-
-    std::fs::create_dir_all(root.join(".timem_data")).unwrap();
-    assert_eq!(
-        default_unconfigured_data_root(&root),
-        PathBuf::from(".timem_data")
-    );
-
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn legacy_session_layout_is_a_timem_fingerprint() {
-    let root = unique_test_root("legacy_data_fingerprint");
-    let legacy = root.join("data/.project/memory/sessions");
-    std::fs::create_dir_all(&legacy).unwrap();
-    std::fs::write(legacy.join("index.jsonl"), "").unwrap();
-    assert_eq!(default_unconfigured_data_root(&root), PathBuf::from("data"));
-
-    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]

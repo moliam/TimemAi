@@ -71,7 +71,7 @@ stop_host() {
 }
 
 first_log="$test_root/first.log"
-"$binary" --no-open --data-dir "$test_root/data" --space lifecycle >"$first_log" 2>&1 &
+"$binary" --no-open --space "$test_root/lifecycle-mem" >"$first_log" 2>&1 &
 host_pid=$!
 first_url="$(wait_for_url "$first_log")"
 first_authority="${first_url#http://}"
@@ -102,10 +102,10 @@ curl "${curl_common[@]}" \
 
 stop_host
 
-# Restart immediately with the same data and port. This proves graceful
+# Restart immediately with the same MEM and port. This proves graceful
 # shutdown releases the listener and the per-memory journal ownership lock.
 second_log="$test_root/second.log"
-"$binary" --no-open --port "$first_port" --data-dir "$test_root/data" --space lifecycle >"$second_log" 2>&1 &
+"$binary" --no-open --port "$first_port" --space "$test_root/lifecycle-mem" >"$second_log" 2>&1 &
 host_pid=$!
 second_url="$(wait_for_url "$second_log")"
 second_token="${second_url##*token=}"
@@ -141,10 +141,10 @@ set -euo pipefail
 binary="$1"
 host_pid_file="$2"
 port="$3"
-data_dir="$4"
+memory_dir="$4"
 
 "$binary" --no-open --port "$port" \
-  --data-dir "$data_dir" --space launcher-crash &
+  --space "$memory_dir" &
 child_pid=$!
 printf '%s\n' "$child_pid" >"$host_pid_file"
 wait "$child_pid"
@@ -152,7 +152,7 @@ EOF
 chmod +x "$launcher_script"
 
 "$launcher_script" "$binary" "$host_pid_file" "$first_port" \
-  "$test_root/data" >"$launcher_log" 2>&1 &
+  "$test_root/launcher-crash-mem" >"$launcher_log" 2>&1 &
 launcher_pid=$!
 
 for _ in $(seq 1 100); do
@@ -177,7 +177,7 @@ launcher_pid=""
 # must wait for ownership handoff instead of falsely reusing a dying instance.
 old_host_pid="$host_pid"
 restart_log="$test_root/launcher-restart.log"
-"$binary" --no-open --port "$first_port"   --data-dir "$test_root/data" --space launcher-crash >"$restart_log" 2>&1 &
+"$binary" --no-open --port "$first_port"   --space "$test_root/launcher-crash-mem" >"$restart_log" 2>&1 &
 host_pid=$!
 restart_url="$(wait_for_url "$restart_log")"
 

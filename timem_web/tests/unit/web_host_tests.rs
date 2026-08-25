@@ -2459,7 +2459,7 @@ async fn reuses_the_same_authenticated_url_after_closing_and_reopening_a_page() 
 fn restarts_timem_web_after_runtime_shutdown_with_the_same_data_and_port() {
     let smoke = include_str!("../../../scripts/web_runtime_lifecycle_smoke.sh");
     assert!(smoke.contains("--port \"$first_port\""));
-    assert!(smoke.contains("--data-dir \"$test_root/data\" --space lifecycle"));
+    assert!(smoke.contains("--space \"$test_root/lifecycle-mem\""));
     assert!(smoke.contains("kill -TERM"));
 }
 
@@ -3186,7 +3186,6 @@ fn web_startup_can_bootstrap_model_service_config_from_latest_session_cache() {
     store.upsert_session(&older).unwrap();
 
     let launch = WebLaunchOptions {
-        data_dir: Some(data_dir.display().to_string()),
         space: Some(data_dir.join(space).display().to_string()),
         ..WebLaunchOptions::default()
     };
@@ -5078,6 +5077,129 @@ fn session_groups_create_move_persist_and_delete_without_deleting_sessions() {
         None
     );
     let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn session_group_move_persistence_failure_keeps_memory_and_disk_unchanged() {
+    let state = routing_test_state();
+    let Some(WireEvent::SessionGroupsUpdated { groups }) = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupCreate {
+            name: "Failure test".to_string(),
+        },
+    )
+    .unwrap() else {
+        panic!("expected session groups update");
+    };
+    let group_id = groups[0].id.clone();
+    let store = current_session_store(&state).unwrap();
+    persist_web_session(&state, "session_a").unwrap();
+    let metadata = store.metadata_path_for_session("session_a");
+    let original = std::fs::read(&metadata).unwrap();
+    std::fs::remove_file(&metadata).unwrap();
+    std::fs::create_dir(&metadata).unwrap();
+
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupMove {
+            session_id: "session_a".to_string(),
+            group_id: Some(group_id),
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("session_metadata_write_failed"));
+    assert_eq!(
+        state.sessions.lock().unwrap()["session_a"].group_id,
+        None,
+        "failed persistence must not mutate the in-memory session"
+    );
+
+    std::fs::remove_dir(&metadata).unwrap();
+    std::fs::write(&metadata, original).unwrap();
+    assert_eq!(
+        store.load_session("session_a").unwrap().unwrap().group_id,
+        None
+    );
+}
+
+#[test]
+fn session_group_delete_persistence_failure_rolls_back_prior_metadata_writes() {
+    let state = routing_test_state();
+    let Some(WireEvent::SessionGroupsUpdated { groups }) = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupCreate {
+            name: "Rollback test".to_string(),
+        },
+    )
+    .unwrap() else {
+        panic!("expected session groups update");
+    };
+    let group_id = groups[0].id.clone();
+    for session_id in ["session_a", "session_b"] {
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SessionGroupMove {
+                session_id: session_id.to_string(),
+                group_id: Some(group_id.clone()),
+            },
+        )
+        .unwrap();
+    }
+    let store = current_session_store(&state).unwrap();
+    let blocked_metadata = store.metadata_path_for_session("session_b");
+    let blocked_original = std::fs::read(&blocked_metadata).unwrap();
+    std::fs::remove_file(&blocked_metadata).unwrap();
+    std::fs::create_dir(&blocked_metadata).unwrap();
+
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupDelete {
+            group_id: group_id.clone(),
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("session_group_delete_persist_failed"));
+    assert_eq!(
+        current_mem_state(&state).unwrap().session_groups,
+        groups,
+        "failed deletion must keep the group definition"
+    );
+    for session_id in ["session_a", "session_b"] {
+        assert_eq!(
+            state.sessions.lock().unwrap()[session_id]
+                .group_id
+                .as_deref(),
+            Some(group_id.as_str()),
+            "failed deletion must keep every in-memory group assignment"
+        );
+    }
+    assert_eq!(
+        store
+            .load_session("session_a")
+            .unwrap()
+            .unwrap()
+            .group_id
+            .as_deref(),
+        Some(group_id.as_str()),
+        "metadata written before the injected failure must be compensated"
+    );
+
+    std::fs::remove_dir(&blocked_metadata).unwrap();
+    std::fs::write(&blocked_metadata, blocked_original).unwrap();
+    assert_eq!(
+        store
+            .load_session("session_b")
+            .unwrap()
+            .unwrap()
+            .group_id
+            .as_deref(),
+        Some(group_id.as_str())
+    );
 }
 
 #[test]
@@ -9806,7 +9928,7 @@ fn existing_instance_is_rejected_with_pid_url_and_stop_command() {
     assert!(error.contains("PID:  4242"));
     assert!(error.contains("http://127.0.0.1:18080/?token=existing-token"));
     assert!(error.contains("--space"));
-    assert!(error.contains("--data-dir"));
+    assert!(!error.contains("--data-dir"));
     #[cfg(unix)]
     assert!(error.contains("kill -TERM 4242"));
     #[cfg(windows)]

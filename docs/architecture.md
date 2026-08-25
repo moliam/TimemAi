@@ -121,7 +121,7 @@ flowchart LR
     Runtime --> Model service["agent_core::model_transport\nmodel service I/O"]
     Model service --> Wire["agent_core::model_api\nwire-format adapter"]
     Model service --> LLM["LLM service"]
-    Core --> Guard["MemGuard\nper data root + space"]
+    Core --> Guard["MemGuard\nper MEM"]
     Guard --> Store["Local data\nmemory + chat history + audit"]
     Core --> Caps["Capability registry\nYAML IDL + tool callbacks"]
     Caps --> Tools["resources/capabilities/tools\n{tool}.yaml + {tool}.rs"]
@@ -220,7 +220,7 @@ OS policy facade.
   command execution, registered tool job lifecycle, evidence shaping, and tool
   audit are core responsibilities.
 - Routes memory-space file access through `MemGuard` so multiple CLI processes
-  using the same data root and space do not corrupt or lose writes.
+  using the same MEM do not corrupt or lose writes.
 - Tracks per-turn stats: model calls, token usage, memory reads/writes, tool
   calls, and prompt shrink counters.
 - Tracks reminder schedules independently for every active Session worker.
@@ -247,7 +247,7 @@ OS policy facade.
   agent reasoning, memory actions, or tool protocol cooperation.
 - Chooses local API/action audit paths and records host turn events through
   core-owned audit document writers and redaction helpers.
-- Loads shell history and runtime data from the selected data root.
+- Loads shell history and runtime data from the selected MEM.
 
 Key shell-side modules:
 
@@ -803,7 +803,7 @@ cross-host command result state.
 A Timem memory space is the unit of shared memory state:
 
 ```text
-identity = realpath(TIMEM_DATA_DIR) + TIMEM_SPACE
+identity = realpath(resolved MEM path)
 ```
 
 Within one identity, durable memory, scratch memory, chat history, SQL snapshots,
@@ -815,13 +815,14 @@ Current CLI implementation uses an in-process `MemGuard` object plus a
 cross-process lock directory under the selected space:
 
 ```text
-data/
-└─ .test_mem/
-   ├─ .guard/mem.lock.d/
-   ├─ memory/memory.jsonl
-   ├─ memory/scratch_notes.jsonl
-   ├─ memory/shell_jobs/jobs.jsonl
-   └─ audit/
+<MEM>/
+├─ .guard/
+│  ├─ workspace-instance.lock
+│  └─ mem.lock.d/
+├─ memory.jsonl
+├─ scratch_notes.jsonl
+├─ shell_jobs/jobs.jsonl
+└─ audit/
       ├─ api_audit.json
       └─ action_audit.json
 ```
@@ -1662,21 +1663,25 @@ operations, but repository validation and publication remain core-owned.
 
 ## Runtime Data
 
-By default, new environments keep data in a hidden directory scoped to where
-`timem-shell` starts. An existing unconfigured `data/` remains the fallback
-until `.timem_data/` exists only when it has a Timem-specific workspace,
-Session-index, or audit-file fingerprint; the directory name alone is not
-enough:
+The MEM directory is the complete runtime workspace. The default is
+`~/.timem/mem`, independent of the launch directory. Select another absolute
+MEM with `TIMEM_SPACE` or `--space`. Existing project-local `.timem_data` and
+legacy `data` directories remain untouched and are not selected implicitly.
 
 ```text
-.timem_data/<space>/audit/api_audit.json
-.timem_data/<space>/audit/action_audit.json
-.timem_data/<space>/memory/
-.timem_data/<space>/memory/shell_jobs/
-.timem_data/<space>/shell_history.txt
+~/.timem/mem/
+  .guard/workspace-instance.lock
+  workspace.json
+  sessions/
+  audit/
+  capabilities/
+  diagnostics/timem-web/
 ```
 
-Use `TIMEM_DATA_DIR=/path/to/data` for a fixed data root.
+Only one Timem Web or Shell host may own a MEM at a time. The shared workspace
+instance lock prevents Web-Web, Shell-Shell, and Web-Shell overlap; hosts using
+different MEM paths can run concurrently. `TIMEM_DATA_DIR` and `--data-dir` are
+rejected so runtime state cannot be split across two roots.
 
 The API audit file is a JSON document with a `version` field and an `events`
 array. `agent_core::audit` owns the guarded append path and legacy JSONL

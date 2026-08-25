@@ -112,7 +112,7 @@ curl_common=(
 
 first_log="$test_root/first.log"
 "$binary" --public --public-host 127.0.0.1 --no-open \
-  --data-dir "$test_root/data" --space public-lifecycle >"$first_log" 2>&1 &
+  --space "$test_root/public-lifecycle-mem" >"$first_log" 2>&1 &
 host_pid=$!
 first_url="$(wait_for_url "$first_log")"
 first_authority="${first_url#http://}"
@@ -164,10 +164,10 @@ assert_websocket_hello "ws://127.0.0.1:$first_port/ws?token=$first_token"
 stop_host
 
 # Public mode must release its listener and journal ownership on shutdown, and
-# rotate credentials when the same data root and port are started again.
+# rotate credentials when the same MEM and port are started again.
 second_log="$test_root/second.log"
 "$binary" --public --public-host 127.0.0.1 --no-open --port "$first_port" \
-  --data-dir "$test_root/data" --space public-lifecycle >"$second_log" 2>&1 &
+  --space "$test_root/public-lifecycle-mem" >"$second_log" 2>&1 &
 host_pid=$!
 second_url="$(wait_for_url "$second_log")"
 second_token="${second_url##*token=}"

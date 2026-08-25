@@ -15,11 +15,11 @@ pub use agent_core::{
     apply_workspace_command_to_path, bash_approval_mode_from_sources, bash_approval_mode_label,
     capabilities_dir_from_sources, collect_storage_profile, combine_additional_contexts,
     compact_runtime_status_text, create_memory_dir, default_api_protocol, default_base_url,
-    default_config_root, default_data_root, default_model, estimate_prompt_context_tokens,
-    host_start_audit_event, is_default_base_url, is_default_model, layout_for_space,
-    load_reminder_tips_config, load_workspace_dirs_from_path, local_time_label,
-    meaningful_latest_usage, model_retry_audit_event, normalize_workspace_dir, parse_api_protocol,
-    parse_token_count, resolve_memory_dir, resolve_topic_reply, runtime_active_elapsed_secs,
+    default_config_root, default_model, estimate_prompt_context_tokens, host_start_audit_event,
+    is_default_base_url, is_default_model, layout_for_space, load_reminder_tips_config,
+    load_workspace_dirs_from_path, local_time_label, meaningful_latest_usage,
+    model_retry_audit_event, normalize_workspace_dir, parse_api_protocol, parse_token_count,
+    resolve_memory_dir, resolve_topic_reply, runtime_active_elapsed_secs,
     runtime_config_apply_report, runtime_config_field_value, runtime_config_menu_report,
     runtime_config_report, runtime_profile_report, runtime_retry_status_view, runtime_time_context,
     runtime_token_status_view, stale_context_decision_request, stale_context_prompt_needed,
@@ -570,7 +570,6 @@ pub struct CliOptions {
     pub api_key: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
-    pub data_dir: Option<String>,
     pub timeout_secs: Option<u64>,
     pub max_llm_output_tokens: Option<u32>,
     pub max_llm_input_tokens: Option<u32>,
@@ -618,10 +617,6 @@ pub fn parse_cli_args(args: &[String]) -> CliOptions {
             }
             ("--base-url", Some(v)) => {
                 options.base_url = Some(v);
-                idx += 2;
-            }
-            ("--data-dir", Some(v)) => {
-                options.data_dir = Some(v);
                 idx += 2;
             }
             ("--timeout", Some(v)) => {

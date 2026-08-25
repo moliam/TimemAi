@@ -6,7 +6,37 @@ mod session_groups;
 mod worker_roles;
 
 fn main() {
-    let diagnostics = lifecycle_diagnostics::LifecycleDiagnostics::install_from_env()
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let memory_root = match lifecycle_diagnostics::memory_root_from_args(&args) {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("\nTimem Web could not start.\n\n{error}\n");
+            std::process::exit(2);
+        }
+    };
+    let help_requested = args.iter().any(|arg| arg == "--help" || arg == "-h");
+    let workspace_lock = if help_requested {
+        None
+    } else {
+        if let Err(error) = agent_core::create_memory_dir(&memory_root) {
+            eprintln!("[timem_web_diagnostics_unavailable] {error}");
+            eprintln!("\nTimem Web could not start.\n\n{error}\n");
+            std::process::exit(2);
+        }
+        match agent_core::WorkspaceInstanceLock::acquire(&memory_root, "timem-web") {
+            Ok(lock) => Some(lock),
+            Err(error) => {
+                let message = server::friendly_workspace_instance_error(
+                    error,
+                    memory_root.to_string_lossy().as_ref(),
+                );
+                eprintln!("\nTimem Web could not start.\n\n{message}\n");
+                std::process::exit(2);
+            }
+        }
+    };
+    let _workspace_lock = workspace_lock;
+    let diagnostics = lifecycle_diagnostics::LifecycleDiagnostics::install_for(&memory_root, &args)
         .unwrap_or_else(|error| {
             eprintln!("[timem_web_diagnostics_unavailable] {error}");
             lifecycle_diagnostics::LifecycleDiagnostics::disabled()

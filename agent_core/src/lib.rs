@@ -647,6 +647,79 @@ fn configured_round_budget_from_env() -> u32 {
     configured_round_budget(std::env::var("TIMEM_MAX_ROUNDS").ok().as_deref())
 }
 
+#[derive(Debug)]
+pub struct WorkspaceInstanceLock {
+    file: fs::File,
+    path: PathBuf,
+}
+
+impl WorkspaceInstanceLock {
+    pub fn acquire(memory_dir: impl AsRef<Path>, host: &str) -> Result<Self, String> {
+        let memory_dir = fs::canonicalize(memory_dir.as_ref())
+            .unwrap_or_else(|_| memory_dir.as_ref().to_path_buf());
+        let guard_dir = memory_dir.join(".guard");
+        fs::create_dir_all(&guard_dir)
+            .map_err(|error| format!("workspace_instance_lock_dir_failed:{error}"))?;
+        let path = guard_dir.join("workspace-instance.lock");
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(0);
+        }
+        let mut file = options
+            .open(&path)
+            .map_err(|error| format!("workspace_instance_lock_open_failed:{error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
+                    "workspace_already_in_use".to_string()
+                } else {
+                    format!("workspace_instance_lock_failed:{error}")
+                });
+            }
+        }
+        let owner = json!({
+            "schema_version": 1,
+            "pid": std::process::id(),
+            "process_identity": os::process_identity(std::process::id()),
+            "host": host,
+            "acquired_at_ms": now_ms(),
+        });
+        let encoded = serde_json::to_vec_pretty(&owner)
+            .map_err(|error| format!("workspace_instance_owner_serialize_failed:{error}"))?;
+        use std::io::{Seek, SeekFrom};
+        file.set_len(0)
+            .and_then(|_| file.seek(SeekFrom::Start(0)).map(|_| ()))
+            .and_then(|_| file.write_all(&encoded))
+            .and_then(|_| file.sync_data())
+            .map_err(|error| format!("workspace_instance_owner_write_failed:{error}"))?;
+        Ok(Self { file, path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for WorkspaceInstanceLock {
+    fn drop(&mut self) {
+        let _ = self.file.sync_data();
+        // Keep the inode: removing a locked file can let another process lock a
+        // replacement inode before this handle is dropped.
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MemGuard {
     lock_dir: PathBuf,

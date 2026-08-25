@@ -48,8 +48,25 @@ fn try_read_json(path: &Path) -> Option<serde_json::Value> {
 fn read_json(path: &Path) -> serde_json::Value {
     try_read_json(path).unwrap_or_else(|| panic!("missing or invalid JSON: {}", path.display()))
 }
-fn diagnostics_root(data: &Path) -> PathBuf {
-    data.join("diagnostics/timem-web")
+fn diagnostics_root(mem: &Path) -> PathBuf {
+    mem.join("diagnostics/timem-web")
+}
+fn current_markers(diagnostics: &Path) -> Vec<PathBuf> {
+    let mut paths = fs::read_dir(diagnostics.join("current-runs"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+fn current_marker_for_pid(diagnostics: &Path, pid: u32) -> Option<PathBuf> {
+    current_markers(diagnostics).into_iter().find(|path| {
+        try_read_json(path).is_some_and(|record| record["pid"].as_u64() == Some(u64::from(pid)))
+    })
 }
 fn output_text(output: &Output) -> String {
     format!(
@@ -58,37 +75,33 @@ fn output_text(output: &Output) -> String {
         String::from_utf8_lossy(&output.stderr)
     )
 }
-fn spawn_running_web(root: &Path) -> (ChildGuard, PathBuf) {
-    let data = root.join("data");
+fn spawn_running_web(root: &Path) -> (ChildGuard, PathBuf, PathBuf) {
     let mem = root.join("mem");
     fs::create_dir_all(&mem).unwrap();
     let output = fs::File::create(root.join("output.log")).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_timem-web"))
-        .args([
-            "--no-open",
-            "--data-dir",
-            data.to_str().unwrap(),
-            "--space",
-            mem.to_str().unwrap(),
-        ])
+        .args(["--no-open", "--space", mem.to_str().unwrap()])
         .stdout(Stdio::from(output.try_clone().unwrap()))
         .stderr(Stdio::from(output))
         .spawn()
         .unwrap();
     let child = ChildGuard(child);
-    let diagnostics = diagnostics_root(&data);
-    let current = diagnostics.join("current-run.json");
+    let diagnostics = diagnostics_root(&mem);
+    let pid = child.0.id();
+    let mut current = None;
     wait_until(WAIT_TIMEOUT, || {
-        try_read_json(&current)
-            .and_then(|value| value["recent_lifecycle_events"].as_array().cloned())
-            .is_some_and(|events| events.iter().any(|event| event["name"] == "listener_bound"))
+        current = current_marker_for_pid(&diagnostics, pid);
+        current.as_ref().is_some_and(|path| {
+            try_read_json(path)
+                .and_then(|value| value["recent_lifecycle_events"].as_array().cloned())
+                .is_some_and(|events| events.iter().any(|event| event["name"] == "listener_bound"))
+        })
     });
-    (child, diagnostics)
+    (child, diagnostics, current.unwrap())
 }
 fn assert_signal_exit(signal: i32, expected_reason: &str) {
     let root = temporary_root(expected_reason);
-    let (mut child, diagnostics) = spawn_running_web(&root);
-    let current = diagnostics.join("current-run.json");
+    let (mut child, diagnostics, current) = spawn_running_web(&root);
     assert_eq!(unsafe { libc::kill(child.0.id() as i32, signal) }, 0);
     wait_until(WAIT_TIMEOUT, || child.0.try_wait().ok().flatten().is_some());
     let exit = read_json(&diagnostics.join("last-exit.json"));
@@ -117,21 +130,22 @@ fn real_process_records_sigterm_sighup_and_sigint_exit_reasons() {
 #[test]
 fn injected_rust_panic_writes_redacted_report_and_preserves_running_marker() {
     let root = temporary_root("panic");
-    let data = root.join("data");
+    let mem = root.join("mem");
+    fs::create_dir_all(&mem).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_timem-web"))
-        .args(["--help", "--data-dir", data.to_str().unwrap()])
+        .args(["--help", "--space", mem.to_str().unwrap()])
         .env("TIMEM_WEB_TEST_FAULT", "panic_after_diagnostics_install")
         .output()
         .unwrap();
     assert!(!output.status.success());
-    let diagnostics = diagnostics_root(&data);
+    let diagnostics = diagnostics_root(&mem);
     let report = fs::read_to_string(diagnostics.join("last-panic.txt")).unwrap();
     assert!(report.contains("TIMEM WEB PANIC REPORT"));
     assert!(report.contains("test_fault_injected"));
     assert!(report.contains("BACKTRACE"));
     assert!(report.contains("[REDACTED]"));
     assert!(!report.contains("test-private-token"));
-    assert!(diagnostics.join("current-run.json").is_file());
+    assert_eq!(current_markers(&diagnostics).len(), 1);
     assert!(!diagnostics.join("last-exit.json").exists());
     fs::remove_dir_all(root).unwrap();
 }
@@ -139,15 +153,15 @@ fn injected_rust_panic_writes_redacted_report_and_preserves_running_marker() {
 #[test]
 fn sigkill_residue_is_promoted_by_the_next_start_without_guessing_cause() {
     let root = temporary_root("sigkill");
-    let data = root.join("data");
-    let (mut child, diagnostics) = spawn_running_web(&root);
+    let mem = root.join("mem");
+    let (mut child, diagnostics, current) = spawn_running_web(&root);
     let killed_pid = child.0.id();
     assert_eq!(unsafe { libc::kill(killed_pid as i32, libc::SIGKILL) }, 0);
     wait_until(WAIT_TIMEOUT, || child.0.try_wait().ok().flatten().is_some());
-    assert!(diagnostics.join("current-run.json").is_file());
+    assert!(current.is_file());
     assert!(!diagnostics.join("last-exit.json").exists());
     let restart = Command::new(env!("CARGO_BIN_EXE_timem-web"))
-        .args(["--help", "--data-dir", data.to_str().unwrap()])
+        .args(["--help", "--space", mem.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(restart.status.success(), "{}", output_text(&restart));
@@ -155,7 +169,7 @@ fn sigkill_residue_is_promoted_by_the_next_start_without_guessing_cause() {
     assert_eq!(previous["status"], "abnormal_exit_detected_on_next_start");
     assert_eq!(previous["exact_cause"], "unknown");
     assert_eq!(previous["pid"], killed_pid);
-    assert!(!diagnostics.join("current-run.json").exists());
+    assert!(current_markers(&diagnostics).is_empty());
     assert_eq!(
         read_json(&diagnostics.join("last-exit.json"))["exit_reason"],
         "help_requested"
@@ -164,14 +178,57 @@ fn sigkill_residue_is_promoted_by_the_next_start_without_guessing_cause() {
 }
 
 #[test]
+fn second_web_process_cannot_open_the_same_mem_workspace() {
+    let root = temporary_root("same-mem-exclusive");
+    let (mut first, diagnostics, first_marker) = spawn_running_web(&root);
+    let mem = root.join("mem");
+    let second = Command::new(env!("CARGO_BIN_EXE_timem-web"))
+        .args(["--no-open", "--space", mem.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(second.status.code(), Some(2));
+    assert!(output_text(&second).contains("already open"));
+    assert!(first_marker.is_file());
+    assert_eq!(current_markers(&diagnostics), vec![first_marker.clone()]);
+
+    assert_eq!(unsafe { libc::kill(first.0.id() as i32, libc::SIGTERM) }, 0);
+    wait_until(WAIT_TIMEOUT, || first.0.try_wait().ok().flatten().is_some());
+    assert!(!first_marker.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn web_processes_can_open_different_mem_workspaces() {
+    let root_a = temporary_root("different-mem-a");
+    let root_b = temporary_root("different-mem-b");
+    let (mut first, diagnostics_a, marker_a) = spawn_running_web(&root_a);
+    let (mut second, diagnostics_b, marker_b) = spawn_running_web(&root_b);
+    assert!(marker_a.is_file());
+    assert!(marker_b.is_file());
+
+    for child in [&mut first, &mut second] {
+        assert_eq!(unsafe { libc::kill(child.0.id() as i32, libc::SIGTERM) }, 0);
+    }
+    wait_until(WAIT_TIMEOUT, || first.0.try_wait().ok().flatten().is_some());
+    wait_until(WAIT_TIMEOUT, || {
+        second.0.try_wait().ok().flatten().is_some()
+    });
+    assert!(current_markers(&diagnostics_a).is_empty());
+    assert!(current_markers(&diagnostics_b).is_empty());
+    fs::remove_dir_all(root_a).unwrap();
+    fs::remove_dir_all(root_b).unwrap();
+}
+
+#[test]
 fn startup_configuration_failure_records_bounded_error_without_secret_values() {
     let root = temporary_root("startup-error");
-    let data = root.join("data");
+    let mem = root.join("mem");
+    fs::create_dir_all(&mem).unwrap();
     let secret = "sk-process-test-private";
     let output = Command::new(env!("CARGO_BIN_EXE_timem-web"))
         .args([
-            "--data-dir",
-            data.to_str().unwrap(),
+            "--space",
+            mem.to_str().unwrap(),
             "--api-key",
             secret,
             "--port",
@@ -180,7 +237,7 @@ fn startup_configuration_failure_records_bounded_error_without_secret_values() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
-    let diagnostics = diagnostics_root(&data);
+    let diagnostics = diagnostics_root(&mem);
     let exit_text = fs::read_to_string(diagnostics.join("last-exit.json")).unwrap();
     let exit: serde_json::Value = serde_json::from_str(&exit_text).unwrap();
     assert_eq!(exit["exit_reason"], "startup_or_runtime_error");
@@ -191,23 +248,35 @@ fn startup_configuration_failure_records_bounded_error_without_secret_values() {
         .contains("port_out_of_range"));
     assert!(!exit_text.contains(secret));
     assert!(!output_text(&output).contains(secret));
-    assert!(!diagnostics.join("current-run.json").exists());
+    assert!(current_markers(&diagnostics).is_empty());
     fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
-fn unavailable_diagnostics_degrades_without_blocking_help() {
-    let root = temporary_root("diagnostics-unavailable");
-    fs::create_dir_all(&root).unwrap();
-    let unusable_data_root = root.join("data-is-a-file");
-    fs::write(&unusable_data_root, b"not a directory").unwrap();
+fn removed_data_dir_option_is_rejected_explicitly() {
+    let root = temporary_root("removed-data-dir");
     let output = Command::new(env!("CARGO_BIN_EXE_timem-web"))
-        .args(["--help", "--data-dir", unusable_data_root.to_str().unwrap()])
+        .args(["--data-dir", root.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(output.status.success(), "{}", output_text(&output));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Timem Web"));
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output_text(&output).contains("unsupported_option:--data-dir"));
+    assert!(!root.exists());
+}
+
+#[test]
+fn unavailable_mem_diagnostics_degrades_without_hiding_configuration_error() {
+    let root = temporary_root("diagnostics-unavailable");
+    fs::create_dir_all(&root).unwrap();
+    let unusable_mem = root.join("mem-is-a-file");
+    fs::write(&unusable_mem, b"not a directory").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_timem-web"))
+        .args(["--space", unusable_mem.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("[timem_web_diagnostics_unavailable]"));
-    assert!(unusable_data_root.is_file());
+    assert!(output_text(&output).contains("mem_directory_create_failed"));
+    assert!(unusable_mem.is_file());
     fs::remove_dir_all(root).unwrap();
 }

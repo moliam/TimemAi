@@ -16,10 +16,9 @@ use agent_core::session_store::{
     SessionResumeNotice, SessionStore, StoredSession, StoredSessionProfile, StoredSessionState,
 };
 use agent_core::{
-    apply_runtime_config_value, combine_additional_contexts, create_memory_dir, default_data_root,
-    default_memory_dir, load_workspace_dirs_from_path,
-    model_service_config_from_sources_allow_missing_api_key, resolve_memory_dir,
-    runtime_config_menu_report, validate_api_key, work_instruction_load_report,
+    apply_runtime_config_value, combine_additional_contexts, create_memory_dir, default_memory_dir,
+    load_workspace_dirs_from_path, model_service_config_from_sources_allow_missing_api_key,
+    resolve_memory_dir, runtime_config_menu_report, validate_api_key, work_instruction_load_report,
     work_instruction_load_request, work_instruction_mode_from_sources, AgentCore, BashApprovalMode,
     CoreSessionWorkerEvent, CoreSessionWorkerManager, CoreSessionWorkerWorkspace, HostDecision,
     HostDecisionRequest, ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind,
@@ -445,8 +444,7 @@ impl WebMemState {
 
     fn from_directory(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = validate_web_mem_directory(path.as_ref())?;
-        let data_dir = default_data_root();
-        Self::new(data_dir, path.display().to_string())
+        Self::new(path.clone(), path.display().to_string())
     }
 
     fn info(&self) -> WebMemInfo {
@@ -1400,6 +1398,9 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
     }
 
     let launch = WebLaunchOptions::parse(&args)?;
+    if std::env::var_os("TIMEM_DATA_DIR").is_some() {
+        return Err("unsupported_env:TIMEM_DATA_DIR; MEM is the complete workspace".to_string());
+    }
     diagnostics.checkpoint("configuration_parsed", serde_json::Value::Null);
     let launch_parent = LaunchParent::capture();
     let template = WorkerTemplate::from_environment(&launch)?;
@@ -2280,10 +2281,19 @@ Timem Web instances are never reused; each launch must own its own process and r
     message.push_str(&format!("\n  kill -TERM {}", info.pid));
     #[cfg(windows)]
     message.push_str(&format!("\n  taskkill /PID {} /T", info.pid));
-    message.push_str(
-        "\n\nTo run another instance concurrently, select a different --space or --data-dir.",
-    );
+    message.push_str("\n\nTo run another instance concurrently, select a different --space.");
     message
+}
+
+pub(crate) fn friendly_workspace_instance_error(error: String, space: &str) -> String {
+    if error == "workspace_already_in_use" {
+        format!(
+            "The MEM workspace is already open in another Timem Web or Shell process: {}. Close that process or select a different --space.",
+            absolute_path(Path::new(space)).display()
+        )
+    } else {
+        format!("Could not claim the MEM workspace {space}: {error}")
+    }
 }
 
 fn friendly_journal_error(error: String, data_dir: &std::path::Path, space: &str) -> String {
@@ -3159,10 +3169,8 @@ fn handle_command_with_id(
             return Ok(Some(event));
         }
         ClientCommand::SessionGroupDelete { group_id } => {
-            let affected = {
-                // Cross-collection lock order is always MEM then Sessions.
-                // No disk or worker operation occurs while both are held.
-                let mut mem = state
+            let (memory_dir, groups, store) = {
+                let mem = state
                     .mem
                     .lock()
                     .map_err(|_| "mem_state_poisoned".to_string())?;
@@ -3172,31 +3180,60 @@ fn handle_command_with_id(
                 if before == groups.len() {
                     return Err("session_group_not_found".to_string());
                 }
-                save_session_groups(&mem.layout.memory_dir(), &groups)?;
-                mem.session_groups = groups;
-                let mut sessions = state
+                (mem.layout.memory_dir(), groups, mem.session_store.clone())
+            };
+            let affected = {
+                let sessions = state
                     .sessions
                     .lock()
-                    .map_err(|_| "session_store_poisoned")?;
+                    .map_err(|_| "session_store_poisoned".to_string())?;
                 sessions
-                    .values_mut()
-                    .filter_map(|session| {
-                        if session.group_id.as_deref() == Some(group_id.as_str()) {
-                            session.group_id = None;
-                            Some(session.session_id.clone())
-                        } else {
-                            None
-                        }
+                    .values()
+                    .filter(|session| session.group_id.as_deref() == Some(group_id.as_str()))
+                    .map(|session| {
+                        let previous = stored_session_from_web_session_with_store(&store, session);
+                        let mut updated = previous.clone();
+                        updated.group_id = None;
+                        (session.session_id.clone(), previous, updated)
                     })
                     .collect::<Vec<_>>()
             };
-            for session_id in &affected {
-                persist_web_session(state, session_id)?;
+            let mut affected = affected;
+            affected.sort_by(|left, right| left.0.cmp(&right.0));
+            let mut persisted = Vec::new();
+            for (session_id, previous, updated) in &affected {
+                if let Err(error) = store.upsert_session(updated) {
+                    rollback_stored_sessions(&store, &persisted)?;
+                    return Err(format!(
+                        "session_group_delete_persist_failed:{session_id}:{error}"
+                    ));
+                }
+                persisted.push(previous.clone());
             }
-            let groups = current_mem_state(state)?.session_groups;
+            if let Err(error) = save_session_groups(&memory_dir, &groups) {
+                rollback_stored_sessions(&store, &persisted)?;
+                return Err(format!("session_group_delete_persist_failed:{error}"));
+            }
+            {
+                let mut mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                mem.session_groups = groups.clone();
+                let mut sessions = state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session_store_poisoned".to_string())?;
+                for (session_id, _, _) in &affected {
+                    sessions
+                        .get_mut(session_id)
+                        .ok_or_else(|| "session_not_found".to_string())?
+                        .group_id = None;
+                }
+            }
             let event = WireEvent::SessionGroupsUpdated { groups };
             publish_semantic(state, event.clone())?;
-            for session_id in affected {
+            for (session_id, _, _) in affected {
                 publish_semantic(
                     state,
                     WireEvent::SessionGroupChanged {
@@ -3231,7 +3268,7 @@ fn handle_command_with_id(
             session_id,
             group_id,
         } => {
-            {
+            let store = {
                 let mem = state
                     .mem
                     .lock()
@@ -3241,15 +3278,28 @@ fn handle_command_with_id(
                         return Err("session_group_not_found".to_string());
                     }
                 }
-                state
+                mem.session_store.clone()
+            };
+            let updated = {
+                let sessions = state
                     .sessions
                     .lock()
-                    .map_err(|_| "session_store_poisoned")?
-                    .get_mut(&session_id)
-                    .ok_or_else(|| "session_not_found".to_string())?
-                    .group_id = group_id.clone();
-            }
-            persist_web_session(state, &session_id)?;
+                    .map_err(|_| "session_store_poisoned")?;
+                let session = sessions
+                    .get(&session_id)
+                    .ok_or_else(|| "session_not_found".to_string())?;
+                let mut updated = stored_session_from_web_session_with_store(&store, session);
+                updated.group_id = group_id.clone();
+                updated
+            };
+            store.upsert_session(&updated)?;
+            state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned")?
+                .get_mut(&session_id)
+                .ok_or_else(|| "session_not_found".to_string())?
+                .group_id = group_id.clone();
             let event = WireEvent::SessionGroupChanged {
                 session_id,
                 group_id,
@@ -4619,15 +4669,20 @@ fn restore_stored_sessions_with_runtime_restart_marker(
 fn list_stored_sessions_resilient(store: &SessionStore) -> Result<Vec<StoredSession>, String> {
     let recovery = store.list_sessions_resilient().map_err(|error| {
         format!(
-            "Session restore index could not be loaded or repaired ({error}). Timem cannot safely update it. Fix permissions or free disk space, inspect {}, and restart.",
-            store.index_path().display()
+            "Session restore metadata could not be loaded or repaired ({error}). Timem cannot safely update it. Fix permissions or free disk space, inspect {}, and restart.",
+            store.sessions_dir().display()
         )
     })?;
-    if let Some(backup) = recovery.backup_path.as_ref() {
+    if recovery.repaired() {
+        let backups = recovery
+            .backup_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
         eprintln!(
-            "[timem_web_warning] session_index_corruption_repaired invalid_records={} backup={}",
-            recovery.invalid_records,
-            backup.display()
+            "[timem_web_warning] session_restore_metadata_corruption_repaired invalid_records={} backups={backups}",
+            recovery.invalid_records
         );
     }
     Ok(recovery.sessions)
@@ -5242,6 +5297,26 @@ fn history_user_entry_kind(kind: Option<&str>) -> &str {
     }
 }
 
+fn rollback_stored_sessions(
+    store: &SessionStore,
+    previous_sessions: &[StoredSession],
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for previous in previous_sessions.iter().rev() {
+        if let Err(error) = store.upsert_session(previous) {
+            errors.push(format!("{}:{error}", previous.session_id));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "session_group_rollback_failed:{}",
+            errors.join(",")
+        ))
+    }
+}
+
 fn persist_web_session(state: &AppState, session_id: &str) -> Result<(), String> {
     let stored = {
         let sessions = state
@@ -5257,6 +5332,18 @@ fn persist_web_session(state: &AppState, session_id: &str) -> Result<(), String>
 }
 
 fn stored_session_from_web_session(state: &AppState, session: &WebSession) -> StoredSession {
+    let store = state
+        .mem
+        .lock()
+        .map(|mem| mem.session_store.clone())
+        .unwrap_or_else(|_| SessionStore::new(PathBuf::new()));
+    stored_session_from_web_session_with_store(&store, session)
+}
+
+fn stored_session_from_web_session_with_store(
+    store: &SessionStore,
+    session: &WebSession,
+) -> StoredSession {
     StoredSession {
         session_id: session.session_id.clone(),
         display_name: session.display_name.clone(),
@@ -5306,14 +5393,8 @@ fn stored_session_from_web_session(state: &AppState, session: &WebSession) -> St
             StoredSessionState::Ready
         },
         last_turn_id: session.turns.last().map(|turn| turn.turn_id.clone()),
-        raw_chat_history_path: state
-            .mem
-            .lock()
-            .map(|mem| {
-                mem.session_store
-                    .history_path_for_session(&session.session_id)
-            })
-            .unwrap_or_else(|_| PathBuf::from(""))
+        raw_chat_history_path: store
+            .history_path_for_session(&session.session_id)
             .display()
             .to_string(),
         group_id: session.group_id.clone(),
@@ -8813,11 +8894,7 @@ impl WorkerTemplate {
             .as_deref()
             .or_else(|| env.get("TIMEM_SPACE").map(String::as_str));
         let space = resolve_memory_dir(configured_space)?.display().to_string();
-        let data_dir = launch
-            .data_dir
-            .clone()
-            .map(PathBuf::from)
-            .unwrap_or_else(default_data_root);
+        let data_dir = PathBuf::from(&space);
         let reminder_tips_config =
             agent_core::load_reminder_tips_config(&agent_core::default_config_root());
         let memory_dir = PathBuf::from(&space);
@@ -9339,7 +9416,6 @@ struct WebLaunchOptions {
     api_key: Option<String>,
     model: Option<String>,
     base_url: Option<String>,
-    data_dir: Option<String>,
     timeout_secs: Option<u64>,
     max_llm_input_tokens: Option<u32>,
     max_llm_output_tokens: Option<u32>,
@@ -9361,7 +9437,6 @@ impl Default for WebLaunchOptions {
             api_key: None,
             model: None,
             base_url: None,
-            data_dir: None,
             timeout_secs: None,
             max_llm_input_tokens: None,
             max_llm_output_tokens: None,
@@ -9410,7 +9485,6 @@ impl WebLaunchOptions {
                 "--api-key" => string(&mut options.api_key)?,
                 "--model" => string(&mut options.model)?,
                 "--base-url" => string(&mut options.base_url)?,
-                "--data-dir" => string(&mut options.data_dir)?,
                 "--bash-approval" => string(&mut options.bash_approval)?,
                 "--work-instructions" => string(&mut options.work_instructions)?,
                 "--debug" => {
@@ -9420,6 +9494,11 @@ impl WebLaunchOptions {
                 "--no-open" => {
                     options.open_browser = false;
                     index += 1;
+                }
+                "--data-dir" => {
+                    return Err(
+                        "unsupported_option:--data-dir; MEM is the complete workspace".to_string(),
+                    );
                 }
                 "--timeout" => {
                     options.timeout_secs = Some(
@@ -9651,7 +9730,7 @@ fn nonempty_text(text: String, label: &str) -> Result<String, String> {
 }
 
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default ~/.timem/mem\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --data-dir <path>            data root\n  --timeout <seconds>          model request timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
+    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default ~/.timem/mem\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model request timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
 }
 
 fn public_access_url(configured_host: Option<&str>, port: u16, token: &str) -> Option<String> {

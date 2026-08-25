@@ -118,8 +118,6 @@ fn parse_cli_args_reads_model_service_and_limits() {
         "gpt-x",
         "--base-url",
         "http://local/v1",
-        "--data-dir",
-        "/tmp/timem-data",
         "--timeout",
         "33",
         "--max-llm-output",
@@ -149,7 +147,6 @@ fn parse_cli_args_reads_model_service_and_limits() {
     assert_eq!(options.api_key.as_deref(), Some("cli-key"));
     assert_eq!(options.model.as_deref(), Some("gpt-x"));
     assert_eq!(options.base_url.as_deref(), Some("http://local/v1"));
-    assert_eq!(options.data_dir.as_deref(), Some("/tmp/timem-data"));
     assert_eq!(options.timeout_secs, Some(33));
     assert_eq!(options.max_llm_output_tokens, Some(10_000));
     assert_eq!(options.max_llm_input_tokens, Some(100_000));

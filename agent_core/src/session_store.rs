@@ -129,12 +129,15 @@ pub struct ChatHistoryPage {
 pub struct SessionIndexRecovery {
     pub sessions: Vec<StoredSession>,
     pub invalid_records: usize,
+    /// First retained corrupt artifact, kept for source compatibility.
     pub backup_path: Option<PathBuf>,
+    /// Every corrupt artifact retained during this recovery pass.
+    pub backup_paths: Vec<PathBuf>,
 }
 
 impl SessionIndexRecovery {
     pub fn repaired(&self) -> bool {
-        self.backup_path.is_some()
+        !self.backup_paths.is_empty()
     }
 }
 
@@ -299,17 +302,20 @@ impl SessionStore {
     /// the index before the repaired replacement is installed.
     pub fn list_sessions_resilient(&self) -> Result<SessionIndexRecovery, String> {
         if self.layout_marker_path().exists() {
-            return self.list_sessions().map(|sessions| SessionIndexRecovery {
-                sessions,
-                invalid_records: 0,
-                backup_path: None,
-            });
+            let _index_lock = self
+                .index_lock
+                .lock()
+                .map_err(|_| "session_index_lock_poisoned".to_string())?;
+            return self
+                .guard
+                .with_write(|| self.recover_metadata_sessions_unlocked())?;
         }
         let recovery = match self.list_legacy_sessions_unlocked() {
             Ok(sessions) => SessionIndexRecovery {
                 sessions,
                 invalid_records: 0,
                 backup_path: None,
+                backup_paths: Vec::new(),
             },
             Err(error) if error == "session_record_parse_failed" => {
                 let _index_lock = self
@@ -333,6 +339,7 @@ impl SessionStore {
                 sessions,
                 invalid_records: 0,
                 backup_path: None,
+                backup_paths: Vec::new(),
             });
         }
         let path = self.index_path();
@@ -388,7 +395,85 @@ impl SessionStore {
         Ok(SessionIndexRecovery {
             sessions,
             invalid_records,
-            backup_path: Some(backup_path),
+            backup_path: Some(backup_path.clone()),
+            backup_paths: vec![backup_path],
+        })
+    }
+
+    fn recover_metadata_sessions_unlocked(&self) -> Result<SessionIndexRecovery, String> {
+        let mut sessions = Vec::new();
+        let mut backup_paths = Vec::new();
+        let entries = match fs::read_dir(self.sessions_dir()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(SessionIndexRecovery {
+                    sessions,
+                    invalid_records: 0,
+                    backup_path: None,
+                    backup_paths,
+                });
+            }
+            Err(_) => return Err("session_dir_read_failed".to_string()),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|_| "session_dir_read_failed".to_string())?;
+            let file_type = entry
+                .file_type()
+                .map_err(|_| "session_dir_read_failed".to_string())?;
+            if !file_type.is_dir() || entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let path = entry.path().join("session.json");
+            if !path.exists() {
+                continue;
+            }
+            let parsed = fs::read(&path)
+                .map_err(|_| "session_metadata_read_failed".to_string())
+                .and_then(|bytes| {
+                    serde_json::from_slice::<StoredSession>(&bytes)
+                        .map_err(|_| "session_metadata_parse_failed".to_string())
+                })
+                .and_then(|session| {
+                    if self.metadata_path_for_session(&session.session_id) == path {
+                        Ok(session)
+                    } else {
+                        Err("session_metadata_id_mismatch".to_string())
+                    }
+                });
+            match parsed {
+                Ok(session) => sessions.push(session),
+                Err(error)
+                    if matches!(
+                        error.as_str(),
+                        "session_metadata_parse_failed" | "session_metadata_id_mismatch"
+                    ) =>
+                {
+                    let suffix = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos();
+                    let backup = path.with_file_name(format!(
+                        "session.json.session-metadata-corrupt-backup-{suffix}"
+                    ));
+                    fs::rename(&path, &backup)
+                        .map_err(|_| "session_metadata_quarantine_failed".to_string())?;
+                    restrict_session_path_permissions(&backup, false)?;
+                    backup_paths.push(backup);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        sessions.sort_by(|left, right| {
+            right
+                .updated_at_ms
+                .cmp(&left.updated_at_ms)
+                .then_with(|| left.session_id.cmp(&right.session_id))
+        });
+        Ok(SessionIndexRecovery {
+            sessions,
+            invalid_records: backup_paths.len(),
+            backup_path: backup_paths.first().cloned(),
+            backup_paths,
         })
     }
 

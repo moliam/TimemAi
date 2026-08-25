@@ -129,7 +129,7 @@ timem
 ```
 
 The `source ./env` step is needed for the initial configuration or when you
-intentionally select a different data root/mem space. The selected Session
+intentionally select a different MEM workspace. The selected Session
 restores its cached model service settings on later starts.
 
 Example terminal session:
@@ -203,8 +203,14 @@ browser "Not secure" warning because it uses plain HTTP; the access token is
 still required. For production exposure, place Timem behind HTTPS and an
 appropriate network access control layer.
 
-Timem Web keeps a bounded, low-overhead lifecycle diagnostic under
-`<TIMEM_DATA_DIR>/diagnostics/timem-web/`. It records process milestones and the
+A MEM directory is the complete Timem workspace. It contains Sessions, memory,
+audit data, workspace configuration, capability overlays, and Web lifecycle
+diagnostics. The default is `~/.timem/mem`; select another absolute directory
+with `--space` or `TIMEM_SPACE`. One Timem Web or Shell host may own a MEM at a
+time, while different MEM directories can run concurrently. Timem Web keeps
+bounded, low-overhead lifecycle diagnostics under
+`<MEM>/diagnostics/timem-web/`. Separate completed runs use independent records,
+so one run cannot erase another run's crash evidence. The recorder captures process milestones and the
 actual graceful-shutdown trigger without storing prompts, replies, API keys, or
 HTTP header values. After an unexpected exit, see
 [Install and configuration](docs/install-and-configuration.md#timem-web-lifecycle-diagnostics)

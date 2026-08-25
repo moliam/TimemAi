@@ -890,3 +890,87 @@ fn resume_notice_references_history_format_without_web_specific_language() {
     assert!(rendered.contains("Current cwd: /work/project"));
     assert!(!rendered.to_lowercase().contains("web"));
 }
+
+#[test]
+fn resilient_metadata_load_quarantines_only_corrupt_session_and_keeps_healthy_sessions() {
+    let root = tmp_dir("resilient_corrupt_metadata");
+    let store = SessionStore::new(&root);
+    let healthy = new_stored_session(
+        "session_healthy",
+        "Healthy",
+        "/tmp/project-healthy",
+        profile(),
+        store.history_path_for_session("session_healthy"),
+    );
+    let corrupt = new_stored_session(
+        "session_corrupt",
+        "Corrupt",
+        "/tmp/project-corrupt",
+        profile(),
+        store.history_path_for_session("session_corrupt"),
+    );
+    store.upsert_session(&healthy).unwrap();
+    store.upsert_session(&corrupt).unwrap();
+    fs::write(
+        store.metadata_path_for_session("session_corrupt"),
+        b"{truncated-json",
+    )
+    .unwrap();
+
+    let recovery = store.list_sessions_resilient().unwrap();
+    assert_eq!(recovery.sessions, vec![healthy.clone()]);
+    assert_eq!(recovery.invalid_records, 1);
+    assert_eq!(recovery.backup_paths.len(), 1);
+    assert_eq!(recovery.backup_path, recovery.backup_paths.first().cloned());
+    assert_eq!(
+        fs::read(&recovery.backup_paths[0]).unwrap(),
+        b"{truncated-json"
+    );
+    assert!(!store.metadata_path_for_session("session_corrupt").exists());
+    assert_eq!(
+        store.load_session("session_healthy").unwrap(),
+        Some(healthy)
+    );
+
+    let second = store.list_sessions_resilient().unwrap();
+    assert_eq!(second.invalid_records, 0);
+    assert!(second.backup_paths.is_empty());
+}
+
+#[test]
+fn resilient_metadata_load_quarantines_id_mismatch_without_hiding_other_sessions() {
+    let root = tmp_dir("resilient_metadata_id_mismatch");
+    let store = SessionStore::new(&root);
+    let healthy = new_stored_session(
+        "session_healthy",
+        "Healthy",
+        "/tmp/project-healthy",
+        profile(),
+        store.history_path_for_session("session_healthy"),
+    );
+    let mut mismatched = new_stored_session(
+        "session_expected",
+        "Mismatched",
+        "/tmp/project-mismatch",
+        profile(),
+        store.history_path_for_session("session_expected"),
+    );
+    store.upsert_session(&healthy).unwrap();
+    store.upsert_session(&mismatched).unwrap();
+    mismatched.session_id = "session_other".to_string();
+    fs::write(
+        store.metadata_path_for_session("session_expected"),
+        serde_json::to_vec_pretty(&mismatched).unwrap(),
+    )
+    .unwrap();
+
+    let recovery = store.list_sessions_resilient().unwrap();
+    assert_eq!(recovery.sessions, vec![healthy]);
+    assert_eq!(recovery.invalid_records, 1);
+    assert_eq!(recovery.backup_paths.len(), 1);
+    assert!(recovery.backup_paths[0]
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .contains("session-metadata-corrupt-backup"));
+}
