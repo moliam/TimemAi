@@ -4591,13 +4591,14 @@ fn restored_web_session_keeps_original_task_with_supplement_in_an_oversized_turn
     .unwrap();
     let store = current_session_store(&state).unwrap();
     let turn_id = "turn_vla_milestone";
+    let history_base_ms = now_ms_i64().saturating_sub(1_000);
     store
         .append_history_record(
             &session_id,
             &ChatHistoryRecord::Message {
                 role: ChatHistoryRole::User,
                 turn_id: turn_id.to_string(),
-                created_at_ms: 1,
+                created_at_ms: history_base_ms,
                 kind: Some("task".to_string()),
                 command_id: None,
                 delivery_state: None,
@@ -4612,7 +4613,7 @@ fn restored_web_session_keeps_original_task_with_supplement_in_an_oversized_turn
                 &ChatHistoryRecord::Event {
                     role: ChatHistoryRole::System,
                     turn_id: turn_id.to_string(),
-                    created_at_ms: index + 2,
+                    created_at_ms: history_base_ms + i64::from(index) + 1,
                     kind: ChatHistoryEventKind::Action,
                     content: format!("action {index}"),
                     extra: BTreeMap::new(),
@@ -4626,7 +4627,7 @@ fn restored_web_session_keeps_original_task_with_supplement_in_an_oversized_turn
             &ChatHistoryRecord::Message {
                 role: ChatHistoryRole::User,
                 turn_id: turn_id.to_string(),
-                created_at_ms: 205,
+                created_at_ms: history_base_ms + 204,
                 kind: Some("supplement".to_string()),
                 command_id: None,
                 delivery_state: None,
@@ -5280,6 +5281,250 @@ fn snapshot_reports_the_active_mem_space_and_paths() {
     assert!(snapshot.server.mem.data_dir.contains("timem_web_data_test"));
     assert!(snapshot.server.mem.space_dir.ends_with(".test_mem"));
     assert!(snapshot.server.mem.memory_dir.ends_with(".test_mem/memory"));
+    assert_eq!(snapshot.server.mem.temporary_retention_days, Some(5));
+}
+
+#[test]
+fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_data() {
+    let state = routing_test_state();
+    let (layout, store) = {
+        let mem = state.mem.lock().unwrap();
+        (mem.layout.clone(), mem.session_store.clone())
+    };
+    let session = state.sessions.lock().unwrap()["session_a"].clone();
+    store
+        .upsert_session(&stored_session_from_web_session_with_store(
+            &store, &session,
+        ))
+        .unwrap();
+    let now_ms = now_ms_i64();
+    let old_ms = now_ms - 6 * MILLIS_PER_DAY;
+    let recent_ms = now_ms - MILLIS_PER_DAY;
+    for record in [
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "old-message".to_string(),
+            created_at_ms: old_ms,
+            kind: Some("task".to_string()),
+            command_id: None,
+            delivery_state: None,
+            content: "old user message stays forever".to_string(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "old-action".to_string(),
+            created_at_ms: old_ms,
+            kind: ChatHistoryEventKind::Action,
+            content: "expired temporary action".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "recent-action".to_string(),
+            created_at_ms: recent_ms,
+            kind: ChatHistoryEventKind::ActionResult,
+            content: "recent temporary action result".to_string(),
+            extra: BTreeMap::new(),
+        },
+    ] {
+        store.append_history_record("session_a", &record).unwrap();
+    }
+
+    let shell_dir = layout.memory_dir().join("shell_jobs");
+    std::fs::create_dir_all(&shell_dir).unwrap();
+    let old_output = shell_dir.join("old.out");
+    let old_stderr = shell_dir.join("old.err");
+    let old_status = shell_dir.join("old.status");
+    for (path, text) in [
+        (&old_output, "expired stdout"),
+        (&old_stderr, "expired stderr"),
+        (&old_status, "exit:0"),
+    ] {
+        std::fs::write(path, text).unwrap();
+    }
+    let old_job = agent_core::ShellJobRecord {
+        id: "old-job".to_string(),
+        created_at_ms: old_ms,
+        kind: "background".to_string(),
+        session_id: "session_a".to_string(),
+        turn_id: "old-action".to_string(),
+        pid: std::process::id(),
+        process_identity: None,
+        tool_call_id: "old-call".to_string(),
+        owner_id: Some("old-owner".to_string()),
+        command: "printf expired".to_string(),
+        cwd: layout.memory_dir().display().to_string(),
+        output_file: old_output.display().to_string(),
+        stderr_file: old_stderr.display().to_string(),
+        status_file: old_status.display().to_string(),
+        tail_out: false,
+    };
+    std::fs::write(
+        shell_dir.join("jobs.jsonl"),
+        format!("{}\n", serde_json::to_string(&old_job).unwrap()),
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(layout.api_audit_file().parent().unwrap()).unwrap();
+    std::fs::write(
+        layout.api_audit_file(),
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "events": [
+                {"type":"expired", "time_ms":old_ms},
+                {"type":"recent", "time_ms":recent_ms}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .state = "working".to_string();
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::MemTemporaryRetentionUpdate { days: Some(5) },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::MemSettingsUpdated {
+        temporary_retention_days,
+    } = event
+    else {
+        panic!("expected authoritative MEM settings event")
+    };
+    assert_eq!(temporary_retention_days, Some(5));
+
+    let retained = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert!(retained.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Message { content, .. } if content == "old user message stays forever"
+    )));
+    assert!(!retained.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Event { content, .. } if content == "expired temporary action"
+    )));
+    assert!(retained.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Event { content, .. } if content == "recent temporary action result"
+    )));
+    assert!(!old_output.exists());
+    assert!(!old_stderr.exists());
+    assert!(!old_status.exists());
+    assert!(std::fs::read_to_string(shell_dir.join("jobs.jsonl"))
+        .unwrap()
+        .trim()
+        .is_empty());
+    let audit = agent_core::read_audit_doc(&layout.api_audit_file()).unwrap();
+    assert_eq!(audit["events"].as_array().unwrap().len(), 1);
+    assert_eq!(audit["events"][0]["type"], "recent");
+    assert_eq!(
+        load_web_mem_settings(store.root())
+            .unwrap()
+            .temporary_retention_days,
+        Some(5)
+    );
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::MemTemporaryRetentionUpdate { days: None },
+    )
+    .unwrap();
+    assert_eq!(
+        WebMemState::new(
+            state.template.data_dir.clone(),
+            state.mem.lock().unwrap().space.clone()
+        )
+        .unwrap()
+        .settings
+        .temporary_retention_days,
+        None,
+        "unlimited retention must survive reopening the same MEM"
+    );
+}
+
+#[test]
+fn temporary_retention_rolls_forward_is_idempotent_and_unlimited_skips_cleanup() {
+    let state = routing_test_state();
+    let (layout, store) = {
+        let mem = state.mem.lock().unwrap();
+        (mem.layout.clone(), mem.session_store.clone())
+    };
+    let session = state.sessions.lock().unwrap()["session_a"].clone();
+    store
+        .upsert_session(&stored_session_from_web_session_with_store(
+            &store, &session,
+        ))
+        .unwrap();
+    let day = MILLIS_PER_DAY;
+    let base_now = 20 * day;
+    for (created_at_ms, content) in [
+        (base_now - 4 * day, "first expires on later tick"),
+        (base_now - day, "second remains"),
+    ] {
+        store
+            .append_history_record(
+                "session_a",
+                &ChatHistoryRecord::Event {
+                    role: ChatHistoryRole::System,
+                    turn_id: content.to_string(),
+                    created_at_ms,
+                    kind: ChatHistoryEventKind::Repair,
+                    content: content.to_string(),
+                    extra: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+    }
+
+    assert_eq!(
+        apply_temporary_retention(&layout, &store, Some(5), base_now)
+            .unwrap()
+            .history_events,
+        0
+    );
+    assert_eq!(
+        apply_temporary_retention(&layout, &store, Some(5), base_now + 2 * day)
+            .unwrap()
+            .history_events,
+        1,
+        "the moving cutoff must expire data on a later periodic pass"
+    );
+    assert_eq!(
+        apply_temporary_retention(&layout, &store, Some(5), base_now + 2 * day).unwrap(),
+        TemporaryRetentionResult::default(),
+        "repeating a periodic pass at the same cutoff must be idempotent"
+    );
+    assert_eq!(
+        apply_temporary_retention(&layout, &store, None, i64::MAX).unwrap(),
+        TemporaryRetentionResult::default()
+    );
+    let retained = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert!(retained.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Event { content, .. } if content == "second remains"
+    )));
+}
+
+#[test]
+fn mem_temporary_retention_rejects_invalid_values() {
+    let state = routing_test_state();
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::MemTemporaryRetentionUpdate { days: Some(2) },
+        )
+        .unwrap_err(),
+        "mem_temporary_retention_days_invalid"
+    );
 }
 
 #[test]
@@ -5713,6 +5958,7 @@ fn test_runtime_profile() -> WebSessionRuntimeProfile {
         timeout_secs: 1,
         max_llm_input_tokens: 10_000,
         max_llm_output_tokens: 1_024,
+        stream: false,
         max_rounds: "unlimited".to_string(),
         bash_approval: "ask".to_string(),
         work_instructions: "off".to_string(),
@@ -10238,6 +10484,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
             base_url: format!("https://api-{index:05}.example.test/v1"),
             max_llm_input_tokens: 100_000,
             max_llm_output_tokens: 10_000,
+            stream: false,
             api_key: format!("secret-{index:05}"),
             http_headers: Default::default(),
         }
@@ -10293,6 +10540,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                 base_url: "https://updated.example.test/v1".to_string(),
                 max_llm_input_tokens: 100_000,
                 max_llm_output_tokens: 10_000,
+                stream: true,
                 api_key: None,
                 http_headers: BTreeMap::from([
                     ("Authorization".to_string(), "****".to_string()),
@@ -10346,6 +10594,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                         base_url: format!("https://concurrent-{index}.example.test/v1"),
                         max_llm_input_tokens: 100_000,
                         max_llm_output_tokens: 10_000,
+                        stream: false,
                         api_key: None,
                         http_headers: Default::default(),
                     },
@@ -10381,6 +10630,7 @@ fn legacy_model_endpoints_load_with_default_token_limits() {
     let endpoints = load_model_endpoints_resilient(&memory_dir).unwrap();
     assert_eq!(endpoints[0].max_llm_input_tokens, 100_000);
     assert_eq!(endpoints[0].max_llm_output_tokens, 10_000);
+    assert!(!endpoints[0].stream);
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -10422,6 +10672,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         base_url: "https://api.example.test/v1".to_string(),
         max_llm_input_tokens: 128_000,
         max_llm_output_tokens: 10_000,
+        stream: false,
         api_key: None,
         http_headers: Default::default(),
     };
@@ -10439,12 +10690,34 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         base_url: "https://api.example.test/v1".to_string(),
         max_llm_input_tokens: 200_000,
         max_llm_output_tokens: 8_000,
+        stream: false,
         api_key: None,
         http_headers: Default::default(),
     };
     assert_eq!(
         normalize_model_endpoint_input(None, invalid_output).unwrap_err(),
         "invalid_model_endpoint_max_output_tokens"
+    );
+}
+
+#[test]
+fn model_endpoint_stream_requires_openai_compatible_protocol() {
+    let input = ModelEndpointInput {
+        id: None,
+        name: "Responses stream".to_string(),
+        model: "gpt".to_string(),
+        api_protocol: "openai-responses".to_string(),
+        response_protocol: "json".to_string(),
+        base_url: "https://api.example.test/v1".to_string(),
+        max_llm_input_tokens: 200_000,
+        max_llm_output_tokens: 20_000,
+        stream: true,
+        api_key: None,
+        http_headers: Default::default(),
+    };
+    assert_eq!(
+        normalize_model_endpoint_input(None, input).unwrap_err(),
+        "model_endpoint_stream_requires_openai_compatible"
     );
 }
 
@@ -10468,6 +10741,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 base_url: "https://api.example.test/v1".to_string(),
                 max_llm_input_tokens: 100_000,
                 max_llm_output_tokens: 10_000,
+                stream: false,
                 api_key: Some("secret-endpoint-key".to_string()),
                 http_headers: BTreeMap::from([
                     ("X-Tenant".to_string(), "tenant\"one\\东京".to_string()),
@@ -10492,6 +10766,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     assert_eq!(applied.model, "gpt-4.1");
     assert_eq!(applied.max_llm_input_tokens, 100_000);
     assert_eq!(applied.max_llm_output_tokens, 10_000);
+    assert!(!applied.stream);
     {
         let sessions = state.sessions.lock().unwrap();
         let session = &sessions[&session_id];
@@ -10510,6 +10785,10 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 .get("TIMEM_MAX_LLM_OUTPUT")
                 .map(String::as_str),
             Some("10000")
+        );
+        assert_eq!(
+            session.runtime.env.get("TIMEM_STREAM").map(String::as_str),
+            Some("false")
         );
     }
     let reveal = execute_browser_command(
@@ -10548,6 +10827,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 base_url: "https://api.example.test/v1".to_string(),
                 max_llm_input_tokens: 1_000_000,
                 max_llm_output_tokens: 50_000,
+                stream: true,
                 api_key: None,
                 http_headers: Default::default(),
             },
@@ -10560,6 +10840,12 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         assert_eq!(session.max_llm_input_tokens, 1_000_000);
         assert_eq!(session.runtime_profile.max_llm_input_tokens, 1_000_000);
         assert_eq!(session.runtime_profile.max_llm_output_tokens, 50_000);
+        assert!(session.runtime_profile.stream);
+        assert!(session.runtime.settings.config.openai_compatible.stream);
+        assert_eq!(
+            session.runtime.env.get("TIMEM_STREAM").map(String::as_str),
+            Some("true")
+        );
     }
     let endpoint_update_events = drain_wire_events(&mut endpoint_events);
     assert!(endpoint_update_events.iter().any(|event| matches!(
@@ -10570,6 +10856,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
         } if updated_session_id == &session_id
             && runtime_profile.max_llm_input_tokens == 1_000_000
             && runtime_profile.max_llm_output_tokens == 50_000
+            && runtime_profile.stream
     )));
 
     handle_command(
@@ -10585,6 +10872,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 base_url: "https://responses.example.test/v1".to_string(),
                 max_llm_input_tokens: 1_000_000,
                 max_llm_output_tokens: 50_000,
+                stream: false,
                 api_key: None,
                 http_headers: Default::default(),
             },
@@ -10600,6 +10888,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     assert_eq!(restored[0].name, "Production renamed");
     assert_eq!(restored[0].max_llm_input_tokens, 1_000_000);
     assert_eq!(restored[0].max_llm_output_tokens, 50_000);
+    assert!(!restored[0].stream);
     assert_eq!(restored[0].api_key, "secret-endpoint-key");
 
     handle_command(
@@ -10661,9 +10950,12 @@ fn system_default_mem_detection_uses_the_resolved_path() {
 
 #[tokio::test]
 async fn occupied_default_mem_preferred_port_falls_back_to_another_supported_port() {
-    let occupied = TcpListener::bind((Ipv4Addr::LOCALHOST, DEFAULT_MEM_PREFERRED_PORT))
-        .await
-        .unwrap();
+    let occupied = match TcpListener::bind((Ipv4Addr::LOCALHOST, DEFAULT_MEM_PREFERRED_PORT)).await
+    {
+        Ok(listener) => Some(listener),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => None,
+        Err(error) => panic!("failed to occupy preferred port: {error}"),
+    };
     let selected = bind_web_listener(None, false, true).await.unwrap();
     let selected_port = selected.local_addr().unwrap().port();
     assert_ne!(selected_port, DEFAULT_MEM_PREFERRED_PORT);

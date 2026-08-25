@@ -797,6 +797,96 @@ impl SessionStore {
         Ok(deleted)
     }
 
+    /// Removes temporary chat-history events older than `cutoff_ms` while preserving
+    /// every user/assistant message, durable event kinds, and malformed lines. The
+    /// replacement is installed atomically.
+    pub fn prune_temporary_history_events_before(
+        &self,
+        session_id: &str,
+        cutoff_ms: i64,
+    ) -> Result<usize, String> {
+        validate_session_id(session_id)?;
+        let path = self.history_path_for_session(session_id);
+        let removed = MemGuard::for_memory_domain(
+            &self.root,
+            format!(
+                "session-data-{}",
+                sanitize_session_path_component(session_id)
+            ),
+        )
+        .with_write(|| {
+            if !path.exists() {
+                return Ok(0);
+            }
+            let parent = path
+                .parent()
+                .ok_or_else(|| "chat_history_path_invalid".to_string())?;
+            let temporary = parent.join(format!(
+                "raw_chat_history.jsonl.retention.tmp-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            let source = fs::File::open(&path).map_err(|_| "chat_history_open_failed")?;
+            let mut options = OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut target = options
+                .open(&temporary)
+                .map_err(|_| "chat_history_open_failed")?;
+            let result: Result<usize, String> = (|| {
+                let mut removed = 0usize;
+                for line in BufReader::new(source).lines() {
+                    let line = line.map_err(|_| "chat_history_read_failed".to_string())?;
+                    if parse_chat_history_record_line(&line).is_some_and(|record| {
+                        matches!(
+                            record,
+                            ChatHistoryRecord::Event {
+                                created_at_ms,
+                                kind: ChatHistoryEventKind::Action
+                                    | ChatHistoryEventKind::ActionResult
+                                    | ChatHistoryEventKind::ContextCompact
+                                    | ChatHistoryEventKind::Repair,
+                                ..
+                            } if created_at_ms < cutoff_ms
+                        )
+                    }) {
+                        removed = removed.saturating_add(1);
+                        continue;
+                    }
+                    writeln!(target, "{line}")
+                        .map_err(|_| "chat_history_write_failed".to_string())?;
+                }
+                target
+                    .sync_all()
+                    .map_err(|_| "chat_history_sync_failed".to_string())?;
+                fs::rename(&temporary, &path)
+                    .map_err(|_| "chat_history_replace_failed".to_string())?;
+                restrict_session_path_permissions(&path, false)?;
+                #[cfg(unix)]
+                fs::File::open(parent)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|_| "chat_history_dir_sync_failed".to_string())?;
+                Ok(removed)
+            })();
+            if result.is_err() {
+                let _ = fs::remove_file(&temporary);
+            }
+            result
+        })??;
+        self.history_indexes
+            .lock()
+            .map_err(|_| "chat_history_index_poisoned".to_string())?
+            .remove(&path);
+        Ok(removed)
+    }
+
     pub fn read_history_page(
         &self,
         session_id: &str,

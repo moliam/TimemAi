@@ -144,6 +144,173 @@ fn chat_history_records_round_trip_as_jsonl() {
 }
 
 #[test]
+fn temporary_retention_prunes_only_selected_old_events() {
+    let root = tmp_dir("temporary_retention");
+    let store = SessionStore::new(&root);
+    let records = [
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "old_message".to_string(),
+            created_at_ms: 1,
+            kind: None,
+            command_id: None,
+            delivery_state: None,
+            content: "old user message must remain".to_string(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "old_action".to_string(),
+            created_at_ms: 1,
+            kind: ChatHistoryEventKind::Action,
+            content: "expired action".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "old_action_result".to_string(),
+            created_at_ms: 2,
+            kind: ChatHistoryEventKind::ActionResult,
+            content: "expired action result".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "old_compact".to_string(),
+            created_at_ms: 3,
+            kind: ChatHistoryEventKind::ContextCompact,
+            content: "expired compact".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "old_repair".to_string(),
+            created_at_ms: 4,
+            kind: ChatHistoryEventKind::Repair,
+            content: "expired repair".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "old_progress".to_string(),
+            created_at_ms: 1,
+            kind: ChatHistoryEventKind::Progress,
+            content: "old durable progress remains".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "boundary_action".to_string(),
+            created_at_ms: 100,
+            kind: ChatHistoryEventKind::Action,
+            content: "boundary remains".to_string(),
+            extra: BTreeMap::new(),
+        },
+    ];
+    for record in &records {
+        store.append_history_record("session_a", record).unwrap();
+    }
+    let path = store.history_path_for_session("session_a");
+    use std::io::Write as _;
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap(),
+        "not-json"
+    )
+    .unwrap();
+
+    assert_eq!(
+        store
+            .prune_temporary_history_events_before("session_a", 100)
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        store
+            .prune_temporary_history_events_before("session_a", 100)
+            .unwrap(),
+        0,
+        "repeating the same rolling cleanup must be idempotent"
+    );
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("old user message must remain"));
+    assert!(text.contains("old durable progress remains"));
+    assert!(text.contains("boundary remains"));
+    assert!(
+        text.contains("not-json"),
+        "malformed evidence must be preserved"
+    );
+    assert!(!text.contains("expired action"));
+    assert!(!text.contains("expired compact"));
+    assert!(!text.contains("expired repair"));
+}
+
+#[test]
+fn temporary_retention_serializes_with_concurrent_appends_without_losing_messages() {
+    let root = tmp_dir("temporary_retention_concurrent_append");
+    let store = SessionStore::new(&root);
+    store
+        .append_history_record(
+            "session_a",
+            &ChatHistoryRecord::Event {
+                role: ChatHistoryRole::System,
+                turn_id: "expired".to_string(),
+                created_at_ms: 1,
+                kind: ChatHistoryEventKind::Action,
+                content: "expired action".to_string(),
+                extra: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+    let writer_store = store.clone();
+    let writer = std::thread::spawn(move || {
+        for index in 0..500 {
+            writer_store
+                .append_history_record(
+                    "session_a",
+                    &ChatHistoryRecord::Message {
+                        role: ChatHistoryRole::User,
+                        turn_id: format!("message-{index}"),
+                        created_at_ms: 1,
+                        kind: None,
+                        command_id: None,
+                        delivery_state: None,
+                        content: format!("durable message {index}"),
+                    },
+                )
+                .unwrap();
+        }
+    });
+    for _ in 0..50 {
+        store
+            .prune_temporary_history_events_before("session_a", 100)
+            .unwrap();
+    }
+    writer.join().unwrap();
+    store
+        .prune_temporary_history_events_before("session_a", 100)
+        .unwrap();
+
+    let records = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert_eq!(records.len(), 500);
+    assert!(records.iter().all(|record| matches!(
+        record,
+        ChatHistoryRecord::Message { content, .. } if content.starts_with("durable message ")
+    )));
+    let turn_ids = records
+        .iter()
+        .map(|record| record.turn_id().to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        turn_ids.len(),
+        500,
+        "no concurrent append may be lost or duplicated"
+    );
+}
+
+#[test]
 fn prompt_format_hint_examples_are_generated_from_real_schema() {
     let path = PathBuf::from("/tmp/raw_chat_history.jsonl");
     let hint = chat_history_prompt_format_hint(&path);

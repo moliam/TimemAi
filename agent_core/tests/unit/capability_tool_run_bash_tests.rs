@@ -1127,6 +1127,102 @@ fn process_running_treats_zombie_as_not_running() {
 }
 
 #[test]
+fn shell_job_retention_removes_only_old_finished_jobs_and_artifacts() {
+    let dir = tmp_memory_dir("rolling_retention");
+    let store = FileShellJobStore::new(&dir);
+    let shell_dir = dir.join("shell_jobs");
+    let cutoff_ms = now_ms();
+    let make_record = |id: &str, created_at_ms: i64| ShellJobRecord {
+        id: id.to_string(),
+        created_at_ms,
+        kind: "background".to_string(),
+        session_id: "retention-session".to_string(),
+        turn_id: id.to_string(),
+        pid: std::process::id(),
+        process_identity: None,
+        tool_call_id: format!("call-{id}"),
+        owner_id: Some("retention-owner".to_string()),
+        command: format!("command-{id}"),
+        cwd: dir.display().to_string(),
+        output_file: shell_dir.join(format!("{id}.out")).display().to_string(),
+        stderr_file: shell_dir.join(format!("{id}.err")).display().to_string(),
+        status_file: shell_dir.join(format!("{id}.status")).display().to_string(),
+        tail_out: false,
+    };
+    let old_finished = make_record("old-finished", cutoff_ms - 1);
+    let boundary_finished = make_record("boundary-finished", cutoff_ms);
+    let old_running = make_record("old-running", cutoff_ms - 1);
+    for record in [&old_finished, &boundary_finished, &old_running] {
+        fs::write(&record.output_file, format!("stdout-{}", record.id)).unwrap();
+        fs::write(&record.stderr_file, format!("stderr-{}", record.id)).unwrap();
+        store.append(record).unwrap();
+    }
+    fs::write(&old_finished.status_file, "exit:0").unwrap();
+    fs::write(format!("{}.notified", old_finished.status_file), "1").unwrap();
+    fs::write(&boundary_finished.status_file, "exit:0").unwrap();
+
+    assert_eq!(store.prune_finished_before(cutoff_ms).unwrap(), 1);
+    assert_eq!(store.prune_finished_before(cutoff_ms).unwrap(), 0);
+    for path in [
+        old_finished.output_file.as_str(),
+        old_finished.stderr_file.as_str(),
+        old_finished.status_file.as_str(),
+    ] {
+        assert!(!Path::new(path).exists());
+    }
+    assert!(!Path::new(&format!("{}.notified", old_finished.status_file)).exists());
+    for record in [&boundary_finished, &old_running] {
+        assert!(Path::new(&record.output_file).exists());
+        assert!(Path::new(&record.stderr_file).exists());
+    }
+    let retained = store.records_unlocked();
+    assert_eq!(retained.len(), 2);
+    assert!(retained
+        .iter()
+        .any(|record| record.id == boundary_finished.id));
+    assert!(retained.iter().any(|record| record.id == old_running.id));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn shell_job_retention_rejects_artifact_paths_outside_its_store() {
+    let dir = tmp_memory_dir("retention_path_escape");
+    let store = FileShellJobStore::new(&dir);
+    let outside = dir.join("must-remain.out");
+    let status = dir.join("shell_jobs/escaped.status");
+    fs::write(&outside, "do not delete").unwrap();
+    fs::write(&status, "exit:0").unwrap();
+    let record = ShellJobRecord {
+        id: "escaped".to_string(),
+        created_at_ms: 1,
+        kind: "background".to_string(),
+        session_id: "session".to_string(),
+        turn_id: "turn".to_string(),
+        pid: std::process::id(),
+        process_identity: None,
+        tool_call_id: "call".to_string(),
+        owner_id: Some("owner".to_string()),
+        command: "command".to_string(),
+        cwd: dir.display().to_string(),
+        output_file: outside.display().to_string(),
+        stderr_file: dir.join("shell_jobs/escaped.err").display().to_string(),
+        status_file: status.display().to_string(),
+        tail_out: false,
+    };
+    store.append(&record).unwrap();
+
+    assert_eq!(store.prune_finished_before(2).unwrap(), 0);
+    assert!(
+        outside.exists(),
+        "a corrupted index must not delete files outside shell_jobs"
+    );
+    assert_eq!(store.records_unlocked(), vec![record]);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn shutdown_terminates_only_shell_jobs_owned_by_this_process() {
     let dir = tmp_memory_dir("owned_shutdown");
     let store = FileShellJobStore::new(&dir);

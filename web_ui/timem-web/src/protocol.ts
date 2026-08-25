@@ -91,6 +91,7 @@ export type Session = {
     timeout_secs: number;
     max_llm_input_tokens: number;
     max_llm_output_tokens: number;
+    stream: boolean;
     max_rounds: string;
     bash_approval: string;
     work_instructions: string;
@@ -207,6 +208,7 @@ export type ModelEndpoint = {
   base_url: string;
   max_llm_input_tokens: number;
   max_llm_output_tokens: number;
+  stream: boolean;
   api_key_configured: boolean;
   http_headers: Record<string, string>;
 };
@@ -223,6 +225,7 @@ export type Snapshot = {
       data_dir: string;
       space_dir: string;
       memory_dir: string;
+      temporary_retention_days: 1 | 5 | 10 | null;
     };
     runtime_options: Array<{ key: string; value: string; applies_to: "new_sessions" | string }>;
     session_env_defaults: Record<string, string>;
@@ -258,6 +261,7 @@ export type WireEvent =
   | { type: "host_error"; message: string }
   | { type: "runtime_notice"; session_id: string; level: "notice" | "warning" | "error" | string; title: string; message: string }
   | { type: "host_config_updated"; key: string; value: string; session_env_defaults: Record<string, string> }
+  | { type: "mem_settings_updated"; temporary_retention_days: 1 | 5 | 10 | null }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
   | { type: "attachment_removed"; session_id: string; attachment_id: string }
   | { type: "history_page"; session_id: string; records: ChatHistoryRecord[]; before_cursor?: string | null; has_more: boolean }
@@ -300,7 +304,7 @@ export type ClientCommand =
   | { type: "tool_repo_open_terminal"; session_id: string; tool_id: string }
   | { type: "runtime_update"; key: string; value: string }
   | { type: "session_runtime_update"; session_id: string; key: string; value: string }
-  | { type: "model_endpoint_upsert"; endpoint: { id?: string; name: string; model: string; api_protocol: string; response_protocol: string; base_url: string; max_llm_input_tokens: number; max_llm_output_tokens: number; api_key?: string; http_headers: Record<string, string> } }
+  | { type: "model_endpoint_upsert"; endpoint: { id?: string; name: string; model: string; api_protocol: string; response_protocol: string; base_url: string; max_llm_input_tokens: number; max_llm_output_tokens: number; stream: boolean; api_key?: string; http_headers: Record<string, string> } }
   | { type: "model_endpoint_delete"; endpoint_id: string }
   | { type: "model_endpoint_apply"; session_id: string; endpoint_id: string }
   | { type: "model_endpoint_secret_reveal"; endpoint_id: string }
@@ -310,6 +314,7 @@ export type ClientCommand =
   | { type: "mcp_server_reconnect"; session_id: string; server_id: string }
   | { type: "mcp_server_secrets_reveal"; server_id: string }
   | { type: "mem_switch"; path: string }
+  | { type: "mem_temporary_retention_update"; days: 1 | 5 | 10 | null }
   | {
       type: "topic_reply";
       session_id: string;

@@ -1628,6 +1628,8 @@ body {
 .turn-user-entry:hover > .user-message-delete,
 .turn-user-entry:focus-within > .user-message-delete { opacity: 1; }
 .turn-user-entry > .markdown-body { padding-right: 26px; }
+/* Preserve textarea soft line breaks inside user-message Markdown paragraphs. */
+.turn-user-entry .markdown-body :is(p, li) { white-space: pre-wrap; }
 
 /* User messages use a muted blue-gray in dark mode and a light blue in light mode. */
 .turn-user-content {
@@ -1885,6 +1887,11 @@ body {
 .endpoint-editor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 10px; }
 .endpoint-editor-grid label { min-width: 0; display: grid; gap: 5px; color: #9eb0bc; font-size: 11px; font-weight: 700; }
 .endpoint-editor-grid > .wide { grid-column: 1 / -1; }
+.endpoint-api-protocol { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 7px; }
+.endpoint-api-protocol > label { min-width: 0; }
+.endpoint-api-protocol .endpoint-stream-toggle { display: inline-flex; min-height: 32px; align-items: center; gap: 4px; padding: 0 2px; white-space: nowrap; font-size: 10px; font-weight: 700; }
+.endpoint-api-protocol .endpoint-stream-toggle input { width: 13px; height: 13px; margin: 0; padding: 0; accent-color: #64bbaa; }
+.endpoint-api-protocol .endpoint-stream-toggle input:disabled + span { opacity: .45; }
 .endpoint-editor-grid input, .endpoint-editor-grid select { min-width: 0; width: 100%; border: 1px solid #38515e; border-radius: 4px; padding: 7px 8px; background: #091319; color: #e1edf2; outline: none; }
 .endpoint-editor-grid input:focus, .endpoint-editor-grid select:focus { border-color: #64bbaa; }
 .endpoint-api-key { position: relative; }
@@ -2057,9 +2064,8 @@ body {
 .session-group-heading { position: sticky; top: 0; z-index: 2; min-width: 0; display: flex; align-items: center; gap: 3px; margin: 12px 2px 4px; padding: 4px 3px; border-radius: 7px; background: color-mix(in srgb, #171717 92%, transparent); backdrop-filter: blur(8px); }
 .session-group-toggle { min-width: 0; flex: 1; display: flex; align-items: center; gap: 6px; border: 0; padding: 3px 2px; background: transparent; color: #a8a8a8; text-align: left; font: inherit; font-size: 13px; font-weight: 720; letter-spacing: .025em; }
 .session-group-toggle svg { flex: none; }
-.session-group-chevron { transition: transform .18s ease; }
-.session-group-toggle[aria-expanded="true"] .session-group-chevron { transform: rotate(90deg); }
-.session-group-folder { color: #929292; }
+.session-group-folder { width: 14px; height: 14px; flex: none; color: #929292; transition: color .15s ease; }
+.session-group-toggle:hover .session-group-folder { color: #c0c0c0; }
 .session-group-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-group-toggle small { margin-left: auto; min-width: 18px; padding: 1px 5px; border-radius: 99px; background: #2c2c2c; color: #818181; text-align: center; font-size: 9px; }
 .session-group-actions { position: relative; display: flex; align-items: center; opacity: 0; transition: opacity .15s ease; }
@@ -2080,9 +2086,15 @@ body {
 .session-delete-select:hover:not(:disabled) { border-color: #9a6a66; background: #302524; }
 .session-delete-select.selected { border-color: #b86e68; background: #6b3834; color: #ffe4e1; }
 .session-drag { width: 22px; height: 30px; flex: none; display: grid; place-items: center; border: 0; padding: 0; background: transparent; color: #646d6d; cursor: grab; touch-action: none; }
+.session-group-list .session-row > .session-drag { margin-left: 12px; }
 .session-drag:hover:not(:disabled) { color: #b2bcbc; }
 .session-drag:active { cursor: grabbing; }
 .session-row .session { padding-right: 2px; }
+.session-endpoint-reveal { min-width: 0; max-width: 46%; flex: none; display: inline-flex; align-items: center; gap: 4px; margin-right: 5px; overflow: hidden; border: 1px solid #40504c; border-radius: 999px; padding: 2px 6px; background: #222a28; color: #899b96; font-size: 9px; line-height: 1.2; white-space: nowrap; opacity: 0; visibility: hidden; transform: translateX(3px); transition: opacity .15s ease, visibility .15s ease, transform .15s ease; pointer-events: none; }
+.session-endpoint-reveal > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.session-row:hover .session-endpoint-reveal, .session-row:focus-within .session-endpoint-reveal, .session-endpoint-reveal.pending { opacity: 1; visibility: visible; transform: translateX(0); }
+.session-endpoint-reveal.pending { color: #8fb9d5; }
+.session-row.delete-selecting .session-endpoint-reveal { display: none; }
 .session-overlay { width: 220px; min-height: 42px; padding: 6px 34px 6px 3px; border: 1px solid #526967; background: #292f2f; color: #ededed; box-shadow: 0 12px 28px #0008; }
 .session-overlay .session-name { min-width: 0; font-size: 12px; font-weight: 650; }
 
@@ -2109,9 +2121,810 @@ body {
 :root[data-theme="light"] .session-group.drop-target .session-group-drop-hint { border-color: #6d9c92; color: #46776d; }
 :root[data-theme="light"] .session-drag { color: #929c9b; }
 :root[data-theme="light"] .session-drag:hover:not(:disabled) { color: #4d6460; }
+:root[data-theme="light"] .session-endpoint-reveal { border-color: #cbd6d2; background: #eef3f1; color: #64756f; }
+:root[data-theme="light"] .session-endpoint-reveal.pending { color: #587d91; }
 :root[data-theme="light"] .session-overlay { border-color: #9aafaa; background: #fff; color: #222; box-shadow: 0 12px 28px #4564; }
 
 @media (max-width: 720px) {
   .session-group-actions { opacity: 1; }
   .session-group-heading { position: static; }
 }
+
+
+/* Coordinated management palette: teal is constructive/selected, amber is unavailable, red is destructive. */
+:root {
+  --management-accent: #68b8a7;
+  --management-accent-hover: #7bcbbb;
+  --management-accent-surface: #1b302c;
+  --management-accent-surface-hover: #223d37;
+  --management-accent-border: #426f65;
+  --management-panel: #171d1c;
+  --management-panel-soft: #1b2221;
+  --management-card: #1d2523;
+  --management-card-hover: #242e2b;
+  --management-border: #303b38;
+  --management-muted: #85948f;
+  --management-text: #e5ece9;
+}
+
+/* Session navigation */
+.sidebar { border-right-color: var(--management-border); background: var(--management-panel); }
+.new-session {
+  border: 1px solid var(--management-accent-border);
+  background: var(--management-accent-surface);
+  color: #d9f1eb;
+  box-shadow: inset 0 1px #ffffff08;
+  transition: border-color .15s, background-color .15s, color .15s, box-shadow .15s;
+}
+.new-session:hover:not(:disabled) { border-color: #568d80; background: var(--management-accent-surface-hover); color: #f2fffb; }
+.new-session:focus-visible { outline: 0; border-color: var(--management-accent); box-shadow: 0 0 0 2px #68b8a730; }
+.session-management-actions { border-bottom: 1px solid #26302e; padding-bottom: 4px; }
+.new-session-group { border-color: #34423e; background: #1d2523; color: #91a39d; }
+.new-session-group:hover:not(:disabled) { border-color: var(--management-accent-border); background: var(--management-accent-surface); color: #cce8e1; }
+.session-group-heading { background: color-mix(in srgb, var(--management-panel) 92%, transparent); }
+.session-group-toggle { color: #a9b7b2; }
+.session-group-folder { color: #6f9f92; }
+.session-group-toggle small { background: #26312e; color: #82928d; }
+.session-group-actions > button:hover:not(:disabled) { background: #26312e; color: #d8e4e0; }
+.session-row:hover { background: var(--management-card-hover); }
+.session-row.active { background: #243530; box-shadow: inset 0 0 0 1px #4b6d64, 0 2px 7px #05080738; }
+.session-row.active .session { color: #f1faf7; }
+.session-row.renaming-session { background: #22302d; }
+.session-drag { color: #667873; }
+.session-drag:hover:not(:disabled) { color: #a7bbb5; }
+.session-detail::before, .session-detail::after { border-color: #35423f; }
+.session-row.active .session-detail::before, .session-row.active .session-detail::after { border-color: #54766e; }
+
+/* Roles library */
+.worker-role-panel { border-left-color: var(--management-border); background: var(--management-panel); }
+.worker-role-panel > header > span { color: var(--management-text); }
+.worker-role-help { color: var(--management-muted); }
+.worker-role-group { border-color: var(--management-border); background: var(--management-panel-soft); }
+.worker-role-group.collapsed { border-color: #2c3633; background: #191f1e; }
+.worker-role-panel .worker-role-group-toggle { color: #a7b6b1; }
+.worker-role-panel .worker-role-group-toggle:hover { background: #25302d; color: #e3eeea; }
+.worker-role-panel .worker-role-group-toggle small { background: #26312e; color: #82928d; }
+.worker-role-item { border-color: #34413d; background: var(--management-card); }
+.worker-role-item:hover { border-color: #40534d; background: var(--management-card-hover); }
+.worker-role-item.selected { border-color: #568d80; background: #20352f; box-shadow: inset 3px 0 var(--management-accent); }
+.worker-role-item strong { color: var(--management-text); }
+.worker-role-item small { color: #899994; }
+.worker-role-panel button { border-color: #35423f; background: #202826; color: #a8b5b1; }
+.worker-role-panel button:hover:not(:disabled) { border-color: #4a5d57; color: #f0f7f4; }
+.worker-role-group-editor input,
+.worker-role-editor input,
+.worker-role-editor textarea { border-color: #394742; background: #1d2523; color: #e8efec; }
+.worker-role-group-editor input:focus,
+.worker-role-editor input:focus,
+.worker-role-editor textarea:focus { border-color: #5d9689; box-shadow: 0 0 0 2px #68b8a724; }
+.worker-role-panel :is(.worker-role-group-create, .worker-role-primary-action) { border-color: #568d80; background: #285548; color: #dff5ef; }
+.worker-role-panel :is(.worker-role-group-create, .worker-role-primary-action):hover:not(:disabled) { border-color: #70ad9f; background: #32685a; color: #fff; }
+
+/* Shared endpoint management */
+.endpoint-menu { border-color: var(--management-border); background: var(--management-panel); }
+.endpoint-menu-heading strong, .endpoint-editor-heading strong { color: var(--management-text); }
+.endpoint-add-action {
+  border-color: #568d80;
+  background: #285548;
+  color: #dff5ef;
+  box-shadow: inset 0 1px #ffffff0a;
+}
+.endpoint-add-action:hover:not(:disabled) { border-color: #70ad9f; background: #32685a; color: #fff; }
+.endpoint-add-action:focus-visible { outline: 0; border-color: var(--management-accent); box-shadow: 0 0 0 2px #68b8a730; }
+.endpoint-row { border-color: #34443f; background: var(--management-card); }
+.endpoint-row:hover { border-color: #425850; }
+.endpoint-row.active { border-color: #568d80; background: #20352f; box-shadow: 0 2px 8px #05080740; }
+.endpoint-select:hover:not(:disabled) { background: #25332f; }
+.endpoint-select > span svg { color: var(--management-accent); }
+.endpoint-empty { border-color: #3d514b; background: #1a2321; color: #899a95; }
+.endpoint-editor { border-top-color: #344740; }
+.endpoint-editor-grid input, .endpoint-editor-grid select { border-color: #3a4b45; background: #19211f; }
+.endpoint-editor-grid input:focus, .endpoint-editor-grid select:focus { border-color: var(--management-accent); box-shadow: 0 0 0 2px #68b8a720; }
+
+:root[data-theme="light"] {
+  --management-accent: #3f9886;
+  --management-accent-hover: #318270;
+  --management-accent-surface: #e6f3ef;
+  --management-accent-surface-hover: #d7ebe5;
+  --management-accent-border: #8bbcaf;
+  --management-panel: #f7faf9;
+  --management-panel-soft: #f1f6f4;
+  --management-card: #fff;
+  --management-card-hover: #edf4f2;
+  --management-border: #d6e1dd;
+  --management-muted: #71817b;
+  --management-text: #24332f;
+}
+:root[data-theme="light"] .sidebar { border-right-color: var(--management-border); background: var(--management-panel); }
+:root[data-theme="light"] .new-session { border-color: var(--management-accent-border); background: var(--management-accent-surface); color: #245f54; box-shadow: inset 0 1px #fff; }
+:root[data-theme="light"] .new-session:hover:not(:disabled) { border-color: #6da797; background: var(--management-accent-surface-hover); color: #174d43; }
+:root[data-theme="light"] .session-management-actions { border-bottom-color: #e1e9e6; }
+:root[data-theme="light"] .new-session-group { border-color: #d2dfdb; background: #fff; color: #687b75; }
+:root[data-theme="light"] .new-session-group:hover:not(:disabled) { border-color: var(--management-accent-border); background: var(--management-accent-surface); color: #2b6c60; }
+:root[data-theme="light"] .session-group-heading { background: color-mix(in srgb, var(--management-panel) 92%, transparent); }
+:root[data-theme="light"] .session-group-toggle { color: #596b65; }
+:root[data-theme="light"] .session-group-folder { color: #568f80; }
+:root[data-theme="light"] .session-group-toggle small { background: #e7eeeb; color: #71817b; }
+:root[data-theme="light"] .session-row:hover { background: var(--management-card-hover); }
+:root[data-theme="light"] .session-row.active { background: #e0efeb; box-shadow: inset 0 0 0 1px #a5c9bf, 0 2px 7px #31564b1c; }
+:root[data-theme="light"] .session-row.active .session { color: #20312c; }
+:root[data-theme="light"] .session-row.renaming-session { background: #e6f1ee; }
+:root[data-theme="light"] .session-detail::before,
+:root[data-theme="light"] .session-detail::after { border-color: #d7e1de; }
+:root[data-theme="light"] .session-row.active .session-detail::before,
+:root[data-theme="light"] .session-row.active .session-detail::after { border-color: #a8c7bf; }
+
+:root[data-theme="light"] .worker-role-panel { border-left-color: var(--management-border); background: var(--management-panel); }
+:root[data-theme="light"] .worker-role-group { border-color: var(--management-border); background: var(--management-panel-soft); }
+:root[data-theme="light"] .worker-role-group.collapsed { border-color: #dde6e3; background: #f5f8f7; }
+:root[data-theme="light"] .worker-role-panel .worker-role-group-toggle { color: #596b65; }
+:root[data-theme="light"] .worker-role-panel .worker-role-group-toggle:hover { background: #e5eeeb; color: #263c35; }
+:root[data-theme="light"] .worker-role-panel .worker-role-group-toggle small { background: #e3ebe8; color: #71817b; }
+:root[data-theme="light"] .worker-role-item { border-color: #d7e2de; background: #fff; }
+:root[data-theme="light"] .worker-role-item:hover { border-color: #b8cec7; background: #f7fbfa; }
+:root[data-theme="light"] .worker-role-item.selected { border-color: #86b8aa; background: #e5f2ee; box-shadow: inset 3px 0 var(--management-accent); }
+:root[data-theme="light"] .worker-role-group-editor input,
+:root[data-theme="light"] .worker-role-editor input,
+:root[data-theme="light"] .worker-role-editor textarea { border-color: #ccd9d5; background: #fff; color: #24332f; }
+:root[data-theme="light"] .worker-role-panel :is(.worker-role-group-create, .worker-role-primary-action) { border-color: #79aa9d; background: #dcefeb; color: #245f55; }
+:root[data-theme="light"] .worker-role-panel :is(.worker-role-group-create, .worker-role-primary-action):hover:not(:disabled) { border-color: #60998a; background: #cce6df; color: #174f46; }
+
+:root[data-theme="light"] .endpoint-menu { border-color: var(--management-border); background: var(--management-panel); box-shadow: 0 18px 42px #30453d26; }
+:root[data-theme="light"] .endpoint-add-action { border-color: #79aa9d; background: #dcefeb; color: #245f55; }
+:root[data-theme="light"] .endpoint-add-action:hover:not(:disabled) { border-color: #60998a; background: #cce6df; color: #174f46; }
+:root[data-theme="light"] .endpoint-row { border-color: #d3dfdb; background: #fff; }
+:root[data-theme="light"] .endpoint-row:hover { border-color: #aec8c0; }
+:root[data-theme="light"] .endpoint-row.active { border-color: #86b8aa; background: #e5f2ee; box-shadow: 0 2px 8px #31564b20; }
+:root[data-theme="light"] .endpoint-select:hover:not(:disabled) { background: #edf4f2; }
+:root[data-theme="light"] .endpoint-empty { border-color: #bfd1cb; background: #f4f8f7; color: #71817b; }
+:root[data-theme="light"] .endpoint-editor-grid input,
+:root[data-theme="light"] .endpoint-editor-grid select { border-color: #c4d4cf; background: #fff; color: #24332f; }
+
+
+/* Compact Session toolbar and full-width group labels. */
+.session-management-actions {
+  min-height: 38px;
+  padding: 2px 2px 6px;
+}
+.session-create-actions,
+.session-delete-actions { display: flex; align-items: center; gap: 5px; }
+.session-create-actions { grid-template-columns: none; }
+.new-session,
+.new-session-group,
+.session-delete-manage,
+.session-delete-cancel {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  justify-content: center;
+  gap: 0;
+  border-radius: 7px;
+  padding: 0;
+}
+.new-session { border: 1px solid var(--management-accent-border); }
+.session-group-heading { position: sticky; padding-right: 3px; }
+.session-group-toggle { width: 100%; padding-right: 4px; }
+.session-group-toggle span { min-width: 0; }
+.session-group-actions {
+  position: absolute;
+  z-index: 3;
+  right: 3px;
+  top: 50%;
+  visibility: hidden;
+  opacity: 0;
+  padding: 2px;
+  border: 1px solid #34423e;
+  border-radius: 6px;
+  background: #202826f2;
+  box-shadow: -10px 0 16px #171d1c;
+  transform: translateY(-50%);
+  transition: opacity .15s ease, visibility 0s linear .15s;
+}
+.session-group-heading:hover .session-group-actions,
+.session-group-actions:focus-within {
+  visibility: visible;
+  opacity: 1;
+  transition-delay: 0s;
+}
+.session-group-editor.inline { right: 0; }
+
+:root[data-theme="light"] .session-group-actions {
+  border-color: #d3dfdb;
+  background: #f7faf9f5;
+  box-shadow: -10px 0 16px #f7faf9;
+}
+@media (hover: none) {
+  .session-group-actions { position: static; visibility: visible; opacity: 1; border: 0; padding: 0; background: transparent; box-shadow: none; transform: none; }
+  .session-group-heading .session-group-toggle { padding-right: 4px; }
+}
+
+/* Shared compact create/delete management controls for model endpoints. */
+.endpoint-management-actions { display: flex; align-items: center; gap: 5px; }
+.endpoint-add-action,
+.endpoint-delete-manage,
+.endpoint-delete-cancel {
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+}
+.endpoint-add-action {
+  border-color: #3e5d55;
+  background: #20332e;
+  color: #9ed2c5;
+  box-shadow: none;
+}
+.endpoint-add-action:hover:not(:disabled) { border-color: #52796f; background: #29423b; color: #d9f4ed; }
+.endpoint-add-action:focus-visible { outline: 2px solid #68b8a74a; outline-offset: 1px; box-shadow: none; }
+.endpoint-delete-manage { background: transparent; color: #899793; }
+.endpoint-delete-manage:hover:not(:disabled) { border-color: #7d4b48; background: #402725; color: #f0aaa5; }
+.endpoint-delete-manage.confirm { border-color: #c94f49; background: #c94f49; color: #fff; box-shadow: 0 2px 8px #8f2f2a3d; }
+.endpoint-delete-cancel { border-color: #d5dadd; background: #f7f8f8; color: #111820; box-shadow: 0 2px 7px #0004; }
+.endpoint-row.delete-selecting { cursor: pointer; }
+.endpoint-row.delete-selecting:not(.delete-selected) { background: #202323; box-shadow: none; }
+.endpoint-row.delete-selected { border-color: #a45e59; background: #332625; box-shadow: 0 2px 8px #160b0a45; }
+.endpoint-row.delete-selecting .endpoint-select { cursor: pointer; opacity: 1; }
+.endpoint-delete-select { margin-left: auto; width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid #58635f; border-radius: 6px; color: transparent; }
+.endpoint-delete-select.selected { border-color: #b86e68; background: #6b3834; color: #ffe4e1; }
+
+:root[data-theme="light"] .endpoint-add-action { border-color: #b8d2cb; background: #e8f2ef; color: #36786a; box-shadow: none; }
+:root[data-theme="light"] .endpoint-add-action:hover:not(:disabled) { border-color: #91b9ae; background: #dcece7; color: #205f53; }
+:root[data-theme="light"] .endpoint-delete-manage { color: #66716e; }
+:root[data-theme="light"] .endpoint-delete-manage:hover:not(:disabled) { border-color: #cf7772; background: #fbe9e7; color: #a53f3a; }
+:root[data-theme="light"] .endpoint-delete-manage.confirm { border-color: #c94f49; background: #c94f49; color: #fff; box-shadow: 0 2px 7px #8f2f2a2b; }
+:root[data-theme="light"] .endpoint-delete-cancel { border-color: #cfd5d8; background: #fff; color: #111820; box-shadow: 0 2px 7px #26343d24; }
+:root[data-theme="light"] .endpoint-row.delete-selecting:not(.delete-selected) { background: #f4f6f5; }
+:root[data-theme="light"] .endpoint-row.delete-selected { border-color: #c46b65; background: #f8e9e7; box-shadow: 0 2px 8px #73332d18; }
+:root[data-theme="light"] .endpoint-delete-select { border-color: #aab5b2; }
+:root[data-theme="light"] .endpoint-delete-select.selected { border-color: #b55f59; background: #d9827b; color: #fff; }
+
+/* Keep endpoint toolbar icons geometrically centered despite generic heading rules. */
+.endpoint-menu-heading > .endpoint-management-actions {
+  min-width: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+.endpoint-menu-heading > .endpoint-management-actions > button {
+  display: grid;
+  place-items: center;
+  justify-content: center;
+  gap: 0;
+  line-height: 0;
+}
+.endpoint-management-actions > button > svg { display: block; margin: 0; }
+
+/* Refined endpoint delete selection affordance. */
+.endpoint-row.delete-selecting {
+  transition: border-color .15s ease, background-color .15s ease, box-shadow .15s ease;
+}
+.endpoint-row.delete-selecting:hover:not(.delete-selected) {
+  border-color: #596560;
+  background: #242a28;
+}
+.endpoint-delete-select {
+  width: 20px;
+  height: 20px;
+  border-color: #56625e;
+  border-radius: 6px;
+  background: #171d1b;
+  box-shadow: inset 0 0 0 1px #ffffff05;
+  transition: border-color .14s ease, background-color .14s ease, color .14s ease, box-shadow .14s ease, transform .14s ease;
+}
+.endpoint-row.delete-selecting:hover .endpoint-delete-select {
+  border-color: #8b6a66;
+  background: #211c1b;
+}
+.endpoint-delete-select.selected {
+  border-color: #c77a73;
+  background: #8f4944;
+  color: #fff8f7;
+  box-shadow: inset 0 1px 0 #ffffff20, 0 0 0 2px #c7787224;
+}
+.endpoint-delete-select.selected svg {
+  display: block;
+  color: #fff8f7;
+  filter: drop-shadow(0 1px 1px #531d1a66);
+}
+.endpoint-row.delete-selecting .endpoint-select:focus-visible {
+  outline: 0;
+  box-shadow: inset 0 0 0 1px #9b746f;
+  border-radius: 5px;
+}
+
+:root[data-theme="light"] .endpoint-row.delete-selecting:hover:not(.delete-selected) {
+  border-color: #bdc9c5;
+  background: #f1f5f3;
+}
+:root[data-theme="light"] .endpoint-delete-select {
+  border-color: #aebbb7;
+  background: #fff;
+  box-shadow: inset 0 0 0 1px #52655f0a;
+}
+:root[data-theme="light"] .endpoint-row.delete-selecting:hover .endpoint-delete-select {
+  border-color: #bd7771;
+  background: #fff8f7;
+}
+:root[data-theme="light"] .endpoint-delete-select.selected {
+  border-color: #b85f59;
+  background: #d57972;
+  color: #fff;
+  box-shadow: inset 0 1px 0 #ffffff42, 0 0 0 2px #bd686124;
+}
+:root[data-theme="light"] .endpoint-delete-select.selected svg {
+  color: #fff;
+  filter: drop-shadow(0 1px 1px #7d302b45);
+}
+:root[data-theme="light"] .endpoint-row.delete-selecting .endpoint-select:focus-visible {
+  box-shadow: inset 0 0 0 1px #c58a84;
+}
+
+
+/* Unified normal selection language across Session, endpoint, MCP, and Role. */
+.session-row.active,
+.endpoint-row.active,
+.mcp-server.selected,
+.worker-role-item.selected {
+  background: #20352f;
+  box-shadow: inset 0 0 0 1px #4b6d64, 0 2px 8px #05080740;
+}
+.endpoint-row.active,
+.worker-role-item.selected { border-color: #568d80; }
+.mcp-server.selected {
+  border-bottom-color: transparent;
+  border-radius: 7px;
+}
+
+:root[data-theme="light"] .session-row.active,
+:root[data-theme="light"] .endpoint-row.active,
+:root[data-theme="light"] .mcp-server.selected,
+:root[data-theme="light"] .worker-role-item.selected {
+  background: #e5f2ee;
+  box-shadow: inset 0 0 0 1px #a5c9bf, 0 2px 8px #31564b20;
+}
+:root[data-theme="light"] .endpoint-row.active,
+:root[data-theme="light"] .worker-role-item.selected { border-color: #86b8aa; }
+:root[data-theme="light"] .mcp-server.selected { border-bottom-color: transparent; }
+
+/* Border-light management surfaces: reserve visible borders for form controls and stateful toggles. */
+.sidebar {
+  border-right-color: transparent;
+  box-shadow: inset -1px 0 #303b3875;
+}
+.worker-role-panel {
+  border-left-color: transparent;
+  box-shadow: inset 1px 0 #303b3875;
+}
+.endpoint-menu,
+.mcp-panel {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #ffffff0a, 0 18px 46px #0009;
+}
+.mcp-panel { box-shadow: inset 0 0 0 1px #ffffff0a, 0 22px 60px #0009; }
+.mcp-panel > header {
+  border-bottom-color: transparent;
+  box-shadow: 0 1px #2d3a377a;
+}
+.worker-role-group,
+.worker-role-item,
+.endpoint-row {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #ffffff0b;
+}
+.worker-role-group:hover,
+.worker-role-item:hover,
+.endpoint-row:hover {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #5d756d55, 0 2px 7px #05080724;
+}
+.mcp-server {
+  border-bottom-color: transparent;
+  box-shadow: inset 0 -1px #2a38357a;
+}
+.mcp-server:last-child { box-shadow: none; }
+.session-group-actions {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #ffffff0c, -10px 0 16px #171d1c;
+}
+.new-session,
+.new-session-group,
+.endpoint-add-action,
+.worker-role-panel button,
+.mcp-panel-header-actions > button,
+.endpoint-delete-manage {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #ffffff0d;
+}
+.new-session:hover:not(:disabled),
+.new-session-group:hover:not(:disabled),
+.endpoint-add-action:hover:not(:disabled),
+.worker-role-panel button:hover:not(:disabled),
+.mcp-panel-header-actions > button:hover:not(:disabled),
+.endpoint-delete-manage:hover:not(:disabled) {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #82a19842, 0 2px 6px #05080722;
+}
+.mcp-add {
+  border-color: transparent;
+  border-style: solid;
+  box-shadow: inset 0 0 0 1px #55726855;
+}
+.mcp-add:hover {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #6d9c8e88, 0 2px 7px #05080724;
+}
+.session-row.active,
+.endpoint-row.active,
+.mcp-server.selected,
+.worker-role-item.selected {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #4b6d64, 0 2px 8px #05080740;
+}
+
+:root[data-theme="light"] .sidebar { box-shadow: inset -1px 0 #cfdad675; }
+:root[data-theme="light"] .worker-role-panel { box-shadow: inset 1px 0 #cfdad675; }
+:root[data-theme="light"] .endpoint-menu {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #49655b0d, 0 18px 42px #30453d26;
+}
+:root[data-theme="light"] .mcp-panel {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #49655b0d, 0 22px 60px #24343d30;
+}
+:root[data-theme="light"] .mcp-panel > header {
+  border-bottom-color: transparent;
+  box-shadow: 0 1px #dbe4e175;
+}
+:root[data-theme="light"] .worker-role-group,
+:root[data-theme="light"] .worker-role-item,
+:root[data-theme="light"] .endpoint-row {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #47605714;
+}
+:root[data-theme="light"] .worker-role-group:hover,
+:root[data-theme="light"] .worker-role-item:hover,
+:root[data-theme="light"] .endpoint-row:hover {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #7d9c9252, 0 2px 7px #31564b14;
+}
+:root[data-theme="light"] .mcp-server {
+  border-bottom-color: transparent;
+  box-shadow: inset 0 -1px #dbe4e175;
+}
+:root[data-theme="light"] .mcp-server:last-child { box-shadow: none; }
+:root[data-theme="light"] .session-group-actions {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #47605714, -10px 0 16px #f7faf9;
+}
+:root[data-theme="light"] .new-session,
+:root[data-theme="light"] .new-session-group,
+:root[data-theme="light"] .endpoint-add-action,
+:root[data-theme="light"] .worker-role-panel button,
+:root[data-theme="light"] .mcp-panel-header-actions > button,
+:root[data-theme="light"] .endpoint-delete-manage {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #47605718;
+}
+:root[data-theme="light"] .mcp-add {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #789c9155;
+}
+:root[data-theme="light"] .session-row.active,
+:root[data-theme="light"] .endpoint-row.active,
+:root[data-theme="light"] .mcp-server.selected,
+:root[data-theme="light"] .worker-role-item.selected {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #a5c9bf, 0 2px 8px #31564b20;
+}
+
+/* Role cards stay borderless; depth comes from background and soft ambient shadow. */
+.worker-role-item {
+  border-color: transparent;
+  box-shadow: 0 2px 7px #0508071f;
+}
+.worker-role-item:hover {
+  border-color: transparent;
+  box-shadow: 0 3px 9px #0508072e;
+}
+.worker-role-item.selected {
+  border-color: transparent;
+  box-shadow: 0 3px 10px #0508073d, 0 0 8px #68b8a71a;
+}
+
+:root[data-theme="light"] .worker-role-item {
+  border-color: transparent;
+  box-shadow: 0 2px 7px #31564b12;
+}
+:root[data-theme="light"] .worker-role-item:hover {
+  border-color: transparent;
+  box-shadow: 0 3px 9px #31564b1b;
+}
+:root[data-theme="light"] .worker-role-item.selected {
+  border-color: transparent;
+  box-shadow: 0 3px 10px #31564b20, 0 0 8px #3f988616;
+}
+
+/* Softer placeholder hierarchy across creation and editing forms. */
+:root { --form-placeholder: #62706c; }
+:root[data-theme="light"] { --form-placeholder: #9aa5a1; }
+
+:is(
+  .endpoint-editor-grid,
+  .worker-role-editor,
+  .worker-role-group-editor,
+  .worker-role-group > header,
+  .mcp-editor,
+  .session-modal,
+  .session-group-editor,
+  .structured-field-row,
+  .structured-list-row,
+  .session-credential-control,
+  .toolrepo-controls,
+  .toolgen-dialog,
+  .mem-switch-modal
+) :is(input, textarea)::placeholder,
+.composer textarea::placeholder,
+.expanded-text-editor > textarea::placeholder {
+  color: var(--form-placeholder);
+  opacity: .78;
+}
+
+:is(
+  .endpoint-editor-grid,
+  .worker-role-editor,
+  .worker-role-group-editor,
+  .worker-role-group > header,
+  .mcp-editor,
+  .session-modal,
+  .session-group-editor,
+  .structured-field-row,
+  .structured-list-row,
+  .session-credential-control,
+  .toolrepo-controls,
+  .toolgen-dialog,
+  .mem-switch-modal
+) :is(input, textarea):disabled::placeholder,
+.composer textarea:disabled::placeholder {
+  opacity: .52;
+}
+
+/* MEM footer separates settings from the dedicated workspace switch action. */
+.mem-card-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 34px; gap: 6px; align-items: stretch; }
+.mem-card-row .mem-card { min-width: 0; }
+.mem-card-row .mem-card,
+.mem-switch-action { border: 0; background: #202020; color: #bcbcbc; box-shadow: inset 0 0 0 1px #303030, 0 2px 7px #00000024; transition: background-color .15s, color .15s, box-shadow .15s; }
+.mem-switch-action { display: grid; place-items: center; border-radius: 8px; }
+.mem-card-row .mem-card:hover:not(:disabled),
+.mem-switch-action:hover:not(:disabled) { background: #282828; color: #ececec; box-shadow: inset 0 0 0 1px #454545, 0 3px 9px #00000030; }
+.mem-switch-action:focus-visible { outline: 2px solid #68b8a74a; outline-offset: 1px; }
+.mem-switch-action:disabled { opacity: .45; cursor: default; }
+.mem-settings-modal { width: min(460px, calc(100vw - 28px)); }
+.mem-settings-modal label { display: grid; gap: 7px; margin-top: 16px; color: #9eb0bc; font-size: 12px; font-weight: 700; }
+.mem-settings-modal select { width: 100%; border: 1px solid #394742; border-radius: 6px; padding: 9px 10px; background: #1d2523; color: #e8efec; outline: none; }
+.mem-settings-modal select:focus { border-color: #5d9689; box-shadow: 0 0 0 2px #68b8a724; }
+:root[data-theme="light"] .mem-card-row .mem-card,
+:root[data-theme="light"] .mem-switch-action { border: 0; background: #f3f3f3; color: #333; box-shadow: inset 0 0 0 1px #dedede, 0 2px 7px #24342e14; }
+:root[data-theme="light"] .mem-card-row .mem-card:hover:not(:disabled),
+:root[data-theme="light"] .mem-switch-action:hover:not(:disabled) { background: #ebebeb; color: #202020; box-shadow: inset 0 0 0 1px #c8c8c8, 0 3px 9px #24342e1c; }
+:root[data-theme="light"] .mem-settings-modal label { color: #596b65; }
+:root[data-theme="light"] .mem-settings-modal select { border-color: #ccd9d5; background: #fff; color: #24332f; }
+
+/* Runtime loss takes exclusive focus once per outage; the persistent banner remains after dismissal. */
+.runtime-unavailable-backdrop { z-index: 60; background: #050706d9; backdrop-filter: blur(7px) saturate(.7); }
+.runtime-unavailable-dialog { width: min(480px, 100%); border-color: #826d32; background: #1d1b14; box-shadow: 0 28px 90px #000c, 0 0 0 1px #d0ab4730; }
+.runtime-unavailable-dialog .modal-titlebar h2 { display: flex; align-items: center; gap: 9px; color: #ffe4a0; }
+.runtime-unavailable-dialog .modal-titlebar h2 svg { flex: none; color: #d5ad43; }
+.runtime-unavailable-dialog > p { margin: 2px 0 0; color: #e1d4ad; line-height: 1.55; }
+.runtime-unavailable-dialog .runtime-unavailable-hint { margin-top: 13px; color: #a99e7d; font-size: 12px; }
+:root[data-theme="light"] .runtime-unavailable-backdrop { background: #26302db8; }
+:root[data-theme="light"] .runtime-unavailable-dialog { border-color: #d3b65f; background: #fffaf0; box-shadow: 0 28px 80px #26302d52, 0 0 0 1px #9e791f24; }
+:root[data-theme="light"] .runtime-unavailable-dialog .modal-titlebar h2 { color: #654d10; }
+:root[data-theme="light"] .runtime-unavailable-dialog .modal-titlebar h2 svg { color: #a47a12; }
+:root[data-theme="light"] .runtime-unavailable-dialog > p { color: #695b35; }
+:root[data-theme="light"] .runtime-unavailable-dialog .runtime-unavailable-hint { color: #877956; }
+
+/* Endpoint selection is shown only by the blue check badge, not by the row surface. */
+.endpoint-row.active:not(.delete-selecting) {
+  border-color: transparent;
+  background: var(--management-card);
+  box-shadow: inset 0 0 0 1px #ffffff0b;
+}
+.endpoint-row.active:not(.delete-selecting):hover {
+  background: var(--management-card-hover);
+  box-shadow: inset 0 0 0 1px #5d756d55, 0 2px 7px #05080724;
+}
+:root[data-theme="light"] .endpoint-row.active:not(.delete-selecting) {
+  border-color: transparent;
+  background: #fff;
+  box-shadow: inset 0 0 0 1px #47605714;
+}
+:root[data-theme="light"] .endpoint-row.active:not(.delete-selecting):hover {
+  background: #f4f7f6;
+  box-shadow: inset 0 0 0 1px #7d9c9252, 0 2px 7px #31564b14;
+}
+
+
+/* Compact Session rows: hidden endpoint labels never reserve name width. */
+.session-group-list { gap: 0; }
+.session-row { min-height: 32px; border-radius: 4px; }
+.session-row::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  right: 5px;
+  bottom: 0;
+  left: 12px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #ffffff12 12%, #ffffff12 88%, transparent);
+  pointer-events: none;
+}
+.session-row .session {
+  min-height: 32px;
+  padding-block: 2px;
+  gap: 6px;
+}
+.session-drag { height: 28px; }
+.session-identity { flex: 1; min-width: 0; }
+.session-endpoint-reveal {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  right: 5px;
+  max-width: 46%;
+  margin-right: 0;
+  transform: translate(3px, -50%);
+}
+.session-row:hover .session-endpoint-reveal,
+.session-row:focus-within .session-endpoint-reveal,
+.session-endpoint-reveal.pending { transform: translate(0, -50%); }
+:root[data-theme="light"] .session-row::after {
+  background: linear-gradient(90deg, transparent, #24342e14 12%, #24342e14 88%, transparent);
+}
+
+/* Selected endpoint badge sits immediately before the edit action. */
+.endpoint-actions { display: flex; align-items: center; gap: 4px; padding-right: 4px; }
+.endpoint-selected-badge {
+  width: 21px;
+  height: 21px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  background: #287fd1;
+  color: #fff;
+  box-shadow: inset 0 1px #ffffff35, 0 2px 6px #0b4d8b45;
+}
+.endpoint-selected-badge svg { display: block; color: #fff; }
+:root[data-theme="light"] .endpoint-selected-badge {
+  background: #247ccb;
+  color: #fff;
+  box-shadow: inset 0 1px #ffffff4a, 0 2px 6px #175b962e;
+}
+
+/* Endpoint list text uses normal reading contrast instead of placeholder-like gray. */
+.endpoint-select { color: #e3ebe8; }
+.endpoint-select:disabled { opacity: 1; cursor: default; }
+.endpoint-select strong { color: #edf4f1; font-weight: 650; }
+.endpoint-select small { color: #a9b7b2; }
+:root[data-theme="light"] .endpoint-select { color: #293833; }
+:root[data-theme="light"] .endpoint-select strong { color: #1f2d29; }
+:root[data-theme="light"] .endpoint-select small { color: #5f706a; }
+
+
+/* Active Session uses a deeper pine surface with borderless, graduated edges. */
+.session-row.active {
+  background: linear-gradient(90deg, #17372f 0%, #1d453b 52%, #183b33 100%);
+  box-shadow: 0 3px 10px #050a0838, 0 0 12px #285e501f;
+}
+.session-row.active:hover {
+  background: linear-gradient(90deg, #1b4037 0%, #234f44 52%, #1d443a 100%);
+}
+.session-row.active .session,
+.session-row.active .session.active { color: #f2faf7; }
+:root[data-theme="light"] .session-row.active {
+  background: linear-gradient(90deg, #b6d2ca 0%, #c2dad3 52%, #b9d3cc 100%);
+  box-shadow: 0 3px 10px #31564b18, 0 0 12px #4f887827;
+}
+:root[data-theme="light"] .session-row.active:hover {
+  background: linear-gradient(90deg, #abcac1 0%, #b8d3cb 52%, #aecdc4 100%);
+}
+:root[data-theme="light"] .session-row.active .session,
+:root[data-theme="light"] .session-row.active .session.active { color: #183129; }
+
+
+/* High-contrast interaction states across Session, endpoint, MCP, Role, and Memory. */
+:root {
+  --delete-check-bg: #a83f39;
+  --delete-check-bg-hover: #bd4b44;
+  --delete-check-ring: #e4888152;
+  --delete-check-mark: #fff;
+}
+
+/* Destructive selection boxes: solid red surface and crisp white check. */
+.session-delete-select.selected,
+.endpoint-delete-select.selected,
+.mcp-delete-select.selected {
+  border-color: #d66b64;
+  background: var(--delete-check-bg);
+  color: var(--delete-check-mark);
+  box-shadow: 0 0 0 2px var(--delete-check-ring), 0 2px 6px #350d0b52;
+}
+.session-delete-select.selected:hover:not(:disabled),
+.endpoint-row.delete-selecting:hover .endpoint-delete-select.selected,
+.mcp-delete-select.selected:hover:not(:disabled) { background: var(--delete-check-bg-hover); }
+.session-delete-select.selected svg,
+.endpoint-delete-select.selected svg,
+.mcp-delete-select.selected svg {
+  display: block;
+  color: var(--delete-check-mark);
+  stroke-width: 3.25;
+  filter: drop-shadow(0 1px 1px #4c100d80);
+}
+.session-delete-select:focus-visible,
+.endpoint-row.delete-selecting .endpoint-select:focus-visible,
+.mcp-delete-select:focus-visible {
+  outline: 2px solid #ee9b94;
+  outline-offset: 2px;
+}
+.session-row.delete-selected,
+.endpoint-row.delete-selected,
+.mcp-server.delete-selected,
+.worker-role-item.delete-selected {
+  background: #382321;
+  box-shadow: 0 3px 9px #16070642;
+}
+
+/* Role checkboxes stay legible and retain green for normal selection, red for deletion. */
+.worker-role-item input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  margin: 1px 0 0;
+  accent-color: #438f7d;
+}
+.worker-role-item.delete-selecting input[type="checkbox"] { accent-color: var(--delete-check-bg); }
+.worker-role-item input[type="checkbox"]:focus-visible { outline: 2px solid #77ad9f; outline-offset: 2px; }
+.worker-role-item.delete-selecting input[type="checkbox"]:focus-visible { outline-color: #ee9b94; }
+
+/* Disabled management controls remain readable; state is conveyed by cursor and muted surface. */
+.mem-card:disabled,
+.mem-switch-action:disabled {
+  opacity: .72;
+  filter: saturate(.82);
+}
+.mem-card:focus-visible,
+.mem-switch-action:focus-visible {
+  outline: 2px solid #72aa9b;
+  outline-offset: 2px;
+}
+.mem-card:disabled .mem-card-copy small { color: #9ca7a3; }
+
+:root[data-theme="light"] .session-delete-select.selected,
+:root[data-theme="light"] .endpoint-delete-select.selected,
+:root[data-theme="light"] .mcp-delete-select.selected {
+  border-color: #a9342f;
+  background: #c84b45;
+  color: #fff;
+  box-shadow: 0 0 0 2px #c84b4538, 0 2px 6px #6f211d2e;
+}
+:root[data-theme="light"] .session-delete-select.selected:hover:not(:disabled),
+:root[data-theme="light"] .endpoint-row.delete-selecting:hover .endpoint-delete-select.selected,
+:root[data-theme="light"] .mcp-delete-select.selected:hover:not(:disabled) { background: #b83e38; }
+:root[data-theme="light"] .session-row.delete-selected,
+:root[data-theme="light"] .endpoint-row.delete-selected,
+:root[data-theme="light"] .mcp-server.delete-selected,
+:root[data-theme="light"] .worker-role-item.delete-selected {
+  background: #f7dfdc;
+  box-shadow: 0 3px 9px #73332d1c;
+}
+:root[data-theme="light"] .worker-role-item input[type="checkbox"] { accent-color: #327d6c; }
+:root[data-theme="light"] .worker-role-item.delete-selecting input[type="checkbox"] { accent-color: #c84b45; }
+:root[data-theme="light"] .mem-card:disabled .mem-card-copy small { color: #66716d; }

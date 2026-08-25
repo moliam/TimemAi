@@ -64,6 +64,13 @@ describe("user message bubble styling", () => {
     expect(styles).toContain('font-weight: var(--user-font-weight)');
   });
 
+  it("preserves soft line breaks entered in user message textareas", () => {
+    expect(source).toContain('<MarkdownContent text={entry.text}/>');
+    expect(styles).toContain('/* Preserve textarea soft line breaks inside user-message Markdown paragraphs. */');
+    expect(styles).toContain('.turn-user-entry .markdown-body :is(p, li) { white-space: pre-wrap; }');
+    expect(styles).not.toContain('.message-content .markdown-body :is(p, li) { white-space: pre-wrap; }');
+  });
+
   it("uses a muted blue-gray bubble in dark mode and keeps the readable light-blue bubble in light mode", () => {
     expect(styles).toContain(".turn-user-content {\n  background: #263746;\n  color: #e7f1f8;");
     expect(styles).toContain(".turn-user-entry .markdown-body pre { border-color: #456176; background: #111a22; }");
@@ -164,7 +171,8 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('.session-row .session { padding-right: 2px; }');
     expect(styles).toContain('.session-row.delete-selecting .session { padding-right: 34px; }');
     expect(styles).toContain('font-size: 13px; font-weight: 720; letter-spacing: .025em; }');
-    expect(styles).toContain('.session-group-toggle[aria-expanded="true"] .session-group-chevron { transform: rotate(90deg); }');
+    expect(source).toContain('collapsed ? <Folder className="session-group-folder" size={14}/> : <FolderOpen className="session-group-folder" size={14}/>');
+    expect(source).not.toContain('className="session-group-chevron"');
   });
 
   it("submits session group editors as forms and keeps empty groups visible as drop targets", () => {
@@ -186,6 +194,17 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('.session-group.drop-target .session-group-list');
     expect(styles).toContain('.session-row.dragging');
     expect(styles).toContain('.session-drag {');
+    expect(styles).toContain('.session-group-list .session-row > .session-drag { margin-left: 12px; }');
+    expect(source).toContain('className={`session-endpoint-reveal ${renamingSession ? "pending" : ""}`}');
+    expect(styles).toContain('.session-row:hover .session-endpoint-reveal, .session-row:focus-within .session-endpoint-reveal, .session-endpoint-reveal.pending');
+    expect(styles).toContain('.session-row.delete-selecting .session-endpoint-reveal { display: none; }');
+    expect(styles).toContain('/* Compact Session rows: hidden endpoint labels never reserve name width. */');
+    expect(styles).toContain('.session-row { min-height: 32px; border-radius: 4px; }');
+    expect(styles).toContain('.session-row::after {');
+    expect(styles).toContain('.session-row .session {\n  min-height: 32px;\n  padding-block: 2px;');
+    expect(styles).toContain('.session-identity { flex: 1; min-width: 0; }');
+    expect(styles).toContain('.session-endpoint-reveal {\n  position: absolute;');
+    expect(styles).toContain('transform: translate(3px, -50%);');
   });
 
   it("keeps previous-message and thread-bottom navigation beside the thread", () => {
@@ -1121,7 +1140,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('const runtimeReady = connected && snapshotReady;');
     expect(source).toContain('const runtimeLocked = pendingMemSwitch || !runtimeReady;');
     expect(source).toContain('const newSessionLabel = runtimeLocked ? "Session controls are temporarily locked" : "New session";');
-    expect(source).toContain('ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked}');
+    expect(source).toContain('ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked || sessionDeleteMode}');
     expect(source).toContain('title={runtimeLocked ? "Session controls are temporarily locked" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`}');
     expect(source).toContain('aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}`');
     expect(source).toContain('aria-expanded={expandedSessionIds.has(session.session_id)} disabled={runtimeLocked || sessionDeleteMode}');
@@ -1275,8 +1294,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).not.toContain('workspacePathLabel(session.current_dir)');
     expect(source).toContain('title={runtimeLocked ? "Session controls are temporarily locked" : session.display_name}');
     expect(source).toContain('const sessionEndpointName = endpointNameForProfile(server?.model_endpoints ?? [], session.runtime_profile) ?? UNCONFIGURED_MODEL_LABEL;');
-    expect(source).toContain('className="session-detail session-profile" title={sessionEndpointName}');
-    expect(source).not.toContain('className="session-detail session-profile" title={modelDisplayName(session)}');
+    expect(source).toContain('className={`session-endpoint-reveal ${renamingSession ? "pending" : ""}`} title={renamingSession ? "Saving name" : sessionEndpointName}');
+    expect(source).not.toContain('className="session-detail session-profile"');
     expect(source).toContain('className="session-working-icon" size={15} aria-label="Session working"');
     expect(source).not.toContain('className="session-state">busy</span>');
     expect(styles).not.toContain(".session-state");
@@ -1297,6 +1316,25 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain('font-family: "SFMono-Regular", Consolas, monospace;');
   });
 
+  it("opens MEM settings from the card and uses a dedicated switch button", () => {
+    expect(source).toContain('const [showMemSettings, setShowMemSettings] = useState(false);');
+    expect(source).toContain('className="mem-card-row"');
+    expect(source).toContain('ref={memSettingsButtonRef} className="mem-card"');
+    expect(source).toContain('ref={memSwitchButtonRef} className="mem-switch-action"');
+    expect(source).toContain('<ArrowLeftRight size={15} aria-hidden="true"/>');
+    expect(source).toContain('function MemSettingsDialog');
+    expect(source).toContain('<option value="1">最近 1 天</option>');
+    expect(source).toContain('<option value="5">最近 5 天</option>');
+    expect(source).toContain('<option value="10">最近 10 天</option>');
+    expect(source).toContain('<option value="unlimited">不限</option>');
+    expect(source).toContain('sendCommand({ type: "mem_temporary_retention_update", days })');
+    expect(styles).toContain('.mem-card-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 34px;');
+    expect(styles).toContain('.mem-switch-action');
+    expect(styles).toContain(`.mem-card-row .mem-card,\n.mem-switch-action { border: 0; background: #202020; color: #bcbcbc; box-shadow: inset 0 0 0 1px #303030`);
+    expect(styles).toContain(`:root[data-theme="light"] .mem-card-row .mem-card,\n:root[data-theme="light"] .mem-switch-action { border: 0; background: #f3f3f3; color: #333; box-shadow: inset 0 0 0 1px #dedede`);
+    expect(styles).toContain('.mem-settings-modal');
+  });
+
   it("announces runtime connection state and explains mem switch availability", () => {
     expect(source).toContain('const [runtimeEverConnected, setRuntimeEverConnected] = useState(false);');
     expect(source).toContain('const [reconnectAttempt, setReconnectAttempt] = useState(0);');
@@ -1314,6 +1352,16 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain("const runtimeDisconnected = runtimeEverConnected && !connected;");
     expect(source).toContain("const runtimeUnavailable = runtimeDisconnected && reconnectAttempt >= 3;");
     expect(source).toContain('const runtimeDisconnectedTitle = runtimeUnavailable ? "Runtime unavailable" : "Connection lost";');
+    expect(source).toContain('const [runtimeUnavailableDialogDismissed, setRuntimeUnavailableDialogDismissed] = useState(false);');
+    expect(source).toContain('const showRuntimeUnavailableDialog = runtimeUnavailable && !runtimeUnavailableDialogDismissed;');
+    expect(source).toContain('if (!runtimeUnavailable) setRuntimeUnavailableDialogDismissed(false);');
+    expect(source).toContain('showRuntimeUnavailableDialog && <RuntimeUnavailableDialog detail={runtimeDisconnectedDetail} onClose={() => setRuntimeUnavailableDialogDismissed(true)}/>');
+    expect(source).toContain('className="modal-backdrop runtime-unavailable-backdrop" role="presentation"');
+    expect(source).toContain('className="decision-modal runtime-unavailable-dialog" role="dialog" aria-modal="true"');
+    expect(source).toContain('autoFocus title="Close runtime unavailable alert" aria-label="Close runtime unavailable alert"');
+    expect(source).toContain('After you close this dialog, the warning banner will remain visible.');
+    expect(styles).toContain('.runtime-unavailable-backdrop { z-index: 60;');
+    expect(styles).toContain('.runtime-unavailable-dialog');
     expect(source).toContain("sessionInteractionLockReasonForState(pendingMemSwitch, connected, runtimeEverConnected, reconnectAttempt)");
     expect(viewModelSource).toContain('return reconnectAttempt >= 3 ? "Runtime unavailable. Restart timem-web." : "Connection lost. Reconnecting…";');
     expect(source).toContain("sessionInteractionLockReason={sessionInteractionLockReason}");
@@ -1322,7 +1370,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain("<span>{runtimeDisconnectedDetail}</span>");
     expect(styles).toContain(".runtime-disconnect-banner");
     expect(styles).toContain(":root[data-theme=\"light\"] .runtime-disconnect-banner");
-    expect(source).toContain('ref={memSwitchButtonRef} className="mem-card"');
+    expect(source).toContain('ref={memSettingsButtonRef} className="mem-card"');
+    expect(source).toContain('ref={memSwitchButtonRef} className="mem-switch-action"');
     expect(source).toContain('<span className="mem-card-icon" aria-hidden="true"><Database size={15}/></span>');
     expect(source).toContain('<span className="mem-card-copy"><strong>Memory</strong>');
     expect(source).toContain('<small dir="rtl">{pendingMemSwitch ? "Switching…" : server?.mem?.space_dir ?? "…"}</small>');
@@ -1392,6 +1441,180 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).not.toContain("activeModelServiceIssue");
     expect(source).not.toContain("modelServiceIssues");
     expect(styles).not.toContain(".model-config-banner");
+  });
+
+  it("coordinates endpoint, role, and session management colors across themes", () => {
+    expect(source).toContain('className="endpoint-add-action" title="新增接入点" aria-label="新增接入点"');
+    expect(styles).toContain("/* Coordinated management palette: teal is constructive/selected, amber is unavailable, red is destructive. */");
+    expect(styles).toContain("--management-accent: #68b8a7;");
+    expect(styles).toContain("--management-panel: #171d1c;");
+    expect(source).toContain('className={`mcp-server ${connectionState} ${active && !deleteMode ? "selected" : ""}');
+    expect(styles).toContain("/* Unified normal selection language across Session, endpoint, MCP, and Role. */");
+    expect(styles).toContain(`.session-row.active,
+.endpoint-row.active,
+.mcp-server.selected,
+.worker-role-item.selected {
+  background: #20352f;
+  box-shadow: inset 0 0 0 1px #4b6d64, 0 2px 8px #05080740;
+}`);
+    expect(styles).toContain(`:root[data-theme="light"] .session-row.active,
+:root[data-theme="light"] .endpoint-row.active,
+:root[data-theme="light"] .mcp-server.selected,
+:root[data-theme="light"] .worker-role-item.selected {
+  background: #e5f2ee;
+  box-shadow: inset 0 0 0 1px #a5c9bf, 0 2px 8px #31564b20;
+}`);
+    expect(styles).toContain('.new-session {\n  border: 1px solid var(--management-accent-border);');
+    expect(styles).toContain(':root[data-theme="light"] {\n  --management-accent: #3f9886;');
+    expect(styles).toContain('.mcp-session-toggle.failed[aria-checked="true"] { border-color: #d2a23b; background: #a97818;');
+    expect(styles).toContain('.session-delete-manage.confirm { border-color: #c94f49; background: #c94f49;');
+    expect(styles).toContain('.endpoint-add-action {\n  border-color: #3e5d55;\n  background: #20332e;');
+    expect(styles).toContain(':root[data-theme="light"] .endpoint-add-action { border-color: #b8d2cb; background: #e8f2ef;');
+  });
+
+  it("uses edge shadows instead of visible borders for non-form management surfaces", () => {
+    expect(styles).toContain("/* Border-light management surfaces: reserve visible borders for form controls and stateful toggles. */");
+    expect(styles).toContain(`.sidebar {
+  border-right-color: transparent;
+  box-shadow: inset -1px 0 #303b3875;
+}`);
+    expect(styles).toContain(`.worker-role-group,
+.worker-role-item,
+.endpoint-row {
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px #ffffff0b;
+}`);
+    expect(styles).toContain(`.endpoint-menu,
+.mcp-panel {
+  border-color: transparent;`);
+    expect(styles).toContain(`.session-row.active,
+.endpoint-row.active,
+.mcp-server.selected,
+.worker-role-item.selected {
+  border-color: transparent;`);
+    expect(styles).toContain(`:root[data-theme="light"] .endpoint-menu {
+  border-color: transparent;`);
+    expect(styles).toContain('.endpoint-editor-grid input, .endpoint-editor-grid select { border-color: #3a4b45;');
+    expect(styles).toContain(`.worker-role-group-editor input,
+.worker-role-editor input,
+.worker-role-editor textarea { border-color: #394742;`);
+    expect(styles).toContain('.mcp-session-toggle { position: relative; width: 32px; height: 18px; min-height: 18px; flex: none; margin-right: 7px; border: 1px solid');
+    expect(styles).toContain("/* Endpoint selection is shown only by the blue check badge, not by the row surface. */");
+    expect(styles).toContain(`.endpoint-row.active:not(.delete-selecting) {
+  border-color: transparent;
+  background: var(--management-card);
+  box-shadow: inset 0 0 0 1px #ffffff0b;
+}`);
+    expect(styles).toContain(`:root[data-theme="light"] .endpoint-row.active:not(.delete-selecting) {
+  border-color: transparent;
+  background: #fff;
+  box-shadow: inset 0 0 0 1px #47605714;
+}`);
+    expect(styles).not.toContain('background: #1c302b;');
+    expect(styles).not.toContain('background: #d8e8e3;');
+    expect(styles).toContain("/* Role cards stay borderless; depth comes from background and soft ambient shadow. */");
+    expect(styles).toContain(`.worker-role-item {
+  border-color: transparent;
+  box-shadow: 0 2px 7px #0508071f;
+}`);
+    expect(styles).toContain(`.worker-role-item.selected {
+  border-color: transparent;
+  box-shadow: 0 3px 10px #0508073d, 0 0 8px #68b8a71a;
+}`);
+  });
+
+  it("uses softer placeholders across endpoint, role, session, MCP, and composer forms", () => {
+    expect(styles).toContain("/* Softer placeholder hierarchy across creation and editing forms. */");
+    expect(styles).toContain(":root { --form-placeholder: #62706c; }");
+    expect(styles).toContain(':root[data-theme="light"] { --form-placeholder: #9aa5a1; }');
+    expect(styles).toContain(`.endpoint-editor-grid,
+  .worker-role-editor,
+  .worker-role-group-editor,`);
+    expect(styles).toContain(`) :is(input, textarea)::placeholder,
+.composer textarea::placeholder,
+.expanded-text-editor > textarea::placeholder {
+  color: var(--form-placeholder);
+  opacity: .78;
+}`);
+    expect(styles).toContain(`.composer textarea:disabled::placeholder {
+  opacity: .52;
+}`);
+  });
+
+  it("keeps session creation controls on one compact row without reserving hidden group-action space", () => {
+    expect(source).toContain('className={`session-management-actions ${sessionDeleteMode ? "deleting" : ""}`}><div className="session-create-actions"');
+    expect(source).toContain('className="new-session" title={newSessionLabel} aria-label={newSessionLabel}');
+    expect(source).toContain('<Plus size={16}/></button><button type="button" className="new-session-group"');
+    expect(source).toContain('className="session-group-toggle" title={bucket?.name ?? "Unsorted"}');
+    expect(styles).toContain("/* Compact Session toolbar and full-width group labels. */");
+    expect(styles).toContain(`.session-create-actions,
+.session-delete-actions { display: flex; align-items: center; gap: 5px; }`);
+    expect(styles).toContain(`.session-group-actions {
+  position: absolute;`);
+    expect(styles).toContain(`visibility: hidden;
+  opacity: 0;`);
+    expect(styles).not.toContain('.session-group-heading:hover .session-group-toggle,');
+  });
+
+  it("uses the shared select-then-confirm delete pattern for model endpoints", () => {
+    expect(source).toContain('const [deleteMode, setDeleteMode] = useState(false);');
+    expect(source).toContain('const [selectedDeleteEndpointId, setSelectedDeleteEndpointId] = useState("");');
+    expect(source).toContain('className="endpoint-management-actions"');
+    expect(source).toContain('className={`endpoint-delete-manage ${deleteMode ? "confirm" : ""}`}');
+    expect(source).toContain('className={`endpoint-row ${active ? "active" : ""} ${deleteMode ? "delete-selecting" : ""} ${deleteSelected ? "delete-selected" : ""}`}');
+    expect(source).toContain('className="endpoint-actions">{active && <span className="endpoint-selected-badge" role="img" aria-label="当前选中的接入点"><Check size={13} strokeWidth={3}/></span>}<button');
+    expect(source).not.toContain(': active && <Check size={13}/>');
+    expect(styles).toContain('/* Selected endpoint badge sits immediately before the edit action. */');
+    expect(styles).toContain('.endpoint-selected-badge {\n  width: 21px;\n  height: 21px;');
+    expect(styles).toContain('background: #287fd1;\n  color: #fff;');
+    expect(styles).toContain('.endpoint-selected-badge svg { display: block; color: #fff; }');
+    expect(styles).toContain('/* Endpoint list text uses normal reading contrast instead of placeholder-like gray. */');
+    expect(styles).toContain('.endpoint-select:disabled { opacity: 1; cursor: default; }');
+    expect(styles).toContain('.endpoint-select strong { color: #edf4f1; font-weight: 650; }');
+    expect(styles).toContain('.endpoint-select small { color: #a9b7b2; }');
+    expect(styles).toContain(':root[data-theme="light"] .endpoint-select strong { color: #1f2d29; }');
+    expect(styles).toContain(':root[data-theme="light"] .endpoint-select small { color: #5f706a; }');
+    expect(styles).toContain('/* Active Session uses a deeper pine surface with borderless, graduated edges. */');
+    expect(styles).toContain('background: linear-gradient(90deg, #17372f 0%, #1d453b 52%, #183b33 100%);');
+    expect(styles).toContain('box-shadow: 0 3px 10px #050a0838, 0 0 12px #285e501f;');
+    expect(styles).toContain('background: linear-gradient(90deg, #1b4037 0%, #234f44 52%, #1d443a 100%);');
+    expect(styles).toContain('background: linear-gradient(90deg, #b6d2ca 0%, #c2dad3 52%, #b9d3cc 100%);');
+    expect(styles).toContain('box-shadow: 0 3px 10px #31564b18, 0 0 12px #4f887827;');
+    expect(styles).toContain('background: linear-gradient(90deg, #abcac1 0%, #b8d3cb 52%, #aecdc4 100%);');
+    expect(styles).not.toContain('inset 0 0 0 1px #4f756a80');
+    expect(styles).not.toContain('inset 0 0 0 1px #9ebfb680');
+    expect(styles).toContain('/* High-contrast interaction states across Session, endpoint, MCP, Role, and Memory. */');
+    expect(styles).toContain('--delete-check-bg: #a83f39;');
+    expect(styles).toContain(`.session-delete-select.selected,
+.endpoint-delete-select.selected,
+.mcp-delete-select.selected {`);
+    expect(styles).toContain('stroke-width: 3.25;');
+    expect(styles).toContain(`.session-row.delete-selected,
+.endpoint-row.delete-selected,
+.mcp-server.delete-selected,
+.worker-role-item.delete-selected {`);
+    expect(styles).toContain('.worker-role-item input[type="checkbox"] {');
+    expect(styles).toContain('.worker-role-item.delete-selecting input[type="checkbox"] { accent-color: var(--delete-check-bg); }');
+    expect(styles).toContain(`.mem-card:disabled,
+.mem-switch-action:disabled {
+  opacity: .72;`);
+    expect(styles).toContain('.mem-card:focus-visible,');
+    expect(styles).toContain(':root[data-theme="light"] .mcp-delete-select.selected {');
+    expect(source).toContain('className={`endpoint-delete-select ${deleteSelected ? "selected" : ""}`}');
+    expect(source).toContain('<Plus size={16} strokeWidth={2.8}/>');
+    expect(source).not.toContain('title={`Delete ${endpoint.name}`}');
+    expect(styles).toContain('/* Shared compact create/delete management controls for model endpoints. */');
+    expect(styles).toContain('.endpoint-delete-manage.confirm { border-color: #c94f49; background: #c94f49;');
+    expect(styles).toContain('.endpoint-row.delete-selected { border-color: #a45e59; background: #332625;');
+    expect(styles).toContain('.endpoint-menu-heading > .endpoint-management-actions {');
+    expect(styles).toContain('display: flex;\n  align-items: center;\n  justify-content: flex-end;');
+    expect(styles).toContain('.endpoint-menu-heading > .endpoint-management-actions > button {\n  display: grid;\n  place-items: center;');
+    expect(styles).toContain('.endpoint-management-actions > button > svg { display: block; margin: 0; }');
+    expect(styles).toContain('/* Refined endpoint delete selection affordance. */');
+    expect(styles).toContain('.endpoint-delete-select {\n  width: 20px;\n  height: 20px;');
+    expect(styles).toContain('.endpoint-delete-select.selected svg {\n  display: block;\n  color: #fff8f7;');
+    expect(styles).toContain('.endpoint-row.delete-selecting .endpoint-select:focus-visible {');
+    expect(styles).toContain(':root[data-theme="light"] .endpoint-delete-select.selected {');
   });
 
   it("manages shared model endpoints without leaking API keys into snapshots", () => {
@@ -2104,7 +2327,7 @@ it("uses an explicit session-created event and session-scoped inline decisions",
     expect(source).toContain('const [deleteMode, setDeleteMode] = useState(false);');
     expect(source).toContain('const [selectedDeleteServerId, setSelectedDeleteServerId] = useState("");');
     expect(source).toContain('className={`mcp-delete-manage ${deleteMode ? "confirm" : ""}`}');
-    expect(source).toContain('className={`mcp-server ${connectionState} ${deleteMode ? "delete-selecting" : ""}');
+    expect(source).toContain('className={`mcp-server ${connectionState} ${active && !deleteMode ? "selected" : ""} ${deleteMode ? "delete-selecting" : ""}');
     expect(source).toContain('className={`mcp-delete-select ${selectedDeleteServerId === server.config.id ? "selected" : ""}`}');
     expect(source).toContain('type: "mcp_server_delete", server_id: server.config.id');
     expect(source).toContain('disabled={!session || pending || deleteMode}');

@@ -7,6 +7,7 @@ export type ModelEndpoint = {
   base_url: string;
   max_llm_input_tokens: number;
   max_llm_output_tokens: number;
+  stream: boolean;
   api_key_configured: boolean;
   http_headers: Record<string, string>;
 };
@@ -20,6 +21,7 @@ export type ModelEndpointDraft = {
   base_url: string;
   max_llm_input_tokens: number;
   max_llm_output_tokens: number;
+  stream: boolean;
   api_key?: string;
   http_headers: Record<string, string>;
 };
@@ -31,6 +33,7 @@ type ModelEndpointProfile = {
   base_url: string;
   max_llm_input_tokens: number;
   max_llm_output_tokens: number;
+  stream: boolean;
   api_key_configured: boolean;
 };
 
@@ -45,6 +48,7 @@ export function endpointMatchesProfile(endpoint: ModelEndpoint, profile: ModelEn
     && endpoint.base_url === profile.base_url
     && endpoint.max_llm_input_tokens === profile.max_llm_input_tokens
     && endpoint.max_llm_output_tokens === profile.max_llm_output_tokens
+    && endpoint.stream === profile.stream
     && endpoint.api_key_configured === profile.api_key_configured;
 }
 

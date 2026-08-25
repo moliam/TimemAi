@@ -85,9 +85,9 @@ pub use audit::{
     append_audit_event, append_repair_output_event, host_start_audit_event,
     max_llm_output_increased_audit_event, model_input_overflow_recovery_audit_event,
     model_repair_output_event, model_repair_request_audit_event, model_retry_audit_event,
-    read_audit_doc, round_limit_audit_event, stale_context_choice_audit_event,
-    turn_error_audit_event, turn_final_audit_event, turn_start_audit_event,
-    user_approval_audit_event, user_supplement_audit_event,
+    prune_api_audit_before, read_audit_doc, round_limit_audit_event,
+    stale_context_choice_audit_event, turn_error_audit_event, turn_final_audit_event,
+    turn_start_audit_event, user_approval_audit_event, user_supplement_audit_event,
 };
 pub use config_edit::{
     apply_runtime_config_value, bash_approval_mode_from_sources, capabilities_dir_from_sources,
@@ -2807,6 +2807,7 @@ impl AgentCore {
             )
         });
         let mut compacted_successfully = false;
+        let mut successful_compact_summaries = Vec::new();
         for compact in &parsed.context_compacts {
             let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
             if missing.is_empty() {
@@ -2872,6 +2873,7 @@ impl AgentCore {
                     self.current_session_id(),
                     &compact_report,
                 )]);
+                successful_compact_summaries.push(compact.summary.trim().to_string());
                 compacted_successfully = true;
             } else {
                 slices.push((
@@ -2886,7 +2888,18 @@ impl AgentCore {
         if compacted_successfully {
             self.context_compact_required = false;
         }
-        if compacted_successfully && native_calls.is_empty() {
+        if compacted_successfully && !native_calls.is_empty() {
+            // A native context_compact call can discard the delta that would have
+            // owned its structured exchange. Persist each successful summary as a
+            // fresh assistant slice instead: the summary is the replacement context
+            // baseline and must never depend on a discarded/offloaded delta.
+            slices.extend(
+                successful_compact_summaries
+                    .into_iter()
+                    .map(|summary| ("llm_response".to_string(), summary)),
+            );
+        }
+        if compacted_successfully {
             slices.push((
                 "context_compacted".to_string(),
                 format!(
@@ -2998,34 +3011,10 @@ impl AgentCore {
             };
         }
         if !parsed.context_compacts.is_empty() {
-            if !native_calls.is_empty() {
-                let result = if compacted_successfully {
-                    "Action result: context_compact\nstatus: completed".to_string()
-                } else {
-                    slices
-                        .iter()
-                        .find(|(kind, _)| kind == "result_of_llm_action")
-                        .map(|(_, text)| text.clone())
-                        .unwrap_or_else(|| {
-                            "Action result: context_compact\nerror: compaction_failed".to_string()
-                        })
-                };
-                self.native_exchanges.push(NativeExchange {
-                    delta_id: self.current_native_delta_id(),
-                    assistant_text: response.content.clone(),
-                    results: native_calls
-                        .iter()
-                        .map(|call| NativeToolResult {
-                            call_id: call.id.clone(),
-                            name: call.name.clone(),
-                            content: result.clone(),
-                            is_error: !compacted_successfully,
-                        })
-                        .collect(),
-                    calls: native_calls,
-                });
-                slices.clear();
-            }
+            // context_compact is an intrinsic state rewrite. In native mode, do not
+            // retain its tool exchange: its owning delta may be removed by the same
+            // operation. The independently persisted summary and runtime confirmation
+            // below are the canonical continuation context.
             self.submit_running_job_updates_for_session(&self.current_session_id(), runtime);
             self.append_delta_with_action_output_budget(slices);
             self.append_in_turn_shrink_review_if_needed();

@@ -77,6 +77,121 @@ fn model_api_curl_command_does_not_expose_secret_or_body_in_argv() {
 }
 
 #[test]
+fn model_timeout_is_connect_and_inactivity_bound_not_total_duration() {
+    let command = build_curl_command(7);
+    let argv = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy())
+        .collect::<Vec<_>>();
+
+    assert!(!argv.iter().any(|arg| arg == "--max-time"), "{argv:?}");
+    assert!(argv
+        .windows(2)
+        .any(|pair| pair == ["--connect-timeout", "7"]));
+    assert!(argv.iter().any(|arg| arg == "--no-buffer"), "{argv:?}");
+    assert!(!argv.iter().any(|arg| arg == "--speed-time"), "{argv:?}");
+}
+
+#[test]
+fn progressing_response_may_outlive_configured_timeout() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _request = read_http_request(&mut stream);
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 6\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        for part in [b"aa", b"bb", b"cc"] {
+            stream.write_all(part).unwrap();
+            stream.flush().unwrap();
+            thread::sleep(Duration::from_millis(600));
+        }
+    });
+
+    let mut request = prepare_model_http_request(
+        &LocalLLMKeyFile {
+            api_key: "test-key".to_string(),
+            available_models: vec!["test-model".to_string()],
+        }
+        .to_model_service_config("test-model"),
+        "hello",
+    );
+    request.endpoint = format!("http://{addr}/v1/chat/completions");
+    let body = serde_json::to_string(&request.model_request.body).unwrap();
+    let started = Instant::now();
+    let output = run_command_with_input_cancel_and_inactivity_timeout(
+        build_curl_command(1),
+        build_curl_config(&request, &body).into_bytes(),
+        Duration::from_secs(1),
+        &mut || false,
+    )
+    .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(started.elapsed() > Duration::from_millis(1_200));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let (response, status) = split_curl_body_status(&stdout).unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(response, "aabbcc");
+    server.join().unwrap();
+}
+
+#[test]
+fn stalled_response_still_hits_configured_inactivity_timeout() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _request = read_http_request(&mut stream);
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        thread::sleep(Duration::from_secs(4));
+    });
+
+    let mut request = prepare_model_http_request(
+        &LocalLLMKeyFile {
+            api_key: "test-key".to_string(),
+            available_models: vec!["test-model".to_string()],
+        }
+        .to_model_service_config("test-model"),
+        "hello",
+    );
+    request.endpoint = format!("http://{addr}/v1/chat/completions");
+    let body = serde_json::to_string(&request.model_request.body).unwrap();
+    let started = Instant::now();
+    let error = run_command_with_input_cancel_and_inactivity_timeout(
+        build_curl_command(1),
+        build_curl_config(&request, &body).into_bytes(),
+        Duration::from_secs(1),
+        &mut || false,
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "model_timeout: no response progress for 1 seconds");
+    assert!(started.elapsed() >= Duration::from_millis(900));
+    assert!(started.elapsed() < Duration::from_millis(2_500));
+    server.join().unwrap();
+}
+
+#[test]
 fn curl_config_escape_keeps_values_single_config_entries() {
     let escaped = curl_config_escape("quote\" slash\\ newline\n tab\t");
     assert_eq!(escaped, "quote\\\" slash\\\\ newline\\n tab\\t");

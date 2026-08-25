@@ -2,7 +2,7 @@ import { AssistantRuntimeProvider, ThreadMessageLike, ThreadPrimitive, useExtern
 import { closestCenter, DndContext, DragEndEvent, DragOverlay, DragOverEvent, KeyboardSensor, PointerSensor, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ArrowDown, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, Folder, FolderOpen, FolderPlus, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, TriangleAlert, Trash2, Wrench, X } from "lucide-react";
+import { ArrowDown, ArrowLeftRight, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, Folder, FolderOpen, FolderPlus, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, TriangleAlert, Trash2, Wrench, X } from "lucide-react";
 import { Children, CSSProperties, Dispatch, isValidElement, memo, MutableRefObject, ReactNode, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
@@ -163,6 +163,7 @@ function TimemApp() {
   const [snapshotReady, setSnapshotReady] = useState(false);
   const [runtimeEverConnected, setRuntimeEverConnected] = useState(false);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [runtimeUnavailableDialogDismissed, setRuntimeUnavailableDialogDismissed] = useState(false);
   const [showToolRepo, setShowToolRepo] = useState(false);
   const [showRoles, setShowRoles] = useState(false);
   const [toolSearchQuery, setToolSearchQuery] = useState("");
@@ -183,6 +184,7 @@ function TimemApp() {
   const [showAppearance, setShowAppearance] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
   const [showNewSession, setShowNewSession] = useState(false);
+  const [showMemSettings, setShowMemSettings] = useState(false);
   const [showMemSwitch, setShowMemSwitch] = useState(false);
   const [deleteSessionCandidate, setDeleteSessionCandidate] = useState<Session | null>(null);
   const [sessionDeleteMode, setSessionDeleteMode] = useState(false);
@@ -217,6 +219,7 @@ function TimemApp() {
   const [pendingUploadSessionIds, setPendingUploadSessionIds] = useState<Set<string>>(() => new Set());
   const [pendingUploadFiles, setPendingUploadFiles] = useState<Record<string, { name: string; bytes: number }>>({});
   const [pendingMemSwitch, setPendingMemSwitch] = useState(false);
+  const [pendingMemRetention, setPendingMemRetention] = useState(false);
   const [completedTurnsBySession, setCompletedTurnsBySession] = useState<Record<string, { key: string; successful: boolean }>>({});
   const [commandAcks, setCommandAcks] = useState<Record<string, Extract<WireEvent, { type: "command_ack" }>>>({});
   const consumeCommandAcks = useCallback((commandIds: ReadonlySet<string>) => {
@@ -254,6 +257,7 @@ function TimemApp() {
   const mobileSidebarRef = useRef<HTMLElement | null>(null);
   const toolRepoButtonRef = useRef<HTMLButtonElement | null>(null);
   const toolRepoPanelRef = useRef<HTMLElement | null>(null);
+  const memSettingsButtonRef = useRef<HTMLButtonElement | null>(null);
   const memSwitchButtonRef = useRef<HTMLButtonElement | null>(null);
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? sessions[0];
   sessionsRef.current = sessions;
@@ -295,6 +299,10 @@ function TimemApp() {
   const closeMobileSidebar = useCallback((restoreFocus = true) => {
     setShowMobileSessions(false);
     if (restoreFocus) mobileSessionButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+  const closeMemSettingsDialog = useCallback((restoreFocus = true) => {
+    setShowMemSettings(false);
+    if (restoreFocus) memSettingsButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeMemSwitchDialog = useCallback((restoreFocus = true) => {
     setShowMemSwitch(false);
@@ -674,6 +682,9 @@ function TimemApp() {
             cancellingSessionTimeouts.current.delete(sessionId);
             setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
           }
+          if (completed?.command.type === "mem_temporary_retention_update") {
+            setPendingMemRetention(false);
+          }
           if (pendingCredential) {
             reportUiError(
               "API key update rejected",
@@ -688,6 +699,12 @@ function TimemApp() {
           }
         }
       }
+      return;
+    }
+    if (event.type === "mem_settings_updated") {
+      setPendingMemRetention(false);
+      setServer((current) => current ? { ...current, mem: { ...current.mem, temporary_retention_days: event.temporary_retention_days } } : current);
+      closeMemSettingsDialog(false);
       return;
     }
     if (event.type === "hello") {
@@ -1285,10 +1302,15 @@ function TimemApp() {
   const runtimeDisconnectedDetail = runtimeUnavailable
     ? "Restart timem-web and reopen the authenticated URL to continue."
     : "Reconnecting to Timem runtime… sending and session changes are paused until it reconnects.";
+  const showRuntimeUnavailableDialog = runtimeUnavailable && !runtimeUnavailableDialogDismissed;
+  useEffect(() => {
+    if (!runtimeUnavailable) setRuntimeUnavailableDialogDismissed(false);
+  }, [runtimeUnavailable]);
   const sessionInteractionLockReason = sessionInteractionLockReasonForState(pendingMemSwitch, connected, runtimeEverConnected, reconnectAttempt);
   const runtimeReady = connected && snapshotReady;
   const runtimeLocked = pendingMemSwitch || !runtimeReady;
   const connectionLabel = runtimeConnectionLabel(connected, snapshotReady, runtimeEverConnected, reconnectAttempt);
+  const memSettingsTitle = !runtimeReady ? "Wait for the runtime snapshot before opening mem settings" : "Open mem settings";
   const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem directory";
   const newSessionLabel = runtimeLocked ? "Session controls are temporarily locked" : "New session";
   const modelEndpointsUnavailable = !!server && server.model_endpoints.length === 0;
@@ -1379,15 +1401,14 @@ function TimemApp() {
       {showMobileSessions && <button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => closeMobileSidebar()}/>}
       <aside id="session-navigation" ref={mobileSidebarRef} className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`} aria-label="Session navigation" tabIndex={-1}>
         <div className="brand"><img src="/timem_logo.png" alt="Timem logo" className="brand-logo"/><span>TIMEM</span><button type="button" className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => closeMobileSidebar()}><X size={17}/></button></div>
-        <div className="session-create-actions"><button type="button" ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/> New session</button></div>
-        <div className={`session-management-actions ${sessionDeleteMode ? "deleting" : ""}`}><button type="button" className="new-session-group" title="New session group" aria-label="New session group" disabled={runtimeLocked || sessionDeleteMode} onClick={() => setSessionGroupEditor({ name: "" })}><FolderPlus size={16}/></button><div>{sessionDeleteMode && <button type="button" className="session-delete-cancel" title="取消删除 Session" aria-label="取消删除 Session" onClick={cancelSessionDeleteMode}><X size={14} strokeWidth={3}/></button>}<button type="button" className={`session-delete-manage ${sessionDeleteMode ? "confirm" : ""}`} title={sessionDeleteMode ? selectedDeleteSessionId ? "确认删除选中的 Session" : "请选择要删除的 Session" : "选择要删除的 Session"} aria-label={sessionDeleteMode ? selectedDeleteSessionId ? "确认删除选中的 Session" : "请选择要删除的 Session" : "选择要删除的 Session"} disabled={runtimeLocked || sessions.length === 0 || (sessionDeleteMode && !selectedDeleteSessionId)} onClick={() => { if (!sessionDeleteMode) { setSessionGroupEditor(null); setRenamingSessionId(""); setRenameDraft(""); setSessionDeleteMode(true); setSelectedDeleteSessionId(""); } else confirmSelectedSessionDelete(); }}>{sessionDeleteMode ? <Check size={15} strokeWidth={3}/> : <Trash2 size={15}/>}</button></div></div>
+        <div className={`session-management-actions ${sessionDeleteMode ? "deleting" : ""}`}><div className="session-create-actions"><button type="button" ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked || sessionDeleteMode} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/></button><button type="button" className="new-session-group" title="New session group" aria-label="New session group" disabled={runtimeLocked || sessionDeleteMode} onClick={() => setSessionGroupEditor({ name: "" })}><FolderPlus size={16}/></button></div><div className="session-delete-actions">{sessionDeleteMode && <button type="button" className="session-delete-cancel" title="取消删除 Session" aria-label="取消删除 Session" onClick={cancelSessionDeleteMode}><X size={14} strokeWidth={3}/></button>}<button type="button" className={`session-delete-manage ${sessionDeleteMode ? "confirm" : ""}`} title={sessionDeleteMode ? selectedDeleteSessionId ? "确认删除选中的 Session" : "请选择要删除的 Session" : "选择要删除的 Session"} aria-label={sessionDeleteMode ? selectedDeleteSessionId ? "确认删除选中的 Session" : "请选择要删除的 Session" : "选择要删除的 Session"} disabled={runtimeLocked || sessions.length === 0 || (sessionDeleteMode && !selectedDeleteSessionId)} onClick={() => { if (!sessionDeleteMode) { setSessionGroupEditor(null); setRenamingSessionId(""); setRenameDraft(""); setSessionDeleteMode(true); setSelectedDeleteSessionId(""); } else confirmSelectedSessionDelete(); }}>{sessionDeleteMode ? <Check size={15} strokeWidth={3}/> : <Trash2 size={15}/>}</button></div></div>
         {sessionGroupEditor && !sessionGroupEditor.id && <form className="session-group-editor" onSubmit={(event) => { event.preventDefault(); saveSessionGroup(); }}><input autoFocus value={sessionGroupEditor.name} placeholder="Group name" aria-label="New session group name" onChange={(event) => setSessionGroupEditor({ name: event.target.value })} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setSessionGroupEditor(null); } }}/><button type="submit" disabled={!sessionGroupEditor.name.trim()}><Check size={13}/></button><button type="button" onClick={() => setSessionGroupEditor(null)}><X size={13}/></button></form>}
         <DndContext sensors={sessionDragSensors} collisionDetection={closestCenter} onDragStart={(event) => setDraggedSessionId(String(event.active.id).replace(/^session:/, ""))} onDragCancel={() => setDraggedSessionId("")} onDragEnd={finishSessionDrag}>
           <nav className="session-list" aria-label="Sessions">
             {sessionBuckets.map(({ id: bucketId, group: bucket, sessions: bucketSessions }) => {
               const collapsed = collapsedSessionGroupIds.has(bucketId);
               return <SessionDropGroup id={bucketId} sessionIds={bucketSessions.map((session) => session.session_id)} className="session-group" key={bucketId}>
-                <div className="session-group-heading"><button type="button" className="session-group-toggle" aria-expanded={!collapsed} onClick={() => setCollapsedSessionGroupIds((current) => { const next = new Set(current); if (next.has(bucketId)) next.delete(bucketId); else next.add(bucketId); return next; })}><ChevronRight className="session-group-chevron" size={12}/><Folder className="session-group-folder" size={14}/><span>{bucket?.name ?? "Unsorted"}</span><small>{bucketSessions.length}</small></button>{bucket && <div className="session-group-actions">{sessionGroupEditor?.id === bucket.id ? <form className="session-group-editor inline" onSubmit={(event) => { event.preventDefault(); saveSessionGroup(); }}><input autoFocus value={sessionGroupEditor.name} aria-label={`Rename ${bucket.name}`} onChange={(event) => setSessionGroupEditor({ id: bucket.id, name: event.target.value })} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setSessionGroupEditor(null); } }}/><button type="submit" disabled={!sessionGroupEditor.name.trim()}><Check size={12}/></button><button type="button" onClick={() => setSessionGroupEditor(null)}><X size={12}/></button></form> : <><button type="button" title="Move group up" aria-label={`Move ${bucket.name} up`} disabled={sessionDeleteMode || sessionGroups[0]?.id === bucket.id} onClick={() => moveSessionGroup(bucket.id, -1)}><ChevronUp size={12}/></button><button type="button" title="Move group down" aria-label={`Move ${bucket.name} down`} disabled={sessionDeleteMode || sessionGroups.at(-1)?.id === bucket.id} onClick={() => moveSessionGroup(bucket.id, 1)}><ChevronDown size={12}/></button><button type="button" title={`Rename ${bucket.name}`} aria-label={`Rename ${bucket.name}`} disabled={sessionDeleteMode} onClick={() => setSessionGroupEditor({ id: bucket.id, name: bucket.name })}><Pencil size={12}/></button><button type="button" className={sessionGroupDeleteConfirmId === bucket.id ? "confirming" : ""} disabled={sessionDeleteMode} title={sessionGroupDeleteConfirmId === bucket.id ? "Click again to delete; sessions become unsorted" : `Delete ${bucket.name}`} aria-label={`Delete ${bucket.name}`} onClick={() => { if (sessionGroupDeleteConfirmId === bucket.id) { sendCommand({ type: "session_group_delete", group_id: bucket.id }); setSessionGroupDeleteConfirmId(""); } else setSessionGroupDeleteConfirmId(bucket.id); }}><Trash2 size={12}/></button></>}</div>}</div>
+                <div className="session-group-heading"><button type="button" className="session-group-toggle" title={bucket?.name ?? "Unsorted"} aria-expanded={!collapsed} onClick={() => setCollapsedSessionGroupIds((current) => { const next = new Set(current); if (next.has(bucketId)) next.delete(bucketId); else next.add(bucketId); return next; })}>{collapsed ? <Folder className="session-group-folder" size={14}/> : <FolderOpen className="session-group-folder" size={14}/>}<span>{bucket?.name ?? "Unsorted"}</span><small>{bucketSessions.length}</small></button>{bucket && <div className="session-group-actions">{sessionGroupEditor?.id === bucket.id ? <form className="session-group-editor inline" onSubmit={(event) => { event.preventDefault(); saveSessionGroup(); }}><input autoFocus value={sessionGroupEditor.name} aria-label={`Rename ${bucket.name}`} onChange={(event) => setSessionGroupEditor({ id: bucket.id, name: event.target.value })} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setSessionGroupEditor(null); } }}/><button type="submit" disabled={!sessionGroupEditor.name.trim()}><Check size={12}/></button><button type="button" onClick={() => setSessionGroupEditor(null)}><X size={12}/></button></form> : <><button type="button" title="Move group up" aria-label={`Move ${bucket.name} up`} disabled={sessionDeleteMode || sessionGroups[0]?.id === bucket.id} onClick={() => moveSessionGroup(bucket.id, -1)}><ChevronUp size={12}/></button><button type="button" title="Move group down" aria-label={`Move ${bucket.name} down`} disabled={sessionDeleteMode || sessionGroups.at(-1)?.id === bucket.id} onClick={() => moveSessionGroup(bucket.id, 1)}><ChevronDown size={12}/></button><button type="button" title={`Rename ${bucket.name}`} aria-label={`Rename ${bucket.name}`} disabled={sessionDeleteMode} onClick={() => setSessionGroupEditor({ id: bucket.id, name: bucket.name })}><Pencil size={12}/></button><button type="button" className={sessionGroupDeleteConfirmId === bucket.id ? "confirming" : ""} disabled={sessionDeleteMode} title={sessionGroupDeleteConfirmId === bucket.id ? "Click again to delete; sessions become unsorted" : `Delete ${bucket.name}`} aria-label={`Delete ${bucket.name}`} onClick={() => { if (sessionGroupDeleteConfirmId === bucket.id) { sendCommand({ type: "session_group_delete", group_id: bucket.id }); setSessionGroupDeleteConfirmId(""); } else setSessionGroupDeleteConfirmId(bucket.id); }}><Trash2 size={12}/></button></>}</div>}</div>
                 {!collapsed && <div className="session-group-list">{bucketSessions.map((session) => {
                   const renamingSession = pendingRenameSessionIds.has(session.session_id);
                   const deletingSession = pendingDeleteSessionIds.has(session.session_id);
@@ -1397,7 +1418,7 @@ function TimemApp() {
                       <button type="button" className="session-drag" disabled={runtimeLocked || sessionDeleteMode} title={`拖动 ${session.display_name} 到其他分组`} aria-label={`拖动 ${session.display_name} 到其他分组`} {...attributes} {...listeners}><GripVertical size={13}/></button>
                       <button type="button" className={`session-expand ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}` : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={expandedSessionIds.has(session.session_id)} disabled={runtimeLocked || sessionDeleteMode} onClick={() => setExpandedSessionIds((current) => { const next = new Set(current); if (next.has(session.session_id)) next.delete(session.session_id); else next.add(session.session_id); return next; })}><ChevronRight size={13}/></button>
                       {renamingSessionId === session.session_id ? <input className="session-rename-input" autoFocus value={renameDraft} aria-label={`Rename ${session.display_name}`} disabled={runtimeLocked} onChange={(event) => setRenameDraft(event.target.value)} onBlur={() => finishRename(session.session_id)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); } if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); } }}/>: <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.display_name} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { if (sessionDeleteMode) { setSelectedDeleteSessionId((current) => current === session.session_id ? "" : session.session_id); return; } setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
-                        {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && !sessionDeleteMode && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span><span className="session-sub">{renamingSession ? <span className="session-detail session-pending">Saving name...</span> : <span className="session-detail session-profile" title={sessionEndpointName}><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{sessionEndpointName}</span></span>}</span></span><span className="sr-only">Session state: {session.state}</span>
+                        {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && !sessionDeleteMode && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span></span><span className={`session-endpoint-reveal ${renamingSession ? "pending" : ""}`} title={renamingSession ? "Saving name" : sessionEndpointName}>{renamingSession ? <span className="session-pending">Saving name...</span> : <><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{sessionEndpointName}</span></>}</span><span className="sr-only">Session state: {session.state}</span>
                       </button>}
                       {sessionDeleteMode && <button type="button" className={`session-delete-select ${selectedDeleteSessionId === session.session_id ? "selected" : ""}`} title={`选择删除 ${session.display_name}`} aria-label={`选择删除 ${session.display_name}`} aria-pressed={selectedDeleteSessionId === session.session_id} disabled={runtimeLocked || deletingSession} onClick={() => setSelectedDeleteSessionId((current) => current === session.session_id ? "" : session.session_id)}>{deletingSession ? <LoaderCircle size={14}/> : selectedDeleteSessionId === session.session_id ? <Check size={14}/> : null}</button>}
                     </div>
@@ -1411,7 +1432,7 @@ function TimemApp() {
         </DndContext>
         <div className="sidebar-footer">
           <div className="connection-row" role="status" aria-live="polite" title={connectionLabel}><span className={`connection ${connected ? "online" : "offline"}`}/><span className="connection-label">{connectionLabel}</span></div>
-          <button type="button" ref={memSwitchButtonRef} className="mem-card" title={server?.mem?.space_dir ?? memSwitchTitle} aria-label={memSwitchTitle} disabled={!runtimeReady || pendingMemSwitch} onClick={() => setShowMemSwitch(true)}><span className="mem-card-icon" aria-hidden="true"><Database size={15}/></span><span className="mem-card-copy"><strong>Memory</strong><small dir="rtl">{pendingMemSwitch ? "Switching…" : server?.mem?.space_dir ?? "…"}</small></span><ChevronRight size={14} aria-hidden="true"/></button>
+          <div className="mem-card-row"><button type="button" ref={memSettingsButtonRef} className="mem-card" title={server?.mem?.space_dir ?? memSettingsTitle} aria-label={memSettingsTitle} aria-expanded={showMemSettings} disabled={!runtimeReady || pendingMemSwitch} onClick={() => setShowMemSettings(true)}><span className="mem-card-icon" aria-hidden="true"><Database size={15}/></span><span className="mem-card-copy"><strong>Memory</strong><small dir="rtl">{pendingMemSwitch ? "Switching…" : server?.mem?.space_dir ?? "…"}</small></span><ChevronRight size={14} aria-hidden="true"/></button><button type="button" ref={memSwitchButtonRef} className="mem-switch-action" title={memSwitchTitle} aria-label={memSwitchTitle} disabled={!runtimeReady || pendingMemSwitch} onClick={() => setShowMemSwitch(true)}><ArrowLeftRight size={15} aria-hidden="true"/></button></div>
         </div>
       </aside>
       <main className="chat-shell">
@@ -1658,6 +1679,13 @@ function TimemApp() {
           }
         }}
       />}
+      {showMemSettings && <MemSettingsDialog current={server ? server.mem.temporary_retention_days : 5} pending={pendingMemRetention} onClose={() => { if (!pendingMemRetention) closeMemSettingsDialog(); }} onSave={(days) => {
+        setPendingMemRetention(true);
+        if (!sendCommand({ type: "mem_temporary_retention_update", days })) {
+          setPendingMemRetention(false);
+          reportUiError("Mem settings failed", "Reconnect to Timem Web before updating temporary-data retention.", "system");
+        }
+      }}/>}
       {showMemSwitch && <MemSwitchDialog current={server?.mem?.space_dir ?? ""} pending={pendingMemSwitch} onClose={() => { if (!pendingMemSwitch) closeMemSwitchDialog(); }} onSwitch={(path) => {
         setRenamingSessionId("");
         setRenameDraft("");
@@ -1670,6 +1698,7 @@ function TimemApp() {
         }
       }}
       />}
+      {showRuntimeUnavailableDialog && <RuntimeUnavailableDialog detail={runtimeDisconnectedDetail} onClose={() => setRuntimeUnavailableDialogDismissed(true)}/>}
       {toolgenDialog && <ToolGenDialog
         key={`${toolgenDialog.sessionId}:${toolgenDialog.turnId}`}
         pending={pendingToolgenRequests.has(toolgenRequestKey(toolgenDialog.sessionId, toolgenDialog.turnId))}
@@ -3453,7 +3482,7 @@ function McpPanel({ panelRef, servers, session, pendingKeys, revealedSecrets, on
         const connectionState = !active ? "disabled" : server.state === "connected" ? "connected" : server.state === "error" || !!server.error ? "failed" : "connecting";
         const connectionLabel = connectionState === "connected" ? `${server.tools.length} tools` : connectionState === "failed" ? "⚠️无法连接" : connectionState === "connecting" ? "连接中…" : "";
         const connectionTitle = connectionState === "failed" && server.error ? `${connectionLabel}：${server.error}` : connectionLabel || "未启用";
-        return <article className={`mcp-server ${connectionState} ${deleteMode ? "delete-selecting" : ""} ${selectedDeleteServerId === server.config.id ? "delete-selected" : ""}`} key={server.config.id}>
+        return <article className={`mcp-server ${connectionState} ${active && !deleteMode ? "selected" : ""} ${deleteMode ? "delete-selecting" : ""} ${selectedDeleteServerId === server.config.id ? "delete-selected" : ""}`} key={server.config.id}>
           <div className="mcp-server-main"><strong>{server.config.name}</strong><button type="button" role="switch" aria-checked={active} aria-label={`${active ? "Disable" : "Enable"} ${server.config.name} for this session`} className={`mcp-session-toggle ${connectionState}`} title={deleteMode ? "MCP controls are disabled while selecting a server to delete" : `${connectionTitle} · click to ${active ? "disable" : "enable"}`} disabled={!session || pending || deleteMode} onClick={() => session && onCommand(`toggle:${server.config.id}`, { type: "mcp_session_toggle", session_id: session.session_id, server_id: server.config.id, enabled: !active })}><span className="mcp-session-toggle-thumb" aria-hidden="true"/></button></div>
           {active && <div className={`mcp-server-meta ${connectionState}`} title={connectionState === "failed" ? server.error ?? undefined : undefined}><span>{connectionLabel}</span></div>}
           {deleteMode ? <button type="button" className={`mcp-delete-select ${selectedDeleteServerId === server.config.id ? "selected" : ""}`} title={`选择删除 ${server.config.name}`} aria-label={`选择删除 ${server.config.name}`} aria-pressed={selectedDeleteServerId === server.config.id} disabled={pending} onClick={() => setSelectedDeleteServerId((current) => current === server.config.id ? "" : server.config.id)}>{selectedDeleteServerId === server.config.id ? <Check size={13}/> : null}</button> : <div className="mcp-server-actions"><button type="button" title="Reconnect and refresh tools" aria-label={`Reconnect ${server.config.name}`} disabled={!session || pending} onClick={() => session && onCommand(`reconnect:${server.config.id}`, { type: "mcp_server_reconnect", session_id: session.session_id, server_id: server.config.id })}><RefreshCw size={13}/></button><button type="button" title="Edit server" aria-label={`Edit ${server.config.name}`} disabled={pending} onClick={() => setEditing(server.config)}><Pencil size={13}/></button></div>}
@@ -3671,23 +3700,35 @@ function ModelEndpointPanel({ panelRef, server, session, endpointEditor, reveale
 }) {
   const endpoints = server?.model_endpoints ?? [];
   const selected = endpoints.find((endpoint) => endpointMatchesProfile(endpoint, session?.runtime_profile));
+  const [deleteMode, setDeleteMode] = useState(false);
+  const [selectedDeleteEndpointId, setSelectedDeleteEndpointId] = useState("");
+  useEffect(() => {
+    if (selectedDeleteEndpointId && !endpoints.some((endpoint) => endpoint.id === selectedDeleteEndpointId)) setSelectedDeleteEndpointId("");
+    if (deleteMode && endpoints.length === 0) setDeleteMode(false);
+  }, [deleteMode, endpoints, selectedDeleteEndpointId]);
+  const cancelDeleteMode = () => { setDeleteMode(false); setSelectedDeleteEndpointId(""); };
+  const confirmDelete = () => {
+    const endpoint = endpoints.find((candidate) => candidate.id === selectedDeleteEndpointId);
+    if (endpoint) onDelete(endpoint);
+  };
   return <section id="runtime-panel" ref={panelRef} className={`runtime-card endpoint-menu ${endpointEditor ? "editing" : ""}`} tabIndex={-1}>
     {endpointEditor ? <ModelEndpointEditor endpoint={endpointEditor === "new" ? undefined : endpointEditor} revealedApiKey={endpointEditor === "new" ? "" : revealedEndpointApiKeys[endpointEditor.id]} revealedHeaders={endpointEditor === "new" ? {} : revealedEndpointHeaders[endpointEditor.id]} onClose={() => onEdit(null)} onSave={onSave}/> : <>
-      <div className="endpoint-menu-heading"><div><span className="eyebrow">MODEL ENDPOINTS</span><strong>{session ? `用于 ${session.display_name}` : "选择 Session 后应用"}</strong></div><button type="button" className="secondary compact" onClick={() => onEdit("new")}><Plus size={14}/> 新增接入点</button></div>
+      <div className="endpoint-menu-heading"><div><span className="eyebrow">MODEL ENDPOINTS</span><strong>{session ? `用于 ${session.display_name}` : "选择 Session 后应用"}</strong></div><div className="endpoint-management-actions"><button type="button" className="endpoint-add-action" title="新增接入点" aria-label="新增接入点" disabled={deleteMode} onClick={() => onEdit("new")}><Plus size={16} strokeWidth={2.8}/></button>{deleteMode && <button type="button" className="endpoint-delete-cancel" title="取消删除接入点" aria-label="取消删除接入点" onClick={cancelDeleteMode}><X size={14} strokeWidth={3}/></button>}<button type="button" className={`endpoint-delete-manage ${deleteMode ? "confirm" : ""}`} title={deleteMode ? selectedDeleteEndpointId ? "确认删除选中的接入点" : "请选择要删除的接入点" : "选择要删除的接入点"} aria-label={deleteMode ? selectedDeleteEndpointId ? "确认删除选中的接入点" : "请选择要删除的接入点" : "选择要删除的接入点"} disabled={endpoints.length === 0 || (deleteMode && !selectedDeleteEndpointId)} onClick={() => { if (!deleteMode) { onEdit(null); setDeleteMode(true); setSelectedDeleteEndpointId(""); } else confirmDelete(); }}>{deleteMode ? <Check size={15} strokeWidth={3}/> : <Trash2 size={15}/>}</button></div></div>
       <div className="endpoint-list">{endpoints.length === 0 ? <div className="endpoint-empty">还没有可用接入点。新增后，它会在所有 Session 中共用。</div> : endpoints.map((endpoint) => {
         const active = selected?.id === endpoint.id;
-        return <div className={`endpoint-row ${active ? "active" : ""}`} key={endpoint.id}>
-          <button type="button" className="endpoint-select" disabled={!session || session.state === "working"} onClick={() => onApply(endpoint.id)}><span><strong>{endpoint.name}</strong>{active && <Check size={13}/>}</span><small>{endpoint.model} · {endpoint.api_protocol} · {endpoint.max_llm_input_tokens === 1_000_000 ? "1M" : `${endpoint.max_llm_input_tokens / 1_000}K`} / {endpoint.max_llm_output_tokens / 1_000}K</small><small title={endpoint.base_url}>{endpoint.base_url}</small></button>
-          <div className="endpoint-actions"><button type="button" title={`Edit ${endpoint.name}`} aria-label={`Edit ${endpoint.name}`} onClick={() => { onEdit(endpoint); if ((endpoint.api_key_configured || Object.keys(endpoint.http_headers).length > 0) && revealedEndpointApiKeys[endpoint.id] === undefined) onReveal(endpoint.id); }}><Pencil size={14}/></button><button type="button" title={`Delete ${endpoint.name}`} aria-label={`Delete ${endpoint.name}`} onClick={() => onDelete(endpoint)}><Trash2 size={14}/></button></div>
+        const deleteSelected = selectedDeleteEndpointId === endpoint.id;
+        return <div className={`endpoint-row ${active ? "active" : ""} ${deleteMode ? "delete-selecting" : ""} ${deleteSelected ? "delete-selected" : ""}`} key={endpoint.id}>
+          <button type="button" className="endpoint-select" disabled={!deleteMode && (!session || session.state === "working")} aria-pressed={deleteMode ? deleteSelected : undefined} onClick={() => { if (deleteMode) { setSelectedDeleteEndpointId((current) => current === endpoint.id ? "" : endpoint.id); return; } onApply(endpoint.id); }}><span><strong>{endpoint.name}</strong>{deleteMode && <span className={`endpoint-delete-select ${deleteSelected ? "selected" : ""}`}>{deleteSelected && <Check size={13} strokeWidth={3}/>}</span>}</span><small>{endpoint.model} · {endpoint.api_protocol}{endpoint.stream ? " · stream" : ""} · {endpoint.max_llm_input_tokens === 1_000_000 ? "1M" : `${endpoint.max_llm_input_tokens / 1_000}K`} / {endpoint.max_llm_output_tokens / 1_000}K</small><small title={endpoint.base_url}>{endpoint.base_url}</small></button>
+          {!deleteMode && <div className="endpoint-actions">{active && <span className="endpoint-selected-badge" role="img" aria-label="当前选中的接入点"><Check size={13} strokeWidth={3}/></span>}<button type="button" title={`Edit ${endpoint.name}`} aria-label={`Edit ${endpoint.name}`} onClick={() => { onEdit(endpoint); if ((endpoint.api_key_configured || Object.keys(endpoint.http_headers).length > 0) && revealedEndpointApiKeys[endpoint.id] === undefined) onReveal(endpoint.id); }}><Pencil size={14}/></button></div>}
         </div>;
       })}</div>
-      {session?.state === "working" && <p className="endpoint-note">当前 Session 工作中，结束或停止任务后才能切换接入点。</p>}
+      {session?.state === "working" && !deleteMode && <p className="endpoint-note">当前 Session 工作中，结束或停止任务后才能切换接入点。</p>}
     </>}
   </section>;
 }
 
 function ModelEndpointEditor({ endpoint, revealedApiKey, revealedHeaders, onClose, onSave }: { endpoint?: ModelEndpoint; revealedApiKey?: string; revealedHeaders?: Record<string, string>; onClose: () => void; onSave: (endpoint: ModelEndpointDraft) => void }) {
-  const [draft, setDraft] = useState<ModelEndpointDraft>(() => ({ id: endpoint?.id, name: endpoint?.name ?? "", model: endpoint?.model ?? "", api_protocol: endpoint?.api_protocol ?? "openai-compatible", response_protocol: endpoint?.response_protocol ?? "xml", base_url: endpoint?.base_url ?? "", max_llm_input_tokens: endpoint?.max_llm_input_tokens ?? 100_000, max_llm_output_tokens: endpoint?.max_llm_output_tokens ?? 10_000, api_key: revealedApiKey, http_headers: endpoint?.http_headers ?? {} }));
+  const [draft, setDraft] = useState<ModelEndpointDraft>(() => ({ id: endpoint?.id, name: endpoint?.name ?? "", model: endpoint?.model ?? "", api_protocol: endpoint?.api_protocol ?? "openai-compatible", response_protocol: endpoint?.response_protocol ?? "xml", base_url: endpoint?.base_url ?? "", max_llm_input_tokens: endpoint?.max_llm_input_tokens ?? 100_000, max_llm_output_tokens: endpoint?.max_llm_output_tokens ?? 10_000, stream: endpoint?.stream ?? false, api_key: revealedApiKey, http_headers: endpoint?.http_headers ?? {} }));
   const [headerRows, setHeaderRows] = useState<StructuredRow[]>(() => structuredRows(endpoint?.http_headers ?? {}));
   const [showApiKey, setShowApiKey] = useState(false);
   const [showHeaders, setShowHeaders] = useState(!endpoint);
@@ -3706,7 +3747,7 @@ function ModelEndpointEditor({ endpoint, revealedApiKey, revealedHeaders, onClos
   const save = () => { if (!duplicateHeaderNames && endpointDraftValid(endpointDraft)) onSave(endpointDraft); };
   return <div className="endpoint-editor"><div className="endpoint-editor-heading"><strong>{endpoint ? "编辑接入点" : "新增接入点"}</strong><button type="button" aria-label="Close endpoint editor" onClick={onClose}><X size={14}/></button></div><div className="endpoint-editor-grid">
     <label>名称<input autoFocus value={draft.name} placeholder="例如：生产环境 GPT" onChange={(event) => setDraft({ ...draft, name: event.target.value })}/></label><label>模型<input value={draft.model} placeholder="gpt-4.1" onChange={(event) => setDraft({ ...draft, model: event.target.value })}/></label>
-    <label>API 协议<select value={draft.api_protocol} onChange={(event) => setDraft({ ...draft, api_protocol: event.target.value })}><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select></label><label>响应协议<select value={draft.response_protocol} onChange={(event) => setDraft({ ...draft, response_protocol: event.target.value })}><option value="xml">xml</option><option value="json">json</option></select></label>
+    <div className="endpoint-api-protocol"><label>API 协议<select value={draft.api_protocol} onChange={(event) => { const api_protocol = event.target.value; setDraft({ ...draft, api_protocol, stream: api_protocol === "openai-compatible" && draft.stream }); }}><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select></label><label className="endpoint-stream-toggle" title="以流式 SSE 接收 OpenAI-compatible 响应"><input type="checkbox" checked={draft.stream} disabled={draft.api_protocol !== "openai-compatible"} onChange={(event) => setDraft({ ...draft, stream: event.target.checked })}/><span>Stream</span></label></div><label>响应协议<select value={draft.response_protocol} onChange={(event) => setDraft({ ...draft, response_protocol: event.target.value })}><option value="xml">xml</option><option value="json">json</option></select></label>
     <label className="wide">Base URL<input value={draft.base_url} placeholder="https://api.example.com/v1" onChange={(event) => setDraft({ ...draft, base_url: event.target.value })}/></label>
     <label>最大上下文窗口<select value={draft.max_llm_input_tokens} onChange={(event) => setDraft({ ...draft, max_llm_input_tokens: Number(event.target.value) })}>{MODEL_CONTEXT_WINDOW_OPTIONS.map((tokens) => <option key={tokens} value={tokens}>{tokens === 1_000_000 ? "1M" : `${tokens / 1_000}K`}</option>)}</select></label><label>最大输出<select value={draft.max_llm_output_tokens} onChange={(event) => setDraft({ ...draft, max_llm_output_tokens: Number(event.target.value) })}>{MODEL_OUTPUT_TOKEN_OPTIONS.map((tokens) => <option key={tokens} value={tokens}>{tokens / 1_000}K</option>)}</select></label>
     <label className="wide">API Key<div className="endpoint-api-key"><input type={showApiKey ? "text" : "password"} autoComplete="new-password" spellCheck={false} value={apiKey} placeholder={endpoint?.api_key_configured && revealedApiKey === undefined ? "正在读取…" : "可留空"} onChange={(event) => setDraft({ ...draft, api_key: event.target.value })}/><div className="endpoint-api-key-actions"><button type="button" className={copyClass} title={copyLabel} aria-label={copyLabel} disabled={!apiKey} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={12}/> : <Copy size={12}/>}</button><button type="button" title={apiKeyVisibilityLabel} aria-label={apiKeyVisibilityLabel} onClick={() => setShowApiKey((visible) => !visible)}>{showApiKey ? <EyeOff size={13}/> : <Eye size={13}/>}</button></div></div></label>
@@ -3819,6 +3860,18 @@ const SESSION_RUNTIME_FIELDS = [
   ["TIMEM_STREAM", "Stream response", "boolean"],
 ] as const;
 
+function RuntimeUnavailableDialog({ detail, onClose }: { detail: string; onClose: () => void }) {
+  return <div className="modal-backdrop runtime-unavailable-backdrop" role="presentation">
+    <section className="decision-modal runtime-unavailable-dialog" role="dialog" aria-modal="true" aria-labelledby="runtime-unavailable-title" aria-describedby="runtime-unavailable-description" onKeyDown={(event) => {
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
+    }}>
+      <div className="modal-titlebar"><div><span className="eyebrow">RUNTIME STATUS</span><h2 id="runtime-unavailable-title"><TriangleAlert size={20} aria-hidden="true"/> Runtime unavailable</h2></div><button type="button" className="icon-button" autoFocus title="Close runtime unavailable alert" aria-label="Close runtime unavailable alert" onClick={onClose}><X size={16}/></button></div>
+      <p id="runtime-unavailable-description">{detail}</p>
+      <p className="runtime-unavailable-hint">Timem cannot send messages or change sessions until the runtime reconnects. After you close this dialog, the warning banner will remain visible.</p>
+    </section>
+  </div>;
+}
+
 function NewSessionDialog({ workspaces, runtimeDefaults, creating, memSwitching, onClose, onCreate }: {
   workspaces: string[];
   runtimeDefaults: Snapshot["server"]["session_env_defaults"];
@@ -3890,6 +3943,17 @@ function ToolGenDialog({ pending, onClose, onSubmit }: { pending: boolean; onClo
   const statusId = "toolgen-dialog-status";
   const describedBy = pending ? `${descriptionId} ${statusId}` : descriptionId;
   return <div className="modal-backdrop" role="presentation" aria-label="Dismiss ToolGen dialog" onClick={closeIfIdle}><section className="decision-modal toolgen-dialog" role="dialog" aria-modal="true" aria-label="Generate reusable tool" aria-describedby={describedBy} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">TOOLGEN</span><h2>Extract reusable tool</h2></div><button type="button" className="icon-button" title="Close ToolGen dialog" aria-label="Close ToolGen dialog" disabled={pending} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>Timem will preserve reusable work from the completed task as one or more standalone script tools. Add optional guidance below.</p>{pending && <p id={statusId} className="toolgen-dialog-status" role="status" aria-live="polite">Starting ToolGen and opening a generating-tools task…</p>}<label>Additional guidance<textarea autoFocus value={instruction} disabled={pending} placeholder="Optional: preferred interface, language, scope, or reusable workflow…" onChange={(event) => setInstruction(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); } }}/><small className="toolgen-dialog-hint">Cmd/Ctrl+Enter to generate; Escape closes before it starts.</small></label><div className="decision-actions"><button type="button" className="secondary" disabled={pending} onClick={closeIfIdle}>Cancel</button><button type="button" className={`primary ${pending ? "sending" : ""}`} disabled={pending} onClick={submit}>{pending ? <LoaderCircle size={16}/> : <Wrench size={15}/>} {pending ? "Starting…" : "Generate tool"}</button></div></section></div>;
+}
+
+function MemSettingsDialog({ current, pending, onClose, onSave }: {
+  current: 1 | 5 | 10 | null;
+  pending: boolean;
+  onClose: () => void;
+  onSave: (days: 1 | 5 | 10 | null) => void;
+}) {
+  const [days, setDays] = useState<1 | 5 | 10 | null>(current);
+  const closeIfIdle = () => { if (!pending) onClose(); };
+  return <div className="modal-backdrop" role="presentation" aria-label="Dismiss mem settings" onClick={closeIfIdle}><section className="decision-modal mem-settings-modal" role="dialog" aria-modal="true" aria-label="Memory settings" aria-describedby="mem-settings-description" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">MEM SETTINGS</span><h2>Memory settings</h2></div><button type="button" className="icon-button" title="Close mem settings" aria-label="Close mem settings" disabled={pending} onClick={closeIfIdle}><X size={16}/></button></div><p id="mem-settings-description">Rollingly retain recent temporary data in this MEM: action/action-result/context-compact/repair events, finished shell-job output, and API audit JSON. User and assistant messages are never removed by this setting.</p><label>Temporary-data retention<select autoFocus value={days === null ? "unlimited" : String(days)} disabled={pending} onChange={(event) => setDays(event.target.value === "unlimited" ? null : Number(event.target.value) as 1 | 5 | 10)}><option value="1">最近 1 天</option><option value="5">最近 5 天</option><option value="10">最近 10 天</option><option value="unlimited">不限</option></select></label>{pending && <p className="mem-validation" role="status" aria-live="polite">Saving and applying temporary-data retention…</p>}<div className="decision-actions"><button type="button" className="secondary" disabled={pending} onClick={closeIfIdle}>Cancel</button><button type="button" className={`primary ${pending ? "sending" : ""}`} disabled={pending || days === current} onClick={() => onSave(days)}>{pending && <LoaderCircle size={16}/>} {pending ? "Saving…" : "Save"}</button></div></section></div>;
 }
 
 function MemSwitchDialog({ current, pending, onClose, onSwitch }: {
