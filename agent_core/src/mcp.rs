@@ -354,8 +354,8 @@ impl McpConnection {
                     .get("inputSchema")
                     .cloned()
                     .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
-                let action_name = mcp_action_name(&config.id, name);
-                if action_name.ends_with('.') || !action_names.insert(action_name.clone()) {
+                let action_name = mcp_action_name(&config.name, name);
+                if action_name.ends_with('_') || !action_names.insert(action_name.clone()) {
                     return Err(format!("mcp_tool_action_name_collision:{action_name}"));
                 }
                 tools.push(McpTool {
@@ -836,18 +836,34 @@ fn resolve_legacy_sse_endpoint(base: &str, endpoint: &str) -> Result<String, Str
     Ok(format!("{base_dir}/{endpoint}"))
 }
 
-pub fn mcp_action_name(server_id: &str, tool_name: &str) -> String {
+pub fn mcp_action_name(server_name: &str, tool_name: &str) -> String {
+    // Use the conservative `[A-Za-z0-9_]+` subset accepted by native model APIs.
+    // The double underscore separates the MCP server name from its function name.
+    // One identifier format is shared by native tools, JSON, XML, prompts, and execution.
     format!(
-        "mcp.{}.{}",
-        action_component(server_id),
+        "mcp_{}__{}",
+        action_component(server_name),
         action_component(tool_name)
     )
 }
 
 fn action_component(value: &str) -> String {
+    normalized_component(value, false)
+}
+
+fn canonical_server_id(value: &str) -> String {
+    // Server IDs are persisted user configuration. Keep accepting the existing
+    // kebab-case form while model-visible action names use underscores only.
+    normalized_component(value, true)
+}
+
+fn normalized_component(value: &str, allow_hyphen: bool) -> String {
     let mut out = String::new();
     for character in value.chars() {
-        if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+        if character.is_ascii_alphanumeric()
+            || character == '_'
+            || (allow_hyphen && character == '-')
+        {
             out.push(character.to_ascii_lowercase());
         } else {
             out.push('_');
@@ -857,10 +873,10 @@ fn action_component(value: &str) -> String {
 }
 
 fn validate_server_config(config: &McpServerConfig) -> Result<(), String> {
-    if config.id.trim().is_empty() || action_component(&config.id).is_empty() {
+    if config.id.trim().is_empty() || canonical_server_id(&config.id).is_empty() {
         return Err("mcp_server_id_required".to_string());
     }
-    if config.id != action_component(&config.id) {
+    if config.id != canonical_server_id(&config.id) {
         return Err("mcp_server_id_must_be_canonical".to_string());
     }
     if config.name.trim().is_empty() {

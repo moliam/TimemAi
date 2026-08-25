@@ -431,7 +431,7 @@ fn xml_native_actions_convert_schema_typed_arrays_objects_and_mcp_tool_names() {
         server_id: "demo".to_string(),
         server_name: "Demo".to_string(),
         name: "batch".to_string(),
-        action_name: "mcp.demo.batch".to_string(),
+        action_name: "mcp_demo__batch".to_string(),
         description: "Batch demo".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -450,15 +450,15 @@ fn xml_native_actions_convert_schema_typed_arrays_objects_and_mcp_tool_names() {
     };
     let capabilities = caps().with_mcp_tools(&[tool]).expect("MCP capability");
     let env = parse_xml_envelope(
-        r#"<ASSISTANT><actions><mcp.demo.batch name="batch demo files">
+        r#"<ASSISTANT><actions><mcp_demo__batch name="batch demo files">
           <files><item>README.md</item><item>package.json</item></files>
           <options strict="true"><limit>20</limit></options>
-        </mcp.demo.batch></actions></ASSISTANT>"#,
+        </mcp_demo__batch></actions></ASSISTANT>"#,
         &capabilities,
     );
 
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert_eq!(env.next_actions[0].action, "mcp.demo.batch");
+    assert_eq!(env.next_actions[0].action, "mcp_demo__batch");
     assert_eq!(
         env.next_actions[0].raw_input["files"],
         serde_json::json!(["README.md", "package.json"])
@@ -475,7 +475,7 @@ fn xml_native_values_cover_nullable_large_integer_additional_properties_and_lite
         server_id: "types".to_string(),
         server_name: "Types".to_string(),
         name: "probe".to_string(),
-        action_name: "mcp.types.probe".to_string(),
+        action_name: "mcp_types__probe".to_string(),
         description: "Exercise XML value conversion".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -509,13 +509,13 @@ fn xml_native_values_cover_nullable_large_integer_additional_properties_and_lite
     };
     let capabilities = caps().with_mcp_tools(&[tool]).expect("MCP capability");
     let env = parse_xml_envelope(
-        r#"<ASSISTANT><actions><mcp.types.probe name="probe XML value conversion" count="18446744073709551615" ratio="1.25" choice="7">
+        r#"<ASSISTANT><actions><mcp_types__probe name="probe XML value conversion" count="18446744073709551615" ratio="1.25" choice="7">
           <nothing/>
           <tuple><item>9</item><item>false</item></tuple>
           <metadata><alpha>1</alpha><beta>2</beta></metadata>
           <rows><item ok="true"><name>A&#38;B</name></item></rows>
           <payload><![CDATA[  &lt;raw>&value  ]]></payload>
-        </mcp.types.probe></actions></ASSISTANT>"#,
+        </mcp_types__probe></actions></ASSISTANT>"#,
         &capabilities,
     );
 
@@ -543,7 +543,7 @@ fn capability_prompt_exposes_the_same_nested_types_that_xml_runtime_accepts() {
         server_id: "typed".to_string(),
         server_name: "Typed".to_string(),
         name: "submit".to_string(),
-        action_name: "mcp.typed.submit".to_string(),
+        action_name: "mcp_typed__submit".to_string(),
         description: "Submit typed values".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
