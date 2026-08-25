@@ -1231,11 +1231,12 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(styles).toContain(".worker-state-dot.working");
   });
 
-  it("shows the live session cwd in navigation and the composer footer", () => {
+  it("keeps cwd in the composer footer instead of repeating it in session navigation", () => {
     expect(source).toContain('className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`}');
     expect(source).toContain('className="session-name" title={session.display_name}');
-    expect(source).toContain('className="session-detail session-cwd" title={session.current_dir}><FolderOpen size={11} aria-hidden="true"/><span className="path-tail">{workspacePathLabel(session.current_dir)}</span>');
-    expect(source).toContain('className="session-sub"><span className="session-detail session-cwd"');
+    expect(source).not.toContain('className="session-detail session-cwd"');
+    expect(source).not.toContain('workspacePathLabel(session.current_dir)');
+    expect(source).toContain('title={runtimeLocked ? "Session controls are temporarily locked" : session.display_name}');
     expect(source).toContain('const sessionEndpointName = endpointNameForProfile(server?.model_endpoints ?? [], session.runtime_profile) ?? UNCONFIGURED_MODEL_LABEL;');
     expect(source).toContain('className="session-detail session-profile" title={sessionEndpointName}');
     expect(source).not.toContain('className="session-detail session-profile" title={modelDisplayName(session)}');
@@ -1248,8 +1249,9 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source.indexOf('aria-label="Message Timem"')).toBeLessThan(source.lastIndexOf('className="composer-cwd-inline"'));
     expect(styles).toContain(".path-tail { direction: rtl; text-align: left; unicode-bidi: plaintext; }");
     expect(viewModelSource).toContain("context_state");
-    expect(styles).toContain(".session-cwd");
     expect(styles).toContain(".composer-cwd-inline");
+    expect(styles).toContain('.composer-actions { min-height: 26px; margin-top: 6px; padding-top: 7px; border-top: 1px solid #ffffff12; }');
+    expect(styles).toContain(':root[data-theme="light"] .composer-actions { border-top-color: #17324d14; }');
     expect(source).toContain('activeSession?.debug_dir && <span className="composer-cwd-inline composer-debug-inline" title={activeSession.debug_dir}><b>DEBUG:</b><span>{activeSession.debug_dir}</span></span>');
     expect(source).not.toContain("tailPath(activeSession.debug_dir, 64)");
     expect(styles).toContain('.composer-paths { min-width: 0; flex: 1 1 auto; display: grid; gap: 2px; overflow: hidden; }');
@@ -1553,7 +1555,6 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(styles).toContain(':root[data-theme="light"] .session-row.active { background: #e8e8e8; box-shadow: none; }');
     expect(styles).toContain(':root[data-theme="light"] .session-row.active .session.active { background: transparent; }');
     expect(styles).toContain(':root[data-theme="light"] .session-row.active .session { color: #202020; }');
-    expect(styles).toContain(':root[data-theme="light"] .session-row.active .session-cwd { color: #666; }');
     expect(styles).toContain(':root[data-theme="light"] .session-row.active .session-profile { color: #747474; }');
   });
 
@@ -1816,11 +1817,10 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-r
     expect(source).toContain('releaseQueuedMessageClaim(queuedMessageClaimsRef.current, sessionId, commandId);');
   });
 
-  it("shows long current directories by their tail while preserving the full path tooltip", () => {
-    expect(source).toContain('<span className="session-detail session-cwd" title={session.current_dir}><FolderOpen size={11} aria-hidden="true"/><span className="path-tail">{workspacePathLabel(session.current_dir)}</span></span>');
-    expect(styles).toContain('.session-cwd span { text-overflow: clip; }');
+  it("shows long current directories by their tail only in the composer", () => {
+    expect(source).not.toContain('workspacePathLabel(session.current_dir)');
+    expect(source).not.toContain('className="session-detail session-cwd"');
     expect(styles).toContain('.session-detail::before');
-    expect(styles).toContain('.session-detail:not(:last-child)::after');
     expect(styles).toContain('border-bottom-left-radius: 5px');
     expect(styles).toContain('.session-profile { display: inline-flex; align-items: center; gap: 6px;');
     expect(source).toContain('className="composer-cwd-inline"');
@@ -2018,7 +2018,8 @@ it("uses an explicit session-created event and session-scoped inline decisions",
     expect(styles).toContain(".header-context > span:first-child { display: none; }");
     expect(styles).toContain(".composer-buttons { flex: none; width: auto; flex-wrap: nowrap; }");
     expect(styles).toContain(".stop-button { width: 34px; height: 32px;");
-    expect(styles).toContain(".session-cwd, .session-profile { font-size: 11px; }");
+    expect(styles).toContain(".session-name { font-size: 12px; font-weight: 600; line-height: 1.3; }");
+    expect(styles).toContain(".session-profile { font-size: 11px; }");
   });
 
   it("uses the shared worker-aware decision key for inline request pending state", () => {

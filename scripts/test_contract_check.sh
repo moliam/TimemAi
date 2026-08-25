@@ -427,7 +427,7 @@ web_ui_required_test_names=(
   "uses frame styling without repeating user or session identity labels"
   "coalesces tool lifecycles and renders tools as compact subordinate rows"
   "replaces an action start with its terminal lifecycle event"
-  "shows the live session cwd in navigation and the composer footer"
+  "keeps cwd in the composer footer instead of repeating it in session navigation"
   "uses only the selected session's latest real model usage for context"
   "renders live task usage and session context without replacing final telemetry"
   "attaches completion telemetry only to the matching final answer"
