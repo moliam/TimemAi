@@ -10208,6 +10208,62 @@ fn toolrepo_detail_rename_and_future_prompt_hint_share_the_published_state() {
 }
 
 #[test]
+fn workspace_lock_error_identifies_owner_and_escape_routes() {
+    let root = std::env::temp_dir().join(unique_web_id("workspace_lock_message"));
+    std::fs::create_dir_all(&root).unwrap();
+    let lock = agent_core::WorkspaceInstanceLock::acquire(&root, "timem-shell").unwrap();
+
+    let message = friendly_workspace_instance_error(
+        "workspace_already_in_use".to_string(),
+        root.to_string_lossy().as_ref(),
+    );
+    assert!(message.contains("already open"));
+    assert!(message.contains("actively locked"));
+    assert!(message.contains(&format!("PID:  {}", std::process::id())));
+    assert!(message.contains("Host: timem-shell"));
+    assert!(message.contains("workspace-instance.lock"));
+    assert!(message.contains("PID identity matches"));
+    assert!(message.contains("--space /absolute/path/to/another-mem"));
+    assert!(message.contains("Do not delete the lock file"));
+    #[cfg(unix)]
+    {
+        assert!(message.contains(&format!("ps -fp {}", std::process::id())));
+        assert!(message.contains(&format!("kill -TERM {}", std::process::id())));
+        assert!(message.contains("lsof"));
+    }
+    #[cfg(windows)]
+    {
+        assert!(message.contains(&format!("tasklist /FI \"PID eq {}\"", std::process::id())));
+        assert!(message.contains(&format!("taskkill /PID {} /T", std::process::id())));
+    }
+
+    drop(lock);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_lock_error_handles_unreadable_owner_metadata() {
+    let root = std::env::temp_dir().join(unique_web_id("workspace_lock_unknown_owner"));
+    std::fs::create_dir_all(root.join(".guard")).unwrap();
+    std::fs::write(
+        agent_core::WorkspaceInstanceLock::lock_path(&root),
+        b"not-json",
+    )
+    .unwrap();
+
+    let message = friendly_workspace_instance_error(
+        "workspace_already_in_use".to_string(),
+        root.to_string_lossy().as_ref(),
+    );
+    assert!(message.contains("PID:  unavailable"));
+    assert!(message.contains("--space /absolute/path/to/another-mem"));
+    #[cfg(unix)]
+    assert!(message.contains("fuser -v"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn friendly_journal_error_replaces_in_use_with_actionable_message() {
     let data_dir = std::path::PathBuf::from("/tmp/timem_test_data");
     let msg = friendly_journal_error("event_journal_in_use".to_string(), &data_dir, ".test_mem");
