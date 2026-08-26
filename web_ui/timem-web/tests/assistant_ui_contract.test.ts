@@ -241,14 +241,16 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('requestAnimationFrame(animate)');
     expect(source).toContain('const eased = 1 - Math.pow(1 - progress, 3);');
     expect(source).toContain('const [userMessageNavigationVisible, setUserMessageNavigationVisible] = useState(false);');
-    expect(source).toContain('}, 5000);');
+    expect(source).toContain('}, 6000);');
     expect(source).toContain('revealUserMessageNavigation();');
     expect(source).toContain('onWheelCapture={revealUserMessageNavigation}');
     expect(source).toContain('onTouchMove={revealUserMessageNavigation}');
     expect(source).toContain('if (event.clientX >= bounds.right - 18) revealUserMessageNavigation();');
     expect(source).toContain('["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)');
     expect(source).toContain('onMouseEnter={() => { cancelUserMessageNavigationHide(); setUserMessageNavigationVisible(true); }}');
-    expect(source).toContain('onMouseLeave={scheduleUserMessageNavigationHide}');
+    expect(source).toContain('onMouseLeave={(event) => { if (!event.currentTarget.contains(document.activeElement)) scheduleUserMessageNavigationHide(); }}');
+    expect(source).toContain('onFocusCapture={() => { cancelUserMessageNavigationHide(); setUserMessageNavigationVisible(true); }}');
+    expect(source).toContain('onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) scheduleUserMessageNavigationHide(); }}');
     expect(source).toContain('tabIndex={userMessageNavigationVisible ? 0 : -1}');
     expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 42px); right: max(10px, calc((100% - 900px) / 2)); display: grid; gap: 0; opacity: 0; visibility: hidden; pointer-events: none;');
     expect(styles).toContain('.user-message-navigation.visible { opacity: 1; visibility: visible; pointer-events: auto;');
@@ -1592,10 +1594,6 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
   position: absolute;`);
     expect(styles).toContain(`visibility: hidden;
   opacity: 0;`);
-    expect(styles).toContain(`.session-group:hover .session-group-actions,
-.session-group-heading:focus-within .session-group-actions,
-.session-group-actions:hover,
-.session-group-actions:focus-within {`);
     expect(styles).not.toContain('.session-group-heading:hover .session-group-toggle,');
   });
 

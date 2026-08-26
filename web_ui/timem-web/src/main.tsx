@@ -2337,7 +2337,7 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
     userMessageNavigationHideTimerRef.current = setTimeout(() => {
       userMessageNavigationHideTimerRef.current = null;
       setUserMessageNavigationVisible(false);
-    }, 5000);
+    }, 6000);
   }, [cancelUserMessageNavigationHide]);
 
   const revealUserMessageNavigation = useCallback(() => {
@@ -3000,7 +3000,8 @@ const toggleQueuedMessages = () => {
         </form>
       </ThreadPrimitive.ViewportFooter>
     </ThreadPrimitive.Viewport>
-    <nav className={`user-message-navigation ${userMessageNavigationVisible ? "visible" : ""}`} aria-label="用户消息导航" aria-hidden={!userMessageNavigationVisible} onMouseEnter={() => { cancelUserMessageNavigationHide(); setUserMessageNavigationVisible(true); }} onMouseLeave={scheduleUserMessageNavigationHide}>
+    <nav className={`user-message-navigation ${userMessageNavigationVisible ? "visible" : ""}`} aria-label="用户消息导航" aria-hidden={!userMessageNavigationVisible} onMouseEnter={() => { cancelUserMessageNavigationHide(); setUserMessageNavigationVisible(true); }} onMouseLeave={(event) => { if (!event.currentTarget.contains(document.activeElement)) scheduleUserMessageNavigationHide(); }} onFocusCapture={() => { cancelUserMessageNavigationHide(); setUserMessageNavigationVisible(true); }} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) scheduleUserMessageNavigationHide(); }}>
+
       <button type="button" tabIndex={userMessageNavigationVisible ? 0 : -1} title="上一条用户消息" aria-label="上一条用户消息" disabled={!userMessageNavigation.previous} onClick={() => { revealUserMessageNavigation(); navigateUserMessage("previous"); }}><span className="user-message-navigation-triangle up" aria-hidden="true"/></button>
       <button type="button" tabIndex={userMessageNavigationVisible ? 0 : -1} title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} aria-label={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} disabled={!userMessageNavigation.next && !userMessageNavigation.bottom} onClick={() => { revealUserMessageNavigation(); if (userMessageNavigation.next) navigateUserMessage("next"); else navigateToThreadBottom(); }}><span className="user-message-navigation-triangle down" aria-hidden="true"/></button>
     </nav>
