@@ -1,14 +1,154 @@
 pub mod json_suite;
-pub mod markdown_suite;
 pub mod xml_suite;
 
 use serde_json::Value;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::capability::CapabilityRegistry;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptDeltaBoundary {
+    Bracketed,
+    XmlElement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptRoleBoundary {
+    MarkdownHeading,
+    XmlElement,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptBoundarySpec {
+    pub static_begin: &'static str,
+    pub static_end: &'static str,
+    pub delta_boundary: PromptDeltaBoundary,
+    pub role_boundary: PromptRoleBoundary,
+    pub user_role: &'static str,
+    pub runtime_role: &'static str,
+    pub assistant_role: &'static str,
+}
+
+pub const BRACKETED_PROMPT_BOUNDARIES: PromptBoundarySpec = PromptBoundarySpec {
+    static_begin: "[BEGIN SYSTEM PROMPT]",
+    static_end: "[END SYSTEM PROMPT]",
+    delta_boundary: PromptDeltaBoundary::Bracketed,
+    role_boundary: PromptRoleBoundary::MarkdownHeading,
+    user_role: "USER",
+    runtime_role: "RUNTIME",
+    assistant_role: "ASSISTANT",
+};
+
+pub const XML_PROMPT_BOUNDARIES: PromptBoundarySpec = PromptBoundarySpec {
+    static_begin: "<Timem System Prompt>",
+    static_end: "</Timem System Prompt>",
+    delta_boundary: PromptDeltaBoundary::XmlElement,
+    role_boundary: PromptRoleBoundary::XmlElement,
+    user_role: "USER",
+    runtime_role: "RUNTIME",
+    assistant_role: "ASSISTANT",
+};
+
+pub const KNOWN_PROMPT_BOUNDARIES: &[PromptBoundarySpec] =
+    &[BRACKETED_PROMPT_BOUNDARIES, XML_PROMPT_BOUNDARIES];
+
+impl PromptBoundarySpec {
+    pub fn wrap_static_prompt(self, prompt: &str) -> String {
+        format!("{}\n{}\n{}", self.static_begin, prompt, self.static_end)
+    }
+
+    pub fn user_heading_line(&self) -> String {
+        format!("## {}", self.user_role)
+    }
+
+    pub fn runtime_heading_line(&self) -> String {
+        format!("## {}", self.runtime_role)
+    }
+
+    pub fn assistant_heading_line(&self, id: &str) -> String {
+        format!("## {}", id)
+    }
+
+    pub fn uses_xml_role_elements(self) -> bool {
+        self.role_boundary == PromptRoleBoundary::XmlElement
+    }
+
+    pub fn render_role_open(self, role: &str, assistant_id: Option<&str>) -> String {
+        match self.role_boundary {
+            PromptRoleBoundary::MarkdownHeading => {
+                format!("## {}", assistant_id.unwrap_or(role))
+            }
+            PromptRoleBoundary::XmlElement => format!("<{role}>"),
+        }
+    }
+
+    pub fn render_role_close(self, role: &str, _assistant_id: Option<&str>) -> Option<String> {
+        match self.role_boundary {
+            PromptRoleBoundary::MarkdownHeading => None,
+            PromptRoleBoundary::XmlElement => Some(format!("</{role}>")),
+        }
+    }
+
+    pub fn render_delta_open(self, delta_id: &str, time_ms: i64) -> String {
+        match self.delta_boundary {
+            PromptDeltaBoundary::Bracketed => {
+                format!("[BEGIN DELTA delta_id: {delta_id}, time_ms: {time_ms}]\n")
+            }
+            PromptDeltaBoundary::XmlElement => {
+                format!("<prompt_delta id=\"{delta_id}\" time_ms=\"{time_ms}\">\n")
+            }
+        }
+    }
+
+    pub fn delta_close(self) -> &'static str {
+        match self.delta_boundary {
+            PromptDeltaBoundary::Bracketed => "",
+            PromptDeltaBoundary::XmlElement => "</prompt_delta>",
+        }
+    }
+
+    pub fn delta_start_marker(self) -> &'static str {
+        match self.delta_boundary {
+            PromptDeltaBoundary::Bracketed => "[BEGIN DELTA ",
+            PromptDeltaBoundary::XmlElement => "<prompt_delta ",
+        }
+    }
+
+    pub fn parse_delta_id(self, segment: &str) -> Option<String> {
+        match self.delta_boundary {
+            PromptDeltaBoundary::Bracketed => {
+                let first_line = segment.lines().next().unwrap_or_default();
+                if let Some(rest) = first_line.strip_prefix(self.delta_start_marker()) {
+                    let rest = rest.strip_prefix("delta_id:")?.trim_start();
+                    let (id, _) = rest.split_once(',')?;
+                    let id = id.trim();
+                    return (!id.is_empty()).then(|| id.to_string());
+                }
+                if first_line == "[BEGIN DELTA]" {
+                    return segment.lines().find_map(|line| {
+                        line.strip_prefix("delta_id:")
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string)
+                    });
+                }
+                None
+            }
+            PromptDeltaBoundary::XmlElement => {
+                let first_line = segment.lines().next().unwrap_or_default();
+                let rest = first_line.strip_prefix(self.delta_start_marker())?;
+                let rest = rest.split_once("id=\"")?.1;
+                let (id, _) = rest.split_once('"')?;
+                (!id.is_empty()).then(|| id.to_string())
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ResponseProtocolKind {
-    Markdown,
     Json,
     #[default]
     Xml,
@@ -18,7 +158,6 @@ impl ResponseProtocolKind {
     pub fn from_name(name: &str) -> Self {
         match name.trim().to_ascii_lowercase().as_str() {
             "" => Self::default(),
-            "markdown" | "md" | "markdown_v1" => Self::Markdown,
             "json" | "json_v1" | "response_v1" => Self::Json,
             "xml" | "xml_v1" => Self::Xml,
             _ => Self::default(),
@@ -27,7 +166,6 @@ impl ResponseProtocolKind {
 
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Markdown => "markdown",
             Self::Json => "json",
             Self::Xml => "xml",
         }
@@ -35,7 +173,6 @@ impl ResponseProtocolKind {
 
     pub fn lang_format(&self) -> &'static str {
         match self {
-            Self::Markdown => "Markdown",
             Self::Json => "JSON",
             Self::Xml => "XML",
         }
@@ -43,33 +180,37 @@ impl ResponseProtocolKind {
 
     pub fn suite(&self) -> &'static dyn ResponseProtocolSuite {
         match self {
-            Self::Markdown => &markdown_suite::MarkdownSuiteV1,
             Self::Json => &json_suite::JsonSuiteV1,
             Self::Xml => &xml_suite::XmlSuiteV1,
         }
     }
 }
 
+static INLINE_TOOL_CALL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn generated_inline_tool_call_id() -> String {
+    let seq = INLINE_TOOL_CALL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let mut hasher = DefaultHasher::new();
+    std::process::id().hash(&mut hasher);
+    now.hash(&mut hasher);
+    seq.hash(&mut hasher);
+    format!("{:06x}", hasher.finish() & 0x00ff_ffff)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedAction {
     pub action: String,
+    pub name: Option<String>,
+    pub call_id: String,
     pub raw_input: Value,
 }
 impl ParsedAction {
     pub fn audit_input(&self) -> Value {
-        let mut input = self.raw_input.clone();
-        if self.action == "self_tool" {
-            if let Some(object) = input.as_object_mut() {
-                if let Some(key) = object.get("key").and_then(Value::as_str) {
-                    if crate::self_tool::is_sensitive_env_key(key)
-                        || crate::self_tool::is_memory_path_env_key(key)
-                    {
-                        object.insert("value".to_string(), serde_json::json!("<redacted>"));
-                    }
-                }
-            }
-        }
-        input
+        self.raw_input.clone()
     }
 
     pub fn input_str(&self, key: &str) -> String {
@@ -129,21 +270,11 @@ impl ParsedAction {
     }
 
     pub fn timeout_ms(&self, default_ms: u64) -> u64 {
-        self.input_u64("timeout_ms")
-            .or_else(|| {
-                self.input_u64("timeout_sec")
-                    .map(|seconds| seconds.saturating_mul(1000))
-            })
-            .unwrap_or(default_ms)
+        self.input_u64("timeout_ms").unwrap_or(default_ms)
     }
 
     pub fn timeout_ms_i64(&self, default_ms: i64) -> i64 {
-        self.input_i64("timeout_ms")
-            .or_else(|| {
-                self.input_i64("timeout_sec")
-                    .map(|seconds| seconds.saturating_mul(1000))
-            })
-            .unwrap_or(default_ms)
+        self.input_i64("timeout_ms").unwrap_or(default_ms)
     }
 
     pub fn shell_timeout_ms(&self) -> u64 {
@@ -156,11 +287,6 @@ impl ParsedAction {
 
     pub fn background(&self) -> bool {
         self.input_bool("background")
-            || self
-                .raw_input
-                .get("mode")
-                .and_then(Value::as_str)
-                .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("background"))
     }
 }
 
@@ -172,9 +298,6 @@ pub(crate) fn parse_action_object(
     let Some(object) = value.as_object() else {
         return Err(format!("{label}.action_missing"));
     };
-    if object.contains_key("order") || object.contains_key("actions") {
-        return Err(format!("{label}.old_group_object_not_supported"));
-    }
     if object.len() != 1 {
         return Err(format!("{label}.action_missing"));
     }
@@ -289,6 +412,8 @@ fn validate_parsed_action(
     }
     Ok(ParsedAction {
         action: name,
+        name: None,
+        call_id: generated_inline_tool_call_id(),
         raw_input: input,
     })
 }
@@ -334,7 +459,17 @@ pub struct ParsedEnvelope {
     pub action_groups: Vec<ParsedActionGroup>,
     pub context_compacts: Vec<ParsedContextCompact>,
     pub memory_candidates: Vec<String>,
+    /// Exact protocol response accepted by the runtime for assistant replay.
+    ///
+    /// XML recovery may extract a complete response root. In that case the
+    /// next prompt must replay this accepted response instead of the polluted
+    /// raw model output.
+    pub accepted_response: Option<String>,
     pub runtime_note: Option<String>,
+    /// Protocol defect observed and recovered without requesting another model response.
+    ///
+    /// Hosts may count this for diagnostics, but it must not increment repair_calls.
+    pub recovered_issue: Option<String>,
     pub repair_issue: Option<String>,
 }
 
@@ -356,7 +491,9 @@ pub struct ParsedContextCompact {
 /// Trait for response protocol implementations.
 pub trait ResponseProtocolSuite {
     fn name(&self) -> &str;
+    fn prompt_boundaries(&self) -> &'static PromptBoundarySpec;
     fn lang_format(&self) -> &str;
+    fn action_result_heading(&self) -> Option<&str>;
     fn response_shape_hint(&self) -> &str;
     fn protocol_schema(&self) -> &str;
     fn protocol_examples(&self) -> &str;

@@ -6,6 +6,13 @@ import shlex
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from xml.sax.saxutils import escape
+
+
+FINISH_CONFIRM_PREFIX = (
+    "Now let me think seriously twice before I announce stop. Review user's task "
+    "list. Is my delivery consistent with user's demand?"
+)
 
 
 def extract_text(value):
@@ -57,64 +64,43 @@ class Handler(BaseHTTPRequestHandler):
             content = toolgen_scenario_response(prompt)
         elif "CROSS_HOST_RESUME_SMOKE" in prompt:
             content = (
-                "<response>"
+                "<ASSISTANT>"
                 "<final_answer>CROSS_HOST_RESUME_OK</final_answer>"
-                "</response>"
+                "</ASSISTANT>"
             )
         elif "TTY_STRESS" in prompt and "STRESS_ACTION_DONE" in prompt:
             content = (
-                "<response>"
+                "<ASSISTANT>"
                 "<final_answer>STRESS_OK</final_answer>"
-                "</response>"
+                "</ASSISTANT>"
             )
         elif "TTY_STRESS" in prompt:
             time.sleep(self.response_delay)
-            free_talk = (
-                "正在执行真实终端压力测试：验证 Thought / Action 面板在长进度、"
-                "长 Bash 命令、CJK 字符、box drawing 字符 │└─、以及用户中途补充"
-                "同时出现时仍然能稳定换行、保持边框宽度，并且不会重复残留旧行。"
-            )
+            content = tty_stress_scenario_response()
+        elif "Q2：最终答案只输出 SUPPLEMENT_OK。" in prompt:
             content = (
-                "<response>"
-                "<free_talk><![CDATA["
-                + free_talk
-                + "]]></free_talk>"
-                "<working_still_action><action_json><![CDATA["
-                + json.dumps(
-                    [
-                        {
-                            "run_bash": {
-                                "cmd": (
-                                    "printf 'STRESS_ACTION_DONE\\n'; "
-                                    "sleep 1; "
-                                    "printf '长输出-一二三四五六七八九十-abcdefghijklmnopqrstuvwxyz-1234567890-│└─\\n'"
-                                ),
-                                "timeout_ms": 5000,
-                            },
-                        },
-                    ],
-                    ensure_ascii=False,
-                )
-                + "]]></action_json></working_still_action>"
-                "</response>"
+                "<ASSISTANT>"
+                "<final_answer>SUPPLEMENT_OK</final_answer>"
+                "</ASSISTANT>"
             )
         elif "## USER" in prompt and "SUPPLEMENT_OK" in prompt:
             content = (
-                "<response>"
+                "<ASSISTANT>"
                 "<final_answer>SUPPLEMENT_OK</final_answer>"
-                "</response>"
+                "</ASSISTANT>"
             )
         else:
             time.sleep(self.response_delay)
             content = (
-                "<response>"
+                "<ASSISTANT>"
                 "<final_answer>NO_SUPPLEMENT</final_answer>"
-                "</response>"
+                "</ASSISTANT>"
             )
 
         self.send_model_response(prompt, content)
 
     def send_model_response(self, prompt, content):
+        content = confirm_xml_final(content)
         prompt_tokens = max(1, len(prompt) // 4)
         completion_tokens = max(1, len(content) // 4)
         total_tokens = max(2, (len(prompt) + len(content)) // 4)
@@ -154,14 +140,70 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
 
+def confirm_xml_final(content):
+    if "<final_answer" not in content or "<finish_confirm" in content:
+        return content
+    confirmation = f"<finish_confirm>{FINISH_CONFIRM_PREFIX}</finish_confirm>"
+    candidates = [
+        pos
+        for pos in (content.find("<toolgen_retrospect"), content.find("<final_answer"))
+        if pos >= 0
+    ]
+    insertion_point = min(candidates)
+    return content[:insertion_point] + confirmation + content[insertion_point:]
+
+
+def xml_element(name, value):
+    if value is None:
+        return f"<{name}/>"
+    if isinstance(value, bool):
+        text = "true" if value else "false"
+        return f"<{name}>{text}</{name}>"
+    if isinstance(value, dict):
+        body = "".join(xml_element(child, child_value) for child, child_value in value.items())
+        return f"<{name}>{body}</{name}>"
+    if isinstance(value, list):
+        body = "".join(xml_element("item", item) for item in value)
+        return f"<{name}>{body}</{name}>"
+    return f"<{name}>{escape(str(value))}</{name}>"
+
+
 def xml_action(payload, free_talk):
+    if len(payload) != 1:
+        raise ValueError("XML action fixture requires exactly one tool")
+    tool, arguments = next(iter(payload.items()))
+    action_name = escape(f"run fake {tool} action")
+    action_body = xml_element(tool, arguments)
+    action_body = action_body.replace(f"<{tool}>", f'<{tool} name="{action_name}">', 1)
     return (
-        "<response>"
+        "<ASSISTANT>"
         f"<free_talk>{free_talk}</free_talk>"
-        "<working_still_action><action_json><![CDATA["
-        + json.dumps([payload], ensure_ascii=False)
-        + "]]></action_json></working_still_action>"
-        "</response>"
+        "<actions>"
+        + action_body
+        + "</actions>"
+        "</ASSISTANT>"
+    )
+
+
+
+def tty_stress_scenario_response():
+    free_talk = (
+        "正在执行真实终端压力测试：验证 Thought / Action 面板在长进度、"
+        "长 Bash 命令、CJK 字符、box drawing 字符 │└─、以及用户中途补充"
+        "同时出现时仍然能稳定换行、保持边框宽度，并且不会重复残留旧行。"
+    )
+    return xml_action(
+        {
+            "run_bash": {
+                "cmd": (
+                    "printf 'STRESS_ACTION_DONE\\n'; "
+                    "sleep 1; "
+                    "printf '长输出-一二三四五六七八九十-abcdefghijklmnopqrstuvwxyz-1234567890-│└─\\n'"
+                ),
+                "timeout_ms": 5000,
+            },
+        },
+        free_talk,
     )
 
 
@@ -169,9 +211,9 @@ def toolgen_scenario_response(prompt):
     if "[TOOL_GEN_TASK]" not in prompt:
         if "Action result: run_bash" in prompt and "TOOLGEN_E2E_SOURCE_DONE" in prompt:
             return (
-                "<response><free_talk>The reusable source task completed.</free_talk>"
+                "<ASSISTANT><free_talk>The reusable source task completed.</free_talk>"
                 "<final_answer>ToolGen source task completed with two ERROR records.</final_answer>"
-                "</response>"
+                "</ASSISTANT>"
             )
         return xml_action(
             {
@@ -186,15 +228,15 @@ def toolgen_scenario_response(prompt):
     marker = "Write the new tool files only in this temporary staging directory:\n"
     match = re.search(re.escape(marker) + r"([^\n]+)", prompt)
     if not match:
-        return "<response><final_answer>ToolGen fixture could not locate its draft.</final_answer></response>"
+        return "<ASSISTANT><final_answer>ToolGen fixture could not locate its draft.</final_answer></ASSISTANT>"
     draft = match.group(1).strip()
     if "FORCE_TOOLGEN_PROTOCOL_FAILURE" in prompt:
         return "ToolGen fixture intentionally returned a non-protocol response."
     if "Action result: toolgen\nop: publish\nstatus: ready" in prompt:
         return (
-            "<response><toolgen_retrospect>Published deterministic-log-error-counter after runtime validation.</toolgen_retrospect>"
+            "<ASSISTANT><toolgen_retrospect>Published deterministic-log-error-counter after runtime validation.</toolgen_retrospect>"
             "<final_answer>ToolGen generated and validated deterministic-log-error-counter.</final_answer>"
-            "</response>"
+            "</ASSISTANT>"
         )
     if "Action result: run_bash" in prompt and "TOOLGEN_E2E_DRAFT_READY" in prompt:
         return xml_action(
@@ -248,8 +290,13 @@ def toolgen_scenario_response(prompt):
 def self_test():
     assert extract_prompt({"messages": [{"content": "hello"}]}) == "hello"
     assert extract_prompt({"instructions": "system", "input": "user"}) == "system\nuser"
+    stress = tty_stress_scenario_response()
+    assert "<actions>" in stress and '<run_bash name="run fake run_bash action">' in stress
+    assert "STRESS_ACTION_DONE" in stress
+    assert "<working_still_action>" not in stress
+    assert "<action_json>" not in stress
     source = toolgen_scenario_response("TOOLGEN_E2E_SOURCE")
-    assert '"run_bash"' in source and "TOOLGEN_E2E_SOURCE_DONE" in source
+    assert '<run_bash name="' in source and "TOOLGEN_E2E_SOURCE_DONE" in source
     completed = toolgen_scenario_response(
         "Action result: run_bash\noutput: TOOLGEN_E2E_SOURCE_DONE"
     )
@@ -260,11 +307,11 @@ def self_test():
         "/tmp/toolgen-fixture-draft\n"
     )
     draft = toolgen_scenario_response(toolgen_prompt)
-    assert '"run_bash"' in draft and "TOOLGEN_E2E_DRAFT_READY" in draft
+    assert '<run_bash name="' in draft and "TOOLGEN_E2E_DRAFT_READY" in draft
     publish = toolgen_scenario_response(
         toolgen_prompt + "\nAction result: run_bash\noutput: TOOLGEN_E2E_DRAFT_READY"
     )
-    assert '"toolgen"' in publish and '"op": "publish"' in publish
+    assert '<toolgen name="' in publish and "<op>publish</op>" in publish
     finished = toolgen_scenario_response(
         toolgen_prompt + "\nAction result: toolgen\nop: publish\nstatus: ready"
     )

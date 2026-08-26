@@ -9,9 +9,6 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-
 const MANIFEST_FILE: &str = ".timem-tool.json";
 const README_FILE: &str = "README.md";
 const MAX_TOOL_FILES: usize = 64;
@@ -434,7 +431,7 @@ fn run_self_test(root: &Path, manifest: &ToolManifest) -> Result<String, String>
             command
         }
         "bash" | "shell" | "sh" => {
-            let mut command = Command::new("/bin/bash");
+            let mut command = Command::new(crate::os::BASH_EXECUTABLE);
             command.arg(&entrypoint);
             command
         }
@@ -452,16 +449,7 @@ fn run_self_test(root: &Path, manifest: &ToolManifest) -> Result<String, String>
         .env("TIMEM_TOOLGEN_SELF_TEST", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setpgid(0, 0) == 0 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
-    }
+    crate::os::configure_child_process_group(&mut command);
     let mut child = command
         .spawn()
         .map_err(|error| format!("tool_self_test_spawn_failed:{error}"))?;
@@ -481,10 +469,7 @@ fn run_self_test(root: &Path, manifest: &ToolManifest) -> Result<String, String>
         {
             Some(status) => break status,
             None if Instant::now() >= deadline => {
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(-(child.id() as i32), libc::SIGKILL);
-                }
+                crate::os::kill_process_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = join_bounded_reader(stdout_reader);

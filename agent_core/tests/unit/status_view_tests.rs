@@ -104,7 +104,7 @@ fn runtime_retry_status_view_applies_defaults_and_countdown() {
     let view = runtime_retry_status_view(&retry, 10_000);
     assert_eq!(view.remaining_secs, 0);
     assert_eq!(view.attempt, 1);
-    assert_eq!(view.max_attempts, 5);
+    assert_eq!(view.max_attempts, DEFAULT_MODEL_SYSTEM_ERROR_RETRIES);
     assert_eq!(view.error, None);
 }
 

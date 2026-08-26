@@ -13,6 +13,12 @@
 # Known values: openai-compatible, openai-responses, anthropic.
 # Default: openai-compatible.
 # export TIMEM_API_PROTOCOL=openai-compatible
+# Tool-call transport: auto probes once per provider/model configuration and
+# chooses native when supported, otherwise inline. Parallel calls are probed
+# independently and their API flag is always sent explicitly.
+# export TIMEM_TOOL_CALL_MODE=auto
+# export TIMEM_PARALLEL_TOOL_CALLS=auto
+# Inline response syntax only; ignored in native mode.
 # export TIMEM_RESPONSE_PROTOCOL=xml
 
 # Generic API key. Prefer env/source over command-line flags so secrets do not
@@ -26,12 +32,8 @@
 # Model name.
 # export TIMEM_MODEL=qwen-plus
 
-# Memory/audit space name.
-# export TIMEM_SPACE=.test_mem
-
-# Runtime data root for memory, audit logs, and shell history.
-# Default for a new environment: .timem_data
-# export TIMEM_DATA_DIR=.timem_data
+# Absolute MEM directory path. If unset, Timem uses ~/.timem/mem and creates it.
+# export TIMEM_SPACE=/absolute/path/to/mem
 
 # Model API request timeout in seconds.
 # export TIMEM_TIMEOUT=120
@@ -44,6 +46,9 @@
 # export TIMEM_ENABLE_THINKING=true
 # export TIMEM_REASONING_EFFORT=max
 # export TIMEM_STREAM=true
+# OpenAI-compatible cache wire mode:
+# auto (default, server-side stable-prefix caching), off, or ephemeral
+# export TIMEM_OPENAI_CACHE_MODE=auto
 
 # Maximum LLM input context window. Accepts plain numbers or K suffix, such as 100K.
 # export TIMEM_MAX_LLM_INPUT=100K

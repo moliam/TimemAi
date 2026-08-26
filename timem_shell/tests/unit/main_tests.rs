@@ -1,35 +1,36 @@
 use super::{
     active_elapsed_secs, apply_config_value, boxed_config_table_at_width,
-    cache_shell_session_runtime, cli_help_text, config_field_value, consume_turn_cancel_request,
-    display_width, load_or_create_shell_session, merge_queued_input, model_service_config_from_env,
-    new_shell_session, next_paste_recovery_choice, normalize_newlines, paste_marker_ranges,
-    paste_marker_segments, paste_recovery_return_edit_clear_lines,
-    paste_recovery_summary_from_markers, pasted_line_count, prev_paste_recovery_choice,
-    push_thinking_supplement_bytes, queued_input_drain_from_bytes, queued_text_to_supplements,
-    random_spinner_tick, raw_multiline_paste_display, raw_multiline_paste_needs_confirmation,
-    read_approval_key, read_approval_key_until, read_menu_key, read_paste_recovery_key,
-    reedline_keyboard_protocol_enter_sequence, reedline_keyboard_protocol_exit_sequence,
-    render_approval_choices, render_config_apply_report, render_config_menu,
-    render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
-    render_paste_recovery_choices, render_paste_recovery_prompt,
-    render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
-    render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
-    render_stale_context_prompt, render_startup_banner, render_startup_status_block,
-    render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
-    render_work_instructions_load_choices, render_work_instructions_load_prompt,
-    render_workspace_command_report, render_workspace_delete_choices, render_workspace_menu,
-    rendered_terminal_rows, resolve_paste_markers, resolve_work_instruction_context_for_turn,
-    runtime_help_text, sanitize_user_input, shell_runtime_info_entries,
-    shell_session_effective_env, shell_session_env_values, shell_session_profile,
-    shell_session_work_dir, startup_control_hint, strip_ansi, strip_paste_markers,
-    submitted_input_rows, take_shell_resume_notice, thinking_supplement_terminal_mode,
-    timem_reedline_keybindings, utf8_expected_len, work_instruction_shell_load_result,
-    workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, ConfigField,
-    ConfigRow, ConfigTableItem, CoreTopicEvent, HostDecision, HostDecisionRequest, MenuKey,
-    PasteRecord, PasteRecoveryChoice, PasteRecoveryKey, PasteRecoverySummary, QueuedInputDrain,
-    SharedPasteRecords, SharedPrefillInput, ThinkingStatus, TimemEditMode, TimemPasteHighlighter,
-    TimemReedlinePrompt, TurnUi, ANSI_HIGHLIGHT, PASTE_END_MARKER, PASTE_START_MARKER,
-    STATIC_PROMPT, TURN_CANCEL_REQUESTED,
+    cache_shell_session_runtime, cli_help_text, config_field_row_kind, config_field_value,
+    consume_turn_cancel_request, display_width, load_or_create_shell_session, merge_queued_input,
+    model_service_config_from_env, new_shell_session, next_paste_recovery_choice,
+    normalize_newlines, paste_marker_ranges, paste_marker_segments,
+    paste_recovery_return_edit_clear_lines, paste_recovery_summary_from_markers, pasted_line_count,
+    prev_paste_recovery_choice, push_thinking_queue_bytes, queued_input_drain_from_bytes,
+    queued_text_to_questions, random_spinner_tick, raw_multiline_paste_display,
+    raw_multiline_paste_needs_confirmation, read_approval_key, read_approval_key_until,
+    read_menu_key, read_paste_recovery_key, reedline_keyboard_protocol_enter_sequence,
+    reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_apply_report,
+    render_config_menu, render_expand_output_choices, render_expand_output_prompt,
+    render_note_box_at_width, render_paste_recovery_choices, render_paste_recovery_prompt,
+    render_queued_user_line, render_raw_multiline_paste_submit_choices,
+    render_raw_multiline_paste_submit_prompt, render_round_limit_choices,
+    render_round_limit_prompt, render_stale_context_choices, render_stale_context_prompt,
+    render_startup_banner, render_startup_status_block, render_submitted_user_line_rewrite,
+    render_user_approval_prompt, render_user_input_prompt, render_work_instructions_load_choices,
+    render_work_instructions_load_prompt, render_workspace_command_report,
+    render_workspace_delete_choices, render_workspace_menu, rendered_terminal_rows,
+    resolve_paste_markers, resolve_work_instruction_context_for_turn, runtime_help_text,
+    sanitize_user_input, shell_session_effective_env, shell_session_env_values,
+    shell_session_profile, shell_session_work_dir, startup_control_hint, strip_ansi,
+    strip_paste_markers, submitted_input_rows, take_shell_resume_notice,
+    thinking_queue_terminal_mode, timem_reedline_keybindings, utf8_expected_len,
+    work_instruction_shell_load_result, workspace_menu_line_count, wrapped_terminal_rows,
+    ApprovalChoice, ApprovalKey, CliTurnUi, ConfigField, ConfigRow, ConfigTableItem,
+    CoreTopicEvent, HostDecision, HostDecisionRequest, MenuKey, PasteRecord, PasteRecoveryChoice,
+    PasteRecoveryKey, PasteRecoverySummary, QueuedInputDrain, SharedPasteRecords,
+    SharedPrefillInput, ThinkingStatus, TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt,
+    TurnUi, ANSI_HIGHLIGHT, PASTE_END_MARKER, PASTE_START_MARKER, STATIC_PROMPT,
+    TURN_CANCEL_REQUESTED,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -78,18 +79,17 @@ fn static_prompt_uses_full_shared_v1_resource() {
     assert!(STATIC_PROMPT.contains("# Timem System Prompt"));
     assert!(STATIC_PROMPT.contains("## Role"));
     assert!(STATIC_PROMPT.contains("## Memory"));
-    assert!(STATIC_PROMPT.contains("## Tools And Skills"));
+    assert!(STATIC_PROMPT.contains("{{TOOL_CATALOG_SECTION_HEADING}}"));
     assert!(STATIC_PROMPT.contains("{{RESPONSE_PROTOCOL_SECTION}}"));
     // Response schema is now inside protocol section file
     assert!(STATIC_PROMPT.contains("{{TOOL_CATALOG}}"));
-    assert!(STATIC_PROMPT.contains("{{SKILL_HEADERS}}"));
     assert!(!STATIC_PROMPT.contains("resources/response_v1_summary.json"));
     assert!(!STATIC_PROMPT.contains("response_v1` schema summary"));
     assert!(!STATIC_PROMPT.contains("\"acceptance_check?\""));
     assert!(!STATIC_PROMPT.contains("\"perspective_policy\""));
     assert!(!STATIC_PROMPT.contains("\"tool_claim_policy\""));
     assert!(!STATIC_PROMPT.contains("\"storage_style_policy\""));
-    assert!(STATIC_PROMPT.contains("persisted user/assistant chat records"));
+    assert!(STATIC_PROMPT.contains("search the visible conversation record"));
     assert!(!STATIC_PROMPT.contains("\"durable|raw_chat|scratch|context\""));
     assert!(!STATIC_PROMPT.contains("\"durable: query|schema|sql|insert|update|upsert|delete; raw_chat: query|sql|delete; scratch: query|write|read|delete; context: shrink\""));
     assert!(!STATIC_PROMPT.contains("\"query\": {\"type\": \"string\""));
@@ -109,9 +109,9 @@ fn static_prompt_uses_full_shared_v1_resource() {
     assert!(!STATIC_PROMPT.contains("foreground|background"));
     assert!(!STATIC_PROMPT.contains("\"durable_ctx_score\""));
     assert!(!STATIC_PROMPT.contains("Every model response must score"));
-    assert!(STATIC_PROMPT.contains("Context maintenance"));
-    assert!(STATIC_PROMPT.contains("response protocol's context compact branch"));
-    assert!(STATIC_PROMPT.contains("do not target this system prompt"));
+    assert!(STATIC_PROMPT.contains("## Prompt context"));
+    assert!(STATIC_PROMPT.contains("Each dynamic delta has a `delta_id`"));
+    assert!(STATIC_PROMPT.contains("context maintenance"));
     assert!(!STATIC_PROMPT.contains("\"json_protocol\""));
     assert!(!STATIC_PROMPT.contains("\"evidence_guard\""));
     assert!(!STATIC_PROMPT.contains("\"action_result_guard\""));
@@ -125,15 +125,37 @@ fn static_prompt_uses_full_shared_v1_resource() {
     assert!(!STATIC_PROMPT.contains("rounds_guard"));
     assert!(!STATIC_PROMPT.contains("perspective_rewrite"));
     assert!(!STATIC_PROMPT.contains("continue:false"));
-    assert!(STATIC_PROMPT.len() > 3_000);
+    assert!(STATIC_PROMPT.contains("{{RESPONSE_MODE_INSTRUCTION}}"));
+    assert!(STATIC_PROMPT.contains("{{TOOL_CATALOG}}"));
+    assert!(STATIC_PROMPT.contains("{{RESPONSE_PROTOCOL_SECTION}}"));
 }
 
 #[test]
-fn thinking_supplement_collects_utf8_lines() {
+fn busy_shell_input_is_queued_for_a_separate_turn_not_sent_as_a_supplement() {
+    let mut ui = CliTurnUi {
+        status: None,
+        interactive_approval: false,
+        queued_input: None,
+        queued_questions: vec!["Q2".to_string()],
+    };
+
+    assert!(ui.drain_user_supplements().is_empty());
+    assert_eq!(ui.take_queued_questions(), vec!["Q2"]);
+}
+
+#[test]
+fn queued_question_renders_as_a_new_user_bubble() {
+    let rendered = render_queued_user_line("Q2", "12:34:56");
+    assert!(rendered.contains("[12:34:56] You ❯❯"));
+    assert!(rendered.ends_with("Q2\n"));
+}
+
+#[test]
+fn thinking_queue_collects_utf8_lines() {
     let mut buffer = Vec::new();
     let mut pending = Vec::new();
 
-    push_thinking_supplement_bytes(
+    push_thinking_queue_bytes(
         &mut buffer,
         &mut pending,
         "补充：请优先修复 UI\r".as_bytes(),
@@ -144,45 +166,45 @@ fn thinking_supplement_collects_utf8_lines() {
 }
 
 #[test]
-fn thinking_supplement_backspace_removes_one_utf8_char() {
+fn thinking_queue_backspace_removes_one_utf8_char() {
     let mut buffer = Vec::new();
     let mut pending = Vec::new();
 
-    push_thinking_supplement_bytes(&mut buffer, &mut pending, "中文".as_bytes());
-    push_thinking_supplement_bytes(&mut buffer, &mut pending, &[127]);
-    push_thinking_supplement_bytes(&mut buffer, &mut pending, b"\n");
+    push_thinking_queue_bytes(&mut buffer, &mut pending, "中文".as_bytes());
+    push_thinking_queue_bytes(&mut buffer, &mut pending, &[127]);
+    push_thinking_queue_bytes(&mut buffer, &mut pending, b"\n");
 
     assert_eq!(pending, vec!["中"]);
 }
 
 #[test]
-fn thinking_supplement_ignores_empty_and_control_lines() {
+fn thinking_queue_ignores_empty_and_control_lines() {
     let mut buffer = Vec::new();
     let mut pending = Vec::new();
 
-    push_thinking_supplement_bytes(&mut buffer, &mut pending, b"   \n");
-    push_thinking_supplement_bytes(&mut buffer, &mut pending, &[3, 4, 27]);
-    push_thinking_supplement_bytes(&mut buffer, &mut pending, b" keep \n");
+    push_thinking_queue_bytes(&mut buffer, &mut pending, b"   \n");
+    push_thinking_queue_bytes(&mut buffer, &mut pending, &[3, 4, 27]);
+    push_thinking_queue_bytes(&mut buffer, &mut pending, b" keep \n");
 
     assert_eq!(pending, vec!["keep"]);
 }
 
 #[test]
-fn queued_thinking_supplement_text_splits_nonempty_lines() {
+fn queued_thinking_text_splits_nonempty_questions() {
     assert_eq!(
-        queued_text_to_supplements("\n 补充一 \r\n\n补充二\n"),
+        queued_text_to_questions("\n 补充一 \r\n\n补充二\n"),
         vec!["补充一", "补充二"]
     );
 }
 
 #[test]
-fn thinking_supplement_terminal_mode_is_noncanonical_but_keeps_sigint() {
+fn thinking_queue_terminal_mode_is_noncanonical_but_keeps_sigint() {
     let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
     original.c_lflag = libc::ICANON | libc::ECHO | libc::ISIG;
     original.c_cc[libc::VMIN] = 1;
     original.c_cc[libc::VTIME] = 1;
 
-    let mode = thinking_supplement_terminal_mode(original);
+    let mode = thinking_queue_terminal_mode(original);
 
     assert_eq!(mode.c_lflag & libc::ICANON, 0);
     assert_eq!(mode.c_lflag & libc::ECHO, 0);
@@ -459,6 +481,8 @@ fn workspace_path_normalization_canonicalizes_existing_paths() {
 #[test]
 fn config_menu_renders_effective_values_and_can_apply_updates() {
     let mut config = ModelServiceConfig {
+        interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -466,7 +490,7 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
         timeout_secs: 120,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut core = AgentCore::new(
@@ -542,8 +566,10 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
 }
 
 #[test]
-fn config_protocol_update_keeps_endpoint_defaults_consistent() {
+fn config_response_protocol_update_is_supported_by_terminal_host() {
     let mut config = ModelServiceConfig {
+        interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -551,7 +577,52 @@ fn config_protocol_update_keeps_endpoint_defaults_consistent() {
         timeout_secs: 120,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Xml,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+    };
+    let mut core = AgentCore::new(
+        "STATIC",
+        CoreProfile {
+            model: config.model.clone(),
+        },
+        std::env::temp_dir().join(format!(
+            "timem_config_response_protocol_test_{}",
+            epoch_millis()
+        )),
+    );
+    let mut bash = BashApprovalMode::Ask;
+    let mut work = WorkInstructionLoadMode::Silent;
+
+    apply_config_value(
+        &mut config,
+        &mut core,
+        &mut bash,
+        &mut work,
+        ConfigField::ResponseProtocol,
+        "json",
+    )
+    .unwrap();
+
+    assert_eq!(config.response_protocol, ResponseProtocolKind::Json);
+    assert_eq!(
+        config_field_row_kind(ConfigField::ResponseProtocol),
+        timem_shell::RuntimeConfigRowKind::ResponseProtocol
+    );
+}
+
+#[test]
+fn config_protocol_update_keeps_endpoint_defaults_consistent() {
+    let mut config = ModelServiceConfig {
+        interaction: Default::default(),
+        http_headers: Default::default(),
+        api_protocol: ApiProtocol::OpenAiCompatible,
+        api_key: "secret".to_string(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+        timeout_secs: 120,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut core = AgentCore::new(
@@ -602,6 +673,8 @@ fn config_protocol_update_keeps_endpoint_defaults_consistent() {
 #[test]
 fn config_protocol_update_preserves_explicit_endpoint() {
     let mut config = ModelServiceConfig {
+        interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
@@ -609,7 +682,7 @@ fn config_protocol_update_preserves_explicit_endpoint() {
         timeout_secs: 120,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let mut core = AgentCore::new(
@@ -665,6 +738,8 @@ fn random_spinner_tick_maps_to_valid_icon_slot() {
 #[test]
 fn startup_banner_lists_env_overrides_on_separate_lines() {
     let config = ModelServiceConfig {
+        interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -672,13 +747,12 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
         timeout_secs: 120,
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let banner = render_startup_banner(
         ".xxx_mem",
         &config,
-        std::path::Path::new("/data"),
         std::path::Path::new("/api_audit.json"),
         std::path::Path::new("/action_audit.json"),
         BashApprovalMode::Approve,
@@ -722,8 +796,6 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
     assert!(banner.contains("100K"));
     assert!(banner.contains("TIMEM_BASH_APPROVAL"));
     assert!(banner.contains("approve"));
-    assert!(banner.contains("TIMEM_DATA_DIR"));
-    assert!(banner.contains("/data"));
     assert!(banner.contains("local_audit"));
     assert!(banner.contains("api_audit.json"));
     assert!(banner.contains("payload 记录"));
@@ -743,12 +815,10 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
     let runtime_idx = banner.find("TIMEM_MAX_LLM_INPUT").unwrap();
     let bash_idx = banner.find("TIMEM_BASH_APPROVAL").unwrap();
     let space_idx = banner.find("TIMEM_SPACE").unwrap();
-    let data_idx = banner.find("TIMEM_DATA_DIR").unwrap();
     assert!(model_idx < protocol_idx);
     assert!(protocol_idx < runtime_idx);
     assert!(runtime_idx < bash_idx);
     assert!(bash_idx < space_idx);
-    assert!(space_idx < data_idx);
 }
 
 #[test]
@@ -807,6 +877,8 @@ fn config_table_uses_window_width_ratio_and_wraps_long_values() {
 #[test]
 fn startup_banner_highlights_values_outside_protocol_defaults() {
     let default_config = ModelServiceConfig {
+        interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -814,13 +886,12 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
         timeout_secs: 120,
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let default_banner = render_startup_banner(
         ".test_mem",
         &default_config,
-        std::path::Path::new("data"),
         std::path::Path::new(".test_mem/audit/api_audit.json"),
         std::path::Path::new(".test_mem/audit/action_audit.json"),
         BashApprovalMode::Ask,
@@ -829,6 +900,8 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
     assert!(!default_banner.contains(ANSI_HIGHLIGHT));
 
     let override_config = ModelServiceConfig {
+        interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
@@ -836,13 +909,12 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
         timeout_secs: 120,
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let override_banner = render_startup_banner(
         ".test_mem",
         &override_config,
-        std::path::Path::new("data"),
         std::path::Path::new(".test_mem/audit/api_audit.json"),
         std::path::Path::new(".test_mem/audit/action_audit.json"),
         BashApprovalMode::Ask,
@@ -864,6 +936,8 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
 #[test]
 fn startup_banner_highlights_custom_model_and_base_url() {
     let config = ModelServiceConfig {
+        interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
@@ -871,13 +945,12 @@ fn startup_banner_highlights_custom_model_and_base_url() {
         timeout_secs: 120,
         max_llm_output_tokens: 4096,
         max_llm_input_tokens: 100_000,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     };
     let banner = render_startup_banner(
         ".test_mem",
         &config,
-        std::path::Path::new("data"),
         std::path::Path::new(".test_mem/audit/api_audit.json"),
         std::path::Path::new(".test_mem/audit/action_audit.json"),
         BashApprovalMode::Ask,
@@ -907,8 +980,6 @@ fn cli_help_lists_all_env_backed_options() {
         "TIMEM_MODEL",
         "--api-key",
         "TIMEM_API_KEY",
-        "--data-dir",
-        "TIMEM_DATA_DIR",
         "--timeout",
         "TIMEM_TIMEOUT",
         "--max-llm-output",
@@ -943,6 +1014,12 @@ fn cli_help_lists_all_env_backed_options() {
     assert!(help.contains(
             "  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay"
         ));
+    assert!(help.contains(
+        "--space <absolute-path>        env TIMEM_SPACE; MEM directory, default ~/.timem/mem"
+    ));
+    assert!(help.contains("timem --space /absolute/path/to/mem"));
+    assert!(!help.contains("--space <name>"));
+    assert!(!help.contains("default .test_mem"));
 }
 
 #[test]
@@ -959,6 +1036,7 @@ fn runtime_help_omits_startup_options_and_highlights_sections() {
         "/exit",
         "Ctrl+C or Esc cancels",
         "While Timem is thinking",
+        "queue a separate next turn",
         "Use /prof to inspect token usage",
         "Use /config for changes that can take effect without restarting",
     ] {
@@ -1005,7 +1083,6 @@ fn env_template_exports_values_for_plain_source() {
         "TIMEM_BASE_URL",
         "TIMEM_MODEL",
         "TIMEM_SPACE",
-        "TIMEM_DATA_DIR",
         "TIMEM_TIMEOUT",
         "TIMEM_MAX_LLM_OUTPUT",
         "TIMEM_MAX_LLM_INPUT",
@@ -1087,6 +1164,10 @@ fn shell_and_session_env_keep_openai_thinking_stream_options() {
         ("TIMEM_ENABLE_THINKING".to_string(), "true".to_string()),
         ("TIMEM_REASONING_EFFORT".to_string(), "max".to_string()),
         ("TIMEM_STREAM".to_string(), "true".to_string()),
+        (
+            "TIMEM_OPENAI_CACHE_MODE".to_string(),
+            "ephemeral".to_string(),
+        ),
     ]);
     let config = model_service_config_from_env(&CliOptions::default(), &env).unwrap();
     assert_eq!(config.openai_compatible.enable_thinking, Some(true));
@@ -1110,6 +1191,10 @@ fn shell_and_session_env_keep_openai_thinking_stream_options() {
         Some("max")
     );
     assert_eq!(stored.get("TIMEM_STREAM").map(String::as_str), Some("true"));
+    assert_eq!(
+        stored.get("TIMEM_OPENAI_CACHE_MODE").map(String::as_str),
+        Some("ephemeral")
+    );
 }
 
 #[test]
@@ -1966,38 +2051,14 @@ fn rendered_terminal_rows_counts_soft_wrapped_status_lines() {
 }
 
 #[test]
-fn shell_runtime_info_is_host_supplied_and_has_no_cwd() {
-    let core = AgentCore::new(
-        STATIC_PROMPT,
-        CoreProfile {
-            model: "qwen-plus".into(),
-        },
-        std::env::temp_dir().join(format!("timem_shell_runtime_info_{}", epoch_millis())),
-    );
-    let entries = shell_runtime_info_entries(&core);
-    let joined = entries.join("\n");
-
-    assert!(joined.contains("ui:"));
-    assert!(
-        joined.contains("os: macos")
-            || joined.contains("os: linux")
-            || joined.contains("os: windows")
-            || joined.contains("os: unknown")
-    );
-    assert!(joined.contains("arch: "));
-    assert!(joined.contains("os_version: "));
-    assert!(joined.contains("run_bash: available"));
-    assert!(!joined.contains("cwd:"));
-    assert!(!joined.contains("/Users/"));
-}
-
-#[test]
 fn shell_session_resume_uses_shared_store_and_notice_format() {
     let root = std::env::temp_dir().join(format!("timem_shell_session_resume_{}", epoch_millis()));
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let store = SessionStore::new(root.join("memory"));
     let config = ModelServiceConfig {
+        interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2011,6 +2072,7 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
     let stored = StoredSession {
         session_id: "web_session_1".to_string(),
         display_name: "Recovered Web".to_string(),
+        group_id: None,
         created_at_ms: 1,
         updated_at_ms: 2,
         current_dir: workspace.display().to_string(),
@@ -2044,13 +2106,83 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
     let mut pending = true;
     let notice = take_shell_resume_notice(&store, &loaded.session_id, &workspace, &mut pending)
         .expect("first restored shell turn should include resume notice");
-    assert!(notice.contains("This session was restored"));
+    assert!(notice.contains(
+        "Runtime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them."
+    ));
+    assert!(!notice.contains("This session was restored"));
+    assert!(!notice.contains("## RUNTIME"));
+    assert!(!notice.contains("<RUNTIME>"));
     assert!(notice.contains("raw_chat_history.jsonl"));
     assert!(notice.contains("format: JSONL, one record per line."));
+    assert!(notice.contains(&format!("Current cwd: {}", workspace.display())));
     assert!(!pending);
     assert!(
         take_shell_resume_notice(&store, &loaded.session_id, &workspace, &mut pending).is_none()
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shell_start_recovers_valid_session_from_partially_corrupt_index() {
+    let root = std::env::temp_dir().join(format!("timem_shell_corrupt_index_{}", epoch_millis()));
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let store = SessionStore::new(root.join("memory"));
+    fs::create_dir_all(store.sessions_dir()).unwrap();
+    let config = ModelServiceConfig {
+        interaction: Default::default(),
+        http_headers: Default::default(),
+        api_protocol: ApiProtocol::OpenAiCompatible,
+        api_key: "secret".to_string(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://example.invalid/v1".to_string(),
+        timeout_secs: 120,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        response_protocol: ResponseProtocolKind::Xml,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+    };
+    let stored = StoredSession {
+        session_id: "shell_recovered".to_string(),
+        display_name: "Recovered".to_string(),
+        group_id: None,
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        current_dir: workspace.display().to_string(),
+        profile: shell_session_profile(&config),
+        env: BTreeMap::new(),
+        env_overrides: None,
+        mcp_server_ids: Vec::new(),
+        state: StoredSessionState::Interrupted,
+        last_turn_id: None,
+        raw_chat_history_path: store
+            .history_path_for_session("shell_recovered")
+            .display()
+            .to_string(),
+    };
+    let original = format!("{}\nnot-json\n", serde_json::to_string(&stored).unwrap());
+    fs::write(store.index_path(), &original).unwrap();
+
+    let loaded = load_or_create_shell_session(
+        &store,
+        &config,
+        BashApprovalMode::Approve,
+        WorkInstructionLoadMode::Silent,
+        &workspace,
+    );
+    assert_eq!(loaded.session_id, "shell_recovered");
+    assert_eq!(store.list_sessions().unwrap(), vec![stored]);
+    let backup = fs::read_dir(store.sessions_dir())
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("index.jsonl.session-index-corrupt-backup-")
+        })
+        .unwrap();
+    assert_eq!(fs::read_to_string(backup.path()).unwrap(), original);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2063,6 +2195,8 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
     fs::create_dir_all(&restored_dir).unwrap();
     let store = SessionStore::new(root.join("memory"));
     let config = ModelServiceConfig {
+        interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2077,6 +2211,7 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
         .upsert_session(&StoredSession {
             session_id: "web_session_cwd".to_string(),
             display_name: "Recovered Web".to_string(),
+            group_id: None,
             created_at_ms: 1,
             updated_at_ms: 2,
             current_dir: restored_dir.display().to_string(),
@@ -2136,14 +2271,12 @@ fn shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence() {
     fs::create_dir_all(&workspace).unwrap();
     let launch_env = HashMap::from([
         ("TIMEM_MODEL".to_string(), "launch-model".to_string()),
-        (
-            "TIMEM_RESPONSE_PROTOCOL".to_string(),
-            "markdown".to_string(),
-        ),
+        ("TIMEM_RESPONSE_PROTOCOL".to_string(), "json".to_string()),
     ]);
     let session = StoredSession {
         session_id: "web_session_env".to_string(),
         display_name: "Recovered Web".to_string(),
+        group_id: None,
         created_at_ms: 1,
         updated_at_ms: 2,
         current_dir: workspace.display().to_string(),
@@ -2209,6 +2342,8 @@ fn shell_resume_selects_the_most_recent_valid_session() {
     fs::create_dir_all(&workspace).unwrap();
     let store = SessionStore::new(root.join("memory"));
     let config = ModelServiceConfig {
+        interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "launch-secret".to_string(),
         model: "launch-model".to_string(),
@@ -2262,6 +2397,8 @@ fn shell_runtime_config_changes_are_cached_before_another_turn_runs() {
     fs::create_dir_all(&workspace).unwrap();
     let store = SessionStore::new(root.join("memory"));
     let mut config = ModelServiceConfig {
+        interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "cached-secret".to_string(),
         model: "old-model".to_string(),
@@ -2310,6 +2447,8 @@ fn shell_can_resume_web_style_session_history() {
     let store = SessionStore::new(root.join("memory"));
     let session_id = "web_session_handoff";
     let config = ModelServiceConfig {
+        interaction: Default::default(),
+        http_headers: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2324,6 +2463,7 @@ fn shell_can_resume_web_style_session_history() {
         .upsert_session(&StoredSession {
             session_id: session_id.to_string(),
             display_name: "Session0".to_string(),
+            group_id: None,
             created_at_ms: 1,
             updated_at_ms: 4,
             current_dir: workspace.display().to_string(),

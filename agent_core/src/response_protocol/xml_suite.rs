@@ -1,5 +1,6 @@
 use super::{
-    ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope, ResponseProtocolSuite,
+    ParsedAction, ParsedActionGroup, ParsedContextCompact, ParsedEnvelope, PromptBoundarySpec,
+    ResponseProtocolSuite, XML_PROMPT_BOUNDARIES,
 };
 use crate::capability::CapabilityRegistry;
 use serde_json::{Map, Number, Value};
@@ -9,18 +10,23 @@ pub struct XmlSuiteV1;
 
 const XML_RESPONSE_PROTOCOL_SECTION: &str =
     include_str!("../../../resources/protocol/xml/response_protocol.md");
-const XML_RESPONSE_SCHEMA_SUMMARY: &str =
-    include_str!("../../../resources/protocol/xml/response_schema_summary.md");
 
+pub const FINISH_CONFIRM_PREFIX: &str = "Now let me think seriously twice before I announce stop. Review user's task list. Is my delivery consistent with user's demand?";
 impl ResponseProtocolSuite for XmlSuiteV1 {
     fn name(&self) -> &str {
         "xml_v1"
     }
+    fn prompt_boundaries(&self) -> &'static PromptBoundarySpec {
+        &XML_PROMPT_BOUNDARIES
+    }
     fn lang_format(&self) -> &str {
         "XML"
     }
+    fn action_result_heading(&self) -> Option<&str> {
+        None
+    }
     fn response_shape_hint(&self) -> &str {
-        "one-root label <response>...</response>"
+        "one-root label <ASSISTANT>...</ASSISTANT>"
     }
     fn protocol_schema(&self) -> &str {
         ""
@@ -29,7 +35,7 @@ impl ResponseProtocolSuite for XmlSuiteV1 {
         ""
     }
     fn response_schema_summary(&self) -> &str {
-        XML_RESPONSE_SCHEMA_SUMMARY
+        ""
     }
     fn protocol_prompt_section(&self) -> String {
         XML_RESPONSE_PROTOCOL_SECTION.to_string()
@@ -56,8 +62,7 @@ impl ResponseProtocolSuite for XmlSuiteV1 {
 
 pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnvelope {
     let trimmed = content.trim();
-    let protocol_text = strip_surrounding_xml_fence(trimmed).unwrap_or(trimmed);
-    let (outer_free_talk, protocol_text) = split_outer_response_text(protocol_text);
+    let (root_was_extracted, protocol_text) = split_outer_response_text(trimmed);
     if protocol_text.starts_with('{')
         || protocol_text.starts_with('[')
         || starts_with_markdown_protocol(protocol_text)
@@ -67,37 +72,53 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     if looks_like_external_tool_call_protocol(protocol_text) {
         return malformed_xml_response("external_tool_call_protocol");
     }
-    let (protocol_text, root_was_completed) = match complete_missing_response_root(protocol_text) {
-        Some(completed) => (completed, true),
-        None => (protocol_text.to_string(), false),
-    };
-
-    let Some(response) = parse_response_fields(&protocol_text) else {
-        if protocol_text.is_empty() {
+    let original_protocol_text = protocol_text.to_string();
+    let response = if let Some(response) = parse_response_fields(&original_protocol_text) {
+        response
+    } else {
+        if original_protocol_text.is_empty() {
             return malformed_xml_response("empty_response");
         }
-        if protocol_text.starts_with('<') {
-            return malformed_xml_response(classify_xml_root_issue(&protocol_text));
+
+        if let Some(candidate) = repair_missing_response_root(&original_protocol_text) {
+            let mut repaired = parse_xml_envelope(&candidate, capabilities);
+            if repaired.repair_issue.is_none() {
+                repaired.recovered_issue = Some("runtime_root_repair_help".to_string());
+                return repaired;
+            }
+        }
+
+        if original_protocol_text.starts_with('<') {
+            return malformed_xml_response(classify_xml_root_issue(&original_protocol_text));
         }
         return malformed_xml_response("xml_response_root_missing");
     };
+    let protocol_text = original_protocol_text;
 
-    let response_was_recovered = outer_free_talk.is_some() || root_was_completed;
+    let response_was_recovered = root_was_extracted;
     let mut repair_issue = response.flow_issue.clone();
     let has_status = response.has_status;
+    let has_finish_confirm = response.has_finish_confirm;
     let mut final_answer = response.final_answer.clone();
     let toolgen_retrospect = response.toolgen_retrospect.clone();
-    let thought = match outer_free_talk.as_deref().filter(|text| !text.is_empty()) {
-        Some(outer) if response.free_talk.trim().is_empty() => outer.to_string(),
-        Some(outer) => format!("{outer}\n\n{}", response.free_talk),
-        None => response.free_talk.clone(),
-    };
+    let thought = response.free_talk.clone();
     let thought_keep_in_context = !thought.trim().is_empty();
 
-    if repair_issue.is_none() && response_was_recovered && !final_answer.trim().is_empty() {
+    if response_was_recovered && !final_answer.trim().is_empty() {
+        // Terminal completion is a hard protocol boundary. Even if another XML
+        // error was found first, never allow a final answer obtained from a
+        // runtime-completed or runtime-extracted root to reach the host.
         repair_issue = Some("xml_recovered_final_answer_requires_retry".to_string());
         // A recovered final answer must never cross the runtime's terminal boundary,
         // including after the protocol-repair retry budget is exhausted.
+        final_answer.clear();
+    }
+
+    if !final_answer.trim().is_empty() && !response.finish_confirm_accepted {
+        repair_issue
+            .get_or_insert_with(|| "finish_confirm_required_before_final_answer".to_string());
+        // The confirmation is a terminal safety boundary. Never expose a final
+        // answer that did not pass it, even after the repair budget is exhausted.
         final_answer.clear();
     }
 
@@ -117,6 +138,7 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
     if repair_issue.is_none() && has_status {
         repair_issue = Some("status_tag_not_supported".to_string());
     }
+    debug_assert!(continue_work || has_finish_confirm);
     if repair_issue.is_none() && !continue_work && !next_actions.is_empty() {
         repair_issue = Some("status_finished_must_not_include_next_actions".to_string());
     }
@@ -137,129 +159,122 @@ pub fn parse_xml_envelope(content: &str, capabilities: &CapabilityRegistry) -> P
         action_groups,
         context_compacts,
         memory_candidates: vec![],
-        runtime_note: match (outer_free_talk.is_some(), root_was_completed) {
-            (true, true) => Some(
-                "auto_recovered_xml_prefix_as_free_talk;auto_completed_xml_response_root"
-                    .to_string(),
-            ),
-            (true, false) => Some("auto_recovered_xml_prefix_as_free_talk".to_string()),
-            (false, true) => Some("auto_completed_xml_response_root".to_string()),
-            (false, false) => None,
-        },
+        accepted_response: Some(protocol_text.clone()),
+        // A complete recovered response is already the canonical replay value.
+        // Do not turn successfully discarded outer noise into a new prompt
+        // error; genuine structural failures still use `repair_issue` below.
+        runtime_note: None,
+        recovered_issue: None,
         repair_issue,
     }
 }
 
-fn split_outer_response_text(text: &str) -> (Option<String>, &str) {
+fn repair_missing_response_root(text: &str) -> Option<String> {
     let text = text.trim();
-    let Some(open_start) = find_open_tag(text, "response") else {
-        return (None, text);
-    };
-    let Some(open_end) = find_tag_end(text, open_start) else {
-        return (None, text);
-    };
-    let close_start = find_first_response_close(text, open_end + 1);
-    let protocol_end = close_start
-        .map(|start| start + "</response>".len())
-        .unwrap_or(text.len());
-    let leading = text[..open_start].trim();
-    let trailing = text[protocol_end..].trim();
-    let outer = match (leading.is_empty(), trailing.is_empty()) {
-        (true, true) => None,
-        (false, true) => Some(leading.to_string()),
-        (true, false) => Some(trailing.to_string()),
-        (false, false) => Some(format!("{leading}\n\n{trailing}")),
-    };
-    (outer, text[open_start..protocol_end].trim())
+    if !text.starts_with('<') || !text.ends_with('>') {
+        return None;
+    }
+
+    let needs_open = !text.starts_with("<ASSISTANT>");
+    let needs_close = !text.ends_with("</ASSISTANT>");
+    if !needs_open && !needs_close {
+        return None;
+    }
+
+    let mut repaired = String::with_capacity(
+        text.len()
+            + usize::from(needs_open) * "<ASSISTANT>".len()
+            + usize::from(needs_close) * "</ASSISTANT>".len(),
+    );
+    if needs_open {
+        repaired.push_str("<ASSISTANT>");
+    }
+    repaired.push_str(text);
+    if needs_close {
+        repaired.push_str("</ASSISTANT>");
+    }
+    Some(repaired)
 }
 
-fn find_first_response_close(text: &str, from: usize) -> Option<usize> {
-    let mut cursor = from;
-    while let Some(close_start) = find_close_tag(text, cursor, "response") {
-        if !is_inside_cdata(text, close_start)
-            && ![
+fn split_outer_response_text(text: &str) -> (bool, &str) {
+    let text = text.trim();
+    if let Some((start, end)) = largest_complete_response_root(text) {
+        let extracted = start != 0 || end != text.len();
+        return (extracted, text[start..end].trim());
+    }
+
+    // Recovery is extraction-only. Missing opening or closing response
+    // boundaries remain protocol deviations and are never synthesized.
+    (false, text)
+}
+
+fn largest_complete_response_root(text: &str) -> Option<(usize, usize)> {
+    let mut open_cursor = 0usize;
+    let mut best_clean: Option<(usize, usize)> = None;
+    let mut best_repairable: Option<(usize, usize)> = None;
+
+    while open_cursor < text.len() {
+        let Some(open_rel) = find_open_tag(&text[open_cursor..], "ASSISTANT") else {
+            break;
+        };
+        let open_start = open_cursor + open_rel;
+        open_cursor = open_start.saturating_add("<ASSISTANT".len());
+
+        if is_inside_cdata(text, open_start)
+            || [
                 "free_talk",
-                "free-talk",
-                "freetalk",
+                "finish_confirm",
                 "final_answer",
                 "toolgen_retrospect",
                 "summary",
             ]
             .iter()
-            .any(|tag| is_inside_outer_text_field(text, close_start, tag))
+            .any(|tag| is_inside_outer_text_field(text, open_start, tag))
         {
-            return Some(close_start);
+            continue;
         }
-        cursor = close_start + "</response>".len();
-    }
-    None
-}
 
-fn complete_missing_response_root(text: &str) -> Option<String> {
-    const ROOT_BODY_TAGS: &[&str] = &[
-        "free_talk",
-        "free-talk",
-        "freetalk",
-        "actions",
-        "working_still_action",
-        "context_compact",
-        "toolgen_retrospect",
-        "final_answer",
-        "status",
-    ];
+        let Some(open_end) = find_tag_end(text, open_start) else {
+            continue;
+        };
+        if is_self_closing_start_tag(&text[open_start..=open_end]) {
+            continue;
+        }
 
-    let text = text.trim();
-    if text.is_empty()
-        || text.starts_with("<?xml")
-        || text.starts_with("<response/")
-        || has_adjacent_response_roots(text)
-    {
-        return None;
-    }
-
-    let response_open = find_open_tag(text, "response");
-    let response_close = find_last_close_tag(text, 0, "response");
-
-    match (response_open, response_close) {
-        (Some(0), None) => {
-            let open_end = find_tag_end(text, 0)?;
-            if !text[..=open_end].eq_ignore_ascii_case("<response>") {
-                return None;
+        let mut close_cursor = open_end + 1;
+        while let Some(close_start) = find_close_tag(text, close_cursor, "ASSISTANT") {
+            close_cursor = close_start + "</ASSISTANT>".len();
+            if is_inside_cdata(text, close_start) {
+                continue;
             }
-            Some(format!("{text}</response>"))
-        }
-        (None, Some(close_start))
-            if close_start + "</response>".len() == text.len()
-                && starts_with_supported_response_field(text, ROOT_BODY_TAGS) =>
-        {
-            Some(format!("<response>{text}"))
-        }
-        (None, None) if starts_with_supported_response_field(text, ROOT_BODY_TAGS) => {
-            Some(format!("<response>{text}</response>"))
-        }
-        _ => None,
-    }
-}
 
-fn starts_with_supported_response_field(text: &str, tags: &[&str]) -> bool {
-    tags.iter().any(|tag| find_open_tag(text, tag) == Some(0))
-}
+            let end = close_start + "</ASSISTANT>".len();
+            let candidate = &text[open_start..end];
+            let Some(fields) = parse_response_fields(candidate) else {
+                continue;
+            };
 
-fn has_adjacent_response_roots(text: &str) -> bool {
-    let mut cursor = 0usize;
-    while let Some(close_rel) = text[cursor..].find("</response>") {
-        let close_start = cursor + close_rel;
-        let after = close_start + "</response>".len();
-        if !is_inside_cdata(text, close_start)
-            && !is_inside_outer_text_field(text, close_start, "free_talk")
-            && !is_inside_outer_text_field(text, close_start, "final_answer")
-            && find_open_tag(text[after..].trim_start(), "response") == Some(0)
-        {
-            return true;
+            // A literal </ASSISTANT> inside a text field can produce a
+            // repairable-but-truncated candidate. Keep scanning: a later close
+            // may form the actual outer root. Structurally clean candidates
+            // outrank repairable candidates; within each class, select the
+            // largest complete root and keep the first on equal length.
+            let slot = if fields.flow_issue.is_none() {
+                &mut best_clean
+            } else {
+                &mut best_repairable
+            };
+            let candidate_len = end.saturating_sub(open_start);
+            let current_len = slot
+                .map(|(start, end)| end.saturating_sub(start))
+                .unwrap_or_default();
+            if candidate_len > current_len {
+                *slot = Some((open_start, end));
+            }
         }
-        cursor = after;
     }
-    false
+
+    best_clean.or(best_repairable)
 }
 
 fn is_inside_outer_text_field(text: &str, pos: usize, tag: &str) -> bool {
@@ -274,31 +289,18 @@ fn is_inside_outer_text_field(text: &str, pos: usize, tag: &str) -> bool {
     open_count > close_count
 }
 
-fn strip_surrounding_xml_fence(text: &str) -> Option<&str> {
-    let text = text.trim();
-    let rest = text.strip_prefix("```")?;
-    let newline = rest.find('\n')?;
-    let lang = rest[..newline].trim().to_ascii_lowercase();
-    if lang != "xml" {
-        return None;
-    }
-    let body = &rest[newline + 1..];
-    let closing = body.rfind("```")?;
-    if !body[closing + 3..].trim().is_empty() {
-        return None;
-    }
-    Some(body[..closing].trim())
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ResponseFields {
     free_talk: String,
+    finish_confirm: String,
     toolgen_retrospect: String,
     final_answer: String,
     actions_xml: Vec<String>,
-    action_json_blocks: Vec<String>,
     context_compacts: Vec<ContextCompactFields>,
     has_status: bool,
+    has_finish_confirm: bool,
+    finish_confirm_valid: bool,
+    finish_confirm_accepted: bool,
     flow_issue: Option<String>,
 }
 
@@ -311,7 +313,7 @@ struct ContextCompactFields {
 
 fn parse_response_fields(text: &str) -> Option<ResponseFields> {
     let text = text.trim();
-    let open_start = find_open_tag(text, "response")?;
+    let open_start = find_open_tag(text, "ASSISTANT")?;
     if !text[..open_start].trim().is_empty() {
         return None;
     }
@@ -319,8 +321,8 @@ fn parse_response_fields(text: &str) -> Option<ResponseFields> {
     if is_self_closing_start_tag(&text[open_start..=open_end]) {
         return None;
     }
-    let close_start = find_last_close_tag(text, open_end + 1, "response")?;
-    let close_end = close_start + "</response>".len();
+    let close_start = find_last_close_tag(text, open_end + 1, "ASSISTANT")?;
+    let close_end = close_start + "</ASSISTANT>".len();
     if !text[close_end..].trim().is_empty() {
         return None;
     }
@@ -330,7 +332,7 @@ fn parse_response_fields(text: &str) -> Option<ResponseFields> {
 
 fn classify_xml_root_issue(text: &str) -> &'static str {
     let text = text.trim();
-    let Some(open_start) = find_open_tag(text, "response") else {
+    let Some(open_start) = find_open_tag(text, "ASSISTANT") else {
         return "xml_response_root_missing";
     };
     if !text[..open_start].trim().is_empty() {
@@ -342,10 +344,10 @@ fn classify_xml_root_issue(text: &str) -> &'static str {
     if is_self_closing_start_tag(&text[open_start..=open_end]) {
         return "xml_response_root_self_closing";
     }
-    let Some(close_start) = find_last_close_tag(text, open_end + 1, "response") else {
+    let Some(close_start) = find_last_close_tag(text, open_end + 1, "ASSISTANT") else {
         return "xml_response_root_unclosed";
     };
-    let close_end = close_start + "</response>".len();
+    let close_end = close_start + "</ASSISTANT>".len();
     if !text[close_end..].trim().is_empty() {
         return "xml_content_after_response";
     }
@@ -355,10 +357,8 @@ fn classify_xml_root_issue(text: &str) -> &'static str {
 fn scan_response_body(body: &str) -> ResponseFields {
     const TOP_LEVEL_TAGS: &[&str] = &[
         "free_talk",
-        "free-talk",
-        "freetalk",
+        "finish_confirm",
         "actions",
-        "working_still_action",
         "context_compact",
         "toolgen_retrospect",
         "final_answer",
@@ -371,6 +371,8 @@ fn scan_response_body(body: &str) -> ResponseFields {
     let mut has_working_action = false;
     let mut has_final_answer = false;
     let mut has_free_talk = false;
+    let mut has_finish_confirm = false;
+    let mut finish_confirm_count = 0usize;
 
     while let Some((open_start, tag)) = find_next_open_raw_tag(body, cursor, TOP_LEVEL_TAGS) {
         if fields.flow_issue.is_none() && !body[cursor..open_start].trim().is_empty() {
@@ -382,23 +384,30 @@ fn scan_response_body(body: &str) -> ResponseFields {
                 .get_or_insert_with(|| format!("xml_malformed_tag:{tag}"));
             break;
         };
-        let tag_order = if matches!(tag, "free_talk" | "free-talk" | "freetalk") {
+        let tag_order = if tag == "free_talk" {
             if has_free_talk && fields.flow_issue.is_none() {
                 fields.flow_issue = Some("xml_duplicate_free_talk".to_string());
             }
             has_free_talk = true;
             1
-        } else if tag == "toolgen_retrospect" {
+        } else if tag == "finish_confirm" {
+            if has_finish_confirm && fields.flow_issue.is_none() {
+                fields.flow_issue = Some("xml_duplicate_finish_confirm".to_string());
+            }
+            has_finish_confirm = true;
+            finish_confirm_count += 1;
             2
+        } else if tag == "toolgen_retrospect" {
+            3
         } else {
             state_branch_count += 1;
-            if matches!(tag, "actions" | "working_still_action") {
+            if tag == "actions" {
                 has_working_action = true;
             }
             if tag == "final_answer" {
                 has_final_answer = true;
             }
-            3
+            4
         };
         if fields.flow_issue.is_none() && tag_order < last_order {
             fields.flow_issue = Some("xml_tags_out_of_order".to_string());
@@ -408,6 +417,11 @@ fn scan_response_body(body: &str) -> ResponseFields {
         if is_self_closing_start_tag(&body[open_start..=open_end]) {
             if tag == "status" {
                 fields.has_status = true;
+            } else if tag == "finish_confirm" {
+                fields.has_finish_confirm = true;
+                fields
+                    .flow_issue
+                    .get_or_insert_with(|| "finish_confirm_prefix_invalid".to_string());
             }
             cursor = open_end + 1;
             continue;
@@ -415,7 +429,7 @@ fn scan_response_body(body: &str) -> ResponseFields {
 
         let close_start = if matches!(tag, "final_answer" | "toolgen_retrospect") {
             find_last_close_tag(body, open_end + 1, tag)
-        } else if matches!(tag, "actions" | "working_still_action" | "context_compact") {
+        } else if matches!(tag, "actions" | "context_compact") {
             find_close_tag_outside_cdata(body, open_end + 1, tag)
         } else {
             find_close_tag(body, open_end + 1, tag)
@@ -428,10 +442,21 @@ fn scan_response_body(body: &str) -> ResponseFields {
         };
         let inner = &body[open_end + 1..close_start];
         match tag {
-            "free_talk" | "free-talk" | "freetalk" => {
+            "free_talk" => {
                 fields.free_talk = decode_xml_field_text(inner);
             }
+            "finish_confirm" => {
+                fields.has_finish_confirm = true;
+                fields.finish_confirm = decode_xml_field_text(inner);
+                fields.finish_confirm_valid =
+                    fields.finish_confirm.starts_with(FINISH_CONFIRM_PREFIX);
+                if fields.flow_issue.is_none() && !fields.finish_confirm_valid {
+                    fields.flow_issue = Some("finish_confirm_prefix_invalid".to_string());
+                }
+            }
             "final_answer" => {
+                fields.finish_confirm_accepted =
+                    finish_confirm_count == 1 && fields.finish_confirm_valid;
                 fields.final_answer = decode_xml_field_text(inner);
             }
             "toolgen_retrospect" => {
@@ -444,11 +469,6 @@ fn scan_response_body(body: &str) -> ResponseFields {
                 fields
                     .context_compacts
                     .push(parse_context_compact_fields(inner));
-            }
-            "working_still_action" => {
-                fields
-                    .action_json_blocks
-                    .extend(extract_action_json_blocks(inner));
             }
             "actions" => fields.actions_xml.push(inner.to_string()),
             _ => {}
@@ -477,62 +497,10 @@ fn scan_response_body(body: &str) -> ResponseFields {
 
 fn parse_context_compact_fields(body: &str) -> ContextCompactFields {
     ContextCompactFields {
-        discard: extract_tag_text(body, "discard", false)
-            .or_else(|| extract_tag_text(body, "delta_ids", false))
-            .unwrap_or_default(),
+        discard: extract_tag_text(body, "discard", false).unwrap_or_default(),
         offload: extract_tag_text(body, "offload", false).unwrap_or_default(),
         summary: extract_tag_text(body, "summary", true).unwrap_or_default(),
     }
-}
-
-fn extract_action_json_blocks(body: &str) -> Vec<String> {
-    let mut blocks = Vec::new();
-    let mut cursor = 0usize;
-    while let Some(open_start) = find_open_tag(&body[cursor..], "action_json") {
-        let open_start = cursor + open_start;
-        let Some(open_end) = find_tag_end(body, open_start) else {
-            break;
-        };
-        if is_self_closing_start_tag(&body[open_start..=open_end]) {
-            cursor = open_end + 1;
-            continue;
-        }
-        let content_start = open_end + 1;
-        let after_open = body[content_start..].trim_start();
-        let skipped_ws = body[content_start..].len() - after_open.len();
-        if after_open.starts_with("<![CDATA[") {
-            let cdata_start = content_start + skipped_ws + "<![CDATA[".len();
-            if let Some((cdata_end, close_start)) =
-                find_cdata_end_before_close_tag(body, cdata_start, "action_json")
-            {
-                blocks.push(body[cdata_start..cdata_end].to_string());
-                cursor = close_start + close_tag_len("action_json");
-                continue;
-            }
-        }
-        let Some(close_start) = find_close_tag(body, content_start, "action_json") else {
-            break;
-        };
-        blocks.push(decode_xml_text(body[content_start..close_start].trim()));
-        cursor = close_start + close_tag_len("action_json");
-    }
-    blocks
-}
-
-fn find_cdata_end_before_close_tag(
-    haystack: &str,
-    from: usize,
-    tag: &str,
-) -> Option<(usize, usize)> {
-    let mut cursor = from;
-    while let Some(close_start) = find_close_tag(haystack, cursor, tag) {
-        let before_close = haystack[from..close_start].trim_end();
-        if let Some(cdata_end_rel) = before_close.rfind("]]>") {
-            return Some((from + cdata_end_rel, close_start));
-        }
-        cursor = close_start + close_tag_len(tag);
-    }
-    None
 }
 
 fn extract_tag_text(body: &str, tag: &str, use_last_close: bool) -> Option<String> {
@@ -601,7 +569,9 @@ fn malformed_xml_response(issue: &str) -> ParsedEnvelope {
         action_groups: vec![],
         context_compacts: vec![],
         memory_candidates: vec![],
+        accepted_response: None,
         runtime_note: None,
+        recovered_issue: None,
         repair_issue: Some(issue.to_string()),
     }
 }
@@ -714,14 +684,6 @@ fn parse_response_actions(
             }
         }
     }
-    if response.actions_xml.is_empty() {
-        let (legacy_actions, legacy_groups) = parse_action_blocks(
-            response.action_json_blocks.clone(),
-            capabilities,
-            repair_issue,
-        );
-        return (legacy_actions, legacy_groups);
-    }
     let next_actions = action_groups
         .iter()
         .flat_map(|group| group.actions.clone())
@@ -740,6 +702,7 @@ fn parse_xml_action_groups(
         return Err(format!("actions[{block_idx}].actions_required"));
     }
     let mut groups = Vec::new();
+    let mut unnamed_counter = 0usize;
     for (idx, element) in elements.iter().enumerate() {
         let label = format!("actions[{block_idx}][{idx}]");
         if element.name == "parallel" {
@@ -749,17 +712,18 @@ fn parse_xml_action_groups(
             if element.children.is_empty() {
                 return Err(format!("{label}.actions_required"));
             }
-            let actions = element
-                .children
-                .iter()
-                .enumerate()
-                .map(|(child_idx, child)| {
-                    if child.name == "parallel" {
-                        return Err(format!("{label}[{child_idx}].parallel_nested"));
-                    }
-                    parse_xml_tool_action(child, &format!("{label}[{child_idx}]"), capabilities)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut actions = Vec::new();
+            for (child_idx, child) in element.children.iter().enumerate() {
+                if child.name == "parallel" {
+                    return Err(format!("{label}[{child_idx}].parallel_nested"));
+                }
+                actions.push(parse_xml_tool_action(
+                    child,
+                    &format!("{label}[{child_idx}]"),
+                    capabilities,
+                    &mut unnamed_counter,
+                )?);
+            }
             groups.push(ParsedActionGroup {
                 order: super::ActionGroupOrder::Parallel,
                 actions,
@@ -767,17 +731,25 @@ fn parse_xml_action_groups(
         } else {
             groups.push(ParsedActionGroup {
                 order: super::ActionGroupOrder::Sequential,
-                actions: vec![parse_xml_tool_action(element, &label, capabilities)?],
+                actions: vec![parse_xml_tool_action(
+                    element,
+                    &label,
+                    capabilities,
+                    &mut unnamed_counter,
+                )?],
             });
         }
     }
     Ok(groups)
 }
 
+const MAX_XML_ACTION_NAME_CHARS: usize = 128;
+
 fn parse_xml_tool_action(
     element: &XmlActionElement,
     label: &str,
     capabilities: &CapabilityRegistry,
+    unnamed_counter: &mut usize,
 ) -> Result<ParsedAction, String> {
     if !capabilities.contains_tool(&element.name) {
         return Err(format!("unsupported_action:{}", element.name));
@@ -785,8 +757,16 @@ fn parse_xml_tool_action(
     if !element.text.trim().is_empty() {
         return Err(format!("{label}.tool_text_not_allowed"));
     }
+    let action_name = element
+        .attributes
+        .get("name")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let mut input = Map::new();
     for (name, raw) in &element.attributes {
+        if name == "name" {
+            continue;
+        }
         let schema = capabilities.tool_input_property_schema(&element.name, name);
         input.insert(
             name.clone(),
@@ -798,13 +778,32 @@ fn parse_xml_tool_action(
             return Err(format!("{label}.input.{}_duplicate", child.name));
         }
         let schema = capabilities.tool_input_property_schema(&element.name, &child.name);
-        input.insert(child.name.clone(), xml_element_value(child, schema, label)?);
+        let value = if element.name == "context_compact"
+            && crate::context_compact::is_delta_list_field(&child.name)
+            && child.children.is_empty()
+            && child.attributes.is_empty()
+        {
+            crate::context_compact::inline_xml_delta_list(&child.text)
+        } else {
+            xml_element_value(child, schema, label)?
+        };
+        input.insert(child.name.clone(), value);
     }
     let action_value = Value::Object(Map::from_iter([(
         element.name.clone(),
         Value::Object(input),
     )]));
-    super::parse_action_object(&action_value, label, capabilities)
+    let mut action = super::parse_action_object(&action_value, label, capabilities)?;
+    let action_name = action_name.unwrap_or_else(|| {
+        let name = format!("action_{}", *unnamed_counter);
+        *unnamed_counter += 1;
+        name
+    });
+    if action_name.chars().count() > MAX_XML_ACTION_NAME_CHARS {
+        return Err(format!("{label}.name_too_long"));
+    }
+    action.name = Some(action_name);
+    Ok(action)
 }
 
 fn xml_element_value(
@@ -1334,126 +1333,6 @@ fn expect_xml(body: &str, cursor: &mut usize, expected: &str, issue: &str) -> Re
     }
 }
 
-fn parse_action_blocks(
-    action_blocks: Vec<String>,
-    capabilities: &CapabilityRegistry,
-    repair_issue: &mut Option<String>,
-) -> (Vec<ParsedAction>, Vec<ParsedActionGroup>) {
-    if action_blocks.is_empty() {
-        return (Vec::new(), Vec::new());
-    }
-
-    let mut action_groups = Vec::new();
-    for (block_idx, block) in action_blocks.iter().enumerate() {
-        match parse_action_json_value(block) {
-            Ok(value) => {
-                if !value.is_array() {
-                    if value.as_object().is_some_and(|object| {
-                        object.contains_key("order") || object.contains_key("actions")
-                    }) {
-                        match super::parse_action_workflow_value(
-                            &value,
-                            &format!("actions[{block_idx}]"),
-                            capabilities,
-                        ) {
-                            Ok(_) => {}
-                            Err(issue) => {
-                                *repair_issue = Some(issue);
-                                return (Vec::new(), Vec::new());
-                            }
-                        }
-                    }
-                    *repair_issue = Some(format!("actions[{block_idx}].array_required"));
-                    return (Vec::new(), Vec::new());
-                }
-                match super::parse_action_workflow_value(
-                    &value,
-                    &format!("actions[{block_idx}]"),
-                    capabilities,
-                ) {
-                    Ok(groups) => action_groups.extend(groups),
-                    Err(issue) => {
-                        *repair_issue = Some(issue);
-                        return (Vec::new(), Vec::new());
-                    }
-                }
-            }
-            Err(error) => {
-                *repair_issue = Some(format!(
-                    "actions[{block_idx}].invalid_json:{}",
-                    compact_json_error(&error.to_string(), 160)
-                ));
-                return (Vec::new(), Vec::new());
-            }
-        }
-    }
-    let next_actions = action_groups
-        .iter()
-        .flat_map(|group| group.actions.clone())
-        .collect::<Vec<_>>();
-    (next_actions, action_groups)
-}
-
-fn parse_action_json_value(block: &str) -> serde_json::Result<Value> {
-    let trimmed = trim_json_boundary_whitespace(block.trim());
-    match serde_json::from_str::<Value>(trimmed) {
-        Ok(value) => Ok(value),
-        Err(original_error) => {
-            // Models sometimes emit `]]>` after a top-level JSON array. In that
-            // spelling the first `]` closes CDATA instead of the JSON array.
-            // Recover only this single, unambiguous omission and only when the
-            // repaired value is still the required top-level array.
-            if trimmed.starts_with('[') && !trimmed.ends_with(']') {
-                let repaired = format!("{trimmed}]");
-                if let Ok(value) = serde_json::from_str::<Value>(&repaired) {
-                    if value.is_array() {
-                        return Ok(value);
-                    }
-                }
-            }
-            if let Some(repaired) = trimmed.strip_suffix(']') {
-                if let Ok(value) = serde_json::from_str::<Value>(repaired) {
-                    if value.is_array() {
-                        return Ok(value);
-                    }
-                }
-            }
-            Err(original_error)
-        }
-    }
-}
-
-fn compact_json_error(error: &str, max_chars: usize) -> String {
-    let normalized = error.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.chars().count() <= max_chars {
-        normalized
-    } else {
-        let mut truncated = normalized
-            .chars()
-            .take(max_chars.saturating_sub(1))
-            .collect::<String>();
-        truncated.push('…');
-        truncated
-    }
-}
-
-fn trim_json_boundary_whitespace(mut text: &str) -> &str {
-    loop {
-        let trimmed = text.trim();
-        let next = trimmed
-            .strip_prefix("\\n")
-            .or_else(|| trimmed.strip_prefix("\\r"))
-            .or_else(|| trimmed.strip_prefix("\\t"))
-            .or_else(|| trimmed.strip_suffix("\\n"))
-            .or_else(|| trimmed.strip_suffix("\\r"))
-            .or_else(|| trimmed.strip_suffix("\\t"));
-        match next {
-            Some(value) => text = value,
-            None => return trimmed,
-        }
-    }
-}
-
 fn parse_context_compacts_from_fields(
     response: &ResponseFields,
     repair_issue: &mut Option<String>,
@@ -1502,73 +1381,70 @@ fn split_id_list(raw: &str) -> Vec<String> {
 pub fn xml_repair_instruction(issue: &str) -> &'static str {
     match issue {
         "empty_response" => {
-            "检查到模型没有生成可解析的内容。请重新输出一个完整的 <response>...</response>；需要工具时提供 XML-native <actions>，已经完成时提供 <final_answer>。"
+            "检查到模型没有生成可解析的内容。请重新输出一个完整的 <ASSISTANT>...</ASSISTANT>；需要工具时提供 XML-native <actions>，已经完成时提供 <final_answer>。"
         }
         "truncated_model_output" => {
             "检查到刚刚的输出被 max output token 截断。请继续使用 XML response protocol，输出更短的 <free_talk> 或 <final_answer>；长报告可用 run_bash 写入文件后在回答中给出路径。"
         }
         "external_tool_call_protocol" => {
-            "检查到刚刚的输出用了外部 tool_call/function_call 格式。请使用 XML-native actions：<response><actions><tool_id><argument>value</argument></tool_id></actions></response>；并行工具放入 <parallel>。"
+            "检查到刚刚的输出用了外部 tool_call/function_call 格式。请使用 XML-native actions：<ASSISTANT><actions><tool_id><argument>value</argument></tool_id></actions></ASSISTANT>；并行工具放入 <parallel>。"
         }
         "status_tag_not_supported" => {
             "检查到刚刚的输出格式有点问题：当前 XML response protocol 不使用 <status>。已完成时提供 <final_answer>；仍需 runtime 工具时提供 <actions>。"
+        }
+        "finish_confirm_required_before_final_answer" => {
+            "检查到最终回答前缺少 <finish_confirm>。请在 <final_answer> 前加入 <finish_confirm>，并让其内容以协议中给定的 CONFIRM_PREFIX 完整开头。"
+        }
+        "finish_confirm_prefix_invalid" => {
+            "检查到 <finish_confirm> 的内容没有以协议规定的 CONFIRM_PREFIX 完整开头。请保留标签位置并原样写出该前缀，然后再补充二次确认结论。"
         }
         "status_finished_must_not_include_next_actions" => {
             "检查到刚刚的输出格式有点问题：<final_answer> 表示当前请求已完成，不能同时包含 <actions>。仍需工具时只选择 <actions>，拿到结果后再提供 <final_answer>。"
         }
         "xml_recovered_final_answer_requires_retry" => {
-            "The runtime had to recover the outer XML boundary of a response containing <final_answer>. A recovered final answer cannot finish the task. Return the same answer again as one complete, unmodified <response><final_answer>...</final_answer></response>, with nothing outside the root."
+            "The runtime had to recover the outer XML boundary of a response containing <final_answer>. A recovered final answer cannot finish the task. Return the same answer again as one complete, unmodified <ASSISTANT><finish_confirm>CONFIRM_PREFIX followed by the confirmation</finish_confirm><final_answer>...</final_answer></ASSISTANT>, with nothing outside the root."
         }
         "next_actions_required_when_status_working" => {
             "检查到刚刚的输出格式有点问题：仍需 runtime 工具时必须提供非空 <actions>；如果当前请求已经完成，请改用 <final_answer>。"
         }
         "invalid_xml_response_root" => {
-            "The response must be exactly one <response>...</response> root element, with no text or tags before <response> or after </response>. Put <free_talk> and the selected state branch inside that root."
+            "The response must be exactly one <ASSISTANT>...</ASSISTANT> root element, with no text or tags before <ASSISTANT> or after </ASSISTANT>. Put <free_talk> and the selected state branch inside that root."
         }
         "xml_response_root_missing" => {
-            "The required <response> root is missing. Return XML only, beginning with <response> and ending with </response>."
+            "The required <ASSISTANT> root is missing. Return XML only, beginning with <ASSISTANT> and ending with </ASSISTANT>."
         }
         "xml_response_root_unclosed" => {
-            "The <response> root is not completely closed. Return one complete <response>...</response> document."
+            "The <ASSISTANT> root is not completely closed. Return one complete <ASSISTANT>...</ASSISTANT> document."
         }
         "xml_response_root_self_closing" => {
-            "A self-closing <response/> cannot contain the required response branch. Use <response>...</response> with exactly one state branch inside."
+            "A self-closing <ASSISTANT/> cannot contain the required response branch. Use <ASSISTANT>...</ASSISTANT> with exactly one state branch inside."
         }
         "xml_content_before_response" => {
-            "The response contains text or tags before <response>. Move all response fields inside the single <response> root."
+            "The response contains text or tags before <ASSISTANT>. Move all response fields inside the single <ASSISTANT> root."
         }
         "xml_content_after_response" => {
-            "The response contains text or tags after </response>. Return exactly one XML root and remove all trailing content."
+            "The response contains text or tags after </ASSISTANT>. Return exactly one XML root and remove all trailing content."
         }
         "xml_unexpected_content_inside_response" => {
-            "The <response> body contains text or an unknown top-level tag outside a supported field. Put text inside <free_talk> or <final_answer>, and use only one supported state branch."
+            "The <ASSISTANT> body contains text or an unknown top-level tag outside a supported field. Put text inside <free_talk> or <final_answer>, and use only one supported state branch."
         }
         "xml_duplicate_free_talk" => {
             "The response contains more than one <free_talk> field. Merge them into one optional <free_talk> before the state branch."
         }
+        "xml_duplicate_finish_confirm" => {
+            "The response contains more than one <finish_confirm> field. Keep exactly one, after optional <free_talk> and before the selected state branch."
+        }
         issue if issue.starts_with("xml_unclosed_tag:") => {
-            "A response field tag is not closed. Close the named tag before writing the next field or </response>."
+            "A response field tag is not closed. Close the named tag before writing the next field or </ASSISTANT>."
         }
         issue if issue.starts_with("xml_malformed_tag:") => {
             "A response field opening tag is malformed. Rewrite that field with a complete opening tag, matching closing tag, and no broken attributes."
         }
         "xml_tags_out_of_order" => {
-            "The XML tags are out of order. Inside <response>, put optional <free_talk> first, followed by exactly one of <actions>, <context_compact>, or <final_answer>."
+            "The XML tags are out of order. Inside <ASSISTANT>, put optional <free_talk> first, optional <finish_confirm> next, then exactly one of <actions>, <context_compact>, or <final_answer>. A final answer requires <finish_confirm>."
         }
         "state_branch_must_choose_one" => {
-            "The response selected more than one state branch. Inside <response>, use exactly one of <actions>, <context_compact>, or <final_answer>."
-        }
-        issue if issue.contains(".invalid_json") => {
-            "The legacy JSON action payload was malformed. Rewrite it as XML-native <actions>: use the exact tool id as an element name, arguments as attributes or child elements, and <parallel> only for concurrent tools."
-        }
-        issue if issue.ends_with(".action_missing") => {
-            "An action entry is missing its tool-name key. In the top-level workflow array, write each sequential action as {\"tool_name\":{...}}; write a parallel stage as an inner array of those tool objects."
-        }
-        issue if issue.ends_with(".args_must_be_object") => {
-            "A tool value is not a JSON object. Write each action as {\"tool_name\":{\"argument\":\"value\"}}, even when the tool has no arguments."
-        }
-        issue if issue.ends_with(".old_group_object_not_supported") => {
-            "The action payload used the removed {\"order\":...,\"actions\":[...]} group shape. Use an inner JSON array for a parallel stage and preserve outer-array order for sequential stages."
+            "The response selected more than one state branch. Inside <ASSISTANT>, use exactly one of <actions>, <context_compact>, or <final_answer>."
         }
         issue if issue.ends_with(".actions_required") => {
             "The <actions> or <parallel> element is empty. Add at least one concrete tool element from the capability catalog."
@@ -1593,6 +1469,10 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
         {
             "The XML action tree exceeds the runtime safety limit. Flatten unnecessary nesting or split the work across model rounds."
         }
+
+        issue if issue.ends_with(".name_too_long") => {
+            "The XML action name is too long. Shorten it to at most 128 characters while keeping it descriptive; the name is protocol metadata and is not passed to the tool."
+        }
         issue if issue.contains(".tool_text_not_allowed") => {
             "A tool element cannot contain bare text. Put each tool argument in an attribute or named child element."
         }
@@ -1611,11 +1491,8 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
         issue if issue.starts_with("context_compact[") && issue.ends_with(".summary_required") => {
             "The <context_compact> block is missing a non-empty <summary> describing the essential retained task state."
         }
-        issue if issue.ends_with(".array_required") => {
-            "检测到旧的 action_json 结构。请改用 XML-native <actions>，例如 <actions><run_bash><cmd>pwd</cmd></run_bash></actions>。"
-        }
         _ => {
-            "Use one XML <response>. If tools are needed, write XML-native <actions> with exact tool-id elements; if the current request is complete, write <final_answer>."
+            "Use one XML <ASSISTANT>. If tools are needed, write XML-native <actions> with exact tool-id elements; if the current request is complete, write <final_answer>."
         }
     }
 }
@@ -1635,61 +1512,62 @@ pub fn xml_repair_instruction_for_response(issue: &str, raw_response: &str) -> S
                 .to_string()
         });
         return format!(
-            "Exact protocol error: `{issue}`. XML action indexes identify the <actions> block, stage, and tool in order; `input.<name>` identifies the argument.\nCause: {cause}\nCorrection: {}\nPreserve the parts of the previous XML that are already valid; change the smallest failing element or argument and return one complete <response>.",
+            "Exact protocol error: `{issue}`. XML action indexes identify the <actions> block, stage, and tool in order; `input.<name>` identifies the argument.\nCause: {cause}\nCorrection: {}\nPreserve the parts of the previous XML that are already valid; change the smallest failing element or argument and return one complete <ASSISTANT>.",
             xml_repair_instruction(issue)
         );
     }
 
     let trimmed = raw_response.trim();
-    let protocol_text = strip_surrounding_xml_fence(trimmed).unwrap_or(trimmed);
-    let response_start = find_open_tag(protocol_text, "response");
+    let protocol_text = trimmed;
+    let response_start = find_open_tag(protocol_text, "ASSISTANT");
     let has_content_before_root = response_start
         .map(|start| !protocol_text[..start].trim().is_empty())
         .unwrap_or(false);
-    let branch =
-        if protocol_text.contains("<actions") || protocol_text.contains("<working_still_action") {
-            "<actions>...</actions>"
-        } else if protocol_text.contains("<context_compact") {
-            "<context_compact>...</context_compact>"
-        } else if protocol_text.contains("<final_answer") {
-            "<final_answer>...</final_answer>"
-        } else {
-            "<actions>...</actions>"
-        };
-    let free_talk = if protocol_text.contains("<free_talk")
-        || protocol_text.contains("<free-talk")
-        || protocol_text.contains("<freetalk")
-    {
+    let branch = if protocol_text.contains("<actions") {
+        "<actions>...</actions>"
+    } else if protocol_text.contains("<context_compact") {
+        "<context_compact>...</context_compact>"
+    } else if protocol_text.contains("<final_answer") {
+        "<final_answer>...</final_answer>"
+    } else {
+        "<actions>...</actions>"
+    };
+    let free_talk = if protocol_text.contains("<free_talk") {
         "<free_talk>...</free_talk>"
     } else {
         ""
     };
-    let expected = format!("<response>{free_talk}{branch}</response>");
+    let finish_confirm = if branch.starts_with("<final_answer") {
+        "<finish_confirm>CONFIRM_PREFIX followed by the confirmation</finish_confirm>"
+    } else {
+        ""
+    };
+    let expected = format!("<ASSISTANT>{free_talk}{finish_confirm}{branch}</ASSISTANT>");
 
     if issue == "xml_content_before_response" || has_content_before_root {
         return format!(
-            "Exact protocol error: `{issue}`.\nCause: The previous output placed content before the <response> root.\nCorrection: The response must be in format '{expected}'. Move every tag, including <free_talk>, inside <response>; output nothing before <response> or after </response>.\nPreserve valid inner content and return one complete <response>."
+            "Exact protocol error: `{issue}`.\nCause: The previous output placed content before the <ASSISTANT> root.\nCorrection: The response must be in format '{expected}'. Move every tag, including <free_talk>, inside <ASSISTANT>; output nothing before <ASSISTANT> or after </ASSISTANT>.\nPreserve valid inner content and return one complete <ASSISTANT>."
         );
     }
     if issue == "xml_content_after_response" {
         return format!(
-            "Exact protocol error: `{issue}`.\nCause: The previous output placed content after the </response> root, usually trailing prose or another response root.\nCorrection: The response must be in format '{expected}'. Output nothing before <response> or after </response>.\nPreserve the first valid response content, remove the trailing duplicate or prose, and return one complete <response>."
+            "Exact protocol error: `{issue}`.\nCause: The previous output placed content after the </ASSISTANT> root, usually trailing prose or another response root.\nCorrection: The response must be in format '{expected}'. Output nothing before <ASSISTANT> or after </ASSISTANT>.\nPreserve the first valid response content, remove the trailing duplicate or prose, and return one complete <ASSISTANT>."
         );
     }
     if issue == "xml_response_root_unclosed" || response_start.is_some() {
         return format!(
-            "Exact protocol error: `{issue}`.\nCause: The previous output did not form one complete <response>...</response> root.\nCorrection: The response must be in format '{expected}'. Close the root and every inner tag; output nothing before <response> or after </response>.\nPreserve valid inner content and return one complete <response>."
+            "Exact protocol error: `{issue}`.\nCause: The previous output did not form one complete <ASSISTANT>...</ASSISTANT> root.\nCorrection: The response must be in format '{expected}'. Close the root and every inner tag; output nothing before <ASSISTANT> or after </ASSISTANT>.\nPreserve valid inner content and return one complete <ASSISTANT>."
         );
     }
     format!(
-        "Exact protocol error: `{issue}`.\nCause: The previous output did not contain the required <response> root.\nCorrection: The response must be in format '{expected}'.\nPreserve valid content by moving it into the appropriate branch and return one complete <response>."
+        "Exact protocol error: `{issue}`.\nCause: The previous output did not contain the required <ASSISTANT> root.\nCorrection: The response must be in format '{expected}'.\nPreserve valid content by moving it into the appropriate branch and return one complete <ASSISTANT>."
     )
 }
 
 fn xml_repair_cause(issue: &str) -> Option<String> {
     if issue == "xml_recovered_final_answer_requires_retry" {
         return Some(
-            "The previous output contained a final answer, but the runtime had to add a missing response boundary or extract content outside the response root. Terminal completion requires an unmodified protocol response."
+            "The previous output contained a final answer inside a response root extracted from surrounding content. Terminal completion requires one unmodified protocol response with nothing outside the root."
                 .to_string(),
         );
     }

@@ -4,7 +4,7 @@ use agent_core::session_store::read_all_history_records;
 use agent_core::{
     core_initialized_topic_event, CoreProfile, CoreSessionState, CoreSessionWorkerWorkspace,
     CoreTopic, CoreTopicEvent, LlmResponse, TurnOutcome, UsageStats, CORE_TOPIC_ACTION,
-    CORE_TOPIC_MODEL_RESPONSE,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE,
 };
 use std::sync::atomic::AtomicUsize;
 use std::sync::Condvar;
@@ -12,6 +12,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const TEST_PORT: u16 = 12345;
+
+fn confirmed_xml_response(body: &str) -> String {
+    format!(
+        "<ASSISTANT><finish_confirm>{} verified</finish_confirm>{body}</ASSISTANT>",
+        agent_core::response_protocol::xml_suite::FINISH_CONFIRM_PREFIX
+    )
+}
 
 #[test]
 fn reliable_command_wire_is_legacy_compatible_and_ack_is_correlated() {
@@ -33,6 +40,398 @@ fn reliable_command_wire_is_legacy_compatible_and_ack_is_correlated() {
     .unwrap();
     assert_eq!(ack["command_id"], "cancel_1");
     assert_eq!(ack["status"], "rejected");
+}
+
+#[test]
+fn worker_role_create_preserves_client_id_and_correlates_authoritative_event() {
+    let state = routing_test_state();
+    let event = handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("role-command-1"),
+        ClientCommand::WorkerRoleCreate {
+            session_id: "session_a".to_string(),
+            role_id: Some("role-client-1".to_string()),
+            name: "Builder".to_string(),
+            description: "Build carefully.".to_string(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::WorkerRoleLibraryUpdated {
+        library,
+        command_id,
+    } = event
+    else {
+        panic!("role creation should return the correlated authoritative library");
+    };
+    assert_eq!(command_id.as_deref(), Some("role-command-1"));
+    assert_eq!(library.roles[0].id, "role-client-1");
+}
+
+#[test]
+fn worker_roles_are_global_grouped_persisted_and_render_exact_system_context() {
+    let state = routing_test_state();
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::WorkerRoleCreate {
+            session_id: "session_a".to_string(),
+            role_id: None,
+            name: "Reviewer".to_string(),
+            description: "Inspect evidence before changing code.".to_string(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::WorkerRoleLibraryUpdated { library, .. } = event else {
+        panic!("role creation should publish the authoritative global library")
+    };
+    assert_eq!(library.roles.len(), 1);
+    assert_eq!(
+        state.sessions.lock().unwrap()["session_a"].roles,
+        library.roles
+    );
+    assert_eq!(
+        state.sessions.lock().unwrap()["session_b"].roles,
+        library.roles
+    );
+    assert_eq!(
+        load_role_library(&role_library_path(
+            &current_mem_state(&state).unwrap().layout.memory_dir()
+        ))
+        .unwrap(),
+        library
+    );
+    assert_eq!(
+        worker_roles_context(&library.roles).as_deref(),
+        Some(
+            r#"TIMEM_WORKER_ROLE_CONTEXT: {"description":"Inspect evidence before changing code.","name":"Reviewer"}"#
+        )
+    );
+
+    let role_id = library.roles[0].id.clone();
+    let group_event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::WorkerRoleGroupCreate {
+            session_id: "session_b".to_string(),
+            name: "Quality".to_string(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::WorkerRoleLibraryUpdated { library, .. } = group_event else {
+        panic!("group creation should publish the global library")
+    };
+    let group = library.groups[0].clone();
+    let reordered = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::WorkerRoleLibraryReorder {
+            session_id: "session_a".to_string(),
+            groups: vec![WorkerRoleGroup {
+                id: group.id.clone(),
+                name: group.name.clone(),
+                role_ids: vec![role_id.clone()],
+            }],
+            ungrouped_role_ids: Vec::new(),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::WorkerRoleLibraryUpdated { library, .. } = reordered else {
+        panic!("role reorder should publish the global library")
+    };
+    assert_eq!(library.groups[0].role_ids, vec![role_id.clone()]);
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::WorkerRoleUpdate {
+            session_id: "session_b".to_string(),
+            role_id: role_id.clone(),
+            name: "Evidence reviewer".to_string(),
+            description: "Review logs before changing code.".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        state.sessions.lock().unwrap()["session_a"].roles[0].name,
+        "Evidence reviewer"
+    );
+    assert_eq!(
+        state.sessions.lock().unwrap()["session_b"].roles[0].name,
+        "Evidence reviewer"
+    );
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::WorkerRoleDelete {
+            session_id: "session_a".to_string(),
+            role_id,
+        },
+    )
+    .unwrap();
+    assert!(state.sessions.lock().unwrap()["session_a"].roles.is_empty());
+    assert!(state.sessions.lock().unwrap()["session_b"].roles.is_empty());
+    let persisted = load_role_library(&role_library_path(
+        &current_mem_state(&state).unwrap().layout.memory_dir(),
+    ))
+    .unwrap();
+    assert!(persisted.roles.is_empty());
+    assert!(persisted.groups[0].role_ids.is_empty());
+}
+
+#[test]
+fn worker_role_snapshots_survive_raw_history_reconstruction() {
+    let state = routing_test_state();
+    let role = WorkerRole {
+        id: "role_reviewer".to_string(),
+        name: "Reviewer".to_string(),
+        description: "Review carefully.".to_string(),
+    };
+    let second_role = WorkerRole {
+        id: "role_tester".to_string(),
+        name: "Tester".to_string(),
+        description: "Test thoroughly.".to_string(),
+    };
+    let selected_roles = vec![role.clone(), second_role];
+    let turn = start_web_turn_with_selected_attachments_and_roles(
+        &state,
+        "session_a",
+        "inspect this",
+        None,
+        Some("role_history_command"),
+        selected_roles.clone(),
+    )
+    .unwrap();
+    let records = read_all_history_records(
+        &current_session_store(&state)
+            .unwrap()
+            .history_path_for_session("session_a"),
+    )
+    .unwrap();
+    let restored = restored_turns_from_history_records(&records);
+    let restored_entry = restored
+        .iter()
+        .find(|candidate| candidate.turn_id == turn.turn_id)
+        .and_then(|candidate| candidate.user_entries.first())
+        .unwrap();
+    assert_eq!(restored_entry.worker_roles, selected_roles);
+}
+
+#[test]
+fn multiple_worker_roles_resolve_in_message_order_and_render_all_contexts() {
+    let state = routing_test_state();
+    let roles = vec![
+        WorkerRole {
+            id: "role_reviewer".to_string(),
+            name: "Reviewer".to_string(),
+            description: "Review evidence.".to_string(),
+        },
+        WorkerRole {
+            id: "role_tester".to_string(),
+            name: "Tester".to_string(),
+            description: "Run regression tests.".to_string(),
+        },
+    ];
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.role_library.roles = roles.clone();
+    }
+    for session in state.sessions.lock().unwrap().values_mut() {
+        session.roles = roles.clone();
+    }
+    let selected = resolve_worker_roles(
+        &state,
+        "session_a",
+        &[
+            "role_tester".to_string(),
+            "role_reviewer".to_string(),
+            "role_tester".to_string(),
+        ],
+        None,
+    )
+    .unwrap();
+    assert_eq!(selected, vec![roles[1].clone(), roles[0].clone()]);
+    let context = worker_roles_context(&selected).unwrap();
+    assert!(context.contains(r#""name":"Tester""#));
+    assert!(context.contains(r#""name":"Reviewer""#));
+    assert!(context.find("Tester").unwrap() < context.find("Reviewer").unwrap());
+    assert_eq!(
+        context
+            .matches(agent_core::WORKER_ROLE_CONTEXT_PREFIX)
+            .count(),
+        2
+    );
+    assert_eq!(
+        resolve_worker_roles(&state, "session_a", &["missing".to_string()], None).unwrap_err(),
+        "worker_role_not_found"
+    );
+}
+
+#[test]
+fn turn_submit_wire_accepts_multiple_worker_role_ids_and_legacy_single_id() {
+    let multi: ClientCommand = serde_json::from_value(json!({
+        "type": "turn_submit",
+        "session_id": "session_a",
+        "text": "review and test",
+        "role_ids": ["role_reviewer", "role_tester"]
+    }))
+    .unwrap();
+    let ClientCommand::TurnSubmit {
+        role_ids, role_id, ..
+    } = multi
+    else {
+        panic!("expected turn_submit")
+    };
+    assert_eq!(role_ids, vec!["role_reviewer", "role_tester"]);
+    assert_eq!(role_id, None);
+
+    let legacy: ClientCommand = serde_json::from_value(json!({
+        "type": "turn_submit",
+        "session_id": "session_a",
+        "text": "review",
+        "role_id": "role_reviewer"
+    }))
+    .unwrap();
+    let ClientCommand::TurnSubmit {
+        role_ids, role_id, ..
+    } = legacy
+    else {
+        panic!("expected legacy turn_submit")
+    };
+    assert!(role_ids.is_empty());
+    assert_eq!(role_id.as_deref(), Some("role_reviewer"));
+}
+
+#[test]
+fn chat_message_delete_removes_user_and_assistant_content_from_ui_state_and_raw_log() {
+    let state = routing_test_state();
+    let turn = start_web_turn(&state, "session_a", "original task").unwrap();
+    append_turn_user_entry(
+        &state,
+        "session_a",
+        "supplement",
+        "delete this supplement".to_string(),
+    )
+    .unwrap();
+    append_message(
+        &state,
+        "session_a",
+        "assistant",
+        "delete this answer".to_string(),
+    )
+    .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.active_turn_id = None;
+        session.pending_turn_id = None;
+        session.state = "ready".to_string();
+        let stored_turn = session
+            .turns
+            .iter_mut()
+            .find(|candidate| candidate.turn_id == turn.turn_id)
+            .unwrap();
+        stored_turn.state = "finished".to_string();
+        stored_turn.final_answer = Some("delete this answer".to_string());
+    }
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ChatMessageDelete {
+            session_id: "session_a".to_string(),
+            turn_id: turn.turn_id.clone(),
+            role: "user".to_string(),
+            role_index: 1,
+        },
+    )
+    .unwrap()
+    .unwrap();
+    assert!(matches!(
+        event,
+        WireEvent::ChatMessageDeleted { role, role_index: 1, .. } if role == "user"
+    ));
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ChatMessageDelete {
+            session_id: "session_a".to_string(),
+            turn_id: turn.turn_id.clone(),
+            role: "assistant".to_string(),
+            role_index: 0,
+        },
+    )
+    .unwrap();
+
+    let session = state
+        .sessions
+        .lock()
+        .unwrap()
+        .get("session_a")
+        .unwrap()
+        .clone();
+    let stored_turn = session
+        .turns
+        .iter()
+        .find(|candidate| candidate.turn_id == turn.turn_id)
+        .unwrap();
+    assert_eq!(
+        stored_turn
+            .user_entries
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["original task"]
+    );
+    assert!(stored_turn.final_answer.is_none());
+    assert!(!session
+        .messages
+        .iter()
+        .any(|message| message.text == "delete this supplement"
+            || message.text == "delete this answer"));
+
+    let history = read_all_history_records(
+        &current_session_store(&state)
+            .unwrap()
+            .history_path_for_session("session_a"),
+    )
+    .unwrap();
+    let serialized = serde_json::to_string(&history).unwrap();
+    assert!(serialized.contains("original task"));
+    assert!(!serialized.contains("delete this supplement"));
+    assert!(!serialized.contains("delete this answer"));
+}
+
+#[test]
+fn chat_message_delete_rejects_an_active_turn_without_touching_raw_log() {
+    let state = routing_test_state();
+    let turn = start_web_turn(&state, "session_a", "still executing").unwrap();
+
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ChatMessageDelete {
+            session_id: "session_a".to_string(),
+            turn_id: turn.turn_id,
+            role: "user".to_string(),
+            role_index: 0,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, "active_turn_message_delete_not_allowed");
+    let raw = std::fs::read_to_string(
+        current_session_store(&state)
+            .unwrap()
+            .history_path_for_session("session_a"),
+    )
+    .unwrap();
+    assert!(raw.contains("still executing"));
 }
 
 #[test]
@@ -152,6 +551,14 @@ fn command_dedup_terminal_result_survives_restart_without_persisting_secrets() {
         api_key: "secret".to_string(),
     })
     .is_none());
+    assert!(
+        durable_command_result(&WireEvent::ModelEndpointSecretRevealed {
+            endpoint_id: "endpoint_a".to_string(),
+            api_key: "secret".to_string(),
+            http_headers: Default::default(),
+        })
+        .is_none()
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -208,6 +615,92 @@ fn corrupt_mcp_config_is_backed_up_without_blocking_web_startup() {
 }
 
 #[test]
+fn corrupt_worker_role_library_is_backed_up_without_blocking_web_startup() {
+    let data_dir = std::env::temp_dir().join(unique_web_id("corrupt_worker_roles"));
+    let space = ".worker_role_recovery";
+    let memory_dir = RuntimeDataLayout::new(&data_dir, space).memory_dir();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    let path = role_library_path(&memory_dir);
+    std::fs::write(&path, b"not-json").unwrap();
+
+    let mem = WebMemState::new(data_dir.clone(), space.to_string()).unwrap();
+    assert_eq!(mem.role_library, WorkerRoleLibrary::default());
+    assert_eq!(
+        load_role_library(&path).unwrap(),
+        WorkerRoleLibrary::default()
+    );
+    let backups = std::fs::read_dir(&memory_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("worker_roles.json.worker-roles-corrupt-backup-")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(std::fs::read(backups[0].path()).unwrap(), b"not-json");
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[test]
+fn oversized_worker_role_library_is_moved_aside_without_loading_it_into_memory() {
+    let data_dir = std::env::temp_dir().join(unique_web_id("oversized_worker_roles"));
+    let space = ".worker_role_oversized_recovery";
+    let memory_dir = RuntimeDataLayout::new(&data_dir, space).memory_dir();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    let path = role_library_path(&memory_dir);
+    let original = vec![b'x'; MAX_ROLE_FILE_BYTES as usize + 1];
+    std::fs::write(&path, &original).unwrap();
+
+    let mem = WebMemState::new(data_dir.clone(), space.to_string()).unwrap();
+    assert_eq!(mem.role_library, WorkerRoleLibrary::default());
+    let backup = std::fs::read_dir(&memory_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("worker_roles.json.worker-roles-corrupt-backup-")
+        })
+        .unwrap();
+    assert_eq!(
+        std::fs::metadata(backup.path()).unwrap().len(),
+        original.len() as u64
+    );
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[test]
+fn structurally_invalid_worker_role_library_is_quarantined_on_startup() {
+    let data_dir = std::env::temp_dir().join(unique_web_id("invalid_worker_roles"));
+    let space = ".worker_role_validation_recovery";
+    let memory_dir = RuntimeDataLayout::new(&data_dir, space).memory_dir();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    let path = role_library_path(&memory_dir);
+    let original = br#"{"roles":[{"id":"bad id","name":"Broken","description":"Invalid id"},{"id":"role_valid","name":"Reviewer","description":"Review"}],"groups":[]}"#;
+    std::fs::write(&path, original).unwrap();
+
+    let mem = WebMemState::new(data_dir.clone(), space.to_string()).unwrap();
+    assert_eq!(mem.role_library.roles.len(), 1);
+    assert_eq!(mem.role_library.roles[0].id, "role_valid");
+    let backup = std::fs::read_dir(&memory_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("worker_roles.json.worker-roles-corrupt-backup-")
+        })
+        .unwrap();
+    assert_eq!(std::fs::read(backup.path()).unwrap(), original);
+    let _ = std::fs::remove_dir_all(data_dir);
+}
+
+#[test]
 fn corrupt_session_index_record_is_backed_up_while_valid_sessions_remain_usable() {
     let memory_dir = std::env::temp_dir().join(unique_web_id("corrupt_session_index"));
     let store = SessionStore::new(&memory_dir);
@@ -228,6 +721,7 @@ fn corrupt_session_index_record_is_backed_up_while_valid_sessions_remain_usable(
             .join("sessions/session-valid/raw_chat_history.jsonl")
             .display()
             .to_string(),
+        group_id: None,
     };
     let valid_line = serde_json::to_string(&valid).unwrap();
     let original = format!("{valid_line}\nnot-json\n");
@@ -620,6 +1114,9 @@ fn persisted_turn_command_id_prevents_reexecution_after_terminal_ack_loss() {
             text: "perform exactly once".to_string(),
             input_kind: None,
             source_turn_id: None,
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap()
@@ -629,6 +1126,211 @@ fn persisted_turn_command_id_prevents_reexecution_after_terminal_ack_loss() {
     };
     assert_eq!(turn.turn_id, first.turn_id);
     assert_eq!(state.sessions.lock().unwrap()[&session_id].turns.len(), 1);
+}
+
+#[test]
+fn restore_does_not_revive_an_old_unfinished_turn_after_a_newer_turn_completed() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "RESTORE_OLD_UNFINISHED");
+
+    let old_turn = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "old command interrupted before completion",
+        Some("old_accepted_command"),
+    )
+    .unwrap();
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.turns.last_mut().unwrap().user_entries[0].delivery_state =
+            Some(ChatCommandDeliveryState::CoreAccepted);
+        session.turns.last_mut().unwrap().state = "restored".to_string();
+
+        session.turns.push(WebTurn {
+            turn_id: "web_turn_newer_completed".to_string(),
+            state: "completed".to_string(),
+            created_at_ms: old_turn.created_at_ms.saturating_add(1),
+            user_entries: vec![WebTurnUserEntry {
+                kind: "task".to_string(),
+                text: "newer completed command".to_string(),
+                attachments: Vec::new(),
+                created_at_ms: old_turn.created_at_ms.saturating_add(1),
+                command_id: Some("newer_committed_command".to_string()),
+                delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
+                worker_roles: Vec::new(),
+            }],
+            events: Vec::new(),
+            // A turn can finish without an assistant message, for example after
+            // a protocol/model error. Its persisted completion is still terminal.
+            final_answer: None,
+            completion: Some(json!({"stop_reason": "model_error"})),
+        });
+        session.active_turn_id = None;
+        session.state = "ready".to_string();
+    }
+
+    resume_unfinished_core_command_after_restore(&state, &session_id).unwrap();
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(session.state, "ready");
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(
+        session
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == old_turn.turn_id)
+            .unwrap()
+            .state,
+        "restored"
+    );
+
+    drop(sessions);
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+}
+
+#[test]
+fn core_turn_started_immediately_publishes_authoritative_live_state() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "CORE_STARTED_WIRE");
+    let command_id = "core_started_wire_command";
+    let pending_turn = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "wait for the Core boundary",
+        Some(command_id),
+    )
+    .unwrap();
+    let (context_id, worker_id) = {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(session.state, "ready");
+        assert_eq!(session.active_turn_id, None);
+        assert_eq!(
+            session.pending_turn_id.as_deref(),
+            Some(pending_turn.turn_id.as_str())
+        );
+        assert_eq!(session.turns.last().unwrap().state, "pending");
+        assert!(session.workers.iter().all(|worker| worker.state == "ready"));
+        let worker = session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == session.primary_worker_id)
+            .unwrap();
+        (worker.context_id.clone(), worker.worker_id.clone())
+    };
+    let mut events = state.events.subscribe();
+
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnStarted {
+            command_id: Some(command_id.to_string()),
+        },
+    );
+
+    let published = drain_wire_events(&mut events);
+    let started_turn = published
+        .iter()
+        .find_map(|event| match event {
+            WireEvent::TurnStarted {
+                session_id: event_session_id,
+                context_id: event_context_id,
+                worker_id: event_worker_id,
+                turn,
+            } => {
+                assert_eq!(event_session_id, &session_id);
+                assert_eq!(event_context_id, &context_id);
+                assert_eq!(event_worker_id, &worker_id);
+                Some(turn)
+            }
+            _ => None,
+        })
+        .expect("Core TurnStarted must immediately publish browser live state");
+    assert_eq!(started_turn.turn_id, pending_turn.turn_id);
+    assert_eq!(started_turn.state, "working");
+    assert!(published
+        .iter()
+        .all(|event| !matches!(event, WireEvent::WorkerActivity { .. })));
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(session.state, "working");
+    assert_eq!(
+        session.active_turn_id.as_deref(),
+        Some(pending_turn.turn_id.as_str())
+    );
+    assert_eq!(session.pending_turn_id, None);
+    assert_eq!(session.turns.last().unwrap().state, "working");
+    assert_eq!(
+        session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == worker_id)
+            .unwrap()
+            .state,
+        "working"
+    );
+}
+
+#[test]
+fn unmatched_core_turn_started_does_not_activate_an_unrelated_pending_intent() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "UNMATCHED_CORE_STARTED");
+    let pending_turn = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "this intent belongs to another command",
+        Some("expected_command"),
+    )
+    .unwrap();
+    let (context_id, worker_id) = {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(
+            session.pending_turn_id.as_deref(),
+            Some(pending_turn.turn_id.as_str())
+        );
+        let worker = session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == session.primary_worker_id)
+            .unwrap();
+        (worker.context_id.clone(), worker.worker_id.clone())
+    };
+    let mut events = state.events.subscribe();
+
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnStarted {
+            command_id: Some("different_command".to_string()),
+        },
+    );
+
+    assert!(drain_wire_events(&mut events)
+        .iter()
+        .all(|event| !matches!(event, WireEvent::TurnStarted { .. })));
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(session.state, "ready");
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(
+        session.pending_turn_id.as_deref(),
+        Some(pending_turn.turn_id.as_str())
+    );
+    assert_eq!(session.turns.last().unwrap().state, "pending");
+    assert!(session.workers.iter().all(|worker| worker.state == "ready"));
 }
 
 #[test]
@@ -657,35 +1359,64 @@ fn restore_redrives_unfinished_core_accepted_intent_into_the_new_worker() {
         Some("restore_supplement_2"),
     )
     .unwrap();
+
     {
         let mut sessions = state.sessions.lock().unwrap();
         let session = sessions.get_mut(&session_id).unwrap();
         for entry in &mut session.turns.last_mut().unwrap().user_entries {
             entry.delivery_state = Some(ChatCommandDeliveryState::CoreAccepted);
         }
+        session.turns.last_mut().unwrap().state = "restored".to_string();
         session.active_turn_id = None;
+        session.pending_turn_id = None;
         session.state = "ready".to_string();
+        for worker in &mut session.workers {
+            worker.state = "ready".to_string();
+        }
     }
-    assert!(state.sessions.lock().unwrap()[&session_id]
-        .turns
-        .last()
-        .unwrap()
-        .user_entries
-        .iter()
-        .all(|entry| entry.delivery_state == Some(ChatCommandDeliveryState::CoreAccepted)));
 
     resume_unfinished_core_command_after_restore(&state, &session_id).unwrap();
-    assert_eq!(
-        state.sessions.lock().unwrap()[&session_id]
-            .active_turn_id
-            .as_deref(),
-        Some(turn.turn_id.as_str())
-    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(session.state, "ready");
+        assert_eq!(session.active_turn_id, None);
+        assert_eq!(session.pending_turn_id, None);
+        assert_eq!(session.turns.last().unwrap().state, "restored");
+        assert!(session.workers.iter().all(|worker| worker.state == "ready"));
+    }
+
     let deadline = Instant::now() + Duration::from_secs(2);
+    let mut observed_turn_started = false;
     loop {
         for (event_session_id, context_id, worker_id, event) in drain_worker_events(&state) {
+            let is_matching_start = matches!(
+                &event,
+                CoreSessionWorkerEvent::TurnStarted {
+                    command_id: Some(started_command_id)
+                } if started_command_id == command_id
+            );
             handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
+
+            if is_matching_start {
+                observed_turn_started = true;
+                let sessions = state.sessions.lock().unwrap();
+                let session = &sessions[&session_id];
+                assert_eq!(session.state, "working");
+                assert_eq!(
+                    session.active_turn_id.as_deref(),
+                    Some(turn.turn_id.as_str())
+                );
+                assert_eq!(session.pending_turn_id, None);
+                assert_eq!(session.turns.last().unwrap().state, "working");
+                assert!(session
+                    .workers
+                    .iter()
+                    .any(|worker| worker.state == "working"));
+            }
         }
+
         if state.sessions.lock().unwrap()[&session_id]
             .turns
             .last()
@@ -702,12 +1433,73 @@ fn restore_redrives_unfinished_core_accepted_intent_into_the_new_worker() {
         );
         thread::sleep(Duration::from_millis(2));
     }
+    assert!(
+        observed_turn_started,
+        "restored work must cross the Core TurnStarted boundary"
+    );
 
     let manager = {
         let mut guard = state.manager.lock().unwrap();
         std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
     };
     manager.shutdown_all().unwrap();
+}
+
+#[test]
+fn restore_submit_failure_keeps_session_ready_and_turn_restored() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "RESTORE_SUBMIT_FAILURE");
+    let command_id = "restore_command_without_live_worker";
+    let turn = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "must not look live when redrive submission fails",
+        Some(command_id),
+    )
+    .unwrap();
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.turns.last_mut().unwrap().user_entries[0].delivery_state =
+            Some(ChatCommandDeliveryState::CoreAccepted);
+        session.turns.last_mut().unwrap().state = "restored".to_string();
+        session.active_turn_id = None;
+        session.pending_turn_id = None;
+        session.state = "ready".to_string();
+        for worker in &mut session.workers {
+            worker.state = "ready".to_string();
+        }
+    }
+
+    let old_manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+
+    let error = resume_unfinished_core_command_after_restore(&state, &session_id)
+        .expect_err("redrive must fail without the restored Core worker");
+    assert_eq!(error, "session_worker_not_found");
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(session.state, "ready");
+        assert_eq!(session.active_turn_id, None);
+        assert_eq!(session.pending_turn_id, None);
+        assert_eq!(
+            session
+                .turns
+                .iter()
+                .find(|candidate| candidate.turn_id == turn.turn_id)
+                .unwrap()
+                .state,
+            "restored"
+        );
+        assert!(session.workers.iter().all(|worker| worker.state == "ready"));
+    }
+
+    old_manager.shutdown_all().unwrap();
 }
 
 #[test]
@@ -1023,6 +1815,35 @@ async fn disconnect_after_acceptance_does_not_abort_queued_commands() {
 }
 
 #[tokio::test]
+async fn ordered_browser_command_worker_continues_after_one_handler_panics() {
+    let (command_tx, command_rx) = tokio_mpsc::channel(2);
+    let (result_tx, mut result_rx) = tokio_mpsc::unbounded_channel();
+    let worker = tokio::spawn(run_ordered_blocking_queue(
+        command_rx,
+        result_tx,
+        |value: usize| {
+            if value == 1 {
+                panic!("simulated browser command panic");
+            }
+            Ok(value)
+        },
+    ));
+
+    command_tx.send(1).await.unwrap();
+    command_tx.send(2).await.unwrap();
+
+    let first = result_rx.recv().await.unwrap().unwrap_err();
+    assert!(
+        first.starts_with("browser_command_worker_failed:"),
+        "{first}"
+    );
+    assert_eq!(result_rx.recv().await.unwrap().unwrap(), 2);
+
+    drop(command_tx);
+    worker.await.unwrap();
+}
+
+#[tokio::test]
 async fn command_results_from_different_sockets_may_reorder_but_keep_their_ids() {
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let (slow_tx, slow_rx) = tokio_mpsc::channel(1);
@@ -1114,6 +1935,19 @@ async fn browser_command_queue_is_bounded_under_click_flood() {
 }
 
 #[test]
+fn web_absolute_mem_layout_uses_the_selected_directory_directly() {
+    let data_dir = PathBuf::from("/tmp/timem-config");
+    let memory_dir = PathBuf::from("/tmp/timem selected mem");
+    let layout = web_layout_for_space(&data_dir, memory_dir.to_str().unwrap());
+
+    assert_eq!(layout.memory_dir(), memory_dir);
+    assert_eq!(
+        layout.api_audit_file(),
+        PathBuf::from("/tmp/timem selected mem/audit/api_audit.json")
+    );
+}
+
+#[test]
 fn parses_basic_web_launch_options() {
     let options = WebLaunchOptions::parse(&[
         "--port".to_string(),
@@ -1129,6 +1963,7 @@ fn parses_basic_web_launch_options() {
     assert_eq!(options.space.as_deref(), Some("web_test"));
     assert_eq!(options.model.as_deref(), Some("test-model"));
     assert!(!options.public_access);
+    assert!(!options.debug);
     assert!(options.open_browser);
 
     let headless =
@@ -1143,6 +1978,10 @@ fn parses_basic_web_launch_options() {
     ])
     .unwrap();
     assert_eq!(advertised.public_host.as_deref(), Some("10.125.112.83"));
+
+    let debug = WebLaunchOptions::parse(&["--debug".to_string(), "--no-open".to_string()]).unwrap();
+    assert!(debug.debug);
+    assert!(!debug.open_browser);
 }
 
 #[test]
@@ -1185,7 +2024,7 @@ fn mcp_definition_is_mem_scoped_and_session_enablement_is_isolated() {
             command: "/bin/sh".to_string(),
             args: vec![
                 "-c".to_string(),
-                r#"while IFS= read -r line; do case "$line" in *\"method\":\"initialize\"*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}}';; *\"method\":\"tools/list\"*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object","properties":{}}}]}}';; esac; done"#.to_string(),
+                r#"while IFS= read -r line; do case "$line" in *\"method\":\"initialize\"*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake","version":"1"},"instructions":"Use Demo MCP only after validating its input."}}';; *\"method\":\"tools/list\"*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echo","inputSchema":{"type":"object","properties":{}}}]}}';; esac; done"#.to_string(),
             ],
             env: BTreeMap::new(),
         },
@@ -1227,7 +2066,13 @@ fn mcp_definition_is_mem_scoped_and_session_enablement_is_isolated() {
     }
     assert_eq!(
         mcp_reports(&state.mem.lock().unwrap())[0].tools[0].action_name,
-        "mcp.demo.echo"
+        "mcp_demo_mcp__echo"
+    );
+    assert_eq!(
+        mcp_reports(&state.mem.lock().unwrap())[0]
+            .instructions
+            .as_deref(),
+        Some("Use Demo MCP only after validating its input.")
     );
 
     assert!(apply_pending_session_mcp(&state, "session_a").unwrap());
@@ -1412,7 +2257,18 @@ fn web_shutdown_signal_names_cover_terminal_and_service_stops() {
     {
         assert!(web_shutdown_signal_names().contains(&"SIGTERM"));
         assert!(web_shutdown_signal_names().contains(&"SIGHUP"));
+        assert!(web_shutdown_signal_names().contains(&"parent shell exit"));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn launch_parent_monitor_detects_shell_exit_and_ignores_a_live_parent() {
+    assert!(!launch_parent_has_exited(42, 42));
+    assert!(launch_parent_has_exited(42, 1));
+    assert!(launch_parent_has_exited(42, 99));
+    assert!(!launch_parent_has_exited(1, 1));
+    assert!(!launch_parent_has_exited(0, 1));
 }
 
 #[test]
@@ -1603,7 +2459,7 @@ async fn reuses_the_same_authenticated_url_after_closing_and_reopening_a_page() 
 fn restarts_timem_web_after_runtime_shutdown_with_the_same_data_and_port() {
     let smoke = include_str!("../../../scripts/web_runtime_lifecycle_smoke.sh");
     assert!(smoke.contains("--port \"$first_port\""));
-    assert!(smoke.contains("--data-dir \"$test_root/data\" --space lifecycle"));
+    assert!(smoke.contains("--space \"$test_root/lifecycle-mem\""));
     assert!(smoke.contains("kill -TERM"));
 }
 
@@ -1771,9 +2627,10 @@ fn pending_upload_moves_into_the_submitted_user_entry_and_is_not_reinjected() {
             .unwrap()
             .contains("upload_1_notes.md")
     );
-    assert!(!session_context(&state, session_id, &[])
-        .unwrap()
-        .unwrap()
+    let empty_context = session_context(&state, session_id, &[]).unwrap();
+    assert!(!empty_context
+        .as_deref()
+        .unwrap_or("")
         .contains("upload_1_notes.md"));
 
     rollback_web_turn(&state, session_id, &turn.turn_id, vec![attachment.clone()]);
@@ -2011,7 +2868,7 @@ fn always_allow_topic_reply_promotes_session_bash_approval() {
 #[test]
 fn browser_open_uses_a_direct_argument_without_shell_interpolation() {
     let url = "http://127.0.0.1:12345/?token=test&name=a b";
-    let (_program, args) = browser_command(url);
+    let (_program, args) = browser_command(url).expect("supported browser command");
     assert_eq!(args.last().and_then(|arg| arg.to_str()), Some(url));
 }
 
@@ -2035,7 +2892,7 @@ fn web_runtime_updates_only_accept_the_shared_runtime_config_keys() {
 }
 
 #[test]
-fn incomplete_session_model_service_config_blocks_send_without_starting_a_turn() {
+fn session_model_service_config_allows_send_without_an_api_key() {
     let state = routing_test_state();
     {
         let mut sessions = state.sessions.lock().unwrap();
@@ -2049,15 +2906,7 @@ fn incomplete_session_model_service_config_blocks_send_without_starting_a_turn()
             .clear();
     }
 
-    let error = submit_turn(&state, "session_a", "hello".to_string()).unwrap_err();
-    assert_eq!(
-        error,
-        "session_model_service_config_incomplete:missing_api_key"
-    );
-    let sessions = state.sessions.lock().unwrap();
-    let session = &sessions["session_a"];
-    assert!(session.active_turn_id.is_none());
-    assert!(session.turns.is_empty());
+    assert!(validate_session_model_service_config(&state, "session_a").is_ok());
 }
 
 #[test]
@@ -2066,6 +2915,10 @@ fn web_draft_model_service_config_allows_startup_without_an_api_key() {
         model_service_config_for_web_launch(&WebLaunchOptions::default(), &HashMap::new()).unwrap();
     assert!(config.api_key.is_empty());
     assert_eq!(config.model, "qwen-plus");
+    assert_eq!(
+        config.interaction.tool_call_mode,
+        agent_core::ToolCallMode::Auto
+    );
 }
 
 #[test]
@@ -2212,10 +3065,46 @@ fn session_runtime_update_is_scoped_and_persisted_without_changing_host_defaults
             && value == "session-only-model"
             && runtime_profile.model == "session-only-model"
     ));
+    assert!(handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionRuntimeUpdate {
+            session_id: target_session_id.clone(),
+            key: "TIMEM_MAX_ROUNDS".to_string(),
+            value: "200".to_string(),
+        },
+    )
+    .unwrap()
+    .is_none());
+    let max_rounds_event = drain_wire_events(&mut events)
+        .into_iter()
+        .find(|event| {
+            matches!(
+                event,
+                WireEvent::SessionRuntimeConfigUpdated { key, .. }
+                    if key == "TIMEM_MAX_ROUNDS"
+            )
+        })
+        .expect("max steps update should publish an event");
+    assert!(matches!(
+        max_rounds_event,
+        WireEvent::SessionRuntimeConfigUpdated {
+            ref session_id,
+            ref value,
+            ref runtime_profile,
+            ..
+        } if session_id == &target_session_id
+            && value == "200"
+            && runtime_profile.max_rounds == "200"
+    ));
     let sessions = state.sessions.lock().unwrap();
     assert_eq!(
         sessions[&target_session_id].runtime_profile.model,
         "session-only-model"
+    );
+    assert_eq!(
+        sessions[&target_session_id].runtime_profile.max_rounds,
+        "200"
     );
     assert_eq!(
         sessions[&untouched_session_id].runtime_profile.model,
@@ -2234,6 +3123,10 @@ fn session_runtime_update_is_scoped_and_persisted_without_changing_host_defaults
     assert_eq!(
         stored.env.get("TIMEM_MODEL").map(String::as_str),
         Some("session-only-model")
+    );
+    assert_eq!(
+        stored.env.get("TIMEM_MAX_ROUNDS").map(String::as_str),
+        Some("200")
     );
 
     let manager = {
@@ -2255,9 +3148,13 @@ fn web_startup_can_bootstrap_model_service_config_from_latest_session_cache() {
     template.current_dir = root.clone();
     template.workspace_dirs = vec![root.clone()];
     template.data_dir = data_dir.clone();
-    template.initial_space = space.to_string();
+    template.initial_space = data_dir.join(space).display().to_string();
     state.template = Arc::new(template);
-    set_test_mem(&state, data_dir.clone(), space);
+    set_test_mem(
+        &state,
+        data_dir.clone(),
+        &data_dir.join(space).display().to_string(),
+    );
     state.sessions.lock().unwrap().clear();
 
     create_session(
@@ -2289,21 +3186,55 @@ fn web_startup_can_bootstrap_model_service_config_from_latest_session_cache() {
     store.upsert_session(&older).unwrap();
 
     let launch = WebLaunchOptions {
-        data_dir: Some(data_dir.display().to_string()),
-        space: Some(space.to_string()),
+        space: Some(data_dir.join(space).display().to_string()),
         ..WebLaunchOptions::default()
     };
     let restored_template = WorkerTemplate::from_environment(&launch).unwrap();
     let settings = restored_template.settings.lock().unwrap();
     assert_eq!(settings.config.model, "cached-session-model");
     assert_eq!(settings.config.api_key, "cached-session-secret");
+    assert_eq!(
+        settings.config.interaction.tool_call_mode,
+        agent_core::ToolCallMode::Auto
+    );
 }
 
 #[test]
-fn generated_local_access_token_has_expected_entropy_shape() {
-    let token = generate_token().unwrap();
-    assert_eq!(token.len(), 64);
-    assert!(token.chars().all(|character| character.is_ascii_hexdigit()));
+fn restored_interaction_cache_keeps_only_explicit_session_overrides() {
+    let effective_env = BTreeMap::from([
+        ("TIMEM_TOOL_CALL_MODE".to_string(), "inline".to_string()),
+        ("TIMEM_PARALLEL_TOOL_CALLS".to_string(), "false".to_string()),
+        ("TIMEM_MODEL".to_string(), "cached-model".to_string()),
+    ]);
+    let implicit = sanitize_restored_session_env(effective_env.clone(), &BTreeMap::new());
+    assert!(!implicit.contains_key("TIMEM_TOOL_CALL_MODE"));
+    assert!(!implicit.contains_key("TIMEM_PARALLEL_TOOL_CALLS"));
+    assert_eq!(
+        implicit.get("TIMEM_MODEL").map(String::as_str),
+        Some("cached-model")
+    );
+
+    let explicit_overrides =
+        BTreeMap::from([("TIMEM_TOOL_CALL_MODE".to_string(), "inline".to_string())]);
+    let explicit = sanitize_restored_session_env(effective_env, &explicit_overrides);
+    assert_eq!(
+        explicit.get("TIMEM_TOOL_CALL_MODE").map(String::as_str),
+        Some("inline")
+    );
+    assert!(!explicit.contains_key("TIMEM_PARALLEL_TOOL_CALLS"));
+}
+
+#[test]
+fn generated_local_access_token_is_sixteen_hex_characters_and_rotates() {
+    let tokens = (0..32)
+        .map(|_| generate_token().unwrap())
+        .collect::<std::collections::HashSet<_>>();
+
+    assert_eq!(tokens.len(), 32);
+    assert!(tokens.iter().all(|token| token.len() == 16));
+    assert!(tokens
+        .iter()
+        .all(|token| token.chars().all(|character| character.is_ascii_hexdigit())));
 }
 
 #[test]
@@ -2370,9 +3301,11 @@ fn workspace_snapshot_deduplicates_registered_current_directory() {
     let template = WorkerTemplate {
         settings: Arc::new(Mutex::new(RuntimeSettings {
             config: ModelServiceConfig {
+                interaction: Default::default(),
                 model: "test-model".to_string(),
                 base_url: "http://127.0.0.1".to_string(),
                 api_key: "test".to_string(),
+                http_headers: Default::default(),
                 timeout_secs: 1,
                 max_llm_output_tokens: 1_024,
                 max_llm_input_tokens: 10_000,
@@ -2382,12 +3315,14 @@ fn workspace_snapshot_deduplicates_registered_current_directory() {
             },
             bash_approval_mode: BashApprovalMode::Ask,
             work_instruction_mode: WorkInstructionLoadMode::Off,
+            max_rounds: agent_core::UNLIMITED_ROUND_BUDGET,
         })),
         data_dir: PathBuf::from("/tmp/data"),
         initial_space: ".test_mem".to_string(),
         env: BTreeMap::new(),
         current_dir: PathBuf::from("/work/a"),
         workspace_dirs: vec![PathBuf::from("/work/a"), PathBuf::from("/work/b")],
+        reminder_tips_config: agent_core::ReminderTipsConfig::default(),
     };
     assert_eq!(web_workspace_dirs(&template), vec!["/work/a", "/work/b"]);
 }
@@ -2443,6 +3378,128 @@ fn session_create_returns_the_complete_session_to_the_requesting_browser() {
         .lock()
         .unwrap()
         .contains_key(&session.session_id));
+}
+
+#[test]
+fn new_session_does_not_inherit_mem_enabled_mcp_servers() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_new_session_mcp"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    state.template = Arc::new(template);
+    set_test_mem(&state, data_dir, "new_session_mcp_mem");
+    state.sessions.lock().unwrap().clear();
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.mcp_configs.push(McpServerConfig {
+            id: "available".to_string(),
+            name: "Available MCP".to_string(),
+            enabled: true,
+            transport: agent_core::mcp::McpTransportConfig::Stdio {
+                command: "/bin/false".to_string(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+            },
+            request_timeout_ms: 10,
+        });
+        mem.mcp_store.save(&mem.mcp_configs).unwrap();
+    }
+
+    let session_id = create_session(
+        &state,
+        Some("No inherited MCP".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert!(session.mcp_server_ids.is_empty());
+    assert_eq!(session.mcp_config_revision, 0);
+    assert_eq!(session.applied_mcp_config_revision, 0);
+    drop(sessions);
+
+    let stored = current_session_store(&state)
+        .unwrap()
+        .load_session(&session_id)
+        .unwrap()
+        .unwrap();
+    assert!(stored.mcp_server_ids.is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn session_create_accepts_an_unregistered_absolute_workspace_directory() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(format!("timem_web_select_workspace_{}", now_ms()));
+    let registered = root.join("registered");
+    let selected = root.join("selected elsewhere");
+    std::fs::create_dir_all(&registered).unwrap();
+    std::fs::create_dir_all(&selected).unwrap();
+    let mut template = (*state.template).clone();
+    template.current_dir = registered.clone();
+    template.workspace_dirs = vec![registered];
+    template.data_dir = root.join("data");
+    state.template = Arc::new(template);
+    set_test_mem(&state, root.join("data"), ".test_mem");
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionCreate {
+            display_name: Some("Selected workspace".to_string()),
+            workspace_dir: Some(selected.display().to_string()),
+            env: BTreeMap::new(),
+        },
+    )
+    .unwrap()
+    .expect("session creation must succeed for an explicitly selected directory");
+
+    let WireEvent::SessionCreated { session } = event else {
+        panic!("expected SessionCreated")
+    };
+    assert_eq!(
+        PathBuf::from(session.current_dir).canonicalize().unwrap(),
+        selected.canonicalize().unwrap()
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn session_workspace_selection_rejects_relative_missing_and_file_paths() {
+    let root = std::env::temp_dir().join(format!("timem_web_invalid_workspace_{}", now_ms()));
+    std::fs::create_dir_all(&root).unwrap();
+    let file = root.join("not-a-directory.txt");
+    std::fs::write(&file, "test").unwrap();
+    let state = routing_test_state();
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs.clear();
+
+    assert_eq!(
+        template
+            .resolve_workspace(Some("relative/path"))
+            .unwrap_err(),
+        "workspace_must_be_absolute"
+    );
+    assert_eq!(
+        template
+            .resolve_workspace(Some(root.join("missing").to_str().unwrap()))
+            .unwrap_err(),
+        "workspace_not_found"
+    );
+    assert_eq!(
+        template
+            .resolve_workspace(Some(file.to_str().unwrap()))
+            .unwrap_err(),
+        "workspace_not_directory"
+    );
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -2517,6 +3574,11 @@ fn session_delete_stops_workers_and_removes_persisted_session() {
 }
 
 #[test]
+fn assistant_speaker_name_is_fixed() {
+    assert_eq!(assistant_speaker_name(), "ASSISTANT");
+}
+
+#[test]
 fn unnamed_web_session_uses_session_name_while_worker_keeps_core_identity() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(format!("timem_web_default_session_name_{}", now_ms()));
@@ -2558,10 +3620,13 @@ fn unnamed_web_session_uses_session_name_while_worker_keeps_core_identity() {
             display_name: ref name,
         }) if renamed_id == &session_id && name == "Build session"
     ));
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(sessions[&session_id].display_name, "Build session");
     assert_eq!(
-        state.sessions.lock().unwrap()[&session_id].display_name,
-        "Build session"
+        sessions[&session_id].workers[0].display_name, "ID0",
+        "Session rename must not rewrite the Web worker display name"
     );
+    drop(sessions);
 }
 
 #[test]
@@ -2680,6 +3745,71 @@ fn existing_session_api_key_can_be_updated_without_exposing_the_secret() {
 }
 
 #[test]
+fn session_runtime_update_is_allowed_during_an_active_turn() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "ACTIVE_RUNTIME_UPDATE");
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.active_turn_id = Some("turn_active".to_string());
+        session.state = "working".to_string();
+        session.turns.push(WebTurn {
+            turn_id: "turn_active".to_string(),
+            state: "working".to_string(),
+            created_at_ms: now_ms(),
+            user_entries: Vec::new(),
+            events: Vec::new(),
+            final_answer: None,
+            completion: None,
+        });
+    }
+
+    let mut events = state.events.subscribe();
+    assert!(handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionRuntimeUpdate {
+            session_id: session_id.clone(),
+            key: "TIMEM_MODEL".to_string(),
+            value: "active-turn-model".to_string(),
+        },
+    )
+    .unwrap()
+    .is_none());
+
+    let event = drain_wire_events(&mut events)
+        .into_iter()
+        .find(|event| matches!(event, WireEvent::SessionRuntimeConfigUpdated { .. }))
+        .expect("active-turn runtime update should publish a scoped event");
+    assert!(matches!(
+        event,
+        WireEvent::SessionRuntimeConfigUpdated {
+            session_id: ref event_session_id,
+            ref key,
+            ref value,
+            ref runtime_profile,
+        } if event_session_id == &session_id
+            && key == "TIMEM_MODEL"
+            && value == "active-turn-model"
+            && runtime_profile.model == "active-turn-model"
+    ));
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(session.state, "working");
+        assert_eq!(session.active_turn_id.as_deref(), Some("turn_active"));
+        assert_eq!(session.runtime_profile.model, "active-turn-model");
+    }
+
+    let manager = {
+        let mut manager = state.manager.lock().unwrap();
+        std::mem::take(&mut *manager)
+    };
+    manager.shutdown_all().unwrap();
+}
+
+#[test]
 fn session_api_key_update_is_rejected_during_an_active_turn() {
     let state = routing_test_state();
     let mut sessions = state.sessions.lock().unwrap();
@@ -2734,10 +3864,7 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
     ]);
     let second_env = BTreeMap::from([
         ("TIMEM_MODEL".to_string(), "qwen-session-b".to_string()),
-        (
-            "TIMEM_RESPONSE_PROTOCOL".to_string(),
-            "markdown".to_string(),
-        ),
+        ("TIMEM_RESPONSE_PROTOCOL".to_string(), "xml".to_string()),
         ("TIMEM_MAX_LLM_INPUT".to_string(), "64K".to_string()),
         ("TIMEM_ENABLE_THINKING".to_string(), "true".to_string()),
         ("TIMEM_REASONING_EFFORT".to_string(), "max".to_string()),
@@ -2764,10 +3891,7 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
     assert_eq!(sessions[&first].runtime_profile.response_protocol, "json");
     assert_eq!(sessions[&first].max_llm_input_tokens, 128_000);
     assert_eq!(sessions[&second].runtime_profile.model, "qwen-session-b");
-    assert_eq!(
-        sessions[&second].runtime_profile.response_protocol,
-        "markdown"
-    );
+    assert_eq!(sessions[&second].runtime_profile.response_protocol, "xml");
     assert_eq!(sessions[&second].max_llm_input_tokens, 64_000);
     assert_eq!(
         sessions[&second]
@@ -2838,7 +3962,7 @@ fn session_creation_applies_independent_runtime_env_without_mutating_defaults() 
     );
     assert_eq!(
         lifecycle_profiles.get(&second),
-        Some(&("qwen-session-b".to_string(), "markdown".to_string(), 64_000,))
+        Some(&("qwen-session-b".to_string(), "xml".to_string(), 64_000,))
     );
     assert!(!lifecycle_leaked_secret);
 }
@@ -2863,10 +3987,7 @@ fn session_create_command_returns_session_with_runtime_overrides_applied() {
             workspace_dir: Some(root.display().to_string()),
             env: BTreeMap::from([
                 ("TIMEM_MODEL".to_string(), "model-from-dialog".to_string()),
-                (
-                    "TIMEM_RESPONSE_PROTOCOL".to_string(),
-                    "markdown".to_string(),
-                ),
+                ("TIMEM_RESPONSE_PROTOCOL".to_string(), "xml".to_string()),
                 ("TIMEM_MAX_LLM_INPUT".to_string(), "42K".to_string()),
                 ("TIMEM_BASH_APPROVAL".to_string(), "approve".to_string()),
             ]),
@@ -2880,7 +4001,7 @@ fn session_create_command_returns_session_with_runtime_overrides_applied() {
     };
     assert_eq!(session.display_name, "Override session");
     assert_eq!(session.runtime_profile.model, "model-from-dialog");
-    assert_eq!(session.runtime_profile.response_protocol, "markdown");
+    assert_eq!(session.runtime_profile.response_protocol, "xml");
     assert_eq!(session.runtime_profile.max_llm_input_tokens, 42_000);
     assert_eq!(session.runtime_profile.bash_approval, "approve");
 
@@ -2889,13 +4010,186 @@ fn session_create_command_returns_session_with_runtime_overrides_applied() {
     assert_eq!(stored.runtime.settings.config.model, "model-from-dialog");
     assert_eq!(
         stored.runtime.settings.config.response_protocol.name(),
-        "markdown"
+        "xml"
     );
     assert_eq!(stored.runtime.settings.config.max_llm_input_tokens, 42_000);
     assert_eq!(
         stored.runtime.env.get("TIMEM_MODEL").map(String::as_str),
         Some("model-from-dialog")
     );
+}
+
+#[test]
+fn missing_workspace_session_is_detached_once_without_deleting_history() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("missing_workspace_restore"));
+    let data_dir = root.join("data");
+    let space = "missing_workspace_mem";
+    let missing_workspace = root.join("removed-workspace");
+    let template_workspace = root.join("fallback-workspace");
+    std::fs::create_dir_all(&template_workspace).unwrap();
+
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = template_workspace.clone();
+    template.workspace_dirs = vec![template_workspace];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template);
+    state.sessions.lock().unwrap().clear();
+
+    let store = current_session_store(&state).unwrap();
+    let session_id = "session_missing_workspace";
+    let history_path = store.history_path_for_session(session_id);
+    store
+        .append_history_record(
+            session_id,
+            &ChatHistoryRecord::Message {
+                role: ChatHistoryRole::User,
+                turn_id: "turn_before_workspace_removal".to_string(),
+                created_at_ms: 1,
+                kind: Some("task".to_string()),
+                command_id: None,
+                delivery_state: None,
+                content: "preserve this history".to_string(),
+            },
+        )
+        .unwrap();
+    store
+        .upsert_session(&StoredSession {
+            session_id: session_id.to_string(),
+            display_name: "Missing workspace".to_string(),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            current_dir: missing_workspace.display().to_string(),
+            profile: StoredSessionProfile::default(),
+            env: BTreeMap::new(),
+            env_overrides: None,
+            mcp_server_ids: Vec::new(),
+            state: StoredSessionState::Ready,
+            last_turn_id: Some("turn_before_workspace_removal".to_string()),
+            raw_chat_history_path: history_path.display().to_string(),
+            group_id: None,
+        })
+        .unwrap();
+
+    assert_eq!(restore_stored_sessions(&state).unwrap(), 0);
+    assert!(store.load_session(session_id).unwrap().is_none());
+    assert!(history_path.exists());
+    assert!(std::fs::read_to_string(&history_path)
+        .unwrap()
+        .contains("preserve this history"));
+
+    // The repair is persistent: a later startup no longer retries this record.
+    assert_eq!(restore_stored_sessions(&state).unwrap(), 0);
+    assert!(history_path.exists());
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn legacy_session_roles_migrate_into_the_mem_scoped_global_library() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_role_migration"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "role_migration_mem";
+
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    set_test_mem(&state, data_dir.clone(), space);
+    state.sessions.lock().unwrap().clear();
+
+    let first_session = create_session(
+        &state,
+        Some("First legacy session".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let second_session = create_session(
+        &state,
+        Some("Second legacy session".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+
+    let store = current_session_store(&state).unwrap();
+    crate::worker_roles::save_roles(
+        &roles_path_for_history(&store.history_path_for_session(&first_session)).unwrap(),
+        &[
+            WorkerRole {
+                id: "legacy_shared_id".to_string(),
+                name: "Reviewer".to_string(),
+                description: "Review evidence before editing.".to_string(),
+            },
+            WorkerRole {
+                id: "legacy_duplicate_name".to_string(),
+                name: "Builder".to_string(),
+                description: "Old duplicate that should not replace the first Builder.".to_string(),
+            },
+        ],
+    )
+    .unwrap();
+    crate::worker_roles::save_roles(
+        &roles_path_for_history(&store.history_path_for_session(&second_session)).unwrap(),
+        &[
+            WorkerRole {
+                id: "legacy_shared_id".to_string(),
+                name: "Builder".to_string(),
+                description: "Implement and verify the requested change.".to_string(),
+            },
+            WorkerRole {
+                id: "legacy_tester".to_string(),
+                name: "Tester".to_string(),
+                description: "Run focused and regression tests.".to_string(),
+            },
+        ],
+    )
+    .unwrap();
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+
+    assert_eq!(restore_stored_sessions(&restarted).unwrap(), 2);
+
+    let mem = current_mem_state(&restarted).unwrap();
+    assert_eq!(mem.role_library.roles.len(), 3);
+    assert_eq!(
+        mem.role_library
+            .roles
+            .iter()
+            .map(|role| role.name.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["Builder", "Reviewer", "Tester"])
+    );
+    assert_eq!(
+        mem.role_library
+            .roles
+            .iter()
+            .map(|role| role.id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3,
+        "legacy ID collisions must be reassigned instead of dropping a distinct role"
+    );
+
+    let persisted = load_role_library(&role_library_path(&mem.layout.memory_dir())).unwrap();
+    assert_eq!(persisted, mem.role_library);
+
+    let sessions = restarted.sessions.lock().unwrap();
+    assert_eq!(sessions[&first_session].roles, persisted.roles);
+    assert_eq!(sessions[&second_session].roles, persisted.roles);
+    drop(sessions);
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -2989,13 +4283,102 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
     let context = session_context(&restarted, &session_id, &[])
         .unwrap()
         .expect("restored session should inject resume context");
-    assert!(context.contains("This session was restored"));
+    assert!(context.contains(
+        "Runtime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them."
+    ));
+    assert!(!context.contains("Previous audit chat history's runtime info are valid."));
+    assert!(!context.contains("This session was restored"));
     assert!(context.contains("raw_chat_history.jsonl"));
     assert!(context.contains("format: JSONL, one record per line."));
     let context_after_first_use = session_context(&restarted, &session_id, &[])
         .unwrap()
         .unwrap_or_default();
+    assert!(!context_after_first_use.contains("Runtime just restarted."));
     assert!(!context_after_first_use.contains("This session was restored"));
+}
+
+#[test]
+fn web_host_startup_restore_appends_a_visible_raw_chat_restart_marker() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_restart_marker"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "restart_marker_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    state.sessions.lock().unwrap().clear();
+
+    let session_id = create_session(
+        &state,
+        Some("Restart marker".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    start_web_turn(&state, &session_id, "before restart").unwrap();
+    let history_path = current_session_store(&state)
+        .unwrap()
+        .history_path_for_session(&session_id);
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+
+    assert_eq!(
+        restore_stored_sessions_after_runtime_restart(&restarted).unwrap(),
+        1
+    );
+
+    let records = read_all_history_records(&history_path).unwrap();
+    let markers = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::System,
+                    kind: Some(kind),
+                    content,
+                    ..
+                } if kind == RUNTIME_RESTART_HISTORY_KIND
+                    && content == RUNTIME_RESTART_HISTORY_CONTENT
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(markers.len(), 1, "startup must append one raw-chat marker");
+
+    let sessions = restarted.sessions.lock().unwrap();
+    let restored = &sessions[&session_id];
+    assert_eq!(
+        restored.turns.len(),
+        1,
+        "marker must not create an empty turn"
+    );
+    assert_eq!(
+        restored
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role == "system"
+                    && message.kind.as_deref() == Some(RUNTIME_RESTART_HISTORY_KIND)
+            })
+            .count(),
+        1,
+        "marker must be present in the restored Session chat timeline"
+    );
+    assert_eq!(
+        restored
+            .messages
+            .last()
+            .map(|message| message.text.as_str()),
+        Some(RUNTIME_RESTART_HISTORY_CONTENT)
+    );
 }
 
 #[test]
@@ -3102,6 +4485,22 @@ fn session_create_and_restore_defer_unavailable_mcp_discovery_until_send() {
     {
         let sessions = state.sessions.lock().unwrap();
         let session = &sessions[&session_id];
+        assert!(session.mcp_server_ids.is_empty());
+        assert_eq!(
+            session.mcp_config_revision,
+            session.applied_mcp_config_revision
+        );
+    }
+
+    enable_mcp_for_session(&state, &session_id, true, Some("blocking-on-connect")).unwrap();
+    persist_web_session(&state, &session_id).unwrap();
+    assert!(
+        !marker.exists(),
+        "explicit Session enablement must not connect to MCP immediately"
+    );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
         assert_eq!(session.mcp_server_ids, vec!["blocking-on-connect"]);
         assert_ne!(
             session.mcp_config_revision,
@@ -3192,13 +4591,14 @@ fn restored_web_session_keeps_original_task_with_supplement_in_an_oversized_turn
     .unwrap();
     let store = current_session_store(&state).unwrap();
     let turn_id = "turn_vla_milestone";
+    let history_base_ms = now_ms_i64().saturating_sub(1_000);
     store
         .append_history_record(
             &session_id,
             &ChatHistoryRecord::Message {
                 role: ChatHistoryRole::User,
                 turn_id: turn_id.to_string(),
-                created_at_ms: 1,
+                created_at_ms: history_base_ms,
                 kind: Some("task".to_string()),
                 command_id: None,
                 delivery_state: None,
@@ -3213,7 +4613,7 @@ fn restored_web_session_keeps_original_task_with_supplement_in_an_oversized_turn
                 &ChatHistoryRecord::Event {
                     role: ChatHistoryRole::System,
                     turn_id: turn_id.to_string(),
-                    created_at_ms: index + 2,
+                    created_at_ms: history_base_ms + i64::from(index) + 1,
                     kind: ChatHistoryEventKind::Action,
                     content: format!("action {index}"),
                     extra: BTreeMap::new(),
@@ -3227,7 +4627,7 @@ fn restored_web_session_keeps_original_task_with_supplement_in_an_oversized_turn
             &ChatHistoryRecord::Message {
                 role: ChatHistoryRole::User,
                 turn_id: turn_id.to_string(),
-                created_at_ms: 205,
+                created_at_ms: history_base_ms + 204,
                 kind: Some("supplement".to_string()),
                 command_id: None,
                 delivery_state: None,
@@ -3277,6 +4677,7 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
     let overrides = BTreeMap::from([
         ("TIMEM_MODEL".to_string(), "session-model".to_string()),
         ("TIMEM_STREAM".to_string(), "true".to_string()),
+        ("TIMEM_OPENAI_CACHE_MODE".to_string(), "off".to_string()),
         (
             "TIMEM_API_KEY".to_string(),
             "session-only-secret".to_string(),
@@ -3329,6 +4730,15 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
         "session-only-secret"
     );
     assert!(restored.runtime.settings.config.openai_compatible.stream);
+    assert_eq!(
+        restored
+            .runtime
+            .settings
+            .config
+            .openai_compatible
+            .cache_mode,
+        agent_core::OpenAiCompatibleCacheMode::Off
+    );
     assert!(!serde_json::to_string(restored)
         .unwrap()
         .contains("session-only-secret"));
@@ -3385,6 +4795,44 @@ fn restored_web_turns_follow_history_time_not_turn_id_lexical_order() {
     );
     assert_eq!(turns[0].user_entries[0].text, "first by time");
     assert_eq!(turns[1].user_entries[0].text, "second by time");
+}
+
+#[test]
+fn restored_web_turns_recover_terminal_completion_without_an_assistant_message() {
+    let mut extra = BTreeMap::new();
+    extra.insert(
+        "completion".to_string(),
+        json!({"stop_reason": "model_error", "rounds": 3}),
+    );
+    let records = vec![
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_completion_only".to_string(),
+            created_at_ms: 10,
+            kind: Some("task".to_string()),
+            command_id: Some("accepted_command".to_string()),
+            delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
+            content: "task that ended without a final answer".to_string(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "turn_completion_only".to_string(),
+            created_at_ms: 11,
+            kind: ChatHistoryEventKind::Stats,
+            content: "Turn completed.".to_string(),
+            extra,
+        },
+    ];
+
+    let turns = restored_turns_from_history_records(&records);
+
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].state, "completed");
+    assert_eq!(turns[0].final_answer, None);
+    assert_eq!(
+        turns[0].completion,
+        Some(json!({"stop_reason": "model_error", "rounds": 3}))
+    );
 }
 
 #[test]
@@ -3594,6 +5042,237 @@ fn history_page_command_skips_malformed_records_without_breaking_cursor() {
 }
 
 #[test]
+fn session_group_validation_rejects_case_insensitive_duplicate_names() {
+    let groups = vec![
+        SessionGroup {
+            id: "group-a".to_string(),
+            name: "Work".to_string(),
+        },
+        SessionGroup {
+            id: "group-b".to_string(),
+            name: "work".to_string(),
+        },
+    ];
+    assert_eq!(
+        crate::session_groups::validate_session_groups(&groups).unwrap_err(),
+        "session_group_name_duplicate"
+    );
+}
+
+#[test]
+fn session_groups_create_move_persist_and_delete_without_deleting_sessions() {
+    let state = routing_test_state();
+    let workspace = std::env::temp_dir().join(unique_web_id("session_group_workspace"));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session_id = create_session(
+        &state,
+        Some("Grouped work".to_string()),
+        Some(workspace.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+
+    let Some(WireEvent::SessionGroupsUpdated { groups }) = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupCreate {
+            name: "Projects".to_string(),
+        },
+    )
+    .unwrap() else {
+        panic!("expected session groups update");
+    };
+    assert_eq!(groups.len(), 1);
+    let group_id = groups[0].id.clone();
+
+    let moved = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupMove {
+            session_id: session_id.clone(),
+            group_id: Some(group_id.clone()),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        moved,
+        Some(WireEvent::SessionGroupChanged {
+            session_id: ref moved_session_id,
+            group_id: Some(ref persisted_group_id),
+        }) if moved_session_id == &session_id && persisted_group_id == &group_id
+    ));
+    assert_eq!(
+        current_session_store(&state)
+            .unwrap()
+            .load_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .group_id
+            .as_deref(),
+        Some(group_id.as_str())
+    );
+    let snapshot = snapshot_for(&state, TEST_PORT);
+    assert_eq!(snapshot.session_groups, groups);
+    assert_eq!(
+        snapshot
+            .sessions
+            .iter()
+            .find(|session| session.session_id == session_id)
+            .unwrap()
+            .group_id
+            .as_deref(),
+        Some(group_id.as_str())
+    );
+
+    let deleted = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupDelete {
+            group_id: group_id.clone(),
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        deleted,
+        Some(WireEvent::SessionGroupsUpdated { ref groups }) if groups.is_empty()
+    ));
+    assert!(state.sessions.lock().unwrap().contains_key(&session_id));
+    assert_eq!(
+        current_session_store(&state)
+            .unwrap()
+            .load_session(&session_id)
+            .unwrap()
+            .unwrap()
+            .group_id,
+        None
+    );
+    let _ = std::fs::remove_dir_all(workspace);
+}
+
+#[test]
+fn session_group_move_persistence_failure_keeps_memory_and_disk_unchanged() {
+    let state = routing_test_state();
+    let Some(WireEvent::SessionGroupsUpdated { groups }) = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupCreate {
+            name: "Failure test".to_string(),
+        },
+    )
+    .unwrap() else {
+        panic!("expected session groups update");
+    };
+    let group_id = groups[0].id.clone();
+    let store = current_session_store(&state).unwrap();
+    persist_web_session(&state, "session_a").unwrap();
+    let metadata = store.metadata_path_for_session("session_a");
+    let original = std::fs::read(&metadata).unwrap();
+    std::fs::remove_file(&metadata).unwrap();
+    std::fs::create_dir(&metadata).unwrap();
+
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupMove {
+            session_id: "session_a".to_string(),
+            group_id: Some(group_id),
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("session_metadata_write_failed"));
+    assert_eq!(
+        state.sessions.lock().unwrap()["session_a"].group_id,
+        None,
+        "failed persistence must not mutate the in-memory session"
+    );
+
+    std::fs::remove_dir(&metadata).unwrap();
+    std::fs::write(&metadata, original).unwrap();
+    assert_eq!(
+        store.load_session("session_a").unwrap().unwrap().group_id,
+        None
+    );
+}
+
+#[test]
+fn session_group_delete_persistence_failure_rolls_back_prior_metadata_writes() {
+    let state = routing_test_state();
+    let Some(WireEvent::SessionGroupsUpdated { groups }) = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupCreate {
+            name: "Rollback test".to_string(),
+        },
+    )
+    .unwrap() else {
+        panic!("expected session groups update");
+    };
+    let group_id = groups[0].id.clone();
+    for session_id in ["session_a", "session_b"] {
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SessionGroupMove {
+                session_id: session_id.to_string(),
+                group_id: Some(group_id.clone()),
+            },
+        )
+        .unwrap();
+    }
+    let store = current_session_store(&state).unwrap();
+    let blocked_metadata = store.metadata_path_for_session("session_b");
+    let blocked_original = std::fs::read(&blocked_metadata).unwrap();
+    std::fs::remove_file(&blocked_metadata).unwrap();
+    std::fs::create_dir(&blocked_metadata).unwrap();
+
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupDelete {
+            group_id: group_id.clone(),
+        },
+    )
+    .unwrap_err();
+    assert!(error.contains("session_group_delete_persist_failed"));
+    assert_eq!(
+        current_mem_state(&state).unwrap().session_groups,
+        groups,
+        "failed deletion must keep the group definition"
+    );
+    for session_id in ["session_a", "session_b"] {
+        assert_eq!(
+            state.sessions.lock().unwrap()[session_id]
+                .group_id
+                .as_deref(),
+            Some(group_id.as_str()),
+            "failed deletion must keep every in-memory group assignment"
+        );
+    }
+    assert_eq!(
+        store
+            .load_session("session_a")
+            .unwrap()
+            .unwrap()
+            .group_id
+            .as_deref(),
+        Some(group_id.as_str()),
+        "metadata written before the injected failure must be compensated"
+    );
+
+    std::fs::remove_dir(&blocked_metadata).unwrap();
+    std::fs::write(&blocked_metadata, blocked_original).unwrap();
+    assert_eq!(
+        store
+            .load_session("session_b")
+            .unwrap()
+            .unwrap()
+            .group_id
+            .as_deref(),
+        Some(group_id.as_str())
+    );
+}
+
+#[test]
 fn snapshot_reports_the_active_mem_space_and_paths() {
     let state = routing_test_state();
     let snapshot = snapshot_for(&state, TEST_PORT);
@@ -3602,6 +5281,250 @@ fn snapshot_reports_the_active_mem_space_and_paths() {
     assert!(snapshot.server.mem.data_dir.contains("timem_web_data_test"));
     assert!(snapshot.server.mem.space_dir.ends_with(".test_mem"));
     assert!(snapshot.server.mem.memory_dir.ends_with(".test_mem/memory"));
+    assert_eq!(snapshot.server.mem.temporary_retention_days, Some(5));
+}
+
+#[test]
+fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_data() {
+    let state = routing_test_state();
+    let (layout, store) = {
+        let mem = state.mem.lock().unwrap();
+        (mem.layout.clone(), mem.session_store.clone())
+    };
+    let session = state.sessions.lock().unwrap()["session_a"].clone();
+    store
+        .upsert_session(&stored_session_from_web_session_with_store(
+            &store, &session,
+        ))
+        .unwrap();
+    let now_ms = now_ms_i64();
+    let old_ms = now_ms - 6 * MILLIS_PER_DAY;
+    let recent_ms = now_ms - MILLIS_PER_DAY;
+    for record in [
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "old-message".to_string(),
+            created_at_ms: old_ms,
+            kind: Some("task".to_string()),
+            command_id: None,
+            delivery_state: None,
+            content: "old user message stays forever".to_string(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "old-action".to_string(),
+            created_at_ms: old_ms,
+            kind: ChatHistoryEventKind::Action,
+            content: "expired temporary action".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "recent-action".to_string(),
+            created_at_ms: recent_ms,
+            kind: ChatHistoryEventKind::ActionResult,
+            content: "recent temporary action result".to_string(),
+            extra: BTreeMap::new(),
+        },
+    ] {
+        store.append_history_record("session_a", &record).unwrap();
+    }
+
+    let shell_dir = layout.memory_dir().join("shell_jobs");
+    std::fs::create_dir_all(&shell_dir).unwrap();
+    let old_output = shell_dir.join("old.out");
+    let old_stderr = shell_dir.join("old.err");
+    let old_status = shell_dir.join("old.status");
+    for (path, text) in [
+        (&old_output, "expired stdout"),
+        (&old_stderr, "expired stderr"),
+        (&old_status, "exit:0"),
+    ] {
+        std::fs::write(path, text).unwrap();
+    }
+    let old_job = agent_core::ShellJobRecord {
+        id: "old-job".to_string(),
+        created_at_ms: old_ms,
+        kind: "background".to_string(),
+        session_id: "session_a".to_string(),
+        turn_id: "old-action".to_string(),
+        pid: std::process::id(),
+        process_identity: None,
+        tool_call_id: "old-call".to_string(),
+        owner_id: Some("old-owner".to_string()),
+        command: "printf expired".to_string(),
+        cwd: layout.memory_dir().display().to_string(),
+        output_file: old_output.display().to_string(),
+        stderr_file: old_stderr.display().to_string(),
+        status_file: old_status.display().to_string(),
+        tail_out: false,
+    };
+    std::fs::write(
+        shell_dir.join("jobs.jsonl"),
+        format!("{}\n", serde_json::to_string(&old_job).unwrap()),
+    )
+    .unwrap();
+
+    std::fs::create_dir_all(layout.api_audit_file().parent().unwrap()).unwrap();
+    std::fs::write(
+        layout.api_audit_file(),
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "events": [
+                {"type":"expired", "time_ms":old_ms},
+                {"type":"recent", "time_ms":recent_ms}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .state = "working".to_string();
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::MemTemporaryRetentionUpdate { days: Some(5) },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::MemSettingsUpdated {
+        temporary_retention_days,
+    } = event
+    else {
+        panic!("expected authoritative MEM settings event")
+    };
+    assert_eq!(temporary_retention_days, Some(5));
+
+    let retained = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert!(retained.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Message { content, .. } if content == "old user message stays forever"
+    )));
+    assert!(!retained.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Event { content, .. } if content == "expired temporary action"
+    )));
+    assert!(retained.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Event { content, .. } if content == "recent temporary action result"
+    )));
+    assert!(!old_output.exists());
+    assert!(!old_stderr.exists());
+    assert!(!old_status.exists());
+    assert!(std::fs::read_to_string(shell_dir.join("jobs.jsonl"))
+        .unwrap()
+        .trim()
+        .is_empty());
+    let audit = agent_core::read_audit_doc(&layout.api_audit_file()).unwrap();
+    assert_eq!(audit["events"].as_array().unwrap().len(), 1);
+    assert_eq!(audit["events"][0]["type"], "recent");
+    assert_eq!(
+        load_web_mem_settings(store.root())
+            .unwrap()
+            .temporary_retention_days,
+        Some(5)
+    );
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::MemTemporaryRetentionUpdate { days: None },
+    )
+    .unwrap();
+    assert_eq!(
+        WebMemState::new(
+            state.template.data_dir.clone(),
+            state.mem.lock().unwrap().space.clone()
+        )
+        .unwrap()
+        .settings
+        .temporary_retention_days,
+        None,
+        "unlimited retention must survive reopening the same MEM"
+    );
+}
+
+#[test]
+fn temporary_retention_rolls_forward_is_idempotent_and_unlimited_skips_cleanup() {
+    let state = routing_test_state();
+    let (layout, store) = {
+        let mem = state.mem.lock().unwrap();
+        (mem.layout.clone(), mem.session_store.clone())
+    };
+    let session = state.sessions.lock().unwrap()["session_a"].clone();
+    store
+        .upsert_session(&stored_session_from_web_session_with_store(
+            &store, &session,
+        ))
+        .unwrap();
+    let day = MILLIS_PER_DAY;
+    let base_now = 20 * day;
+    for (created_at_ms, content) in [
+        (base_now - 4 * day, "first expires on later tick"),
+        (base_now - day, "second remains"),
+    ] {
+        store
+            .append_history_record(
+                "session_a",
+                &ChatHistoryRecord::Event {
+                    role: ChatHistoryRole::System,
+                    turn_id: content.to_string(),
+                    created_at_ms,
+                    kind: ChatHistoryEventKind::Repair,
+                    content: content.to_string(),
+                    extra: BTreeMap::new(),
+                },
+            )
+            .unwrap();
+    }
+
+    assert_eq!(
+        apply_temporary_retention(&layout, &store, Some(5), base_now)
+            .unwrap()
+            .history_events,
+        0
+    );
+    assert_eq!(
+        apply_temporary_retention(&layout, &store, Some(5), base_now + 2 * day)
+            .unwrap()
+            .history_events,
+        1,
+        "the moving cutoff must expire data on a later periodic pass"
+    );
+    assert_eq!(
+        apply_temporary_retention(&layout, &store, Some(5), base_now + 2 * day).unwrap(),
+        TemporaryRetentionResult::default(),
+        "repeating a periodic pass at the same cutoff must be idempotent"
+    );
+    assert_eq!(
+        apply_temporary_retention(&layout, &store, None, i64::MAX).unwrap(),
+        TemporaryRetentionResult::default()
+    );
+    let retained = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert!(retained.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Event { content, .. } if content == "second remains"
+    )));
+}
+
+#[test]
+fn mem_temporary_retention_rejects_invalid_values() {
+    let state = routing_test_state();
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::MemTemporaryRetentionUpdate { days: Some(2) },
+        )
+        .unwrap_err(),
+        "mem_temporary_retention_days_invalid"
+    );
 }
 
 #[test]
@@ -3614,9 +5537,13 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
     template.current_dir = data_dir.clone();
     template.workspace_dirs = vec![data_dir.clone()];
     template.data_dir = data_dir.clone();
-    template.initial_space = "alpha".to_string();
+    template.initial_space = data_dir.join("alpha").display().to_string();
     state.template = Arc::new(template);
-    set_test_mem(&state, data_dir.clone(), "alpha");
+    set_test_mem(
+        &state,
+        data_dir.clone(),
+        &data_dir.join("alpha").display().to_string(),
+    );
     state.sessions.lock().unwrap().clear();
 
     let alpha_session = create_session(
@@ -3628,13 +5555,21 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
     .unwrap();
     start_web_turn(&state, &alpha_session, "alpha task").unwrap();
 
-    set_test_mem(&state, data_dir.clone(), "beta");
+    set_test_mem(
+        &state,
+        data_dir.clone(),
+        &data_dir.join("beta").display().to_string(),
+    );
     state.sessions.lock().unwrap().clear();
     let beta_session =
         create_session(&state, Some("Beta work".to_string()), None, BTreeMap::new()).unwrap();
     start_web_turn(&state, &beta_session, "beta task").unwrap();
 
-    set_test_mem(&state, data_dir.clone(), "alpha");
+    set_test_mem(
+        &state,
+        data_dir.clone(),
+        &data_dir.join("alpha").display().to_string(),
+    );
     state.sessions.lock().unwrap().clear();
     restore_stored_sessions(&state).unwrap();
     assert!(state.sessions.lock().unwrap().contains_key(&alpha_session));
@@ -3654,7 +5589,13 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
     let WireEvent::Hello { snapshot, .. } = events.try_recv().unwrap() else {
         panic!("expected hello snapshot after mem switch")
     };
-    assert_eq!(snapshot.server.mem.space, "beta");
+    assert_eq!(
+        snapshot.server.mem.space,
+        std::fs::canonicalize(data_dir.join("beta"))
+            .unwrap()
+            .display()
+            .to_string()
+    );
     assert!(snapshot
         .sessions
         .iter()
@@ -3663,13 +5604,27 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
         .sessions
         .iter()
         .any(|session| session.session_id == alpha_session));
+    let beta_history_path = current_session_store(&state)
+        .unwrap()
+        .history_path_for_session(&beta_session);
+    assert!(
+        read_all_history_records(&beta_history_path)
+            .unwrap()
+            .iter()
+            .all(|record| !matches!(
+                record,
+                ChatHistoryRecord::Message {
+                    role: ChatHistoryRole::System,
+                    kind: Some(kind),
+                    ..
+                } if kind == RUNTIME_RESTART_HISTORY_KIND
+            )),
+        "switching memory spaces inside one process is not a runtime restart"
+    );
     let journal_path = state.event_journal.lock().unwrap().path().to_path_buf();
     assert_eq!(
         journal_path,
-        data_dir
-            .join("beta")
-            .join("memory")
-            .join("web_events.ndjson"),
+        data_dir.join("beta").join("web_events.ndjson"),
         "switching mem must also switch the durable semantic-event journal"
     );
 }
@@ -3843,9 +5798,11 @@ fn ask_mode_does_not_announce_work_instructions_before_user_acceptance() {
 
 fn routing_test_state() -> AppState {
     let config = ModelServiceConfig {
+        interaction: Default::default(),
         model: "test-model".to_string(),
         base_url: "http://127.0.0.1".to_string(),
         api_key: "test".to_string(),
+        http_headers: Default::default(),
         timeout_secs: 1,
         max_llm_output_tokens: 1_024,
         max_llm_input_tokens: 10_000,
@@ -3858,12 +5815,14 @@ fn routing_test_state() -> AppState {
             config,
             bash_approval_mode: BashApprovalMode::Ask,
             work_instruction_mode: WorkInstructionLoadMode::Off,
+            max_rounds: agent_core::UNLIMITED_ROUND_BUDGET,
         })),
         data_dir: std::env::temp_dir().join(unique_web_id("timem_web_data_test")),
         initial_space: ".test_mem".to_string(),
         env: BTreeMap::new(),
         current_dir: PathBuf::from("/work"),
         workspace_dirs: vec![PathBuf::from("/work")],
+        reminder_tips_config: agent_core::ReminderTipsConfig::default(),
     };
     let sessions = ["session_a", "session_b"]
         .into_iter()
@@ -3896,6 +5855,7 @@ fn routing_test_state() -> AppState {
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
+        debug: None,
     }
 }
 
@@ -3909,10 +5869,12 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
     let settings = test_runtime_settings();
     WebSession {
         session_id: session_id.to_string(),
+        group_id: None,
         display_name,
         ordinal,
         state: "ready".to_string(),
         current_dir: "/work".to_string(),
+        debug_dir: None,
         max_llm_input_tokens: 10_000,
         tools: Vec::new(),
         mcp_server_ids: Vec::new(),
@@ -3935,6 +5897,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         active_context_id: context_id,
         primary_worker_id: worker_id,
         attachments: Vec::new(),
+        roles: Vec::new(),
         consumed_attachment_ids: BTreeSet::new(),
         messages: Vec::new(),
         turns: Vec::new(),
@@ -3942,8 +5905,10 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         history_has_more: false,
         resume_notice_pending: false,
         active_turn_id: None,
+        pending_turn_id: None,
         pending_completion_message_id: None,
         pending_unconsumed_supplements: Vec::new(),
+        reported_session_working_worker_count: None,
         work_instruction_mode: WorkInstructionLoadMode::Off,
         work_instruction_allowed: None,
         pending_work_instruction_turn: None,
@@ -3966,9 +5931,11 @@ fn test_worker_id(session_id: &str) -> String {
 fn test_runtime_settings() -> RuntimeSettings {
     RuntimeSettings {
         config: ModelServiceConfig {
+            interaction: Default::default(),
             model: "model".to_string(),
             base_url: "http://127.0.0.1:9".to_string(),
             api_key: "test".to_string(),
+            http_headers: Default::default(),
             timeout_secs: 1,
             max_llm_output_tokens: 1_024,
             max_llm_input_tokens: 10_000,
@@ -3978,6 +5945,7 @@ fn test_runtime_settings() -> RuntimeSettings {
         },
         bash_approval_mode: BashApprovalMode::Ask,
         work_instruction_mode: WorkInstructionLoadMode::Off,
+        max_rounds: agent_core::UNLIMITED_ROUND_BUDGET,
     }
 }
 
@@ -3990,10 +5958,56 @@ fn test_runtime_profile() -> WebSessionRuntimeProfile {
         timeout_secs: 1,
         max_llm_input_tokens: 10_000,
         max_llm_output_tokens: 1_024,
+        stream: false,
+        max_rounds: "unlimited".to_string(),
         bash_approval: "ask".to_string(),
         work_instructions: "off".to_string(),
         api_key_configured: true,
     }
+}
+
+#[test]
+fn round_budget_configuration_accepts_ui_choices_and_rejects_invalid_values() {
+    assert_eq!(parse_round_budget("50").unwrap(), 50);
+    assert_eq!(parse_round_budget("200").unwrap(), 200);
+    assert_eq!(parse_round_budget("500").unwrap(), 500);
+    assert_eq!(
+        parse_round_budget("unlimited").unwrap(),
+        agent_core::UNLIMITED_ROUND_BUDGET
+    );
+    assert_eq!(
+        round_budget_value(agent_core::UNLIMITED_ROUND_BUDGET),
+        "unlimited"
+    );
+    assert_eq!(
+        parse_round_budget("0").unwrap_err(),
+        "invalid_session_max_rounds"
+    );
+    assert_eq!(
+        parse_round_budget("not-a-number").unwrap_err(),
+        "invalid_session_max_rounds"
+    );
+}
+
+#[test]
+fn snapshot_exposes_unlimited_max_steps_as_the_session_default() {
+    let state = routing_test_state();
+    let snapshot = snapshot_for(&state, TEST_PORT);
+    let option = snapshot
+        .server
+        .runtime_options
+        .iter()
+        .find(|option| option.key == "TIMEM_MAX_ROUNDS")
+        .expect("max steps runtime option");
+    assert_eq!(option.value, "unlimited");
+    assert_eq!(
+        snapshot
+            .server
+            .session_env_defaults
+            .get("TIMEM_MAX_ROUNDS")
+            .map(String::as_str),
+        Some("unlimited")
+    );
 }
 
 fn final_response_topic(session_id: &str, answer: String) -> CoreTopicEvent {
@@ -4154,7 +6168,13 @@ fn barrier_synchronized_sessions_keep_request_action_final_and_completion_scoped
                 handle_worker_event(
                     &state,
                     &session_id,
-                    CoreSessionWorkerEvent::ModelRequest { round: 1 },
+                    CoreSessionWorkerEvent::ModelRequest {
+                        round: 1,
+                        prompt: String::new(),
+                        interaction_profile: None,
+                        interaction_request: None,
+                        api_payload: None,
+                    },
                 );
                 after_request.wait();
                 let action = CoreTopicEvent::new(
@@ -4262,14 +6282,26 @@ fn one_session_aggregates_primary_and_subworker_state_without_cross_finishing() 
         session_id,
         &primary_context_id,
         &primary_worker_id,
-        CoreSessionWorkerEvent::ModelRequest { round: 1 },
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
+            api_payload: None,
+        },
     );
     handle_scoped_worker_event(
         &state,
         session_id,
         &sub_context_id,
         &sub_worker_id,
-        CoreSessionWorkerEvent::ModelRequest { round: 1 },
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
+            api_payload: None,
+        },
     );
     handle_scoped_worker_event(
         &state,
@@ -4315,6 +6347,528 @@ fn one_session_aggregates_primary_and_subworker_state_without_cross_finishing() 
             && event.payload["context_id"] == sub_context_id
             && event.payload["worker_id"] == sub_worker_id
     }));
+}
+
+#[test]
+fn primary_turn_finish_clears_stale_working_workers_and_session_spinner() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    start_web_turn(&state, session_id, "primary task").unwrap();
+    let (primary_context_id, primary_worker_id) = primary_worker_scope(&state, session_id).unwrap();
+    let sub_context_id = "context_session_a_stale_sub".to_string();
+    let sub_worker_id = "worker_session_a_stale_sub".to_string();
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.contexts.push(WebContext {
+            context_id: sub_context_id.clone(),
+            current_dir: "/work/stale-subtask".to_string(),
+            worker_ids: vec![sub_worker_id.clone()],
+        });
+        session.workers.push(WebWorker {
+            worker_id: sub_worker_id.clone(),
+            context_id: sub_context_id,
+            display_name: "Stale subtask".to_string(),
+            ordinal: 99,
+            state: "working".to_string(),
+            parent_worker_id: Some(primary_worker_id.clone()),
+        });
+    }
+
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
+            api_payload: None,
+        },
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::TurnFinished {
+            outcome: agent_core::TurnOutcome::final_response(
+                "primary done",
+                agent_core::UsageStats::zero(),
+                None,
+                None,
+                Duration::from_millis(1),
+            ),
+        },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(session.state, "ready");
+    assert!(session
+        .workers
+        .iter()
+        .all(|worker| worker.state != "working"));
+    assert_eq!(
+        session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == sub_worker_id)
+            .unwrap()
+            .state,
+        "ready"
+    );
+    assert_eq!(session.turns.last().unwrap().state, "finished");
+}
+
+#[test]
+fn final_answer_is_preserved_before_unconsumed_supplement_starts_a_new_turn() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let first = start_web_turn(&state, session_id, "Q1").unwrap();
+    let (context_id, worker_id) = primary_worker_scope(&state, session_id).unwrap();
+
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(CORE_TOPIC_MODEL_RESPONSE, json!({})),
+            CoreSessionState::Finished,
+            json!({
+                "status": "ALL_FINISHED",
+                "final_answer": "final_answer1",
+                "continue_work": false,
+                "global": {
+                    "working_worker_count": 0,
+                    "session_working_worker_count": 0
+                }
+            }),
+        )
+        .with_worker_scope(context_id.clone(), worker_id.clone())]),
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::UnconsumedSupplements {
+            supplements: vec!["Q2".to_string()],
+        },
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnFinished {
+            outcome: TurnOutcome::final_response(
+                "final_answer1",
+                UsageStats::zero(),
+                None,
+                None,
+                Duration::from_millis(1),
+            ),
+        },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.turns.len(), 2);
+    assert_eq!(session.turns[0].turn_id, first.turn_id);
+    assert_eq!(
+        session.turns[0].final_answer.as_deref(),
+        Some("final_answer1")
+    );
+    assert_eq!(session.turns[0].state, "finished");
+    assert_ne!(session.turns[1].turn_id, first.turn_id);
+    assert_eq!(session.turns[1].user_entries.len(), 1);
+    assert_eq!(session.turns[1].user_entries[0].kind, "task");
+    assert_eq!(session.turns[1].user_entries[0].text, "Q2");
+    assert!(session.turns[1].final_answer.is_none());
+    assert!(
+        session.active_turn_id.as_deref() == Some(session.turns[1].turn_id.as_str())
+            || session.pending_turn_id.as_deref() == Some(session.turns[1].turn_id.as_str()),
+        "Q2 must have a distinct active or pending turn identity"
+    );
+    assert_eq!(
+        session
+            .messages
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["final_answer1"],
+        "starting Q2 must not replace Q1's assistant message"
+    );
+}
+
+#[test]
+fn stopped_primary_turn_preserves_unconsumed_supplements_without_resubmitting() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let supplements = vec!["follow-up one".to_string(), "follow-up two".to_string()];
+
+    let turns_before = {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.pending_unconsumed_supplements = supplements.clone();
+        session.turns.len()
+    };
+
+    let mut outcome =
+        TurnOutcome::final_response("cancelled", UsageStats::zero(), None, None, Duration::ZERO);
+    outcome.stop_reason = Some(agent_core::TurnStopReason::CancelledByUser);
+
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnFinished { outcome },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.pending_unconsumed_supplements, supplements);
+    assert_eq!(session.turns.len(), turns_before);
+}
+
+#[test]
+fn stopped_primary_turn_removes_its_stale_reported_working_count() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    start_web_turn(&state, session_id, "primary task").unwrap();
+    let (primary_context_id, primary_worker_id) = primary_worker_scope(&state, session_id).unwrap();
+
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
+            api_payload: None,
+        },
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(CORE_TOPIC_MODEL_RESPONSE, json!({})),
+            CoreSessionState::Running,
+            json!({
+                "status": "working",
+                "continue_work": true,
+                "global": {
+                    "working_worker_count": 1,
+                    "session_working_worker_count": 1
+                }
+            }),
+        )
+        .with_worker_scope(primary_context_id.clone(), primary_worker_id.clone())]),
+    );
+
+    let mut outcome = agent_core::TurnOutcome::final_response(
+        "",
+        agent_core::UsageStats::zero(),
+        None,
+        None,
+        Duration::from_millis(1),
+    );
+    outcome.stop_reason = Some(agent_core::TurnStopReason::CancelledByUser);
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::TurnFinished { outcome },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(session.state, "ready");
+    assert_eq!(session.reported_session_working_worker_count, None);
+    assert!(session
+        .workers
+        .iter()
+        .all(|worker| worker.state != "working"));
+    assert_eq!(session.turns.last().unwrap().state, "finished");
+}
+
+#[test]
+fn stopped_primary_turn_preserves_a_reported_active_subworker() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    start_web_turn(&state, session_id, "primary task").unwrap();
+    let (primary_context_id, primary_worker_id) = primary_worker_scope(&state, session_id).unwrap();
+    let sub_worker_id = "worker_session_a_active_after_cancel".to_string();
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.workers.push(WebWorker {
+            worker_id: sub_worker_id.clone(),
+            context_id: "context_session_a_active_after_cancel".to_string(),
+            display_name: "Active subtask".to_string(),
+            ordinal: 99,
+            state: "working".to_string(),
+            parent_worker_id: Some(primary_worker_id.clone()),
+        });
+    }
+
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
+            api_payload: None,
+        },
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(CORE_TOPIC_MODEL_RESPONSE, json!({})),
+            CoreSessionState::Running,
+            json!({
+                "status": "working",
+                "continue_work": true,
+                "global": {
+                    "working_worker_count": 2,
+                    "session_working_worker_count": 2
+                }
+            }),
+        )
+        .with_worker_scope(primary_context_id.clone(), primary_worker_id.clone())]),
+    );
+
+    let mut outcome = agent_core::TurnOutcome::final_response(
+        "",
+        agent_core::UsageStats::zero(),
+        None,
+        None,
+        Duration::from_millis(1),
+    );
+    outcome.stop_reason = Some(agent_core::TurnStopReason::CancelledByUser);
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::TurnFinished { outcome },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(session.state, "working");
+    assert_eq!(session.reported_session_working_worker_count, None);
+    assert_eq!(
+        session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == primary_worker_id)
+            .unwrap()
+            .state,
+        "ready"
+    );
+    assert_eq!(
+        session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == sub_worker_id)
+            .unwrap()
+            .state,
+        "working"
+    );
+}
+
+#[test]
+fn primary_turn_finish_preserves_explicitly_reported_active_subworker() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    start_web_turn(&state, session_id, "primary task").unwrap();
+    let (primary_context_id, primary_worker_id) = primary_worker_scope(&state, session_id).unwrap();
+    let sub_context_id = "context_session_a_active_sub".to_string();
+    let sub_worker_id = "worker_session_a_active_sub".to_string();
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.contexts.push(WebContext {
+            context_id: sub_context_id.clone(),
+            current_dir: "/work/active-subtask".to_string(),
+            worker_ids: vec![sub_worker_id.clone()],
+        });
+        session.workers.push(WebWorker {
+            worker_id: sub_worker_id.clone(),
+            context_id: sub_context_id,
+            display_name: "Active subtask".to_string(),
+            ordinal: 99,
+            state: "working".to_string(),
+            parent_worker_id: Some(primary_worker_id.clone()),
+        });
+    }
+
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
+            api_payload: None,
+        },
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(CORE_TOPIC_MODEL_RESPONSE, json!({})),
+            CoreSessionState::Finished,
+            json!({
+                "status": "ALL_FINISHED",
+                "final_answer": "primary done",
+                "continue_work": false,
+                "global": {
+                    "working_worker_count": 1,
+                    "session_working_worker_count": 1
+                }
+            }),
+        )
+        .with_worker_scope(primary_context_id.clone(), primary_worker_id.clone())]),
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::TurnFinished {
+            outcome: agent_core::TurnOutcome::final_response(
+                "primary done",
+                agent_core::UsageStats::zero(),
+                None,
+                None,
+                Duration::from_millis(1),
+            ),
+        },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(session.state, "working");
+    assert_eq!(
+        session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == primary_worker_id)
+            .unwrap()
+            .state,
+        "ready"
+    );
+    assert_eq!(
+        session
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == sub_worker_id)
+            .unwrap()
+            .state,
+        "working"
+    );
+}
+
+#[test]
+fn primary_turn_finish_ignores_other_sessions_global_worker_count() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    start_web_turn(&state, session_id, "primary task").unwrap();
+    let (primary_context_id, primary_worker_id) = primary_worker_scope(&state, session_id).unwrap();
+
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
+            api_payload: None,
+        },
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(CORE_TOPIC_MODEL_RESPONSE, json!({})),
+            CoreSessionState::Finished,
+            json!({
+                "status": "ALL_FINISHED",
+                "final_answer": "primary done",
+                "continue_work": false,
+                "global": {
+                    "working_worker_count": 1,
+                    "session_working_worker_count": 0
+                }
+            }),
+        )
+        .with_worker_scope(primary_context_id.clone(), primary_worker_id.clone())]),
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &primary_context_id,
+        &primary_worker_id,
+        CoreSessionWorkerEvent::TurnFinished {
+            outcome: agent_core::TurnOutcome::final_response(
+                "primary done",
+                agent_core::UsageStats::zero(),
+                None,
+                None,
+                Duration::from_millis(1),
+            ),
+        },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(session.state, "ready");
+    assert!(session
+        .workers
+        .iter()
+        .all(|worker| worker.state != "working"));
 }
 
 #[test]
@@ -4460,8 +7014,45 @@ fn web_runtime_shutdown_stops_all_session_workers() {
     )
     .unwrap();
 
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    let tool_dir = memory_dir.join("shutdown-tool");
+    std::fs::create_dir_all(&tool_dir).unwrap();
+    let script = tool_dir.join("sleep.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\npython3 -c 'import time; time.sleep(30)'\n",
+    )
+    .unwrap();
+    let tool_jobs = FileToolJobStore::new(&memory_dir);
+    let started = tool_jobs.spawn("shutdown_sleep", &script, &serde_json::json!({"args": {}}));
+    let job_id = started
+        .lines()
+        .find_map(|line| line.strip_prefix("job_id: "))
+        .unwrap();
+    let shell_jobs = FileShellJobStore::new(&memory_dir);
+    shell_jobs.spawn_background("sleep 30", &tool_dir, "shutdown-session", "shutdown-turn");
+
     assert_eq!(state.manager.lock().unwrap().worker_count(), 2);
     shutdown_web_runtime(&state).unwrap();
+    assert_eq!(state.manager.lock().unwrap().worker_count(), 0);
+    assert!(tool_jobs.status(job_id, 0).contains("state: cancelled"));
+    assert!(shell_jobs
+        .running_for_session("shutdown-session")
+        .is_empty());
+}
+
+#[test]
+fn web_runtime_cleanup_guard_runs_cleanup_once_on_scope_exit() {
+    let state = routing_test_state();
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    let shell_jobs = FileShellJobStore::new(&memory_dir);
+    shell_jobs.spawn_background("sleep 30", &memory_dir, "guard-session", "guard-turn");
+
+    {
+        let _guard = WebRuntimeCleanupGuard::new(&state);
+    }
+
+    assert!(shell_jobs.running_for_session("guard-session").is_empty());
     assert_eq!(state.manager.lock().unwrap().worker_count(), 0);
 }
 
@@ -4480,7 +7071,8 @@ impl ModelClient for BlockingShutdownModel {
         self.entered.fetch_add(1, Ordering::SeqCst);
         thread::sleep(Duration::from_secs(2));
         Ok(LlmResponse {
-            content: "<response><status>ALL_FINISHED</status><final_answer>late</final_answer></response>".to_string(),
+            tool_calls: Vec::new(),
+            content: confirmed_xml_response("<final_answer>late</final_answer>"),
             model_name: "test-model".to_string(),
             usage: UsageStats::zero(),
             truncated: false,
@@ -4565,10 +7157,11 @@ impl ModelClient for CancelThenFinishModel {
             return Err("cancelled_by_user".to_string());
         }
         Ok(LlmResponse {
-            content: format!(
-                "<response><free_talk>done</free_talk><final_answer>{}</final_answer></response>",
+            tool_calls: Vec::new(),
+            content: confirmed_xml_response(&format!(
+                "<final_answer>{}</final_answer>",
                 self.final_text
-            ),
+            )),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -4716,6 +7309,9 @@ fn cancel_stops_all_session_workers_and_next_turn_runs_only_primary() {
             text: "continue".to_string(),
             input_kind: None,
             source_turn_id: None,
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap();
@@ -5156,6 +7752,268 @@ fn mismatched_core_topic_is_not_forwarded_or_written_to_another_agent() {
 }
 
 #[test]
+fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history() {
+    let mut state = routing_test_state();
+    let debug = Arc::new(DebugStore::create().unwrap());
+    let debug_root = debug.root().to_path_buf();
+    state.debug = Some(debug);
+
+    let session_id = "session_a";
+    let turn = start_web_turn(&state, session_id, "repair malformed XML").unwrap();
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: "debug prompt".to_string(),
+            interaction_profile: Some(agent_core::InteractionProfile {
+                api_protocol: "openai_compatible".to_string(),
+                model: "qwen-plus".to_string(),
+                gateway: "https://gateway.example.test/v1".to_string(),
+                requested_mode: agent_core::ToolCallMode::Auto,
+                resolved_mode: agent_core::ToolCallMode::Native,
+                active_prompt_protocol: "json".to_string(),
+                parallel_supported: true,
+                parallel_enabled: true,
+                source: agent_core::CapabilityProbeSource::Probe,
+                reason: "native_and_parallel_probe_succeeded".to_string(),
+                probe_latency_ms: Some(10),
+                observed_tool_calls: 2,
+            }),
+            interaction_request: Some(Box::new(agent_core::ModelInteractionRequest {
+                rendered_prompt: "debug prompt".to_string(),
+                static_tool_count: 1,
+                tools: vec![agent_core::ToolDefinition {
+                    name: "self_tool".to_string(),
+                    description: "Inspect runtime state".to_string(),
+                    input_schema: json!({"type": "object"}),
+                }],
+                native_exchanges: vec![agent_core::NativeExchange {
+                    delta_id: "pd_1".to_string(),
+                    assistant_text: "previous".to_string(),
+                    calls: vec![agent_core::NativeToolCall {
+                        id: "call_previous".to_string(),
+                        name: "self_tool".to_string(),
+                        arguments: json!({"type": "cwd"}),
+                        raw_arguments: r#"{"type":"cwd"}"#.to_string(),
+                    }],
+                    results: vec![agent_core::NativeToolResult {
+                        call_id: "call_previous".to_string(),
+                        name: "self_tool".to_string(),
+                        content: "CWD: /work".to_string(),
+                        is_error: false,
+                    }],
+                }],
+                resolved_mode: agent_core::ToolCallMode::Native,
+                parallel_tool_calls: true,
+                tool_choice: agent_core::NativeToolChoice::Auto,
+            })),
+            api_payload: Some(Box::new(json!({
+                "messages": [
+                    {"role": "user", "content": "debug prompt"},
+                    {"role": "assistant", "content": "previous", "tool_calls": [{"id": "call_previous", "type": "function", "function": {"name": "self_tool", "arguments": "{\"type\":\"cwd\"}"}}]},
+                    {"role": "tool", "tool_call_id": "call_previous", "content": "CWD: /work"}
+                ]
+            }))),
+        },
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::ModelRequestCompleted {
+            latency: Duration::from_millis(425),
+        },
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::ModelResponseParsed { tool_count: 1 },
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::ModelResponse {
+            round: 1,
+            usage: UsageStats::zero(),
+            content: "I will inspect the workspace.".to_string(),
+            tool_calls: vec![agent_core::NativeToolCall {
+                id: "call_current".to_string(),
+                name: "self_tool".to_string(),
+                arguments: json!({"type": "cwd"}),
+                raw_arguments: r#"{"type":"cwd"}"#.to_string(),
+            }],
+            runtime_phase: None,
+        },
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(CORE_TOPIC_ACTION, json!({})),
+            CoreSessionState::Running,
+            json!({
+                "event": "finish",
+                "cpu_time_available": true,
+                "cpu_time_ns": 25_000_000_u64,
+            }),
+        )]),
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::Topics(vec![CoreTopicEvent::new(
+            session_id,
+            CoreTopic::new(
+                CORE_TOPIC_MODEL_REPAIR,
+                json!({ "name": CORE_TOPIC_MODEL_REPAIR }),
+            ),
+            CoreSessionState::WaitingModel,
+            json!({
+                "issue": "xml_response_root_missing",
+                "reason": "required response root missing",
+                "attempt": 1,
+                "max_attempts": 3,
+            }),
+        )]),
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::Topics(vec![agent_core::runtime_root_repair_help_topic_event(
+            session_id,
+        )]),
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 2,
+            prompt: "inline retry prompt".to_string(),
+            interaction_profile: Some(agent_core::InteractionProfile {
+                api_protocol: "anthropic".to_string(),
+                model: "claude-inline".to_string(),
+                gateway: "https://inline.example/v1".to_string(),
+                requested_mode: agent_core::ToolCallMode::Inline,
+                resolved_mode: agent_core::ToolCallMode::Inline,
+                active_prompt_protocol: "xml".to_string(),
+                parallel_supported: false,
+                parallel_enabled: false,
+                source: agent_core::CapabilityProbeSource::Explicit,
+                reason: "explicit_inline".to_string(),
+                probe_latency_ms: None,
+                observed_tool_calls: 0,
+            }),
+            interaction_request: Some(Box::new(agent_core::ModelInteractionRequest::inline(
+                "inline retry prompt",
+            ))),
+            api_payload: Some(Box::new(json!({
+                "system": "inline system",
+                "messages": [{"role": "user", "content": "inline retry prompt"}]
+            }))),
+        },
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::ModelError {
+            error: "synthetic terminal failure".to_string(),
+        },
+    );
+
+    let statistics =
+        std::fs::read_to_string(debug_root.join(session_id).join("statistics.html")).unwrap();
+    assert!(
+        statistics.contains("Repair error categories"),
+        "{statistics}"
+    );
+    assert!(
+        statistics.contains("missing_or_invalid_response_root"),
+        "{statistics}"
+    );
+    assert!(
+        statistics.contains("Runtime root repair help: 1"),
+        "{statistics}"
+    );
+    assert!(statistics.contains("badge-native"), "{statistics}");
+    assert!(statistics.contains("Action on-CPU time"), "{statistics}");
+    assert!(statistics.contains("LLM API latency"), "{statistics}");
+    assert!(statistics.contains("100.0%"), "{statistics}");
+    assert!(statistics.contains("claude-inline"), "{statistics}");
+    assert!(statistics.contains("badge-inline"), "{statistics}");
+
+    let prompt_dump =
+        std::fs::read_to_string(debug_root.join(session_id).join("llm_prompt.html")).unwrap();
+    assert!(prompt_dump.contains("inline system"), "{prompt_dump}");
+    assert!(prompt_dump.contains("inline retry prompt"), "{prompt_dump}");
+    assert!(
+        prompt_dump.find("inline system").unwrap()
+            < prompt_dump.find("inline retry prompt").unwrap(),
+        "{prompt_dump}"
+    );
+    assert!(!prompt_dump.contains("call_previous"), "{prompt_dump}");
+    assert!(!prompt_dump.contains("CWD: /work"), "{prompt_dump}");
+    assert!(!prompt_dump.contains("worker_id"), "{prompt_dump}");
+
+    let tool_schema_dump =
+        std::fs::read_to_string(debug_root.join(session_id).join("tool_schema.dump")).unwrap();
+    assert!(
+        tool_schema_dump.contains("scope: latest_request_only"),
+        "{tool_schema_dump}"
+    );
+    assert!(
+        tool_schema_dump.contains("tool_call_mode: inline"),
+        "{tool_schema_dump}"
+    );
+    assert!(
+        tool_schema_dump.contains("no native API tools field"),
+        "{tool_schema_dump}"
+    );
+    assert!(
+        !tool_schema_dump.contains("self_tool"),
+        "{tool_schema_dump}"
+    );
+
+    let response_dump =
+        std::fs::read_to_string(debug_root.join(session_id).join("llm_response.dump")).unwrap();
+    assert!(
+        response_dump.contains("request_sequence: 1"),
+        "{response_dump}"
+    );
+    assert!(
+        response_dump.contains("tool_call_count: 1"),
+        "{response_dump}"
+    );
+    assert!(response_dump.contains("call_current"), "{response_dump}");
+    assert!(
+        response_dump.contains("I will inspect the workspace."),
+        "{response_dump}"
+    );
+
+    let records = read_all_history_records(
+        &current_session_store(&state)
+            .unwrap()
+            .history_path_for_session(session_id),
+    )
+    .unwrap();
+    assert!(records.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Event {
+            turn_id,
+            kind: ChatHistoryEventKind::Repair,
+            extra,
+            ..
+        } if turn_id == &turn.turn_id
+            && extra
+                .get("payload")
+                .and_then(|payload| payload.get("topic"))
+                .and_then(|topic| topic.get("name"))
+                .and_then(Value::as_str)
+                == Some(CORE_TOPIC_MODEL_REPAIR)
+    )));
+}
+
+#[test]
 fn successful_cwd_action_updates_only_its_session_and_reconnect_snapshot() {
     let state = routing_test_state();
     let mut events = state.events.subscribe();
@@ -5291,6 +8149,8 @@ fn live_model_usage_is_retained_in_the_active_turn_and_correct_session() {
         "session_a",
         CoreSessionWorkerEvent::ModelResponse {
             round: 2,
+            content: String::new(),
+            tool_calls: Vec::new(),
             runtime_phase: None,
             usage: UsageStats {
                 prompt_tokens: 8_200,
@@ -5305,6 +8165,8 @@ fn live_model_usage_is_retained_in_the_active_turn_and_correct_session() {
         "session_a",
         CoreSessionWorkerEvent::ModelResponse {
             round: 3,
+            content: String::new(),
+            tool_calls: Vec::new(),
             runtime_phase: Some("toolgen".to_string()),
             usage: UsageStats {
                 prompt_tokens: 3_100,
@@ -5425,9 +8287,12 @@ fn active_turn_supplement_consumes_pending_attachments_into_the_same_turn() {
     assert!(state.sessions.lock().unwrap()[&session_id]
         .attachments
         .is_empty());
-    assert!(uploaded_files_context(&updated.user_entries[1].attachments)
-        .unwrap()
-        .contains("extra-context.md (/tmp/timem-web/extra-context.md)"));
+    assert!(uploaded_files_context(
+        &updated.user_entries[1].attachments,
+        &agent_core::response_protocol::XML_PROMPT_BOUNDARIES
+    )
+    .unwrap()
+    .contains("extra-context.md (/tmp/timem-web/extra-context.md)"));
 }
 
 #[test]
@@ -5496,6 +8361,9 @@ fn stale_supplement_after_cancel_consumes_pending_attachments_as_a_new_task() {
         ClientCommand::TurnSupplement {
             session_id: session_id.clone(),
             text: "new task with file".to_string(),
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap()
@@ -5513,6 +8381,109 @@ fn stale_supplement_after_cancel_consumes_pending_attachments_as_a_new_task() {
 }
 
 #[test]
+fn selected_attachment_ids_stay_bound_to_their_messages() {
+    let state = routing_test_state();
+    let first = WebAttachment {
+        id: "upload_first".to_string(),
+        name: "first.png".to_string(),
+        path: "/tmp/timem-web/first.png".to_string(),
+        bytes: 10,
+    };
+    let second = WebAttachment {
+        id: "upload_second".to_string(),
+        name: "second.png".to_string(),
+        path: "/tmp/timem-web/second.png".to_string(),
+        bytes: 20,
+    };
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.attachments = vec![first.clone(), second.clone()];
+    }
+
+    let first_ids = vec![first.id.clone()];
+    let first_turn = start_web_turn_with_selected_attachments(
+        &state,
+        "session_a",
+        "first queued message",
+        Some(&first_ids),
+        Some("queued_first"),
+    )
+    .unwrap();
+
+    assert_eq!(first_turn.user_entries[0].attachments, vec![first.clone()]);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        assert_eq!(sessions["session_a"].attachments, vec![second.clone()]);
+        assert!(sessions["session_a"]
+            .consumed_attachment_ids
+            .contains(&first.id));
+        assert!(!sessions["session_a"]
+            .consumed_attachment_ids
+            .contains(&second.id));
+    }
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.active_turn_id = None;
+        session.pending_turn_id = None;
+        session.state = "ready".to_string();
+    }
+    let second_ids = vec![second.id.clone()];
+    let second_turn = start_web_turn_with_selected_attachments(
+        &state,
+        "session_a",
+        "second queued message",
+        Some(&second_ids),
+        Some("queued_second"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        second_turn.user_entries[0].attachments,
+        vec![second.clone()]
+    );
+    assert!(state.sessions.lock().unwrap()["session_a"]
+        .attachments
+        .is_empty());
+}
+
+#[test]
+fn explicit_empty_attachment_ids_leave_other_queued_files_pending() {
+    let state = routing_test_state();
+    let attachment = WebAttachment {
+        id: "upload_reserved_for_later".to_string(),
+        name: "later.png".to_string(),
+        path: "/tmp/timem-web/later.png".to_string(),
+        bytes: 30,
+    };
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .attachments
+        .push(attachment.clone());
+
+    let turn = start_web_turn_with_selected_attachments(
+        &state,
+        "session_a",
+        "message without files",
+        Some(&[]),
+        Some("queued_without_files"),
+    )
+    .unwrap();
+
+    assert!(turn.user_entries[0].attachments.is_empty());
+    assert_eq!(
+        state.sessions.lock().unwrap()["session_a"].attachments,
+        vec![attachment]
+    );
+}
+
+#[test]
 fn immediate_message_after_core_finalization_starts_a_new_turn() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "FINAL_RACE");
@@ -5524,6 +8495,9 @@ fn immediate_message_after_core_finalization_starts_a_new_turn() {
             text: "finish immediately".to_string(),
             input_kind: None,
             source_turn_id: None,
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap()
@@ -5540,13 +8514,22 @@ fn immediate_message_after_core_finalization_starts_a_new_turn() {
         );
         thread::sleep(Duration::from_millis(2));
     }
-    assert_eq!(
-        state.sessions.lock().unwrap()[&session_id]
-            .active_turn_id
-            .as_deref(),
-        Some(first.turn_id.as_str()),
-        "the host must still expose the narrow stale-working window"
-    );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        if session.active_turn_id.is_none() && session.pending_turn_id.is_none() {
+            assert_eq!(
+                session.state, "ready",
+                "when Core completion is already consumed, UI must be ready"
+            );
+        } else {
+            assert!(
+                session.active_turn_id.as_deref() == Some(first.turn_id.as_str())
+                    || session.pending_turn_id.as_deref() == Some(first.turn_id.as_str()),
+                "an unconsumed Core turn must remain correlated to the first task"
+            );
+        }
+    }
 
     let event = handle_command(
         &state,
@@ -5554,6 +8537,9 @@ fn immediate_message_after_core_finalization_starts_a_new_turn() {
         ClientCommand::TurnSupplement {
             session_id: session_id.clone(),
             text: "run this after the final answer".to_string(),
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap()
@@ -5568,12 +8554,21 @@ fn immediate_message_after_core_finalization_starts_a_new_turn() {
         second.user_entries[0].text,
         "run this after the final answer"
     );
-    assert_eq!(
-        state.sessions.lock().unwrap()[&session_id]
-            .active_turn_id
-            .as_deref(),
-        Some(second.turn_id.as_str())
-    );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert!(
+            session.active_turn_id.as_deref() == Some(second.turn_id.as_str())
+                || session.pending_turn_id.as_deref() == Some(second.turn_id.as_str()),
+            "the new task must be correlated before or after Core TurnStarted"
+        );
+        if session.active_turn_id.is_none() {
+            assert_eq!(
+                session.state, "ready",
+                "a queued task must not manufacture Core working state"
+            );
+        }
+    }
 }
 
 #[test]
@@ -5681,7 +8676,37 @@ fn duplicate_cancel_commands_are_idempotent_for_one_active_turn() {
 }
 
 #[test]
-fn rapid_submit_during_an_active_turn_is_treated_as_a_supplement() {
+fn turn_submit_during_an_active_turn_cannot_merge_into_the_current_turn() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "QUEUED_NEXT_TURN");
+    let first = start_web_turn(&state, &session_id, "Q1").unwrap();
+
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "Q2".to_string(),
+            input_kind: None,
+            source_turn_id: None,
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "turn_already_active_use_supplement");
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(session.turns.len(), 1);
+    assert_eq!(session.turns[0].turn_id, first.turn_id);
+    assert_eq!(session.turns[0].user_entries.len(), 1);
+    assert_eq!(session.turns[0].user_entries[0].text, "Q1");
+}
+
+#[test]
+fn explicit_supplement_during_an_active_turn_stays_in_the_current_turn() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "SUBMIT_RACE");
     let first = start_web_turn(&state, &session_id, "initial upload task").unwrap();
@@ -5834,6 +8859,9 @@ fn stale_supplement_after_cancel_completion_starts_a_new_turn() {
         ClientCommand::TurnSupplement {
             session_id: session_id.clone(),
             text: "new instruction after stop".to_string(),
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap()
@@ -5912,9 +8940,82 @@ fn stale_work_instruction_reply_during_new_active_turn_is_ignored() {
 }
 
 #[test]
+fn background_exit_event_is_appended_to_its_original_turn() {
+    let state = routing_test_state();
+    let first = start_web_turn(&state, "session_a", "start background work").unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.active_turn_id = None;
+        session.turns.push(WebTurn {
+            turn_id: "turn_newer".to_string(),
+            state: "working".to_string(),
+            created_at_ms: now_ms(),
+            user_entries: Vec::new(),
+            events: Vec::new(),
+            final_answer: None,
+            completion: None,
+        });
+        session.active_turn_id = Some("turn_newer".to_string());
+    }
+
+    append_turn_event(
+        &state,
+        "session_a",
+        Some(&first.turn_id),
+        "core_topic",
+        json!({
+            "topic": {"name": "core.action"},
+            "payload": {
+                "action_id": "call_bg",
+                "event": "finish",
+                "status": "background_running"
+            }
+        }),
+    )
+    .expect("background launch event");
+    let terminal = json!({
+        "topic": {"name": "core.action"},
+        "payload": {
+            "action_id": "call_bg",
+            "event": "finish",
+            "status": "completed",
+            "turn_id": "action_turn_internal_id"
+        }
+    });
+    let target = core_topic_target_turn_id(&state, "session_a", &terminal)
+        .expect("action id should recover the original web turn");
+    assert_eq!(target, first.turn_id);
+    let reference = append_turn_event(&state, "session_a", Some(&target), "core_topic", terminal)
+        .expect("original turn terminal event");
+    assert_eq!(reference.turn_id, first.turn_id);
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions["session_a"];
+    assert_eq!(session.active_turn_id.as_deref(), Some("turn_newer"));
+    assert_eq!(
+        session
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == first.turn_id)
+            .unwrap()
+            .events
+            .len(),
+        2
+    );
+    assert!(session
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == "turn_newer")
+        .unwrap()
+        .events
+        .is_empty());
+}
+
+#[test]
 fn active_turn_event_windows_are_bounded_and_session_isolated() {
     const SESSION_COUNT: usize = 5;
-    const EVENTS_PER_SESSION: usize = MAX_TURN_EVENTS + 75;
+    const EVENTS_PER_SESSION: usize = 575;
     let state = routing_test_state();
     {
         let mut sessions = state.sessions.lock().unwrap();
@@ -5955,10 +9056,11 @@ fn active_turn_event_windows_are_bounded_and_session_isolated() {
     for ordinal in 0..SESSION_COUNT {
         let session_id = format!("bounded_{ordinal}");
         let turn = sessions[&session_id].turns.last().unwrap();
-        assert_eq!(turn.events.len(), MAX_TURN_EVENTS);
+        assert_eq!(turn.events.len(), EVENTS_PER_SESSION);
+        assert_eq!(turn.events.first().unwrap().payload["sequence"], 0);
         assert_eq!(
-            turn.events.first().unwrap().payload["sequence"],
-            EVENTS_PER_SESSION - MAX_TURN_EVENTS
+            turn.events.last().unwrap().payload["sequence"],
+            EVENTS_PER_SESSION - 1
         );
         assert!(turn
             .events
@@ -6001,10 +9103,8 @@ impl ModelClient for TaggedFinalModel {
         _should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<LlmResponse, String> {
         Ok(LlmResponse {
-            content: format!(
-                "<response><free_talk>done</free_talk><final_answer>{}</final_answer></response>",
-                self.0
-            ),
+            tool_calls: Vec::new(),
+            content: confirmed_xml_response(&format!("<final_answer>{}</final_answer>", self.0)),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -6035,10 +9135,11 @@ impl ModelClient for RestoreBarrierModel {
         self.prompts.lock().unwrap().push(prompt.to_string());
         self.barrier.wait();
         Ok(LlmResponse {
-            content: format!(
-                "<response><free_talk>done</free_talk><final_answer>{}</final_answer></response>",
+            tool_calls: Vec::new(),
+            content: confirmed_xml_response(&format!(
+                "<final_answer>{}</final_answer>",
                 self.final_answer
-            ),
+            )),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -6066,7 +9167,8 @@ impl ModelClient for ToolGenPromptCaptureModel {
     ) -> Result<LlmResponse, String> {
         self.prompts.lock().unwrap().push(prompt.to_string());
         Ok(LlmResponse {
-            content: "<response><toolgen_retrospect>No reusable tool was published.</toolgen_retrospect><final_answer>ToolGen review complete.</final_answer></response>".to_string(),
+        tool_calls: Vec::new(),
+            content: confirmed_xml_response("<toolgen_retrospect>No reusable tool was published.</toolgen_retrospect><final_answer>ToolGen review complete.</final_answer>"),
             model_name: "test-model".to_string(),
             usage: UsageStats {
                 llm_calls: 1,
@@ -6094,9 +9196,9 @@ impl ModelClient for ToolGenPublishModel {
     ) -> Result<LlmResponse, String> {
         self.calls += 1;
         let content = if self.calls == 1 {
-            "<response><free_talk>Checking the reusable workflow.</free_talk><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"printf toolgen-host-check\",\"timeout_ms\":5000}}]]]></action_json></working_still_action></response>".to_string()
-        } else if prompt.contains("Action result: toolgen\nop: publish\nstatus: ready") {
-            "<response><toolgen_retrospect>Published host-tool after runtime validation.</toolgen_retrospect><final_answer>ToolGen host workflow completed.</final_answer></response>".to_string()
+            "<ASSISTANT><free_talk>Checking the reusable workflow.</free_talk><actions><run_bash name=\"check reusable workflow\" timeout_ms=\"5000\"><cmd>printf toolgen-host-check</cmd></run_bash></actions></ASSISTANT>".to_string()
+        } else if prompt.contains(r#"<action_result><toolgen name="publish verified draft">"#) {
+            confirmed_xml_response("<toolgen_retrospect>Published host-tool after runtime validation.</toolgen_retrospect><final_answer>ToolGen host workflow completed.</final_answer>")
         } else {
             let marker = "Write the new tool files only in this temporary staging directory:\n";
             let draft = prompt
@@ -6127,11 +9229,12 @@ impl ModelClient for ToolGenPublishModel {
             )
             .unwrap();
             format!(
-                "<response><free_talk>Publishing the verified draft.</free_talk><working_still_action><action_json><![CDATA[[{{\"toolgen\":{{\"op\":\"publish\",\"draft_path\":{}}}}}]]]></action_json></working_still_action></response>",
-                serde_json::to_string(draft).unwrap()
+                "<ASSISTANT><free_talk>Publishing the verified draft.</free_talk><actions><toolgen name=\"publish verified draft\" op=\"publish\"><draft_path>{}</draft_path></toolgen></actions></ASSISTANT>",
+                draft
             )
         };
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content,
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -6146,12 +9249,11 @@ impl ModelClient for ToolGenPublishModel {
     }
 }
 
-struct ChangeCwdModel {
-    new_path: String,
+struct InspectPathModel {
     round: u8,
 }
 
-impl ModelClient for ChangeCwdModel {
+impl ModelClient for InspectPathModel {
     fn call_model(
         &mut self,
         _config: &ModelServiceConfig,
@@ -6161,14 +9263,12 @@ impl ModelClient for ChangeCwdModel {
     ) -> Result<LlmResponse, String> {
         self.round += 1;
         let content = if self.round == 1 {
-            format!(
-                "<response><working_still_action><action_json><![CDATA[[{{\"self_tool\":{{\"type\":\"cwd\",\"op\":\"chg_cwd\",\"new_path\":{}}}}}]]]></action_json></working_still_action></response>",
-                serde_json::to_string(&self.new_path).unwrap()
-            )
+            "<ASSISTANT><actions><self_tool name=\"inspect runtime paths\" type=\"path\"/></actions></ASSISTANT>".to_string()
         } else {
-            "<response><final_answer>cwd updated</final_answer></response>".to_string()
+            confirmed_xml_response("<final_answer>paths inspected</final_answer>")
         };
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content,
             model_name: "test-model".to_string(),
             usage: UsageStats {
@@ -6463,6 +9563,9 @@ fn manual_toolgen_uses_system_only_without_optional_user_guidance() {
             text: String::new(),
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some(source_turn_id.clone()),
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap()
@@ -6470,7 +9573,7 @@ fn manual_toolgen_uses_system_only_without_optional_user_guidance() {
     let WireEvent::TurnUpdated { turn, .. } = event else {
         panic!("manual ToolGen must create a Web turn");
     };
-    assert_eq!(turn.state, "working");
+    assert_eq!(turn.state, "pending");
     assert!(turn.turn_id.starts_with("web_toolgen_turn_"));
     assert!(turn.user_entries.is_empty());
     drive_worker_until_session_ready(&state, &session_id, &prompts);
@@ -6481,15 +9584,18 @@ fn manual_toolgen_uses_system_only_without_optional_user_guidance() {
     assert!(!prompt.contains("Completed task:"));
     assert!(!prompt.contains("Completed task result:"));
     assert!(!prompt.contains("Observed action evidence:"));
-    assert!(prompt.contains("## ToolGen test"));
+    assert!(prompt.contains("<ASSISTANT>"));
+    assert!(!prompt.contains("<ASSISTANT id="));
     assert!(!prompt.contains("ToolGen test_TOOLGEN"));
     let marker = "[TOOL_GEN_TASK] Please extract the reusable function";
-    let delta_start = prompt[..prompt.find(marker).unwrap()]
-        .rfind("[BEGIN DELTA]")
-        .unwrap();
-    let delta_end = prompt[delta_start..].find("[END DELTA]").unwrap() + delta_start;
+    let marker_at = prompt.find(marker).unwrap();
+    let delta_start = prompt[..marker_at].rfind("<prompt_delta ").unwrap();
+    let delta_end =
+        prompt[marker_at..].find("</prompt_delta>").unwrap() + marker_at + "</prompt_delta>".len();
     let toolgen_delta = &prompt[delta_start..delta_end];
-    assert!(toolgen_delta.contains("## SYSTEM"));
+    assert!(toolgen_delta.contains("<RUNTIME>"));
+    assert!(!toolgen_delta.contains("<USER>"));
+    assert!(!toolgen_delta.contains("## RUNTIME"));
     assert!(!toolgen_delta.contains("## USER"));
 
     let sessions = state.sessions.lock().unwrap();
@@ -6519,6 +9625,9 @@ fn manual_toolgen_adds_optional_guidance_as_user_component() {
             text: "Prefer a Python CLI with JSON output.".to_string(),
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some(source_turn_id),
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap()
@@ -6534,16 +9643,20 @@ fn manual_toolgen_adds_optional_guidance_as_user_component() {
     let guidance_at = prompt
         .find("Prefer a Python CLI with JSON output.")
         .expect("optional ToolGen guidance must reach the model");
-    let delta_start = prompt[..guidance_at].rfind("[BEGIN DELTA]").unwrap();
-    let delta_end = prompt[guidance_at..].find("[END DELTA]").unwrap() + guidance_at;
+    let delta_start = prompt[..guidance_at].rfind("<prompt_delta ").unwrap();
+    let delta_end = prompt[guidance_at..].find("</prompt_delta>").unwrap()
+        + guidance_at
+        + "</prompt_delta>".len();
     let toolgen_delta = &prompt[delta_start..delta_end];
-    assert!(toolgen_delta.contains("## USER"));
-    let system_at = toolgen_delta.find("## SYSTEM").unwrap();
-    let user_at = toolgen_delta.find("## USER").unwrap();
+    assert!(toolgen_delta.contains("<USER>"));
+    let runtime_at = toolgen_delta.find("<RUNTIME>").unwrap();
+    let user_at = toolgen_delta.find("<USER>").unwrap();
     assert!(
-        system_at < user_at,
-        "the fixed ToolGen SYSTEM instruction must precede optional USER guidance"
+        runtime_at < user_at,
+        "the fixed ToolGen RUNTIME instruction must precede optional USER guidance"
     );
+    assert!(!toolgen_delta.contains("## RUNTIME"));
+    assert!(!toolgen_delta.contains("## USER"));
 }
 
 #[test]
@@ -6560,6 +9673,9 @@ fn manual_toolgen_publishes_tool_and_retains_the_complete_web_event_chain() {
             text: "Keep the generated CLI deterministic.".to_string(),
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some(source_turn_id.clone()),
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap();
@@ -6629,6 +9745,9 @@ fn manual_toolgen_rejects_bad_source_state_and_duplicate_clicks() {
             text: String::new(),
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some("missing_turn".to_string()),
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap_err();
@@ -6649,6 +9768,9 @@ fn manual_toolgen_rejects_bad_source_state_and_duplicate_clicks() {
             text: String::new(),
             input_kind: Some("toolgen".to_string()),
             source_turn_id: Some(unfinished.turn_id),
+            attachment_ids: None,
+            role_id: None,
+            role_ids: Vec::new(),
         },
     )
     .unwrap_err();
@@ -6660,6 +9782,9 @@ fn manual_toolgen_rejects_bad_source_state_and_duplicate_clicks() {
         text: String::new(),
         input_kind: Some("toolgen".to_string()),
         source_turn_id: Some(source_turn_id.clone()),
+        attachment_ids: None,
+        role_id: None,
+        role_ids: Vec::new(),
     };
     assert!(handle_command(&state, TEST_PORT, request())
         .unwrap()
@@ -6752,13 +9877,11 @@ fn real_concurrent_workers_route_final_topics_to_matching_web_sessions() {
 }
 
 #[test]
-fn real_worker_cwd_tool_call_updates_web_session_state() {
+fn real_worker_self_tool_path_call_is_read_only_for_web_session_cwd() {
     let state = routing_test_state();
     let root = std::env::temp_dir().join(format!("timem_web_cwd_e2e_{}", now_ms()));
-    let nested = root.join("nested");
-    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
     let root = std::fs::canonicalize(root).unwrap();
-    let nested = std::fs::canonicalize(nested).unwrap();
     let mut core = AgentCore::new(
         STATIC_PROMPT,
         CoreProfile {
@@ -6782,10 +9905,7 @@ fn real_worker_cwd_tool_call_updates_web_session_state() {
             context_id.clone(),
             Some("CWD_TEST".to_string()),
             None,
-            ChangeCwdModel {
-                new_path: nested.display().to_string(),
-                round: 0,
-            },
+            InspectPathModel { round: 0 },
         )
         .unwrap();
     let mut session = test_web_session(&session_id, 0, "CWD_TEST".to_string());
@@ -6818,7 +9938,10 @@ fn real_worker_cwd_tool_call_updates_web_session_state() {
                 event,
             );
         }
-        if state.sessions.lock().unwrap()[&session_id].current_dir == nested.display().to_string() {
+        if state.sessions.lock().unwrap()[&session_id]
+            .active_turn_id
+            .is_none()
+        {
             break;
         }
         thread::sleep(Duration::from_millis(5));
@@ -6826,7 +9949,7 @@ fn real_worker_cwd_tool_call_updates_web_session_state() {
 
     assert_eq!(
         state.sessions.lock().unwrap()[&session_id].current_dir,
-        nested.display().to_string()
+        root.display().to_string()
     );
 }
 
@@ -6970,8 +10093,10 @@ async fn ask_mode_decline_continues_the_turn_without_loading_work_instructions()
         .pending_work_instruction_turn
         .is_none());
     drop(sessions);
-    let context = session_context(&state, &session_id, &[]).unwrap().unwrap();
-    assert!(context.contains("host: local_web"));
+    let context = session_context(&state, &session_id, &[]).unwrap();
+    let context = context.as_deref().unwrap_or("");
+    assert!(!context.contains("host: local_web"));
+    assert!(!context.contains("transport: websocket"));
     assert!(!context.contains("MUST_NOT_REACH_MODEL"));
 }
 
@@ -7075,8 +10200,846 @@ fn toolrepo_detail_rename_and_future_prompt_hint_share_the_published_state() {
     assert!(context.contains(repo.root().to_string_lossy().as_ref()));
     assert!(context.contains("semantic names"));
     assert!(context.contains("run the script's --help"));
-    assert!(!session_context(&state, "session_b", &[])
-        .unwrap()
-        .unwrap()
+    let other_context = session_context(&state, "session_b", &[]).unwrap();
+    assert!(!other_context
+        .as_deref()
+        .unwrap_or("")
         .contains("Previously accumulated reusable scripts"));
+}
+
+#[test]
+fn workspace_lock_error_identifies_owner_and_escape_routes() {
+    let root = std::env::temp_dir().join(unique_web_id("workspace_lock_message"));
+    std::fs::create_dir_all(&root).unwrap();
+    let lock = agent_core::WorkspaceInstanceLock::acquire(&root, "timem-shell").unwrap();
+
+    let message = friendly_workspace_instance_error(
+        "workspace_already_in_use".to_string(),
+        root.to_string_lossy().as_ref(),
+    );
+    assert!(message.contains("already open"));
+    assert!(message.contains("actively locked"));
+    assert!(message.contains(&format!("PID:  {}", std::process::id())));
+    assert!(message.contains("Host: timem-shell"));
+    assert!(message.contains("workspace-instance.lock"));
+    assert!(message.contains("PID identity matches"));
+    assert!(message.contains("--space /absolute/path/to/another-mem"));
+    assert!(message.contains("Do not delete the lock file"));
+    #[cfg(unix)]
+    {
+        assert!(message.contains(&format!("ps -fp {}", std::process::id())));
+        assert!(message.contains(&format!("kill -TERM {}", std::process::id())));
+        assert!(message.contains("lsof"));
+    }
+    #[cfg(windows)]
+    {
+        assert!(message.contains(&format!("tasklist /FI \"PID eq {}\"", std::process::id())));
+        assert!(message.contains(&format!("taskkill /PID {} /T", std::process::id())));
+    }
+
+    drop(lock);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn workspace_lock_error_handles_unreadable_owner_metadata() {
+    let root = std::env::temp_dir().join(unique_web_id("workspace_lock_unknown_owner"));
+    std::fs::create_dir_all(root.join(".guard")).unwrap();
+    std::fs::write(
+        agent_core::WorkspaceInstanceLock::lock_path(&root),
+        b"not-json",
+    )
+    .unwrap();
+
+    let message = friendly_workspace_instance_error(
+        "workspace_already_in_use".to_string(),
+        root.to_string_lossy().as_ref(),
+    );
+    assert!(message.contains("PID:  unavailable"));
+    assert!(message.contains("--space /absolute/path/to/another-mem"));
+    #[cfg(unix)]
+    assert!(message.contains("fuser -v"));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn friendly_journal_error_replaces_in_use_with_actionable_message() {
+    let data_dir = std::path::PathBuf::from("/tmp/timem_test_data");
+    let msg = friendly_journal_error("event_journal_in_use".to_string(), &data_dir, ".test_mem");
+    assert!(msg.contains("already running on this memory space"));
+    assert!(msg.contains("/tmp/timem_test_data"));
+    assert!(msg.contains(".test_mem"));
+    assert!(msg.contains("--space"));
+    assert!(msg.contains("/absolute/path/to/mem"));
+    assert!(!msg.contains("event_journal_in_use"));
+    let passthrough = friendly_journal_error("other_error".to_string(), &data_dir, ".test_mem");
+    assert_eq!(passthrough, "other_error");
+}
+
+#[test]
+fn existing_instance_is_rejected_with_pid_url_and_stop_command() {
+    let path = std::env::temp_dir().join(unique_web_id("existing_instance_recovery"));
+    let mut journal = EventJournal::open(&path).unwrap();
+    journal
+        .publish_instance_info(&JournalInstanceInfo {
+            pid: 4242,
+            launch_parent_pid: None,
+            port: Some(18080),
+            token: Some("existing-token".to_string()),
+            browser_url: Some("http://127.0.0.1:18080/?token=existing-token".to_string()),
+            public_access: false,
+            started_at_ms: 123,
+        })
+        .unwrap();
+
+    let info = EventJournal::read_instance_info(&path).unwrap();
+    let error = existing_web_instance_error(&info);
+    assert!(error.contains("never reused"));
+    assert!(error.contains("PID:  4242"));
+    assert!(error.contains("http://127.0.0.1:18080/?token=existing-token"));
+    assert!(error.contains("--space"));
+    assert!(!error.contains("--data-dir"));
+    #[cfg(unix)]
+    assert!(error.contains("kill -TERM 4242"));
+    #[cfg(windows)]
+    assert!(error.contains("taskkill /PID 4242 /T"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let lock_path = path.with_file_name(format!(
+            "{}.lock",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        assert_eq!(
+            std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    drop(journal);
+    let _ = std::fs::remove_file(path.with_file_name(format!(
+        "{}.lock",
+        path.file_name().unwrap().to_string_lossy()
+    )));
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn healthy_existing_instance_is_detected_without_taking_its_journal() {
+    let path = std::env::temp_dir().join(unique_web_id("healthy_existing_instance"));
+    let mut owner = EventJournal::open(&path).unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    owner
+        .publish_instance_info(&JournalInstanceInfo {
+            pid: 4242,
+            launch_parent_pid: Some(std::process::id()),
+            port: Some(port),
+            token: Some("healthy-token".to_string()),
+            browser_url: Some(format!("http://127.0.0.1:{port}/?token=healthy-token")),
+            public_access: false,
+            started_at_ms: 123,
+        })
+        .unwrap();
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 1024];
+        let size = socket.read(&mut request).await.unwrap();
+        assert!(String::from_utf8_lossy(&request[..size])
+            .starts_with("GET /api/health?token=healthy-token "));
+        let body = format!(r#"{{"ok":true,"port":{port}}}"#);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    let outcome = open_event_journal_after_handoff(
+        &path,
+        Duration::from_secs(1),
+        Duration::from_millis(10),
+        Duration::from_millis(250),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        EventJournalOpenOutcome::Existing(ref info) if info.pid == 4242
+    ));
+    server.await.unwrap();
+    assert_eq!(
+        EventJournal::open(&path).unwrap_err(),
+        "event_journal_in_use"
+    );
+
+    drop(owner);
+    remove_web_journal_files(&path);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn healthy_host_with_dead_launcher_is_not_reused_during_shutdown_handoff() {
+    let path = std::env::temp_dir().join(unique_web_id("dead_launcher_handoff"));
+    let mut owner = EventJournal::open(&path).unwrap();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    owner
+        .publish_instance_info(&JournalInstanceInfo {
+            pid: 4242,
+            launch_parent_pid: Some(i32::MAX as u32),
+            port: Some(port),
+            token: Some("dying-token".to_string()),
+            browser_url: Some(format!("http://127.0.0.1:{port}/?token=dying-token")),
+            public_access: false,
+            started_at_ms: 123,
+        })
+        .unwrap();
+
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let accepted_for_server = Arc::clone(&accepted);
+    let server = tokio::spawn(async move {
+        if let Ok(Ok((_socket, _))) = timeout(Duration::from_millis(200), listener.accept()).await {
+            accepted_for_server.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let release = tokio::spawn(async move {
+        sleep(Duration::from_millis(80)).await;
+        drop(owner);
+    });
+
+    let outcome = open_event_journal_after_handoff(
+        &path,
+        Duration::from_secs(1),
+        Duration::from_millis(10),
+        Duration::from_millis(100),
+    )
+    .await
+    .unwrap();
+
+    let EventJournalOpenOutcome::Owned(new_owner) = outcome else {
+        panic!("a Host whose launcher exited must not be reused");
+    };
+    release.await.unwrap();
+    server.await.unwrap();
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        0,
+        "launcher death must be checked before probing the dying Host"
+    );
+
+    drop(new_owner);
+    remove_web_journal_files(&path);
+}
+
+#[tokio::test]
+async fn startup_waits_for_exiting_instance_then_takes_over_its_journal() {
+    let path = std::env::temp_dir().join(unique_web_id("journal_handoff"));
+    let owner = EventJournal::open(&path).unwrap();
+
+    let release = tokio::spawn(async move {
+        sleep(Duration::from_millis(80)).await;
+        drop(owner);
+    });
+    let outcome = open_event_journal_after_handoff(
+        &path,
+        Duration::from_secs(1),
+        Duration::from_millis(10),
+        Duration::from_millis(20),
+    )
+    .await
+    .unwrap();
+
+    let EventJournalOpenOutcome::Owned(new_owner) = outcome else {
+        panic!("an inaccessible exiting instance must not be reported as reusable");
+    };
+    release.await.unwrap();
+    assert_eq!(
+        EventJournal::open(&path).unwrap_err(),
+        "event_journal_in_use"
+    );
+    drop(new_owner);
+    remove_web_journal_files(&path);
+}
+
+#[tokio::test]
+async fn inaccessible_instance_that_keeps_the_lock_fails_clearly() {
+    let path = std::env::temp_dir().join(unique_web_id("inaccessible_instance"));
+    let owner = EventJournal::open(&path).unwrap();
+
+    let error = match open_event_journal_after_handoff(
+        &path,
+        Duration::from_millis(80),
+        Duration::from_millis(10),
+        Duration::from_millis(10),
+    )
+    .await
+    {
+        Ok(_) => panic!("an inaccessible lock owner must not be treated as recovered"),
+        Err(error) => error,
+    };
+    assert!(error.contains("still holding this workspace lock"));
+    assert!(error.contains("not reachable"));
+    assert!(!error.contains("event_journal_in_use"));
+
+    drop(owner);
+    remove_web_journal_files(&path);
+}
+
+fn remove_web_journal_files(path: &Path) {
+    let _ = std::fs::remove_file(path.with_file_name(format!(
+        "{}.lock",
+        path.file_name().unwrap().to_string_lossy()
+    )));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn startup_resource_errors_are_actionable_instead_of_internal_codes() {
+    let data_dir = std::path::PathBuf::from("/tmp/timem_test_data");
+    let locked =
+        friendly_memory_space_error("mem_guard_timeout".to_string(), &data_dir, ".test_mem");
+    assert!(locked.contains("locked by another running operation"));
+    assert!(locked.contains("automatically recovers locks"));
+    assert!(locked.contains("cargo run -p timem_web -- --space"));
+    assert!(!locked.contains("mem_guard_timeout"));
+
+    let requested = friendly_bind_error("requested_port_unavailable".to_string(), Some(18080));
+    assert!(requested.contains("Port 18080"));
+    assert!(requested.contains("cargo run -p timem_web"));
+    assert!(!requested.contains("requested_port_unavailable"));
+
+    let exhausted = friendly_bind_error(
+        format!("no_available_port_in_range:{PORT_START}..={PORT_END}"),
+        None,
+    );
+    assert!(exhausted.contains("local web port"));
+    assert!(exhausted.contains("firewall or sandbox"));
+    assert!(!exhausted.contains("no_available_port_in_range"));
+}
+
+#[test]
+#[ignore = "manual endpoint scale/concurrency performance profile"]
+fn model_endpoint_scale_and_concurrency_performance_profile() {
+    fn percentile(mut samples: Vec<std::time::Duration>, percentile: usize) -> std::time::Duration {
+        samples.sort_unstable();
+        samples[(samples.len() - 1) * percentile / 100]
+    }
+
+    fn endpoint(index: usize) -> ModelEndpointConfig {
+        ModelEndpointConfig {
+            id: format!("endpoint-{index:05}"),
+            name: format!("Endpoint {index:05}"),
+            model: "gpt-4.1-mini".to_string(),
+            api_protocol: "openai-compatible".to_string(),
+            response_protocol: "xml".to_string(),
+            base_url: format!("https://api-{index:05}.example.test/v1"),
+            max_llm_input_tokens: 100_000,
+            max_llm_output_tokens: 10_000,
+            stream: false,
+            api_key: format!("secret-{index:05}"),
+            http_headers: Default::default(),
+        }
+    }
+
+    for count in [100usize, 1_000, 5_000] {
+        let state = routing_test_state();
+        let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_perf"));
+        set_test_mem(&state, root.clone(), ".test_mem");
+        {
+            let mut mem = state.mem.lock().unwrap();
+            mem.model_endpoints = (0..count).map(endpoint).collect();
+            save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints).unwrap();
+        }
+        let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+        let file_bytes = std::fs::metadata(model_endpoints_path(&memory_dir))
+            .unwrap()
+            .len();
+
+        let reports = model_endpoint_reports(&state).unwrap();
+        assert_eq!(reports.len(), count);
+        let report_json_bytes = serde_json::to_vec(&reports).unwrap().len();
+        let report_samples = (0..25)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let reports = model_endpoint_reports(&state).unwrap();
+                assert_eq!(reports.len(), count);
+                started.elapsed()
+            })
+            .collect::<Vec<_>>();
+        let secret_samples = (0..25)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                assert_eq!(
+                    model_endpoint_secrets(&state, &format!("endpoint-{:05}", count - 1))
+                        .unwrap()
+                        .0,
+                    format!("secret-{:05}", count - 1)
+                );
+                started.elapsed()
+            })
+            .collect::<Vec<_>>();
+
+        let update_started = std::time::Instant::now();
+        upsert_model_endpoint(
+            &state,
+            ModelEndpointInput {
+                id: Some(format!("endpoint-{:05}", count - 1)),
+                name: format!("Endpoint {:05} renamed", count - 1),
+                model: "gpt-4.1".to_string(),
+                api_protocol: "openai-compatible".to_string(),
+                response_protocol: "json".to_string(),
+                base_url: "https://updated.example.test/v1".to_string(),
+                max_llm_input_tokens: 100_000,
+                max_llm_output_tokens: 10_000,
+                stream: true,
+                api_key: None,
+                http_headers: BTreeMap::from([
+                    ("Authorization".to_string(), "****".to_string()),
+                    ("X-Tenant".to_string(), "****".to_string()),
+                ]),
+            },
+        )
+        .unwrap();
+        let update_elapsed = update_started.elapsed();
+
+        let reload_started = std::time::Instant::now();
+        assert_eq!(
+            load_model_endpoints_resilient(&memory_dir).unwrap().len(),
+            count
+        );
+        let reload_elapsed = reload_started.elapsed();
+
+        eprintln!(
+            "endpoint_perf count={count} file_bytes={file_bytes} report_json_bytes={report_json_bytes} reports_p50_us={} reports_p95_us={} secret_p50_us={} secret_p95_us={} update_fsync_us={} reload_us={}",
+            percentile(report_samples.clone(), 50).as_micros(),
+            percentile(report_samples, 95).as_micros(),
+            percentile(secret_samples.clone(), 50).as_micros(),
+            percentile(secret_samples, 95).as_micros(),
+            update_elapsed.as_micros(),
+            reload_elapsed.as_micros(),
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_concurrency_perf"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.model_endpoints = (0..1_000).map(endpoint).collect();
+        save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints).unwrap();
+    }
+    let started = std::time::Instant::now();
+    let threads = (0..16)
+        .map(|index| {
+            let state = state.clone();
+            std::thread::spawn(move || {
+                upsert_model_endpoint(
+                    &state,
+                    ModelEndpointInput {
+                        id: Some(format!("endpoint-{index:05}")),
+                        name: format!("Concurrent {index:05}"),
+                        model: "gpt-4.1-mini".to_string(),
+                        api_protocol: "openai-compatible".to_string(),
+                        response_protocol: "xml".to_string(),
+                        base_url: format!("https://concurrent-{index}.example.test/v1"),
+                        max_llm_input_tokens: 100_000,
+                        max_llm_output_tokens: 10_000,
+                        stream: false,
+                        api_key: None,
+                        http_headers: Default::default(),
+                    },
+                )
+                .unwrap();
+            })
+        })
+        .collect::<Vec<_>>();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let elapsed = started.elapsed();
+    eprintln!(
+        "endpoint_perf concurrent_updates=16 list_count=1000 total_us={} mean_us={}",
+        elapsed.as_micros(),
+        elapsed.as_micros() / 16
+    );
+    assert_eq!(model_endpoint_reports(&state).unwrap().len(), 1_000);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn legacy_model_endpoints_load_with_default_token_limits() {
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_legacy_model_endpoint"));
+    let memory_dir = root.join("memory");
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    std::fs::write(
+        model_endpoints_path(&memory_dir),
+        r#"[{"id":"legacy","name":"Legacy","model":"gpt","api_protocol":"openai-compatible","response_protocol":"xml","base_url":"https://api.example.test/v1","api_key":""}]"#,
+    )
+    .unwrap();
+
+    let endpoints = load_model_endpoints_resilient(&memory_dir).unwrap();
+    assert_eq!(endpoints[0].max_llm_input_tokens, 100_000);
+    assert_eq!(endpoints[0].max_llm_output_tokens, 10_000);
+    assert!(!endpoints[0].stream);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_endpoint_headers_accept_safe_special_values_and_reject_injection() {
+    let valid = BTreeMap::from([
+        (
+            "X-Signature_1".to_string(),
+            "quoted=\"yes\"; path=C:\\tmp; city=东京".to_string(),
+        ),
+        ("X-Api.Key".to_string(), "a+b/c==".to_string()),
+    ]);
+    assert_eq!(agent_core::validate_model_http_headers(&valid), Ok(()));
+    assert!(agent_core::validate_model_http_headers(&BTreeMap::from([(
+        "Bad Header".to_string(),
+        "value".to_string()
+    )]))
+    .is_err());
+    assert!(agent_core::validate_model_http_headers(&BTreeMap::from([(
+        "X-Test".to_string(),
+        "ok\r\nInjected: yes".to_string()
+    )]))
+    .is_err());
+    assert!(agent_core::validate_model_http_headers(&BTreeMap::from([(
+        "X-Test".to_string(),
+        "bad\0value".to_string()
+    )]))
+    .is_err());
+}
+
+#[test]
+fn model_endpoint_rejects_token_limits_outside_supported_lists() {
+    let invalid_input = ModelEndpointInput {
+        id: None,
+        name: "Invalid input".to_string(),
+        model: "gpt".to_string(),
+        api_protocol: "openai-compatible".to_string(),
+        response_protocol: "xml".to_string(),
+        base_url: "https://api.example.test/v1".to_string(),
+        max_llm_input_tokens: 128_000,
+        max_llm_output_tokens: 10_000,
+        stream: false,
+        api_key: None,
+        http_headers: Default::default(),
+    };
+    assert_eq!(
+        normalize_model_endpoint_input(None, invalid_input).unwrap_err(),
+        "invalid_model_endpoint_max_input_tokens"
+    );
+
+    let invalid_output = ModelEndpointInput {
+        id: None,
+        name: "Invalid output".to_string(),
+        model: "gpt".to_string(),
+        api_protocol: "openai-compatible".to_string(),
+        response_protocol: "xml".to_string(),
+        base_url: "https://api.example.test/v1".to_string(),
+        max_llm_input_tokens: 200_000,
+        max_llm_output_tokens: 8_000,
+        stream: false,
+        api_key: None,
+        http_headers: Default::default(),
+    };
+    assert_eq!(
+        normalize_model_endpoint_input(None, invalid_output).unwrap_err(),
+        "invalid_model_endpoint_max_output_tokens"
+    );
+}
+
+#[test]
+fn model_endpoint_stream_requires_openai_compatible_protocol() {
+    let input = ModelEndpointInput {
+        id: None,
+        name: "Responses stream".to_string(),
+        model: "gpt".to_string(),
+        api_protocol: "openai-responses".to_string(),
+        response_protocol: "json".to_string(),
+        base_url: "https://api.example.test/v1".to_string(),
+        max_llm_input_tokens: 200_000,
+        max_llm_output_tokens: 20_000,
+        stream: true,
+        api_key: None,
+        http_headers: Default::default(),
+    };
+    assert_eq!(
+        normalize_model_endpoint_input(None, input).unwrap_err(),
+        "model_endpoint_stream_requires_openai_compatible"
+    );
+}
+
+#[test]
+fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_model_endpoints"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let session_id = register_real_worker(&state, "MODEL_ENDPOINT_APPLY");
+
+    let created = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointUpsert {
+            endpoint: ModelEndpointInput {
+                id: Some("endpoint-one".to_string()),
+                name: "Production".to_string(),
+                model: "gpt-4.1".to_string(),
+                api_protocol: "openai-compatible".to_string(),
+                response_protocol: "xml".to_string(),
+                base_url: "https://api.example.test/v1".to_string(),
+                max_llm_input_tokens: 100_000,
+                max_llm_output_tokens: 10_000,
+                stream: false,
+                api_key: Some("secret-endpoint-key".to_string()),
+                http_headers: BTreeMap::from([
+                    ("X-Tenant".to_string(), "tenant\"one\\东京".to_string()),
+                    ("Authorization".to_string(), "Basic special==".to_string()),
+                ]),
+            },
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let serialized = serde_json::to_string(&created).unwrap();
+    assert!(serialized.contains("Production"));
+    assert!(serialized.contains("api_key_configured"));
+    assert!(!serialized.contains("secret-endpoint-key"));
+    assert!(!serialized.contains("tenant\"one"));
+    assert!(serialized.contains("\"X-Tenant\":\"****\""));
+    assert_eq!(
+        model_endpoint_secrets(&state, "endpoint-one").unwrap().0,
+        "secret-endpoint-key"
+    );
+    let applied = apply_model_endpoint(&state, &session_id, "endpoint-one").unwrap();
+    assert_eq!(applied.model, "gpt-4.1");
+    assert_eq!(applied.max_llm_input_tokens, 100_000);
+    assert_eq!(applied.max_llm_output_tokens, 10_000);
+    assert!(!applied.stream);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(
+            session
+                .runtime
+                .env
+                .get("TIMEM_MAX_LLM_INPUT")
+                .map(String::as_str),
+            Some("100000")
+        );
+        assert_eq!(
+            session
+                .runtime
+                .env
+                .get("TIMEM_MAX_LLM_OUTPUT")
+                .map(String::as_str),
+            Some("10000")
+        );
+        assert_eq!(
+            session.runtime.env.get("TIMEM_STREAM").map(String::as_str),
+            Some("false")
+        );
+    }
+    let reveal = execute_browser_command(
+        &state,
+        TEST_PORT,
+        BrowserCommand {
+            command_id: None,
+            accepted_mem_epoch: 1,
+            accepted_lane: None,
+            command: ClientCommand::ModelEndpointSecretReveal {
+                endpoint_id: "endpoint-one".to_string(),
+            },
+        },
+    );
+    assert!(matches!(
+        reveal.event,
+        Some(WireEvent::ModelEndpointSecretRevealed {
+            ref endpoint_id,
+            ref api_key,
+            ref http_headers,
+        }) if endpoint_id == "endpoint-one" && api_key == "secret-endpoint-key"
+            && http_headers.get("X-Tenant").map(String::as_str) == Some("tenant\"one\\东京")
+    ));
+
+    let mut endpoint_events = state.events.subscribe();
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointUpsert {
+            endpoint: ModelEndpointInput {
+                id: Some("endpoint-one".to_string()),
+                name: "Production".to_string(),
+                model: "gpt-4.1".to_string(),
+                api_protocol: "openai-compatible".to_string(),
+                response_protocol: "xml".to_string(),
+                base_url: "https://api.example.test/v1".to_string(),
+                max_llm_input_tokens: 1_000_000,
+                max_llm_output_tokens: 50_000,
+                stream: true,
+                api_key: None,
+                http_headers: Default::default(),
+            },
+        },
+    )
+    .unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(session.max_llm_input_tokens, 1_000_000);
+        assert_eq!(session.runtime_profile.max_llm_input_tokens, 1_000_000);
+        assert_eq!(session.runtime_profile.max_llm_output_tokens, 50_000);
+        assert!(session.runtime_profile.stream);
+        assert!(session.runtime.settings.config.openai_compatible.stream);
+        assert_eq!(
+            session.runtime.env.get("TIMEM_STREAM").map(String::as_str),
+            Some("true")
+        );
+    }
+    let endpoint_update_events = drain_wire_events(&mut endpoint_events);
+    assert!(endpoint_update_events.iter().any(|event| matches!(
+        event,
+        WireEvent::SessionRuntimeUpdated {
+            session_id: updated_session_id,
+            runtime_profile,
+        } if updated_session_id == &session_id
+            && runtime_profile.max_llm_input_tokens == 1_000_000
+            && runtime_profile.max_llm_output_tokens == 50_000
+            && runtime_profile.stream
+    )));
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointUpsert {
+            endpoint: ModelEndpointInput {
+                id: Some("endpoint-one".to_string()),
+                name: "Production renamed".to_string(),
+                model: "gpt-4.1-mini".to_string(),
+                api_protocol: "openai-responses".to_string(),
+                response_protocol: "json".to_string(),
+                base_url: "https://responses.example.test/v1".to_string(),
+                max_llm_input_tokens: 1_000_000,
+                max_llm_output_tokens: 50_000,
+                stream: false,
+                api_key: None,
+                http_headers: Default::default(),
+            },
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        model_endpoint_secrets(&state, "endpoint-one").unwrap().0,
+        "secret-endpoint-key"
+    );
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    let restored = load_model_endpoints_resilient(&memory_dir).unwrap();
+    assert_eq!(restored[0].name, "Production renamed");
+    assert_eq!(restored[0].max_llm_input_tokens, 1_000_000);
+    assert_eq!(restored[0].max_llm_output_tokens, 50_000);
+    assert!(!restored[0].stream);
+    assert_eq!(restored[0].api_key, "secret-endpoint-key");
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointDelete {
+            endpoint_id: "endpoint-one".to_string(),
+        },
+    )
+    .unwrap();
+    assert!(load_model_endpoints_resilient(&memory_dir)
+        .unwrap()
+        .is_empty());
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn default_mem_auto_port_candidates_prefer_13764_once() {
+    let offset = 777;
+    let candidates = automatic_web_port_candidates(true, offset);
+    assert_eq!(
+        candidates.first().copied(),
+        Some(DEFAULT_MEM_PREFERRED_PORT)
+    );
+    assert_eq!(
+        candidates
+            .iter()
+            .filter(|port| **port == DEFAULT_MEM_PREFERRED_PORT)
+            .count(),
+        1
+    );
+    assert_eq!(candidates.len(), usize::from(PORT_END - PORT_START + 1));
+    assert!(candidates
+        .iter()
+        .all(|port| (PORT_START..=PORT_END).contains(port)));
+}
+
+#[test]
+fn non_default_mem_auto_port_candidates_keep_rotating_pool_order() {
+    let offset = 777;
+    let candidates = automatic_web_port_candidates(false, offset);
+    assert_eq!(candidates.first().copied(), Some(PORT_START + offset));
+    assert_eq!(candidates.len(), usize::from(PORT_END - PORT_START + 1));
+}
+
+#[test]
+fn system_default_mem_detection_uses_the_resolved_path() {
+    let default = agent_core::default_memory_dir().unwrap();
+    assert!(uses_system_default_mem(default.to_str().unwrap()));
+    assert!(!uses_system_default_mem(
+        default.with_file_name("different-mem").to_str().unwrap()
+    ));
+}
+
+#[tokio::test]
+async fn occupied_default_mem_preferred_port_falls_back_to_another_supported_port() {
+    let occupied = match TcpListener::bind((Ipv4Addr::LOCALHOST, DEFAULT_MEM_PREFERRED_PORT)).await
+    {
+        Ok(listener) => Some(listener),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => None,
+        Err(error) => panic!("failed to occupy preferred port: {error}"),
+    };
+    let selected = bind_web_listener(None, false, true).await.unwrap();
+    let selected_port = selected.local_addr().unwrap().port();
+    assert_ne!(selected_port, DEFAULT_MEM_PREFERRED_PORT);
+    assert!((PORT_START..=PORT_END).contains(&selected_port));
+    drop(selected);
+    drop(occupied);
+}
+
+#[tokio::test]
+async fn explicit_port_remains_higher_priority_than_default_mem_preference() {
+    let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let explicit_port = probe.local_addr().unwrap().port();
+    drop(probe);
+    if !(PORT_START..=PORT_END).contains(&explicit_port) {
+        return;
+    }
+    let selected = bind_web_listener(Some(explicit_port), false, true)
+        .await
+        .unwrap();
+    assert_eq!(selected.local_addr().unwrap().port(), explicit_port);
+}
+
+#[test]
+fn browser_url_highlight_is_ansi_only_when_color_is_enabled() {
+    let url = "http://127.0.0.1:13764/?token=test-token";
+    assert_eq!(highlighted_browser_url(url, false), url);
+    assert_eq!(
+        highlighted_browser_url(url, true),
+        format!("{ANSI_BOLD_BRIGHT_CYAN}{url}{ANSI_RESET}")
+    );
 }

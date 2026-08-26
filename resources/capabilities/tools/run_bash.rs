@@ -1,8 +1,9 @@
 use crate::response_protocol::ParsedAction;
 use crate::MemGuard;
 use crate::{
-    ActionExecution, ActionRuntime, AgentCore, ApprovalRequest, BashApprovalMode,
-    LongRunningCommandDecision, LongRunningCommandStatus, PendingApproval, PendingApprovedAction,
+    ActionExecution, ActionOutcome, ActionRuntime, ActionStatus, AgentCore, ApprovalRequest,
+    BashApprovalMode, BashResultEvidence, LongRunningCommandStatus, PendingApproval,
+    PendingApprovedAction,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,21 +12,19 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-#[cfg(test)]
-use std::sync::MutexGuard;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
-const BASH_EXECUTABLE: &str = "/bin/bash";
-#[cfg(test)]
-static LONG_RUNNING_COMMAND_PROMPT_AFTER_MS: AtomicU64 = AtomicU64::new(60_000);
-#[cfg(test)]
-static LONG_RUNNING_COMMAND_PROMPT_AFTER_LOCK: Mutex<()> = Mutex::new(());
+const LONG_RUNNING_COMMAND_PROMPT_AFTER: Duration = Duration::from_secs(60);
+
+fn configure_run_bash_environment(command: &mut Command) {
+    command
+        .env("GIT_PAGER", "cat")
+        .env("PAGER", "cat")
+        .env("TERM", "dumb");
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShellJobRecord {
@@ -38,11 +37,21 @@ pub struct ShellJobRecord {
     #[serde(default)]
     pub turn_id: String,
     pub pid: u32,
+    #[serde(default)]
+    pub process_identity: Option<String>,
+    #[serde(default)]
+    pub tool_call_id: String,
+    #[serde(default)]
+    pub owner_id: Option<String>,
     pub command: String,
     #[serde(default)]
     pub cwd: String,
     pub output_file: String,
+    #[serde(default)]
+    pub stderr_file: String,
     pub status_file: String,
+    #[serde(default)]
+    pub tail_out: bool,
 }
 
 fn default_shell_job_kind() -> String {
@@ -52,6 +61,7 @@ fn default_shell_job_kind() -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningShellJob {
     pub pid: u32,
+    pub tool_call_id: String,
     pub kind: String,
     pub command: String,
     pub cwd: String,
@@ -63,6 +73,7 @@ pub struct RunningShellJob {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellJobExitUpdate {
     pub pid: u32,
+    pub tool_call_id: String,
     pub kind: String,
     pub command: String,
     pub cwd: String,
@@ -71,6 +82,8 @@ pub struct ShellJobExitUpdate {
     pub created_at_ms: i64,
     pub elapsed_ms: i64,
     pub status: String,
+    pub stdout: String,
+    pub stderr: String,
     pub output: String,
 }
 
@@ -84,6 +97,10 @@ impl ShellJobExitUpdate {
 }
 
 impl RunningShellJob {
+    pub fn elapsed_ms(&self) -> i64 {
+        now_ms().saturating_sub(self.created_at_ms).max(0)
+    }
+
     pub fn description(&self) -> &'static str {
         match self.kind.as_str() {
             "timeout" => "old job timeout",
@@ -98,6 +115,7 @@ pub struct FileShellJobStore {
     index_file: PathBuf,
     guard: MemGuard,
     watcher: ShellJobWatcher,
+    long_running_prompt_after: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +134,7 @@ struct ShellJobWatcherState {
 struct WatchedShellChild {
     child: Child,
     status_file: PathBuf,
+    launcher_status: Option<String>,
 }
 
 impl ShellJobWatcher {
@@ -132,7 +151,14 @@ impl ShellJobWatcher {
     fn register(&self, pid: u32, child: Child, status_file: PathBuf) {
         self.ensure_started();
         if let Ok(mut jobs) = self.state.jobs.lock() {
-            jobs.insert(pid, WatchedShellChild { child, status_file });
+            jobs.insert(
+                pid,
+                WatchedShellChild {
+                    child,
+                    status_file,
+                    launcher_status: None,
+                },
+            );
             self.state.changed.notify_one();
         }
     }
@@ -153,14 +179,13 @@ impl ShellJobWatcher {
         let Some(watched) = jobs.get_mut(&pid) else {
             return;
         };
-        let status = match watched.child.try_wait() {
-            Ok(Some(status)) => Some(exit_status_text(&status)),
-            Ok(None) => None,
-            Err(_) => Some("unknown".to_string()),
-        };
-        if let Some(status) = status {
+        refresh_watched_shell_child(pid, watched);
+        if watched_shell_child_finished(pid, watched) {
             if let Some(watched) = jobs.remove(&pid) {
-                write_status_if_empty(&watched.status_file, &status);
+                write_status_if_empty(
+                    &watched.status_file,
+                    watched.launcher_status.as_deref().unwrap_or("unknown"),
+                );
             }
         }
     }
@@ -179,6 +204,30 @@ impl ShellJobWatcher {
     }
 }
 
+fn watched_shell_child_finished(pid: u32, watched: &WatchedShellChild) -> bool {
+    watched
+        .launcher_status
+        .as_deref()
+        .is_some_and(|status| status.starts_with("signal:"))
+        || (watched.launcher_status.is_some() && !crate::os::process_group_running(pid))
+}
+
+fn refresh_watched_shell_child(pid: u32, watched: &mut WatchedShellChild) {
+    if watched.launcher_status.is_some() {
+        return;
+    }
+    watched.launcher_status = match watched.child.try_wait() {
+        Ok(Some(status)) => {
+            if exit_signal(&status).is_some() {
+                crate::os::kill_process_group(pid);
+            }
+            Some(exit_status_text(&status))
+        }
+        Ok(None) => None,
+        Err(_) => Some("unknown".to_string()),
+    };
+}
+
 fn shell_job_watcher_loop(state: Arc<ShellJobWatcherState>) {
     let mut jobs = match state.jobs.lock() {
         Ok(jobs) => jobs,
@@ -194,15 +243,17 @@ fn shell_job_watcher_loop(state: Arc<ShellJobWatcherState>) {
 
         let mut finished = Vec::new();
         for (pid, watched) in jobs.iter_mut() {
-            match watched.child.try_wait() {
-                Ok(Some(status)) => finished.push((*pid, exit_status_text(&status))),
-                Ok(None) => {}
-                Err(_) => finished.push((*pid, "unknown".to_string())),
+            refresh_watched_shell_child(*pid, watched);
+            if watched_shell_child_finished(*pid, watched) {
+                finished.push(*pid);
             }
         }
-        for (pid, status) in finished {
+        for pid in finished {
             if let Some(watched) = jobs.remove(&pid) {
-                write_status_if_empty(&watched.status_file, &status);
+                write_status_if_empty(
+                    &watched.status_file,
+                    watched.launcher_status.as_deref().unwrap_or("unknown"),
+                );
             }
         }
 
@@ -234,8 +285,21 @@ impl FileShellJobStore {
         Self {
             index_file: dir.join("jobs.jsonl"),
             dir,
-            guard: MemGuard::for_memory_dir(memory_dir),
+            guard: MemGuard::for_memory_domain(memory_dir, "shell-jobs"),
             watcher: ShellJobWatcher::new(),
+            long_running_prompt_after: LONG_RUNNING_COMMAND_PROMPT_AFTER,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_long_running_prompt_after_for_tests(&mut self, duration: Duration) {
+        self.long_running_prompt_after = duration.max(Duration::from_millis(1));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn forget_watched_job_for_tests(&self, pid: u32) {
+        if let Ok(mut jobs) = self.watcher.state.jobs.lock() {
+            jobs.remove(&pid);
         }
     }
 
@@ -246,29 +310,73 @@ impl FileShellJobStore {
         session_id: &str,
         turn_id: &str,
     ) -> String {
+        self.spawn_background_outcome(
+            command,
+            cwd,
+            session_id,
+            turn_id,
+            "unknown_tool_call",
+            false,
+        )
+        .text
+    }
+
+    pub(crate) fn spawn_background_outcome(
+        &self,
+        command: &str,
+        cwd: &Path,
+        session_id: &str,
+        turn_id: &str,
+        tool_call_id: &str,
+        tail_out: bool,
+    ) -> ActionOutcome {
         let clean = command.trim();
         if clean.is_empty() {
-            return bash_action_not_executed(
-                None,
-                "The background command was not started because no shell command was provided.",
+            let reason =
+                "The background command was not started because no shell command was provided.";
+            return bash_finished_error_outcome(
+                bash_action_not_executed(None, reason),
+                "InvalidInput",
+                reason,
             );
         }
-        let record = match self.spawn_record(clean, cwd, "background", session_id, turn_id) {
+        let record = match self.spawn_record(
+            clean,
+            cwd,
+            "background",
+            session_id,
+            turn_id,
+            tool_call_id,
+            tail_out,
+        ) {
             Ok(record) => record,
             Err(_) => {
-                return bash_action_not_executed(
-                    Some(clean),
-                    "The background command could not be started by the local shell.",
-                )
+                let reason = "The background command could not be started by the local shell.";
+                return bash_finished_error_outcome(
+                    bash_action_not_executed(Some(clean), reason),
+                    "SpawnFailed",
+                    reason,
+                );
             }
         };
         let _ = self.append(&record);
-        format!(
-            "Action result: run_bash\npid={}, now keeps running in background\nCommand: {}",
-            record.pid, clean
-        )
+        ActionOutcome::background_running(format!(
+            "Action result: run_bash\npid={}, now keeps running in background",
+            record.pid
+        ))
+        .with_bash_result(BashResultEvidence {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            signal: None,
+            pid: Some(record.pid),
+            timed_out: false,
+            pid_kind: Some(runtime_child_pid_kind().to_string()),
+            error_type: None,
+        })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_record(
         &self,
         clean: &str,
@@ -276,18 +384,26 @@ impl FileShellJobStore {
         kind: &str,
         session_id: &str,
         turn_id: &str,
+        tool_call_id: &str,
+        tail_out: bool,
     ) -> std::io::Result<ShellJobRecord> {
         fs::create_dir_all(&self.dir)?;
         let id = unique_shell_id("job");
         let output_file = self.dir.join(format!("{id}.out"));
+        let stderr_file = self.dir.join(format!("{id}.err"));
         let status_file = self.dir.join(format!("{id}.status"));
         let output = OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
             .open(&output_file)?;
-        let stderr = output.try_clone()?;
-        let mut command = Command::new(BASH_EXECUTABLE);
+        let stderr = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&stderr_file)?;
+        let mut command = Command::new(crate::os::BASH_EXECUTABLE);
+        configure_run_bash_environment(&mut command);
         command
             .arg("-c")
             .arg(clean)
@@ -295,12 +411,15 @@ impl FileShellJobStore {
             .stdin(Stdio::null())
             .stdout(Stdio::from(output))
             .stderr(Stdio::from(stderr));
-        #[cfg(unix)]
-        {
-            command.process_group(0);
-        }
+        crate::os::configure_child_process_group(&mut command);
         let child = command.spawn()?;
         let pid = child.id();
+        if !is_runtime_child_pid(pid) {
+            terminate_process(pid);
+            return Err(std::io::Error::other(
+                "spawned process did not satisfy the managed-child PID invariant",
+            ));
+        }
         self.watcher.register(pid, child, status_file.clone());
         Ok(ShellJobRecord {
             id,
@@ -309,10 +428,15 @@ impl FileShellJobStore {
             session_id: session_id.trim().to_string(),
             turn_id: turn_id.trim().to_string(),
             pid,
+            process_identity: crate::os::process_identity(pid),
+            tool_call_id: tool_call_id.trim().to_string(),
+            owner_id: Some(crate::runtime_process_owner_id().to_string()),
             command: clean.to_string(),
             cwd: cwd.to_string_lossy().to_string(),
             output_file: output_file.to_string_lossy().to_string(),
+            stderr_file: stderr_file.to_string_lossy().to_string(),
             status_file: status_file.to_string_lossy().to_string(),
+            tail_out,
         })
     }
 
@@ -325,11 +449,45 @@ impl FileShellJobStore {
         turn_id: &str,
         runtime: &mut dyn ActionRuntime,
     ) -> String {
-        let result = self
-            .run_with_timeout_structured(command, cwd, timeout_ms, session_id, turn_id, runtime);
-        result.to_action_result("run_bash")
+        self.run_with_timeout_outcome(
+            command,
+            cwd,
+            timeout_ms,
+            session_id,
+            turn_id,
+            "unknown_tool_call",
+            false,
+            runtime,
+        )
+        .text
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_with_timeout_outcome(
+        &self,
+        command: &str,
+        cwd: &Path,
+        timeout_ms: i64,
+        session_id: &str,
+        turn_id: &str,
+        tool_call_id: &str,
+        tail_out: bool,
+        runtime: &mut dyn ActionRuntime,
+    ) -> ActionOutcome {
+        self.run_with_timeout_structured(
+            command,
+            cwd,
+            timeout_ms,
+            session_id,
+            turn_id,
+            tool_call_id,
+            tail_out,
+            runtime,
+        )
+        .to_action_outcome("run_bash")
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn run_with_timeout_structured(
         &self,
         command: &str,
@@ -337,62 +495,113 @@ impl FileShellJobStore {
         timeout_ms: i64,
         session_id: &str,
         turn_id: &str,
+        tool_call_id: &str,
+        tail_out: bool,
         runtime: &mut dyn ActionRuntime,
     ) -> BashCommandOutput {
         let clean = command.trim();
         if timeout_ms <= 0 {
             return bash_error(clean, "invalid_timeout");
         }
-        let Ok(record) = self.spawn_record(clean, cwd, "timeout", session_id, turn_id) else {
+        let Ok(record) = self.spawn_record(
+            clean,
+            cwd,
+            "timeout",
+            session_id,
+            turn_id,
+            tool_call_id,
+            tail_out,
+        ) else {
             return bash_error(clean, "command_failed");
         };
         let started = Instant::now();
         let timeout = Duration::from_millis(timeout_ms as u64);
-        let mut next_long_running_check = long_running_command_prompt_after();
+        let next_long_running_check = self.long_running_prompt_after;
         loop {
             if runtime.should_cancel() {
                 terminate_process(record.pid);
                 write_status_if_empty(Path::new(&record.status_file), "cancelled");
                 return bash_error(clean, "cancelled");
             }
-            if started.elapsed() >= next_long_running_check && started.elapsed() < timeout {
-                let status = LongRunningCommandStatus {
-                    action: "run_bash".to_string(),
-                    command: clean.to_string(),
-                    elapsed: started.elapsed(),
-                    timeout_ms: Some(timeout_ms),
-                };
-                if runtime.on_long_running_command(&status) == LongRunningCommandDecision::Cancel {
-                    terminate_process(record.pid);
-                    write_status_if_empty(Path::new(&record.status_file), "cancelled");
-                    return bash_error(clean, "cancelled_by_user");
-                }
-                next_long_running_check =
-                    next_long_running_check.saturating_add(long_running_command_prompt_after());
-            }
+            self.watcher.refresh_pid(record.pid);
             if let Some(status) = read_process_status(&record.status_file) {
-                let output = fs::read_to_string(&record.output_file).unwrap_or_default();
+                let (stdout, stderr) = read_shell_job_streams(&record);
                 return BashCommandOutput {
                     command: clean.to_string(),
                     status: status.code,
                     signal: status.signal,
-                    output: normalized_shell_output(&output),
+                    output: normalized_shell_output(&combined_shell_output(&stdout, &stderr)),
+                    stdout,
+                    stderr,
                     error: None,
+                    tail_out,
                 };
             }
-            if started.elapsed() >= timeout {
+            if started.elapsed() >= next_long_running_check && started.elapsed() < timeout {
+                let status = LongRunningCommandStatus {
+                    action: "run_bash".to_string(),
+                    command: clean.to_string(),
+                    pid: record.pid,
+                    elapsed: started.elapsed(),
+                    timeout_ms: Some(timeout_ms),
+                };
+                runtime.on_long_running_command(&status);
                 let _ = self.append(&record);
-                let partial = fs::read_to_string(&record.output_file).unwrap_or_default();
+                let (stdout, stderr) = read_shell_job_streams(&record);
                 return BashCommandOutput {
                     command: clean.to_string(),
                     status: None,
                     signal: None,
-                    output: compact_text(&partial, 2000),
+                    output: combined_shell_output(&stdout, &stderr),
+                    stdout,
+                    stderr,
+                    error: Some(format!(
+                        "long_running_still_running:{}:{}",
+                        record.pid,
+                        status.elapsed.as_millis()
+                    )),
+                    tail_out,
+                };
+            }
+            if started.elapsed() >= timeout {
+                let _ = self.append(&record);
+                let (stdout, stderr) = read_shell_job_streams(&record);
+                return BashCommandOutput {
+                    command: clean.to_string(),
+                    status: None,
+                    signal: None,
+                    output: combined_shell_output(&stdout, &stderr),
+                    stdout,
+                    stderr,
                     error: Some(format!("timeout_still_running:{}", record.pid)),
+                    tail_out,
                 };
             }
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// Terminates unfinished shell jobs launched by this process.
+    ///
+    /// Historical records without the current process-unique owner identity
+    /// are ignored, including records from a process whose PID was later reused.
+    pub fn terminate_owned_running(&self) -> usize {
+        let owner_id = crate::runtime_process_owner_id();
+        let records = self.records_unlocked();
+        let mut terminated = 0;
+        for record in records {
+            if record.owner_id.as_deref() != Some(owner_id) || self.record_finished(&record) {
+                continue;
+            }
+            if !self.record_still_owned_process(&record) {
+                write_status_if_empty(Path::new(&record.status_file), "pid_identity_changed");
+                continue;
+            }
+            crate::os::terminate_process_group(record.pid);
+            write_status_if_empty(Path::new(&record.status_file), "cancelled");
+            terminated += 1;
+        }
+        terminated
     }
 
     pub fn cancel_unfinished_for_session(&self, session_id: &str) -> Vec<String> {
@@ -400,20 +609,36 @@ impl FileShellJobStore {
         if clean_session.is_empty() {
             return Vec::new();
         }
-        let records = self
-            .guard
-            .with_read(|| self.records_unlocked())
-            .unwrap_or_default();
+        let records = self.records_unlocked();
+        let owner_id = crate::runtime_process_owner_id();
         let mut cancelled = Vec::new();
         for record in records {
-            if record.session_id != clean_session || self.record_finished(&record) {
+            if record.owner_id.as_deref() != Some(owner_id)
+                || record.session_id != clean_session
+                || self.record_finished(&record)
+            {
                 continue;
             }
-            terminate_process(record.pid);
+            if !self.record_still_owned_process(&record) {
+                write_status_if_empty(Path::new(&record.status_file), "pid_identity_changed");
+                continue;
+            }
+            crate::os::terminate_process_group(record.pid);
             write_status_if_empty(Path::new(&record.status_file), "cancelled");
             cancelled.push(record.id);
         }
         cancelled
+    }
+
+    fn record_still_owned_process(&self, record: &ShellJobRecord) -> bool {
+        self.watcher.refresh_pid(record.pid);
+        if self.watcher.is_watching(record.pid) {
+            return true;
+        }
+        record.process_identity.as_deref().is_some_and(|expected| {
+            crate::os::process_identity(record.pid).as_deref() == Some(expected)
+                && is_runtime_child_pid(record.pid)
+        })
     }
 
     pub fn running_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
@@ -429,24 +654,98 @@ impl FileShellJobStore {
         if clean_session.is_empty() {
             return (Vec::new(), Vec::new());
         }
+        let mut running = Vec::new();
+        let mut exited = Vec::new();
+        let owner_id = crate::runtime_process_owner_id();
+        for record in self.records_unlocked().into_iter().filter(|record| {
+            record.owner_id.as_deref() == Some(owner_id) && record.session_id == clean_session
+        }) {
+            match self.refresh_record_unlocked(record) {
+                ShellJobRefresh::Running(job) => running.push(job),
+                ShellJobRefresh::Exited(update) => exited.push(update),
+                ShellJobRefresh::Finished => {}
+            }
+        }
+        (running, exited)
+    }
+
+    /// Removes finished shell-job records and their output artifacts older than
+    /// `cutoff_ms`. Running jobs are retained regardless of age.
+    pub fn prune_finished_before(&self, cutoff_ms: i64) -> std::io::Result<usize> {
         self.guard
-            .with_write(|| {
-                let mut running = Vec::new();
-                let mut exited = Vec::new();
-                for record in self
-                    .records_unlocked()
-                    .into_iter()
-                    .filter(|record| record.session_id == clean_session)
-                {
-                    match self.refresh_record_unlocked(record) {
-                        ShellJobRefresh::Running(job) => running.push(job),
-                        ShellJobRefresh::Exited(update) => exited.push(update),
-                        ShellJobRefresh::Finished => {}
+            .with_write(|| self.prune_finished_before_unlocked(cutoff_ms))
+            .map_err(std::io::Error::other)?
+    }
+
+    fn prune_finished_before_unlocked(&self, cutoff_ms: i64) -> std::io::Result<usize> {
+        if !self.index_file.exists() {
+            return Ok(0);
+        }
+        let input = fs::File::open(&self.index_file)?;
+        let temporary = self.dir.join(format!(
+            ".jobs.jsonl.retention.tmp-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options.open(&temporary)?;
+        let mut removed_records = Vec::new();
+        let result = (|| -> std::io::Result<()> {
+            for line in BufReader::new(input).lines() {
+                let line = line?;
+                let parsed = serde_json::from_str::<ShellJobRecord>(&line).ok();
+                let remove = parsed.as_ref().is_some_and(|record| {
+                    record.created_at_ms < cutoff_ms && self.record_finished(record)
+                });
+                if remove {
+                    let record = parsed.expect("checked above");
+                    if self.remove_shell_job_artifacts(&record).is_ok() {
+                        removed_records.push(record);
+                        continue;
                     }
                 }
-                (running, exited)
-            })
-            .unwrap_or_default()
+                writeln!(output, "{line}")?;
+            }
+            output.sync_all()?;
+            fs::rename(&temporary, &self.index_file)
+        })();
+        if let Err(error) = result {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        Ok(removed_records.len())
+    }
+
+    fn remove_shell_job_artifacts(&self, record: &ShellJobRecord) -> std::io::Result<()> {
+        let paths = [
+            PathBuf::from(&record.output_file),
+            PathBuf::from(&record.stderr_file),
+            PathBuf::from(&record.status_file),
+            PathBuf::from(format!("{}.notified", record.status_file)),
+        ];
+        if paths
+            .iter()
+            .any(|path| path.parent() != Some(self.dir.as_path()))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "shell job artifact escaped the shell_jobs directory",
+            ));
+        }
+        for path in paths {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     pub fn running_job_list_context(&self, session_id: &str) -> Option<String> {
@@ -457,13 +756,17 @@ impl FileShellJobStore {
         let mut out = String::from("RUNNING JOB LIST:");
         for job in jobs {
             out.push_str(&format!(
-                "\npid={}, {}, cwd={}, cmd={}, still running",
+                "\npid={}, {}, cwd={}, cmd={}, elapsed_ms={}, still running",
                 job.pid,
                 job.description(),
                 job.cwd,
-                compact_text(&job.command, 500)
+                compact_text(&job.command, 500),
+                job.elapsed_ms()
             ));
         }
+        out.push_str(
+            "\nContinue the task by deciding whether to wait, inspect, terminate, or take another appropriate action. Do not ask the user merely because a command is still running.",
+        );
         Some(out)
     }
 
@@ -517,6 +820,7 @@ impl FileShellJobStore {
             }
             return ShellJobRefresh::Running(RunningShellJob {
                 pid: record.pid,
+                tool_call_id: record.tool_call_id.clone(),
                 kind: record.kind,
                 command: record.command,
                 cwd: record.cwd,
@@ -529,8 +833,16 @@ impl FileShellJobStore {
             write_status_if_empty(Path::new(&record.status_file), "exited");
             return self.exit_update_once_unlocked(record);
         }
+        let identity_matches = record.process_identity.as_deref().is_some_and(|expected| {
+            crate::os::process_identity(record.pid).as_deref() == Some(expected)
+        });
+        if !identity_matches {
+            write_status_if_empty(Path::new(&record.status_file), "pid_identity_changed");
+            return self.exit_update_once_unlocked(record);
+        }
         ShellJobRefresh::Running(RunningShellJob {
             pid: record.pid,
+            tool_call_id: record.tool_call_id.clone(),
             kind: record.kind,
             command: record.command,
             cwd: record.cwd,
@@ -542,12 +854,19 @@ impl FileShellJobStore {
 
     fn exit_update_once_unlocked(&self, record: ShellJobRecord) -> ShellJobRefresh {
         let notified_file = format!("{}.notified", record.status_file);
-        if Path::new(&notified_file).exists() {
+        let claimed = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&notified_file)
+            .and_then(|mut file| write!(file, "{}", now_ms()));
+        if claimed.is_err() {
             return ShellJobRefresh::Finished;
         }
-        let _ = fs::write(&notified_file, now_ms().to_string());
+        let (stdout, stderr) = read_shell_job_streams(&record);
+        let output = normalized_shell_output(&combined_shell_output(&stdout, &stderr));
         ShellJobRefresh::Exited(ShellJobExitUpdate {
             pid: record.pid,
+            tool_call_id: record.tool_call_id,
             kind: record.kind,
             command: record.command,
             cwd: record.cwd,
@@ -559,12 +878,9 @@ impl FileShellJobStore {
                 .unwrap_or_else(|_| "unknown".to_string())
                 .trim()
                 .to_string(),
-            output: compact_text(
-                &normalized_shell_output(
-                    &fs::read_to_string(&record.output_file).unwrap_or_default(),
-                ),
-                4000,
-            ),
+            stdout,
+            stderr,
+            output,
         })
     }
 }
@@ -636,6 +952,222 @@ fn validate_bash_safety(command: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn validate_bash_lifecycle(command: &str, background: bool) -> Result<(), String> {
+    if !background && contains_unmanaged_shell_background(command) && !contains_shell_wait(command)
+    {
+        return Err("unmanaged_background_process".to_string());
+    }
+    if contains_explicit_process_detach(command) {
+        return Err("explicit_process_detach".to_string());
+    }
+    for script in nested_shell_scripts(command) {
+        validate_bash_lifecycle(&script, background)?;
+    }
+    Ok(())
+}
+
+fn contains_unmanaged_shell_background(command: &str) -> bool {
+    let chars = command.chars().collect::<Vec<_>>();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' && !in_single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            index += 1;
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            index += 1;
+            continue;
+        }
+        if ch != '&' || in_single || in_double {
+            index += 1;
+            continue;
+        }
+        let previous = index.checked_sub(1).and_then(|i| chars.get(i)).copied();
+        let next = chars.get(index + 1).copied();
+        if previous == Some('&')
+            || next == Some('&')
+            || previous == Some('>')
+            || previous == Some('<')
+            || previous == Some('|')
+            || next == Some('>')
+        {
+            index += 1;
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn contains_shell_wait(command: &str) -> bool {
+    let words = shell_words_for_safety_scan(command);
+    let mut index = 0;
+    while index < words.len() {
+        if !is_command_separator(&words[index]) {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        if shell_executable_index(&words, index)
+            .is_some_and(|executable| words[executable] == "wait")
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn contains_explicit_process_detach(command: &str) -> bool {
+    let words = shell_words_for_safety_scan(command);
+    let mut index = 0;
+    while index < words.len() {
+        if !is_command_separator(&words[index]) {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let Some(executable) = shell_executable_index(&words, index) else {
+            continue;
+        };
+        let executable_name = shell_command_basename(&words[executable]);
+        if matches!(
+            executable_name,
+            "setsid" | "disown" | "daemon" | "daemonize" | "start-stop-daemon"
+        ) {
+            return true;
+        }
+        if is_shell_interpreter(executable_name)
+            && nested_shell_script(&words, executable + 1)
+                .is_some_and(contains_explicit_process_detach)
+        {
+            return true;
+        }
+        index = executable + 1;
+    }
+    false
+}
+
+fn nested_shell_scripts(command: &str) -> Vec<String> {
+    let words = shell_words_for_safety_scan(command);
+    let mut scripts = Vec::new();
+    let mut index = 0;
+    while index < words.len() {
+        if !is_command_separator(&words[index]) {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let Some(executable) = shell_executable_index(&words, index) else {
+            continue;
+        };
+        if is_shell_interpreter(shell_command_basename(&words[executable])) {
+            if let Some(script) = nested_shell_script(&words, executable + 1) {
+                scripts.push(script.to_string());
+            }
+        }
+        index = executable + 1;
+    }
+    scripts
+}
+
+fn shell_command_basename(command: &str) -> &str {
+    command.rsplit('/').next().unwrap_or(command)
+}
+
+fn is_shell_interpreter(command: &str) -> bool {
+    matches!(command, "sh" | "bash" | "dash" | "ksh" | "zsh")
+}
+
+fn nested_shell_script(words: &[String], mut index: usize) -> Option<&str> {
+    while index < words.len() && !is_command_separator(&words[index]) {
+        let word = words[index].as_str();
+        if word == "-c" || (word.starts_with('-') && !word.starts_with("--") && word.contains('c'))
+        {
+            return words.get(index + 1).map(String::as_str);
+        }
+        if word == "--" {
+            return None;
+        }
+        index += 1;
+    }
+    None
+}
+
+fn shell_executable_index(words: &[String], mut index: usize) -> Option<usize> {
+    while index < words.len() && !is_command_separator(&words[index]) {
+        if is_assignment_word(&words[index])
+            || matches!(
+                words[index].as_str(),
+                "command" | "builtin" | "exec" | "nohup"
+            )
+        {
+            index += 1;
+            continue;
+        }
+        if words[index] == "env" {
+            index += 1;
+            while index < words.len() && !is_command_separator(&words[index]) {
+                let word = words[index].as_str();
+                if is_assignment_word(word) {
+                    index += 1;
+                    continue;
+                }
+                if word == "--" {
+                    index += 1;
+                    break;
+                }
+                if !word.starts_with('-') || word == "-" {
+                    break;
+                }
+                index += 1;
+                if matches!(
+                    word,
+                    "-u" | "--unset" | "-C" | "--chdir" | "-S" | "--split-string"
+                ) {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if words[index] == "sudo" {
+            index += 1;
+            while index < words.len() && !is_command_separator(&words[index]) {
+                let word = words[index].as_str();
+                if word == "--" {
+                    index += 1;
+                    break;
+                }
+                if !word.starts_with('-') || word == "-" {
+                    break;
+                }
+                index += 1;
+                if matches!(word, "-u" | "-g" | "-h" | "-p" | "-C" | "-T") {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        return Some(index);
+    }
+    None
 }
 
 fn shell_words_for_safety_scan(command: &str) -> Vec<String> {
@@ -860,9 +1392,11 @@ pub(crate) fn execute_run_bash_action(
 ) -> ActionExecution {
     let loop_command = action.input_str("loop_cmd");
     if !loop_command.is_empty() && !action.input_str("cmd").is_empty() {
-        return ActionExecution::Completed(bash_action_not_executed(
-            None,
-            "The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.",
+        let reason = "The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(None, reason),
+            "InvalidInput",
+            reason,
         ));
     }
     let is_regular_command = loop_command.is_empty();
@@ -880,7 +1414,9 @@ pub(crate) fn execute_run_bash_action(
     let session_id = core.current_session_id();
     let turn_id = core.current_action_turn_id();
     let cwd = core.current_prompt_cwd().to_path_buf();
-    execute_run_bash(
+    let tail_out = action.input_bool("tail_out");
+    let tool_call_id = action.call_id.as_str();
+    execute_run_bash_with_tail(
         &command_to_run,
         &cwd,
         action.background(),
@@ -891,11 +1427,14 @@ pub(crate) fn execute_run_bash_action(
         &core.shell_jobs,
         &session_id,
         &turn_id,
+        tool_call_id,
         is_regular_command,
+        tail_out,
         runtime,
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_run_bash(
     command: &str,
@@ -911,53 +1450,114 @@ pub(crate) fn execute_run_bash(
     is_regular_command: bool,
     runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
+    execute_run_bash_with_tail(
+        command,
+        cwd,
+        background,
+        timeout_ms,
+        interval_ms,
+        once_timeout_ms,
+        approval_mode,
+        shell_jobs,
+        session_id,
+        turn_id,
+        "unknown_tool_call",
+        is_regular_command,
+        false,
+        runtime,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_run_bash_with_tail(
+    command: &str,
+    cwd: &Path,
+    background: bool,
+    timeout_ms: i64,
+    interval_ms: Option<u64>,
+    once_timeout_ms: u64,
+    approval_mode: BashApprovalMode,
+    shell_jobs: &FileShellJobStore,
+    session_id: &str,
+    turn_id: &str,
+    tool_call_id: &str,
+    is_regular_command: bool,
+    tail_out: bool,
+    runtime: &mut dyn ActionRuntime,
+) -> ActionExecution {
     let command_to_run = command.trim();
     if command_to_run.is_empty() {
-        return ActionExecution::Completed(bash_action_not_executed(
-            None,
-            "The command was not executed because no shell command was provided.",
+        let reason = "The command was not executed because no shell command was provided.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(None, reason),
+            "InvalidInput",
+            reason,
         ));
     }
     if let Err(reason) = validate_bash_request(command_to_run) {
-        return ActionExecution::Completed(bash_action_not_executed(
-            Some(command_to_run),
-            bash_validation_message(&reason),
+        let message = bash_validation_message(&reason);
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), message),
+            "InvalidInput",
+            message,
+        ));
+    }
+    if let Err(reason) = validate_bash_lifecycle(command_to_run, background) {
+        let message = bash_validation_message(&reason);
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), message),
+            "InvalidInput",
+            message,
         ));
     }
     if !background && is_regular_command && timeout_ms <= 0 {
-        return ActionExecution::Completed(bash_action_not_executed(
-            Some(command_to_run),
-            "timeout_ms must be a positive integer. Choose a wait budget that matches the command.",
+        let reason =
+            "timeout_ms must be a positive integer. Choose a wait budget that matches the command.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), reason),
+            "InvalidInput",
+            reason,
         ));
     }
     if !background && !is_regular_command && timeout_ms <= 0 {
-        return ActionExecution::Completed(bash_action_not_executed(
-            Some(command_to_run),
-            "loop_timeout_ms must be a positive integer. Choose a total polling wait budget that matches the external state you are waiting for.",
+        let reason = "loop_timeout_ms must be a positive integer. Choose a total polling wait budget that matches the external state you are waiting for.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), reason),
+            "InvalidInput",
+            reason,
         ));
     }
     if !background && is_regular_command && contains_long_normal_sleep(command_to_run) {
-        return ActionExecution::Completed(bash_action_not_executed(
-            Some(command_to_run),
-            "The command contains a long sleep in normal mode. Use loop_cmd with interval_ms to poll external status, or background=true for long local work that should continue across turns.",
+        let reason = "The command contains a long sleep in normal mode. Use loop_cmd with interval_ms to poll external status, or background=true for long local work that should continue across turns.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), reason),
+            "InvalidInput",
+            reason,
         ));
     }
     if background && interval_ms.is_some() {
-        return ActionExecution::Completed(bash_action_not_executed(
-            Some(command_to_run),
-            "Polling mode and background mode cannot be combined. Use loop_cmd with interval_ms for polling, or background=true for a persistent background command.",
+        let reason = "Polling mode and background mode cannot be combined. Use loop_cmd with interval_ms for polling, or background=true for a persistent background command.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), reason),
+            "InvalidInput",
+            reason,
         ));
     }
     if interval_ms.is_some() && is_regular_command {
-        return ActionExecution::Completed(bash_action_not_executed(
-            Some(command_to_run),
-            "interval_ms is only valid with loop_cmd. Move the check command to loop_cmd, or remove interval_ms for a normal command.",
+        let reason = "interval_ms is only valid with loop_cmd. Move the check command to loop_cmd, or remove interval_ms for a normal command.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), reason),
+            "InvalidInput",
+            reason,
         ));
     }
     if interval_ms.is_none() && !is_regular_command {
-        return ActionExecution::Completed(bash_action_not_executed(
-            Some(command_to_run),
-            "loop_cmd needs interval_ms so the runtime knows how often to check the condition.",
+        let reason =
+            "loop_cmd needs interval_ms so the runtime knows how often to check the condition.";
+        return ActionExecution::Completed(bash_finished_error_outcome(
+            bash_action_not_executed(Some(command_to_run), reason),
+            "InvalidInput",
+            reason,
         ));
     }
     if approval_mode == BashApprovalMode::Ask {
@@ -977,39 +1577,49 @@ pub(crate) fn execute_run_bash(
                 once_timeout_ms,
                 session_id: session_id.to_string(),
                 turn_id: turn_id.to_string(),
+                tool_call_id: tool_call_id.to_string(),
                 cwd: cwd.to_path_buf(),
+                tail_out,
             },
+            action_name: None,
+            action_call_id: tool_call_id.to_string(),
             continuation: None,
         });
     }
     if background {
-        return ActionExecution::Completed(shell_jobs.spawn_background(
+        return ActionExecution::Completed(shell_jobs.spawn_background_outcome(
             command_to_run,
             cwd,
             session_id,
             turn_id,
+            tool_call_id,
+            tail_out,
         ));
     }
     if let Some(interval_ms) = interval_ms {
-        return ActionExecution::Completed(execute_polling_bash(
+        return ActionExecution::Completed(execute_polling_bash_outcome_with_tail(
             command_to_run,
             cwd,
             interval_ms,
             timeout_ms,
             once_timeout_ms,
+            tail_out,
             runtime,
         ));
     }
-    ActionExecution::Completed(shell_jobs.run_with_timeout(
+    ActionExecution::Completed(shell_jobs.run_with_timeout_outcome(
         command_to_run,
         cwd,
         timeout_ms,
         session_id,
         turn_id,
+        tool_call_id,
+        tail_out,
         runtime,
     ))
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_approved_bash(
     command: &str,
@@ -1020,39 +1630,102 @@ pub(crate) fn execute_approved_bash(
     once_timeout_ms: u64,
     session_id: &str,
     turn_id: &str,
-    _is_regular_command: bool,
+    is_regular_command: bool,
     request: &ApprovalRequest,
     shell_jobs: &FileShellJobStore,
     runtime: &mut dyn ActionRuntime,
-) -> String {
+) -> ActionOutcome {
+    execute_approved_bash_with_tail(
+        command,
+        cwd,
+        background,
+        timeout_ms,
+        interval_ms,
+        once_timeout_ms,
+        session_id,
+        turn_id,
+        "unknown_tool_call",
+        is_regular_command,
+        false,
+        request,
+        shell_jobs,
+        runtime,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_approved_bash_with_tail(
+    command: &str,
+    cwd: &Path,
+    background: bool,
+    timeout_ms: i64,
+    interval_ms: Option<u64>,
+    once_timeout_ms: u64,
+    session_id: &str,
+    turn_id: &str,
+    tool_call_id: &str,
+    _is_regular_command: bool,
+    tail_out: bool,
+    request: &ApprovalRequest,
+    shell_jobs: &FileShellJobStore,
+    runtime: &mut dyn ActionRuntime,
+) -> ActionOutcome {
     let clean = command.trim();
     if let Err(reason) = validate_bash_request(clean) {
-        let mut result = bash_action_not_executed(Some(clean), bash_validation_message(&reason));
-        result.push_str(&format!(
+        let message = bash_validation_message(&reason);
+        let mut outcome = bash_finished_error_outcome(
+            bash_action_not_executed(Some(clean), message),
+            "InvalidInput",
+            message,
+        );
+        outcome.text.push_str(&format!(
             "\napproval_id: {}\napproval_status: approved_by_user",
             request.approval_id
         ));
-        return result;
+        return outcome;
     }
-    let mut result = if background {
-        shell_jobs.spawn_background(clean, cwd, session_id, turn_id)
+    if let Err(reason) = validate_bash_lifecycle(clean, background) {
+        let message = bash_validation_message(&reason);
+        let mut outcome = bash_finished_error_outcome(
+            bash_action_not_executed(Some(clean), message),
+            "InvalidInput",
+            message,
+        );
+        outcome.text.push_str(&format!(
+            "\napproval_id: {}\napproval_status: approved_by_user",
+            request.approval_id
+        ));
+        return outcome;
+    }
+    let mut outcome = if background {
+        shell_jobs.spawn_background_outcome(clean, cwd, session_id, turn_id, tool_call_id, tail_out)
     } else if let Some(interval_ms) = interval_ms {
-        execute_polling_bash(
+        execute_polling_bash_outcome_with_tail(
             clean,
             cwd,
             interval_ms,
             timeout_ms,
             once_timeout_ms,
+            tail_out,
             runtime,
         )
     } else {
-        shell_jobs.run_with_timeout(clean, cwd, timeout_ms, session_id, turn_id, runtime)
+        shell_jobs.run_with_timeout_outcome(
+            clean,
+            cwd,
+            timeout_ms,
+            session_id,
+            turn_id,
+            tool_call_id,
+            tail_out,
+            runtime,
+        )
     };
-    result.push_str(&format!(
+    outcome.text.push_str(&format!(
         "\napproval_id: {}\napproval_status: approved_by_user",
         request.approval_id
     ));
-    result
+    outcome
 }
 
 pub fn execute_one_bash(command: &str, timeout_ms: i64, runtime: &mut dyn ActionRuntime) -> String {
@@ -1060,14 +1733,35 @@ pub fn execute_one_bash(command: &str, timeout_ms: i64, runtime: &mut dyn Action
     execute_one_bash_structured(command, &cwd, timeout_ms, runtime).to_action_result("run_bash")
 }
 
-pub(crate) fn execute_polling_bash(
+#[cfg(test)]
+pub(crate) fn execute_polling_bash_outcome(
     command: &str,
     cwd: &Path,
     interval_ms: u64,
     timeout_ms: i64,
     once_timeout_ms: u64,
     runtime: &mut dyn ActionRuntime,
-) -> String {
+) -> ActionOutcome {
+    execute_polling_bash_outcome_with_tail(
+        command,
+        cwd,
+        interval_ms,
+        timeout_ms,
+        once_timeout_ms,
+        false,
+        runtime,
+    )
+}
+
+pub(crate) fn execute_polling_bash_outcome_with_tail(
+    command: &str,
+    cwd: &Path,
+    interval_ms: u64,
+    timeout_ms: i64,
+    once_timeout_ms: u64,
+    tail_out: bool,
+    runtime: &mut dyn ActionRuntime,
+) -> ActionOutcome {
     if timeout_ms <= 0 {
         return polling_result(
             command,
@@ -1075,7 +1769,11 @@ pub(crate) fn execute_polling_bash(
             0,
             Duration::ZERO,
             None,
+            None,
             "",
+            "",
+            "",
+            tail_out,
             Some("loop_timeout_ms must be a positive integer."),
         );
     }
@@ -1086,7 +1784,11 @@ pub(crate) fn execute_polling_bash(
             0,
             Duration::ZERO,
             None,
+            None,
             "",
+            "",
+            "",
+            tail_out,
             Some("interval_ms must be a positive integer."),
         );
     }
@@ -1097,7 +1799,11 @@ pub(crate) fn execute_polling_bash(
             0,
             Duration::ZERO,
             None,
+            None,
             "",
+            "",
+            "",
+            tail_out,
             Some("once_timeout_ms must be a positive integer."),
         );
     }
@@ -1107,6 +1813,9 @@ pub(crate) fn execute_polling_bash(
     let mut attempts = 0_u64;
     let mut last_status = None;
     let mut last_output = String::new();
+    let mut last_stdout = String::new();
+    let mut last_stderr = String::new();
+    let mut last_signal = None;
     let mut last_error = None;
 
     loop {
@@ -1117,7 +1826,11 @@ pub(crate) fn execute_polling_bash(
                 attempts,
                 started.elapsed(),
                 last_status,
+                last_signal,
+                &last_stdout,
+                &last_stderr,
                 &last_output,
+                tail_out,
                 last_error.as_deref(),
             );
         }
@@ -1125,6 +1838,9 @@ pub(crate) fn execute_polling_bash(
         attempts = attempts.saturating_add(1);
         let result = execute_one_bash_structured(command, cwd, once_timeout_ms as i64, runtime);
         last_status = result.status;
+        last_signal = result.signal;
+        last_stdout = result.stdout;
+        last_stderr = result.stderr;
         last_output = result.output;
         last_error = result.error;
 
@@ -1136,7 +1852,11 @@ pub(crate) fn execute_polling_bash(
                     attempts,
                     started.elapsed(),
                     last_status,
+                    last_signal,
+                    &last_stdout,
+                    &last_stderr,
                     &last_output,
+                    tail_out,
                     None,
                 );
             }
@@ -1149,7 +1869,11 @@ pub(crate) fn execute_polling_bash(
                 attempts,
                 started.elapsed(),
                 last_status,
+                last_signal,
+                &last_stdout,
+                &last_stderr,
                 &last_output,
+                tail_out,
                 last_error.as_deref(),
             );
         }
@@ -1159,15 +1883,20 @@ pub(crate) fn execute_polling_bash(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn polling_result(
-    command: &str,
+    _command: &str,
     state: &str,
     attempts: u64,
     elapsed: Duration,
     last_status: Option<i32>,
+    last_signal: Option<i32>,
+    stdout: &str,
+    stderr: &str,
     output: &str,
+    _tail_out: bool,
     error: Option<&str>,
-) -> String {
+) -> ActionOutcome {
     let state_sentence = match state {
         "finished" => "The polling command finished because the check command exited with code 0.",
         "timeout" => "The polling command stopped because the total wait budget was reached before the check command exited with code 0.",
@@ -1175,8 +1904,7 @@ fn polling_result(
         _ => "The polling command stopped.",
     };
     let mut out = format!(
-        "Action result: run_bash\n{state_sentence}\nCommand: {}\nPolling state: {}\nAttempts: {}\nElapsed: {} ms\nSuccess condition: exit code 0",
-        command,
+        "Action result: run_bash\n{state_sentence}\nPolling state: {}\nAttempts: {}\nElapsed: {} ms\nSuccess condition: exit code 0",
         state,
         attempts,
         elapsed.as_millis()
@@ -1189,9 +1917,28 @@ fn polling_result(
     }
     if !output.trim().is_empty() {
         out.push_str("\nLast output:\n");
-        out.push_str(&compact_text(output, 4000));
+        out.push_str(output);
     }
-    out
+    let status = match state {
+        "finished" => ActionStatus::Completed,
+        "timeout" => ActionStatus::Timeout,
+        "cancelled" => ActionStatus::Cancelled,
+        _ => ActionStatus::Failed,
+    };
+    ActionOutcome::new(status, out).with_bash_result(BashResultEvidence {
+        stdout: stdout.to_string(),
+        stderr: stderr.to_string(),
+        exit_code: last_status,
+        signal: last_signal,
+        pid: None,
+        timed_out: false,
+        pid_kind: None,
+        error_type: match state {
+            "cancelled" => Some("Cancelled".to_string()),
+            "not_executed" => Some("InvalidInput".to_string()),
+            _ => None,
+        },
+    })
 }
 
 fn sleep_cancelable(duration: Duration, cancelled: &mut impl FnMut() -> bool) {
@@ -1258,46 +2005,103 @@ pub struct BashCommandOutput {
     pub command: String,
     pub status: Option<i32>,
     pub signal: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
     pub output: String,
     pub error: Option<String>,
+    pub tail_out: bool,
 }
 
 impl BashCommandOutput {
     pub fn to_action_result(&self, action_name: &str) -> String {
+        self.to_action_outcome(action_name).text
+    }
+
+    pub(crate) fn to_action_outcome(&self, action_name: &str) -> ActionOutcome {
+        let text = self.render_action_result(action_name);
+        let status = if let Some(error) = self.error.as_deref() {
+            match error {
+                "timeout" => ActionStatus::Timeout,
+                "cancelled" | "cancelled_by_user" => ActionStatus::Cancelled,
+                _ if error.starts_with("timeout_still_running:")
+                    || error.starts_with("long_running_still_running:") =>
+                {
+                    ActionStatus::BackgroundRunning
+                }
+                _ => ActionStatus::Failed,
+            }
+        } else if self.signal.is_some() {
+            ActionStatus::Failed
+        } else if self.status == Some(0) {
+            ActionStatus::Completed
+        } else {
+            ActionStatus::Failed
+        };
+        let running_error = self.error.as_deref();
+        let pid = running_error.and_then(bash_running_pid);
+        let timed_out =
+            running_error.is_some_and(|error| error.starts_with("timeout_still_running:"));
+        let pid_kind = pid.map(|_| runtime_child_pid_kind().to_string());
+        ActionOutcome::new(status, text).with_bash_result(BashResultEvidence {
+            stdout: self.stdout.clone(),
+            stderr: self.stderr.clone(),
+            exit_code: self.status,
+            signal: self.signal,
+            pid,
+            timed_out,
+            pid_kind,
+            error_type: self
+                .error
+                .as_deref()
+                .and_then(bash_error_type)
+                .map(str::to_string),
+        })
+    }
+
+    fn render_action_result(&self, action_name: &str) -> String {
         if let Some(error) = &self.error {
-            if let Some(pid) = error.strip_prefix("timeout_still_running:") {
+            if let Some(details) = error.strip_prefix("long_running_still_running:") {
+                let (pid, elapsed_ms) = details.split_once(':').unwrap_or((details, "unknown"));
                 let mut out = format!(
-                    "Action result: {}\npid={}, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.\nCommand: {}",
-                    action_name, pid, self.command
+                    "Action result: {}\nLONG_RUNNING_COMMAND_STATUS:\nPID: {}\nElapsed: {} ms\nStatus: still running\nThe command has not finished. Continue the task by deciding whether to wait, inspect, terminate, or take another appropriate action. Do not ask the user merely because this command is still running.",
+                    action_name, pid, elapsed_ms
                 );
                 if !self.output.trim().is_empty() {
-                    out.push_str("\nPartial output:\n");
-                    out.push_str(&compact_text(&self.output, 2000));
+                    out.push_str("\nPartial return:\n");
+                    out.push_str(&self.output);
+                }
+                return out;
+            }
+            if let Some(pid) = error.strip_prefix("timeout_still_running:") {
+                let mut out = format!(
+                    "Action result: {}\npid={}, timeout, but is still running\nTimeout means Timem stopped waiting; the process was not killed and there is no final exit code yet.",
+                    action_name, pid
+                );
+                if !self.output.trim().is_empty() {
+                    out.push_str("\nPartial return:\n");
+                    out.push_str(&self.output);
                 }
                 return out;
             }
             return format!(
-                "Action result: {}\nCommand: {}\n{}",
+                "Action result: {}\n{}",
                 action_name,
-                self.command,
                 bash_runtime_error_message(error)
             );
         }
         if let Some(signal) = self.signal {
             return format!(
-                "Action result: {}\nThe command terminated because of a process signal.\nCommand: {}\nSignal: {}\nOutput:\n{}",
+                "Action result: {}\nThe command terminated because of a process signal.\nSignal: {}\nReturn:\n{}",
                 action_name,
-                self.command,
                 signal,
-                compact_text(&self.output, 4000)
+                self.output
             );
         }
         format!(
-            "Action result: {}\nThe command finished.\nCommand: {}\nExit code: {}\nOutput:\n{}",
+            "Action result: {}\nThe command finished.\nExit code: {}\nReturn:\n{}",
             action_name,
-            self.command,
             self.status.unwrap_or(-1),
-            compact_text(&self.output, 4000)
+            self.output
         )
     }
 }
@@ -1313,7 +2117,7 @@ pub fn execute_one_bash_structured(
         cwd,
         timeout_ms,
         runtime,
-        long_running_command_prompt_after(),
+        LONG_RUNNING_COMMAND_PROMPT_AFTER,
     )
 }
 
@@ -1327,17 +2131,15 @@ fn execute_one_bash_structured_with_prompt_after(
     if timeout_ms <= 0 {
         return bash_error(command, "invalid_timeout");
     }
-    let mut shell = Command::new(BASH_EXECUTABLE);
+    let mut shell = Command::new(crate::os::BASH_EXECUTABLE);
+    configure_run_bash_environment(&mut shell);
     shell
         .arg("-lc")
         .arg(command)
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    {
-        shell.process_group(0);
-    }
+    crate::os::configure_child_process_group(&mut shell);
     let spawn = shell.spawn();
     let mut child = match spawn {
         Ok(child) => child,
@@ -1356,14 +2158,11 @@ fn execute_one_bash_structured_with_prompt_after(
             let status = LongRunningCommandStatus {
                 action: "run_bash".to_string(),
                 command: command.to_string(),
+                pid: child.id(),
                 elapsed: started.elapsed(),
                 timeout_ms: Some(timeout_ms),
             };
-            if runtime.on_long_running_command(&status) == LongRunningCommandDecision::Cancel {
-                terminate_process(child.id());
-                let _ = child.wait();
-                return bash_error(command, "cancelled_by_user");
-            }
+            runtime.on_long_running_command(&status);
             next_long_running_check =
                 next_long_running_check.saturating_add(long_running_prompt_after);
         }
@@ -1380,108 +2179,125 @@ fn execute_one_bash_structured_with_prompt_after(
     }
     match child.wait_with_output() {
         Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let mut combined = String::new();
-            if !stdout.trim().is_empty() {
-                combined.push_str(stdout.trim_end());
-            }
-            if !stderr.trim().is_empty() {
-                if !combined.is_empty() {
-                    combined.push('\n');
-                }
-                combined.push_str("stderr: ");
-                combined.push_str(stderr.trim_end());
-            }
-            if combined.is_empty() {
-                combined = "<no output>".to_string();
-            }
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            let combined = combined_shell_output(&stdout, &stderr);
             BashCommandOutput {
                 command: command.to_string(),
                 status: output.status.code(),
                 signal: exit_signal(&output.status),
+                stdout,
+                stderr,
                 output: combined,
                 error: None,
+                tail_out: false,
             }
         }
         Err(_) => bash_error(command, "command_failed"),
     }
 }
 
-fn long_running_command_prompt_after() -> Duration {
-    #[cfg(test)]
-    {
-        Duration::from_millis(
-            LONG_RUNNING_COMMAND_PROMPT_AFTER_MS
-                .load(Ordering::Relaxed)
-                .max(1),
-        )
+fn read_shell_job_streams(record: &ShellJobRecord) -> (String, String) {
+    let stdout = fs::read_to_string(&record.output_file).unwrap_or_default();
+    let stderr = if record.stderr_file.trim().is_empty() {
+        // Historical records merged both streams into output_file. Treat that
+        // file as stdout and never guess which lines originally came from stderr.
+        String::new()
+    } else {
+        fs::read_to_string(&record.stderr_file).unwrap_or_default()
+    };
+    (stdout, stderr)
+}
+
+fn combined_shell_output(stdout: &str, stderr: &str) -> String {
+    let mut combined = String::new();
+    if !stdout.trim().is_empty() {
+        combined.push_str(stdout.trim_end());
     }
-    #[cfg(not(test))]
-    {
-        Duration::from_secs(60)
+    if !stderr.trim().is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str("stderr: ");
+        combined.push_str(stderr.trim_end());
+    }
+    if combined.is_empty() {
+        "<no output>".to_string()
+    } else {
+        combined
     }
 }
 
-#[cfg(test)]
-pub(crate) struct LongRunningPromptAfterGuard {
-    previous_ms: u64,
-    _lock: MutexGuard<'static, ()>,
-}
-
-#[cfg(test)]
-impl Drop for LongRunningPromptAfterGuard {
-    fn drop(&mut self) {
-        LONG_RUNNING_COMMAND_PROMPT_AFTER_MS.store(self.previous_ms, Ordering::Relaxed);
+fn bash_error_type(error: &str) -> Option<&'static str> {
+    match error {
+        "cancelled" | "cancelled_by_user" => Some("Cancelled"),
+        "invalid_timeout" => Some("InvalidInput"),
+        "command_failed" => Some("SpawnFailed"),
+        _ if error.starts_with("timeout_still_running:")
+            || error.starts_with("long_running_still_running:") =>
+        {
+            None
+        }
+        "timeout" => None,
+        _ => Some("InternalError"),
     }
 }
 
-#[cfg(test)]
-pub(crate) fn set_long_running_command_prompt_after_for_tests(
-    duration: Duration,
-) -> LongRunningPromptAfterGuard {
-    let lock = LONG_RUNNING_COMMAND_PROMPT_AFTER_LOCK
-        .lock()
-        .expect("long running prompt threshold test lock should not be poisoned");
-    let previous_ms = LONG_RUNNING_COMMAND_PROMPT_AFTER_MS
-        .swap(duration.as_millis().max(1) as u64, Ordering::Relaxed);
-    LongRunningPromptAfterGuard {
-        previous_ms,
-        _lock: lock,
+fn bash_finished_error_outcome(
+    text: String,
+    error_type: &'static str,
+    error_message: impl Into<String>,
+) -> ActionOutcome {
+    ActionOutcome::failed(text).with_bash_result(BashResultEvidence {
+        stdout: String::new(),
+        stderr: error_message.into(),
+        exit_code: None,
+        signal: None,
+        pid: None,
+        timed_out: false,
+        pid_kind: None,
+        error_type: Some(error_type.to_string()),
+    })
+}
+
+fn is_runtime_child_pid(pid: u32) -> bool {
+    crate::os::is_runtime_child_process_group(pid)
+}
+
+fn runtime_child_pid_kind() -> &'static str {
+    crate::os::runtime_child_pid_kind()
+}
+
+fn bash_running_pid(error: &str) -> Option<u32> {
+    if let Some(pid) = error.strip_prefix("timeout_still_running:") {
+        return pid.parse().ok();
     }
+    error
+        .strip_prefix("long_running_still_running:")
+        .and_then(|details| details.split(':').next())
+        .and_then(|pid| pid.parse().ok())
 }
 
 fn bash_error(command: &str, error: &str) -> BashCommandOutput {
+    let diagnostic = bash_runtime_error_message(error).to_string();
     BashCommandOutput {
         command: command.to_string(),
         status: None,
         signal: None,
-        output: String::new(),
+        stdout: String::new(),
+        stderr: diagnostic.clone(),
+        output: diagnostic,
         error: Some(error.to_string()),
+        tail_out: false,
     }
 }
 
-#[cfg(unix)]
 fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
-    use std::os::unix::process::ExitStatusExt;
-    status.signal()
+    crate::os::exit_signal(status)
 }
 
-#[cfg(not(unix))]
-fn exit_signal(_status: &std::process::ExitStatus) -> Option<i32> {
-    None
-}
-
-fn bash_action_not_executed(command: Option<&str>, reason: &str) -> String {
-    let mut out = String::from("Action result: run_bash\nThe command was not executed.\n");
-    if let Some(command) = command.map(str::trim).filter(|command| !command.is_empty()) {
-        out.push_str("Command: ");
-        out.push_str(command);
-        out.push('\n');
-    }
-    out.push_str("Reason: ");
-    out.push_str(reason);
-    out
+fn bash_action_not_executed(_command: Option<&str>, reason: &str) -> String {
+    format!("Action result: run_bash\nThe command was not executed.\nReason: {reason}")
 }
 
 fn bash_validation_message(reason: &str) -> &'static str {
@@ -1489,6 +2305,12 @@ fn bash_validation_message(reason: &str) -> &'static str {
         "command_required" => "No shell command was provided.",
         "dangerous_recursive_root_delete" => {
             "The shell command was blocked by Timem safety policy because it may recursively delete the filesystem root."
+        }
+        "unmanaged_background_process" => {
+            "检测到命令可能创建脱离 Runtime 管理的后台进程。请改用 run_bash(background=true)。"
+        }
+        "explicit_process_detach" => {
+            "检测到命令可能创建脱离 Runtime 管理的后台进程。请改用 run_bash(background=true)，并移除 setsid、disown 或 daemon 等主动脱离方式。"
         }
         _ => "The shell command request did not pass runtime validation.",
     }
@@ -1555,42 +2377,7 @@ fn normalized_shell_output(output: &str) -> String {
 }
 
 fn process_running(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        let mut status = 0;
-        let wait = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
-        if wait == pid as libc::pid_t {
-            return false;
-        }
-        if wait == 0 {
-            return true;
-        }
-        if let Ok(output) = Command::new("/bin/ps")
-            .arg("-o")
-            .arg("stat=")
-            .arg("-p")
-            .arg(pid.to_string())
-            .output()
-        {
-            if !output.status.success() {
-                return false;
-            }
-            let stat = String::from_utf8_lossy(&output.stdout);
-            let state = stat.trim();
-            if state.starts_with('Z') || state.contains('Z') {
-                return false;
-            }
-            return !state.is_empty();
-        }
-    }
-    Command::new("/bin/kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok()
-        .is_some_and(|status| status.success())
+    crate::os::child_process_running(pid)
 }
 
 #[cfg(test)]
@@ -1600,84 +2387,18 @@ fn shell_quote_path(path: &Path) -> String {
 }
 
 fn terminate_process(pid: u32) {
-    #[cfg(unix)]
-    {
-        terminate_process_unix(pid);
-    }
-    #[cfg(not(unix))]
-    {
-        let status = Command::new("/bin/kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if status.as_ref().is_ok_and(|s| s.success()) {
-            thread::sleep(Duration::from_millis(100));
-            if process_running(pid) {
-                let _ = Command::new("/bin/kill")
-                    .arg("-KILL")
-                    .arg(pid.to_string())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-        }
-    }
-}
-
-#[cfg(unix)]
-fn terminate_process_unix(pid: u32) {
-    let pid = pid as libc::pid_t;
-    let pgid = unsafe { libc::getpgid(pid) };
-    if pgid < 0 {
-        return;
-    }
-    if pgid == pid && pgid != unsafe { libc::getpgrp() } {
-        signal_process_group(pgid, libc::SIGTERM);
-        thread::sleep(Duration::from_millis(100));
-        if process_group_running(pgid as u32) {
-            signal_process_group(pgid, libc::SIGKILL);
-        }
-        return;
-    }
-    signal_process(pid, libc::SIGTERM);
-    thread::sleep(Duration::from_millis(100));
-    if process_running(pid as u32) {
-        signal_process(pid, libc::SIGKILL);
-    }
-}
-
-#[cfg(unix)]
-fn signal_process(pid: libc::pid_t, signal: libc::c_int) {
-    if pid > 1 && pid != unsafe { libc::getpid() } {
-        let _ = unsafe { libc::kill(pid, signal) };
-    }
-}
-
-#[cfg(unix)]
-fn signal_process_group(pgid: libc::pid_t, signal: libc::c_int) {
-    if pgid > 1 && pgid != unsafe { libc::getpgrp() } {
-        let _ = unsafe { libc::kill(-pgid, signal) };
-    }
-}
-
-#[cfg(unix)]
-fn process_group_running(group_leader_pid: u32) -> bool {
-    if group_leader_pid as libc::pid_t == unsafe { libc::getpgrp() } {
-        return false;
-    }
-    let result = unsafe { libc::kill(-(group_leader_pid as libc::pid_t), 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    crate::os::terminate_process(pid);
 }
 
 pub(crate) fn compact_text(text: &str, max_chars: usize) -> String {
-    let mut out = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if out.chars().count() > max_chars {
-        out = out.chars().take(max_chars).collect::<String>();
-        out.push('…');
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let char_count = normalized.chars().count();
+    if char_count <= max_chars {
+        return normalized;
     }
-    out
+    let mut result = normalized.chars().take(max_chars).collect::<String>();
+    result.push('…');
+    result
 }
 
 fn now_ms() -> i64 {

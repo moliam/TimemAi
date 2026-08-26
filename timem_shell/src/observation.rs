@@ -32,6 +32,7 @@ pub enum ObservationEvent {
         timer: ActionTimer,
     },
     UpdateActionStatus {
+        action_id: Option<String>,
         active_text: String,
         status_text: String,
     },
@@ -39,6 +40,12 @@ pub enum ObservationEvent {
         text: String,
         is_last: bool,
         timer: ActionTimer,
+    },
+    StartAction {
+        action_id: Option<String>,
+        text: String,
+        style: ObservationLineStyle,
+        timer: Option<ActionTimer>,
     },
 }
 
@@ -62,6 +69,7 @@ pub struct ObservationLine {
     pub style: ObservationLineStyle,
     pub prefix: String,
     pub timer: Option<ActionTimer>,
+    pub action_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,9 +152,10 @@ impl ObservationPanel {
                 );
             }
             ObservationEvent::UpdateActionStatus {
+                action_id,
                 active_text,
                 status_text,
-            } => self.update_action_status(&active_text, status_text),
+            } => self.update_action_status(action_id.as_deref(), &active_text, status_text),
             ObservationEvent::ActiveChildWithTimer {
                 text,
                 is_last,
@@ -159,19 +168,36 @@ impl ObservationPanel {
                     Some(timer),
                 );
             }
+            ObservationEvent::StartAction {
+                action_id,
+                text,
+                style,
+                timer,
+            } => self.push_line_with_action(
+                text,
+                style,
+                OBSERVATION_LINE_PREFIX.to_string(),
+                timer,
+                action_id,
+            ),
         }
     }
 
-    fn update_action_status(&mut self, active_text: &str, status_text: String) {
+    fn update_action_status(
+        &mut self,
+        action_id: Option<&str>,
+        active_text: &str,
+        status_text: String,
+    ) {
         if status_text.trim().is_empty() {
             return;
         }
-        if let Some(line) = self
-            .lines
-            .iter_mut()
-            .rev()
-            .find(|line| line.text == active_text)
-        {
+        let action_id = action_id.filter(|value| !value.trim().is_empty());
+        if let Some(line) = self.lines.iter_mut().rev().find(|line| {
+            action_id
+                .map(|action_id| line.action_id.as_deref() == Some(action_id))
+                .unwrap_or_else(|| line.text == active_text)
+        }) {
             line.text = status_text;
             line.style = ObservationLineStyle::Normal;
             line.timer = None;
@@ -208,11 +234,26 @@ impl ObservationPanel {
         if text.trim().is_empty() {
             return;
         }
+        self.push_line_with_action(text, style, prefix, timer, None);
+    }
+
+    fn push_line_with_action(
+        &mut self,
+        text: String,
+        style: ObservationLineStyle,
+        prefix: String,
+        timer: Option<ActionTimer>,
+        action_id: Option<String>,
+    ) {
+        if text.trim().is_empty() {
+            return;
+        }
         self.lines.push_back(ObservationLine {
             text,
             style,
             prefix,
             timer,
+            action_id,
         });
         while self.lines.len() > self.max_lines {
             self.lines.pop_front();
@@ -227,6 +268,7 @@ impl ObservationPanel {
                 style: ObservationLineStyle::ActiveBlink,
                 prefix: OBSERVATION_LINE_PREFIX.to_string(),
                 timer: None,
+                action_id: None,
             });
         }
         if lines.len() > self.max_lines {
@@ -522,7 +564,7 @@ pub fn observation_events_from_core_topic_events(
     for event in events {
         if let Some(model_response) = event.as_model_response() {
             let free_talk = model_response.free_talk.trim();
-            if !free_talk.is_empty() {
+            if model_response.continue_work && !free_talk.is_empty() {
                 observations.push(ObservationEvent::Persistent(format!("💡 {free_talk}")));
             }
             if event.payload.get("global").is_some() {
@@ -550,6 +592,8 @@ pub fn observation_events_from_core_topic_events(
             let (detail_text, timer) = action_detail_for_shell(&action.kind);
             if action.event == "finish" {
                 observations.push(ObservationEvent::UpdateActionStatus {
+                    action_id: (!action.action_id.trim().is_empty())
+                        .then(|| action.action_id.clone()),
                     active_text: detail_text,
                     status_text: action_status_detail_for_shell(
                         &action.kind,
@@ -564,12 +608,21 @@ pub fn observation_events_from_core_topic_events(
             } else {
                 ObservationLineStyle::Normal
             };
-            observations.extend(action_observation_pair(
-                None,
-                child_style,
-                detail_text,
-                timer,
-            ));
+            if action.action_id.trim().is_empty() {
+                observations.extend(action_observation_pair(
+                    None,
+                    child_style,
+                    detail_text,
+                    timer,
+                ));
+            } else {
+                observations.push(ObservationEvent::StartAction {
+                    action_id: Some(action.action_id.clone()),
+                    text: detail_text,
+                    style: child_style,
+                    timer,
+                });
+            }
         }
     }
     observations
@@ -620,9 +673,7 @@ fn action_detail_for_shell(kind: &CoreActionKind) -> (String, Option<ActionTimer
             capmgr_action_detail(op.trim(), kind.trim(), id.trim()),
             None,
         ),
-        CoreActionKind::SelfTool { self_type, op } => {
-            (self_tool_action_detail(self_type.trim(), op.trim()), None)
-        }
+        CoreActionKind::SelfTool { self_type } => (self_tool_action_detail(self_type.trim()), None),
         CoreActionKind::ChatHistory { operation } => {
             (memory_action_detail("raw_chat", operation.trim()), None)
         }
@@ -683,9 +734,6 @@ fn capmgr_action_detail(op: &str, kind: &str, id: &str) -> String {
         ("load", kind, id) => format!("能力: 加载 {kind}/{id}"),
         ("list", "", _) => "能力: 列出".to_string(),
         ("list", kind, _) => format!("能力: 列出 {kind}"),
-        ("inspect", kind, id) if !kind.is_empty() && !id.is_empty() => {
-            format!("能力: 查看 {kind}/{id}")
-        }
         ("job_status", _, id) if !id.is_empty() => format!("后台工具任务: {}", id.trim()),
         ("job_status", _, _) => "后台工具任务: 查询".to_string(),
         ("job_cancel", _, id) if !id.is_empty() => format!("后台工具任务: 取消 {}", id.trim()),
@@ -694,13 +742,12 @@ fn capmgr_action_detail(op: &str, kind: &str, id: &str) -> String {
     }
 }
 
-fn self_tool_action_detail(self_type: &str, op: &str) -> String {
-    match (self_type, op) {
-        ("env", "read") => "Timem: 查看环境".to_string(),
-        ("env", "write") => "Timem: 更新环境".to_string(),
-        ("mem_path", "read") => "Timem: 查看记忆路径".to_string(),
-        ("about_me", "read") => "Timem: 查看自身信息".to_string(),
-        _ => "Timem: 自身工具".to_string(),
+fn self_tool_action_detail(self_type: &str) -> String {
+    match self_type {
+        "path" => "Timem: 查看自身路径".to_string(),
+        "params" => "Timem: 查看运行参数".to_string(),
+        other if !other.is_empty() => format!("Timem: 查看自身信息 ({other})"),
+        _ => "Timem: 查看自身信息".to_string(),
     }
 }
 

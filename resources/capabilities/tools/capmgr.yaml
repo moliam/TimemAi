@@ -3,6 +3,10 @@ id: capmgr
 binding_type: builtin
 binding_name: capmgr
 summary: Manage capability tools and skills.
+prompt_synopsis: |
+  {"capmgr":{"op":"list","kind":"skill"}}
+  {"capmgr":{"op":"load","kind":"skill","id":"skill_id"}}
+  {"capmgr":{"op":"job_status","job_id":"job_id","timeout_ms":5000}}
 description: |
   Capability manager. Do not list capabilities for ordinary user tasks. Use
   op=list only when the user asks about available capabilities, or when you need
@@ -12,7 +16,8 @@ description: |
   command-bound tools. Do not use these for run_bash jobs; run_bash returns pid
   and the runtime injects running job updates.
 prompt_input: |
-  Requires op. For op=load or op=inspect, also provide kind=tool|skill and id.
+  Requires op. For op=list, omit kind to list all or use kind=all|tool|skill.
+  For op=load, provide kind=tool|skill and id.
   For op=job_status or op=job_cancel, provide job_id. For job_status,
   timeout_ms is chosen by you; 0 means immediate check, max 15000.
 prompt_result: |
@@ -24,54 +29,47 @@ input_schema: |
   {
     "type": "object",
     "required": ["op"],
+    "additionalProperties": false,
     "properties": {
       "op": {
         "type": "string",
-        "enum": ["list", "load", "inspect", "job_status", "job_cancel"],
+        "enum": ["list", "load", "job_status", "job_cancel"],
         "description": "Capability manager operation."
       },
       "kind": {
         "type": "string",
-        "enum": ["tool", "skill"],
-        "description": "Capability kind."
+        "enum": ["all", "tool", "skill"],
+        "description": "Capability kind. all is valid only for list; load accepts tool or skill."
       },
       "id": {
         "type": "string",
-        "description": "Capability id; required for load/inspect."
+        "minLength": 1,
+        "pattern": "\\S",
+        "description": "Capability id; required for load."
       },
       "job_id": {
         "type": "string",
+        "minLength": 1,
+        "pattern": "\\S",
         "description": "Background job id returned by a registered command-bound tool."
       },
       "timeout_ms": {
         "type": "integer",
+        "minimum": 0,
+        "maximum": 15000,
         "description": "Wait budget for job_status; 0 means immediate check, max 15000."
       }
     },
     "x-required-when": [
-      {"field": "op", "values": ["load", "inspect"], "required": ["kind", "id"]},
+      {"field": "op", "values": ["load"], "required": ["kind", "id"]},
       {"field": "op", "values": ["job_status", "job_cancel"], "required": ["job_id"]}
+    ],
+    "oneOf": [
+      {"properties": {"op": {"enum": ["list"]}, "kind": {"enum": ["all", "tool", "skill"]}}},
+      {"properties": {"op": {"enum": ["load"]}, "kind": {"enum": ["tool", "skill"]}}, "required": ["kind", "id"]},
+      {"properties": {"op": {"enum": ["job_status"]}}, "required": ["job_id"]},
+      {"properties": {"op": {"enum": ["job_cancel"]}}, "required": ["job_id"]}
     ]
-  }
-output_schema: |
-  {
-    "type": "object",
-    "properties": {
-      "op": {"type": "string", "description": "Echoed operation."},
-      "kind": {"type": "string", "description": "Echoed kind when provided."},
-      "results": {"type": "string", "description": "List text for list operations."},
-      "description": {"type": "string", "description": "Tool description for loaded tools."},
-      "input": {"type": "object", "description": "Input schema summary for loaded tools."},
-      "output": {"type": "object", "description": "Output schema summary for loaded tools, or bounded final job output text for job_status."},
-      "body": {"type": "string", "description": "Skill body for loaded skills."},
-      "job_id": {"type": "string", "description": "Echoed registered tool background job id."},
-      "state": {"type": "string", "description": "Job state: running|finished|cancelled."},
-      "exit_code": {"type": "integer", "description": "Process exit code when finished."},
-      "waited_ms": {"type": "integer", "description": "Actual wait time."},
-      "output_file": {"type": "string", "description": "Path where background output is stored."},
-      "partial_output": {"type": "string", "description": "Bounded output while still running."},
-      "error": {"type": "string", "description": "not_found|unsupported_kind|unsupported_op|job_id_required|job_not_found"}
-    }
   }
 example_json: |
   {

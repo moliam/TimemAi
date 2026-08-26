@@ -4,16 +4,31 @@ fn caps() -> CapabilityRegistry {
     CapabilityRegistry::builtin()
 }
 
+fn parse_confirmed_final(content: &str) -> ParsedEnvelope {
+    let confirm = format!("<finish_confirm>{FINISH_CONFIRM_PREFIX}</finish_confirm>");
+    let insertion_point = content
+        .find("<toolgen_retrospect")
+        .or_else(|| content.find("<final_answer"))
+        .expect("confirmed final fixture must contain a final branch");
+    let response = format!(
+        "{}{}{}",
+        &content[..insertion_point],
+        confirm,
+        &content[insertion_point..]
+    );
+    parse_xml_envelope(&response, &caps())
+}
+
 fn extract_response_examples(text: &str) -> Vec<String> {
     let mut examples = Vec::new();
     let mut cursor = 0usize;
-    while let Some(start_rel) = text[cursor..].find("\n<response>\n") {
+    while let Some(start_rel) = text[cursor..].find("\n<ASSISTANT>\n") {
         let start = cursor + start_rel + 1;
-        let search_from = start + "<response>".len();
-        let Some(end_rel) = text[search_from..].find("</response>") else {
+        let search_from = start + "<ASSISTANT>".len();
+        let Some(end_rel) = text[search_from..].find("</ASSISTANT>") else {
             break;
         };
-        let end = search_from + end_rel + "</response>".len();
+        let end = search_from + end_rel + "</ASSISTANT>".len();
         examples.push(text[start..end].to_string());
         cursor = end;
     }
@@ -48,22 +63,105 @@ fn documented_xml_response_examples_parse_with_runtime_parser() {
 
 #[test]
 fn parses_final_answer() {
-    let env = parse_xml_envelope(
-        "<response><final_answer>done</final_answer></response>",
-        &caps(),
-    );
+    let env = parse_confirmed_final("<ASSISTANT><final_answer>done</final_answer></ASSISTANT>");
     assert!(env.repair_issue.is_none());
     assert!(!env.continue_work);
     assert_eq!(env.final_answer, "done");
 }
 
 #[test]
-fn recovered_final_answer_requires_an_unmodified_retry() {
+fn final_answer_requires_a_valid_finish_confirmation() {
+    let missing = parse_xml_envelope(
+        "<ASSISTANT><final_answer>must not escape</final_answer></ASSISTANT>",
+        &caps(),
+    );
+    assert_eq!(
+        missing.repair_issue.as_deref(),
+        Some("finish_confirm_required_before_final_answer")
+    );
+    assert!(missing.final_answer.is_empty());
+    assert!(missing.continue_work);
+
+    let wrong_prefix = parse_xml_envelope(
+        "<ASSISTANT><finish_confirm>I think it is done.</finish_confirm><final_answer>must not escape</final_answer></ASSISTANT>",
+        &caps(),
+    );
+    assert_eq!(
+        wrong_prefix.repair_issue.as_deref(),
+        Some("finish_confirm_prefix_invalid")
+    );
+    assert!(wrong_prefix.final_answer.is_empty());
+    assert!(wrong_prefix.continue_work);
+
+    let previous_prefix = parse_xml_envelope(
+        "<ASSISTANT><finish_confirm>Now let me think seriously twice before I stop. Do I really complete all user's valid tasks or need to stop now? Is my dilivery consistent with user's content? If not, i should continue action.</finish_confirm><final_answer>must not escape</final_answer></ASSISTANT>",
+        &caps(),
+    );
+    assert_eq!(
+        previous_prefix.repair_issue.as_deref(),
+        Some("finish_confirm_prefix_invalid")
+    );
+    assert!(previous_prefix.final_answer.is_empty());
+    assert!(previous_prefix.continue_work);
+}
+
+#[test]
+fn runtime_finish_confirmation_prefix_matches_the_prompt_contract() {
+    assert!(XML_RESPONSE_PROTOCOL_SECTION
+        .contains(&format!("CONFIRM_PREFIX: \"{FINISH_CONFIRM_PREFIX}\"")));
+}
+
+#[test]
+fn finish_confirmation_can_reconsider_and_continue_with_actions() {
+    let raw = format!(
+        "<ASSISTANT><finish_confirm>{FINISH_CONFIRM_PREFIX} More evidence is needed.</finish_confirm><actions><run_bash name=\"inspect cwd\"><cmd>pwd</cmd></run_bash></actions></ASSISTANT>"
+    );
+    let env = parse_xml_envelope(&raw, &caps());
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert!(env.continue_work);
+    assert_eq!(env.next_actions.len(), 1);
+    assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
+}
+
+#[test]
+fn finish_confirmation_is_unique_and_precedes_the_state_branch() {
+    let duplicated = format!(
+        "<ASSISTANT><finish_confirm>{FINISH_CONFIRM_PREFIX}</finish_confirm><finish_confirm>{FINISH_CONFIRM_PREFIX}</finish_confirm><final_answer>done</final_answer></ASSISTANT>"
+    );
+    assert_eq!(
+        parse_xml_envelope(&duplicated, &caps())
+            .repair_issue
+            .as_deref(),
+        Some("xml_duplicate_finish_confirm")
+    );
+
+    let late = format!(
+        "<ASSISTANT><final_answer>done</final_answer><finish_confirm>{FINISH_CONFIRM_PREFIX}</finish_confirm></ASSISTANT>"
+    );
+    let env = parse_xml_envelope(&late, &caps());
+    assert_eq!(env.repair_issue.as_deref(), Some("xml_tags_out_of_order"));
+}
+
+#[test]
+fn largest_complete_response_root_finds_prefixed_final_root() {
+    let raw = "preface<ASSISTANT><final_answer>done</final_answer></ASSISTANT>";
+    let (start, end) =
+        largest_complete_response_root(raw).expect("prefixed complete response root must be found");
+    assert_eq!(
+        &raw[start..end],
+        "<ASSISTANT><final_answer>done</final_answer></ASSISTANT>"
+    );
+    assert!(parse_response_fields(&raw[start..end]).is_some());
+}
+
+#[test]
+fn extracted_final_answer_requires_an_unmodified_retry() {
     for raw in [
-        "preface<response><final_answer>done</final_answer></response>",
-        "<response><final_answer>done</final_answer></response>trailing",
-        "<final_answer>done</final_answer>",
-        "<response><final_answer>done</final_answer>",
+        "preface<ASSISTANT><final_answer>done</final_answer></ASSISTANT>",
+        "<ASSISTANT><final_answer>done</final_answer></ASSISTANT>trailing",
+        "```xml\n<ASSISTANT><final_answer>done</final_answer></ASSISTANT>\n```",
+        "preface<ASSISTANT><actions><run_bash><cmd>true</cmd></run_bash></actions><final_answer>done</final_answer></ASSISTANT>",
     ] {
         let env = parse_xml_envelope(raw, &caps());
         assert_eq!(
@@ -78,9 +176,81 @@ fn recovered_final_answer_requires_an_unmodified_retry() {
 }
 
 #[test]
+fn missing_response_boundaries_are_synthesized_when_the_xml_edges_are_complete() {
+    let action =
+        r#"<actions><run_bash name="run safe command"><cmd>printf safe</cmd></run_bash></actions>"#;
+    for raw in [
+        action.to_string(),
+        format!("<ASSISTANT>{action}"),
+        format!("{action}</ASSISTANT>"),
+        format!("\n  {action}\n  "),
+    ] {
+        let env = parse_xml_envelope(&raw, &caps());
+        assert!(
+            env.repair_issue.is_none(),
+            "raw={raw}: {:?}",
+            env.repair_issue
+        );
+        assert_eq!(
+            env.recovered_issue.as_deref(),
+            Some("runtime_root_repair_help"),
+            "raw={raw}"
+        );
+        assert_eq!(env.next_actions.len(), 1, "raw={raw}");
+        assert_eq!(env.next_actions[0].input_str("cmd"), "printf safe");
+        assert_eq!(
+            env.accepted_response.as_deref(),
+            Some(
+                "<ASSISTANT><actions><run_bash name=\"run safe command\"><cmd>printf safe</cmd></run_bash></actions></ASSISTANT>"
+            ),
+            "raw={raw}"
+        );
+    }
+}
+
+#[test]
+fn synthesized_response_root_can_accept_a_confirmed_final_answer() {
+    let raw = format!(
+        "<finish_confirm>{FINISH_CONFIRM_PREFIX} Complete.</finish_confirm><final_answer>done</final_answer>"
+    );
+    let env = parse_xml_envelope(&raw, &caps());
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.final_answer, "done");
+    assert!(!env.continue_work);
+    assert_eq!(
+        env.accepted_response.as_deref(),
+        Some(
+            format!(
+                "<ASSISTANT><finish_confirm>{FINISH_CONFIRM_PREFIX} Complete.</finish_confirm><final_answer>done</final_answer></ASSISTANT>"
+            )
+            .as_str()
+        )
+    );
+}
+
+#[test]
+fn failed_response_root_synthesis_falls_back_to_the_original_error_flow() {
+    for raw in [
+        "plain text",
+        "<actions><run_bash name=\"broken\"><cmd>true</actions>",
+        "<ASSISTANT><actions><run_bash name=\"broken\"><cmd>true</actions>",
+        "<actions><run_bash name=\"broken\"><cmd>true</actions></ASSISTANT>",
+    ] {
+        let env = parse_xml_envelope(raw, &caps());
+        assert!(env.repair_issue.is_some(), "raw={raw}");
+        assert!(env.recovered_issue.is_none(), "raw={raw}");
+        assert!(env.accepted_response.is_none(), "raw={raw}");
+        assert!(env.final_answer.is_empty(), "raw={raw}");
+        assert!(env.next_actions.is_empty(), "raw={raw}");
+        assert!(env.action_groups.is_empty(), "raw={raw}");
+    }
+}
+
+#[test]
 fn recovery_remains_allowed_for_non_terminal_actions() {
     let env = parse_xml_envelope(
-        "preface<response><actions><run_bash><cmd>printf safe</cmd></run_bash></actions></response>trailing",
+        r#"preface<ASSISTANT><actions><run_bash name="run safe command"><cmd>printf safe</cmd></run_bash></actions></ASSISTANT>trailing"#,
         &caps(),
     );
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
@@ -92,15 +262,13 @@ fn recovery_remains_allowed_for_non_terminal_actions() {
 
 #[test]
 fn cdata_text_fields_are_literal_while_normal_xml_text_decodes_once() {
-    let cdata = parse_xml_envelope(
-        "<response><final_answer><![CDATA[&lt;literal&gt; &amp;]]></final_answer></response>",
-        &caps(),
+    let cdata = parse_confirmed_final(
+        "<ASSISTANT><final_answer><![CDATA[&lt;literal&gt; &amp;]]></final_answer></ASSISTANT>",
     );
     assert_eq!(cdata.final_answer, "&lt;literal&gt; &amp;");
 
-    let escaped = parse_xml_envelope(
-        "<response><final_answer>&amp;lt;decoded-once&amp;gt;</final_answer></response>",
-        &caps(),
+    let escaped = parse_confirmed_final(
+        "<ASSISTANT><final_answer>&amp;lt;decoded-once&amp;gt;</final_answer></ASSISTANT>",
     );
     assert_eq!(escaped.final_answer, "&lt;decoded-once&gt;");
 }
@@ -108,16 +276,16 @@ fn cdata_text_fields_are_literal_while_normal_xml_text_decodes_once() {
 #[test]
 fn parses_xml_native_actions_with_sequential_and_parallel_groups() {
     let env = parse_xml_envelope(
-        r#"<response>
+        r#"<ASSISTANT>
   <free_talk>Inspect, then test.</free_talk>
   <actions>
-    <run_bash timeout_ms="5000"><cmd>pwd</cmd></run_bash>
+    <run_bash name="inspect cwd" timeout_ms="5000"><cmd>pwd</cmd></run_bash>
     <parallel>
-      <run_bash timeout_ms="6000"><cmd>git status --short</cmd></run_bash>
-      <run_bash background="true"><cmd><![CDATA[printf '%s\n' '<ready>' > result.txt]]></cmd></run_bash>
+      <run_bash name="check status" timeout_ms="6000"><cmd>git status --short</cmd></run_bash>
+      <run_bash name="write readiness marker" background="true"><cmd><![CDATA[printf '%s\n' '<ready>' > result.txt]]></cmd></run_bash>
     </parallel>
   </actions>
-</response>"#,
+</ASSISTANT>"#,
         &caps(),
     );
 
@@ -132,7 +300,10 @@ fn parses_xml_native_actions_with_sequential_and_parallel_groups() {
         crate::ActionGroupOrder::Parallel
     );
     assert_eq!(env.action_groups[1].actions.len(), 2);
+    assert_eq!(env.next_actions[0].name.as_deref(), Some("inspect cwd"));
+    assert_eq!(env.next_actions[1].name.as_deref(), Some("check status"));
     assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
+    assert!(env.next_actions[0].raw_input.get("name").is_none());
     assert_eq!(env.next_actions[0].input_i64("timeout_ms"), Some(5000));
     assert_eq!(env.next_actions[1].input_i64("timeout_ms"), Some(6000));
     assert!(env.next_actions[2].input_bool("background"));
@@ -140,16 +311,73 @@ fn parses_xml_native_actions_with_sequential_and_parallel_groups() {
 }
 
 #[test]
+fn xml_native_actions_require_non_empty_descriptive_names() {
+    for raw in [
+        r#"<ASSISTANT><actions><run_bash><cmd>pwd</cmd></run_bash></actions></ASSISTANT>"#,
+        r#"<ASSISTANT><actions><run_bash name="   "><cmd>pwd</cmd></run_bash></actions></ASSISTANT>"#,
+    ] {
+        let env = parse_xml_envelope(raw, &caps());
+        assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+        assert_eq!(env.next_actions.len(), 1);
+        assert_eq!(env.next_actions[0].name.as_deref(), Some("action_0"));
+    }
+
+    let env = parse_xml_envelope(
+        r#"<ASSISTANT><actions><run_bash name="inspect cwd"><cmd>pwd</cmd></run_bash></actions></ASSISTANT>"#,
+        &caps(),
+    );
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert_eq!(env.next_actions[0].name.as_deref(), Some("inspect cwd"));
+    assert!(env.next_actions[0].raw_input.get("name").is_none());
+}
+
+#[test]
+fn xml_action_names_have_a_bounded_character_length() {
+    let allowed_name = "界".repeat(128);
+    let allowed = parse_xml_envelope(
+        &format!(
+            r#"<ASSISTANT><actions><run_bash name="{allowed_name}"><cmd>pwd</cmd></run_bash></actions></ASSISTANT>"#
+        ),
+        &caps(),
+    );
+    assert_eq!(allowed.repair_issue, None);
+    assert_eq!(
+        allowed.next_actions[0].name.as_deref(),
+        Some(allowed_name.as_str())
+    );
+
+    let oversized_name = "界".repeat(161);
+    let oversized = parse_xml_envelope(
+        &format!(
+            r#"<ASSISTANT><actions><run_bash name="{oversized_name}"><cmd>pwd</cmd></run_bash></actions></ASSISTANT>"#
+        ),
+        &caps(),
+    );
+    assert!(
+        oversized
+            .repair_issue
+            .as_deref()
+            .is_some_and(|issue| issue.ends_with(".name_too_long")),
+        "{:?}",
+        oversized.repair_issue
+    );
+    assert!(
+        xml_repair_instruction(oversized.repair_issue.as_deref().unwrap())
+            .contains("at most 128 characters")
+    );
+}
+
+#[test]
 fn recovers_one_missing_final_tool_close_before_parallel_close() {
     let env = parse_xml_envelope(
-        r#"<response>
+        r#"<ASSISTANT>
   <actions>
     <parallel>
-      <run_bash timeout_ms="5000"><cmd>pwd</cmd></run_bash>
-      <run_bash timeout_ms="5000"><cmd><![CDATA[git status --short]]></cmd>
+      <run_bash name="inspect cwd" timeout_ms="5000"><cmd>pwd</cmd></run_bash>
+      <run_bash name="check git status" timeout_ms="5000"><cmd><![CDATA[git status --short]]></cmd>
     </parallel>
   </actions>
-</response>"#,
+</ASSISTANT>"#,
         &caps(),
     );
 
@@ -162,8 +390,8 @@ fn recovers_one_missing_final_tool_close_before_parallel_close() {
 #[test]
 fn does_not_recover_argument_or_unrelated_mismatched_close_tags() {
     for raw in [
-        r#"<response><actions><parallel><run_bash><cmd>pwd</run_bash></parallel></actions></response>"#,
-        r#"<response><actions><parallel><run_bash><cmd>pwd</cmd></memmgr></parallel></actions></response>"#,
+        r#"<ASSISTANT><actions><parallel><run_bash><cmd>pwd</run_bash></parallel></actions></ASSISTANT>"#,
+        r#"<ASSISTANT><actions><parallel><run_bash><cmd>pwd</cmd></memmgr></parallel></actions></ASSISTANT>"#,
     ] {
         let env = parse_xml_envelope(raw, &caps());
         assert!(
@@ -179,7 +407,7 @@ fn does_not_recover_argument_or_unrelated_mismatched_close_tags() {
 #[test]
 fn xml_native_actions_reject_nested_parallel_and_duplicate_arguments() {
     let nested = parse_xml_envelope(
-        r#"<response><actions><parallel><parallel><run_bash><cmd>pwd</cmd></run_bash></parallel></parallel></actions></response>"#,
+        r#"<ASSISTANT><actions><parallel><parallel><run_bash><cmd>pwd</cmd></run_bash></parallel></parallel></actions></ASSISTANT>"#,
         &caps(),
     );
     assert!(nested
@@ -188,7 +416,7 @@ fn xml_native_actions_reject_nested_parallel_and_duplicate_arguments() {
         .is_some_and(|issue| issue.ends_with("parallel_nested")));
 
     let duplicate = parse_xml_envelope(
-        r#"<response><actions><run_bash timeout_ms="1"><cmd>pwd</cmd><timeout_ms>2</timeout_ms></run_bash></actions></response>"#,
+        r#"<ASSISTANT><actions><run_bash timeout_ms="1"><cmd>pwd</cmd><timeout_ms>2</timeout_ms></run_bash></actions></ASSISTANT>"#,
         &caps(),
     );
     assert!(duplicate
@@ -203,7 +431,7 @@ fn xml_native_actions_convert_schema_typed_arrays_objects_and_mcp_tool_names() {
         server_id: "demo".to_string(),
         server_name: "Demo".to_string(),
         name: "batch".to_string(),
-        action_name: "mcp.demo.batch".to_string(),
+        action_name: "mcp_demo__batch".to_string(),
         description: "Batch demo".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -222,15 +450,15 @@ fn xml_native_actions_convert_schema_typed_arrays_objects_and_mcp_tool_names() {
     };
     let capabilities = caps().with_mcp_tools(&[tool]).expect("MCP capability");
     let env = parse_xml_envelope(
-        r#"<response><actions><mcp.demo.batch>
+        r#"<ASSISTANT><actions><mcp_demo__batch name="batch demo files">
           <files><item>README.md</item><item>package.json</item></files>
           <options strict="true"><limit>20</limit></options>
-        </mcp.demo.batch></actions></response>"#,
+        </mcp_demo__batch></actions></ASSISTANT>"#,
         &capabilities,
     );
 
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert_eq!(env.next_actions[0].action, "mcp.demo.batch");
+    assert_eq!(env.next_actions[0].action, "mcp_demo__batch");
     assert_eq!(
         env.next_actions[0].raw_input["files"],
         serde_json::json!(["README.md", "package.json"])
@@ -247,7 +475,7 @@ fn xml_native_values_cover_nullable_large_integer_additional_properties_and_lite
         server_id: "types".to_string(),
         server_name: "Types".to_string(),
         name: "probe".to_string(),
-        action_name: "mcp.types.probe".to_string(),
+        action_name: "mcp_types__probe".to_string(),
         description: "Exercise XML value conversion".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -281,13 +509,13 @@ fn xml_native_values_cover_nullable_large_integer_additional_properties_and_lite
     };
     let capabilities = caps().with_mcp_tools(&[tool]).expect("MCP capability");
     let env = parse_xml_envelope(
-        r#"<response><actions><mcp.types.probe count="18446744073709551615" ratio="1.25" choice="7">
+        r#"<ASSISTANT><actions><mcp_types__probe name="probe XML value conversion" count="18446744073709551615" ratio="1.25" choice="7">
           <nothing/>
           <tuple><item>9</item><item>false</item></tuple>
           <metadata><alpha>1</alpha><beta>2</beta></metadata>
           <rows><item ok="true"><name>A&#38;B</name></item></rows>
           <payload><![CDATA[  &lt;raw>&value  ]]></payload>
-        </mcp.types.probe></actions></response>"#,
+        </mcp_types__probe></actions></ASSISTANT>"#,
         &capabilities,
     );
 
@@ -315,7 +543,7 @@ fn capability_prompt_exposes_the_same_nested_types_that_xml_runtime_accepts() {
         server_id: "typed".to_string(),
         server_name: "Typed".to_string(),
         name: "submit".to_string(),
-        action_name: "mcp.typed.submit".to_string(),
+        action_name: "mcp_typed__submit".to_string(),
         description: "Submit typed values".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -352,10 +580,10 @@ fn capability_prompt_exposes_the_same_nested_types_that_xml_runtime_accepts() {
 #[test]
 fn xml_native_actions_reject_unsafe_xml_constructs_and_resource_exhaustion() {
     for raw in [
-        r#"<response><actions><run_bash><cmd>&unknown;</cmd></run_bash></actions></response>"#,
-        r#"<response><actions><run_bash><cmd>&unterminated</cmd></run_bash></actions></response>"#,
-        r#"<response><actions><run_bash><cmd><!-- hidden --></cmd></run_bash></actions></response>"#,
-        r#"<response><actions><!DOCTYPE run_bash><run_bash><cmd>pwd</cmd></run_bash></actions></response>"#,
+        r#"<ASSISTANT><actions><run_bash><cmd>&unknown;</cmd></run_bash></actions></ASSISTANT>"#,
+        r#"<ASSISTANT><actions><run_bash><cmd>&unterminated</cmd></run_bash></actions></ASSISTANT>"#,
+        r#"<ASSISTANT><actions><run_bash><cmd><!-- hidden --></cmd></run_bash></actions></ASSISTANT>"#,
+        r#"<ASSISTANT><actions><!DOCTYPE run_bash><run_bash><cmd>pwd</cmd></run_bash></actions></ASSISTANT>"#,
     ] {
         let env = parse_xml_envelope(raw, &caps());
         assert!(env.repair_issue.is_some(), "unsafe XML accepted: {raw}");
@@ -368,7 +596,7 @@ fn xml_native_actions_reject_unsafe_xml_constructs_and_resource_exhaustion() {
     }
 
     let nested = format!(
-        "<response><actions><run_bash><cmd>{}x{}</cmd></run_bash></actions></response>",
+        "<ASSISTANT><actions><run_bash><cmd>{}x{}</cmd></run_bash></actions></ASSISTANT>",
         "<level>".repeat(MAX_XML_ACTION_DEPTH + 1),
         "</level>".repeat(MAX_XML_ACTION_DEPTH + 1)
     );
@@ -380,7 +608,7 @@ fn xml_native_actions_reject_unsafe_xml_constructs_and_resource_exhaustion() {
     assert!(env.next_actions.is_empty());
 
     let oversized = format!(
-        "<response><actions>{}</actions></response>",
+        "<ASSISTANT><actions>{}</actions></ASSISTANT>",
         "<run_bash/>".repeat(MAX_XML_ACTION_ELEMENTS + 1)
     );
     let env = parse_xml_envelope(&oversized, &caps());
@@ -394,10 +622,10 @@ fn xml_native_actions_reject_unsafe_xml_constructs_and_resource_exhaustion() {
 #[test]
 fn xml_native_action_batch_is_atomic_when_a_later_action_is_invalid() {
     let env = parse_xml_envelope(
-        r#"<response><actions>
+        r#"<ASSISTANT><actions>
           <run_bash><cmd>printf should-not-run</cmd></run_bash>
           <run_bash timeout_ms="not-an-integer"><cmd>pwd</cmd></run_bash>
-        </actions></response>"#,
+        </actions></ASSISTANT>"#,
         &caps(),
     );
     assert!(env.repair_issue.is_some());
@@ -428,13 +656,50 @@ fn xml_protocol_rejects_json_markdown_and_plain_text_roots() {
 }
 
 #[test]
-fn outer_text_around_first_response_root_is_recovered_as_free_talk() {
+fn legacy_response_root_is_rejected_and_repaired_to_assistant_root() {
+    let raw = "<response><actions><run_bash name=\"must not run\"><cmd>printf legacy</cmd></run_bash></actions></response>";
+    let env = parse_xml_envelope(raw, &caps());
+
+    assert_eq!(
+        env.repair_issue.as_deref(),
+        Some("xml_response_root_missing")
+    );
+    assert!(env.next_actions.is_empty());
+    assert!(env.action_groups.is_empty());
+    assert!(env.accepted_response.is_none());
+
+    let instruction = xml_repair_instruction_for_response("xml_response_root_missing", raw);
+    assert!(instruction.contains("required <ASSISTANT> root"));
+    assert!(instruction.contains("<ASSISTANT><actions>...</actions></ASSISTANT>"));
+    assert!(!instruction.contains("one complete <response>"));
+}
+
+#[test]
+fn legacy_response_root_text_inside_final_answer_remains_opaque_data() {
+    let env = parse_confirmed_final(
+        r#"<ASSISTANT>
+  <final_answer><![CDATA[
+Legacy example: <response><final_answer>old</final_answer></response>
+  ]]></final_answer>
+</ASSISTANT>"#,
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
+    assert!(env
+        .final_answer
+        .contains("<response><final_answer>old</final_answer></response>"));
+    assert!(env.next_actions.is_empty());
+    assert!(env.action_groups.is_empty());
+}
+
+#[test]
+fn outer_text_is_discarded_when_a_non_final_response_root_is_extracted() {
     let env = parse_xml_envelope(
         r#"prefix prose <actions><run_bash><cmd>must not execute</cmd></run_bash></actions>
-<response>
+<ASSISTANT>
   <free_talk>inside thought</free_talk>
-  <actions><run_bash><cmd>printf safe</cmd></run_bash></actions>
-</response>
+  <actions><run_bash name="run selected safe command"><cmd>printf safe</cmd></run_bash></actions>
+</ASSISTANT>
 trailing prose <run_bash><cmd>also must not execute</cmd></run_bash>"#,
         &caps(),
     );
@@ -442,83 +707,104 @@ trailing prose <run_bash><cmd>also must not execute</cmd></run_bash>"#,
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
     assert_eq!(env.next_actions.len(), 1);
     assert_eq!(env.next_actions[0].input_str("cmd"), "printf safe");
+    assert_eq!(env.thought, "inside thought");
     assert_eq!(
-        env.thought,
-        "prefix prose <actions><run_bash><cmd>must not execute</cmd></run_bash></actions>\n\ntrailing prose <run_bash><cmd>also must not execute</cmd></run_bash>\n\ninside thought"
+        env.accepted_response.as_deref(),
+        Some(
+            "<ASSISTANT>\n  <free_talk>inside thought</free_talk>\n  <actions><run_bash name=\"run selected safe command\"><cmd>printf safe</cmd></run_bash></actions>\n</ASSISTANT>"
+        )
     );
-    assert_eq!(
-        env.runtime_note.as_deref(),
-        Some("auto_recovered_xml_prefix_as_free_talk")
-    );
+    assert!(!env.thought.contains("must not execute"));
+    assert!(env.runtime_note.is_none());
 }
 
 #[test]
-fn adjacent_response_roots_keep_only_the_first_root_as_protocol() {
+fn multiple_response_roots_select_the_largest_complete_root() {
     let env = parse_xml_envelope(
-        "before<response><actions><run_bash><cmd>printf first</cmd></run_bash></actions></response><response><actions><run_bash><cmd>must not execute</cmd></run_bash></actions></response>after",
+        r#"before
+<ASSISTANT><actions><run_bash><cmd>must not execute</cmd></run_bash></actions></ASSISTANT>
+noise
+<ASSISTANT>
+  <free_talk>use the larger complete response</free_talk>
+  <actions><run_bash name="run selected command"><cmd>printf selected</cmd></run_bash></actions>
+</ASSISTANT>
+after"#,
         &caps(),
     );
 
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert!(env.final_answer.is_empty());
+    assert_eq!(env.next_actions.len(), 1);
+    assert_eq!(env.next_actions[0].input_str("cmd"), "printf selected");
+    assert_eq!(env.thought, "use the larger complete response");
+    let accepted = env.accepted_response.as_deref().unwrap();
+    assert!(accepted.contains("printf selected"));
+    assert!(!accepted.contains("must not execute"));
+}
+
+#[test]
+fn equal_sized_response_roots_keep_the_first_complete_root() {
+    let env = parse_xml_envelope(
+        r#"<ASSISTANT><actions><run_bash name="run first command"><cmd>printf first</cmd></run_bash></actions></ASSISTANT><ASSISTANT><actions><run_bash name="run later command"><cmd>printf later</cmd></run_bash></actions></ASSISTANT>"#,
+        &caps(),
+    );
+
+    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
     assert_eq!(env.next_actions.len(), 1);
     assert_eq!(env.next_actions[0].input_str("cmd"), "printf first");
-    assert!(env.thought.starts_with("before\n\n<response>"));
-    assert!(env.thought.contains("must not execute"));
-    assert!(env.thought.ends_with("</response>after"));
 }
 
 #[test]
 fn root_repair_moves_free_talk_inside_response_with_matching_action_branch() {
     let malformed = r#"<free_talk>searching</free_talk>
-<response><working_still_action>...</working_still_action></response>"#;
+<ASSISTANT><working_still_action>...</working_still_action></ASSISTANT>"#;
     let instruction = xml_repair_instruction_for_response("xml_content_before_response", malformed);
 
-    assert!(instruction.contains("placed content before the <response> root"));
+    assert!(instruction.contains("placed content before the <ASSISTANT> root"));
     assert!(instruction.contains(
-            "The response must be in format '<response><free_talk>...</free_talk><actions>...</actions></response>'"
+            "The response must be in format '<ASSISTANT><free_talk>...</free_talk><actions>...</actions></ASSISTANT>'"
         ));
-    assert!(instruction.contains("output nothing before <response> or after </response>"));
+    assert!(instruction.contains("output nothing before <ASSISTANT> or after </ASSISTANT>"));
 }
 
 #[test]
 fn root_repair_selects_the_branch_present_in_the_malformed_response() {
     let final_instruction = xml_repair_instruction_for_response(
         "xml_content_before_response",
-        "preface<response><final_answer>done</final_answer></response>",
+        "preface<ASSISTANT><final_answer>done</final_answer></ASSISTANT>",
     );
-    assert!(final_instruction.contains("<response><final_answer>...</final_answer></response>"));
+    assert!(final_instruction.contains(
+        "<ASSISTANT><finish_confirm>CONFIRM_PREFIX followed by the confirmation</finish_confirm><final_answer>...</final_answer></ASSISTANT>"
+    ));
 
     let compact_instruction = xml_repair_instruction_for_response(
         "xml_content_after_response",
-        "<response><context_compact><summary>x</summary></context_compact></response>tail",
+        "<ASSISTANT><context_compact><summary>x</summary></context_compact></ASSISTANT>tail",
     );
-    assert!(
-        compact_instruction.contains("<response><context_compact>...</context_compact></response>")
-    );
-    assert!(compact_instruction.contains("placed content after the </response> root"));
+    assert!(compact_instruction
+        .contains("<ASSISTANT><context_compact>...</context_compact></ASSISTANT>"));
+    assert!(compact_instruction.contains("placed content after the </ASSISTANT> root"));
 }
 
 #[test]
 fn malformed_raw_responses_map_to_distinct_issue_and_guidance() {
     let cases = [
             (
-                "<response/>",
+                "<ASSISTANT/>",
                 "xml_response_root_self_closing",
-                "did not form one complete <response>...</response> root",
+                "did not form one complete <ASSISTANT>...</ASSISTANT> root",
             ),
             (
-                "<response>stray<final_answer>done</final_answer></response>",
+                "<ASSISTANT>stray<final_answer>done</final_answer></ASSISTANT>",
                 "xml_unexpected_content_inside_response",
                 "unknown top-level tag outside a supported field",
             ),
             (
-                "<response><free_talk>a</free_talk><free_talk>b</free_talk><final_answer>done</final_answer></response>",
+                "<ASSISTANT><free_talk>a</free_talk><free_talk>b</free_talk><final_answer>done</final_answer></ASSISTANT>",
                 "xml_duplicate_free_talk",
                 "more than one <free_talk>",
             ),
             (
-                "<response><free_talk>broken<final_answer>done</final_answer></response>",
+                "<ASSISTANT><free_talk>broken<final_answer>done</final_answer></ASSISTANT>",
                 "xml_unclosed_tag:free_talk",
                 "field tag is not closed",
             ),
@@ -557,145 +843,91 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
             },
             Case {
                 name: "self closing response root",
-                raw: "<response/>",
+                raw: "<ASSISTANT/>",
                 issue: "xml_response_root_self_closing",
-                guidance: "one complete <response>...</response> root",
+                guidance: "one complete <ASSISTANT>...</ASSISTANT> root",
             },
             Case {
                 name: "empty response body",
-                raw: "<response></response>",
+                raw: "<ASSISTANT></ASSISTANT>",
                 issue: "next_actions_required_when_status_working",
                 guidance: "必须提供非空 <actions>",
             },
             Case {
                 name: "unknown top level tag",
-                raw: "<response><progress>working</progress><final_answer>done</final_answer></response>",
+                raw: "<ASSISTANT><progress>working</progress><final_answer>done</final_answer></ASSISTANT>",
                 issue: "xml_unexpected_content_inside_response",
                 guidance: "unknown top-level tag",
             },
             Case {
                 name: "raw text inside response",
-                raw: "<response>thinking<final_answer>done</final_answer></response>",
+                raw: "<ASSISTANT>thinking<final_answer>done</final_answer></ASSISTANT>",
                 issue: "xml_unexpected_content_inside_response",
                 guidance: "Put text inside <free_talk> or <final_answer>",
             },
             Case {
                 name: "duplicate free talk",
-                raw: "<response><free_talk>a</free_talk><free_talk>b</free_talk><final_answer>done</final_answer></response>",
+                raw: "<ASSISTANT><free_talk>a</free_talk><free_talk>b</free_talk><final_answer>done</final_answer></ASSISTANT>",
                 issue: "xml_duplicate_free_talk",
                 guidance: "Merge them into one optional <free_talk>",
             },
             Case {
                 name: "free talk after state branch",
-                raw: "<response><final_answer>done</final_answer><free_talk>late</free_talk></response>",
+                raw: "<ASSISTANT><final_answer>done</final_answer><free_talk>late</free_talk></ASSISTANT>",
                 issue: "xml_tags_out_of_order",
                 guidance: "tags are out of order",
             },
             Case {
                 name: "unclosed free talk",
-                raw: "<response><free_talk>broken<final_answer>done</final_answer></response>",
+                raw: "<ASSISTANT><free_talk>broken<final_answer>done</final_answer></ASSISTANT>",
                 issue: "xml_unclosed_tag:free_talk",
                 guidance: "field tag is not closed",
             },
             Case {
                 name: "working and final branches together",
-                raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"pwd\"}}]]]></action_json></working_still_action><final_answer>done</final_answer></response>",
+                raw: "<ASSISTANT><actions><run_bash><cmd>pwd</cmd></run_bash></actions><final_answer>done</final_answer></ASSISTANT>",
                 issue: "status_finished_must_not_include_next_actions",
                 guidance: "不能同时包含 <actions>",
             },
             Case {
                 name: "compact and final branches together",
-                raw: "<response><context_compact><discard>pd_1</discard><summary>state</summary></context_compact><final_answer>done</final_answer></response>",
+                raw: "<ASSISTANT><context_compact><discard>pd_1</discard><summary>state</summary></context_compact><final_answer>done</final_answer></ASSISTANT>",
                 issue: "state_branch_must_choose_one",
                 guidance: "selected more than one state branch",
             },
             Case {
                 name: "unsupported status tag",
-                raw: "<response><status>ALL_FINISHED</status></response>",
+                raw: "<ASSISTANT><status>ALL_FINISHED</status></ASSISTANT>",
                 issue: "status_tag_not_supported",
                 guidance: "不使用 <status>",
             },
             Case {
-                name: "action payload is not array",
-                raw: "<response><working_still_action><action_json><![CDATA[{\"run_bash\":{\"cmd\":\"pwd\"}}]]></action_json></working_still_action></response>",
-                issue: "actions[0].array_required",
-                guidance: "请改用 XML-native <actions>",
-            },
-            Case {
-                name: "invalid action json",
-                raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{\"cmd\":\"pwd\",}}]]]></action_json></working_still_action></response>",
-                issue: "actions[0].invalid_json:trailing comma at line 1 column 27",
-                guidance: "legacy JSON action payload was malformed",
-            },
-            Case {
-                name: "removed action group shape",
-                raw: "<response><working_still_action><action_json><![CDATA[{\"order\":\"parallel\",\"actions\":[]}]]></action_json></working_still_action></response>",
-                issue: "actions[0].old_group_object_not_supported",
-                guidance: "removed {\"order\":...,\"actions\":[...]} group shape",
-            },
-            Case {
-                name: "empty workflow",
-                raw: "<response><working_still_action><action_json><![CDATA[[]]]></action_json></working_still_action></response>",
-                issue: "actions[0].actions_required",
-                guidance: "<actions> or <parallel> element is empty",
-            },
-            Case {
-                name: "empty parallel stage",
-                raw: "<response><working_still_action><action_json><![CDATA[[[]]]]></action_json></working_still_action></response>",
-                issue: "actions[0][0].actions_required",
-                guidance: "<actions> or <parallel> element is empty",
-            },
-            Case {
-                name: "action has no tool key",
-                raw: "<response><working_still_action><action_json><![CDATA[[{}]]]></action_json></working_still_action></response>",
-                issue: "actions[0][0].action_missing",
-                guidance: "missing its tool-name key",
-            },
-            Case {
-                name: "action has multiple tool keys",
-                raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{},\"memmgr\":{}}]]]></action_json></working_still_action></response>",
-                issue: "actions[0][0].action_missing",
-                guidance: "missing its tool-name key",
-            },
-            Case {
-                name: "tool arguments are scalar",
-                raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":\"pwd\"}]]]></action_json></working_still_action></response>",
-                issue: "actions[0][0].args_must_be_object",
-                guidance: "not a JSON object",
-            },
-            Case {
-                name: "workflow entry is scalar",
-                raw: "<response><working_still_action><action_json><![CDATA[[42]]]></action_json></working_still_action></response>",
-                issue: "actions[0][0].action_missing",
-                guidance: "missing its tool-name key",
-            },
-            Case {
                 name: "unknown tool",
-                raw: "<response><working_still_action><action_json><![CDATA[[{\"not_a_tool\":{}}]]]></action_json></working_still_action></response>",
+                raw: "<ASSISTANT><actions><not_a_tool/></actions></ASSISTANT>",
                 issue: "unsupported_action:not_a_tool",
                 guidance: "not in the capability catalog",
             },
             Case {
                 name: "missing required run bash command",
-                raw: "<response><working_still_action><action_json><![CDATA[[{\"run_bash\":{}}]]]></action_json></working_still_action></response>",
+                raw: "<ASSISTANT><actions><run_bash/></actions></ASSISTANT>",
                 issue: "actions[0][0].input.any_required:cmd|loop_cmd",
                 guidance: "do not satisfy the capability schema",
             },
             Case {
                 name: "compact missing ids",
-                raw: "<response><context_compact><summary>state</summary></context_compact></response>",
+                raw: "<ASSISTANT><context_compact><summary>state</summary></context_compact></ASSISTANT>",
                 issue: "context_compact[0].ids_required",
                 guidance: "at least one non-empty <discard> or <offload>",
             },
             Case {
                 name: "compact missing summary",
-                raw: "<response><context_compact><discard>pd_1</discard></context_compact></response>",
+                raw: "<ASSISTANT><context_compact><discard>pd_1</discard></context_compact></ASSISTANT>",
                 issue: "context_compact[0].summary_required",
                 guidance: "missing a non-empty <summary>",
             },
         ];
 
-    assert!(cases.len() >= 23, "keep the malformed corpus substantial");
+    assert!(cases.len() >= 14, "keep the malformed corpus substantial");
     for case in cases {
         let parsed = parse_xml_envelope(case.raw, &caps());
         assert_eq!(
@@ -724,7 +956,7 @@ fn malformed_response_corpus_maps_raw_output_to_precise_repair_reason() {
 fn non_root_repair_keeps_issue_specific_static_instruction() {
     let instruction = xml_repair_instruction_for_response(
         "actions[0][1].input.timeout_ms_must_be_integer",
-        "<response></response>",
+        "<ASSISTANT></ASSISTANT>",
     );
     assert!(instruction
         .contains("Exact protocol error: `actions[0][1].input.timeout_ms_must_be_integer`"));
@@ -737,16 +969,6 @@ fn non_root_repair_keeps_issue_specific_static_instruction() {
 #[test]
 fn common_action_repair_issues_have_specific_correction_guidance() {
     let cases = [
-        (
-            "actions[0].invalid_json",
-            "legacy JSON action payload was malformed",
-        ),
-        ("actions[0].action_missing", "missing its tool-name key"),
-        ("actions[0].args_must_be_object", "not a JSON object"),
-        (
-            "actions[0].old_group_object_not_supported",
-            "removed {\"order\":...,\"actions\":[...]} group shape",
-        ),
         (
             "actions[0].actions_required",
             "<actions> or <parallel> element is empty",
@@ -764,7 +986,7 @@ fn common_action_repair_issues_have_specific_correction_guidance() {
     ];
 
     for (issue, expected) in cases {
-        let instruction = xml_repair_instruction_for_response(issue, "<response/>");
+        let instruction = xml_repair_instruction_for_response(issue, "<ASSISTANT/>");
         assert!(
             instruction.contains(expected),
             "issue={issue}, instruction={instruction}"
@@ -774,32 +996,31 @@ fn common_action_repair_issues_have_specific_correction_guidance() {
 
 #[test]
 fn parses_final_answer_cdata_with_xml_examples() {
-    let env = parse_xml_envelope(
-        r#"<response>
+    let env = parse_confirmed_final(
+        r#"<ASSISTANT>
   <final_answer><![CDATA[
 Example response delta:
 
-<response>
+<ASSISTANT>
   <final_answer>done</final_answer>
-</response>
+</ASSISTANT>
 
 [END DELTA]
   ]]></final_answer>
-</response>"#,
-        &caps(),
+</ASSISTANT>"#,
     );
 
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
     assert!(!env.continue_work);
-    assert!(env.final_answer.contains("<response>"));
+    assert!(env.final_answer.contains("<ASSISTANT>"));
     assert!(env.final_answer.contains("</final_answer>"));
     assert!(env.final_answer.contains("[END DELTA]"));
 }
 
 #[test]
 fn final_answer_xml_action_examples_are_not_parsed_as_real_actions() {
-    let env = parse_xml_envelope(
-        r#"<response>
+    let env = parse_confirmed_final(
+        r#"<ASSISTANT>
   <final_answer><![CDATA[
 This is only a user-facing example:
 
@@ -808,8 +1029,7 @@ This is only a user-facing example:
   }</action_json>
 </working_still_action>
   ]]></final_answer>
-</response>"#,
-        &caps(),
+</ASSISTANT>"#,
     );
 
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
@@ -822,13 +1042,13 @@ This is only a user-facing example:
 
 #[test]
 fn final_answer_raw_xml_code_block_is_opaque_text() {
-    let env = parse_xml_envelope(
-        r#"<response>
+    let env = parse_confirmed_final(
+        r#"<ASSISTANT>
   <final_answer>
 Found the original malformed response:
 
 ```xml
-<response>
+<ASSISTANT>
   <free_talk>并行启动 3 个 sleep 15 的后台任务。</free_talk>
   <working_still_action>
     <action_json>
@@ -842,13 +1062,12 @@ Found the original malformed response:
 }
     </action_json>
   </working_still_action>
-</response>
+</ASSISTANT>
 ```
 
 The issue was the bare group object inside action_json.
   </final_answer>
-</response>"#,
-        &caps(),
+</ASSISTANT>"#,
     );
 
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
@@ -864,34 +1083,33 @@ The issue was the bare group object inside action_json.
 
 #[test]
 fn final_answer_can_contain_multiple_adjacent_response_examples_as_text() {
-    let env = parse_xml_envelope(
-        r#"<response>
+    let env = parse_confirmed_final(
+        r#"<ASSISTANT>
   <final_answer><![CDATA[
 First example:
-<response><final_answer>one</final_answer></response>
-<response><final_answer>two</final_answer></response>
+<ASSISTANT><final_answer>one</final_answer></ASSISTANT>
+<ASSISTANT><final_answer>two</final_answer></ASSISTANT>
   ]]></final_answer>
-</response>"#,
-        &caps(),
+</ASSISTANT>"#,
     );
 
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
     assert!(!env.continue_work);
     assert!(env
         .final_answer
-        .contains("<response><final_answer>one</final_answer></response>"));
+        .contains("<ASSISTANT><final_answer>one</final_answer></ASSISTANT>"));
     assert!(env
         .final_answer
-        .contains("<response><final_answer>two</final_answer></response>"));
+        .contains("<ASSISTANT><final_answer>two</final_answer></ASSISTANT>"));
 }
 
 #[test]
 fn final_answer_raw_unbalanced_xml_is_opaque_text() {
-    let env = parse_xml_envelope(
-        r#"<response>
+    let env = parse_confirmed_final(
+        r#"<ASSISTANT>
   <final_answer>
 The previous bad output started like this:
-<response>
+<ASSISTANT>
   <free_talk>explaining an example without closing the root
 
 Literal same-tag example:
@@ -899,13 +1117,12 @@ Literal same-tag example:
 
 That was text, not a runtime action.
   </final_answer>
-</response>"#,
-        &caps(),
+</ASSISTANT>"#,
     );
 
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
     assert!(!env.continue_work);
-    assert!(env.final_answer.contains("<response>"));
+    assert!(env.final_answer.contains("<ASSISTANT>"));
     assert!(env
         .final_answer
         .contains("<free_talk>explaining an example without closing the root"));
@@ -918,8 +1135,8 @@ That was text, not a runtime action.
 
 #[test]
 fn final_answer_raw_text_can_contain_other_string_tags_without_rescanning() {
-    let env = parse_xml_envelope(
-        r#"<response>
+    let env = parse_confirmed_final(
+        r#"<ASSISTANT>
   <final_answer>
 This answer explains multiple protocol snippets:
 <legacy_note>fake legacy note inside final answer</legacy_note>
@@ -927,8 +1144,7 @@ This answer explains multiple protocol snippets:
 <free_talk>fake free talk inside final answer</free_talk>
 None of these are real control fields.
   </final_answer>
-</response>"#,
-        &caps(),
+</ASSISTANT>"#,
     );
 
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
@@ -948,19 +1164,18 @@ None of these are real control fields.
 
 #[test]
 fn final_answer_raw_action_protocol_example_is_not_a_real_action() {
-    let env = parse_xml_envelope(
-        r#"<response>
+    let env = parse_confirmed_final(
+        r#"<ASSISTANT>
 <final_answer>
 Here is the malformed response example the user asked for:
-<response>
+<ASSISTANT>
   <free_talk>not closed
 <legacy_note>fake note</legacy_note>
 <working_still_action><action_json>{"run_bash":{}}</action_json></working_still_action>
 <summary>fake summary</summary>
 This is all answer text.
 </final_answer>
-</response>"#,
-        &caps(),
+</ASSISTANT>"#,
     );
 
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
@@ -972,15 +1187,14 @@ This is all answer text.
 
 #[test]
 fn final_answer_nested_xml_preserves_attributes_and_escaped_text() {
-    let env = parse_xml_envelope(
-        r#"<response>
+    let env = parse_confirmed_final(
+        r#"<ASSISTANT>
   <final_answer>
 Report:
 <diagnostic level="warn" source="unit-test"><message>ok</message><empty marker="1" /></diagnostic>
 Escaped literal: &lt;response&gt;not protocol&lt;/response&gt;
   </final_answer>
-</response>"#,
-        &caps(),
+</ASSISTANT>"#,
     );
 
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
@@ -998,123 +1212,8 @@ Escaped literal: &lt;response&gt;not protocol&lt;/response&gt;
 }
 
 #[test]
-fn free_talk_xml_action_examples_do_not_hide_real_actions() {
-    let env = parse_xml_envelope(
-        r#"<response>
-<free_talk><![CDATA[
-Example text only:
-<working_still_action>
-  <action_json>{"run_bash":{}}</action_json>
-</working_still_action>
-]]></free_talk>
-<working_still_action>
-<action_json><![CDATA[[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json>
-</working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert!(env.continue_work);
-    assert_eq!(env.next_actions.len(), 1);
-    assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
-    assert!(env.thought.contains("<working_still_action>"));
-}
-
-#[test]
-fn free_talk_nested_xml_is_opaque_and_real_action_still_parses() {
-    let env = parse_xml_envelope(
-        r#"<response>
-<free_talk>
-This is only a note:
-<note priority="high"><working_still_action><action_json>{"run_bash":{}}</action_json></working_still_action></note>
-</free_talk>
-<working_still_action>
-<action_json><![CDATA[[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json>
-</working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert_eq!(env.next_actions.len(), 1);
-    assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
-    assert!(env.thought.contains(r#"<note priority="high">"#));
-    assert!(env.thought.contains("<working_still_action>"));
-}
-
-#[test]
-fn free_talk_raw_xml_text_does_not_break_real_action() {
-    let env = parse_xml_envelope(
-        r#"<response>
-<free_talk>
-I am explaining a malformed example:
-<response><working_still_action><action_json>{ bad
-</free_talk>
-<working_still_action>
-<action_json><![CDATA[[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json>
-</working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert!(env.thought.contains("<response><working_still_action>"));
-    assert_eq!(env.next_actions.len(), 1);
-    assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
-}
-
-#[test]
-fn string_field_protection_does_not_hide_malformed_action_json() {
-    let env = parse_xml_envelope(
-        r#"<response>
-<free_talk>text field can mention {"action":"run_bash"}</free_talk>
-<working_still_action>
-<action_json><![CDATA[
-[{"run_bash":{"cmd":"pwd",}}]
-]]></action_json>
-</working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert!(
-        env.repair_issue
-            .as_deref()
-            .is_some_and(|issue| issue.starts_with("actions[0].invalid_json:trailing comma")),
-        "{:?}",
-        env.repair_issue
-    );
-    assert!(env.next_actions.is_empty());
-    assert!(env.action_groups.is_empty());
-}
-
-#[test]
-fn adjacent_top_level_action_arrays_request_repair_instead_of_execution() {
-    let env = parse_xml_envelope(
-        r#"<response>
-  <free_talk>two stage command plan</free_talk>
-  <working_still_action>
-    <action_json><![CDATA[[{"run_bash":{"cmd":"sleep 10","timeout_ms":1000}}],[{"run_bash":{"cmd":"sleep 10","background":true}}]]]></action_json>
-  </working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert!(
-        env.repair_issue
-            .as_deref()
-            .is_some_and(|issue| issue.starts_with("actions[0].invalid_json:trailing characters")),
-        "{:?}",
-        env.repair_issue
-    );
-    assert!(env.next_actions.is_empty());
-    assert!(env.action_groups.is_empty());
-}
-
-#[test]
 fn old_finished_status_requests_repair() {
-    let env = parse_xml_envelope("<response><status>finished</status></response>", &caps());
+    let env = parse_xml_envelope("<ASSISTANT><status>finished</status></ASSISTANT>", &caps());
 
     assert_eq!(
         env.repair_issue.as_deref(),
@@ -1124,289 +1223,16 @@ fn old_finished_status_requests_repair() {
 }
 
 #[test]
-fn parses_actions_from_cdata_json() {
-    let env = parse_xml_envelope(
-        r#"<response>
-<free_talk>state</free_talk>
-<working_still_action>
-<action_json><![CDATA[[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json>
-</working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert!(env.continue_work);
-    assert_eq!(env.thought, "state");
-    assert_eq!(env.next_actions.len(), 1);
-    assert_eq!(env.next_actions[0].action, "run_bash");
-    assert_eq!(env.next_actions[0].input_str("cmd"), "pwd");
-}
-
-#[test]
-fn recovers_glm_action_array_when_cdata_close_consumes_the_final_bracket() {
-    let env = parse_xml_envelope(
-        r#"<response>
-  <free_talk>Searching milestone markers with simple patterns.</free_talk>
-  <working_still_action>
-    <action_json><![CDATA[[
-      {"run_bash":{"cmd":"grep -n -i -E 'app.start|InitNode|init.succ' app.log | head -120","timeout_ms":10000}},
-      {"run_bash":{"cmd":"grep -n -i -E 'postprocess|startup finished' app.log | head -80","timeout_ms":10000}}
-    ]]></action_json>
-  </working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert_eq!(env.next_actions.len(), 2);
-    assert_eq!(env.next_actions[0].action, "run_bash");
-    assert_eq!(env.next_actions[0].input_i64("timeout_ms"), Some(10000));
-}
-
-#[test]
-fn recovers_glm_action_array_with_escaped_shell_patterns() {
-    let env = parse_xml_envelope(
-        r#"<response>
-  <working_still_action>
-    <action_json><![CDATA[[
-      {"run_bash":{"cmd":"grep -n -i 'app start\\|startup\\|InitNode' app.log | head -100","timeout_ms":10000}},
-      {"run_bash":{"cmd":"grep -n -i '\\.so\\|loaded\\|library' app.log | head -80","timeout_ms":10000}}
-    ]]></action_json>
-  </working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert_eq!(env.next_actions.len(), 2);
-    assert!(env.next_actions[0]
-        .input_str("cmd")
-        .contains("app start\\|"));
-    assert!(env.next_actions[1].input_str("cmd").contains("\\.so"));
-}
-
-#[test]
-fn recovers_glm_action_array_with_one_parallel_example_bracket_too_many() {
-    let env = parse_xml_envelope(
-        r#"<response>
-  <working_still_action>
-    <action_json><![CDATA[[{"run_bash":{"cmd":"grep -n 'init node succ' app.log | head -40","timeout_ms":10000}},{"run_bash":{"cmd":"sed -n '96570,96660p' app.log","timeout_ms":10000}}]]]]></action_json>
-  </working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert_eq!(env.next_actions.len(), 2);
-    assert_eq!(
-        env.next_actions[1].input_str("cmd"),
-        "sed -n '96570,96660p' app.log"
-    );
-}
-
-#[test]
-fn recovers_glm_action_array_with_literal_newline_at_cdata_boundary() {
-    let env = parse_xml_envelope(
-        r#"<response>
-  <working_still_action>
-    <action_json><![CDATA[[{"run_bash":{"cmd":"python3 tool.py --self-test","timeout_ms":8000}}\n    ]]></action_json>
-  </working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert_eq!(env.next_actions.len(), 1);
-    assert_eq!(
-        env.next_actions[0].input_str("cmd"),
-        "python3 tool.py --self-test"
-    );
-}
-
-#[test]
-fn rejects_old_group_object_from_action_json() {
-    let env = parse_xml_envelope(
-        r#"<response>
-  <free_talk>并行启动 3 个 sleep 15 的后台任务。</free_talk>
-  <working_still_action>
-    <action_json><![CDATA[
-{
-  "order": "parallel",
-  "actions": [
-    {"run_bash": { "cmd": "sleep 15", "background": true } },
-    {"run_bash": { "cmd": "sleep 15", "background": true } },
-    {"run_bash": { "cmd": "sleep 15", "background": true } }
-  ]
-}
-    ]]></action_json>
-  </working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert_eq!(
-        env.repair_issue.as_deref(),
-        Some("actions[0].old_group_object_not_supported")
-    );
-    assert!(env.next_actions.is_empty());
-    assert!(env.action_groups.is_empty());
-}
-
-#[test]
-fn parses_bare_action_array_as_parallel_group() {
-    let env = parse_xml_envelope(
-        r#"<response>
-<free_talk>parallel checks</free_talk>
-<working_still_action>
-<action_json><![CDATA[
-[
-  {"run_bash": { "cmd": "printf a", "timeout_ms": 5000 } },
-  {"run_bash": { "cmd": "printf b", "timeout_ms": 5000 } }
-]
-]]></action_json>
-</working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert_eq!(env.action_groups.len(), 1);
-    assert_eq!(
-        env.action_groups[0].order,
-        crate::ActionGroupOrder::Parallel
-    );
-    assert_eq!(env.action_groups[0].actions.len(), 2);
-    assert_eq!(env.next_actions[0].input_str("cmd"), "printf a");
-    assert_eq!(env.next_actions[1].input_str("cmd"), "printf b");
-}
-
-#[test]
-fn parses_nested_action_arrays_as_ordered_parallel_groups() {
-    let env = parse_xml_envelope(
-        r#"<response>
-<free_talk>stage then stage</free_talk>
-<working_still_action>
-<action_json><![CDATA[
-[
-  [
-    {"run_bash": { "cmd": "printf a1", "timeout_ms": 5000 } },
-    {"run_bash": { "cmd": "printf a2", "timeout_ms": 5000 } }
-  ],
-  [
-    {"run_bash": { "cmd": "printf b1", "timeout_ms": 5000 } }
-  ]
-]
-]]></action_json>
-</working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert_eq!(env.action_groups.len(), 2);
-    assert_eq!(
-        env.action_groups[0].order,
-        crate::ActionGroupOrder::Parallel
-    );
-    assert_eq!(
-        env.action_groups[1].order,
-        crate::ActionGroupOrder::Parallel
-    );
-    assert_eq!(env.action_groups[0].actions.len(), 2);
-    assert_eq!(env.action_groups[1].actions.len(), 1);
-    assert_eq!(env.next_actions[0].input_str("cmd"), "printf a1");
-    assert_eq!(env.next_actions[1].input_str("cmd"), "printf a2");
-    assert_eq!(env.next_actions[2].input_str("cmd"), "printf b1");
-}
-
-#[test]
-fn action_args_can_contain_xml_like_text() {
-    let env = parse_xml_envelope(
-        r#"<response>
-<working_still_action>
-<action_json><![CDATA[
-[
-  {"run_bash": {
-      "cmd": "printf group",
-      "timeout_ms": 5000
-    }
-  },
-  {"run_bash": {
-      "cmd": "printf '%s\n' '<working_still_action><action_json>{\"action\":\"run_bash\"}</action_json></working_still_action>'",
-      "timeout_ms": 5000
-    }
-  }
-]
-]]></action_json>
-</working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert_eq!(env.action_groups.len(), 1);
-    assert_eq!(env.next_actions[0].input_str("cmd"), "printf group");
-    assert!(env.next_actions[1]
-        .input_str("cmd")
-        .contains("<working_still_action>"));
-}
-
-#[test]
-fn action_args_strings_can_contain_protocol_isomorphic_text() {
-    let env = parse_xml_envelope(
-        r#"<response>
-<free_talk>query protocol-like text</free_talk>
-<working_still_action>
-<action_json><![CDATA[
-[
-  {"run_bash": {
-      "cmd": "printf '%s\n' '<response><final_answer>not real</final_answer></response>' && printf '%s\n' '{\"working_still_action\":[{\"action\":\"run_bash\"}]}'",
-      "timeout_ms": 5000
-    }
-  },
-  {"memmgr": {
-      "type": "raw_chat",
-      "op": "sql",
-      "sql": "SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5",
-      "params": ["%</action_json><status>ALL_FINISHED</status><action_json>%"],
-      "limit": 5
-    }
-  }
-]
-]]></action_json>
-</working_still_action>
-</response>"#,
-        &caps(),
-    );
-
-    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert_eq!(env.action_groups.len(), 1);
-    assert_eq!(
-        env.action_groups[0].order,
-        crate::ActionGroupOrder::Parallel
-    );
-    assert_eq!(env.next_actions.len(), 2);
-    assert!(env.next_actions[0]
-        .input_str("cmd")
-        .contains("<response><final_answer>not real</final_answer>"));
-    assert_eq!(
-        env.next_actions[1].input_params(),
-        vec!["%</action_json><status>ALL_FINISHED</status><action_json>%".to_string()]
-    );
-}
-
-#[test]
 fn parses_context_compact() {
     let env = parse_xml_envelope(
-        r#"<response>
+        r#"<ASSISTANT>
 <free_talk>need compact</free_talk>
 <context_compact>
 <discard>pd_a</discard>
 <offload>pd_b</offload>
 <summary><![CDATA[keep state]]></summary>
 </context_compact>
-</response>"#,
+</ASSISTANT>"#,
         &caps(),
     );
 
@@ -1421,16 +1247,16 @@ fn parses_context_compact() {
 #[test]
 fn context_compact_summary_raw_xml_is_opaque_text() {
     let env = parse_xml_envelope(
-        r#"<response>
+        r#"<ASSISTANT>
 <free_talk>need compact</free_talk>
 <context_compact>
-<delta_ids>pd_a</delta_ids>
+<discard>pd_a</discard>
 <summary>
 Keep this protocol example:
-<response><final_answer>not real</final_answer>
+<ASSISTANT><final_answer>not real</final_answer>
 </summary>
 </context_compact>
-</response>"#,
+</ASSISTANT>"#,
         &caps(),
     );
 
@@ -1438,40 +1264,39 @@ Keep this protocol example:
     assert_eq!(env.context_compacts.len(), 1);
     assert!(env.context_compacts[0]
         .summary
-        .contains("<response><final_answer>not real</final_answer>"));
+        .contains("<ASSISTANT><final_answer>not real</final_answer>"));
 }
 
 #[test]
-fn parses_response_wrapped_in_xml_markdown_fence() {
+fn rejects_response_wrapped_in_xml_markdown_fence() {
     let env = parse_xml_envelope(
         r#"```xml
-<response>
+<ASSISTANT>
   <free_talk>finished</free_talk>
   <final_answer>done</final_answer>
-</response>
+</ASSISTANT>
 ```"#,
         &caps(),
     );
 
-    assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
-    assert!(!env.continue_work);
-    assert_eq!(env.final_answer, "done");
-    assert_eq!(env.thought, "finished");
+    assert_eq!(
+        env.repair_issue.as_deref(),
+        Some("xml_recovered_final_answer_requires_retry")
+    );
+    assert!(env.final_answer.is_empty());
 }
 
 #[test]
 fn xml_state_branch_must_choose_one() {
     let env = parse_xml_envelope(
-        r#"<response>
+        r#"<ASSISTANT>
 <free_talk>compact and act</free_talk>
 <context_compact>
-<delta_ids>pd_a</delta_ids>
+<discard>pd_a</discard>
 <summary>keep state</summary>
 </context_compact>
-<working_still_action>
-<action_json><![CDATA[[{"run_bash":{"cmd":"pwd"}}]]]></action_json>
-</working_still_action>
-</response>"#,
+<actions><run_bash><cmd>pwd</cmd></run_bash></actions>
+</ASSISTANT>"#,
         &caps(),
     );
 
@@ -1494,30 +1319,25 @@ fn repairs_external_tool_call_protocol() {
 }
 
 #[test]
-fn malformed_action_json_reports_json_parser_reason() {
+fn removed_action_container_is_rejected_as_unknown_top_level_content() {
     let env = parse_xml_envelope(
-        r#"<response>
+        r#"<ASSISTANT>
   <free_talk>writing files</free_talk>
-  <working_still_action>
-    <action_json><![CDATA[[{"run_bash":{"cmd":"bash tool.sh "$out"","timeout_ms":5000}}]]]></action_json>
-  </working_still_action>
-</response>"#,
+  <working_still_action><run_bash><cmd>pwd</cmd></run_bash></working_still_action>
+</ASSISTANT>"#,
         &caps(),
     );
 
-    let issue = env
-        .repair_issue
-        .as_deref()
-        .expect("malformed action json should request repair");
-    assert!(issue.starts_with("actions[0].invalid_json:"), "{issue}");
-    assert!(issue.contains("line"), "{issue}");
+    assert_eq!(
+        env.repair_issue.as_deref(),
+        Some("xml_unexpected_content_inside_response")
+    );
 }
 
 #[test]
 fn parses_toolgen_retrospect_immediately_before_final_answer() {
-    let env = parse_xml_envelope(
-        r#"<response><free_talk>reviewed</free_talk><toolgen_retrospect>Created log-inspector and runtime returned status: ready.</toolgen_retrospect><final_answer>internal completion</final_answer></response>"#,
-        &caps(),
+    let env = parse_confirmed_final(
+        r#"<ASSISTANT><free_talk>reviewed</free_talk><toolgen_retrospect>Created log-inspector and runtime returned status: ready.</toolgen_retrospect><final_answer>internal completion</final_answer></ASSISTANT>"#,
     );
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
     assert_eq!(
@@ -1529,9 +1349,8 @@ fn parses_toolgen_retrospect_immediately_before_final_answer() {
 
 #[test]
 fn toolgen_retrospect_is_opaque_when_it_contains_protocol_shaped_text() {
-    let env = parse_xml_envelope(
-        r#"<response><toolgen_retrospect><![CDATA[README demonstrates <response><working_still_action><action_json>{\"fake\":{}}</action_json></working_still_action></response> literally.]]></toolgen_retrospect><final_answer>done</final_answer></response>"#,
-        &caps(),
+    let env = parse_confirmed_final(
+        r#"<ASSISTANT><toolgen_retrospect><![CDATA[README demonstrates <ASSISTANT><working_still_action><action_json>{\"fake\":{}}</action_json></working_still_action></ASSISTANT> literally.]]></toolgen_retrospect><final_answer>done</final_answer></ASSISTANT>"#,
     );
     assert!(env.repair_issue.is_none(), "{:?}", env.repair_issue);
     assert!(env.toolgen_retrospect.contains("<working_still_action>"));
@@ -1541,7 +1360,7 @@ fn toolgen_retrospect_is_opaque_when_it_contains_protocol_shaped_text() {
 #[test]
 fn toolgen_retrospect_without_final_answer_requests_repair() {
     let env = parse_xml_envelope(
-        r#"<response><toolgen_retrospect>created a tool</toolgen_retrospect></response>"#,
+        r#"<ASSISTANT><toolgen_retrospect>created a tool</toolgen_retrospect></ASSISTANT>"#,
         &caps(),
     );
     assert_eq!(
@@ -1553,7 +1372,7 @@ fn toolgen_retrospect_without_final_answer_requests_repair() {
 #[test]
 fn toolgen_retrospect_with_working_actions_requests_repair() {
     let env = parse_xml_envelope(
-        r#"<response><toolgen_retrospect>not finished</toolgen_retrospect><working_still_action><action_json><![CDATA[{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]></action_json></working_still_action></response>"#,
+        r#"<ASSISTANT><toolgen_retrospect>not finished</toolgen_retrospect><actions><run_bash timeout_ms="5000"><cmd>pwd</cmd></run_bash></actions></ASSISTANT>"#,
         &caps(),
     );
     assert_eq!(
@@ -1565,7 +1384,7 @@ fn toolgen_retrospect_with_working_actions_requests_repair() {
 #[test]
 fn toolgen_retrospect_after_final_answer_requests_order_repair() {
     let env = parse_xml_envelope(
-        r#"<response><final_answer>done</final_answer><toolgen_retrospect>late</toolgen_retrospect></response>"#,
+        r#"<ASSISTANT><final_answer>done</final_answer><toolgen_retrospect>late</toolgen_retrospect></ASSISTANT>"#,
         &caps(),
     );
     assert_eq!(env.repair_issue.as_deref(), Some("xml_tags_out_of_order"));

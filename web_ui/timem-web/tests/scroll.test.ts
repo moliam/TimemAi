@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop } from "../src/scroll";
+import { adjacentUserMessageIndex, canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, wheelDeltaPixels } from "../src/scroll";
 
 describe("progressive history scroll anchoring", () => {
   it("keeps the same content under the viewport after older content is prepended", () => {
@@ -27,5 +27,47 @@ describe("progressive history scroll anchoring", () => {
     expect(restoreSessionScrollTop({ scrollTop: 480, followLatest: true }, 2400)).toBe(2400);
     expect(restoreSessionScrollTop(undefined, 2400)).toBe(2400);
     expect(restoreSessionScrollTop({ scrollTop: 3000, followLatest: false }, 2400)).toBe(2400);
+  });
+});
+
+
+describe("composer wheel ownership", () => {
+  it("keeps wheel input inside a multiline composer while that direction can still scroll", () => {
+    expect(canScrollInDirection({ scrollTop: 80, scrollHeight: 420, clientHeight: 140 }, -24)).toBe(true);
+    expect(canScrollInDirection({ scrollTop: 80, scrollHeight: 420, clientHeight: 140 }, 24)).toBe(true);
+  });
+
+  it("hands wheel input back to the chat viewport at the matching textarea boundary", () => {
+    expect(canScrollInDirection({ scrollTop: 0, scrollHeight: 420, clientHeight: 140 }, -24)).toBe(false);
+    expect(canScrollInDirection({ scrollTop: 280, scrollHeight: 420, clientHeight: 140 }, 24)).toBe(false);
+    expect(canScrollInDirection({ scrollTop: 0, scrollHeight: 120, clientHeight: 140 }, 24)).toBe(false);
+    expect(canScrollInDirection({ scrollTop: 80, scrollHeight: 420, clientHeight: 140 }, 0)).toBe(false);
+  });
+
+  it("normalizes pixel, line, and page wheel deltas before moving the textarea", () => {
+    expect(wheelDeltaPixels(12, 0, 140)).toBe(12);
+    expect(wheelDeltaPixels(3, 1, 140)).toBe(48);
+    expect(wheelDeltaPixels(-1, 2, 140)).toBe(-140);
+  });
+});
+
+
+describe("user message navigation", () => {
+  const anchorTops = [-420, -18, 164, 740];
+
+  it("selects the closest prior and next user message around the viewport top", () => {
+    expect(adjacentUserMessageIndex(anchorTops, 0, "previous")).toBe(1);
+    expect(adjacentUserMessageIndex(anchorTops, 0, "next")).toBe(2);
+  });
+
+  it("skips the message already aligned with the viewport top", () => {
+    expect(adjacentUserMessageIndex([-120, 2, 260], 0, "previous")).toBe(0);
+    expect(adjacentUserMessageIndex([-120, 2, 260], 0, "next")).toBe(2);
+  });
+
+  it("reports boundaries when no user message exists in that direction", () => {
+    expect(adjacentUserMessageIndex([12, 240], 0, "previous")).toBe(-1);
+    expect(adjacentUserMessageIndex([-400, -20], 0, "next")).toBe(-1);
+    expect(adjacentUserMessageIndex([], 0, "next")).toBe(-1);
   });
 });

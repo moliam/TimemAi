@@ -6,7 +6,7 @@ use crate::{
     TurnUi, UsageStats,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -18,8 +18,6 @@ const TOOLGEN_XML_COMPLETION: &str =
     include_str!("../../resources/protocol/xml/toolgen_retrospect.md");
 const TOOLGEN_JSON_COMPLETION: &str =
     include_str!("../../resources/protocol/json/toolgen_retrospect.md");
-const TOOLGEN_MARKDOWN_COMPLETION: &str =
-    include_str!("../../resources/protocol/markdown/toolgen_retrospect.md");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolGenRequest {
@@ -38,6 +36,8 @@ impl ToolGenRequest {
 pub struct CoreSessionWorkerConfig {
     pub identity: CoreSessionWorkerIdentity,
     pub workspace: CoreSessionWorkerWorkspace,
+    pub assistant_speaker_name: Option<String>,
+    pub continue_supplements_after_final_answer: bool,
 }
 
 impl CoreSessionWorkerConfig {
@@ -45,7 +45,19 @@ impl CoreSessionWorkerConfig {
         Self {
             identity,
             workspace,
+            assistant_speaker_name: None,
+            continue_supplements_after_final_answer: true,
         }
+    }
+
+    pub fn with_assistant_speaker_name(mut self, name: impl Into<String>) -> Self {
+        self.assistant_speaker_name = Some(name.into());
+        self
+    }
+
+    pub fn with_separate_turn_for_supplements_after_final_answer(mut self) -> Self {
+        self.continue_supplements_after_final_answer = false;
+        self
     }
 
     pub fn session_id(&self) -> &str {
@@ -64,12 +76,14 @@ impl CoreSessionWorkerConfig {
 #[derive(Clone, Debug)]
 pub struct CoreSessionWorkerRuntime {
     working_workers: Arc<AtomicUsize>,
+    working_workers_by_session: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 impl CoreSessionWorkerRuntime {
     pub fn new() -> Self {
         Self {
             working_workers: Arc::new(AtomicUsize::new(0)),
+            working_workers_by_session: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -77,42 +91,73 @@ impl CoreSessionWorkerRuntime {
         self.working_workers.load(Ordering::SeqCst)
     }
 
-    fn begin_worker_turn(&self) -> WorkingWorkerGuard {
+    fn session_working_worker_count(&self, session_id: &str) -> usize {
+        self.working_workers_by_session
+            .lock()
+            .map(|counts| counts.get(session_id).copied().unwrap_or(0))
+            .unwrap_or(0)
+    }
+
+    fn begin_worker_turn(&self, session_id: &str) -> WorkingWorkerGuard {
         let active = Arc::new(AtomicBool::new(true));
         self.working_workers.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut counts) = self.working_workers_by_session.lock() {
+            *counts.entry(session_id.to_string()).or_insert(0) += 1;
+        }
         WorkingWorkerGuard {
             working_workers: Arc::clone(&self.working_workers),
+            working_workers_by_session: Arc::clone(&self.working_workers_by_session),
+            session_id: session_id.to_string(),
             active,
         }
     }
 
-    fn finish_worker_turn_if_active(&self, active: &Arc<AtomicBool>) -> usize {
+    fn finish_worker_turn_if_active(
+        &self,
+        session_id: &str,
+        active: &Arc<AtomicBool>,
+    ) -> (usize, usize) {
         if active.swap(false, Ordering::SeqCst) {
-            self.working_workers
+            let global_count = self
+                .working_workers
                 .fetch_sub(1, Ordering::SeqCst)
-                .saturating_sub(1)
+                .saturating_sub(1);
+            let session_count =
+                decrement_session_working_count(&self.working_workers_by_session, session_id);
+            (global_count, session_count)
         } else {
-            self.working_worker_count()
+            (
+                self.working_worker_count(),
+                self.session_working_worker_count(session_id),
+            )
         }
     }
 
     fn model_response_global_status(
         &self,
+        session_id: &str,
         continue_work: bool,
         active: Option<&Arc<AtomicBool>>,
     ) -> CoreGlobalWorkerStatus {
-        let visible_count = if continue_work {
-            self.working_worker_count()
+        let (global_count, session_count) = if continue_work {
+            (
+                self.working_worker_count(),
+                self.session_working_worker_count(session_id),
+            )
         } else if let Some(active) = active {
-            self.finish_worker_turn_if_active(active)
+            self.finish_worker_turn_if_active(session_id, active)
         } else {
-            self.working_worker_count()
+            (
+                self.working_worker_count(),
+                self.session_working_worker_count(session_id),
+            )
         };
-        CoreGlobalWorkerStatus::new(visible_count)
+        CoreGlobalWorkerStatus::with_session_working_worker_count(global_count, session_count)
     }
 
     fn enrich_topic_events(
         &self,
+        session_id: &str,
         events: Vec<CoreTopicEvent>,
         active: Option<&Arc<AtomicBool>>,
     ) -> Vec<CoreTopicEvent> {
@@ -122,9 +167,11 @@ impl CoreSessionWorkerRuntime {
                 let Some(model_response) = event.as_model_response() else {
                     return event;
                 };
-                event.with_global_worker_status(
-                    self.model_response_global_status(model_response.continue_work, active),
-                )
+                event.with_global_worker_status(self.model_response_global_status(
+                    session_id,
+                    model_response.continue_work,
+                    active,
+                ))
             })
             .collect()
     }
@@ -138,7 +185,27 @@ impl Default for CoreSessionWorkerRuntime {
 
 struct WorkingWorkerGuard {
     working_workers: Arc<AtomicUsize>,
+    working_workers_by_session: Arc<Mutex<BTreeMap<String, usize>>>,
+    session_id: String,
     active: Arc<AtomicBool>,
+}
+
+fn decrement_session_working_count(
+    counts: &Arc<Mutex<BTreeMap<String, usize>>>,
+    session_id: &str,
+) -> usize {
+    let Ok(mut counts) = counts.lock() else {
+        return 0;
+    };
+    let Some(count) = counts.get_mut(session_id) else {
+        return 0;
+    };
+    *count = count.saturating_sub(1);
+    let remaining = *count;
+    if remaining == 0 {
+        counts.remove(session_id);
+    }
+    remaining
 }
 
 impl WorkingWorkerGuard {
@@ -151,6 +218,7 @@ impl Drop for WorkingWorkerGuard {
     fn drop(&mut self) {
         if self.active.swap(false, Ordering::SeqCst) {
             self.working_workers.fetch_sub(1, Ordering::SeqCst);
+            decrement_session_working_count(&self.working_workers_by_session, &self.session_id);
         }
     }
 }
@@ -164,13 +232,30 @@ pub enum CoreSessionWorkerEvent {
     CommandAccepted {
         command_id: String,
     },
+    /// Core has entered turn execution and now owns live working state.
+    /// Hosts must not infer this state from history or command enqueueing.
+    TurnStarted {
+        command_id: Option<String>,
+    },
     Topics(Vec<CoreTopicEvent>),
     ModelRequest {
         round: u32,
+        prompt: String,
+        interaction_profile: Option<crate::InteractionProfile>,
+        interaction_request: Option<Box<crate::ModelInteractionRequest>>,
+        api_payload: Option<Box<serde_json::Value>>,
+    },
+    ModelRequestCompleted {
+        latency: Duration,
+    },
+    ModelResponseParsed {
+        tool_count: usize,
     },
     ModelResponse {
         round: u32,
         usage: UsageStats,
+        content: String,
+        tool_calls: Vec<crate::NativeToolCall>,
         runtime_phase: Option<String>,
     },
     ModelRetry {
@@ -197,29 +282,34 @@ enum CoreSessionWorkerCommand {
         additional_context: Option<String>,
         command_id: Option<String>,
         initial_supplements: Vec<QueuedSupplement>,
+        cancel_generation: u64,
     },
     RunToolGen {
         request: ToolGenRequest,
         command_id: Option<String>,
+        cancel_generation: u64,
     },
     Rename {
         display_name: String,
+        assistant_speaker_name: Option<String>,
     },
     UpdateBashApproval {
         mode: crate::BashApprovalMode,
     },
-    UpdateRuntimeConfig {
-        field: crate::RuntimeConfigField,
-        value: String,
-    },
+    RuntimeConfigUpdated,
+    MaxRoundsUpdated,
     UpdateApiKey {
         api_key: String,
+    },
+    UpdateHttpHeaders {
+        http_headers: BTreeMap<String, String>,
     },
     UpdateMcp {
         base_capabilities: crate::capability::CapabilityRegistry,
         runtime: crate::mcp::McpRuntime,
         servers: Vec<crate::mcp::McpServerConfig>,
         tools: Vec<crate::mcp::McpTool>,
+        instructions: BTreeMap<String, String>,
     },
     Shutdown,
 }
@@ -232,7 +322,20 @@ struct SupplementMailbox {
 
 struct QueuedSupplement {
     text: String,
+    additional_context: Option<String>,
     command_id: Option<String>,
+}
+
+enum PendingRuntimeUpdate {
+    Config {
+        field: crate::RuntimeConfigField,
+        value: String,
+    },
+    OpenAiCompatible {
+        key: String,
+        value: String,
+    },
+    MaxRounds(u32),
 }
 
 #[derive(Clone)]
@@ -240,9 +343,11 @@ pub struct CoreSessionWorkerHandle {
     command_tx: Sender<CoreSessionWorkerCommand>,
     supplement_mailbox: Arc<Mutex<SupplementMailbox>>,
     cancel_requested: Arc<AtomicBool>,
+    cancel_generation: Arc<AtomicU64>,
     shutdown_requested: Arc<AtomicBool>,
     reply_tx: Sender<TopicReply>,
     accepted_command_ids: Arc<Mutex<BTreeSet<String>>>,
+    pending_runtime_updates: Arc<Mutex<Vec<PendingRuntimeUpdate>>>,
 }
 
 impl CoreSessionWorkerHandle {
@@ -269,6 +374,24 @@ impl CoreSessionWorkerHandle {
         additional_context: Option<String>,
         command_id: Option<String>,
         supplements: Vec<(String, Option<String>)>,
+    ) -> Result<(), String> {
+        self.run_turn_batch_with_supplements(
+            input,
+            additional_context,
+            command_id,
+            supplements
+                .into_iter()
+                .map(|(text, command_id)| (crate::UserSupplement::from(text), command_id))
+                .collect(),
+        )
+    }
+
+    pub fn run_turn_batch_with_supplements(
+        &self,
+        input: impl Into<String>,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+        supplements: Vec<(crate::UserSupplement, Option<String>)>,
     ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
@@ -299,7 +422,7 @@ impl CoreSessionWorkerHandle {
             }
             accepted.extend(batch_command_ids.iter().cloned());
         }
-        self.cancel_requested.store(false, Ordering::SeqCst);
+        let cancel_generation = self.cancel_generation.load(Ordering::SeqCst);
         self.open_supplement_mailbox();
         let result = self
             .command_tx
@@ -309,8 +432,13 @@ impl CoreSessionWorkerHandle {
                 command_id: command_id.clone(),
                 initial_supplements: supplements
                     .into_iter()
-                    .map(|(text, command_id)| QueuedSupplement { text, command_id })
+                    .map(|(supplement, command_id)| QueuedSupplement {
+                        text: supplement.text,
+                        additional_context: supplement.additional_context,
+                        command_id,
+                    })
                     .collect(),
+                cancel_generation,
             })
             .map_err(|_| "core_session_worker_stopped".to_string());
         if result.is_err() {
@@ -345,13 +473,14 @@ impl CoreSessionWorkerHandle {
                 return Ok(());
             }
         }
-        self.cancel_requested.store(false, Ordering::SeqCst);
+        let cancel_generation = self.cancel_generation.load(Ordering::SeqCst);
         self.open_supplement_mailbox();
         let result = self
             .command_tx
             .send(CoreSessionWorkerCommand::RunToolGen {
                 request,
                 command_id: command_id.clone(),
+                cancel_generation,
             })
             .map_err(|_| "core_session_worker_stopped".to_string());
         if result.is_err() {
@@ -374,6 +503,7 @@ impl CoreSessionWorkerHandle {
                 }
                 mailbox.queue.push(QueuedSupplement {
                     text: supplement.into(),
+                    additional_context: None,
                     command_id: None,
                 });
                 true
@@ -402,6 +532,7 @@ impl CoreSessionWorkerHandle {
         before_enqueue()?;
         mailbox.queue.push(QueuedSupplement {
             text: supplement.into(),
+            additional_context: None,
             command_id: None,
         });
         Ok(true)
@@ -410,6 +541,24 @@ impl CoreSessionWorkerHandle {
     pub fn try_add_user_supplement_with_command_id_after<F>(
         &self,
         supplement: impl Into<String>,
+        command_id: Option<String>,
+        before_enqueue: F,
+    ) -> Result<bool, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        self.try_add_user_supplement_with_context_and_command_id_after(
+            supplement,
+            None,
+            command_id,
+            before_enqueue,
+        )
+    }
+
+    pub fn try_add_user_supplement_with_context_and_command_id_after<F>(
+        &self,
+        supplement: impl Into<String>,
+        additional_context: Option<String>,
         command_id: Option<String>,
         before_enqueue: F,
     ) -> Result<bool, String>
@@ -442,6 +591,7 @@ impl CoreSessionWorkerHandle {
         }
         mailbox.queue.push(QueuedSupplement {
             text: supplement.into(),
+            additional_context,
             command_id,
         });
         Ok(true)
@@ -452,6 +602,7 @@ impl CoreSessionWorkerHandle {
     }
 
     pub fn cancel_current_turn(&self) {
+        self.cancel_generation.fetch_add(1, Ordering::SeqCst);
         self.cancel_requested.store(true, Ordering::SeqCst);
     }
 
@@ -494,12 +645,21 @@ impl CoreSessionWorkerHandle {
     }
 
     pub fn rename(&self, display_name: impl Into<String>) -> Result<(), String> {
+        self.rename_with_assistant_speaker_name(display_name, None)
+    }
+
+    pub fn rename_with_assistant_speaker_name(
+        &self,
+        display_name: impl Into<String>,
+        assistant_speaker_name: Option<String>,
+    ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
         }
         self.command_tx
             .send(CoreSessionWorkerCommand::Rename {
                 display_name: display_name.into(),
+                assistant_speaker_name,
             })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
@@ -521,9 +681,51 @@ impl CoreSessionWorkerHandle {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
         }
-        self.command_tx
-            .send(CoreSessionWorkerCommand::UpdateRuntimeConfig { field, value })
-            .map_err(|_| "core_session_worker_stopped".to_string())
+        self.enqueue_runtime_update(
+            PendingRuntimeUpdate::Config { field, value },
+            CoreSessionWorkerCommand::RuntimeConfigUpdated,
+        )
+    }
+
+    pub fn update_openai_compatible_config(
+        &self,
+        key: String,
+        value: String,
+    ) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.enqueue_runtime_update(
+            PendingRuntimeUpdate::OpenAiCompatible { key, value },
+            CoreSessionWorkerCommand::RuntimeConfigUpdated,
+        )
+    }
+
+    pub fn update_max_rounds(&self, max_rounds: u32) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.enqueue_runtime_update(
+            PendingRuntimeUpdate::MaxRounds(max_rounds),
+            CoreSessionWorkerCommand::MaxRoundsUpdated,
+        )
+    }
+
+    fn enqueue_runtime_update(
+        &self,
+        update: PendingRuntimeUpdate,
+        notification: CoreSessionWorkerCommand,
+    ) -> Result<(), String> {
+        let mut pending = self
+            .pending_runtime_updates
+            .lock()
+            .map_err(|_| "core_runtime_update_poisoned".to_string())?;
+        pending.push(update);
+        if self.command_tx.send(notification).is_err() {
+            pending.pop();
+            return Err("core_session_worker_stopped".to_string());
+        }
+        Ok(())
     }
 
     pub fn update_api_key(&self, api_key: String) -> Result<(), String> {
@@ -535,12 +737,41 @@ impl CoreSessionWorkerHandle {
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
+    pub fn update_http_headers(
+        &self,
+        http_headers: BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.command_tx
+            .send(CoreSessionWorkerCommand::UpdateHttpHeaders { http_headers })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
     pub fn update_mcp(
         &self,
         base_capabilities: crate::capability::CapabilityRegistry,
         runtime: crate::mcp::McpRuntime,
         servers: Vec<crate::mcp::McpServerConfig>,
         tools: Vec<crate::mcp::McpTool>,
+    ) -> Result<(), String> {
+        self.update_mcp_with_instructions(
+            base_capabilities,
+            runtime,
+            servers,
+            tools,
+            BTreeMap::new(),
+        )
+    }
+
+    pub fn update_mcp_with_instructions(
+        &self,
+        base_capabilities: crate::capability::CapabilityRegistry,
+        runtime: crate::mcp::McpRuntime,
+        servers: Vec<crate::mcp::McpServerConfig>,
+        tools: Vec<crate::mcp::McpTool>,
+        instructions: BTreeMap<String, String>,
     ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
@@ -551,6 +782,7 @@ impl CoreSessionWorkerHandle {
                 runtime,
                 servers,
                 tools,
+                instructions,
             })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
@@ -683,7 +915,7 @@ impl CoreSessionWorkerManager {
         display_name: Option<String>,
         parent_worker_id: Option<String>,
     ) -> Result<String, String> {
-        self.spawn_worker_in_session_with_model_client(
+        self.spawn_worker_in_session_with_assistant_speaker_name(
             core,
             config,
             workspace,
@@ -691,6 +923,57 @@ impl CoreSessionWorkerManager {
             context_id,
             display_name,
             parent_worker_id,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_worker_in_session_with_separate_late_supplement_turn(
+        &mut self,
+        core: AgentCore,
+        config: ModelServiceConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        session_id: impl Into<String>,
+        context_id: impl Into<String>,
+        display_name: Option<String>,
+        parent_worker_id: Option<String>,
+        assistant_speaker_name: Option<String>,
+    ) -> Result<String, String> {
+        self.spawn_worker_in_session_with_model_client_and_options(
+            core,
+            config,
+            workspace,
+            session_id,
+            context_id,
+            display_name,
+            parent_worker_id,
+            assistant_speaker_name,
+            false,
+            HttpModelClient,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_worker_in_session_with_assistant_speaker_name(
+        &mut self,
+        core: AgentCore,
+        config: ModelServiceConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        session_id: impl Into<String>,
+        context_id: impl Into<String>,
+        display_name: Option<String>,
+        parent_worker_id: Option<String>,
+        assistant_speaker_name: Option<String>,
+    ) -> Result<String, String> {
+        self.spawn_worker_in_session_with_model_client_and_assistant_speaker_name(
+            core,
+            config,
+            workspace,
+            session_id,
+            context_id,
+            display_name,
+            parent_worker_id,
+            assistant_speaker_name,
             HttpModelClient,
         )
     }
@@ -739,6 +1022,66 @@ impl CoreSessionWorkerManager {
     where
         M: ModelClient + Send + 'static,
     {
+        self.spawn_worker_in_session_with_model_client_and_assistant_speaker_name(
+            core,
+            config,
+            workspace,
+            session_id,
+            context_id,
+            display_name,
+            parent_worker_id,
+            None,
+            model_client,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_worker_in_session_with_model_client_and_assistant_speaker_name<M>(
+        &mut self,
+        core: AgentCore,
+        config: ModelServiceConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        session_id: impl Into<String>,
+        context_id: impl Into<String>,
+        display_name: Option<String>,
+        parent_worker_id: Option<String>,
+        assistant_speaker_name: Option<String>,
+        model_client: M,
+    ) -> Result<String, String>
+    where
+        M: ModelClient + Send + 'static,
+    {
+        self.spawn_worker_in_session_with_model_client_and_options(
+            core,
+            config,
+            workspace,
+            session_id,
+            context_id,
+            display_name,
+            parent_worker_id,
+            assistant_speaker_name,
+            true,
+            model_client,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_worker_in_session_with_model_client_and_options<M>(
+        &mut self,
+        core: AgentCore,
+        config: ModelServiceConfig,
+        workspace: CoreSessionWorkerWorkspace,
+        session_id: impl Into<String>,
+        context_id: impl Into<String>,
+        display_name: Option<String>,
+        parent_worker_id: Option<String>,
+        assistant_speaker_name: Option<String>,
+        continue_supplements_after_final_answer: bool,
+        model_client: M,
+    ) -> Result<String, String>
+    where
+        M: ModelClient + Send + 'static,
+    {
         let session_id = session_id.into();
         let context_id = context_id.into();
         if self.workers.values().any(|worker| {
@@ -772,7 +1115,17 @@ impl CoreSessionWorkerManager {
         let worker = CoreSessionWorker::spawn_with_runtime_model_client(
             core,
             config,
-            CoreSessionWorkerConfig::new(identity.clone(), workspace),
+            {
+                let mut worker_config = CoreSessionWorkerConfig::new(identity.clone(), workspace);
+                if let Some(name) = assistant_speaker_name {
+                    worker_config = worker_config.with_assistant_speaker_name(name);
+                }
+                if !continue_supplements_after_final_answer {
+                    worker_config =
+                        worker_config.with_separate_turn_for_supplements_after_final_answer();
+                }
+                worker_config
+            },
             self.runtime.clone(),
             model_client,
         );
@@ -908,21 +1261,31 @@ impl CoreSessionWorker {
         let (reply_tx, reply_rx) = mpsc::channel();
         let supplement_mailbox = Arc::new(Mutex::new(SupplementMailbox::default()));
         let cancel_requested = Arc::new(AtomicBool::new(false));
+        let cancel_generation = Arc::new(AtomicU64::new(0));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let accepted_command_ids = Arc::new(Mutex::new(BTreeSet::new()));
+        let pending_runtime_updates = Arc::new(Mutex::new(Vec::new()));
         let handle = CoreSessionWorkerHandle {
             command_tx,
             supplement_mailbox: Arc::clone(&supplement_mailbox),
             cancel_requested: Arc::clone(&cancel_requested),
+            cancel_generation: Arc::clone(&cancel_generation),
             shutdown_requested: Arc::clone(&shutdown_requested),
             reply_tx,
             accepted_command_ids,
+            pending_runtime_updates: Arc::clone(&pending_runtime_updates),
         };
         let join = thread::spawn(move || {
             let mut identity = worker_config.identity.clone();
             let workspace = worker_config.workspace.clone();
+            let mut assistant_speaker_name = worker_config
+                .assistant_speaker_name
+                .clone()
+                .unwrap_or_else(|| identity.display_name.clone());
+            let continue_supplements_after_final_answer =
+                worker_config.continue_supplements_after_final_answer;
             core.set_response_protocol(config.response_protocol);
-            core.set_assistant_speaker_name(&identity.display_name);
+            core.set_assistant_speaker_name(&assistant_speaker_name);
             core.set_tool_repo_session_id(&identity.session_id);
             let init_event = core_initialized_topic_event_with_worker(
                 &identity.session_id,
@@ -945,23 +1308,50 @@ impl CoreSessionWorker {
                 context_id: identity.context_id.clone(),
                 worker_id: identity.worker_id.clone(),
                 supplement_mailbox,
-                cancel_requested,
+                cancel_requested: Arc::clone(&cancel_requested),
                 reply_rx,
                 runtime: runtime.clone(),
                 current_turn_active: None,
                 phase: None,
                 accept_supplements: true,
+                continue_supplements_after_final_answer,
                 pending_bash_always_allow: false,
+                pending_runtime_updates,
+                interaction_profile: None,
             };
 
-            while let Ok(command) = command_rx.recv() {
+            let mut has_running_shell_jobs = false;
+            loop {
+                let command = if has_running_shell_jobs {
+                    match command_rx.recv_timeout(Duration::from_millis(100)) {
+                        Ok(command) => command,
+                        Err(RecvTimeoutError::Timeout) => {
+                            let context_id = identity.context_id.clone();
+                            has_running_shell_jobs = !core
+                                .refresh_running_shell_jobs_for_session_with_runtime(
+                                    &context_id,
+                                    Some(&mut ui),
+                                )
+                                .is_empty();
+                            continue;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    }
+                } else {
+                    match command_rx.recv() {
+                        Ok(command) => command,
+                        Err(_) => break,
+                    }
+                };
                 match command {
                     CoreSessionWorkerCommand::RunTurn { .. }
                     | CoreSessionWorkerCommand::RunToolGen { .. }
                     | CoreSessionWorkerCommand::Rename { .. }
                     | CoreSessionWorkerCommand::UpdateBashApproval { .. }
-                    | CoreSessionWorkerCommand::UpdateRuntimeConfig { .. }
+                    | CoreSessionWorkerCommand::RuntimeConfigUpdated
+                    | CoreSessionWorkerCommand::MaxRoundsUpdated
                     | CoreSessionWorkerCommand::UpdateApiKey { .. }
+                    | CoreSessionWorkerCommand::UpdateHttpHeaders { .. }
                     | CoreSessionWorkerCommand::UpdateMcp { .. }
                         if shutdown_requested.load(Ordering::SeqCst) =>
                     {
@@ -972,19 +1362,40 @@ impl CoreSessionWorker {
                         mut additional_context,
                         command_id,
                         initial_supplements,
+                        cancel_generation: command_generation,
                     } => {
+                        if command_generation < cancel_generation.load(Ordering::SeqCst) {
+                            if let Some(command_id) = command_id {
+                                let _ = event_tx
+                                    .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                            }
+                            for supplement in initial_supplements {
+                                if let Some(command_id) = supplement.command_id {
+                                    let _ =
+                                        event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
+                                            command_id,
+                                        });
+                                }
+                            }
+                            continue;
+                        }
+                        cancel_requested.store(false, Ordering::SeqCst);
                         if !initial_supplements.is_empty() {
                             if let Ok(mut mailbox) = ui.supplement_mailbox.lock() {
                                 mailbox.queue.extend(initial_supplements);
                             }
                         }
-                        if let Some(command_id) = command_id {
-                            let _ = event_tx
-                                .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                        if let Some(command_id) = command_id.as_ref() {
+                            let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
+                                command_id: command_id.clone(),
+                            });
                         }
                         let context_id = identity.context_id.clone();
                         let outcome = {
-                            let working = runtime.begin_worker_turn();
+                            let working = runtime.begin_worker_turn(&identity.session_id);
+                            let _ = event_tx.send(CoreSessionWorkerEvent::TurnStarted {
+                                command_id: command_id.clone(),
+                            });
                             ui.current_turn_active = Some(working.active_handle());
                             let outcome = loop {
                                 let main_outcome = run_session_turn_with_model_client(
@@ -1002,15 +1413,20 @@ impl CoreSessionWorker {
                                     Some(&mut profiler),
                                     &mut model_client,
                                 );
-                                if main_outcome.stop_summary.is_some() {
-                                    // A structured stop is a hard boundary. Late supplements are
-                                    // already retained by the host turn UI, but must not bypass
-                                    // cancellation, repair, or runtime-failure limits here.
+                                if main_outcome.stop_summary.is_some()
+                                    || !ui.continue_supplements_after_final_answer
+                                {
+                                    // A structured stop is a hard boundary. Web-style turn UIs
+                                    // also treat a visible final answer as a boundary so a late
+                                    // supplement cannot create a second answer in the same turn.
                                     let supplements = ui.close_supplements_for_main_context();
                                     if !supplements.is_empty() {
                                         let _ = event_tx.send(
                                             CoreSessionWorkerEvent::UnconsumedSupplements {
-                                                supplements,
+                                                supplements: supplements
+                                                    .into_iter()
+                                                    .map(|supplement| supplement.text)
+                                                    .collect(),
                                             },
                                         );
                                     }
@@ -1020,27 +1436,51 @@ impl CoreSessionWorker {
                                 if supplements.is_empty() {
                                     break main_outcome;
                                 }
-                                input = supplements.join("\n\n");
-                                additional_context = Some(
-                                    "These user messages arrived while the previous response was being finalized. Address them before finalizing again."
-                                        .to_string(),
+                                input = supplements
+                                    .iter()
+                                    .map(|supplement| supplement.text.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n\n");
+                                let supplement_contexts = supplements
+                                    .iter()
+                                    .filter_map(|supplement| {
+                                        supplement.additional_context.as_deref()
+                                    })
+                                    .collect::<Vec<_>>();
+                                additional_context = crate::combine_additional_contexts(
+                                    std::iter::once(Some("These user messages arrived while the previous response was being finalized. Address them before finalizing again."))
+                                        .chain(supplement_contexts.into_iter().map(Some)),
                                 );
                             };
                             ui.current_turn_active = None;
                             drop(working);
                             outcome
                         };
+                        has_running_shell_jobs = !outcome.running_jobs.is_empty();
                         let _ = event_tx.send(CoreSessionWorkerEvent::TurnFinished { outcome });
                     }
                     CoreSessionWorkerCommand::RunToolGen {
                         request,
                         command_id,
+                        cancel_generation: command_generation,
                     } => {
-                        if let Some(command_id) = command_id {
-                            let _ = event_tx
-                                .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                        if command_generation < cancel_generation.load(Ordering::SeqCst) {
+                            if let Some(command_id) = command_id {
+                                let _ = event_tx
+                                    .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                            }
+                            continue;
                         }
-                        let working = runtime.begin_worker_turn();
+                        cancel_requested.store(false, Ordering::SeqCst);
+                        if let Some(command_id) = command_id.as_ref() {
+                            let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
+                                command_id: command_id.clone(),
+                            });
+                        }
+                        let working = runtime.begin_worker_turn(&identity.session_id);
+                        let _ = event_tx.send(CoreSessionWorkerEvent::TurnStarted {
+                            command_id: command_id.clone(),
+                        });
                         ui.current_turn_active = Some(working.active_handle());
                         let toolgen_runner = ToolGenRunner {
                             core: &mut core,
@@ -1076,11 +1516,17 @@ impl CoreSessionWorker {
                         outcome.toolgen_retrospect = outcome.toolgen_retrospect.trim().to_string();
                         ui.current_turn_active = None;
                         drop(working);
+                        has_running_shell_jobs = !outcome.running_jobs.is_empty();
                         let _ = event_tx.send(CoreSessionWorkerEvent::TurnFinished { outcome });
                     }
-                    CoreSessionWorkerCommand::Rename { display_name } => {
+                    CoreSessionWorkerCommand::Rename {
+                        display_name,
+                        assistant_speaker_name: updated_assistant_speaker_name,
+                    } => {
                         identity.rename(display_name);
-                        core.set_assistant_speaker_name(&identity.display_name);
+                        assistant_speaker_name = updated_assistant_speaker_name
+                            .unwrap_or_else(|| identity.display_name.clone());
+                        core.set_assistant_speaker_name(&assistant_speaker_name);
                         let event = core_initialized_topic_event_with_worker(
                             &identity.session_id,
                             core.profile(),
@@ -1098,54 +1544,38 @@ impl CoreSessionWorker {
                     }
                     CoreSessionWorkerCommand::UpdateBashApproval { mode } => {
                         core.set_bash_approval_mode(mode);
+                        core.set_self_tool_runtime_param(
+                            "TIMEM_BASH_APPROVAL",
+                            crate::bash_approval_mode_label(mode),
+                        );
+                        core.notify_runtime_config_changed();
                     }
-                    CoreSessionWorkerCommand::UpdateRuntimeConfig { field, value } => {
-                        use crate::RuntimeConfigField;
-                        match field {
-                            RuntimeConfigField::Model => config.model = value,
-                            RuntimeConfigField::ApiProtocol => {
-                                if let Ok(proto) = crate::parse_api_protocol(&value) {
-                                    config.api_protocol = proto;
-                                }
-                            }
-                            RuntimeConfigField::BaseUrl => config.base_url = value,
-                            RuntimeConfigField::MaxInput => {
-                                if let Some(tokens) = crate::parse_token_count(&value) {
-                                    let tokens = tokens.max(3_000);
-                                    config.max_llm_input_tokens = tokens;
-                                    core.set_max_llm_input_tokens(tokens);
-                                }
-                            }
-                            RuntimeConfigField::MaxOutput => {
-                                if let Some(tokens) = crate::parse_token_count(&value) {
-                                    config.max_llm_output_tokens = tokens.max(512);
-                                }
-                            }
-                            RuntimeConfigField::BashApproval => {
-                                let mode = match value.trim().to_lowercase().as_str() {
-                                    "approve" => Some(crate::BashApprovalMode::Approve),
-                                    "ask" => Some(crate::BashApprovalMode::Ask),
-                                    _ => None,
-                                };
-                                if let Some(mode) = mode {
-                                    core.set_bash_approval_mode(mode);
-                                }
-                            }
-                            RuntimeConfigField::WorkInstructions => {}
-                        }
+                    CoreSessionWorkerCommand::RuntimeConfigUpdated
+                    | CoreSessionWorkerCommand::MaxRoundsUpdated => {
+                        ui.apply_pending_runtime_updates(&mut core, &mut config);
                     }
                     CoreSessionWorkerCommand::UpdateApiKey { api_key } => {
                         config.api_key = api_key;
+                        core.notify_runtime_config_changed();
+                    }
+                    CoreSessionWorkerCommand::UpdateHttpHeaders { http_headers } => {
+                        config.http_headers = http_headers;
+                        core.notify_runtime_config_changed();
                     }
                     CoreSessionWorkerCommand::UpdateMcp {
                         base_capabilities,
                         runtime,
                         servers,
                         tools,
+                        instructions,
                     } => {
-                        if let Err(error) =
-                            core.apply_mcp_update(base_capabilities, runtime, servers, tools)
-                        {
+                        if let Err(error) = core.apply_mcp_update_with_instructions(
+                            base_capabilities,
+                            runtime,
+                            servers,
+                            tools,
+                            instructions,
+                        ) {
                             let _ = event_tx.send(CoreSessionWorkerEvent::ModelError { error });
                         }
                     }
@@ -1209,14 +1639,16 @@ struct WorkerTurnUi {
     current_turn_active: Option<Arc<AtomicBool>>,
     phase: Option<String>,
     accept_supplements: bool,
+    continue_supplements_after_final_answer: bool,
     pending_bash_always_allow: bool,
+    pending_runtime_updates: Arc<Mutex<Vec<PendingRuntimeUpdate>>>,
+    interaction_profile: Option<crate::InteractionProfile>,
 }
 
 fn toolgen_completion_instruction(protocol: ResponseProtocolKind) -> &'static str {
     match protocol {
         ResponseProtocolKind::Xml => TOOLGEN_XML_COMPLETION,
         ResponseProtocolKind::Json => TOOLGEN_JSON_COMPLETION,
-        ResponseProtocolKind::Markdown => TOOLGEN_MARKDOWN_COMPLETION,
     }
 }
 
@@ -1263,6 +1695,7 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
         );
         ui.begin_toolgen_run(before.len());
         let mut input = request.user_instruction.clone().unwrap_or_default();
+        let mut additional_context = None;
         let mut outcome = loop {
             let current = run_session_turn_with_model_client(
                 core,
@@ -1273,18 +1706,23 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
                     audit_file: &workspace.audit_file,
                     runtime: &workspace.runtime,
                     run_bash_target: &workspace.run_bash_target,
-                    additional_context: None,
+                    additional_context: additional_context.as_deref(),
                 },
                 ui,
                 Some(profiler),
                 model_client,
             );
-            if current.stop_summary.is_some() {
+            if current.stop_summary.is_some() || !ui.continue_supplements_after_final_answer {
                 let supplements = ui.close_supplements_for_main_context();
                 if !supplements.is_empty() {
                     let _ = ui
                         .event_tx
-                        .send(CoreSessionWorkerEvent::UnconsumedSupplements { supplements });
+                        .send(CoreSessionWorkerEvent::UnconsumedSupplements {
+                            supplements: supplements
+                                .into_iter()
+                                .map(|supplement| supplement.text)
+                                .collect(),
+                        });
                 }
                 break current;
             }
@@ -1292,7 +1730,17 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
             if supplements.is_empty() {
                 break current;
             }
-            input = supplements.join("\n\n");
+            input = supplements
+                .iter()
+                .map(|supplement| supplement.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            additional_context = crate::combine_additional_contexts(
+                supplements
+                    .iter()
+                    .filter_map(|supplement| supplement.additional_context.as_deref())
+                    .map(Some),
+            );
         };
         core.disable_toolgen_capability();
         let after = match repo.list() {
@@ -1360,7 +1808,99 @@ fn toolgen_failure_detail(outcome: &TurnOutcome) -> Option<String> {
     })
 }
 
+fn apply_worker_runtime_update(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    update: PendingRuntimeUpdate,
+) {
+    use crate::RuntimeConfigField;
+
+    match update {
+        PendingRuntimeUpdate::Config { field, value } => match field {
+            RuntimeConfigField::Model => {
+                config.model = value;
+                core.set_self_tool_runtime_param(field.label(), config.model.clone());
+            }
+            RuntimeConfigField::ApiProtocol => {
+                if let Ok(protocol) = crate::parse_api_protocol(&value) {
+                    config.api_protocol = protocol;
+                    core.set_self_tool_runtime_param(field.label(), config.api_protocol.label());
+                }
+            }
+            RuntimeConfigField::ResponseProtocol => {
+                config.response_protocol = crate::ResponseProtocolKind::from_name(&value);
+                core.set_response_protocol(config.response_protocol);
+                core.set_self_tool_runtime_param(field.label(), config.response_protocol.name());
+            }
+            RuntimeConfigField::BaseUrl => {
+                config.base_url = value;
+                core.set_self_tool_runtime_param(field.label(), config.base_url.clone());
+            }
+            RuntimeConfigField::MaxInput => {
+                if let Some(tokens) = crate::parse_token_count(&value) {
+                    let tokens = tokens.max(3_000);
+                    config.max_llm_input_tokens = tokens;
+                    core.set_max_llm_input_tokens(tokens);
+                    core.set_self_tool_runtime_param(field.label(), tokens.to_string());
+                }
+            }
+            RuntimeConfigField::MaxOutput => {
+                if let Some(tokens) = crate::parse_token_count(&value) {
+                    config.max_llm_output_tokens = tokens.max(512);
+                    core.set_self_tool_runtime_param(
+                        field.label(),
+                        config.max_llm_output_tokens.to_string(),
+                    );
+                }
+            }
+            RuntimeConfigField::BashApproval => {
+                let mode = match value.trim().to_lowercase().as_str() {
+                    "approve" => Some(crate::BashApprovalMode::Approve),
+                    "ask" => Some(crate::BashApprovalMode::Ask),
+                    _ => None,
+                };
+                if let Some(mode) = mode {
+                    core.set_bash_approval_mode(mode);
+                    core.set_self_tool_runtime_param(
+                        field.label(),
+                        crate::bash_approval_mode_label(mode),
+                    );
+                }
+            }
+            RuntimeConfigField::WorkInstructions => {
+                core.set_self_tool_runtime_param(field.label(), value);
+            }
+        },
+        PendingRuntimeUpdate::OpenAiCompatible { key, value } => {
+            if crate::apply_openai_compatible_env_value(&mut config.openai_compatible, &key, &value)
+                .unwrap_or(false)
+            {
+                core.set_self_tool_runtime_param(&key, value);
+            }
+        }
+        PendingRuntimeUpdate::MaxRounds(max_rounds) => core.set_max_rounds(max_rounds),
+    }
+    core.notify_runtime_config_changed();
+}
+
 impl TurnUi for WorkerTurnUi {
+    fn apply_pending_runtime_updates(
+        &mut self,
+        core: &mut AgentCore,
+        config: &mut ModelServiceConfig,
+    ) -> bool {
+        let updates = self
+            .pending_runtime_updates
+            .lock()
+            .map(|mut updates| std::mem::take(&mut *updates))
+            .unwrap_or_default();
+        let changed = !updates.is_empty();
+        for update in updates {
+            apply_worker_runtime_update(core, config, update);
+        }
+        changed
+    }
+
     fn is_cancel_requested(&mut self) -> bool {
         self.cancel_requested.load(Ordering::SeqCst)
     }
@@ -1369,7 +1909,7 @@ impl TurnUi for WorkerTurnUi {
         self.cancel_requested.swap(false, Ordering::SeqCst)
     }
 
-    fn drain_user_supplements(&mut self) -> Vec<String> {
+    fn drain_user_supplements_with_context(&mut self) -> Vec<crate::UserSupplement> {
         if !self.accept_supplements {
             return Vec::new();
         }
@@ -1379,16 +1919,47 @@ impl TurnUi for WorkerTurnUi {
             .unwrap_or_default()
     }
 
-    fn on_model_request(&mut self, round: u32, _prompt: &str) {
-        let _ = self
-            .event_tx
-            .send(CoreSessionWorkerEvent::ModelRequest { round });
+    fn continue_supplements_after_final_answer(&self) -> bool {
+        self.continue_supplements_after_final_answer
     }
 
-    fn on_model_response(&mut self, round: u32, usage: &UsageStats, _content: &str) {
+    fn on_model_api_request(
+        &mut self,
+        round: u32,
+        request: &crate::ModelInteractionRequest,
+        api_payload: &serde_json::Value,
+    ) {
+        let _ = self.event_tx.send(CoreSessionWorkerEvent::ModelRequest {
+            round,
+            prompt: request.rendered_prompt.clone(),
+            interaction_profile: self.interaction_profile.clone(),
+            interaction_request: Some(Box::new(request.clone())),
+            api_payload: Some(Box::new(api_payload.clone())),
+        });
+    }
+
+    fn on_model_request_completed(&mut self, latency: Duration) {
+        let _ = self
+            .event_tx
+            .send(CoreSessionWorkerEvent::ModelRequestCompleted { latency });
+    }
+
+    fn on_model_response_parsed(&mut self, tool_count: usize) {
+        let _ = self
+            .event_tx
+            .send(CoreSessionWorkerEvent::ModelResponseParsed { tool_count });
+    }
+
+    fn on_interaction_profile(&mut self, profile: &crate::InteractionProfile) {
+        self.interaction_profile = Some(profile.clone());
+    }
+
+    fn on_model_interaction_response(&mut self, round: u32, response: &crate::LlmResponse) {
         let _ = self.event_tx.send(CoreSessionWorkerEvent::ModelResponse {
             round,
-            usage: usage.clone(),
+            usage: response.usage.clone(),
+            content: response.content.clone(),
+            tool_calls: response.tool_calls.clone(),
             runtime_phase: self.phase.clone(),
         });
     }
@@ -1396,7 +1967,11 @@ impl TurnUi for WorkerTurnUi {
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
         let events = self
             .runtime
-            .enrich_topic_events(events.to_vec(), self.current_turn_active.as_ref())
+            .enrich_topic_events(
+                &self.session_id,
+                events.to_vec(),
+                self.current_turn_active.as_ref(),
+            )
             .into_iter()
             .map(|mut event| {
                 event.session_id = self.session_id.clone();
@@ -1479,8 +2054,27 @@ impl TurnUi for WorkerTurnUi {
     }
 }
 
+impl crate::ActionRuntime for WorkerTurnUi {
+    fn should_cancel(&mut self) -> bool {
+        self.cancel_requested.load(Ordering::SeqCst)
+    }
+
+    fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+        TurnUi::on_core_topic_events(self, events);
+    }
+
+    fn take_bash_always_allow(&mut self) -> bool {
+        let flag = self.pending_bash_always_allow;
+        self.pending_bash_always_allow = false;
+        flag
+    }
+}
+
 impl WorkerTurnUi {
-    fn accept_queued_supplements(&self, queued: Vec<QueuedSupplement>) -> Vec<String> {
+    fn accept_queued_supplements(
+        &self,
+        queued: Vec<QueuedSupplement>,
+    ) -> Vec<crate::UserSupplement> {
         queued
             .into_iter()
             .map(|queued| {
@@ -1489,12 +2083,12 @@ impl WorkerTurnUi {
                         .event_tx
                         .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
                 }
-                queued.text
+                crate::UserSupplement::new(queued.text, queued.additional_context)
             })
             .collect()
     }
 
-    fn take_or_close_supplements_for_main_context(&mut self) -> Vec<String> {
+    fn take_or_close_supplements_for_main_context(&mut self) -> Vec<crate::UserSupplement> {
         self.supplement_mailbox
             .lock()
             .map(|mut mailbox| {
@@ -1507,7 +2101,7 @@ impl WorkerTurnUi {
             .unwrap_or_default()
     }
 
-    fn close_supplements_for_main_context(&mut self) -> Vec<String> {
+    fn close_supplements_for_main_context(&mut self) -> Vec<crate::UserSupplement> {
         self.supplement_mailbox
             .lock()
             .map(|mut mailbox| {

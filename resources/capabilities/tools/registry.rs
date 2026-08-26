@@ -1,10 +1,17 @@
 use crate::response_protocol::ParsedAction;
-use crate::{capmgr, memmgr, self_tool, shell_exec, toolgen};
+use crate::{capmgr, memmgr, readfile, self_tool, shell_exec, toolgen};
 use crate::{ActionExecution, ActionRuntime, AgentCore};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] =
-    &["memmgr", "capmgr", "run_bash", "self_tool", "toolgen"];
+pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
+    "memmgr",
+    "capmgr",
+    "context_compact",
+    "readfile",
+    "run_bash",
+    "self_tool",
+    "toolgen",
+];
 
 type BuiltinToolCallback =
     fn(&mut AgentCore, &ParsedAction, &mut dyn ActionRuntime) -> ActionExecution;
@@ -34,12 +41,27 @@ where
 fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
     match binding_name {
         "capmgr" => Some(execute_capmgr),
+        "context_compact" => Some(execute_context_compact),
         "memmgr" => Some(execute_memmgr),
+        "readfile" => Some(execute_readfile),
         "self_tool" => Some(execute_self_tool),
         "run_bash" => Some(execute_run_bash),
         "toolgen" => Some(execute_toolgen),
         _ => None,
     }
+}
+
+fn execute_context_compact(
+    _core: &mut AgentCore,
+    _action: &ParsedAction,
+    _runtime: &mut dyn ActionRuntime,
+) -> ActionExecution {
+    // AgentCore promotes this intrinsic action before ordinary dispatch so it
+    // can atomically rewrite prompt state. This callback is a defensive guard
+    // that also keeps manifest and compiled binding registries paired.
+    ActionExecution::Completed(crate::ActionOutcome::failed(
+        "Action result: context_compact\nerror: intrinsic_dispatch_required",
+    ))
 }
 
 fn execute_toolgen(
@@ -55,7 +77,7 @@ fn execute_capmgr(
     action: &ParsedAction,
     _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
-    ActionExecution::Completed(capmgr::execute_action(core, action))
+    ActionExecution::Completed(capmgr::execute_action_outcome(core, action))
 }
 
 fn execute_memmgr(
@@ -63,7 +85,7 @@ fn execute_memmgr(
     action: &ParsedAction,
     _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
-    ActionExecution::Completed(memmgr::execute(core, action))
+    ActionExecution::Completed(memmgr::execute_outcome(core, action))
 }
 
 fn execute_self_tool(
@@ -71,7 +93,15 @@ fn execute_self_tool(
     action: &ParsedAction,
     _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
-    ActionExecution::Completed(self_tool::execute_action(core, action))
+    ActionExecution::Completed(self_tool::execute_action_outcome(core, action))
+}
+
+fn execute_readfile(
+    core: &mut AgentCore,
+    action: &ParsedAction,
+    _runtime: &mut dyn ActionRuntime,
+) -> ActionExecution {
+    ActionExecution::Completed(readfile::execute_action_outcome(core, action))
 }
 
 fn execute_run_bash(

@@ -1,28 +1,56 @@
 import { AssistantRuntimeProvider, ThreadMessageLike, ThreadPrimitive, useExternalStoreRuntime } from "@assistant-ui/react";
-import { ArrowDown, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, FolderOpen, Gauge, GripVertical, KeyRound, LoaderCircle, Menu, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, Trash2, Wrench, X } from "lucide-react";
-import { Children, Dispatch, isValidElement, memo, MutableRefObject, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { closestCenter, DndContext, DragEndEvent, DragOverlay, DragOverEvent, KeyboardSensor, PointerSensor, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
+import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { ArrowDown, ArrowLeftRight, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, Folder, FolderOpen, FolderPlus, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, TriangleAlert, Trash2, Wrench, X } from "lucide-react";
+import { Children, CSSProperties, Dispatch, isValidElement, memo, MutableRefObject, ReactNode, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
-import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent } from "./protocol";
-import { isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition } from "./scroll";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "./view_model";
+import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, ModelEndpoint, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole, WorkerRoleGroup, WorkerRoleLibrary, SessionGroup } from "./protocol";
+import { applyWorkerRoleMutation, isOptimisticWorkerRoleMutation, replayWorkerRoleMutations, WorkerRoleMutation } from "./worker_roles_ui";
+import { adjacentUserMessageIndex, canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, UserMessageNavigationDirection, wheelDeltaPixels } from "./scroll";
+import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, manualToolGenCommand, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn } from "./view_model";
 import { safeMarkdownUrl } from "./markdown_security";
-import { createMcpTransportDrafts, maskSensitiveMcpValues, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
+import { createMcpTransportDrafts, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
+import { commandSessionId, isModelSubmissionCommand, modelDisplayName, modelServiceIssue, NO_MODEL_ENDPOINTS_ISSUE, UNCONFIGURED_MODEL_LABEL } from "./model_service_ui";
+import { endpointDraftValid, endpointMatchesProfile, endpointNameForProfile, MODEL_CONTEXT_WINDOW_OPTIONS, MODEL_OUTPUT_TOKEN_OPTIONS, ModelEndpointDraft } from "./model_endpoints";
 import { createFrameEventQueue } from "./frame_event_queue";
-import { applyQueuedMessagesAck, claimQueuedMessage, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, removeQueuedMessage, reorderQueuedMessages, saveQueuedMessages, selectQueuedDispatches } from "./queued_messages";
+import { formatTokens } from "./token_format";
+import { summarizeConsecutiveToolActivities, ToolActivitySummary } from "./activity_groups";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearQueuedMessagesPause, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, loadQueuedMessagesPause, QueuedMessage, queuedMessageKey, QueuedMessagesPauseSource, QueuedMessagesPauseState, queuedMessagesPauseSessionId, queuedMessagesPauseStorageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, saveQueuedMessagesPause, selectQueuedDispatches, shouldDirectManualMessage, stopQueuedAutoSend, unclaimedQueuedMessages } from "./queued_messages";
 import { acceptOutboxCommand, addCommandToOutbox, commandMayPersist, commandNeedsReliableDelivery, CommandOutboxItem, commandOutboxStorageKey, finishOutboxCommand, loadCommandOutbox, reliableStorageScope, removeCommandOutboxItem, saveCommandOutboxItem } from "./command_outbox";
 import { classifyEventSequence, loadEventCursor, resolveHelloEventCursor, saveEventCursor } from "./event_cursor";
 import { enablesSemanticDelivery, shouldReduceTopLevelWireEvent } from "./wire_delivery";
+import { clipboardImageFiles } from "./clipboard_images";
+import { humanizeToolStatus, isToolActivityRunning, TOOL_STATUS_RUNNING } from "./tool_status";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 
-const MAX_ACTIVITY_ITEMS = 300;
 const STORED_HISTORY_PAGE_SIZE = 200;
 const TOKEN_STORAGE_KEY = "timem-web-access-token";
 const EMPTY_CHAT_MESSAGES: ChatMessage[] = [];
+const SESSION_API_KEY_SAVE_TIMEOUT_MS = 20_000;
+const TURN_CANCEL_UI_TIMEOUT_MS = 15_000;
+type PendingSessionApiKeyCommand = {
+  sessionId: string;
+  timeoutId: number;
+};
+type ChatMessageDeleteCandidate = {
+  sessionId: string;
+  turnId: string;
+  role: "user" | "assistant";
+  roleIndex: number;
+  preview: string;
+};
+
+function chatMessageDeleteKey(candidate: Pick<ChatMessageDeleteCandidate, "sessionId" | "turnId" | "role" | "roleIndex">) {
+  return `${candidate.sessionId}\u0000${candidate.turnId}\u0000${candidate.role}\u0000${candidate.roleIndex}`;
+}
+
 const FOCUSABLE_DIALOG_SELECTOR = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
 
 function useDialogFocusTrap() {
@@ -71,18 +99,73 @@ function makeMessage(role: ChatMessage["role"], text: string, id?: string): Chat
   return { id: id ?? `${role}-${clientId()}`, role, text, created_at_ms: Date.now() };
 }
 
+type SortableSessionRenderState = {
+  setNodeRef: (node: HTMLElement | null) => void;
+  style: CSSProperties;
+  attributes: ReturnType<typeof useSortable>["attributes"];
+  listeners: ReturnType<typeof useSortable>["listeners"];
+  isDragging: boolean;
+};
+
+function SortableSession({ id, disabled, children }: {
+  id: string;
+  disabled: boolean;
+  children: (state: SortableSessionRenderState) => ReactNode;
+}) {
+  const sortable = useSortable({
+    id: `session:${id}`,
+    disabled,
+    transition: { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" },
+  });
+  return children({
+    setNodeRef: sortable.setNodeRef,
+    style: {
+      transform: CSS.Transform.toString(sortable.transform),
+      transition: sortable.transition,
+      zIndex: sortable.isDragging ? 4 : undefined,
+    },
+    attributes: sortable.attributes,
+    listeners: sortable.listeners,
+    isDragging: sortable.isDragging,
+  });
+}
+
+function SessionDropGroup({ id, sessionIds, className, children }: {
+  id: string;
+  sessionIds: string[];
+  className: string;
+  children: ReactNode;
+}) {
+  const droppable = useDroppable({ id: `session-group:${id}` });
+  return <section ref={droppable.setNodeRef} className={`${className} ${droppable.isOver ? "drop-target" : ""}`}>
+    <SortableContext items={sessionIds.map((sessionId) => `session:${sessionId}`)} strategy={verticalListSortingStrategy}>
+      {children}
+    </SortableContext>
+  </section>;
+}
+
 function TimemApp() {
   useDialogFocusTrap();
   const [appearance, setAppearance] = useState<Appearance>(loadAppearance);
   const [sessions, setSessions] = useState<Session[]>([]);
+  const [roleLibrary, setRoleLibrary] = useState<WorkerRoleLibrary>({ roles: [], groups: [] });
+  const [sessionGroups, setSessionGroups] = useState<SessionGroup[]>([]);
+  const [collapsedSessionGroupIds, setCollapsedSessionGroupIds] = useState<Set<string>>(() => new Set());
+  const [sessionGroupEditor, setSessionGroupEditor] = useState<{ id?: string; name: string } | null>(null);
+  const [sessionGroupDeleteConfirmId, setSessionGroupDeleteConfirmId] = useState("");
+  const [draggedSessionId, setDraggedSessionId] = useState("");
+  const authoritativeRoleLibraryRef = useRef<WorkerRoleLibrary>({ roles: [], groups: [] });
+  const pendingWorkerRoleMutationsRef = useRef<Map<string, WorkerRoleMutation>>(new Map());
   const [activeSessionId, setActiveSessionId] = useState("");
-  const [activities, setActivities] = useState<Activity[]>([]);
+  const [selectedRoleIds, setSelectedRoleIds] = useState<Record<string, string[]>>({});
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [connected, setConnected] = useState(false);
   const [snapshotReady, setSnapshotReady] = useState(false);
   const [runtimeEverConnected, setRuntimeEverConnected] = useState(false);
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [runtimeUnavailableDialogDismissed, setRuntimeUnavailableDialogDismissed] = useState(false);
   const [showToolRepo, setShowToolRepo] = useState(false);
+  const [showRoles, setShowRoles] = useState(false);
   const [toolSearchQuery, setToolSearchQuery] = useState("");
   const [toolSearchResults, setToolSearchResults] = useState<Record<string, ToolSummary[]>>({});
   const [pendingToolSearchKey, setPendingToolSearchKey] = useState("");
@@ -94,11 +177,19 @@ function TimemApp() {
   const [toolgenDialog, setToolgenDialog] = useState<{ sessionId: string; turnId: string } | null>(null);
   const [showMobileSessions, setShowMobileSessions] = useState(false);
   const [showRuntime, setShowRuntime] = useState(false);
+  const [endpointEditor, setEndpointEditor] = useState<ModelEndpoint | "new" | null>(null);
+  const [deleteEndpointCandidate, setDeleteEndpointCandidate] = useState<ModelEndpoint | null>(null);
+  const [revealedEndpointApiKeys, setRevealedEndpointApiKeys] = useState<Record<string, string>>({});
+  const [revealedEndpointHeaders, setRevealedEndpointHeaders] = useState<Record<string, Record<string, string>>>({});
   const [showAppearance, setShowAppearance] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
   const [showNewSession, setShowNewSession] = useState(false);
+  const [showMemSettings, setShowMemSettings] = useState(false);
   const [showMemSwitch, setShowMemSwitch] = useState(false);
   const [deleteSessionCandidate, setDeleteSessionCandidate] = useState<Session | null>(null);
+  const [sessionDeleteMode, setSessionDeleteMode] = useState(false);
+  const [selectedDeleteSessionId, setSelectedDeleteSessionId] = useState("");
+  const [deleteMessageCandidate, setDeleteMessageCandidate] = useState<ChatMessageDeleteCandidate | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState("");
   const [expandedSessionIds, setExpandedSessionIds] = useState<Set<string>>(() => new Set());
   const [renameDraft, setRenameDraft] = useState("");
@@ -110,12 +201,15 @@ function TimemApp() {
   const selectedToolRef = useRef<ToolDetail | null>(null);
   const toolCountBySessionRef = useRef<Map<string, number>>(new Map());
   const cancellingSessionIds = useRef<Set<string>>(new Set());
+  const cancellingSessionCommandIds = useRef<Map<string, string>>(new Map());
+  const cancellingSessionTimeouts = useRef<Map<string, number>>(new Map());
   const [cancellingSessionIdSet, setCancellingSessionIdSet] = useState<Set<string>>(() => new Set());
   const [creatingSession, setCreatingSession] = useState(false);
   const [pendingAttachmentRemoveIds, setPendingAttachmentRemoveIds] = useState<Set<string>>(() => new Set());
   const [pendingDecisionKeys, setPendingDecisionKeys] = useState<Set<string>>(() => new Set());
   const [pendingRenameSessionIds, setPendingRenameSessionIds] = useState<Set<string>>(() => new Set());
   const [pendingDeleteSessionIds, setPendingDeleteSessionIds] = useState<Set<string>>(() => new Set());
+  const [pendingDeleteMessageKeys, setPendingDeleteMessageKeys] = useState<Set<string>>(() => new Set());
   const [pendingRuntimeKeys, setPendingRuntimeKeys] = useState<Set<string>>(() => new Set());
   const [pendingSessionCredentialIds, setPendingSessionCredentialIds] = useState<Set<string>>(() => new Set());
   const [pendingMcpKeys, setPendingMcpKeys] = useState<Set<string>>(() => new Set());
@@ -125,7 +219,8 @@ function TimemApp() {
   const [pendingUploadSessionIds, setPendingUploadSessionIds] = useState<Set<string>>(() => new Set());
   const [pendingUploadFiles, setPendingUploadFiles] = useState<Record<string, { name: string; bytes: number }>>({});
   const [pendingMemSwitch, setPendingMemSwitch] = useState(false);
-  const [completedTurnKey, setCompletedTurnKey] = useState("");
+  const [pendingMemRetention, setPendingMemRetention] = useState(false);
+  const [completedTurnsBySession, setCompletedTurnsBySession] = useState<Record<string, { key: string; successful: boolean }>>({});
   const [commandAcks, setCommandAcks] = useState<Record<string, Extract<WireEvent, { type: "command_ack" }>>>({});
   const consumeCommandAcks = useCallback((commandIds: ReadonlySet<string>) => {
     setCommandAcks((current) => Object.fromEntries(Object.entries(current).filter(([commandId]) => !commandIds.has(commandId))));
@@ -140,9 +235,12 @@ function TimemApp() {
   const pendingDecisionKeysRef = useRef<Set<string>>(new Set());
   const pendingRenameSessionIdsRef = useRef<Set<string>>(new Set());
   const pendingDeleteSessionIdsRef = useRef<Set<string>>(new Set());
+  const pendingDeleteMessageKeysRef = useRef<Set<string>>(new Set());
   const pendingRuntimeKeysRef = useRef<Set<string>>(new Set());
   const pendingSessionCredentialIdsRef = useRef<Set<string>>(new Set());
   const pendingSessionApiKeyValuesRef = useRef<Map<string, string>>(new Map());
+  const pendingSessionApiKeyCommandsRef = useRef<Map<string, PendingSessionApiKeyCommand>>(new Map());
+  const pendingSessionApiKeyCommandIdsRef = useRef<Map<string, string>>(new Map());
   const pendingMcpKeysRef = useRef<Set<string>>(new Set());
   const pendingHistorySessionIdsRef = useRef<Set<string>>(new Set());
   const pendingUploadSessionIdsRef = useRef<Set<string>>(new Set());
@@ -159,24 +257,21 @@ function TimemApp() {
   const mobileSidebarRef = useRef<HTMLElement | null>(null);
   const toolRepoButtonRef = useRef<HTMLButtonElement | null>(null);
   const toolRepoPanelRef = useRef<HTMLElement | null>(null);
+  const memSettingsButtonRef = useRef<HTMLButtonElement | null>(null);
   const memSwitchButtonRef = useRef<HTMLButtonElement | null>(null);
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? sessions[0];
   sessionsRef.current = sessions;
   const activeMessages = activeSession?.messages ?? EMPTY_CHAT_MESSAGES;
   const pushActivity = useCallback((activity: Activity) => {
-    setActivities((current) => {
-      const existingIndex = current.findIndex((candidate) =>
-        candidate.sessionId === activity.sessionId &&
-        candidate.tone === activity.tone &&
-        candidate.title === activity.title &&
-        candidate.detail === activity.detail
-      );
-      const withoutExisting = existingIndex >= 0
-        ? current.filter((_, index) => index !== existingIndex)
-        : current;
-      const merged = existingIndex >= 0 ? { ...activity, id: current[existingIndex].id } : activity;
-      return [merged, ...withoutExisting].slice(0, MAX_ACTIVITY_ITEMS);
-    });
+    const requestedSessionId = activity.sessionId === "system"
+      ? activeSessionIdRef.current
+      : activity.sessionId;
+    if (!requestedSessionId) return;
+    setSessions((current) => current.map((session) => (
+      session.session_id === requestedSessionId
+        ? appendActivityToCurrentTurn(session, { ...activity, sessionId: requestedSessionId })
+        : session
+    )));
   }, []);
   const reportUiError = useCallback((title: string, detail: string, sessionId = activeSessionIdRef.current || "system") => {
     pushActivity({ id: clientId(), sessionId, tone: "error", title, detail, createdAt: Date.now() });
@@ -188,6 +283,8 @@ function TimemApp() {
   const closeRuntimePanel = useCallback((restoreFocus = true) => {
     setShowRuntime(false);
     setRevealedSessionApiKeys({});
+    setRevealedEndpointApiKeys({});
+    setRevealedEndpointHeaders({});
     if (restoreFocus) runtimeButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeAppearancePanel = useCallback((restoreFocus = true) => {
@@ -202,6 +299,10 @@ function TimemApp() {
   const closeMobileSidebar = useCallback((restoreFocus = true) => {
     setShowMobileSessions(false);
     if (restoreFocus) mobileSessionButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+  const closeMemSettingsDialog = useCallback((restoreFocus = true) => {
+    setShowMemSettings(false);
+    if (restoreFocus) memSettingsButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeMemSwitchDialog = useCallback((restoreFocus = true) => {
     setShowMemSwitch(false);
@@ -372,16 +473,56 @@ function TimemApp() {
     });
   }, []);
 
+  const finishPendingSessionApiKeyCommand = useCallback((sessionId: string, commandId?: string, committed = false) => {
+    const activeCommandId = pendingSessionApiKeyCommandIdsRef.current.get(sessionId);
+    if (commandId && activeCommandId !== commandId) return false;
+    if (activeCommandId) {
+      const pending = pendingSessionApiKeyCommandsRef.current.get(activeCommandId);
+      if (pending) window.clearTimeout(pending.timeoutId);
+      pendingSessionApiKeyCommandsRef.current.delete(activeCommandId);
+      pendingSessionApiKeyCommandIdsRef.current.delete(sessionId);
+      commandOutboxRef.current = finishOutboxCommand(commandOutboxRef.current, activeCommandId);
+      removeCommandOutboxItem(window.localStorage, commandOutboxScopeRef.current, activeCommandId);
+    }
+    const savedApiKey = pendingSessionApiKeyValuesRef.current.get(sessionId);
+    pendingSessionApiKeyValuesRef.current.delete(sessionId);
+    removePendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, sessionId);
+    if (committed && savedApiKey !== undefined) {
+      setRevealedSessionApiKeys((current) => updateRevealedSessionApiKeys(current, sessionId, savedApiKey));
+      setSessions((current) => current.map((session) => session.session_id === sessionId && session.runtime_profile
+        ? { ...session, runtime_profile: { ...session.runtime_profile, api_key_configured: savedApiKey.length > 0 } }
+        : session));
+    }
+    return true;
+  }, [removePendingKey]);
+
+  const cancelAllPendingSessionApiKeyCommands = useCallback((detail?: string) => {
+    const sessionIds = Array.from(pendingSessionApiKeyCommandIdsRef.current.keys());
+    for (const sessionId of sessionIds) {
+      finishPendingSessionApiKeyCommand(sessionId);
+      if (detail) reportUiError("API key update interrupted", detail, sessionId);
+    }
+  }, [finishPendingSessionApiKeyCommand, reportUiError]);
+
   const clearAllPendingCommands = useCallback(() => {
     creatingSessionRef.current = false;
     cancellingSessionIds.current.clear();
+    cancellingSessionCommandIds.current.clear();
+    for (const timeoutId of cancellingSessionTimeouts.current.values()) window.clearTimeout(timeoutId);
+    cancellingSessionTimeouts.current.clear();
     pendingAttachmentRemoveIdsRef.current.clear();
     pendingDecisionKeysRef.current.clear();
     pendingRenameSessionIdsRef.current.clear();
     pendingDeleteSessionIdsRef.current.clear();
+    pendingDeleteMessageKeysRef.current.clear();
     pendingRuntimeKeysRef.current.clear();
+    for (const pending of pendingSessionApiKeyCommandsRef.current.values()) {
+      window.clearTimeout(pending.timeoutId);
+    }
     pendingSessionCredentialIdsRef.current.clear();
     pendingSessionApiKeyValuesRef.current.clear();
+    pendingSessionApiKeyCommandsRef.current.clear();
+    pendingSessionApiKeyCommandIdsRef.current.clear();
     pendingMcpKeysRef.current.clear();
     pendingHistorySessionIdsRef.current.clear();
     pendingUploadSessionIdsRef.current.clear();
@@ -392,6 +533,7 @@ function TimemApp() {
     setPendingDecisionKeys(new Set());
     setPendingRenameSessionIds(new Set());
     setPendingDeleteSessionIds(new Set());
+    setPendingDeleteMessageKeys(new Set());
     setPendingRuntimeKeys(new Set());
     setPendingSessionCredentialIds(new Set());
     setPendingMcpKeys(new Set());
@@ -414,6 +556,10 @@ function TimemApp() {
     for (const sessionId of Array.from(cancellingSessionIds.current)) {
       if (!workingIds.has(sessionId)) {
         cancellingSessionIds.current.delete(sessionId);
+        cancellingSessionCommandIds.current.delete(sessionId);
+        const timeoutId = cancellingSessionTimeouts.current.get(sessionId);
+        if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+        cancellingSessionTimeouts.current.delete(sessionId);
         changed = true;
       }
     }
@@ -454,7 +600,12 @@ function TimemApp() {
   const applySnapshot = useCallback((snapshot: Snapshot) => {
     toolCountBySessionRef.current = new Map(snapshot.sessions.map((session) => [session.session_id, session.tools.length]));
     setServer(snapshot.server);
-    setSessions(snapshot.sessions.map(boundSessionHistory));
+    const authoritativeRoleLibrary = snapshot.role_library ?? { roles: snapshot.sessions[0]?.roles ?? [], groups: [] };
+    authoritativeRoleLibraryRef.current = authoritativeRoleLibrary;
+    const visibleRoleLibrary = replayWorkerRoleMutations(authoritativeRoleLibrary, pendingWorkerRoleMutationsRef.current.values());
+    setRoleLibrary(visibleRoleLibrary);
+    setSessionGroups(snapshot.session_groups ?? []);
+    setSessions(snapshot.sessions.map((session) => boundSessionHistory({ ...session, roles: visibleRoleLibrary.roles })));
     setActiveSessionId((current) => resolveActiveSessionId(current, snapshot.sessions));
   }, []);
 
@@ -488,7 +639,10 @@ function TimemApp() {
       return;
     }
     if (event.type === "command_ack") {
-      if (event.command_id.startsWith("queued-")) {
+      if (
+        event.command_id.startsWith("queued-")
+        || (event.command_id.startsWith("submit-") && event.status === "rejected")
+      ) {
         setCommandAcks((current) => ({ ...current, [event.command_id]: event }));
       }
       if (event.status === "accepted") {
@@ -496,12 +650,61 @@ function TimemApp() {
         const accepted = commandOutboxRef.current.find((item) => item.commandId === event.command_id);
         if (accepted && commandMayPersist(accepted.command)) saveCommandOutboxItem(window.localStorage, commandOutboxScopeRef.current, accepted);
       } else {
+        const completed = commandOutboxRef.current.find((item) => item.commandId === event.command_id);
+        const pendingCredential = pendingSessionApiKeyCommandsRef.current.get(event.command_id);
         commandOutboxRef.current = finishOutboxCommand(commandOutboxRef.current, event.command_id);
         removeCommandOutboxItem(window.localStorage, commandOutboxScopeRef.current, event.command_id);
+        if (pendingCredential) {
+          finishPendingSessionApiKeyCommand(
+            pendingCredential.sessionId,
+            event.command_id,
+            event.status === "committed",
+          );
+        }
         if (event.status === "rejected") {
-          reportUiError("Command rejected", event.error || "The runtime rejected this command.");
+          if (pendingWorkerRoleMutationsRef.current.delete(event.command_id)) {
+            const visibleLibrary = replayWorkerRoleMutations(authoritativeRoleLibraryRef.current, pendingWorkerRoleMutationsRef.current.values());
+            setRoleLibrary(visibleLibrary);
+            setSessions((current) => current.map((session) => ({ ...session, roles: visibleLibrary.roles })));
+          }
+          const sessionId = pendingCredential?.sessionId
+            ?? commandSessionId(completed?.command)
+            ?? (activeSessionIdRef.current || "system");
+          if (
+            completed?.command.type === "turn_cancel"
+            && sessionId !== "system"
+            && cancellingSessionCommandIds.current.get(sessionId) === event.command_id
+          ) {
+            cancellingSessionIds.current.delete(sessionId);
+            cancellingSessionCommandIds.current.delete(sessionId);
+            const timeoutId = cancellingSessionTimeouts.current.get(sessionId);
+            if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+            cancellingSessionTimeouts.current.delete(sessionId);
+            setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
+          }
+          if (completed?.command.type === "mem_temporary_retention_update") {
+            setPendingMemRetention(false);
+          }
+          if (pendingCredential) {
+            reportUiError(
+              "API key update rejected",
+              event.error || "The runtime rejected this Session credential. Check the value and try again.",
+              sessionId,
+            );
+          } else if (isModelSubmissionCommand(completed?.command)) {
+            const issue = modelServiceIssue(event.error || "The runtime rejected this model request.");
+            reportUiError(issue.title, issue.detail, sessionId);
+          } else {
+            reportUiError("Command rejected", event.error || "The runtime rejected this command.", sessionId);
+          }
         }
       }
+      return;
+    }
+    if (event.type === "mem_settings_updated") {
+      setPendingMemRetention(false);
+      setServer((current) => current ? { ...current, mem: { ...current.mem, temporary_retention_days: event.temporary_retention_days } } : current);
+      closeMemSettingsDialog(false);
       return;
     }
     if (event.type === "hello") {
@@ -520,6 +723,10 @@ function TimemApp() {
         commandOutboxScopeRef.current = scope;
         commandOutboxRef.current = loadCommandOutbox(window.localStorage, scope);
         setCommandAcks({});
+      }
+      const durableCommandIds = new Set(commandOutboxRef.current.map((item) => item.commandId));
+      for (const commandId of pendingWorkerRoleMutationsRef.current.keys()) {
+        if (!durableCommandIds.has(commandId)) pendingWorkerRoleMutationsRef.current.delete(commandId);
       }
       clearAllPendingCommands();
       setDecisions(decisionsFromSessions(event.snapshot.sessions));
@@ -551,7 +758,6 @@ function TimemApp() {
         return next;
       });
       setDecisions((current) => current.filter((decision) => decision.event.session_id !== event.session_id));
-      setActivities((current) => current.filter((activity) => activity.sessionId !== event.session_id));
       setSessions((current) => {
         const remaining = current.filter((session) => session.session_id !== event.session_id);
         setActiveSessionId((activeId) => resolveActiveSessionId(activeId, remaining));
@@ -559,20 +765,78 @@ function TimemApp() {
       });
       return;
     }
-    if (event.type === "session_runtime_updated") {
-      removePendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, event.session_id);
-      const savedApiKey = pendingSessionApiKeyValuesRef.current.get(event.session_id);
-      pendingSessionApiKeyValuesRef.current.delete(event.session_id);
-      setRevealedSessionApiKeys((current) => updateRevealedSessionApiKeys(current, event.session_id, savedApiKey));
+    if (event.type === "session_groups_updated") {
+      setSessionGroups(event.groups);
+      setSessionGroupEditor(null);
+      setSessionGroupDeleteConfirmId("");
+      return;
+    }
+    if (event.type === "session_group_changed") {
       setSessions((current) => current.map((session) => session.session_id === event.session_id
-        ? { ...session, runtime_profile: event.runtime_profile }
+        ? { ...session, group_id: event.group_id ?? null }
+        : session));
+      return;
+    }
+    if (event.type === "worker_roles_updated") {
+      setSessions((current) => current.map((session) => session.session_id === event.session_id
+        ? { ...session, roles: event.roles }
+        : session));
+      setSelectedRoleIds((current) => {
+        const selected = current[event.session_id] ?? [];
+        const retained = selected.filter((roleId) => event.roles.some((role) => role.id === roleId));
+        if (retained.length === selected.length) return current;
+        if (retained.length === 0) {
+          const next = { ...current };
+          delete next[event.session_id];
+          return next;
+        }
+        return { ...current, [event.session_id]: retained };
+      });
+      return;
+    }
+    if (event.type === "worker_role_library_updated") {
+      authoritativeRoleLibraryRef.current = event.library;
+      if (event.command_id) pendingWorkerRoleMutationsRef.current.delete(event.command_id);
+      const visibleLibrary = replayWorkerRoleMutations(event.library, pendingWorkerRoleMutationsRef.current.values());
+      setRoleLibrary(visibleLibrary);
+      setSessions((current) => current.map((session) => ({ ...session, roles: visibleLibrary.roles })));
+      setSelectedRoleIds((current) => {
+        let changed = false;
+        const next: Record<string, string[]> = {};
+        for (const [sessionId, selected] of Object.entries(current)) {
+          const retained = selected.filter((roleId) => visibleLibrary.roles.some((role) => role.id === roleId));
+          if (retained.length > 0) next[sessionId] = retained;
+          if (retained.length !== selected.length) changed = true;
+        }
+        return changed ? next : current;
+      });
+      return;
+    }
+    if (event.type === "chat_message_deleted") {
+      const key = chatMessageDeleteKey({
+        sessionId: event.session_id,
+        turnId: event.turn_id,
+        role: event.role,
+        roleIndex: event.role_index,
+      });
+      removePendingKey(pendingDeleteMessageKeysRef, setPendingDeleteMessageKeys, key);
+      setDeleteMessageCandidate((current) => current && chatMessageDeleteKey(current) === key ? null : current);
+      setSessions((current) => current.map((session) => session.session_id === event.session_id
+        ? applyChatMessageDeleted(session, event.turn_id, event.role, event.role_index)
+        : session));
+      return;
+    }
+    if (event.type === "session_runtime_updated") {
+      finishPendingSessionApiKeyCommand(event.session_id, undefined, true);
+      setSessions((current) => current.map((session) => session.session_id === event.session_id
+        ? applySessionRuntimeProfile(session, event.runtime_profile)
         : session));
       return;
     }
     if (event.type === "session_runtime_config_updated") {
       removePendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, `${event.session_id}:${event.key}`);
       setSessions((current) => current.map((session) => session.session_id === event.session_id
-        ? { ...session, runtime_profile: event.runtime_profile, max_llm_input_tokens: event.runtime_profile.max_llm_input_tokens }
+        ? applySessionRuntimeProfile(session, event.runtime_profile)
         : session));
       const activity: Activity = { id: clientId(), sessionId: event.session_id, tone: "notice", title: "Session setting updated", detail: `${runtimeOptionLabel(event.key)}: ${event.value}`, createdAt: Date.now() };
       pushActivity(activity);
@@ -583,18 +847,41 @@ function TimemApp() {
       setRevealedSessionApiKeys((current) => ({ ...current, [event.session_id]: event.api_key }));
       return;
     }
+    if (event.type === "turn_started") {
+      setSessions((current) => current.map((session) => {
+        if (session.session_id !== event.session_id) return session;
+        return updateSessionWorkerState(upsertTurn(session, event.turn), event.worker_id, "working");
+      }));
+      return;
+    }
     if (event.type === "turn_updated") {
       const consumedAttachmentIds = new Set(event.turn.user_entries.flatMap((entry) => entry.attachments ?? []).map((attachment) => attachment.id));
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? { ...upsertTurn(session, event.turn), attachments: session.attachments.filter((attachment) => !consumedAttachmentIds.has(attachment.id)) }
         : session));
-      if (event.turn.state !== "working") setCompletedTurnKey(`${event.session_id}:${event.turn.turn_id}`);
       return;
     }
     if (event.type === "host_error") {
       clearAllPendingCommands();
-      const activity: Activity = { id: clientId(), sessionId: "system", tone: "error", title: "Runtime error", detail: event.message, createdAt: Date.now() };
-      pushActivity(activity);
+      pushActivity({
+        id: clientId(),
+        sessionId: activeSessionIdRef.current || "system",
+        tone: "error",
+        title: "Runtime error",
+        detail: event.message,
+        createdAt: Date.now(),
+      });
+      return;
+    }
+    if (event.type === "runtime_notice") {
+      pushActivity({
+        id: clientId(),
+        sessionId: event.session_id,
+        tone: event.level === "error" ? "error" : event.level === "notice" ? "notice" : "warning",
+        title: event.title,
+        detail: event.message,
+        createdAt: Date.now(),
+      });
       return;
     }
     if (event.type === "host_config_updated") {
@@ -626,6 +913,19 @@ function TimemApp() {
     if (event.type === "mcp_server_secrets_revealed") {
       removePendingKey(pendingMcpKeysRef, setPendingMcpKeys, `reveal:${event.server_id}`);
       setRevealedMcpSecrets((current) => ({ ...current, [event.server_id]: event.values }));
+      return;
+    }
+    if (event.type === "model_endpoints_updated") {
+      setServer((current) => current ? { ...current, model_endpoints: event.endpoints } : current);
+      setEndpointEditor(null);
+      setDeleteEndpointCandidate(null);
+      setRevealedEndpointApiKeys({});
+      setRevealedEndpointHeaders({});
+      return;
+    }
+    if (event.type === "model_endpoint_secret_revealed") {
+      setRevealedEndpointApiKeys((current) => ({ ...current, [event.endpoint_id]: event.api_key }));
+      setRevealedEndpointHeaders((current) => ({ ...current, [event.endpoint_id]: event.http_headers }));
       return;
     }
     if (event.type === "file_uploaded") {
@@ -690,11 +990,6 @@ function TimemApp() {
     }
     if (event.type === "worker_activity") {
       const kind = String(event.event.kind ?? "worker_event");
-      if (kind !== "model_request" && kind !== "model_response") {
-        const detail = Object.entries(event.event).filter(([key]) => !["kind", "session_id", "context_id", "worker_id"].includes(key)).map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`).join("\n");
-        const activity: Activity = { id: clientId(), sessionId: event.session_id, tone: kind.includes("error") ? "error" : kind.includes("retry") ? "warning" : "notice", title: kind.replaceAll("_", " "), detail, createdAt: Date.now() };
-        pushActivity(activity);
-      }
       const turnEvent: WebTurnEvent = { event_id: event.turn_event_id ?? clientId(), source: "worker_activity", payload: event.event, created_at_ms: Date.now() };
       const workerState = kind === "model_request"
         ? "working"
@@ -719,17 +1014,28 @@ function TimemApp() {
       pendingToolgenRequestsRef.current = removeToolgenRequestsForSession(pendingToolgenRequestsRef.current, event.session_id);
       setPendingToolgenRequests(new Set(pendingToolgenRequestsRef.current));
       cancellingSessionIds.current.delete(event.session_id);
+      cancellingSessionCommandIds.current.delete(event.session_id);
+      const cancellationTimeoutId = cancellingSessionTimeouts.current.get(event.session_id);
+      if (cancellationTimeoutId !== undefined) window.clearTimeout(cancellationTimeoutId);
+      cancellingSessionTimeouts.current.delete(event.session_id);
       setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? finishTurn(attachTurnCompletion(session, event.outcome.message_id, event.outcome.completion ?? {}), event.turn_id, event.outcome.completion ?? {})
         : session));
-      setCompletedTurnKey(`${event.session_id}:${event.turn_id ?? ""}`);
+      const completedKey = event.turn_id
+        ? `${event.session_id}:${event.turn_id}`
+        : clientId(`turn-finished-${event.session_id}`);
+      setCompletedTurnsBySession((current) => ({
+        ...current,
+        [event.session_id]: {
+          key: completedKey,
+          successful: !event.outcome.completion?.stop_reason,
+        },
+      }));
       return;
     }
     if (event.type !== "core_topic") return;
     const topic = event.event;
-    const activity = activityFromTopic(topic);
-    if (activity) setActivities((current) => [activity, ...current.filter((item) => !(activity.kind === "toolgen" && item.kind === "toolgen" && item.sessionId === activity.sessionId))].slice(0, MAX_ACTIVITY_ITEMS));
     setSessions((current) => current.map((session) => applyCoreTopicToSession(
       appendTurnEvent(session, event.turn_id, { event_id: event.turn_event_id ?? clientId(), source: "core_topic", payload: topic as unknown as Record<string, unknown>, created_at_ms: Date.now() }),
       topic,
@@ -748,11 +1054,11 @@ function TimemApp() {
         const ordinal = typeof item.ordinal === "number" ? item.ordinal : 0;
         setSessions((current) => current.some((session) => session.session_id === sessionId)
           ? current
-          : [...current, { session_id: sessionId, display_name: displayName, ordinal, state: "ready", current_dir: "", max_llm_input_tokens: typeof topic.payload.max_llm_input_tokens === "number" ? topic.payload.max_llm_input_tokens : 0, tools: [], mcp_server_ids: [], contexts: [{ context_id: contextId, current_dir: "", worker_ids: [workerId] }], workers: [{ worker_id: workerId, context_id: contextId, display_name: displayName, ordinal, state: "ready", parent_worker_id: typeof item.parent_worker_id === "string" ? item.parent_worker_id : null }], active_context_id: contextId, primary_worker_id: workerId, attachments: [], messages: [], turns: [], history_before_cursor: null, history_has_more: false, active_turn_id: null }]);
+          : [...current, { session_id: sessionId, display_name: displayName, ordinal, state: "ready", current_dir: "", max_llm_input_tokens: typeof topic.payload.max_llm_input_tokens === "number" ? topic.payload.max_llm_input_tokens : 0, tools: [], mcp_server_ids: [], contexts: [{ context_id: contextId, current_dir: "", worker_ids: [workerId] }], workers: [{ worker_id: workerId, context_id: contextId, display_name: displayName, ordinal, state: "ready", parent_worker_id: typeof item.parent_worker_id === "string" ? item.parent_worker_id : null }], active_context_id: contextId, primary_worker_id: workerId, attachments: [], roles: [], messages: [], turns: [], history_before_cursor: null, history_has_more: false, active_turn_id: null }]);
         setActiveSessionId((current) => current || sessionId);
       }
     }
-  }, [applySnapshot, clearAllPendingCommands, pushActivity, removePendingKey, reportUiError]);
+  }, [applySnapshot, clearAllPendingCommands, finishPendingSessionApiKeyCommand, pushActivity, removePendingKey, reportUiError]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -818,10 +1124,13 @@ function TimemApp() {
       };
       ws.onclose = () => {
         if (socket.current === ws) socket.current = null;
+        if (stopped) return;
         setConnected(false);
         setSnapshotReady(false);
-        if (!stopped) {
-          const nextAttempt = retryAttempt + 1;
+        cancelAllPendingSessionApiKeyCommands(
+          "The runtime connection closed before the credential update completed. Your input was kept; reconnect and try again.",
+        );
+        const nextAttempt = retryAttempt + 1;
           retryAttempt = nextAttempt;
           setReconnectAttempt(nextAttempt);
           if (hasConnectedOnce && !disconnectNoticeShown) {
@@ -835,9 +1144,8 @@ function TimemApp() {
               createdAt: Date.now(),
             });
           }
-          const delay = Math.min(10_000, 500 * 2 ** Math.min(nextAttempt - 1, 5));
-          retryTimer = window.setTimeout(connect, delay);
-        }
+        const delay = Math.min(10_000, 500 * 2 ** Math.min(nextAttempt - 1, 5));
+        retryTimer = window.setTimeout(connect, delay);
       };
       ws.onerror = () => setConnected(false);
       ws.onmessage = (message) => {
@@ -849,19 +1157,31 @@ function TimemApp() {
       stopped = true;
       inboundEvents.dispose();
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      cancelAllPendingSessionApiKeyCommands();
       socket.current?.close();
       socket.current = null;
     };
-  }, [pushActivity, receive]);
+  }, [cancelAllPendingSessionApiKeyCommands, pushActivity, receive]);
 
-  const sendTextForSession = useCallback((sessionId: string, text: string, commandId?: string): boolean => {
+  const sendTextForSession = useCallback((sessionId: string, text: string, commandId?: string, attachmentIds?: readonly string[], forceSupplement = false, roleIds: readonly string[] = [], forceNewTurn = false): boolean => {
     const targetSession = sessionsRef.current.find((session) => session.session_id === sessionId);
+    if (server && server.model_endpoints.length === 0) {
+      setShowAppearance(false);
+      setShowMcp(false);
+      setShowToolRepo(false);
+      setShowRuntime(false);
+      pushActivity({ id: clientId(), sessionId, tone: "notice", ...NO_MODEL_ENDPOINTS_ISSUE, createdAt: Date.now() });
+      return false;
+    }
     const decision = composerSendDecision(
       targetSession,
       text,
       targetSession ? cancellingSessionIds.current.has(targetSession.session_id) : false,
       pendingMemSwitch,
-    );
+    attachmentIds,
+ forceSupplement,
+ forceNewTurn,
+ );
     if (decision.kind === "skip") {
       if (decision.reason === "cancelling" && targetSession) {
         pushActivity({ id: clientId(), sessionId: targetSession.session_id, tone: "notice", title: "Cancellation in progress", detail: "Wait for the current turn to stop before sending another message.", createdAt: Date.now() });
@@ -870,12 +1190,13 @@ function TimemApp() {
       }
       return false;
     }
-    if (!sendCommand(decision.command, commandId)) {
+    const command = roleIds.length > 0 ? { ...decision.command, role_ids: [...new Set(roleIds)] } : decision.command;
+    if (!sendCommand(command, commandId)) {
       pushActivity({ id: clientId(), sessionId: decision.command.session_id, tone: "error", title: "Runtime unavailable", detail: "Timem Web runtime is not connected. Restart timem-web and reopen the authenticated URL before sending another message.", createdAt: Date.now() });
       return false;
     }
     return decision.clearDraftOnSuccess;
-  }, [pendingMemSwitch, pushActivity, sendCommand]);
+  }, [pendingMemSwitch, pushActivity, sendCommand, server]);
   const sendText = useCallback((text: string, commandId?: string) => activeSession
     ? sendTextForSession(activeSession.session_id, text, commandId)
     : false, [activeSession, sendTextForSession]);
@@ -920,22 +1241,45 @@ function TimemApp() {
     }
   }, [addPendingKey, pendingMemSwitch, pushActivity, removePendingKey, sendCommand]);
 
-  const runtimeMessages = useMemo<readonly ThreadMessageLike[]>(() => activeMessages.map((message) => ({
-    id: message.id,
-    role: message.role,
-    content: [{ type: "text" as const, text: message.text }],
-  })), [activeMessages]);
+  const runtimeMessages = useMemo<readonly ThreadMessageLike[]>(() => activeMessages
+    .filter((message): message is ChatMessage & { role: "user" | "assistant" } => message.role !== "system")
+    .map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: [{ type: "text" as const, text: message.text }],
+    })), [activeMessages]);
   const [auiMessages, setAuiMessages] = useState<readonly ThreadMessageLike[]>(runtimeMessages);
   useEffect(() => setAuiMessages(runtimeMessages), [runtimeMessages]);
   const cancelActiveTurn = useCallback(async () => {
     if (!activeSession || activeSession.state !== "working" || pendingMemSwitch) return;
     if (cancellingSessionIds.current.has(activeSession.session_id)) return;
-    cancellingSessionIds.current.add(activeSession.session_id);
+    const sessionId = activeSession.session_id;
+    const commandId = clientId("turn-cancel");
+    cancellingSessionIds.current.add(sessionId);
+    cancellingSessionCommandIds.current.set(sessionId, commandId);
     setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
-    if (!sendCommand({ type: "turn_cancel", session_id: activeSession.session_id })) {
-      cancellingSessionIds.current.delete(activeSession.session_id);
+    const previousTimeoutId = cancellingSessionTimeouts.current.get(sessionId);
+    if (previousTimeoutId !== undefined) window.clearTimeout(previousTimeoutId);
+    const timeoutId = window.setTimeout(() => {
+      if (cancellingSessionCommandIds.current.get(sessionId) !== commandId) return;
+      cancellingSessionTimeouts.current.delete(sessionId);
+      cancellingSessionCommandIds.current.delete(sessionId);
+      if (!cancellingSessionIds.current.delete(sessionId)) return;
       setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
-      const activity: Activity = { id: clientId(), sessionId: activeSession.session_id, tone: "error", title: "Cancel failed", detail: "Reconnect to Timem Web before cancelling this turn.", createdAt: Date.now() };
+      reportUiError(
+        "Cancellation is taking too long",
+        "The runtime has not confirmed that the turn stopped. You can retry Stop, reconnect, or restart Timem Web if the turn remains unresponsive.",
+        sessionId,
+      );
+    }, TURN_CANCEL_UI_TIMEOUT_MS);
+    cancellingSessionTimeouts.current.set(sessionId, timeoutId);
+    if (!sendCommand({ type: "turn_cancel", session_id: sessionId }, commandId)) {
+      window.clearTimeout(timeoutId);
+      cancellingSessionTimeouts.current.delete(sessionId);
+      cancellingSessionCommandIds.current.delete(sessionId);
+      cancellingSessionIds.current.delete(sessionId);
+      setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
+      const activity: Activity = { id: clientId(), sessionId, tone: "error", title: "Cancel failed", detail: "Reconnect to Timem Web before cancelling this turn.", createdAt: Date.now() };
       pushActivity(activity);
     }
   }, [activeSession, pendingMemSwitch, pushActivity, sendCommand]);
@@ -952,77 +1296,152 @@ function TimemApp() {
   });
 
   const sessionDecisions = decisions.filter((decision) => decision.event.session_id === activeSession?.session_id);
-  const visibleErrors = activities.filter((activity) => activity.tone === "error" && (activity.sessionId === activeSession?.session_id || activity.sessionId === "system"));
-  const visibleError = visibleErrors[0];
-  const visibleErrorText = visibleError ? `${visibleError.title}${visibleError.detail ? ` · ${visibleError.detail}` : ""}` : "";
-  const visibleErrorCount = visibleErrors.length;
-  const hiddenErrorCount = Math.max(0, visibleErrorCount - 1);
-  const dismissErrorLabel = visibleError ? `Dismiss ${visibleError.title}` : "Dismiss error";
   const runtimeDisconnected = runtimeEverConnected && !connected;
   const runtimeUnavailable = runtimeDisconnected && reconnectAttempt >= 3;
   const runtimeDisconnectedTitle = runtimeUnavailable ? "Runtime unavailable" : "Connection lost";
   const runtimeDisconnectedDetail = runtimeUnavailable
     ? "Restart timem-web and reopen the authenticated URL to continue."
     : "Reconnecting to Timem runtime… sending and session changes are paused until it reconnects.";
+  const showRuntimeUnavailableDialog = runtimeUnavailable && !runtimeUnavailableDialogDismissed;
+  useEffect(() => {
+    if (!runtimeUnavailable) setRuntimeUnavailableDialogDismissed(false);
+  }, [runtimeUnavailable]);
   const sessionInteractionLockReason = sessionInteractionLockReasonForState(pendingMemSwitch, connected, runtimeEverConnected, reconnectAttempt);
   const runtimeReady = connected && snapshotReady;
   const runtimeLocked = pendingMemSwitch || !runtimeReady;
   const connectionLabel = runtimeConnectionLabel(connected, snapshotReady, runtimeEverConnected, reconnectAttempt);
+  const memSettingsTitle = !runtimeReady ? "Wait for the runtime snapshot before opening mem settings" : "Open mem settings";
   const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem directory";
   const newSessionLabel = runtimeLocked ? "Session controls are temporarily locked" : "New session";
-  const headerModelLabel = activeSession?.runtime_profile?.model ?? "";
+  const modelEndpointsUnavailable = !!server && server.model_endpoints.length === 0;
+  const headerModelLabel = endpointNameForProfile(server?.model_endpoints ?? [], activeSession?.runtime_profile) ?? UNCONFIGURED_MODEL_LABEL;
+  const openEndpointCreator = () => {
+    setShowAppearance(false);
+    setShowMcp(false);
+    setShowToolRepo(false);
+    setShowRuntime(true);
+    setEndpointEditor("new");
+  };
   const appearanceLabel = showAppearance ? "Close appearance settings" : "Open appearance settings";
   const runtimeLabel = showRuntime ? "Close runtime information" : "Open runtime information";
   const activeToolCount = activeSession?.tools.length ?? 0;
+  const activeMcpServerIds = new Set(activeSession?.mcp_server_ids ?? []);
+  const activeMcpServers = (server?.mcp_servers ?? []).filter((item) => activeMcpServerIds.has(item.config.id));
+  const connectedMcpCount = activeMcpServers.filter((item) => item.state === "connected").length;
+  const failedMcpCount = activeMcpServers.filter((item) => item.state !== "connected" && (item.state === "error" || !!item.error)).length;
+  const mcpLabel = `Manage MCP servers · ${connectedMcpCount} connected${failedMcpCount ? ` · ${failedMcpCount} failed` : ""}`;
+  const selectedRoleIdsForSession = activeSession ? selectedRoleIds[activeSession.session_id] ?? [] : [];
   const toolRepoLabel = showToolRepo ? "Close ToolRepo" : `Open ToolRepo · ${activeToolCount} reusable tools`;
   const mobileSessionsLabel = showMobileSessions ? "Close session navigation" : "Open session navigation";
+  const knownSessionGroupIds = new Set(sessionGroups.map((group) => group.id));
+  const sessionBucketId = (session: Session) => session.group_id && knownSessionGroupIds.has(session.group_id) ? session.group_id : "__ungrouped";
+  const ungroupedSessions = sessions.filter((session) => sessionBucketId(session) === "__ungrouped");
+  const sessionBuckets = [
+    ...sessionGroups.map((group) => ({ id: group.id, group, sessions: sessions.filter((session) => session.group_id === group.id) })),
+    { id: "__ungrouped", group: undefined, sessions: ungroupedSessions },
+  ];
+  const sessionDragSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  useEffect(() => {
+    if (selectedDeleteSessionId && !sessions.some((session) => session.session_id === selectedDeleteSessionId)) {
+      setSelectedDeleteSessionId("");
+    }
+    if (sessionDeleteMode && sessions.length === 0) setSessionDeleteMode(false);
+  }, [selectedDeleteSessionId, sessionDeleteMode, sessions]);
+  const draggedSession = sessions.find((session) => session.session_id === draggedSessionId);
+  const finishSessionDrag = (event: DragEndEvent) => {
+    setDraggedSessionId("");
+    const sessionId = String(event.active.id).replace(/^session:/, "");
+    const overId = event.over ? String(event.over.id) : "";
+    if (!overId) return;
+    let targetGroupId: string | null | undefined;
+    if (overId.startsWith("session-group:")) {
+      const bucketId = overId.slice("session-group:".length);
+      targetGroupId = bucketId === "__ungrouped" ? null : bucketId;
+    } else if (overId.startsWith("session:")) {
+      const targetSession = sessions.find((session) => session.session_id === overId.slice("session:".length));
+      if (targetSession) targetGroupId = sessionBucketId(targetSession) === "__ungrouped" ? null : sessionBucketId(targetSession);
+    }
+    const session = sessions.find((candidate) => candidate.session_id === sessionId);
+    if (!session || targetGroupId === undefined || (session.group_id ?? null) === targetGroupId) return;
+    sendCommand({ type: "session_group_move", session_id: sessionId, group_id: targetGroupId });
+  };
+  const saveSessionGroup = (editor = sessionGroupEditor) => {
+    const name = editor?.name.trim();
+    if (!editor || !name || runtimeLocked) return;
+    const command: ClientCommand = editor.id
+      ? { type: "session_group_update", group_id: editor.id, name }
+      : { type: "session_group_create", name };
+    if (sendCommand(command)) setSessionGroupEditor(null);
+  };
+  const moveSessionGroup = (groupId: string, offset: number) => {
+    const index = sessionGroups.findIndex((group) => group.id === groupId);
+    const target = index + offset;
+    if (index < 0 || target < 0 || target >= sessionGroups.length) return;
+    const groups = [...sessionGroups];
+    [groups[index], groups[target]] = [groups[target], groups[index]];
+    setSessionGroups(groups);
+    if (!sendCommand({ type: "session_groups_reorder", groups })) setSessionGroups(sessionGroups);
+  };
+  const cancelSessionDeleteMode = () => {
+    setSessionDeleteMode(false);
+    setSelectedDeleteSessionId("");
+  };
+  const confirmSelectedSessionDelete = () => {
+    const session = sessions.find((candidate) => candidate.session_id === selectedDeleteSessionId);
+    if (!session) return;
+    setDeleteSessionCandidate(session);
+    cancelSessionDeleteMode();
+    closeMobileSidebar(false);
+  };
   return <AssistantRuntimeProvider runtime={runtime}>
     <div className="app-shell">
       {showMobileSessions && <button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => closeMobileSidebar()}/>}
       <aside id="session-navigation" ref={mobileSidebarRef} className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`} aria-label="Session navigation" tabIndex={-1}>
         <div className="brand"><img src="/timem_logo.png" alt="Timem logo" className="brand-logo"/><span>TIMEM</span><button type="button" className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => closeMobileSidebar()}><X size={17}/></button></div>
-        <button type="button" ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/> New session</button>
-        <nav className="session-list" aria-label="Sessions">
-          {sessions.map((session) => {
-            const renamingSession = pendingRenameSessionIds.has(session.session_id);
-            const deletingSession = pendingDeleteSessionIds.has(session.session_id);
-            return <div key={session.session_id} className="session-group"><div className={`session-row ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""} ${renamingSession ? "renaming-session" : ""}`} aria-busy={renamingSession || deletingSession || undefined}>
-            <button type="button" className={`session-expand ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}` : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={expandedSessionIds.has(session.session_id)} disabled={runtimeLocked} onClick={() => setExpandedSessionIds((current) => {
-              const next = new Set(current);
-              if (next.has(session.session_id)) next.delete(session.session_id); else next.add(session.session_id);
-              return next;
-            })}><ChevronRight size={13}/></button>
-            {renamingSessionId === session.session_id ? <input
-              className="session-rename-input"
-              autoFocus
-              value={renameDraft}
-              aria-label={`Rename ${session.display_name}`}
-              disabled={runtimeLocked}
-              onChange={(event) => setRenameDraft(event.target.value)}
-              onBlur={() => finishRename(session.session_id)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); }
-                if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); }
-              }}
-            />: <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.current_dir} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
-              {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : <span className={`session-dot ${session.state}`} aria-hidden="true"/>}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span><span className="session-sub"><span className="session-detail session-cwd" title={session.current_dir}><FolderOpen size={11} aria-hidden="true"/><span className="path-tail">{workspacePathLabel(session.current_dir)}</span></span>{renamingSession ? <span className="session-detail session-pending">Saving name...</span> : session.runtime_profile && <span className="session-detail session-profile" title={session.runtime_profile.model}><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{session.runtime_profile.model}</span></span>}</span></span><span className="sr-only">Session state: {session.state}</span>
-            </button>}
-            <button type="button" className={`session-delete ${deletingSession ? "deleting" : ""}`} title={`Delete ${session.display_name}`} aria-label={`Delete ${session.display_name}`} disabled={runtimeLocked || deletingSession} onClick={() => { setDeleteSessionCandidate(session); closeMobileSidebar(false); }}>{deletingSession ? <LoaderCircle size={14}/> : <Trash2 size={14}/>}</button>
-          </div>{expandedSessionIds.has(session.session_id) && <div className="worker-list" aria-label={`Workers for ${session.display_name}: ${session.workers.length} worker${session.workers.length === 1 ? "" : "s"}`}>{[...session.workers].sort((left, right) => left.ordinal - right.ordinal).map((worker) => <div className="worker-row" key={worker.worker_id} title={`${worker.worker_id} · ${worker.context_id}`}><span className={`worker-state-dot ${worker.state}`} aria-hidden="true"/><span className="worker-name">{worker.display_name || `ID${worker.ordinal}`}</span><span className="worker-state">{worker.state}</span></div>)}</div>}</div>;
-          })}
-        </nav>
+        <div className={`session-management-actions ${sessionDeleteMode ? "deleting" : ""}`}><div className="session-create-actions"><button type="button" ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked || sessionDeleteMode} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/></button><button type="button" className="new-session-group" title="New session group" aria-label="New session group" disabled={runtimeLocked || sessionDeleteMode} onClick={() => setSessionGroupEditor({ name: "" })}><FolderPlus size={16}/></button></div><div className="session-delete-actions">{sessionDeleteMode && <button type="button" className="session-delete-cancel" title="取消删除 Session" aria-label="取消删除 Session" onClick={cancelSessionDeleteMode}><X size={14} strokeWidth={3}/></button>}<button type="button" className={`session-delete-manage ${sessionDeleteMode ? "confirm" : ""}`} title={sessionDeleteMode ? selectedDeleteSessionId ? "确认删除选中的 Session" : "请选择要删除的 Session" : "选择要删除的 Session"} aria-label={sessionDeleteMode ? selectedDeleteSessionId ? "确认删除选中的 Session" : "请选择要删除的 Session" : "选择要删除的 Session"} disabled={runtimeLocked || sessions.length === 0 || (sessionDeleteMode && !selectedDeleteSessionId)} onClick={() => { if (!sessionDeleteMode) { setSessionGroupEditor(null); setRenamingSessionId(""); setRenameDraft(""); setSessionDeleteMode(true); setSelectedDeleteSessionId(""); } else confirmSelectedSessionDelete(); }}>{sessionDeleteMode ? <Check size={15} strokeWidth={3}/> : <Trash2 size={15}/>}</button></div></div>
+        {sessionGroupEditor && !sessionGroupEditor.id && <form className="session-group-editor" onSubmit={(event) => { event.preventDefault(); saveSessionGroup(); }}><input autoFocus value={sessionGroupEditor.name} placeholder="Group name" aria-label="New session group name" onChange={(event) => setSessionGroupEditor({ name: event.target.value })} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setSessionGroupEditor(null); } }}/><button type="submit" disabled={!sessionGroupEditor.name.trim()}><Check size={13}/></button><button type="button" onClick={() => setSessionGroupEditor(null)}><X size={13}/></button></form>}
+        <DndContext sensors={sessionDragSensors} collisionDetection={closestCenter} onDragStart={(event) => setDraggedSessionId(String(event.active.id).replace(/^session:/, ""))} onDragCancel={() => setDraggedSessionId("")} onDragEnd={finishSessionDrag}>
+          <nav className="session-list" aria-label="Sessions">
+            {sessionBuckets.map(({ id: bucketId, group: bucket, sessions: bucketSessions }) => {
+              const collapsed = collapsedSessionGroupIds.has(bucketId);
+              return <SessionDropGroup id={bucketId} sessionIds={bucketSessions.map((session) => session.session_id)} className="session-group" key={bucketId}>
+                <div className="session-group-heading"><button type="button" className="session-group-toggle" title={bucket?.name ?? "Unsorted"} aria-expanded={!collapsed} onClick={() => setCollapsedSessionGroupIds((current) => { const next = new Set(current); if (next.has(bucketId)) next.delete(bucketId); else next.add(bucketId); return next; })}>{collapsed ? <Folder className="session-group-folder" size={14}/> : <FolderOpen className="session-group-folder" size={14}/>}<span>{bucket?.name ?? "Unsorted"}</span><small>{bucketSessions.length}</small></button>{bucket && <div className="session-group-actions">{sessionGroupEditor?.id === bucket.id ? <form className="session-group-editor inline" onSubmit={(event) => { event.preventDefault(); saveSessionGroup(); }}><input autoFocus value={sessionGroupEditor.name} aria-label={`Rename ${bucket.name}`} onChange={(event) => setSessionGroupEditor({ id: bucket.id, name: event.target.value })} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setSessionGroupEditor(null); } }}/><button type="submit" disabled={!sessionGroupEditor.name.trim()}><Check size={12}/></button><button type="button" onClick={() => setSessionGroupEditor(null)}><X size={12}/></button></form> : <><button type="button" title="Move group up" aria-label={`Move ${bucket.name} up`} disabled={sessionDeleteMode || sessionGroups[0]?.id === bucket.id} onClick={() => moveSessionGroup(bucket.id, -1)}><ChevronUp size={12}/></button><button type="button" title="Move group down" aria-label={`Move ${bucket.name} down`} disabled={sessionDeleteMode || sessionGroups.at(-1)?.id === bucket.id} onClick={() => moveSessionGroup(bucket.id, 1)}><ChevronDown size={12}/></button><button type="button" title={`Rename ${bucket.name}`} aria-label={`Rename ${bucket.name}`} disabled={sessionDeleteMode} onClick={() => setSessionGroupEditor({ id: bucket.id, name: bucket.name })}><Pencil size={12}/></button><button type="button" className={sessionGroupDeleteConfirmId === bucket.id ? "confirming" : ""} disabled={sessionDeleteMode} title={sessionGroupDeleteConfirmId === bucket.id ? "Click again to delete; sessions become unsorted" : `Delete ${bucket.name}`} aria-label={`Delete ${bucket.name}`} onClick={() => { if (sessionGroupDeleteConfirmId === bucket.id) { sendCommand({ type: "session_group_delete", group_id: bucket.id }); setSessionGroupDeleteConfirmId(""); } else setSessionGroupDeleteConfirmId(bucket.id); }}><Trash2 size={12}/></button></>}</div>}</div>
+                {!collapsed && <div className="session-group-list">{bucketSessions.map((session) => {
+                  const renamingSession = pendingRenameSessionIds.has(session.session_id);
+                  const deletingSession = pendingDeleteSessionIds.has(session.session_id);
+                  const sessionEndpointName = endpointNameForProfile(server?.model_endpoints ?? [], session.runtime_profile) ?? UNCONFIGURED_MODEL_LABEL;
+                  return <SortableSession id={session.session_id} disabled={runtimeLocked || sessionDeleteMode} key={session.session_id}>{({ setNodeRef, style, attributes, listeners, isDragging }) => <>
+                    <div ref={setNodeRef} style={style} className={`session-row ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""} ${renamingSession ? "renaming-session" : ""} ${renamingSessionId === session.session_id || runtimeLocked || isDragging ? "controls-suppressed" : ""} ${sessionDeleteMode ? "delete-selecting" : ""} ${selectedDeleteSessionId === session.session_id ? "delete-selected" : ""} ${isDragging ? "dragging" : ""}`} aria-busy={renamingSession || deletingSession || undefined}>
+                      <button type="button" className="session-drag" disabled={runtimeLocked || sessionDeleteMode || renamingSessionId === session.session_id} title={`拖动 ${session.display_name} 到其他分组`} aria-label={`拖动 ${session.display_name} 到其他分组`} {...attributes} {...listeners}><GripVertical size={13}/></button>
+                      <button type="button" className={`session-expand ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.workers.length === 0 ? "No workers in this session" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}` : session.workers.length === 0 ? `No workers for ${session.display_name}` : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={session.workers.length > 0 && expandedSessionIds.has(session.session_id)} disabled={runtimeLocked || sessionDeleteMode || renamingSessionId === session.session_id || session.workers.length === 0} onClick={() => setExpandedSessionIds((current) => { const next = new Set(current); if (next.has(session.session_id)) next.delete(session.session_id); else next.add(session.session_id); return next; })}><ChevronRight size={13}/></button>
+                      {renamingSessionId === session.session_id ? <input className="session-rename-input" autoFocus value={renameDraft} aria-label={`Rename ${session.display_name}`} disabled={runtimeLocked} onChange={(event) => setRenameDraft(event.target.value)} onBlur={() => finishRename(session.session_id)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); } if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); } }}/>: <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.display_name} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { if (sessionDeleteMode) { setSelectedDeleteSessionId((current) => current === session.session_id ? "" : session.session_id); return; } setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
+                        {session.state === "working" && <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/>}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && !sessionDeleteMode && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span></span><span className={`session-endpoint-reveal ${renamingSession ? "pending" : ""}`} title={renamingSession ? "Saving name" : sessionEndpointName}>{renamingSession ? <span className="session-pending">Saving name...</span> : <><Sparkles size={9} className="session-model-icon" aria-hidden="true"/><span>{sessionEndpointName}</span></>}</span><span className="sr-only">Session state: {session.state}</span>
+                      </button>}
+                      {sessionDeleteMode && <button type="button" className={`session-delete-select ${selectedDeleteSessionId === session.session_id ? "selected" : ""}`} title={`选择删除 ${session.display_name}`} aria-label={`选择删除 ${session.display_name}`} aria-pressed={selectedDeleteSessionId === session.session_id} disabled={runtimeLocked || deletingSession} onClick={() => setSelectedDeleteSessionId((current) => current === session.session_id ? "" : session.session_id)}>{deletingSession ? <LoaderCircle size={14}/> : selectedDeleteSessionId === session.session_id ? <Check size={14}/> : null}</button>}
+                    </div>
+                    {session.workers.length > 0 && expandedSessionIds.has(session.session_id) && <div className="worker-list" aria-label={`Workers for ${session.display_name}: ${session.workers.length} worker${session.workers.length === 1 ? "" : "s"}`}>{[...session.workers].sort((left, right) => left.ordinal - right.ordinal).map((worker) => <div className="worker-row" key={worker.worker_id} title={`${worker.worker_id} · ${worker.context_id}`}><span className={`worker-state-dot ${worker.state}`} aria-hidden="true"/><span className="worker-name">{worker.display_name || `ID${worker.ordinal}`}</span><span className="worker-state">{worker.state}</span></div>)}</div>}
+                  </>}</SortableSession>;
+                })}{bucketSessions.length === 0 && <div className="session-group-drop-hint">拖动 Session 到这里</div>}</div>}
+              </SessionDropGroup>;
+            })}
+          </nav>
+          <DragOverlay dropAnimation={prefersReducedMotion() ? null : { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" }}>{draggedSession && <div className="session-row session-overlay" aria-hidden="true"><span className="session-drag"><GripVertical size={13}/></span><span className="session-name">{draggedSession.display_name}</span></div>}</DragOverlay>
+        </DndContext>
         <div className="sidebar-footer">
           <div className="connection-row" role="status" aria-live="polite" title={connectionLabel}><span className={`connection ${connected ? "online" : "offline"}`}/><span className="connection-label">{connectionLabel}</span></div>
-          <button type="button" ref={memSwitchButtonRef} className="mem-card" title={server?.mem?.space_dir ?? memSwitchTitle} aria-label={memSwitchTitle} disabled={!runtimeReady || pendingMemSwitch} onClick={() => setShowMemSwitch(true)}><span className="mem-card-icon" aria-hidden="true"><Database size={15}/></span><span className="mem-card-copy"><strong>Memory</strong><small dir="rtl">{pendingMemSwitch ? "Switching…" : server?.mem?.space_dir ?? "…"}</small></span><ChevronRight size={14} aria-hidden="true"/></button>
+          <div className="mem-card-row"><button type="button" ref={memSettingsButtonRef} className="mem-card" title={server?.mem?.space_dir ?? memSettingsTitle} aria-label={memSettingsTitle} aria-expanded={showMemSettings} disabled={!runtimeReady || pendingMemSwitch} onClick={() => setShowMemSettings(true)}><span className="mem-card-icon" aria-hidden="true"><Database size={15}/></span><span className="mem-card-copy"><strong>Memory</strong><small dir="rtl">{pendingMemSwitch ? "Switching…" : server?.mem?.space_dir ?? "…"}</small></span><ChevronRight size={14} aria-hidden="true"/></button><button type="button" ref={memSwitchButtonRef} className="mem-switch-action" title={memSwitchTitle} aria-label={memSwitchTitle} disabled={!runtimeReady || pendingMemSwitch} onClick={() => setShowMemSwitch(true)}><ArrowLeftRight size={15} aria-hidden="true"/></button></div>
         </div>
       </aside>
       <main className="chat-shell">
         <header className="chat-header">
-          <div className="header-identity"><button type="button" ref={runtimeButtonRef} className={`header-model ${showRuntime ? "selected" : ""}`} title={runtimeLabel} aria-label={`${runtimeLabel}: ${headerModelLabel}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowMcp(false); setShowToolRepo(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true); }}><span title={headerModelLabel}>{headerModelLabel}</span><ChevronDown size={12} aria-hidden="true"/></button><HeaderContextUsage session={activeSession}/></div>
+          <div className="header-identity"><div className="header-model-guide-anchor"><button type="button" ref={runtimeButtonRef} className={`header-model ${showRuntime ? "selected" : ""}`} title={runtimeLabel} aria-label={`${runtimeLabel}: ${headerModelLabel}`} aria-expanded={showRuntime} aria-controls="runtime-panel" onClick={() => { setShowAppearance(false); setShowMcp(false); setShowToolRepo(false); if (showRuntime) closeRuntimePanel(); else setShowRuntime(true); }}><span title={headerModelLabel}>{headerModelLabel}</span><ChevronDown size={12} aria-hidden="true"/></button>{modelEndpointsUnavailable && !showRuntime && <div className="endpoint-guide-bubble" role="status"><span className="endpoint-guide-icon" aria-hidden="true"><Sparkles size={14}/></span><div className="endpoint-guide-copy"><strong>尚未配置模型接入点</strong><span>添加一个接入点，即可开始使用当前 Session。</span></div><button type="button" onClick={openEndpointCreator}><Plus size={13}/><span>立即配置</span></button></div>}</div><HeaderContextUsage session={activeSession}/><button type="button" ref={mcpButtonRef} title={mcpLabel} aria-label={mcpLabel} className={`icon-button mcp-button ${connectedMcpCount > 0 ? "enabled" : ""} ${failedMcpCount > 0 ? "has-failures" : ""} ${showMcp ? "selected" : ""}`} aria-expanded={showMcp} aria-controls="mcp-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowToolRepo(false); if (showMcp) closeMcpPanel(); else setShowMcp(true); }}><Plug size={16}/>{connectedMcpCount > 0 && <span className="mcp-count mcp-count-connected" aria-hidden="true">{connectedMcpCount}</span>}{failedMcpCount > 0 && <span className="mcp-failure-indicator" aria-hidden="true"><TriangleAlert size={9}/></span>}</button></div>
           <div className="header-actions">
             <button type="button" ref={mobileSessionButtonRef} title={mobileSessionsLabel} aria-label={mobileSessionsLabel} className="icon-button mobile-session-button" aria-expanded={showMobileSessions} aria-controls="session-navigation" onClick={() => setShowMobileSessions(true)}><Menu size={18}/></button>
+            <button type="button" title="Open worker roles" aria-label="Open worker roles" className="icon-button mobile-role-button" aria-expanded={showRoles} aria-controls="worker-role-panel" onClick={() => setShowRoles(true)}><BriefcaseBusiness size={17}/></button>
             <button type="button" ref={appearanceButtonRef} title={appearanceLabel} aria-label={appearanceLabel} className={`icon-button ${showAppearance ? "selected" : ""}`} aria-expanded={showAppearance} aria-controls="appearance-panel" onClick={() => { setShowRuntime(false); setShowMcp(false); setShowToolRepo(false); if (showAppearance) closeAppearancePanel(); else setShowAppearance(true); }}><Palette size={17}/></button>
-            <button type="button" ref={mcpButtonRef} title="Manage MCP servers" aria-label="Manage MCP servers" className={`icon-button mcp-button ${showMcp ? "selected" : ""}`} aria-expanded={showMcp} aria-controls="mcp-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowToolRepo(false); if (showMcp) closeMcpPanel(); else setShowMcp(true); }}><Plug size={17}/>{(activeSession?.mcp_server_ids.length ?? 0) > 0 && <span className="mcp-enabled-dot" aria-hidden="true"/>}</button>
             <button type="button" ref={toolRepoButtonRef} title={toolRepoLabel} aria-label={toolRepoLabel} className={`icon-button toolrepo-header-button ${showToolRepo ? "selected" : ""} ${toolCountPulseSessionId === activeSession?.session_id ? "count-pulse" : ""}`} aria-expanded={showToolRepo} aria-controls="toolrepo-panel" onClick={() => { setShowAppearance(false); setShowRuntime(false); setShowMcp(false); if (showToolRepo) closeToolRepoPanel(); else setShowToolRepo(true); }}><Wrench size={17}/><span className="toolrepo-header-count" aria-hidden="true">{activeToolCount}</span></button>
           </div>
         </header>
@@ -1050,42 +1469,26 @@ function TimemApp() {
           <strong>{runtimeDisconnectedTitle}</strong>
           <span>{runtimeDisconnectedDetail}</span>
         </div>}
-        {visibleError && <div className="host-error-banner" role="alert">
-          <span className="host-error-text" title={visibleErrorText}><strong>{visibleError.title}</strong>{visibleError.detail && <span className="host-error-detail"> · {visibleError.detail}</span>}{hiddenErrorCount > 0 && <em>{hiddenErrorCount} more hidden error{hiddenErrorCount === 1 ? "" : "s"}</em>}</span>
-          <div className="host-error-actions">
-            {hiddenErrorCount > 0 && <button type="button" className="host-error-dismiss-all" title="Dismiss all visible errors" aria-label="Dismiss all visible errors" onClick={() => setActivities((current) => current.filter((activity) => activity.tone !== "error" || (activity.sessionId !== activeSession?.session_id && activity.sessionId !== "system")))}>Dismiss all</button>}
-            <button type="button" className="icon-button" title={dismissErrorLabel} aria-label={dismissErrorLabel} onClick={() => setActivities((current) => current.filter((activity) => activity.id !== visibleError.id))}><X size={15}/></button>
-          </div>
-        </div>}
-        {showRuntime && <RuntimePanel panelRef={runtimePanelRef} server={server} session={activeSession} pendingKeys={new Set(activeSession ? Array.from(pendingRuntimeKeys).filter((key) => key.startsWith(`${activeSession.session_id}:`)).map((key) => key.slice(activeSession.session_id.length + 1)) : [])} credentialPending={!!activeSession && (pendingSessionCredentialIds.has(activeSession.session_id) || pendingSessionCredentialIds.has(`reveal:${activeSession.session_id}`))} onApiKeyUpdate={(apiKey) => {
-          if (!activeSession || !addPendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, activeSession.session_id)) return;
-          pendingSessionApiKeyValuesRef.current.set(activeSession.session_id, apiKey);
-          if (!sendCommand({ type: "session_api_key_update", session_id: activeSession.session_id, api_key: apiKey })) {
-            pendingSessionApiKeyValuesRef.current.delete(activeSession.session_id);
-            removePendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, activeSession.session_id);
-            reportUiError("API key update failed", "Reconnect to Timem Web before saving this Session credential.", activeSession.session_id);
-          }
-        }} revealedApiKey={activeSession ? revealedSessionApiKeys[activeSession.session_id] : undefined} onApiKeyReveal={() => {
-          if (!activeSession) return;
-          const key = `reveal:${activeSession.session_id}`;
-          if (!connected || !addPendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, key)) return;
-          if (!sendCommand({ type: "session_api_key_reveal", session_id: activeSession.session_id })) {
-            removePendingKey(pendingSessionCredentialIdsRef, setPendingSessionCredentialIds, key);
-            reportUiError("API key reveal failed", "Reconnect to Timem Web before revealing this Session credential.", activeSession.session_id);
-          }
-        }} onUpdate={(key, value) => {
-          if (!activeSession) return;
-          const pendingKey = `${activeSession.session_id}:${key}`;
-          if (!addPendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, pendingKey)) return;
-          if (!sendCommand({ type: "session_runtime_update", session_id: activeSession.session_id, key, value })) {
-            removePendingKey(pendingRuntimeKeysRef, setPendingRuntimeKeys, pendingKey);
-            reportUiError("Runtime update failed", "Reconnect to Timem Web before applying this Session configuration.", activeSession.session_id);
-          }
-        }}/>}
+        {showRuntime && <ModelEndpointPanel
+          panelRef={runtimePanelRef}
+          server={server}
+          session={activeSession}
+          endpointEditor={endpointEditor}
+          revealedEndpointApiKeys={revealedEndpointApiKeys}
+          revealedEndpointHeaders={revealedEndpointHeaders}
+          onEdit={setEndpointEditor}
+          onDelete={setDeleteEndpointCandidate}
+          onApply={(endpointId) => {
+            if (!activeSession || activeSession.state === "working") return;
+            sendCommand({ type: "model_endpoint_apply", session_id: activeSession.session_id, endpoint_id: endpointId });
+          }}
+          onReveal={(endpointId) => sendCommand({ type: "model_endpoint_secret_reveal", endpoint_id: endpointId })}
+          onSave={(endpoint) => sendCommand({ type: "model_endpoint_upsert", endpoint })}
+        />}
         <TimemThread
           activeSession={activeSession}
           sessions={sessions}
-          completedTurnKey={completedTurnKey}
+          completedTurnsBySession={completedTurnsBySession}
           commandAcks={commandAcks}
           onConsumeCommandAcks={consumeCommandAcks}
           reliableStorageScope={server ? reliableStorageScope(window.location.origin, server.mem.space_dir) : ""}
@@ -1103,12 +1506,21 @@ function TimemApp() {
           onLoadMoreHistory={loadMoreHistory}
           onSend={sendText}
           onSendForSession={sendTextForSession}
+          selectedRoleIds={selectedRoleIdsForSession}
+          onRolesConsumed={(sessionId, expectedRoleIds) => setSelectedRoleIds((current) => {
+    if (
+      expectedRoleIds
+      && JSON.stringify(current[sessionId] ?? []) !== JSON.stringify(expectedRoleIds)
+    ) return current;
+    return Object.fromEntries(Object.entries(current).filter(([key]) => key !== sessionId));
+  })}
           pendingToolGenTurnIds={activeSession ? pendingToolgenTurnIds(pendingToolgenRequests, activeSession.session_id) : new Set()}
           toolGenSessionBusy={!!activeSession && hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)}
           onRequestToolGen={(turnId) => {
             if (!activeSession || activeSession.state === "working" || runtimeLocked || hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)) return;
             setToolgenDialog({ sessionId: activeSession.session_id, turnId });
           }}
+          onRequestMessageDelete={setDeleteMessageCandidate}
           onCancel={cancelActiveTurn}
           onUpload={uploadFile}
           onRemoveAttachment={(attachmentId) => {
@@ -1135,6 +1547,49 @@ function TimemApp() {
           }}
         />
       </main>
+      {!showToolRepo && showRoles && <button type="button" className="role-panel-backdrop" aria-label="Close worker roles" onClick={() => setShowRoles(false)}/>}
+      {!showToolRepo && <WorkerRolePanel
+        session={activeSession}
+        library={roleLibrary}
+        mobileOpen={showRoles}
+        onClose={() => setShowRoles(false)}
+        selectedRoleIds={selectedRoleIdsForSession}
+        disabled={runtimeLocked}
+        onSelect={(roleId) => {
+          if (!activeSession) return;
+          setSelectedRoleIds((current) => {
+            const selected = current[activeSession.session_id] ?? [];
+            const nextSelected = selected.includes(roleId)
+              ? selected.filter((selectedId) => selectedId !== roleId)
+              : [...selected, roleId];
+            if (nextSelected.length === 0) {
+              const next = { ...current };
+              delete next[activeSession.session_id];
+              return next;
+            }
+            return { ...current, [activeSession.session_id]: nextSelected };
+          });
+        }}
+        onCommand={(command) => {
+          if (!isOptimisticWorkerRoleMutation(command)) return sendCommand(command);
+          const commandId = clientId("worker-role-command");
+          const optimisticCommand: WorkerRoleMutation = command.type === "worker_role_create"
+            ? { ...command, role_id: command.role_id ?? clientId("role") }
+            : command;
+          pendingWorkerRoleMutationsRef.current.set(commandId, optimisticCommand);
+          setRoleLibrary((current) => applyWorkerRoleMutation(current, optimisticCommand));
+          setSessions((current) => current.map((session) => ({
+            ...session,
+            roles: applyWorkerRoleMutation({ roles: session.roles, groups: [] }, optimisticCommand).roles,
+          })));
+          if (sendCommand(optimisticCommand, commandId)) return true;
+          pendingWorkerRoleMutationsRef.current.delete(commandId);
+          const visibleLibrary = replayWorkerRoleMutations(authoritativeRoleLibraryRef.current, pendingWorkerRoleMutationsRef.current.values());
+          setRoleLibrary(visibleLibrary);
+          setSessions((current) => current.map((session) => ({ ...session, roles: visibleLibrary.roles })));
+          return false;
+        }}
+      />}
       {showToolRepo && <button type="button" className="side-panel-backdrop" aria-label="Close ToolRepo" onClick={closeToolRepoPanel}/>}
       {showToolRepo && <ToolRepoPanel
         panelRef={toolRepoPanelRef}
@@ -1192,6 +1647,7 @@ function TimemApp() {
           reportUiError("Create session failed", "Reconnect to Timem Web before creating a new session.", "system");
         }
       }} />}
+      {deleteEndpointCandidate && <ModelEndpointDeleteDialog endpoint={deleteEndpointCandidate} onClose={() => setDeleteEndpointCandidate(null)} onConfirm={() => sendCommand({ type: "model_endpoint_delete", endpoint_id: deleteEndpointCandidate.id })}/>}
       {deleteSessionCandidate && <SessionDeleteDialog session={deleteSessionCandidate} pending={pendingDeleteSessionIds.has(deleteSessionCandidate.session_id)} onClose={() => {
         if (!pendingDeleteSessionIdsRef.current.has(deleteSessionCandidate.session_id)) setDeleteSessionCandidate(null);
       }} onConfirm={() => {
@@ -1202,6 +1658,34 @@ function TimemApp() {
           reportUiError("Delete session failed", "Reconnect to Timem Web before deleting this session.", sessionId);
         }
       }} />}
+      {deleteMessageCandidate && <ChatMessageDeleteDialog
+        candidate={deleteMessageCandidate}
+        pending={pendingDeleteMessageKeys.has(chatMessageDeleteKey(deleteMessageCandidate))}
+        onClose={() => {
+          if (!pendingDeleteMessageKeysRef.current.has(chatMessageDeleteKey(deleteMessageCandidate))) setDeleteMessageCandidate(null);
+        }}
+        onConfirm={() => {
+          const key = chatMessageDeleteKey(deleteMessageCandidate);
+          if (!addPendingKey(pendingDeleteMessageKeysRef, setPendingDeleteMessageKeys, key)) return;
+          if (!sendCommand({
+            type: "chat_message_delete",
+            session_id: deleteMessageCandidate.sessionId,
+            turn_id: deleteMessageCandidate.turnId,
+            role: deleteMessageCandidate.role,
+            role_index: deleteMessageCandidate.roleIndex,
+          })) {
+            removePendingKey(pendingDeleteMessageKeysRef, setPendingDeleteMessageKeys, key);
+            reportUiError("Delete message failed", "Reconnect to Timem Web before deleting this message.", deleteMessageCandidate.sessionId);
+          }
+        }}
+      />}
+      {showMemSettings && <MemSettingsDialog memPath={server?.mem?.space_dir ?? ""} current={server ? server.mem.temporary_retention_days : 5} pending={pendingMemRetention} onClose={() => { if (!pendingMemRetention) closeMemSettingsDialog(); }} onSave={(days) => {
+        setPendingMemRetention(true);
+        if (!sendCommand({ type: "mem_temporary_retention_update", days })) {
+          setPendingMemRetention(false);
+          reportUiError("Mem settings failed", "Reconnect to Timem Web before updating temporary-data retention.", "system");
+        }
+      }}/>}
       {showMemSwitch && <MemSwitchDialog current={server?.mem?.space_dir ?? ""} pending={pendingMemSwitch} onClose={() => { if (!pendingMemSwitch) closeMemSwitchDialog(); }} onSwitch={(path) => {
         setRenamingSessionId("");
         setRenameDraft("");
@@ -1214,6 +1698,7 @@ function TimemApp() {
         }
       }}
       />}
+      {showRuntimeUnavailableDialog && <RuntimeUnavailableDialog detail={runtimeDisconnectedDetail} onClose={() => setRuntimeUnavailableDialogDismissed(true)}/>}
       {toolgenDialog && <ToolGenDialog
         key={`${toolgenDialog.sessionId}:${toolgenDialog.turnId}`}
         pending={pendingToolgenRequests.has(toolgenRequestKey(toolgenDialog.sessionId, toolgenDialog.turnId))}
@@ -1235,6 +1720,218 @@ function TimemApp() {
       />}
     </div>
   </AssistantRuntimeProvider>;
+}
+
+type SortableWorkerRoleRenderState = {
+  setNodeRef: (node: HTMLElement | null) => void;
+  style: CSSProperties;
+  attributes: ReturnType<typeof useSortable>["attributes"];
+  listeners: ReturnType<typeof useSortable>["listeners"];
+  isDragging: boolean;
+};
+
+function SortableWorkerRole({ id, disabled, children }: {
+  id: string;
+  disabled: boolean;
+  children: (state: SortableWorkerRoleRenderState) => ReactNode;
+}) {
+  const sortable = useSortable({
+    id,
+    disabled,
+    transition: {
+      duration: 180,
+      easing: "cubic-bezier(.2, .8, .2, 1)",
+    },
+  });
+  return children({
+    setNodeRef: sortable.setNodeRef,
+    style: {
+      transform: CSS.Transform.toString(sortable.transform),
+      transition: sortable.transition,
+      zIndex: sortable.isDragging ? 4 : undefined,
+    },
+    attributes: sortable.attributes,
+    listeners: sortable.listeners,
+    isDragging: sortable.isDragging,
+  });
+}
+
+function WorkerRoleDropGroup({ id, roleIds, className, children }: {
+  id: string;
+  roleIds: string[];
+  className: string;
+  children: ReactNode;
+}) {
+  const droppable = useDroppable({ id });
+  return <section ref={droppable.setNodeRef} className={`${className} ${droppable.isOver ? "drop-target" : ""}`}>
+    <SortableContext items={roleIds} strategy={verticalListSortingStrategy}>
+      {children}
+    </SortableContext>
+  </section>;
+}
+
+function ExpandedTextEditor({ title, eyebrow, value, placeholder, maxLength, disabled, onChange, onClose, onCancel }: {
+  title: string;
+  eyebrow: string;
+  value: string;
+  placeholder: string;
+  maxLength?: number;
+  disabled?: boolean;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onCancel: () => void;
+}) {
+  return createPortal(<div className="expanded-text-backdrop" role="presentation">
+    <section className="expanded-text-editor" role="dialog" aria-modal="true" aria-label={title} onKeyDown={(event) => {
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
+    }}>
+      <header>
+        <div><span className="eyebrow">{eyebrow}</span><h2>{title}</h2><p>修改会同步回原输入框；完成编辑不会自动保存或发送。</p></div>
+        <button type="button" className="expanded-text-collapse" title="收起编辑器" aria-label="收起编辑器" onClick={onClose}><Minimize2 size={16}/></button>
+      </header>
+      <textarea autoFocus value={value} maxLength={maxLength} disabled={disabled} placeholder={placeholder} onChange={(event) => onChange(event.target.value)}/>
+      <footer>
+        <span>{maxLength ? `${value.length.toLocaleString()} / ${maxLength.toLocaleString()}` : `${value.length.toLocaleString()} 字符`}</span>
+        <div><button type="button" className="secondary" onClick={onCancel}>取消修改</button><button type="button" className="primary" onClick={onClose}>完成编辑</button></div>
+      </footer>
+    </section>
+  </div>, document.body);
+}
+
+function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOpen, onClose, onSelect, onCommand }: {
+  session?: Session;
+  library: WorkerRoleLibrary;
+  selectedRoleIds: readonly string[];
+  disabled: boolean;
+  mobileOpen: boolean;
+  onClose: () => void;
+  onSelect: (roleId: string) => void;
+  onCommand: (command: ClientCommand) => boolean;
+}) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [roleDeleteMode, setRoleDeleteMode] = useState(false);
+  const [selectedDeleteRoleId, setSelectedDeleteRoleId] = useState("");
+  const [newGroupName, setNewGroupName] = useState("");
+  const [editingGroupId, setEditingGroupId] = useState("");
+  const [editingGroupName, setEditingGroupName] = useState("");
+  const [draggedRoleId, setDraggedRoleId] = useState("");
+  const [collapsedRoleGroupIds, setCollapsedRoleGroupIds] = useState<Set<string>>(() => new Set());
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
+  const [descriptionBeforeExpand, setDescriptionBeforeExpand] = useState("");
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  const resetEditor = () => { setEditingId(null); setName(""); setDescription(""); setDescriptionExpanded(false); };
+  useEffect(() => { resetEditor(); setRoleDeleteMode(false); setSelectedDeleteRoleId(""); setEditingGroupId(""); }, [session?.session_id]);
+  useEffect(() => {
+    const validGroupIds = new Set(["ungrouped", ...library.groups.map((group) => group.id)]);
+    setCollapsedRoleGroupIds((current) => new Set(Array.from(current).filter((id) => validGroupIds.has(id))));
+  }, [library.groups]);
+  useEffect(() => {
+    if (selectedDeleteRoleId && !library.roles.some((role) => role.id === selectedDeleteRoleId)) {
+      setSelectedDeleteRoleId("");
+    }
+    if (roleDeleteMode && library.roles.length === 0) setRoleDeleteMode(false);
+  }, [library.roles, roleDeleteMode, selectedDeleteRoleId]);
+  const toggleRoleGroup = (groupId: string) => setCollapsedRoleGroupIds((current) => {
+    const next = new Set(current);
+    if (next.has(groupId)) next.delete(groupId); else next.add(groupId);
+    return next;
+  });
+
+  const submit = () => {
+    if (!session || !name.trim() || !description.trim()) return;
+    const command: ClientCommand = editingId
+      ? { type: "worker_role_update", session_id: session.session_id, role_id: editingId, name, description }
+      : { type: "worker_role_create", session_id: session.session_id, name, description };
+    if (onCommand(command)) resetEditor();
+  };
+
+  const groupedRoleIds = new Set(library.groups.flatMap((group) => group.role_ids));
+  const ungroupedRoles = library.roles.filter((role) => !groupedRoleIds.has(role.id));
+  const roleById = new Map(library.roles.map((role) => [role.id, role]));
+  const groupForRole = (roleId: string) => library.groups.find((group) => group.role_ids.includes(roleId))?.id ?? null;
+
+  const reorderRole = (roleId: string, targetGroupId: string | null, beforeRoleId?: string) => {
+    if (!session || disabled) return;
+    const groups = library.groups.map((group) => ({ ...group, role_ids: group.role_ids.filter((id) => id !== roleId) }));
+    const ungrouped = ungroupedRoles.map((role) => role.id).filter((id) => id !== roleId);
+    const target = targetGroupId ? groups.find((group) => group.id === targetGroupId)?.role_ids : ungrouped;
+    if (!target) return;
+    const beforeIndex = beforeRoleId ? target.indexOf(beforeRoleId) : -1;
+    if (beforeIndex >= 0) target.splice(beforeIndex, 0, roleId); else target.push(roleId);
+    onCommand({ type: "worker_role_library_reorder", session_id: session.session_id, groups, ungrouped_role_ids: ungrouped });
+  };
+
+  const finishRoleDrag = (event: DragEndEvent) => {
+    setDraggedRoleId("");
+    const roleId = String(event.active.id);
+    const overId = event.over ? String(event.over.id) : "";
+    if (!overId || overId === roleId) return;
+    if (overId === "role-group:ungrouped") {
+      reorderRole(roleId, null);
+      return;
+    }
+    if (overId.startsWith("role-group:")) {
+      reorderRole(roleId, overId.slice("role-group:".length));
+      return;
+    }
+    if (roleById.has(overId)) reorderRole(roleId, groupForRole(overId), overId);
+  };
+
+  const roleItem = (role: WorkerRole) => <SortableWorkerRole id={role.id} disabled={disabled || roleDeleteMode} key={role.id}>{({ setNodeRef, style, attributes, listeners, isDragging }) =>
+    <article ref={setNodeRef} style={style} className={`worker-role-item ${!roleDeleteMode && selectedRoleIds.includes(role.id) ? "selected" : ""} ${roleDeleteMode ? "delete-selecting" : ""} ${selectedDeleteRoleId === role.id ? "delete-selected" : ""} ${isDragging ? "dragging" : ""}`}>
+      <button type="button" className="worker-role-drag" disabled={disabled || roleDeleteMode} title={`拖动 ${role.name}`} aria-label={`拖动 ${role.name}`} {...attributes} {...listeners}><GripVertical size={13}/></button>
+      <label title={roleDeleteMode ? `选择删除 ${role.name}` : `Use ${role.name} for the next message`}><input type="checkbox" checked={roleDeleteMode ? selectedDeleteRoleId === role.id : selectedRoleIds.includes(role.id)} disabled={disabled} onChange={() => roleDeleteMode ? setSelectedDeleteRoleId((current) => current === role.id ? "" : role.id) : onSelect(role.id)}/><span><strong>{role.name}</strong><small>{role.description}</small></span></label>
+      {!roleDeleteMode && <div className="worker-role-actions"><button type="button" className="worker-role-action worker-role-edit" disabled={disabled} title={`Edit ${role.name}`} aria-label={`Edit ${role.name}`} onClick={() => { setEditingId(role.id); setName(role.name); setDescription(role.description); }}><Pencil size={12}/></button></div>}
+    </article>
+  }</SortableWorkerRole>;
+
+  const draggedRole = roleById.get(draggedRoleId);
+  return <aside id="worker-role-panel" className={`worker-role-panel ${mobileOpen ? "mobile-open" : ""}`} aria-label="Worker roles">
+    <header><span><BriefcaseBusiness size={16}/> Roles</span><div>{roleDeleteMode && <button type="button" className="worker-role-delete-cancel" title="取消删除 Role" aria-label="取消删除 Role" onClick={() => { setRoleDeleteMode(false); setSelectedDeleteRoleId(""); }}><X size={14} strokeWidth={3}/></button>}<button type="button" className={`worker-role-delete-manage ${roleDeleteMode ? "confirm" : ""}`} title={roleDeleteMode ? selectedDeleteRoleId ? "确认删除选中的 Role" : "请选择要删除的 Role" : "选择要删除的 Role"} aria-label={roleDeleteMode ? selectedDeleteRoleId ? "确认删除选中的 Role" : "请选择要删除的 Role" : "选择要删除的 Role"} disabled={disabled || library.roles.length === 0 || (roleDeleteMode && !selectedDeleteRoleId)} onClick={() => { if (!roleDeleteMode) { resetEditor(); setRoleDeleteMode(true); setSelectedDeleteRoleId(""); return; } if (session && selectedDeleteRoleId && onCommand({ type: "worker_role_delete", session_id: session.session_id, role_id: selectedDeleteRoleId })) { setRoleDeleteMode(false); setSelectedDeleteRoleId(""); } }}>{roleDeleteMode ? <Check size={14} strokeWidth={3}/> : <Trash2 size={14}/>}</button><button type="button" className="worker-role-close" title="Close roles" aria-label="Close roles" onClick={onClose}><X size={15}/></button></div></header>
+    <p className={`worker-role-help ${roleDeleteMode ? "delete-mode" : ""}`}>{roleDeleteMode ? "勾选一个 Role，然后点击顶部对勾确认删除。" : "拖动 Role 可排序或归入分组。"}</p>
+    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={(event) => setDraggedRoleId(String(event.active.id))} onDragCancel={() => setDraggedRoleId("")} onDragEnd={finishRoleDrag}>
+      <div className="worker-role-list">
+        {library.groups.map((group) => {
+          const collapsed = collapsedRoleGroupIds.has(group.id);
+          return <WorkerRoleDropGroup id={`role-group:${group.id}`} roleIds={group.role_ids} className={`worker-role-group ${collapsed ? "collapsed" : ""}`} key={group.id}>
+            <header>
+              {editingGroupId === group.id ? <input autoFocus value={editingGroupName} maxLength={80} aria-label={`Rename group ${group.name}`} onChange={(event) => setEditingGroupName(event.target.value)} onKeyDown={(event) => {
+                if (event.key === "Escape") setEditingGroupId("");
+                if (event.key === "Enter" && session && editingGroupName.trim() && onCommand({ type: "worker_role_group_update", session_id: session.session_id, group_id: group.id, name: editingGroupName })) setEditingGroupId("");
+              }}/> : <button type="button" className="worker-role-group-toggle" aria-expanded={!collapsed} aria-controls={`worker-role-group-list-${group.id}`} title={collapsed ? `展开 ${group.name}` : `折叠 ${group.name}`} onClick={() => toggleRoleGroup(group.id)}><ChevronRight size={12}/><strong>{group.name}</strong><small>{group.role_ids.length}</small></button>}
+              <div><button type="button" className="worker-role-action worker-role-edit" disabled={disabled || roleDeleteMode} title={`Rename ${group.name}`} aria-label={`Rename ${group.name}`} onClick={() => { setEditingGroupId(group.id); setEditingGroupName(group.name); }}><Pencil size={11}/></button><button type="button" className="worker-role-action worker-role-delete" disabled={disabled || roleDeleteMode} title={`Delete ${group.name}`} aria-label={`Delete ${group.name}`} onClick={() => session && onCommand({ type: "worker_role_group_delete", session_id: session.session_id, group_id: group.id })}><Trash2 size={11}/></button></div>
+            </header>
+            {!collapsed && <div id={`worker-role-group-list-${group.id}`} className="worker-role-group-list">{group.role_ids.map((id) => roleById.get(id)).filter((role): role is WorkerRole => !!role).map(roleItem)}{group.role_ids.length === 0 && <span className="worker-role-drop-hint">拖动 Role 到这里</span>}</div>}
+          </WorkerRoleDropGroup>;
+        })}
+        <WorkerRoleDropGroup id="role-group:ungrouped" roleIds={ungroupedRoles.map((role) => role.id)} className={`worker-role-group worker-role-ungrouped ${collapsedRoleGroupIds.has("ungrouped") ? "collapsed" : ""}`}>
+          <header><button type="button" className="worker-role-group-toggle" aria-expanded={!collapsedRoleGroupIds.has("ungrouped")} aria-controls="worker-role-group-list-ungrouped" title={collapsedRoleGroupIds.has("ungrouped") ? "展开未分组" : "折叠未分组"} onClick={() => toggleRoleGroup("ungrouped")}><ChevronRight size={12}/><strong>未分组</strong><small>{ungroupedRoles.length}</small></button></header>
+          {!collapsedRoleGroupIds.has("ungrouped") && <div id="worker-role-group-list-ungrouped" className="worker-role-group-list">{ungroupedRoles.map(roleItem)}{ungroupedRoles.length === 0 && library.roles.length > 0 && <span className="worker-role-drop-hint">所有 Role 已归组</span>}</div>}
+        </WorkerRoleDropGroup>
+        {library.roles.length === 0 && <div className="worker-role-empty">还没有 Role。创建一个，供所有 Session 使用。</div>}
+        {!session && <div className="worker-role-empty">Select a session to manage roles.</div>}
+      </div>
+      <DragOverlay dropAnimation={prefersReducedMotion() ? null : { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" }}>
+        {draggedRole && <article className="worker-role-item worker-role-overlay" aria-hidden="true"><span className="worker-role-drag"><GripVertical size={13}/></span><span><strong>{draggedRole.name}</strong><small>{draggedRole.description}</small></span></article>}
+      </DragOverlay>
+    </DndContext>
+    {session && !roleDeleteMode && <form className="worker-role-group-editor" onSubmit={(event) => { event.preventDefault(); if (newGroupName.trim() && onCommand({ type: "worker_role_group_create", session_id: session.session_id, name: newGroupName })) setNewGroupName(""); }}>
+      <input value={newGroupName} maxLength={80} disabled={disabled} placeholder="新分组名称" aria-label="Role group name" onChange={(event) => setNewGroupName(event.target.value)}/>
+      <button type="submit" className="worker-role-group-create" disabled={disabled || !newGroupName.trim()}><Plus size={12}/> 分组</button>
+    </form>}
+    {session && !roleDeleteMode && <form className={`worker-role-editor ${editingId ? "editing" : "creating"}`} onSubmit={(event) => { event.preventDefault(); submit(); }}>
+      <strong>{editingId ? "编辑 Role" : "新建 Role"}</strong>
+      <input value={name} maxLength={80} disabled={disabled} placeholder="称呼，例如：严谨审查员" aria-label="Role name" onChange={(event) => setName(event.target.value)}/>
+      <div className="expandable-text-field worker-role-description-field"><textarea value={description} maxLength={16384} disabled={disabled} placeholder="描述工作要求、步骤和约束…" aria-label="Role description" onChange={(event) => setDescription(event.target.value)}/><button type="button" className="text-field-expand" title="展开编辑 Role 描述" aria-label="展开编辑 Role 描述" disabled={disabled} onClick={() => { setDescriptionBeforeExpand(description); setDescriptionExpanded(true); }}><Maximize2 size={13}/></button></div>
+      <div><button type="submit" className="worker-role-primary-action" disabled={disabled || !name.trim() || !description.trim()}>{editingId ? "保存" : "创建"}</button>{editingId && <button type="button" onClick={resetEditor}>取消</button>}</div>
+      {descriptionExpanded && <ExpandedTextEditor eyebrow="ROLE DESCRIPTION" title={editingId ? `编辑 ${name.trim() || "Role"} 的描述` : "编写 Role 描述"} value={description} maxLength={16384} disabled={disabled} placeholder="描述工作要求、步骤和约束…" onChange={setDescription} onClose={() => setDescriptionExpanded(false)} onCancel={() => { setDescription(descriptionBeforeExpand); setDescriptionExpanded(false); }}/>}
+    </form>}
+  </aside>;
 }
 
 function ToolRepoPanel({ panelRef, onClose, session, searchQuery, searchPending, onSearchQueryChange, tools, selectedTool, pendingToolDetailId, pendingToolRenameIds, onSelectTool, onCollapseTool, onRenameTool, onOpenTerminal }: {
@@ -1348,12 +2045,12 @@ function ToolRepoPanel({ panelRef, onClose, session, searchQuery, searchPending,
   </aside>;
 }
 
-const MAX_RENDERED_TURN_EVENTS = 200;
 const EMPTY_DECISIONS: Decision[] = [];
 
-const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, decisionsByTurn, sessionInteractionLocked, pendingDecisionKeys, pendingToolGenTurnIds, toolGenSessionBusy, onDecisionReply, onRequestToolGen }: {
+const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, restartMarkers, decisionsByTurn, sessionInteractionLocked, pendingDecisionKeys, pendingToolGenTurnIds, toolGenSessionBusy, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
   sessionId: string;
   turns: WebTurn[];
+  restartMarkers: ChatMessage[];
   decisionsByTurn: ReadonlyMap<string, Decision[]>;
   sessionInteractionLocked: boolean;
   pendingDecisionKeys: Set<string>;
@@ -1361,25 +2058,101 @@ const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, decisi
   toolGenSessionBusy: boolean;
   onDecisionReply: (decision: Decision, reply: "accept" | "decline" | "always_allow") => void;
   onRequestToolGen: (turnId: string) => void;
+  onRequestMessageDelete: (candidate: ChatMessageDeleteCandidate) => void;
 }) {
-  return turns.map((turn) => <TurnInteraction
-    key={turn.turn_id}
-    sessionId={sessionId}
-    turn={turn}
-    decisions={decisionsByTurn.get(sessionTurnKey(sessionId, turn.turn_id)) ?? EMPTY_DECISIONS}
-    sessionInteractionLocked={sessionInteractionLocked}
-    pendingDecisionKeys={pendingDecisionKeys}
-    toolGenPending={pendingToolGenTurnIds.has(turn.turn_id)}
-    toolGenBlocked={toolGenSessionBusy && !pendingToolGenTurnIds.has(turn.turn_id)}
-    onDecisionReply={onDecisionReply}
-    onRequestToolGen={onRequestToolGen}
-  />);
+  const timeline = [
+    ...turns.map((turn) => {
+      const placement = turnTimelinePlacement(turn, restartMarkers);
+      return {
+        type: "turn" as const,
+        createdAtMs: placement.createdAtMs,
+        resumedAfterRestart: placement.resumedAfterRestart,
+        id: turn.turn_id,
+        turn,
+      };
+    }),
+    ...restartMarkers.map((marker) => ({
+      type: "restart" as const,
+      createdAtMs: marker.created_at_ms,
+      resumedAfterRestart: false,
+      id: marker.id,
+      marker,
+    })),
+  ].sort(compareTurnTimelineItems);
+
+  return timeline.map((item) => {
+    if (item.type === "restart") return <RuntimeRestartDivider key={item.id} marker={item.marker}/>;
+    const turn = item.turn;
+    return <TurnInteraction
+      key={turn.turn_id}
+      sessionId={sessionId}
+      turn={turn}
+      decisions={decisionsByTurn.get(sessionTurnKey(sessionId, turn.turn_id)) ?? EMPTY_DECISIONS}
+      sessionInteractionLocked={sessionInteractionLocked}
+      pendingDecisionKeys={pendingDecisionKeys}
+      toolGenPending={pendingToolGenTurnIds.has(turn.turn_id)}
+      toolGenBlocked={toolGenSessionBusy && !pendingToolGenTurnIds.has(turn.turn_id)}
+      onDecisionReply={onDecisionReply}
+      onRequestToolGen={onRequestToolGen}
+      onRequestMessageDelete={onRequestMessageDelete}
+    />;
+  });
 });
 
-function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, onConsumeCommandAcks, reliableStorageScope, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, onLoadMoreHistory, onSend, onSendForSession, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen }: {
+function RuntimeRestartDivider({ marker }: { marker: ChatMessage }) {
+  const restartedAt = new Date(marker.created_at_ms);
+  const timeLabel = Number.isNaN(restartedAt.getTime())
+    ? ""
+    : restartedAt.toLocaleString([], { dateStyle: "medium", timeStyle: "medium" });
+  return <div className="runtime-restart-divider" role="separator" aria-label={`${marker.text}${timeLabel ? `，${timeLabel}` : ""}`}>
+    <span aria-hidden="true"/>
+    <div><strong>{marker.text}</strong>{timeLabel && <time dateTime={restartedAt.toISOString()}>{timeLabel}</time>}</div>
+    <span aria-hidden="true"/>
+  </div>;
+}
+
+type SortableQueuedMessageRenderState = {
+  setNodeRef: (node: HTMLElement | null) => void;
+  style: CSSProperties;
+  attributes: ReturnType<typeof useSortable>["attributes"];
+  listeners: ReturnType<typeof useSortable>["listeners"];
+  isDragging: boolean;
+};
+
+function SortableQueuedMessage({
+  id,
+  disabled,
+  children,
+}: {
+  id: string;
+  disabled: boolean;
+  children: (state: SortableQueuedMessageRenderState) => ReactNode;
+}) {
+  const sortable = useSortable({
+    id,
+    disabled,
+    transition: {
+      duration: 180,
+      easing: "cubic-bezier(.2, .8, .2, 1)",
+    },
+  });
+  return children({
+    setNodeRef: sortable.setNodeRef,
+    style: {
+      transform: CSS.Transform.toString(sortable.transform),
+      transition: sortable.transition,
+      zIndex: sortable.isDragging ? 4 : undefined,
+    },
+    attributes: sortable.attributes,
+    listeners: sortable.listeners,
+    isDragging: sortable.isDragging,
+  });
+}
+
+function TimemThread({ activeSession, sessions, completedTurnsBySession, commandAcks, onConsumeCommandAcks, reliableStorageScope, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, selectedRoleIds, onRolesConsumed, onLoadMoreHistory, onSend, onSendForSession, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
   activeSession: Session | undefined;
   sessions: Session[];
-  completedTurnKey: string;
+  completedTurnsBySession: Record<string, { key: string; successful: boolean }>;
   commandAcks: Record<string, Extract<WireEvent, { type: "command_ack" }>>;
   onConsumeCommandAcks: (commandIds: ReadonlySet<string>) => void;
   reliableStorageScope: string;
@@ -1398,30 +2171,52 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
   toolGenSessionBusy: boolean;
   onLoadMoreHistory: (session: Session) => void;
   onSend: (text: string, commandId?: string) => boolean;
-  onSendForSession: (sessionId: string, text: string, commandId?: string) => boolean;
+  onSendForSession: (sessionId: string, text: string, commandId?: string, attachmentIds?: readonly string[], forceSupplement?: boolean, roleIds?: readonly string[], forceNewTurn?: boolean) => boolean;
+  selectedRoleIds: readonly string[];
+  onRolesConsumed: (sessionId: string, expectedRoleIds?: readonly string[]) => void;
   onCancel: () => Promise<void>;
   onUpload: (file: File) => Promise<void>;
   onRemoveAttachment: (attachmentId: string) => void;
   onDecisionReply: (decision: Decision, reply: "accept" | "decline" | "always_allow") => void;
   onRequestToolGen: (turnId: string) => void;
+  onRequestMessageDelete: (candidate: ChatMessageDeleteCandidate) => void;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const previousScrollMetrics = useRef<ScrollMetrics | null>(null);
   const sessionScrollPositionsRef = useRef<Map<string, SessionScrollPosition>>(new Map());
   const renderedSessionIdRef = useRef<string | undefined>(undefined);
   const restoredSessionIdRef = useRef<string | undefined>(undefined);
   const followThreadLatest = useRef(true);
   const [draftsBySession, setDraftsBySession] = useState<Record<string, string>>({});
+  const [composerExpanded, setComposerExpanded] = useState(false);
+  const [composerDraftBeforeExpand, setComposerDraftBeforeExpand] = useState("");
   const [queuedMessagesBySession, setQueuedMessagesBySession] = useState<Record<string, QueuedMessage[]>>({});
   const queuedMessagesBySessionRef = useRef<Record<string, QueuedMessage[]>>(queuedMessagesBySession);
   const [expandedQueueSessionIds, setExpandedQueueSessionIds] = useState<Set<string>>(() => new Set());
+  const [collapsedQueuePanelSessionIds, setCollapsedQueuePanelSessionIds] = useState<Set<string>>(() => new Set());
   const [draggedQueueMessageId, setDraggedQueueMessageId] = useState<string>();
+  const [queuedMessageOverId, setQueuedMessageOverId] = useState<string>();
+  const queueDragSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
   const [editingQueuedMessage, setEditingQueuedMessage] = useState<{ sessionId: string; id: string; text: string }>();
   const queuedDispatchSessionIdsRef = useRef<Set<string>>(new Set());
   const queuedMessageClaimsRef = useRef<Set<string>>(new Set());
   const [queuedMessageClaims, setQueuedMessageClaims] = useState<Set<string>>(() => new Set());
+ const [queuedMessagesPauseBySession, setQueuedMessagesPauseBySession] = useState<Record<string, QueuedMessagesPauseState>>({});
+ const queuedMessagesPauseBySessionRef = useRef<Record<string, QueuedMessagesPauseState>>({});
+ const queuedAutoContinueSessionIdsRef = useRef<Set<string>>(new Set());
+ const processedCompletedTurnKeysRef = useRef<Map<string, string>>(new Map());
+ const [queuedAutoContinueVersion, setQueuedAutoContinueVersion] = useState(0);
   const submittingDraftSessionIdsRef = useRef<Set<string>>(new Set());
   const submittingDraftStartedAtRef = useRef<Map<string, number>>(new Map());
+  const directSubmissionsRef = useRef<Map<string, {
+    commandId: string;
+    text: string;
+    roleIds: string[];
+  }>>(new Map());
   const [submittingDraftSessionIds, setSubmittingDraftSessionIds] = useState<Set<string>>(() => new Set());
   const updateQueuedMessages = useCallback((update: (current: Record<string, QueuedMessage[]>) => Record<string, QueuedMessage[]>) => {
     const previous = queuedMessagesBySessionRef.current;
@@ -1430,15 +2225,75 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
     queuedMessagesBySessionRef.current = next;
     setQueuedMessagesBySession(next);
   }, [reliableStorageScope]);
+ const releaseAllQueuedDispatches = useCallback(() => {
+ queuedDispatchSessionIdsRef.current.clear();
+ queuedMessageClaimsRef.current.clear();
+ setQueuedMessageClaims(new Set());
+ setDraggedQueueMessageId(undefined);
+ setQueuedMessageOverId(undefined);
+ }, []);
+ const pauseQueuedMessages = useCallback((sessionId: string, reason: string, source: QueuedMessagesPauseSource) => {
+ const current = queuedMessagesPauseBySessionRef.current[sessionId] ?? null;
+ const pause = stopQueuedAutoSend(current, reason, source, Date.now());
+ if (pause === current) return false;
+ if (reliableStorageScope && !saveQueuedMessagesPause(window.localStorage, reliableStorageScope, sessionId, pause)) return false;
+ const next = { ...queuedMessagesPauseBySessionRef.current, [sessionId]: pause };
+ queuedMessagesPauseBySessionRef.current = next;
+ queuedDispatchSessionIdsRef.current.delete(sessionId);
+ if (releaseSessionQueuedMessageClaims(queuedMessageClaimsRef.current, sessionId) > 0) {
+ setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+ }
+ setQueuedMessagesPauseBySession(next);
+ return true;
+ }, [reliableStorageScope]);
+ const resumeQueuedMessages = useCallback((sessionId: string) => {
+ if (reliableStorageScope && !clearQueuedMessagesPause(window.localStorage, reliableStorageScope, sessionId)) return false;
+ const next = { ...queuedMessagesPauseBySessionRef.current };
+ delete next[sessionId];
+ queuedMessagesPauseBySessionRef.current = next;
+ setQueuedMessagesPauseBySession(next);
+ return true;
+ }, [reliableStorageScope]);
   const turns = activeSession?.turns ?? [];
+  const restartMarkers = useMemo(
+    () => visibleRuntimeRestartMarkers(
+      turns,
+      (activeSession?.messages ?? []).filter((message) => message.role === "system" && message.kind === "runtime_restart"),
+    ),
+    [activeSession?.messages, turns],
+  );
   const activeSessionId = activeSession?.session_id;
+  const queuedMessagesPause = activeSessionId ? queuedMessagesPauseBySession[activeSessionId] ?? null : null;
   const draft = draftForSession(draftsBySession, activeSessionId);
   const queuedMessages = activeSessionId ? queuedMessagesBySession[activeSessionId] ?? [] : [];
+  const displayQueuedMessages = activeSessionId
+    ? unclaimedQueuedMessages(queuedMessages, queuedMessageClaims, activeSessionId)
+    : [];
   const queueExpanded = !!activeSessionId && expandedQueueSessionIds.has(activeSessionId);
-  const visibleQueuedMessages = queueExpanded ? queuedMessages : queuedMessages.slice(0, COLLAPSED_QUEUE_LIMIT);
-  const hiddenQueuedMessageCount = Math.max(0, queuedMessages.length - COLLAPSED_QUEUE_LIMIT);
+  const queuePanelCollapsed = !!activeSessionId && collapsedQueuePanelSessionIds.has(activeSessionId);
+  const firstQueuedMessage = displayQueuedMessages[0];
+  const visibleQueuedMessages = queueExpanded ? displayQueuedMessages : displayQueuedMessages.slice(0, COLLAPSED_QUEUE_LIMIT);
+  const hiddenQueuedMessageCount = Math.max(0, displayQueuedMessages.length - COLLAPSED_QUEUE_LIMIT);
+  const draggedQueuedMessage = draggedQueueMessageId
+    ? visibleQueuedMessages.find((message) => message.id === draggedQueueMessageId)
+    : undefined;
+  const draggedQueuedMessagePosition = draggedQueuedMessage
+    ? reorderQueuedMessages(
+      queuedMessages,
+      draggedQueuedMessage.id,
+      queuedMessageOverId ?? draggedQueuedMessage.id,
+    ).findIndex((message) => message.id === draggedQueuedMessage.id) + 1
+    : 0;
+ const reservedAttachmentIds = useMemo(() => reservedQueuedAttachmentIds(queuedMessages), [queuedMessages]);
+ const availableAttachments = useMemo(
+   () => (activeSession?.attachments ?? []).filter((attachment) => !reservedAttachmentIds.has(attachment.id)),
+   [activeSession?.attachments, reservedAttachmentIds],
+ );
+  const selectedRoles = activeSession?.roles.filter((role) => selectedRoleIds.includes(role.id)) ?? [];
   const submittingDraft = !!activeSessionId && submittingDraftSessionIds.has(activeSessionId);
-  const sendLabel = isCancelling ? "Cancellation in progress" : activeSession?.state === "working" ? "Queue message" : "Send message";
+  const hasDraftText = !!draft.trim();
+  const showStopAction = composerPrimaryAction(activeSession?.state, draft, isCancelling) === "stop";
+  const sendLabel = activeSession?.state === "working" ? "Queue message" : "Send message";
   const lockedControlHint = sessionInteractionLocked ? sessionInteractionLockReason : "";
   const missingSessionHint = activeSession ? "" : "Create a session before using Timem";
   const uploadingAttachmentText = uploadingAttachmentFile ? `Uploading ${uploadingAttachmentFile.name}` : "Uploading file…";
@@ -1462,8 +2317,118 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
   const latestTurn = turns.at(-1);
   const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${latestTurn?.events.length ?? 0}:${latestTurn?.user_entries.length ?? 0}:${latestTurn?.final_answer?.length ?? 0}:${latestTurn?.completion ? 1 : 0}`;
   const liveSessionKey = sessionIds.join("\u0000");
+  const liveSessionIds = useMemo(() => new Set(sessionIds), [liveSessionKey]);
   const welcomeTitle = activeSession ? "Ready when you are." : "Create a session to start.";
   const welcomeText = activeSession ? "Ask Timem to investigate, write, or work with you." : "Use New session to choose a workspace and runtime profile.";
+  const [userMessageNavigation, setUserMessageNavigation] = useState({ previous: false, next: false, bottom: false });
+  const userMessageNavigationOffset = 18;
+  const userMessageNavigationAnimationRef = useRef<number | null>(null);
+
+  const userMessageAnchors = useCallback(() => {
+    const viewport = viewportRef.current;
+    return viewport ? Array.from(viewport.querySelectorAll<HTMLElement>("[data-user-message-anchor]")) : [];
+  }, []);
+
+  const updateUserMessageNavigation = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) {
+      setUserMessageNavigation((current) => current.previous || current.next || current.bottom ? { previous: false, next: false, bottom: false } : current);
+      return;
+    }
+    const viewportTop = viewport.getBoundingClientRect().top;
+    const navigationTop = viewportTop + userMessageNavigationOffset;
+    const anchorTops = userMessageAnchors().map((anchor) => anchor.getBoundingClientRect().top);
+    const nextUserMessageAvailable = adjacentUserMessageIndex(anchorTops, navigationTop, "next") >= 0;
+    const next = {
+      previous: adjacentUserMessageIndex(anchorTops, navigationTop, "previous") >= 0,
+      next: nextUserMessageAvailable,
+      bottom: !nextUserMessageAvailable && !isNearScrollBottom({
+        scrollTop: viewport.scrollTop,
+        scrollHeight: viewport.scrollHeight,
+        clientHeight: viewport.clientHeight,
+      }),
+    };
+    setUserMessageNavigation((current) => current.previous === next.previous && current.next === next.next && current.bottom === next.bottom ? current : next);
+  }, [userMessageAnchors, userMessageNavigationOffset]);
+
+  const navigateUserMessage = useCallback((direction: UserMessageNavigationDirection) => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const anchors = userMessageAnchors();
+    const viewportTop = viewport.getBoundingClientRect().top;
+    const navigationTop = viewportTop + userMessageNavigationOffset;
+    const index = adjacentUserMessageIndex(anchors.map((anchor) => anchor.getBoundingClientRect().top), navigationTop, direction);
+    const target = anchors[index];
+    if (!target) return;
+    followThreadLatest.current = false;
+    const targetTop = viewport.scrollTop + target.getBoundingClientRect().top - viewportTop - userMessageNavigationOffset;
+    if (userMessageNavigationAnimationRef.current !== null) cancelAnimationFrame(userMessageNavigationAnimationRef.current);
+    if (prefersReducedMotion()) {
+      viewport.scrollTop = targetTop;
+      updateUserMessageNavigation();
+      return;
+    }
+    const startTop = viewport.scrollTop;
+    const distance = targetTop - startTop;
+    const startedAt = performance.now();
+    const durationMs = 180;
+    const animate = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / durationMs);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      viewport.scrollTop = startTop + distance * eased;
+      if (progress < 1) {
+        userMessageNavigationAnimationRef.current = requestAnimationFrame(animate);
+      } else {
+        userMessageNavigationAnimationRef.current = null;
+        updateUserMessageNavigation();
+      }
+    };
+    userMessageNavigationAnimationRef.current = requestAnimationFrame(animate);
+  }, [updateUserMessageNavigation, userMessageAnchors, userMessageNavigationOffset]);
+
+  const navigateToThreadBottom = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    if (userMessageNavigationAnimationRef.current !== null) {
+      cancelAnimationFrame(userMessageNavigationAnimationRef.current);
+      userMessageNavigationAnimationRef.current = null;
+    }
+    followThreadLatest.current = true;
+    viewport.scrollTo({
+      top: viewport.scrollHeight,
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+    });
+  }, []);
+
+  useEffect(() => () => {
+    if (userMessageNavigationAnimationRef.current !== null) cancelAnimationFrame(userMessageNavigationAnimationRef.current);
+  }, []);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    updateUserMessageNavigation();
+    const mutationObserver = new MutationObserver(updateUserMessageNavigation);
+    mutationObserver.observe(viewport, { childList: true, subtree: true });
+    const resizeObserver = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(updateUserMessageNavigation);
+    resizeObserver?.observe(viewport);
+    return () => { mutationObserver.disconnect(); resizeObserver?.disconnect(); };
+  }, [activeSessionId, updateUserMessageNavigation]);
+
+  useEffect(() => {
+    const textarea = composerTextareaRef.current;
+    if (!textarea) return;
+    const prioritizeComposerScroll = (event: WheelEvent) => {
+      if (document.activeElement !== textarea) return;
+      const deltaY = wheelDeltaPixels(event.deltaY, event.deltaMode, textarea.clientHeight);
+      if (!canScrollInDirection(textarea, deltaY)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      textarea.scrollTop += deltaY;
+    };
+    textarea.addEventListener("wheel", prioritizeComposerScroll, { passive: false });
+    return () => textarea.removeEventListener("wheel", prioritizeComposerScroll);
+  }, []);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -1478,60 +2443,112 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
     viewport.style.scrollBehavior = previousBehavior;
   }, [activeSessionId]);
 
-  useEffect(() => {
-    if (!reliableStorageScope) return;
-    const restored = loadQueuedMessages(window.localStorage, reliableStorageScope);
-    queuedMessagesBySessionRef.current = restored;
-    queuedMessageClaimsRef.current.clear();
-    queuedDispatchSessionIdsRef.current.clear();
-    setQueuedMessageClaims(new Set());
-    setQueuedMessagesBySession(restored);
-  }, [reliableStorageScope]);
+ useEffect(() => {
+ if (!reliableStorageScope) return;
+ const restored = loadQueuedMessages(window.localStorage, reliableStorageScope);
+ const restoredPauses = Object.fromEntries(sessionIds.flatMap((sessionId) => {
+ const pause = loadQueuedMessagesPause(window.localStorage, reliableStorageScope, sessionId);
+ return pause ? [[sessionId, pause] as const] : [];
+ }));
+ queuedMessagesBySessionRef.current = restored;
+ releaseAllQueuedDispatches();
+ setQueuedMessagesBySession(restored);
+ queuedMessagesPauseBySessionRef.current = restoredPauses;
+ setQueuedMessagesPauseBySession(restoredPauses);
+ }, [liveSessionKey, releaseAllQueuedDispatches, reliableStorageScope]);
 
-  useEffect(() => {
-    const syncCrossTabQueues = (event: StorageEvent) => {
-      if (!reliableStorageScope || !event.key?.startsWith(`${queuedMessagesStorageKey(reliableStorageScope)}:`)) return;
-      const restored = loadQueuedMessages(window.localStorage, reliableStorageScope);
-      queuedMessagesBySessionRef.current = restored;
-      for (const [sessionId, messages] of Object.entries(restored)) {
-        if (messages.some((message) => message.deliveryError)) queuedDispatchSessionIdsRef.current.delete(sessionId);
-      }
-      for (const key of Array.from(queuedMessageClaimsRef.current)) {
-        if (!Object.entries(restored).some(([sessionId, messages]) => messages.some((message) => queuedMessageKey(sessionId, message.id) === key))) {
-          queuedMessageClaimsRef.current.delete(key);
-        }
-      }
-      setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-      setQueuedMessagesBySession(restored);
-    };
-    window.addEventListener("storage", syncCrossTabQueues);
-    return () => window.removeEventListener("storage", syncCrossTabQueues);
-  }, [reliableStorageScope]);
+ useEffect(() => {
+ const syncCrossTabQueues = (event: StorageEvent) => {
+ if (!reliableStorageScope || !event.key) return;
+ const pauseSessionId = queuedMessagesPauseSessionId(reliableStorageScope, event.key);
+ if (pauseSessionId && liveSessionIds.has(pauseSessionId)) {
+ const restoredPause = loadQueuedMessagesPause(window.localStorage, reliableStorageScope, pauseSessionId);
+ const next = { ...queuedMessagesPauseBySessionRef.current };
+ if (restoredPause) {
+ next[pauseSessionId] = restoredPause;
+ queuedDispatchSessionIdsRef.current.delete(pauseSessionId);
+ if (releaseSessionQueuedMessageClaims(queuedMessageClaimsRef.current, pauseSessionId) > 0) {
+ setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+ }
+ } else {
+ delete next[pauseSessionId];
+ }
+ queuedMessagesPauseBySessionRef.current = next;
+ setQueuedMessagesPauseBySession(next);
+ return;
+ }
+ if (!event.key.startsWith(`${queuedMessagesStorageKey(reliableStorageScope)}:`)) return;
+ const restored = loadQueuedMessages(window.localStorage, reliableStorageScope);
+ queuedMessagesBySessionRef.current = restored;
+ for (const [sessionId, messages] of Object.entries(restored)) {
+ if (messages.some((message) => message.deliveryError)) queuedDispatchSessionIdsRef.current.delete(sessionId);
+ }
+ for (const key of Array.from(queuedMessageClaimsRef.current)) {
+ if (!Object.entries(restored).some(([sessionId, messages]) => messages.some((message) => queuedMessageKey(sessionId, message.id) === key))) {
+ queuedMessageClaimsRef.current.delete(key);
+ }
+ }
+ setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+ setQueuedMessagesBySession(restored);
+ };
+ window.addEventListener("storage", syncCrossTabQueues);
+ return () => window.removeEventListener("storage", syncCrossTabQueues);
+ }, [liveSessionIds, reliableStorageScope]);
 
   useEffect(() => {
     if (sessionIds.length === 0) return;
     setDraftsBySession((current) => pruneSessionDrafts(current, sessionIds));
-    updateQueuedMessages((current) => Object.fromEntries(Object.entries(current).filter(([sessionId]) => sessionIds.includes(sessionId))));
-    setExpandedQueueSessionIds((current) => new Set(Array.from(current).filter((sessionId) => sessionIds.includes(sessionId))));
-    setEditingQueuedMessage((current) => current && sessionIds.includes(current.sessionId) ? current : undefined);
+    updateQueuedMessages((current) => Object.fromEntries(Object.entries(current).filter(([sessionId]) => liveSessionIds.has(sessionId))));
+    setExpandedQueueSessionIds((current) => new Set(Array.from(current).filter((sessionId) => liveSessionIds.has(sessionId))));
+    setCollapsedQueuePanelSessionIds((current) => new Set(Array.from(current).filter((sessionId) => liveSessionIds.has(sessionId))));
+    const retainedPauses = Object.fromEntries(Object.entries(queuedMessagesPauseBySessionRef.current).filter(([sessionId]) => liveSessionIds.has(sessionId)));
+    queuedMessagesPauseBySessionRef.current = retainedPauses;
+    for (const sessionId of Array.from(processedCompletedTurnKeysRef.current.keys())) {
+      if (!liveSessionIds.has(sessionId)) processedCompletedTurnKeysRef.current.delete(sessionId);
+    }
+    for (const sessionId of Array.from(queuedAutoContinueSessionIdsRef.current)) {
+      if (!liveSessionIds.has(sessionId)) queuedAutoContinueSessionIdsRef.current.delete(sessionId);
+    }
+    setQueuedMessagesPauseBySession(retainedPauses);
+    setEditingQueuedMessage((current) => current && liveSessionIds.has(current.sessionId) ? current : undefined);
     for (const sessionId of Array.from(queuedDispatchSessionIdsRef.current)) {
-      if (!sessionIds.includes(sessionId)) queuedDispatchSessionIdsRef.current.delete(sessionId);
+      if (!liveSessionIds.has(sessionId)) queuedDispatchSessionIdsRef.current.delete(sessionId);
     }
     for (const key of Array.from(queuedMessageClaimsRef.current)) {
-      if (!sessionIds.some((sessionId) => key.startsWith(`${sessionId}\u0000`))) queuedMessageClaimsRef.current.delete(key);
+      if (!liveSessionIds.has(key.slice(0, key.indexOf("\u0000")))) queuedMessageClaimsRef.current.delete(key);
     }
     setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+    for (const sessionId of Array.from(directSubmissionsRef.current.keys())) {
+      if (!liveSessionIds.has(sessionId)) directSubmissionsRef.current.delete(sessionId);
+    }
     if (pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds)) {
       setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
     }
-  }, [liveSessionKey, updateQueuedMessages]);
+  }, [liveSessionIds, updateQueuedMessages]);
 
   useEffect(() => {
     let nextQueues = queuedMessagesBySessionRef.current;
     const appliedCommandIds = new Set<string>();
     const matchedSessionByCommand = new Map<string, string>();
     const rejectedSessionIds = new Set<string>();
+    let directSubmissionReleased = false;
+    const rejectedDirectDrafts = new Map<string, string>();
     for (const ack of Object.values(commandAcks)) {
+      if (ack.command_id.startsWith("submit-")) {
+        appliedCommandIds.add(ack.command_id);
+        for (const [sessionId, submission] of directSubmissionsRef.current) {
+          if (submission.commandId !== ack.command_id) continue;
+          directSubmissionsRef.current.delete(sessionId);
+          submittingDraftStartedAtRef.current.delete(sessionId);
+          rejectedDirectDrafts.set(sessionId, submission.text);
+          directSubmissionReleased = releaseSessionDraftSubmission(
+            submittingDraftSessionIdsRef,
+            sessionId,
+          ) || directSubmissionReleased;
+          break;
+        }
+        continue;
+      }
       if (ack.status === "accepted") continue;
       const result = applyQueuedMessagesAck(nextQueues, ack.command_id, ack.status, ack.error, clientId("queued"));
       if (!result.matchedSessionId) continue;
@@ -1541,29 +2558,86 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
       nextQueues = result.queues;
     }
     if (appliedCommandIds.size === 0) return;
-    if (!reliableStorageScope || !saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current)) return;
-    queuedMessagesBySessionRef.current = nextQueues;
-    setQueuedMessagesBySession(nextQueues);
+    const queuesChanged = matchedSessionByCommand.size > 0;
+    if (
+      queuesChanged
+      && (!reliableStorageScope || !saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current))
+    ) return;
+    if (queuesChanged) {
+      queuedMessagesBySessionRef.current = nextQueues;
+      setQueuedMessagesBySession(nextQueues);
+    }
+    if (rejectedDirectDrafts.size > 0) {
+      setDraftsBySession((current) => {
+        let next = current;
+        for (const [sessionId, rejectedText] of rejectedDirectDrafts) {
+          const newerDraft = draftForSession(next, sessionId);
+          const restored = newerDraft.trim()
+            ? `${rejectedText}\n\n${newerDraft}`
+            : rejectedText;
+          next = setSessionDraft(next, sessionId, restored);
+        }
+        return next;
+      });
+    }
+    if (directSubmissionReleased) {
+      setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
+    }
     for (const [commandId, sessionId] of matchedSessionByCommand) {
       releaseQueuedMessageClaim(queuedMessageClaimsRef.current, sessionId, commandId);
     }
     setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
     for (const sessionId of rejectedSessionIds) queuedDispatchSessionIdsRef.current.delete(sessionId);
+    for (const sessionId of new Set([...rejectedSessionIds, ...rejectedDirectDrafts.keys()])) {
+      queuedAutoContinueSessionIdsRef.current.delete(sessionId);
+    }
     onConsumeCommandAcks(appliedCommandIds);
   }, [commandAcks, onConsumeCommandAcks, reliableStorageScope]);
+
+  useEffect(() => {
+    let completionChanged = false;
+    let claimsChanged = false;
+    let draftLocksChanged = false;
+    for (const [sessionId, completion] of Object.entries(completedTurnsBySession)) {
+      if (processedCompletedTurnKeysRef.current.get(sessionId) === completion.key) continue;
+      processedCompletedTurnKeysRef.current.set(sessionId, completion.key);
+      if (completion.successful) queuedAutoContinueSessionIdsRef.current.add(sessionId);
+      else queuedAutoContinueSessionIdsRef.current.delete(sessionId);
+      claimsChanged = queuedDispatchSessionIdsRef.current.delete(sessionId) || claimsChanged;
+      if (releaseSessionDraftSubmission(submittingDraftSessionIdsRef, sessionId)) {
+        submittingDraftStartedAtRef.current.delete(sessionId);
+        draftLocksChanged = true;
+      }
+      completionChanged = true;
+    }
+    if (claimsChanged) setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+    if (draftLocksChanged) setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
+    if (completionChanged) setQueuedAutoContinueVersion((version) => version + 1);
+  }, [completedTurnsBySession]);
 
   useEffect(() => {
     if (sessionInteractionLocked) return;
     for (const session of sessions) {
       if (session.state === "working") {
         queuedDispatchSessionIdsRef.current.delete(session.session_id);
+        queuedAutoContinueSessionIdsRef.current.delete(session.session_id);
       }
     }
-    const dispatches = selectQueuedDispatches(sessions, queuedMessagesBySessionRef.current, queuedDispatchSessionIdsRef.current, editingQueuedMessage?.sessionId);
+    const dispatches = selectQueuedDispatches(
+      sessions,
+      queuedMessagesBySessionRef.current,
+      queuedDispatchSessionIdsRef.current,
+      editingQueuedMessage?.sessionId,
+      new Set(Object.keys(queuedMessagesPauseBySessionRef.current)),
+      queuedAutoContinueSessionIdsRef.current,
+    );
     for (const { sessionId, message: next } of dispatches) {
       if (!claimQueuedMessage(queuedMessageClaimsRef.current, sessionId, queuedMessagesBySessionRef.current[sessionId] ?? [], next.id)) continue;
+      // One authoritative successful completion permits exactly one queued
+      // continuation. Consume it before delivery so failure cannot cascade.
+      queuedAutoContinueSessionIdsRef.current.delete(sessionId);
       queuedDispatchSessionIdsRef.current.add(sessionId);
-      if (!onSendForSession(sessionId, next.text, next.id)) {
+      if (!onSendForSession(sessionId, next.text, next.id, next.attachmentIds, false, next.roleIds ?? (next.roleId ? [next.roleId] : []))) {
         queuedDispatchSessionIdsRef.current.delete(sessionId);
         releaseQueuedMessageClaim(queuedMessageClaimsRef.current, sessionId, next.id);
         updateQueuedMessages((current) => ({
@@ -1575,23 +2649,26 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
       }
     }
     setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-  }, [editingQueuedMessage?.sessionId, onSendForSession, queuedMessagesBySession, sessionInteractionLocked, sessions, updateQueuedMessages]);
+  }, [editingQueuedMessage?.sessionId, onSendForSession, queuedAutoContinueVersion, queuedMessagesBySession, queuedMessagesPauseBySession, sessionInteractionLocked, sessions, updateQueuedMessages]);
 
   useEffect(() => {
-    if (!completedTurnKey) return;
-    const sessionId = completedTurnKey.slice(0, completedTurnKey.indexOf(":"));
-    if (queuedDispatchSessionIdsRef.current.delete(sessionId)) {
-      setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
+    let changed = false;
+    for (const session of sessions) {
+      if (session.state !== "working") continue;
+      const submission = directSubmissionsRef.current.get(session.session_id);
+      if (!submission) continue;
+      directSubmissionsRef.current.delete(session.session_id);
+      submittingDraftStartedAtRef.current.delete(session.session_id);
+      if (submission.roleIds.length > 0) {
+        onRolesConsumed(session.session_id, submission.roleIds);
+      }
+      changed = releaseSessionDraftSubmission(
+        submittingDraftSessionIdsRef,
+        session.session_id,
+      ) || changed;
     }
-  }, [completedTurnKey]);
-
-  useEffect(() => {
-    if (!completedTurnKey || !activeSessionId || !completedTurnKey.startsWith(`${activeSessionId}:`)) return;
-    if (releaseSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId)) {
-      submittingDraftStartedAtRef.current.delete(activeSessionId);
-      setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
-    }
-  }, [activeSessionId, completedTurnKey]);
+    if (changed) setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
+  }, [onRolesConsumed, sessions]);
 
   const latestActiveTurn = activeSession?.turns.at(-1);
   useEffect(() => {
@@ -1645,22 +2722,91 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
     const reserved = reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession);
     if (reserved === null) return;
     setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
-    const nextQueues = {
-      ...queuedMessagesBySessionRef.current,
-      [reserved.sessionId]: [...(queuedMessagesBySessionRef.current[reserved.sessionId] ?? []), { id: clientId("queued"), text: reserved.text, createdAtMs: Date.now() }],
-    };
-    const sent = !!reliableStorageScope && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);
-    if (sent) updateQueuedMessages(() => nextQueues);
+    const attachmentIds = availableAttachments.map((attachment) => attachment.id);
+    const existingQueue = queuedMessagesBySessionRef.current[reserved.sessionId] ?? [];
+    const direct = activeSession?.session_id === reserved.sessionId
+      && shouldDirectManualMessage(activeSession.state, existingQueue.length, !!queuedMessagesPause);
+    let sent: boolean;
+    let directCommandId: string | undefined;
+    if (direct) {
+      queuedAutoContinueSessionIdsRef.current.delete(reserved.sessionId);
+      directCommandId = clientId("submit");
+      sent = onSendForSession(
+        reserved.sessionId,
+        reserved.text,
+        directCommandId,
+        attachmentIds,
+        false,
+        selectedRoleIds,
+      );
+    } else {
+      const nextQueues = {
+        ...queuedMessagesBySessionRef.current,
+        [reserved.sessionId]: [...existingQueue, {
+          id: clientId("queued"),
+          text: reserved.text,
+          createdAtMs: Date.now(),
+          attachmentIds,
+          roleIds: [...selectedRoleIds],
+        }],
+      };
+      sent = !!reliableStorageScope
+        && saveQueuedMessages(window.localStorage, reliableStorageScope, nextQueues, queuedMessagesBySessionRef.current);
+      if (sent) {
+        // Busy, paused, and already-backed-up sessions retain durable FIFO ordering.
+        updateQueuedMessages(() => nextQueues);
+      }
+    }
+    if (sent && !directCommandId && selectedRoleIds.length > 0) {
+      onRolesConsumed(reserved.sessionId);
+    }
     // Release the synchronous deduplication lock before publishing the React state
     // snapshot. Calling the mutating helper inside a deferred state updater would
     // leave the next lock snapshot stale and keep the composer stuck on Sending.
     const nextDrafts = finishSessionDraftSubmission(submittingDraftSessionIdsRef, draftsBySession, reserved.sessionId, reserved.text, sent);
+    if (sent && directCommandId) {
+      // Keep this Session occupied until Core authoritatively starts the turn.
+      // A rejected command ACK releases the same lock so the user can retry.
+      directSubmissionsRef.current.set(reserved.sessionId, {
+        commandId: directCommandId,
+        text: reserved.text,
+        roleIds: [...selectedRoleIds],
+      });
+      submittingDraftStartedAtRef.current.set(reserved.sessionId, Date.now());
+      submittingDraftSessionIdsRef.current.add(reserved.sessionId);
+    }
     setDraftsBySession(nextDrafts);
     if (!submittingDraftSessionIdsRef.current.has(reserved.sessionId)) submittingDraftStartedAtRef.current.delete(reserved.sessionId);
     setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
   };
 
-  const toggleQueuedMessages = () => {
+  const submitDraftAsSupplement = () => {
+ if (uploadingAttachment || sessionInteractionLocked) return;
+ const reserved = reserveSessionDraftSubmission(submittingDraftSessionIdsRef, activeSessionId, draftsBySession);
+ if (reserved === null) return;
+ setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
+ const sent = onSendForSession(
+ reserved.sessionId,
+ reserved.text,
+ clientId("supplement"),
+ availableAttachments.map((attachment) => attachment.id),
+ true,
+ selectedRoleIds,
+ );
+ if (sent && selectedRoleIds.length > 0) onRolesConsumed(reserved.sessionId);
+ const nextDrafts = finishSessionDraftSubmission(
+ submittingDraftSessionIdsRef,
+ draftsBySession,
+ reserved.sessionId,
+ reserved.text,
+ sent,
+ );
+ setDraftsBySession(nextDrafts);
+ if (!submittingDraftSessionIdsRef.current.has(reserved.sessionId)) submittingDraftStartedAtRef.current.delete(reserved.sessionId);
+ setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
+};
+
+const toggleQueuedMessages = () => {
     if (!activeSessionId) return;
     setExpandedQueueSessionIds((current) => {
       const next = new Set(current);
@@ -1670,13 +2816,34 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
     });
   };
 
-  const dropQueuedMessage = (targetId: string) => {
-    if (!activeSessionId || !draggedQueueMessageId) return;
+  const toggleQueuedMessagePanel = () => {
+    if (!activeSessionId) return;
+    setCollapsedQueuePanelSessionIds((current) => {
+      const next = new Set(current);
+      if (next.has(activeSessionId)) next.delete(activeSessionId);
+      else next.add(activeSessionId);
+      return next;
+    });
+  };
+
+  const previewQueuedMessageDrag = ({ over }: DragOverEvent) => {
+    setQueuedMessageOverId(over ? String(over.id) : undefined);
+  };
+
+  const finishQueuedMessageDrag = ({ active, over }: DragEndEvent) => {
+    setDraggedQueueMessageId(undefined);
+    setQueuedMessageOverId(undefined);
+    if (!activeSessionId || !over || active.id === over.id) return;
     updateQueuedMessages((current) => ({
       ...current,
-      [activeSessionId]: reorderQueuedMessages(current[activeSessionId] ?? [], draggedQueueMessageId, targetId, queuedMessageClaimsRef.current, activeSessionId),
+      [activeSessionId]: reorderQueuedMessages(
+        current[activeSessionId] ?? [],
+        String(active.id),
+        String(over.id),
+        queuedMessageClaimsRef.current,
+        activeSessionId,
+      ),
     }));
-    setDraggedQueueMessageId(undefined);
   };
 
   const saveQueuedMessageEdit = () => {
@@ -1692,7 +2859,13 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
     setEditingQueuedMessage(undefined);
   };
 
-  return <ThreadPrimitive.Root key={activeSessionId ?? "no-session"} className="aui-thread">
+ const cancelActiveSessionTurn = async () => {
+ if (activeSessionId) queuedAutoContinueSessionIdsRef.current.delete(activeSessionId);
+ setEditingQueuedMessage(undefined);
+ await onCancel();
+ };
+
+ return <ThreadPrimitive.Root key={activeSessionId ?? "no-session"} className="aui-thread">
     <ThreadPrimitive.Viewport
       ref={viewportRef}
       className="chat-scroll aui-thread-viewport"
@@ -1707,6 +2880,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
           scrollTop: event.currentTarget.scrollTop,
           followLatest: followThreadLatest.current,
         });
+        updateUserMessageNavigation();
       }}
     >
       {(activeSession?.turns.length ?? 0) === 0 &&
@@ -1716,6 +2890,7 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
       <VisibleTurnList
         sessionId={activeSession?.session_id ?? ""}
         turns={turns}
+        restartMarkers={restartMarkers}
         decisionsByTurn={decisionsByTurn}
         sessionInteractionLocked={sessionInteractionLocked}
         pendingDecisionKeys={pendingDecisionKeys}
@@ -1723,32 +2898,51 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
         toolGenSessionBusy={toolGenSessionBusy}
         onDecisionReply={onDecisionReply}
         onRequestToolGen={onRequestToolGen}
+        onRequestMessageDelete={onRequestMessageDelete}
       />
       <ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">
-        <ThreadPrimitive.ScrollToBottom asChild><button type="button" className="scroll-to-bottom" title="Scroll to latest message" aria-label="Scroll to latest message"><ArrowDown size={16} aria-hidden="true"/></button></ThreadPrimitive.ScrollToBottom>
-        {!!activeSession && queuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"}`} aria-label={`${queuedMessages.length} queued message${queuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span><small>上一条完成后自动发送</small>{hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${queuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}</header><div className="queued-message-items">{visibleQueuedMessages.map((message) => {
+        {!!activeSession && displayQueuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`} aria-label={`${displayQueuedMessages.length} queued message${displayQueuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span>{queuePanelCollapsed ? <div className={`queued-message-summary ${firstQueuedMessage?.deliveryError ? "delivery-error" : ""}`} title={firstQueuedMessage?.deliveryError || firstQueuedMessage?.text}><p>{firstQueuedMessage?.text}</p>{firstQueuedMessage && firstQueuedMessage.attachmentIds.length > 0 && <small className="queued-message-summary-attachments"><Paperclip size={10}/>{firstQueuedMessage.attachmentIds.length}</small>}<small className="queued-message-summary-count">{displayQueuedMessages.length} 条</small></div> : <small title={queuedMessagesPause?.reason}>{queuedMessagesPause ? `自动发送已停止${queuedMessagesPause.reason ? `：${queuedMessagesPause.reason}` : ""}` : "上一条正常完成后自动发送"}</small>}<div className="queued-message-header-actions"><label className="queued-auto-send-control"><span>自动发送</span><button type="button" role="switch" className="queued-auto-send-switch" aria-checked={!queuedMessagesPause} aria-label={queuedMessagesPause ? "开启自动发送" : "停止自动发送"} title={queuedMessagesPause ? "开启自动发送" : "停止自动发送"} onClick={() => { if (!activeSessionId) return; if (queuedMessagesPause) resumeQueuedMessages(activeSessionId); else pauseQueuedMessages(activeSessionId, "用户关闭了自动发送", "user"); }}><span className="queued-auto-send-thumb"/></button></label>{!queuePanelCollapsed && hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${displayQueuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}<button type="button" className="queued-message-panel-toggle" aria-expanded={!queuePanelCollapsed} aria-controls={`queued-message-items-${activeSession.session_id}`} title={queuePanelCollapsed ? "展开待发送队列" : "折叠待发送队列为一行"} onClick={toggleQueuedMessagePanel}>{queuePanelCollapsed ? <ChevronDown size={14}/> : <ChevronUp size={14}/>}<span>{queuePanelCollapsed ? "展开" : "折叠"}</span></button></div></header>{!queuePanelCollapsed && <DndContext
+          sensors={queueDragSensors}
+          collisionDetection={closestCenter}
+          onDragStart={({ active }) => {
+            setDraggedQueueMessageId(String(active.id));
+            setQueuedMessageOverId(String(active.id));
+          }}
+          onDragOver={previewQueuedMessageDrag}
+          onDragCancel={() => {
+            setDraggedQueueMessageId(undefined);
+            setQueuedMessageOverId(undefined);
+          }}
+          onDragEnd={finishQueuedMessageDrag}
+        ><SortableContext items={visibleQueuedMessages.map(({ id }) => id)} strategy={verticalListSortingStrategy}><div id={`queued-message-items-${activeSession.session_id}`} className="queued-message-items">{visibleQueuedMessages.map((message) => {
           const index = queuedMessages.findIndex((candidate) => candidate.id === message.id);
           const editing = editingQueuedMessage?.sessionId === activeSession.session_id && editingQueuedMessage.id === message.id;
           const claimed = queuedMessageClaims.has(queuedMessageKey(activeSession.session_id, message.id));
-          return <article className={`queued-message ${editing ? "editing" : ""} ${message.deliveryError ? "delivery-error" : ""} ${draggedQueueMessageId === message.id ? "dragging" : ""} ${claimed ? "sending" : ""}`} aria-busy={claimed || undefined} key={message.id} onDragOver={(event) => { if (!editing && !claimed) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }} onDrop={(event) => { event.preventDefault(); if (!editing && !claimed) dropQueuedMessage(message.id); }}><button type="button" className="queued-message-drag" draggable={!editing && !claimed && queuedMessages.length > 1} disabled={editing || claimed} title={`拖动调整第 ${index + 1} 条消息的顺序`} aria-label={`拖动调整第 ${index + 1} 条消息的顺序`} onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", message.id); setDraggedQueueMessageId(message.id); }} onDragEnd={() => setDraggedQueueMessageId(undefined)}><GripVertical size={13}/></button><span className="queued-message-order" aria-label={`Queue position ${index + 1}`}>{index + 1}</span>{editing ? <textarea className="queued-message-editor" autoFocus value={editingQueuedMessage.text} aria-label={`编辑第 ${index + 1} 条待发送消息`} onChange={(event) => setEditingQueuedMessage({ ...editingQueuedMessage, text: event.target.value })} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveQueuedMessageEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditingQueuedMessage(undefined); } }}/>: <p title={message.deliveryError || message.text}>{message.text}{message.deliveryError && <small className="queued-message-error">{message.deliveryError}</small>}</p>}<div>{editing ? <><button type="button" className="queued-message-edit-save" disabled={!editingQueuedMessage.text.trim() || claimed} onClick={saveQueuedMessageEdit}>保存</button><button type="button" disabled={claimed} onClick={() => setEditingQueuedMessage(undefined)}>取消</button></> : <><button type="button" className="queued-message-edit" title="重新编辑这条待发送消息" aria-label={`重新编辑第 ${index + 1} 条待发送消息`} disabled={claimed} onClick={() => { setEditingQueuedMessage({ sessionId: activeSession.session_id, id: message.id, text: message.text }); setExpandedQueueSessionIds((current) => new Set(current).add(activeSession.session_id)); }}><Pencil size={12}/></button><button type="button" className="queued-message-supplement" title={message.deliveryError ? "重试发送这条消息" : "立即发送为当前任务的补充"} disabled={claimed || (!message.deliveryError && activeSession.state !== "working") || sessionInteractionLocked || isCancelling} onClick={() => {
+          const messageRoleIds = message.roleIds ?? (message.roleId ? [message.roleId] : []);
+          const messageRoleNames = messageRoleIds.map((roleId) => activeSession.roles.find((role) => role.id === roleId)?.name ?? roleId);
+          const dragDisabled = editing || claimed || displayQueuedMessages.length <= 1;
+ const sendAsNewTurn = activeSession.state !== "working";
+          return <SortableQueuedMessage id={message.id} disabled={dragDisabled} key={message.id}>{({ setNodeRef, style, attributes, listeners, isDragging }) => <article ref={setNodeRef} style={style} className={`queued-message ${editing ? "editing" : ""} ${message.deliveryError ? "delivery-error" : ""} ${isDragging ? "dragging" : ""} ${claimed ? "sending" : ""}`} aria-busy={claimed || undefined}><button type="button" className="queued-message-drag" disabled={dragDisabled} title={`拖动调整第 ${index + 1} 条消息的顺序`} aria-label={`拖动调整第 ${index + 1} 条消息的顺序`} {...attributes} {...listeners}><GripVertical size={13}/></button><span className="queued-message-order" aria-label={`Queue position ${index + 1}`}>{index + 1}</span><div className="queued-message-preview">{messageRoleNames.length > 0 && <small className="queued-message-roles" title={messageRoleNames.join(" | ")}><BriefcaseBusiness size={11}/><span className="queued-message-role-names">{messageRoleNames.map((roleName, roleIndex) => <span className="queued-message-role" key={`${messageRoleIds[roleIndex]}-${roleIndex}`}>{roleIndex > 0 && <i className="queued-message-role-separator" aria-hidden="true">|</i>}<span>{roleName}</span></span>)}</span></small>}{editing ? <textarea className="queued-message-editor" autoFocus value={editingQueuedMessage.text} aria-label={`编辑第 ${index + 1} 条待发送消息`} onChange={(event) => setEditingQueuedMessage({ ...editingQueuedMessage, text: event.target.value })} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") { event.preventDefault(); saveQueuedMessageEdit(); } if (event.key === "Escape") { event.preventDefault(); setEditingQueuedMessage(undefined); } }}/>: <p title={message.deliveryError || message.text}>{message.text}</p>}{message.attachmentIds.length > 0 && <small className="queued-message-attachments"><Paperclip size={11}/>{message.attachmentIds.length} 个附件</small>}{message.deliveryError && <small className="queued-message-error">{message.deliveryError}</small>}</div><div className="queued-message-actions">{editing ? <><button type="button" className="queued-message-edit-save" disabled={!editingQueuedMessage.text.trim() || claimed} onClick={saveQueuedMessageEdit}>保存</button><button type="button" className="queued-message-edit-cancel" disabled={claimed} onClick={() => setEditingQueuedMessage(undefined)}>取消</button></> : <><button type="button" className="queued-message-edit" title="重新编辑这条待发送消息" aria-label={`重新编辑第 ${index + 1} 条待发送消息`} disabled={claimed} onClick={() => { setEditingQueuedMessage({ sessionId: activeSession.session_id, id: message.id, text: message.text }); setExpandedQueueSessionIds((current) => new Set(current).add(activeSession.session_id)); }}><Pencil size={12}/></button><button type="button" className="queued-message-supplement" title={message.deliveryError ? "重试发送这条消息" : sendAsNewTurn ? "作为新消息开始任务" : "立即发送为当前任务的补充"} disabled={claimed || sessionInteractionLocked || isCancelling} onClick={() => {
           if (!claimQueuedMessage(queuedMessageClaimsRef.current, activeSession.session_id, queuedMessagesBySession[activeSession.session_id] ?? [], message.id)) return;
+          queuedAutoContinueSessionIdsRef.current.delete(activeSession.session_id);
           setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-          if (!onSend(message.text, message.id)) {
+          if (!onSendForSession(activeSession.session_id, message.text, message.id, message.attachmentIds, !sendAsNewTurn, messageRoleIds, sendAsNewTurn)) {
             releaseQueuedMessageClaim(queuedMessageClaimsRef.current, activeSession.session_id, message.id);
             setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
             updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: (current[activeSession.session_id] ?? []).map((candidate) => candidate.id === message.id ? { ...candidate, deliveryError: "消息尚未安全保存，请检查浏览器存储后重试" } : candidate) }));
             return;
           }
           if (message.deliveryError) updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: (current[activeSession.session_id] ?? []).map((candidate) => candidate.id === message.id ? { ...candidate, deliveryError: undefined } : candidate) }));
-        }}>{claimed ? "发送中…" : message.deliveryError ? "重试" : "立即"}</button><button type="button" className="queued-message-remove" title="Remove queued message" aria-label={`Remove queued message ${index + 1}`} disabled={claimed} onClick={() => updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: removeQueuedMessage(current[activeSession.session_id] ?? [], message.id, queuedMessageClaimsRef.current, activeSession.session_id) }))}><X size={13}/></button></>}</div></article>;
-        })}</div></section>}
-        {!!activeSession && (!!activeSession.attachments.length || uploadingAttachment) && <div className="attachment-strip" aria-label={attachmentStripLabel} aria-live="polite" aria-busy={uploadingAttachment || undefined}>{attachedFileCount > 0 && <div className="attachment-summary" title={attachmentSummary}><Paperclip size={13}/><span>{attachmentSummary}</span></div>}{uploadingAttachment && <div className="pending-attachment uploading" role="status" aria-label={uploadingAttachmentFile ? `${uploadingAttachmentText}, ${formatBytes(uploadingAttachmentFile.bytes)}` : uploadingAttachmentText} title={uploadingAttachmentFile?.name ?? uploadingAttachmentText}><span className="upload-dot" aria-hidden="true"/><span className="pending-attachment-name">{uploadingAttachmentFile?.name ?? "Uploading file…"}</span>{uploadingAttachmentFile && <small>{formatBytes(uploadingAttachmentFile.bytes)}</small>}</div>}{activeSession.attachments.map((attachment) => {
+        }}>{claimed ? "发送中…" : message.deliveryError ? "重试" : "立即"}</button><button type="button" className="queued-message-remove" title="Remove queued message" aria-label={`Remove queued message ${index + 1}`} disabled={claimed} onClick={() => updateQueuedMessages((current) => ({ ...current, [activeSession.session_id]: removeQueuedMessage(current[activeSession.session_id] ?? [], message.id, queuedMessageClaimsRef.current, activeSession.session_id) }))}><X size={13}/></button></>}</div></article>}</SortableQueuedMessage>;
+        })}</div></SortableContext><DragOverlay dropAnimation={prefersReducedMotion() ? null : { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" }}>{draggedQueuedMessage && <article className="queued-message queued-message-overlay" aria-hidden="true"><span className="queued-message-drag"><GripVertical size={13}/></span><span className="queued-message-order">{draggedQueuedMessagePosition}</span><div className="queued-message-preview"><p>{draggedQueuedMessage.text}</p>{draggedQueuedMessage.attachmentIds.length > 0 && <small className="queued-message-attachments"><Paperclip size={11}/>{draggedQueuedMessage.attachmentIds.length} 个附件</small>}</div></article>}</DragOverlay></DndContext>}</section>}
+        {!!activeSession && (!!availableAttachments.length || uploadingAttachment) && <div className="attachment-strip" aria-label={attachmentStripLabel} aria-live="polite" aria-busy={uploadingAttachment || undefined}>{attachedFileCount > 0 && <div className="attachment-summary" title={attachmentSummary}><Paperclip size={13}/><span>{attachmentSummary}</span></div>}{uploadingAttachment && <div className="pending-attachment uploading" role="status" aria-label={uploadingAttachmentFile ? `${uploadingAttachmentText}, ${formatBytes(uploadingAttachmentFile.bytes)}` : uploadingAttachmentText} title={uploadingAttachmentFile?.name ?? uploadingAttachmentText}><span className="upload-dot" aria-hidden="true"/><span className="pending-attachment-name">{uploadingAttachmentFile?.name ?? "Uploading file…"}</span>{uploadingAttachmentFile && <small>{formatBytes(uploadingAttachmentFile.bytes)}</small>}</div>}{availableAttachments.map((attachment) => {
           const removing = pendingAttachmentRemoveIds.has(`${activeSession.session_id}:${attachment.id}`);
           const removeLabel = removing ? `Removing ${attachment.name}` : sessionInteractionLocked ? `${sessionInteractionLockReason} · cannot remove ${attachment.name}` : `Remove ${attachment.name}`;
           return <div className="pending-attachment" key={attachment.id} title={attachment.name}><Paperclip size={13}/><span className="pending-attachment-name">{attachment.name}</span><small>{formatBytes(attachment.bytes)}</small><button type="button" title={removeLabel} aria-label={removeLabel} aria-busy={removing || undefined} disabled={removing || sessionInteractionLocked} onClick={() => onRemoveAttachment(attachment.id)}>{removing ? "…" : <X size={13}/>}</button></div>;
         })}</div>}
         <form className="composer" onSubmit={(event) => { event.preventDefault(); submitDraft(); }}>
-          <textarea
+          <div className="expandable-text-field composer-text-field"><textarea
+            ref={composerTextareaRef}
             value={draft}
             placeholder={!activeSession ? "Create a session to start…" : sessionInteractionLocked ? sessionInteractionLockReason : activeSession.state === "working" ? "继续输入…" : "Ask Timem to investigate, write, or work with you."}
             aria-label="Message Timem"
@@ -1757,16 +2951,28 @@ function TimemThread({ activeSession, sessions, completedTurnKey, commandAcks, o
             disabled={!activeSession || sessionInteractionLocked}
             onChange={(event) => setDraftsBySession((current) => setSessionDraft(current, activeSessionId, event.target.value))}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                submitDraft();
-              }
-            }}
-          />
-          <div className="composer-actions"><span className="composer-cwd-inline" title={activeSession?.current_dir}>{activeSession && <><b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span></>}</span><span id={composerHintId} className="sr-only" role="status" aria-live="polite">{composerHint}</span><div className="composer-buttons"><button className={`attach-button ${uploadingAttachment ? "uploading" : ""}`} type="button" title={attachTitle} aria-label={attachLabel} disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onClick={() => fileInput.current?.click()}>{uploadingAttachment ? <LoaderCircle size={17}/> : <Paperclip size={17}/>}</button><input ref={fileInput} className="file-input" type="file" disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/><button className={`send-button ${submittingDraft ? "sending" : ""}`} type="submit" title={effectiveSendLabel} aria-label={effectiveSendLabel} disabled={!activeSession || !draft.trim() || submittingDraft || uploadingAttachment || sessionInteractionLocked}>{submittingDraft ? <LoaderCircle size={17}/> : <Send size={17}/>}</button>{activeSession?.state === "working" && <button className={`stop-button ${isCancelling ? "sending" : ""}`} type="button" title={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} aria-label={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} disabled={isCancelling || sessionInteractionLocked} onClick={() => void onCancel()}>{isCancelling ? <LoaderCircle size={17}/> : <CircleStop size={17}/>} {isCancelling ? "Stopping…" : "Stop"}</button>}</div></div>
+ if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+ if (event.metaKey || event.ctrlKey) {
+ event.preventDefault();
+ submitDraftAsSupplement();
+ return;
+ }
+ if (!event.shiftKey) {
+ event.preventDefault();
+ submitDraft();
+ }
+ }}
+ /><button type="button" className="text-field-expand" title="展开编辑用户信息" aria-label="展开编辑用户信息" disabled={!activeSession || sessionInteractionLocked} onClick={() => { setComposerDraftBeforeExpand(draft); setComposerExpanded(true); }}><Maximize2 size={14}/></button></div>
+          {composerExpanded && activeSession && <ExpandedTextEditor eyebrow="MESSAGE" title="编辑用户信息" value={draft} disabled={sessionInteractionLocked} placeholder={activeSession.state === "working" ? "继续输入…" : "Ask Timem to investigate, write, or work with you."} onChange={(value) => setDraftsBySession((current) => setSessionDraft(current, activeSessionId, value))} onClose={() => setComposerExpanded(false)} onCancel={() => { setDraftsBySession((current) => setSessionDraft(current, activeSessionId, composerDraftBeforeExpand)); setComposerExpanded(false); }}/>}
+          {selectedRoles.length > 0 && activeSession && <div className="composer-role" title={selectedRoles.map((role) => `${role.name}: ${role.description}`).join("\n")}><BriefcaseBusiness size={14}/><span>本条将使用 <strong>{selectedRoles.map((role) => role.name).join("、")}</strong></span><button type="button" title="Clear roles for this message" aria-label="Clear selected roles" onClick={() => onRolesConsumed(activeSession.session_id)}><X size={13}/></button></div>}
+          <div className="composer-actions"><div className="composer-paths">{activeSession && <span className="composer-cwd-inline" title={activeSession.current_dir}><b>CWD:</b><span className="path-tail">{tailPath(activeSession.current_dir, 64)}</span></span>}{activeSession?.debug_dir && <span className="composer-cwd-inline composer-debug-inline" title={activeSession.debug_dir}><b>DEBUG:</b><span>{activeSession.debug_dir}</span></span>}</div><span id={composerHintId} className="sr-only" role="status" aria-live="polite">{composerHint}</span><div className="composer-buttons"><button className={`attach-button ${uploadingAttachment ? "uploading" : ""}`} type="button" title={attachTitle} aria-label={attachLabel} disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onClick={() => fileInput.current?.click()}>{uploadingAttachment ? <LoaderCircle size={17}/> : <Paperclip size={17}/>}</button><input ref={fileInput} className="file-input" type="file" disabled={!activeSession || uploadingAttachment || sessionInteractionLocked} onChange={(event) => { const file = event.target.files?.[0]; event.currentTarget.value = ""; if (file) void onUpload(file); }}/>{showStopAction ? <button className={`stop-button ${isCancelling ? "sending" : ""}`} type="button" title={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} aria-label={isCancelling ? "Cancellation requested" : lockedControlHint || "Cancel current turn"} disabled={isCancelling || sessionInteractionLocked} onClick={() => void cancelActiveSessionTurn()}>{isCancelling ? <LoaderCircle size={17}/> : <CircleStop size={17}/>} {isCancelling ? "Stopping…" : "Stop"}</button> : <button className={`send-button ${submittingDraft ? "sending" : ""}`} type="submit" title={effectiveSendLabel} aria-label={effectiveSendLabel} disabled={!activeSession || !hasDraftText || submittingDraft || uploadingAttachment || sessionInteractionLocked}>{submittingDraft ? <LoaderCircle size={17}/> : <Send size={17}/>}</button>}</div></div>
         </form>
       </ThreadPrimitive.ViewportFooter>
     </ThreadPrimitive.Viewport>
+    <nav className="user-message-navigation" aria-label="用户消息导航">
+      <button type="button" title="上一条用户消息" aria-label="上一条用户消息" disabled={!userMessageNavigation.previous} onClick={() => navigateUserMessage("previous")}><ChevronUp size={17} aria-hidden="true"/></button>
+      <button type="button" title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} aria-label={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} disabled={!userMessageNavigation.next && !userMessageNavigation.bottom} onClick={() => { if (userMessageNavigation.next) navigateUserMessage("next"); else navigateToThreadBottom(); }}><ChevronDown size={17} aria-hidden="true"/></button>
+    </nav>
   </ThreadPrimitive.Root>;
 }
 
@@ -1780,45 +2986,102 @@ type TurnInteractionProps = {
   toolGenBlocked: boolean;
   onDecisionReply: (decision: Decision, reply: "accept" | "decline" | "always_allow") => void;
   onRequestToolGen: (turnId: string) => void;
+  onRequestMessageDelete: (candidate: ChatMessageDeleteCandidate) => void;
 };
 
-const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked, pendingDecisionKeys, toolGenPending, toolGenBlocked, onDecisionReply, onRequestToolGen }: TurnInteractionProps) {
+const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked, pendingDecisionKeys, toolGenPending, toolGenBlocked, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: TurnInteractionProps) {
   const workScrollRef = useRef<HTMLDivElement | null>(null);
-  const followLatest = useRef(true);
-  const previousUpdateCount = useRef(turn.events.length + decisions.length);
+ const workContentRef = useRef<HTMLDivElement | null>(null);
+ const followLatest = useRef(true);
+  const previousUpdateCount = useRef(
+    turn.events.length
+      + turn.user_entries.filter((entry) => entry.kind === "supplement").length
+      + decisions.length,
+  );
   const previousTurnState = useRef(turn.state);
   const [pendingUpdates, setPendingUpdates] = useState(0);
+  const [workingElapsedMs, setWorkingElapsedMs] = useState(() => Math.max(0, Date.now() - turn.created_at_ms));
   const lifecycleEvents = useMemo(() => coalesceActionLifecycle(turn.events), [turn.events]);
-  const visibleEvents = useMemo(() => lifecycleEvents.slice(-MAX_RENDERED_TURN_EVENTS), [lifecycleEvents]);
-  const processActivities = useMemo(() => lifecycleEvents
-    .map((event) => activityFromTurnEvent(event, turn.turn_id))
-    .filter((activity): activity is Activity => activity !== null), [lifecycleEvents, turn.turn_id]);
-  const persistentToolGenEvents = useMemo(() => visibleEvents.filter((event) => {
-    const activity = activityFromTurnEvent(event, turn.turn_id);
-    return activity?.kind === "toolgen" && activity.toolgen_phase === "published";
-  }), [turn.turn_id, visibleEvents]);
-  const persistentToolGenEventIds = useMemo(() => new Set(persistentToolGenEvents.map((event) => event.event_id)), [persistentToolGenEvents]);
-  const scrollEvents = useMemo(() => visibleEvents.filter((event) => !persistentToolGenEventIds.has(event.event_id)), [persistentToolGenEventIds, visibleEvents]);
-  const omitted = lifecycleEvents.length - visibleEvents.length;
-  const hasVisibleProcess = processActivities.length > 0 || decisions.length > 0 || turn.state === "working";
-  const hasOnlyFreeTalk = hasOnlyFreeTalkActivity(processActivities, decisions.length);
+ const lifecycleItems = useMemo(() => lifecycleEvents.map((event) => ({
+ type: "event" as const,
+ key: event.event_id,
+ createdAt: event.created_at_ms,
+ event,
+ activity: activityFromTurnEvent(event, sessionId),
+ })), [lifecycleEvents, sessionId]);
+ const supplementItems = useMemo(() => turn.user_entries
+ .map((entry, roleIndex) => ({ entry, roleIndex }))
+ .filter(({ entry }) => entry.kind === "supplement")
+ .map(({ entry, roleIndex }) => ({
+ type: "supplement" as const,
+ key: `user-supplement-${entry.created_at_ms}-${roleIndex}`,
+ createdAt: entry.created_at_ms,
+ activity: {
+ id: `user-supplement-${turn.turn_id}-${entry.created_at_ms}-${roleIndex}`,
+ sessionId,
+ tone: "thinking" as const,
+ kind: "user_supplement" as const,
+ title: "[用户补充]",
+ detail: entry.text,
+ createdAt: entry.created_at_ms,
+ },
+ })), [sessionId, turn.turn_id, turn.user_entries]);
+ const timelineItems = useMemo(() => [...lifecycleItems, ...supplementItems]
+ .sort((left, right) => left.createdAt - right.createdAt), [lifecycleItems, supplementItems]);
+ const visibleItems = timelineItems;
+ const processActivities = useMemo(() => timelineItems
+ .map(({ activity }) => activity)
+ .filter((activity): activity is Activity => activity !== null), [timelineItems]);
+ const modelRetryStatus = useMemo(() => activeModelRetryStatus(turn), [turn]);
+ const persistentToolGenItems = useMemo(() => visibleItems.filter((item) => (
+ item.type === "event"
+ && item.activity?.kind === "toolgen"
+ && item.activity.toolgen_phase === "published"
+ )), [visibleItems]);
+ const persistentToolGenItemKeys = useMemo(() => new Set(
+ persistentToolGenItems.map(({ key }) => key)
+ ), [persistentToolGenItems]);
+ const scrollItems = useMemo(() => visibleItems.filter(
+ item => !persistentToolGenItemKeys.has(item.key)
+ ), [persistentToolGenItemKeys, visibleItems]);
+ const toolActivityRuns = useMemo(
+ () => summarizeConsecutiveToolActivities(scrollItems.map(({ activity }) => activity)),
+ [scrollItems],
+ );
+ const toolActivityRunByStartIndex = useMemo(
+ () => new Map(toolActivityRuns.map((run) => [run.startIndex, run.summary])),
+ [toolActivityRuns],
+ );
+ const hasVisibleProcess = processActivities.length > 0 || supplementItems.length > 0 || decisions.length > 0 || turn.state === "working";
   const interruptedByUser = turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
-  const [showCompletedWork, setShowCompletedWork] = useState(() => !interruptedByUser && (turn.state === "working" || !hasOnlyFreeTalk));
+  const [showWorkStream, setShowWorkStream] = useState(() => turn.state === "working");
   const isToolGenTurn = turn.turn_id.startsWith("web_toolgen_turn_")
     || turn.user_entries.some((entry) => entry.kind === "toolgen_instruction")
     || turn.events.some((event) => (event.payload.topic as { name?: string } | undefined)?.name === "core.toolgen");
   const canCollapseCompletedWork = turn.state !== "working" && (!!turn.final_answer || interruptedByUser);
-  const showWorkStream = !canCollapseCompletedWork || showCompletedWork;
+  const canToggleWorkStream = turn.state === "working" || canCollapseCompletedWork;
+  const workStreamVisible = !canToggleWorkStream || showWorkStream;
+  const workingElapsed = turn.state === "working" ? formatDuration(workingElapsedMs) : undefined;
+
+  useEffect(() => {
+    if (turn.state !== "working") return;
+    const updateElapsed = () => setWorkingElapsedMs(Math.max(0, Date.now() - turn.created_at_ms));
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 1_000);
+    return () => window.clearInterval(timer);
+  }, [turn.created_at_ms, turn.state]);
+  const canDeleteConversationContent = turn.state !== "working" && !sessionInteractionLocked;
 
   useEffect(() => {
     const wasWorking = previousTurnState.current === "working";
     previousTurnState.current = turn.state;
-    if (wasWorking && turn.state !== "working" && (hasOnlyFreeTalk || interruptedByUser)) setShowCompletedWork(false);
-  }, [hasOnlyFreeTalk, interruptedByUser, turn.state]);
+    if (!wasWorking && turn.state === "working") setShowWorkStream(true);
+    if (wasWorking && turn.state !== "working") setShowWorkStream(false);
+  }, [turn.state]);
 
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
-    const updateCount = turn.events.length + decisions.length;
+    const updateCount = turn.events.length + supplementItems.length + decisions.length;
     const added = Math.max(0, updateCount - previousUpdateCount.current);
     previousUpdateCount.current = updateCount;
     if (!scroll) return;
@@ -1828,7 +3091,20 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
     } else if (added > 0) {
       setPendingUpdates((count) => count + added);
     }
-  }, [turn.events.length, decisions.length]);
+  }, [turn.events.length, supplementItems.length, decisions.length]);
+ useLayoutEffect(() => {
+ const scroll = workScrollRef.current;
+ const content = workContentRef.current;
+ if (!scroll || !content || typeof ResizeObserver === "undefined") return;
+ const observer = new ResizeObserver(() => {
+ if (!followLatest.current) return;
+ scroll.scrollTop = scroll.scrollHeight;
+ setPendingUpdates(0);
+ });
+ observer.observe(content);
+ return () => observer.disconnect();
+ }, [workStreamVisible]);
+
 
   const scrollWorkToLatest = () => {
     const scroll = workScrollRef.current;
@@ -1839,32 +3115,38 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
   };
 
   return <article className={`turn-interaction ${turn.state === "working" ? "active" : "completed"}`} data-turn-id={turn.turn_id}>
-    {!!turn.user_entries.filter((e) => e.kind !== "approval").length && <section className="turn-user-frame">
-      <div className="turn-user-content">{turn.user_entries.filter((e) => e.kind !== "approval").map((entry, index) => <div className={`turn-user-entry ${entry.kind}`} key={`${entry.created_at_ms}-${index}`}>
+    {!!turn.user_entries.filter((e) => e.kind !== "approval").length && <section className="turn-user-frame" data-user-message-anchor>
+      <div className="turn-user-content">{turn.user_entries.map((entry, roleIndex) => ({ entry, roleIndex })).filter(({ entry }) => entry.kind !== "approval").map(({ entry, roleIndex }) => <div className={`turn-user-entry ${entry.kind}`} key={`${entry.created_at_ms}-${roleIndex}`} onCopy={(event) => {
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0 || selection.isCollapsed || !selection.anchorNode || !selection.focusNode) return;
+        if (!event.currentTarget.contains(selection.anchorNode) || !event.currentTarget.contains(selection.focusNode)) return;
+        const copiedText = normalizeCopiedUserMessageText(selection.toString());
+        event.clipboardData.setData("text/plain", copiedText);
+        event.preventDefault();
+      }}>
+        <button type="button" className="chat-message-delete user-message-delete" title="Delete this message from the conversation and raw chat log" aria-label="Delete user message" disabled={!canDeleteConversationContent} onClick={() => onRequestMessageDelete({ sessionId, turnId: turn.turn_id, role: "user", roleIndex, preview: entry.text })}><Trash2 size={13}/></button>
         {entry.kind === "supplement" && <span>[补充]</span>}
         <MarkdownContent text={entry.text}/>
+        {(entry.worker_roles ?? (entry.worker_role ? [entry.worker_role] : [])).length > 0 && <div className="turn-entry-roles" aria-label={`使用 Role：${(entry.worker_roles ?? (entry.worker_role ? [entry.worker_role] : [])).map((role) => role.name).join("、")}`}><BriefcaseBusiness size={12}/><span>Role</span>{(entry.worker_roles ?? (entry.worker_role ? [entry.worker_role] : [])).map((role) => <b key={role.id} title={role.description}>{role.name}</b>)}</div>}
         {!!entry.attachments?.length && <div className="turn-entry-attachments">{entry.attachments.map((attachment) => <span key={attachment.id} title={attachment.path}><Paperclip size={13}/><i aria-hidden="true">:</i><b>{attachment.name}</b><small>{formatBytes(attachment.bytes)}</small></span>)}</div>}
       </div>)}</div>
     </section>}
-    {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state} ${showWorkStream ? "" : "collapsed-work"}`}>
-      {(turn.state === "working" || canCollapseCompletedWork) && <div className="turn-assistant-heading">{canCollapseCompletedWork ? <button type="button" className={`working-chip work-title-chip completed-work-title work-collapse-toggle${interruptedByUser ? " interrupted-work-title" : ""}${isToolGenTurn ? " toolgen-working toolgen-completed-title" : ""}`} title={showCompletedWork ? "Hide work details" : "Show work details"} aria-label={showCompletedWork ? "Hide work details" : "Show work details"} aria-expanded={showCompletedWork} onClick={() => setShowCompletedWork((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/><CheckCheck size={11}/>{isToolGenTurn ? "ToolGen" : "Thought/Action"}{interruptedByUser && <span className="work-title-status">(Interrupted)</span>}</button> : <span className={`working-chip work-title-chip active-work-title${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite">{isToolGenTurn ? <Wrench size={11}/> : <span className="pulse"/>}{isToolGenTurn ? "Generating tools…" : "working"}</span>}</div>}
-      {showWorkStream && <div className="turn-work-panel">
-        <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleEvents.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
-          const remaining = event.currentTarget.scrollHeight - event.currentTarget.scrollTop - event.currentTarget.clientHeight;
-          followLatest.current = remaining < 36;
+    {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state} ${workStreamVisible ? "" : "collapsed-work"}`}>
+      {canToggleWorkStream && <div className="turn-assistant-heading"><button type="button" className={`working-chip work-title-chip work-collapse-toggle${turn.state === "working" ? " active-work-title" : " completed-work-title"}${interruptedByUser ? " interrupted-work-title" : ""}${isToolGenTurn ? ` toolgen-working${turn.state === "working" ? "" : " toolgen-completed-title"}` : ""}`} title={showWorkStream ? "Hide work details" : "Show work details"} aria-label={showWorkStream ? "Hide work details" : "Show work details"} aria-expanded={showWorkStream} onClick={() => setShowWorkStream((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>{isToolGenTurn && <Wrench size={11}/>} {turn.state === "working" ? (isToolGenTurn ? "Generating tools…" : <span className="working-label">working</span>) : (isToolGenTurn ? "ToolGen" : "Thought/Action")}{workingElapsed && <span className="working-elapsed" aria-hidden="true">{workingElapsed}</span>}{interruptedByUser && <span className="work-title-status">(Interrupted)</span>}</button>{modelRetryStatus && <details className={`model-retry-status ${modelRetryStatus.kind}`}><summary title={`展开 ${modelRetryStatus.label} 详情`} aria-label={`展开 ${modelRetryStatus.label} 详情`}><ChevronRight size={12} aria-hidden="true"/><span>{modelRetryStatus.label}</span>{modelRetryStatus.progress && <small>{modelRetryStatus.progress}</small>}</summary><div className="model-retry-detail"><MarkdownContent text={modelRetryStatus.detail}/></div></details>}</div>}
+      {workStreamVisible && <div className="turn-work-panel">
+        <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleItems.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
+          followLatest.current = isNearScrollBottom({ scrollTop: event.currentTarget.scrollTop, scrollHeight: event.currentTarget.scrollHeight, clientHeight: event.currentTarget.clientHeight }, 36);
           if (followLatest.current) setPendingUpdates(0);
         }}>
-          {omitted > 0 && <div className="turn-events-omitted">{omitted} earlier work updates are retained by the host but not rendered.</div>}
-          {scrollEvents.map((event) => <TurnEventView key={event.event_id} event={event} sessionId={sessionId}/>)}
-          {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
+          <div className="turn-work-content" ref={workContentRef}> {scrollItems.map((item, index) => { const { activity } = item; if (activity?.tone === "action") { const summary = toolActivityRunByStartIndex.get(index); return summary ? <ToolActivityGroup key={`tool-activity-group-${item.key}`} summary={summary}/> : null; } return activity ? <ActivityView key={item.key} activity={activity}/> : null; })} {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
           {turn.state === "working" && <LiveTurnUsage turn={turn}/>}
-          {visibleEvents.length === 0 && decisions.length === 0 && turn.state === "working" && <div className={`working-indicator${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite"><span className="pulse"/>{isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"}</div>}
+          {visibleItems.length === 0 && decisions.length === 0 && turn.state === "working" && <div className={`working-indicator${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite"><span className="pulse"/>{isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"}</div>} </div>
         </div>
         {pendingUpdates > 0 && <button type="button" className="turn-new-updates" title="Scroll to latest work update" aria-live="polite" aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`} onClick={scrollWorkToLatest}><ArrowDown size={13} aria-hidden="true"/>{pendingUpdates} new update{pendingUpdates === 1 ? "" : "s"}</button>}
       </div>}
     </section>}
-    {persistentToolGenEvents.length > 0 && <div className="turn-persistent-toolgen" aria-label="ToolGen result">{persistentToolGenEvents.map((event) => <TurnEventView key={event.event_id} event={event} sessionId={sessionId}/>)}</div>}
-    {turn.final_answer && <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)}/>}
+    {persistentToolGenItems.length > 0 && <div className="turn-persistent-toolgen" aria-label="ToolGen result">{persistentToolGenItems.map(({ key, activity }) => activity ? <ActivityView key={key} activity={activity}/> : null)}</div>}
+    {turn.final_answer && <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)} onDelete={canDeleteConversationContent ? () => onRequestMessageDelete({ sessionId, turnId: turn.turn_id, role: "assistant", roleIndex: 0, preview: turn.final_answer ?? "" }) : undefined}/>}
     {!turn.final_answer && turn.completion && <section className="turn-completion-only"><CompletionCard completion={turn.completion}/></section>}
   </article>;
 }, areTurnInteractionPropsEqual);
@@ -1878,6 +3160,7 @@ function areTurnInteractionPropsEqual(previous: TurnInteractionProps, next: Turn
     || previous.toolGenBlocked !== next.toolGenBlocked
     || previous.onDecisionReply !== next.onDecisionReply
     || previous.onRequestToolGen !== next.onRequestToolGen
+    || previous.onRequestMessageDelete !== next.onRequestMessageDelete
     || previous.decisions.length !== next.decisions.length
   ) return false;
   return previous.decisions.every((decision, index) => {
@@ -1887,16 +3170,21 @@ function areTurnInteractionPropsEqual(previous: TurnInteractionProps, next: Turn
   });
 }
 
-function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked, onToolGen }: { text: string; completion: WebTurn["completion"]; toolGenPending: boolean; toolGenBlocked: boolean; onToolGen?: () => void }) {
+function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked, onToolGen, onDelete }: { text: string; completion: WebTurn["completion"]; toolGenPending: boolean; toolGenBlocked: boolean; onToolGen?: () => void; onDelete?: () => void }) {
   const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(text, {
     idle: "Copy answer",
     copied: "Answer copied",
     failed: "Copy answer failed",
   });
+  const answerActions = <div className="final-answer-actions">
+    <button type="button" className={`final-copy ${copyClass}`} title={copyLabel} aria-label={copyLabel} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={13}/> : <Copy size={13}/>}</button>
+    {onDelete && <button type="button" className="chat-message-delete assistant-message-delete" title="Delete this answer from the conversation and raw chat log" aria-label="Delete assistant answer" onClick={onDelete}><Trash2 size={13}/></button>}
+  </div>;
   return <section className="turn-final-delivery">
-    <div className="turn-final-toolbar"><button type="button" className={`final-copy ${copyClass}`} title={copyLabel} aria-label={copyLabel} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={13}/> : <Copy size={13}/>}<span aria-live="polite">{copyLabel}</span></button></div>
     <div className="message-content"><MarkdownContent text={text}/></div>
-    {completion && <CompletionCard completion={completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen}/>}
+    {completion
+      ? <CompletionCard completion={completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen} answerActions={answerActions}/>
+      : answerActions}
   </section>;
 }
 
@@ -1923,16 +3211,18 @@ function LiveTurnUsage({ turn }: { turn: WebTurn }) {
   </div>;
 }
 
-function TurnEventView({ event, sessionId }: { event: WebTurnEvent; sessionId: string }) {
-  const activity = activityFromTurnEvent(event, sessionId);
-  if (!activity) return null;
-  if (activity.kind === "context_compact") return <ContextCompactNotice activity={activity}/>;
-  if (activity.kind === "toolgen") return <ToolGenNotice activity={activity}/>;
-  if (activity.tone === "action") return <ToolActivity activity={activity}/>;
-  return <div className={`turn-work-item ${activity.tone}`}>
-    <span className="activity-mark">{activity.tone === "thinking" ? "💡" : activity.tone === "warning" ? "⚠️" : activity.tone === "error" ? "×" : "i"}</span>
-    <div>{activity.title && <strong>{activity.title}</strong>}{activity.detail && <div className="turn-work-detail"><MarkdownContent text={activity.detail}/></div>}{activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)}/>}</div>
-  </div>;
+function ActivityView({ activity }: { activity: Activity }) {
+ if (activity.kind === "context_compact") return <ContextCompactNotice activity={activity}/>;
+ if (activity.kind === "toolgen") return <ToolGenNotice activity={activity}/>;
+ if (activity.kind === "user_supplement") return <div className="turn-work-item thinking user-supplement">
+ <span className="activity-mark" aria-hidden="true">💡</span>
+ <div className="user-supplement-line"><strong>{activity.title}</strong>{activity.detail && <span>{activity.detail}</span>}</div>
+ </div>;
+ if (activity.tone === "action") return <ToolActivity activity={activity}/>;
+ return <div className={`turn-work-item ${activity.tone}${activity.kind === "free_talk" ? " free-talk" : ""}`}>
+ <span className="activity-mark">{activity.tone === "thinking" ? <span className="activity-thinking-dot" aria-hidden="true"/> : activity.tone === "warning" ? "⚠️" : activity.tone === "error" ? "×" : "i"}</span>
+ <div>{activity.title && <strong>{activity.title}</strong>}{activity.detail && <div className="turn-work-detail"><MarkdownContent text={activity.detail}/></div>}{activity.code && <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)}/>}</div>
+ </div>;
 }
 
 function ToolGenNotice({ activity }: { activity: Activity }) {
@@ -1947,21 +3237,37 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
   </details>;
 }
 
+function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
+ const [open, setOpen] = useState(false);
+ const running = summary.status === "running";
+ const summaryLabel = `${open ? "收起" : "展开"}工具活动：${summary.label}，${summary.status}`;
+ return <details className={`tool-activity-group ${summary.status}`} open={open} aria-busy={running || undefined} onToggle={(event) => setOpen(event.currentTarget.open)}>
+ <summary aria-label={summaryLabel} title={open ? "收起工具活动" : "展开工具活动"}>
+ <span className="tool-activity-group-icon tool-command-symbol" aria-hidden="true">&gt;_</span>
+ <span className="tool-activity-group-counts" aria-hidden="true">{summary.counts.map(({ name, count }, index) => <span className="tool-activity-group-count" key={name}>{index > 0 && <i>|</i>}<span>{name}</span><strong>{count}</strong></span>)}</span>
+ <span className="tool-activity-group-status">· {summary.status}</span>
+ <ChevronRight className="tool-activity-chevron" size={14}/>
+ </summary>
+ <div className="tool-activity-group-body">{summary.activities.map((activity, index) => <ToolActivity key={`${activity.id}-${index}`} activity={activity}/>)}</div>
+ </details>;
+}
+
 function ToolActivity({ activity }: { activity: Activity }) {
-  const status = activity.tool_status || "running";
-  const running = status === "running" || status === "background_running";
+  const status = activity.tool_status || TOOL_STATUS_RUNNING;
+  const running = isToolActivityRunning(status);
   const bashActivity = activity.tool_name === "run_bash";
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const invocationPreview = toolInvocationPreview(activity);
-  const hasExpandableDetail = !!activity.detail?.trim() || !!activity.code?.trim();
+ const detail = activity.detail?.trim();
+ const code = activity.code?.trim();
+ const hasExpandableDetail = !!detail || !!code;
   const toolName = toolDisplayName(activity.tool_name || activity.title);
   const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;
   const summaryContent = <>
-    <span className="tool-activity-icon">{activity.tool_name === "run_bash" ? <Terminal size={14}/> : <Wrench size={14}/>}</span>
+    <span className="tool-activity-icon tool-command-symbol" aria-hidden="true">&gt;_</span>
     <b>{toolName}</b>
-    <span className="tool-activity-status">{humanizeToolStatus(status)}</span>
-    {activity.elapsed_ms !== undefined && !running && <span className="tool-activity-duration">{formatDuration(activity.elapsed_ms)}</span>}
-    {!hasExpandableDetail && invocationPreview && <code title={invocationPreview}>{invocationPreview}</code>}
+    <span className="tool-activity-meta"><span className="tool-activity-status">{humanizeToolStatus(status)}</span>{activity.elapsed_ms !== undefined && !running && <span className="tool-activity-duration">{formatDuration(activity.elapsed_ms)}</span>}</span>
+    {invocationPreview && <code className="tool-activity-command" title={invocationPreview}>{invocationPreview}</code>}
   </>;
   if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""} ${running ? "running" : "settled"}`} aria-busy={running || undefined}>
     {summaryContent}
@@ -1972,10 +3278,10 @@ function ToolActivity({ activity }: { activity: Activity }) {
       <ChevronRight className="tool-activity-chevron" size={14}/>
     </summary>
     <div className="tool-activity-body">
-      {activity.detail && <div className="turn-work-detail"><MarkdownContent text={activity.detail}/></div>}
-      {activity.code && (
-        <MarkdownContent text={fencedCode(activity.code_language ?? "text", activity.code)} />
-      )}
+      {detail && <div className="turn-work-detail"><MarkdownContent text={detail}/></div>}
+      {code && (
+ <MarkdownContent text={fencedCode(activity.code_language ?? "text", code)} />
+ )}
     </div>
   </details>;
 }
@@ -1986,17 +3292,27 @@ function toolInvocationPreview(activity: Activity) {
   return activity.detail?.split("\n", 1)[0]?.trim();
 }
 
-function humanizeToolStatus(status: string) {
-  if (status === "background_running") return "background running";
-  if (status === "timeout") return "timed out";
-  return status.replaceAll("_", " ");
-}
-
 function activityFromTurnEvent(event: WebTurnEvent, sessionId: string): Activity | null {
-  if (event.source === "core_topic") return activityFromTopic(event.payload as unknown as import("./protocol").CoreTopicEvent);
-  if (event.source !== "worker_activity") return null;
+ if (event.source === "ui_activity") {
+  const activity = event.payload as unknown as Activity;
+  return { ...activity, id: event.event_id, sessionId, createdAt: event.created_at_ms };
+ }
+ if (event.source === "core_topic") {
+ const activity = activityFromTopic(event.payload as unknown as import("./protocol").CoreTopicEvent);
+ return activity ? {
+ ...activity,
+ id: event.event_id,
+ sessionId,
+ createdAt: event.created_at_ms,
+ } : null;
+ }
+ if (event.source !== "worker_activity") return null;
   const kind = String(event.payload.kind ?? "worker_event");
-  if (kind === "model_request" || kind === "model_response") return null;
+  if (kind === "model_request" || kind === "model_response" || kind === "model_retry") return null;
+  if (kind === "model_error") {
+    const issue = modelServiceIssue(event.payload.error);
+    return { id: event.event_id, sessionId, tone: "error", title: issue.title, detail: issue.detail, createdAt: event.created_at_ms };
+  }
   const detail = Object.entries(event.payload)
     .filter(([key]) => !["kind", "session_id", "context_id", "worker_id"].includes(key))
     .map(([key, value]) => `${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`)
@@ -2008,9 +3324,14 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
   const before = activity.before_tokens;
   const after = activity.after_tokens;
   const ratio = before && after !== undefined ? Math.max(6, Math.min(100, (after / before) * 100)) : 36;
-  return <section className="context-compact-notice" aria-label="Context compacted">
-    <div className="compact-icon"><Gauge size={17}/></div>
-    <div className="compact-copy"><span>Context compacted</span><strong>{formatTokens(before) ?? "?"} → {formatTokens(after) ?? "?"}</strong></div>
+  const hasBreakdown = activity.text_before_tokens !== undefined || activity.native_before_tokens !== undefined;
+  const breakdown = hasBreakdown
+    ? `Text ${formatTokens(activity.text_before_tokens) ?? "?"} → ${formatTokens(activity.text_after_tokens) ?? "?"}; Tool ${formatTokens(activity.native_before_tokens) ?? "?"} → ${formatTokens(activity.native_after_tokens) ?? "?"}`
+    : undefined;
+  const label = `Dynamic context compacted: ${formatTokens(before) ?? "unknown"} to ${formatTokens(after) ?? "unknown"}${breakdown ? `. ${breakdown}` : ""}`;
+  return <section className="context-compact-notice" aria-label={label} title={breakdown}>
+    <div className="compact-icon"><Gauge size={13}/></div>
+    <div className="compact-copy"><span>Dynamic context</span><strong>{formatTokens(before) ?? "?"} → {formatTokens(after) ?? "?"}</strong>{breakdown && <small>{breakdown}</small>}</div>
     <div className="compact-meter" aria-hidden="true"><span className="compact-before"/><span className="compact-after" style={{ width: `${ratio}%` }}/></div>
   </section>;
 }
@@ -2046,7 +3367,7 @@ function CodeBlock({ children }: React.ComponentPropsWithoutRef<"pre">) {
     failed: `Copy ${codeCopySubject} failed`,
   });
   return <figure className="code-block">
-    <figcaption><span title={language}>{language}</span><button type="button" className={copyClass} onClick={() => void copy()} title={copyLabel} aria-label={copyLabel}>{copyState === "copied" ? <CheckCheck size={14}/> : <Copy size={14}/>}<span aria-live="polite">{copyLabel}</span></button></figcaption>
+    <figcaption><span title={language}>{language}</span><button type="button" className={copyClass} onClick={() => void copy()} title={copyLabel} aria-label={copyLabel}>{copyState === "copied" ? <CheckCheck size={14}/> : <Copy size={14}/>}</button></figcaption>
     <pre>{children}</pre>
   </figure>;
 }
@@ -2126,7 +3447,20 @@ function McpPanel({ panelRef, servers, session, pendingKeys, revealedSecrets, on
   onCommand: (key: string, command: ClientCommand) => void;
 }) {
   const [editing, setEditing] = useState<McpServerConfig | null>(null);
+  const [deleteMode, setDeleteMode] = useState(false);
+  const [selectedDeleteServerId, setSelectedDeleteServerId] = useState("");
   const enabled = new Set(session?.mcp_server_ids ?? []);
+  useEffect(() => {
+    if (selectedDeleteServerId && !servers.some((server) => server.config.id === selectedDeleteServerId)) setSelectedDeleteServerId("");
+    if (deleteMode && servers.length === 0) setDeleteMode(false);
+  }, [deleteMode, selectedDeleteServerId, servers]);
+  const cancelDeleteMode = () => { setDeleteMode(false); setSelectedDeleteServerId(""); };
+  const confirmSelectedDelete = () => {
+    const server = servers.find((candidate) => candidate.config.id === selectedDeleteServerId);
+    if (!server || !window.confirm(`Delete MCP server “${server.config.name}”? This removes it from every session in the current mem.`)) return;
+    onCommand(`delete:${server.config.id}`, { type: "mcp_server_delete", server_id: server.config.id });
+    cancelDeleteMode();
+  };
   const startNew = () => setEditing({
     id: "",
     name: "",
@@ -2135,7 +3469,7 @@ function McpPanel({ panelRef, servers, session, pendingKeys, revealedSecrets, on
     request_timeout_ms: 30000,
   });
   return <section id="mcp-panel" ref={panelRef} className="mcp-panel" role="dialog" aria-modal="false" aria-label="MCP servers" tabIndex={-1}>
-    <header><div><span className="eyebrow">MCP</span><h2><strong className="mcp-session-name">{session?.display_name ?? "Current session"}</strong> 's Capabilities</h2></div><button type="button" className="icon-button" title="Close MCP panel" aria-label="Close MCP panel" onClick={onClose}><X size={16}/></button></header>
+    <header><div><span className="eyebrow">MCP</span><h2><strong className="mcp-session-name">{session?.display_name ?? "Current session"}</strong> 's Capabilities</h2></div><div className="mcp-panel-header-actions">{!editing && deleteMode && <button type="button" className="mcp-delete-cancel" title="取消删除 MCP" aria-label="取消删除 MCP" onClick={cancelDeleteMode}><X size={14} strokeWidth={3}/></button>}{!editing && <button type="button" className={`mcp-delete-manage ${deleteMode ? "confirm" : ""}`} title={deleteMode ? selectedDeleteServerId ? "确认删除选中的 MCP" : "请选择要删除的 MCP" : "选择要删除的 MCP"} aria-label={deleteMode ? selectedDeleteServerId ? "确认删除选中的 MCP" : "请选择要删除的 MCP" : "选择要删除的 MCP"} disabled={servers.length === 0 || (deleteMode && (!selectedDeleteServerId || pendingKeys.has(`delete:${selectedDeleteServerId}`)))} onClick={() => { if (!deleteMode) { setDeleteMode(true); setSelectedDeleteServerId(""); } else confirmSelectedDelete(); }}>{deleteMode ? <Check size={14} strokeWidth={3}/> : <Trash2 size={14}/>}</button>}<button type="button" className="icon-button" title="Close MCP panel" aria-label="Close MCP panel" onClick={onClose}><X size={16}/></button></div></header>
     {editing ? <McpEditor config={editing} pending={pendingKeys.has(`save:${editing.id || "new"}`)} revealPending={!!editing.id && pendingKeys.has(`reveal:${editing.id}`)} revealedSecrets={editing.id ? revealedSecrets[editing.id] : undefined} onReveal={() => editing.id && onCommand(`reveal:${editing.id}`, { type: "mcp_server_secrets_reveal", server_id: editing.id })} onCancel={() => setEditing(null)} onSave={(config) => {
       if (!session) return;
       const key = `save:${config.id || "new"}`;
@@ -2146,15 +3480,71 @@ function McpPanel({ panelRef, servers, session, pendingKeys, revealedSecrets, on
         const active = enabled.has(server.config.id);
         const pending = Array.from(pendingKeys).some((key) => key.endsWith(`:${server.config.id}`));
         const connectionState = !active ? "disabled" : server.state === "connected" ? "connected" : server.state === "error" || !!server.error ? "failed" : "connecting";
-        const connectionLabel = connectionState === "connected" ? "Connected" : connectionState === "failed" ? "Enabled, connection failed" : connectionState === "connecting" ? "Enabled, connecting" : "Disabled";
-        return <article className={`mcp-server ${connectionState}`} key={server.config.id}>
-          <div className="mcp-server-main"><div><strong>{server.config.name}</strong><small>{mcpEndpoint(server.config)}</small></div><button type="button" role="switch" aria-checked={active} aria-label={`${active ? "Disable" : "Enable"} ${server.config.name} for this session`} className={`mcp-session-toggle ${connectionState}`} title={`${connectionLabel} · click to ${active ? "disable" : "enable"}`} disabled={!session || pending} onClick={() => session && onCommand(`toggle:${server.config.id}`, { type: "mcp_session_toggle", session_id: session.session_id, server_id: server.config.id, enabled: !active })}><span className="mcp-port-glyph" aria-hidden="true"><span className="mcp-port-node left"/><span className="mcp-port-link"/><span className="mcp-port-node right"/>{connectionState === "failed" && <X className="mcp-port-failure" size={10}/>}</span></button></div>
-          <div className="mcp-server-meta"><span>{mcpTransportLabel(server.config.transport)}</span><span>{connectionLabel}</span><span>{server.tools.length} tool{server.tools.length === 1 ? "" : "s"}</span>{server.error && <span className="mcp-error" title={server.error}>{server.error}</span>}</div>
-          <div className="mcp-server-actions"><button type="button" title="Reconnect and refresh tools" aria-label={`Reconnect ${server.config.name}`} disabled={!session || pending} onClick={() => session && onCommand(`reconnect:${server.config.id}`, { type: "mcp_server_reconnect", session_id: session.session_id, server_id: server.config.id })}><RefreshCw size={13}/></button><button type="button" title="Edit server" aria-label={`Edit ${server.config.name}`} disabled={pending} onClick={() => setEditing(server.config)}><Pencil size={13}/></button><button type="button" className="danger" title="Delete server" aria-label={`Delete ${server.config.name}`} disabled={pending} onClick={() => window.confirm(`Delete MCP server “${server.config.name}”? This removes it from every session in the current mem.`) && onCommand(`delete:${server.config.id}`, { type: "mcp_server_delete", server_id: server.config.id })}><Trash2 size={13}/></button></div>
+        const connectionLabel = connectionState === "connected" ? `${server.tools.length} tools` : connectionState === "failed" ? "⚠️无法连接" : connectionState === "connecting" ? "连接中…" : "";
+        const connectionTitle = connectionState === "failed" && server.error ? `${connectionLabel}：${server.error}` : connectionLabel || "未启用";
+        return <article className={`mcp-server ${connectionState} ${active && !deleteMode ? "selected" : ""} ${deleteMode ? "delete-selecting" : ""} ${selectedDeleteServerId === server.config.id ? "delete-selected" : ""}`} key={server.config.id}>
+          <div className="mcp-server-main"><strong>{server.config.name}</strong><button type="button" role="switch" aria-checked={active} aria-label={`${active ? "Disable" : "Enable"} ${server.config.name} for this session`} className={`mcp-session-toggle ${connectionState}`} title={deleteMode ? "MCP controls are disabled while selecting a server to delete" : `${connectionTitle} · click to ${active ? "disable" : "enable"}`} disabled={!session || pending || deleteMode} onClick={() => session && onCommand(`toggle:${server.config.id}`, { type: "mcp_session_toggle", session_id: session.session_id, server_id: server.config.id, enabled: !active })}><span className="mcp-session-toggle-thumb" aria-hidden="true"/></button></div>
+          {active && <div className={`mcp-server-meta ${connectionState}`} title={connectionState === "failed" ? server.error ?? undefined : undefined}><span>{connectionLabel}</span></div>}
+          {deleteMode ? <button type="button" className={`mcp-delete-select ${selectedDeleteServerId === server.config.id ? "selected" : ""}`} title={`选择删除 ${server.config.name}`} aria-label={`选择删除 ${server.config.name}`} aria-pressed={selectedDeleteServerId === server.config.id} disabled={pending} onClick={() => setSelectedDeleteServerId((current) => current === server.config.id ? "" : server.config.id)}>{selectedDeleteServerId === server.config.id ? <Check size={13}/> : null}</button> : <div className="mcp-server-actions"><button type="button" title="Reconnect and refresh tools" aria-label={`Reconnect ${server.config.name}`} disabled={!session || pending} onClick={() => session && onCommand(`reconnect:${server.config.id}`, { type: "mcp_server_reconnect", session_id: session.session_id, server_id: server.config.id })}><RefreshCw size={13}/></button><button type="button" title="Edit server" aria-label={`Edit ${server.config.name}`} disabled={pending} onClick={() => setEditing(server.config)}><Pencil size={13}/></button></div>}
         </article>;
       })}</div>
-      <button type="button" className="mcp-add" disabled={!session} onClick={startNew}><Plus size={15}/> Add MCP server</button>
+      {!deleteMode && <button type="button" className="mcp-add" disabled={!session} onClick={startNew}><Plus size={15}/> Add MCP server</button>}
     </>}
+  </section>;
+}
+
+type StructuredRow = { id: string; key: string; value: string };
+type ListRow = { id: string; value: string };
+
+function structuredRows(value: Record<string, string>): StructuredRow[] {
+  return Object.entries(value).map(([key, item]) => ({ id: clientId(), key, value: item }));
+}
+
+function structuredRecord(rows: StructuredRow[]): Record<string, string> {
+  return Object.fromEntries(rows.map((row) => [row.key.trim(), row.value]).filter(([key]) => key));
+}
+
+function hasDuplicateStructuredKeys(rows: StructuredRow[]) {
+  const keys = rows.map((row) => row.key.trim().toLowerCase()).filter(Boolean);
+  return new Set(keys).size !== keys.length;
+}
+
+function StructuredKeyValueEditor({ label, description, rows, keyLabel = "Key", valueLabel = "Value", keyPlaceholder, valuePlaceholder, addLabel, showValues = true, revealAction, onChange }: {
+  label: string;
+  description?: string;
+  rows: StructuredRow[];
+  keyLabel?: string;
+  valueLabel?: string;
+  keyPlaceholder: string;
+  valuePlaceholder: string;
+  addLabel: string;
+  showValues?: boolean;
+  revealAction?: ReactNode;
+  onChange: (rows: StructuredRow[]) => void;
+}) {
+  const duplicateKeys = hasDuplicateStructuredKeys(rows);
+  const update = (id: string, patch: Partial<StructuredRow>) => onChange(rows.map((row) => row.id === id ? { ...row, ...patch } : row));
+  return <section className="structured-field" aria-label={label}>
+    <div className="structured-field-heading"><div><strong>{label}</strong>{description && <small>{description}</small>}</div>{revealAction}</div>
+    <div className="structured-field-list">{rows.map((row) => <div className="structured-field-row" key={row.id}>
+      <label><span>{keyLabel}</span><input value={row.key} placeholder={keyPlaceholder} spellCheck={false} onChange={(event) => update(row.id, { key: event.target.value })}/></label>
+      <label><span>{valueLabel}</span><input type={showValues ? "text" : "password"} value={row.value} placeholder={valuePlaceholder} autoComplete="off" spellCheck={false} onChange={(event) => update(row.id, { value: event.target.value })}/></label>
+      <button type="button" className="structured-field-delete" title={`删除这一项 ${label}`} aria-label={`删除 ${label}`} onClick={() => onChange(rows.filter((item) => item.id !== row.id))}><Trash2 size={14}/></button>
+    </div>)}</div>
+    {duplicateKeys && <small className="structured-field-error" role="alert">{keyLabel} 不能重复。</small>}
+    <button type="button" className="structured-field-add" onClick={() => onChange([...rows, { id: clientId(), key: "", value: "" }])}><Plus size={14}/> {addLabel}</button>
+  </section>;
+}
+
+function StructuredListEditor({ label, description, rows, placeholder, addLabel, onChange }: { label: string; description?: string; rows: ListRow[]; placeholder: string; addLabel: string; onChange: (rows: ListRow[]) => void }) {
+  const update = (id: string, value: string) => onChange(rows.map((row) => row.id === id ? { ...row, value } : row));
+  return <section className="structured-field structured-list-field" aria-label={label}>
+    <div className="structured-field-heading"><div><strong>{label}</strong>{description && <small>{description}</small>}</div></div>
+    <div className="structured-field-list">{rows.map((row, index) => <div className="structured-list-row" key={row.id}>
+      <span className="structured-list-index" aria-hidden="true">{index + 1}</span><input aria-label={`${label} ${index + 1}`} value={row.value} placeholder={placeholder} spellCheck={false} onChange={(event) => update(row.id, event.target.value)}/>
+      <button type="button" className="structured-field-delete" title={`删除第 ${index + 1} 项`} aria-label={`删除 ${label} ${index + 1}`} onClick={() => onChange(rows.filter((item) => item.id !== row.id))}><Trash2 size={14}/></button>
+    </div>)}</div>
+    <button type="button" className="structured-field-add" onClick={() => onChange([...rows, { id: clientId(), value: "" }])}><Plus size={14}/> {addLabel}</button>
   </section>;
 }
 
@@ -2162,16 +3552,24 @@ function McpEditor({ config, pending, revealPending, revealedSecrets, onReveal, 
   const [draft, setDraft] = useState(config);
   const [transportType, setTransportType] = useState<McpTransport["type"]>(config.transport.type);
   const [transportDrafts, setTransportDrafts] = useState(() => createMcpTransportDrafts(config.transport));
+  const [argumentRows, setArgumentRows] = useState<ListRow[]>(() => createMcpTransportDrafts(config.transport).stdio.args.map((value) => ({ id: clientId(), value })));
+  const [envRows, setEnvRows] = useState<StructuredRow[]>(() => structuredRows(createMcpTransportDrafts(config.transport).stdio.env));
+  const [httpHeaderRows, setHttpHeaderRows] = useState<StructuredRow[]>(() => structuredRows(createMcpTransportDrafts(config.transport).streamable_http.headers));
+  const [sseHeaderRows, setSseHeaderRows] = useState<StructuredRow[]>(() => structuredRows(createMcpTransportDrafts(config.transport).sse.headers));
   const [showSecrets, setShowSecrets] = useState(false);
-  const transport = transportDrafts[transportType];
-  const valid = draft.name.trim() && (transport.type === "stdio" ? transport.command.trim() : transport.url.trim());
+  const baseTransport = transportDrafts[transportType];
+  const transport: McpTransport = baseTransport.type === "stdio"
+    ? { ...baseTransport, args: argumentRows.map((row) => row.value).filter((value) => value.length > 0), env: structuredRecord(envRows) }
+    : baseTransport.type === "streamable_http"
+      ? { ...baseTransport, headers: structuredRecord(httpHeaderRows) }
+      : { ...baseTransport, headers: structuredRecord(sseHeaderRows) };
+  const activeMapRows = transport.type === "stdio" ? envRows : transport.type === "streamable_http" ? httpHeaderRows : sseHeaderRows;
+  const valid = draft.name.trim() && (transport.type === "stdio" ? transport.command.trim() : transport.url.trim()) && !hasDuplicateStructuredKeys(activeMapRows);
   useEffect(() => {
     if (!revealedSecrets) return;
-    setTransportDrafts((current) => ({
-      stdio: { ...current.stdio, env: mergeMcpSecrets(current.stdio.env, revealedSecrets) },
-      streamable_http: { ...current.streamable_http, headers: mergeMcpSecrets(current.streamable_http.headers, revealedSecrets) },
-      sse: { ...current.sse, headers: mergeMcpSecrets(current.sse.headers, revealedSecrets) },
-    }));
+    setEnvRows((rows) => structuredRows(mergeMcpSecrets(structuredRecord(rows), revealedSecrets)));
+    setHttpHeaderRows((rows) => structuredRows(mergeMcpSecrets(structuredRecord(rows), revealedSecrets)));
+    setSseHeaderRows((rows) => structuredRows(mergeMcpSecrets(structuredRecord(rows), revealedSecrets)));
     setShowSecrets(true);
   }, [revealedSecrets]);
   const toggleSecrets = () => {
@@ -2179,6 +3577,7 @@ function McpEditor({ config, pending, revealPending, revealedSecrets, onReveal, 
     else if (revealedSecrets) setShowSecrets(true);
     else onReveal();
   };
+  const revealAction = draft.id ? <button type="button" className="structured-field-visibility" title={showSecrets ? "Hide values" : "Reveal sensitive values"} aria-label={showSecrets ? "Hide values" : "Reveal sensitive values"} disabled={revealPending} onClick={toggleSecrets}>{showSecrets ? <EyeOff size={14}/> : <Eye size={14}/>}</button> : undefined;
   return <form className="mcp-editor" onSubmit={(event) => {
     event.preventDefault();
     if (!valid) return;
@@ -2190,21 +3589,16 @@ function McpEditor({ config, pending, revealPending, revealedSecrets, onReveal, 
     {draft.id && <label>Server ID<input value={draft.id} disabled/></label>}
     {transport.type === "stdio" ? <>
       <label>Command<input value={transport.command} placeholder="npx" onChange={(event) => setTransportDrafts((current) => ({ ...current, stdio: { ...current.stdio, command: event.target.value } }))}/></label>
-      <label>Arguments<textarea rows={3} value={transport.args.join("\n")} placeholder={"-y\n@modelcontextprotocol/server-filesystem\n/path"} onChange={(event) => setTransportDrafts((current) => ({ ...current, stdio: { ...current.stdio, args: nonemptyLines(event.target.value) } }))}/><small>One argument per line. Spaces stay inside that argument.</small></label>
-      <div className="mcp-secret-field"><div className="mcp-secret-heading"><span>Environment</span>{draft.id && <button type="button" className="icon-button" title={showSecrets ? "Hide sensitive environment values" : "Reveal sensitive environment values"} aria-label={showSecrets ? "Hide sensitive environment values" : "Reveal sensitive environment values"} disabled={revealPending} onClick={toggleSecrets}>{showSecrets ? <EyeOff size={14}/> : <Eye size={14}/>}</button>}</div><textarea aria-label="Environment" rows={3} value={mapLines(showSecrets ? transport.env : maskSensitiveMcpValues(transport.env))} placeholder="KEY=value" onChange={(event) => setTransportDrafts((current) => ({ ...current, stdio: { ...current.stdio, env: parseMapLines(event.target.value) } }))}/></div>
+      <StructuredListEditor label="Arguments" description="每个命令参数单独一项，不需要手动编排多行格式。" rows={argumentRows} placeholder="例如：-y 或 @modelcontextprotocol/server-filesystem" addLabel="添加参数" onChange={setArgumentRows}/>
+      <StructuredKeyValueEditor label="Environment" description="环境变量使用独立的 Key / Value 输入。" rows={envRows} keyPlaceholder="例如：GITHUB_TOKEN" valuePlaceholder="Environment value" addLabel="添加环境变量" showValues={showSecrets || !draft.id} revealAction={revealAction} onChange={setEnvRows}/>
     </> : <>
       <label>{transport.type === "sse" ? "SSE URL" : "MCP endpoint URL"}<input value={transport.url} placeholder={transport.type === "sse" ? "https://example.com/sse" : "https://example.com/mcp"} onChange={(event) => setTransportDrafts((current) => ({ ...current, [transport.type]: { ...current[transport.type], url: event.target.value } }))}/></label>
-      <div className="mcp-secret-field"><div className="mcp-secret-heading"><span>Headers</span>{draft.id && <button type="button" className="icon-button" title={showSecrets ? "Hide sensitive headers" : "Reveal sensitive headers"} aria-label={showSecrets ? "Hide sensitive headers" : "Reveal sensitive headers"} disabled={revealPending} onClick={toggleSecrets}>{showSecrets ? <EyeOff size={14}/> : <Eye size={14}/>}</button>}</div><textarea aria-label="Headers" rows={3} value={mapLines(showSecrets ? transport.headers : maskSensitiveMcpValues(transport.headers))} placeholder="Authorization=Bearer ${MCP_TOKEN}" onChange={(event) => setTransportDrafts((current) => ({ ...current, [transport.type]: { ...current[transport.type], headers: parseMapLines(event.target.value) } }))}/><small>One header per line as Name=value. Environment references use ${"${NAME}"}.</small></div>
+      <StructuredKeyValueEditor label="Headers" description={`每个 Header 单独填写；Value 中可使用 ${"${NAME}"} 引用环境变量。`} rows={transport.type === "streamable_http" ? httpHeaderRows : sseHeaderRows} keyLabel="Name" keyPlaceholder="例如：Authorization" valuePlaceholder={`例如：Bearer ${"${MCP_TOKEN}"}`} addLabel="添加 Header" showValues={showSecrets || !draft.id} revealAction={revealAction} onChange={transport.type === "streamable_http" ? setHttpHeaderRows : setSseHeaderRows}/>
     </>}
     <label>Request timeout (ms)<input type="number" min={1} value={draft.request_timeout_ms} onChange={(event) => setDraft({ ...draft, request_timeout_ms: Math.max(1, Number(event.target.value) || 1) })}/></label>
     <div className="mcp-editor-actions"><button type="button" className="secondary" disabled={pending} onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={!valid || pending}>{pending ? <LoaderCircle size={14}/> : <Plug size={14}/>} Save and connect</button></div>
   </form>;
 }
-
-function nonemptyLines(value: string) { return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean); }
-function mcpEndpoint(config: McpServerConfig) { return config.transport.type === "stdio" ? config.transport.command : config.transport.url; }
-function parseMapLines(value: string) { return Object.fromEntries(value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => { const index = line.indexOf("="); return index < 0 ? [line, ""] : [line.slice(0, index).trim(), line.slice(index + 1)]; }).filter(([key]) => key)); }
-function mapLines(value: Record<string, string>) { return Object.entries(value).map(([key, item]) => `${key}=${item}`).join("\n"); }
 
 function AppearancePanel({ panelRef, appearance, onChange, onClose }: { panelRef: MutableRefObject<HTMLElement | null>; appearance: Appearance; onChange: (appearance: Appearance) => void; onClose: () => void }) {
   const update = <K extends keyof Appearance>(key: K, value: Appearance[K]) => onChange({ ...appearance, [key]: value });
@@ -2227,7 +3621,7 @@ function fencedCode(language: string, code: string) {
   return `${fence}${language}\n${code}\n${fence}`;
 }
 
-function CompletionCard({ completion, toolGenPending = false, toolGenBlocked = false, onToolGen }: { completion: NonNullable<ChatMessage["completion"]>; toolGenPending?: boolean; toolGenBlocked?: boolean; onToolGen?: () => void }) {
+function CompletionCard({ completion, toolGenPending = false, toolGenBlocked = false, onToolGen, answerActions }: { completion: NonNullable<ChatMessage["completion"]>; toolGenPending?: boolean; toolGenBlocked?: boolean; onToolGen?: () => void; answerActions?: React.ReactNode }) {
   const stats = completion.stats ?? {};
   const cancelled = completion.stop_reason?.toLowerCase() === "cancelledbyuser";
   const toolGenLabel = toolGenPending ? "Starting ToolGen" : toolGenBlocked ? "ToolGen busy" : "ToolGen";
@@ -2249,6 +3643,7 @@ function CompletionCard({ completion, toolGenPending = false, toolGenBlocked = f
     {!cancelled && isNotableStopReason(completion.stop_reason) && <span className="completion-status"><b>Status</b> {completion.stop_reason}</span>}
     {completion.repair_issue && <span className="completion-status warning"><b>Last repair</b> {completion.repair_issue}</span>}
     {onToolGen && !cancelled && <button className={`completion-toolgen ${toolGenPending ? "sending" : ""}`} type="button" title={toolGenTitle} aria-label={toolGenTitle} aria-busy={toolGenPending || undefined} disabled={toolGenPending || toolGenBlocked} onClick={onToolGen}>{toolGenPending ? <LoaderCircle size={12}/> : <Wrench size={12}/>}<span aria-live="polite">{toolGenLabel}</span></button>}
+    {answerActions}
   </div>;
 }
 
@@ -2266,11 +3661,6 @@ function completionFactTitle(label: string, completion: NonNullable<ChatMessage[
 function isNotableStopReason(reason: string | null | undefined) {
   if (!reason) return false;
   return !["finished", "completed", "all_finished", "final_answer"].includes(reason.toLowerCase());
-}
-
-function formatTokens(value: number | undefined) {
-  if (!value) return value === 0 ? "0" : undefined;
-  return value >= 1000 ? `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)}K` : String(value);
 }
 
 function formatOptionalTokens(value: number | undefined) {
@@ -2295,7 +3685,77 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function RuntimePanel({ panelRef, server, session, pendingKeys, credentialPending, revealedApiKey, onUpdate, onApiKeyUpdate, onApiKeyReveal }: {
+function ModelEndpointPanel({ panelRef, server, session, endpointEditor, revealedEndpointApiKeys, revealedEndpointHeaders, onEdit, onDelete, onApply, onReveal, onSave }: {
+  panelRef: MutableRefObject<HTMLElement | null>;
+  server: Snapshot["server"] | null;
+  session: Session | undefined;
+  endpointEditor: "new" | ModelEndpoint | null;
+  revealedEndpointApiKeys: Record<string, string>;
+  revealedEndpointHeaders: Record<string, Record<string, string>>;
+  onEdit: (endpoint: "new" | ModelEndpoint | null) => void;
+  onDelete: (endpoint: ModelEndpoint) => void;
+  onApply: (endpointId: string) => void;
+  onReveal: (endpointId: string) => void;
+  onSave: (endpoint: ModelEndpointDraft) => void;
+}) {
+  const endpoints = server?.model_endpoints ?? [];
+  const selected = endpoints.find((endpoint) => endpointMatchesProfile(endpoint, session?.runtime_profile));
+  const [deleteMode, setDeleteMode] = useState(false);
+  const [selectedDeleteEndpointId, setSelectedDeleteEndpointId] = useState("");
+  useEffect(() => {
+    if (selectedDeleteEndpointId && !endpoints.some((endpoint) => endpoint.id === selectedDeleteEndpointId)) setSelectedDeleteEndpointId("");
+    if (deleteMode && endpoints.length === 0) setDeleteMode(false);
+  }, [deleteMode, endpoints, selectedDeleteEndpointId]);
+  const cancelDeleteMode = () => { setDeleteMode(false); setSelectedDeleteEndpointId(""); };
+  const confirmDelete = () => {
+    const endpoint = endpoints.find((candidate) => candidate.id === selectedDeleteEndpointId);
+    if (endpoint) onDelete(endpoint);
+  };
+  return <section id="runtime-panel" ref={panelRef} className={`runtime-card endpoint-menu ${endpointEditor ? "editing" : ""}`} tabIndex={-1}>
+    {endpointEditor ? <ModelEndpointEditor endpoint={endpointEditor === "new" ? undefined : endpointEditor} revealedApiKey={endpointEditor === "new" ? "" : revealedEndpointApiKeys[endpointEditor.id]} revealedHeaders={endpointEditor === "new" ? {} : revealedEndpointHeaders[endpointEditor.id]} onClose={() => onEdit(null)} onSave={onSave}/> : <>
+      <div className="endpoint-menu-heading"><div><span className="eyebrow">MODEL ENDPOINTS</span><strong>{session ? `用于 ${session.display_name}` : "选择 Session 后应用"}</strong></div><div className="endpoint-management-actions"><button type="button" className="endpoint-add-action" title="新增接入点" aria-label="新增接入点" disabled={deleteMode} onClick={() => onEdit("new")}><Plus size={16} strokeWidth={2.8}/></button>{deleteMode && <button type="button" className="endpoint-delete-cancel" title="取消删除接入点" aria-label="取消删除接入点" onClick={cancelDeleteMode}><X size={14} strokeWidth={3}/></button>}<button type="button" className={`endpoint-delete-manage ${deleteMode ? "confirm" : ""}`} title={deleteMode ? selectedDeleteEndpointId ? "确认删除选中的接入点" : "请选择要删除的接入点" : "选择要删除的接入点"} aria-label={deleteMode ? selectedDeleteEndpointId ? "确认删除选中的接入点" : "请选择要删除的接入点" : "选择要删除的接入点"} disabled={endpoints.length === 0 || (deleteMode && !selectedDeleteEndpointId)} onClick={() => { if (!deleteMode) { onEdit(null); setDeleteMode(true); setSelectedDeleteEndpointId(""); } else confirmDelete(); }}>{deleteMode ? <Check size={15} strokeWidth={3}/> : <Trash2 size={15}/>}</button></div></div>
+      <div className="endpoint-list">{endpoints.length === 0 ? <div className="endpoint-empty">还没有可用接入点。新增后，它会在所有 Session 中共用。</div> : endpoints.map((endpoint) => {
+        const active = selected?.id === endpoint.id;
+        const deleteSelected = selectedDeleteEndpointId === endpoint.id;
+        return <div className={`endpoint-row ${active ? "active" : ""} ${deleteMode ? "delete-selecting" : ""} ${deleteSelected ? "delete-selected" : ""}`} key={endpoint.id}>
+          <button type="button" className="endpoint-select" disabled={!deleteMode && (!session || session.state === "working")} aria-pressed={deleteMode ? deleteSelected : undefined} onClick={() => { if (deleteMode) { setSelectedDeleteEndpointId((current) => current === endpoint.id ? "" : endpoint.id); return; } onApply(endpoint.id); }}><span><strong>{endpoint.name}</strong>{deleteMode && <span className={`endpoint-delete-select ${deleteSelected ? "selected" : ""}`}>{deleteSelected && <Check size={13} strokeWidth={3}/>}</span>}</span><small className="endpoint-model-summary"><Sparkles size={10} className="session-model-icon" aria-hidden="true"/><span>{endpoint.model} · {endpoint.api_protocol}{endpoint.stream ? " · stream" : ""} · {endpoint.max_llm_input_tokens === 1_000_000 ? "1M" : `${endpoint.max_llm_input_tokens / 1_000}K`} / {endpoint.max_llm_output_tokens / 1_000}K</span></small><small title={endpoint.base_url}>{endpoint.base_url}</small></button>
+          {!deleteMode && <div className="endpoint-actions">{active && <span className="endpoint-selected-badge" role="img" aria-label="当前选中的接入点"><Check size={13} strokeWidth={3}/></span>}<button type="button" title={`Edit ${endpoint.name}`} aria-label={`Edit ${endpoint.name}`} onClick={() => { onEdit(endpoint); if ((endpoint.api_key_configured || Object.keys(endpoint.http_headers).length > 0) && revealedEndpointApiKeys[endpoint.id] === undefined) onReveal(endpoint.id); }}><Pencil size={14}/></button></div>}
+        </div>;
+      })}</div>
+      {session?.state === "working" && !deleteMode && <p className="endpoint-note">当前 Session 工作中，结束或停止任务后才能切换接入点。</p>}
+    </>}
+  </section>;
+}
+
+function ModelEndpointEditor({ endpoint, revealedApiKey, revealedHeaders, onClose, onSave }: { endpoint?: ModelEndpoint; revealedApiKey?: string; revealedHeaders?: Record<string, string>; onClose: () => void; onSave: (endpoint: ModelEndpointDraft) => void }) {
+  const [draft, setDraft] = useState<ModelEndpointDraft>(() => ({ id: endpoint?.id, name: endpoint?.name ?? "", model: endpoint?.model ?? "", api_protocol: endpoint?.api_protocol ?? "openai-compatible", response_protocol: endpoint?.response_protocol ?? "xml", base_url: endpoint?.base_url ?? "", max_llm_input_tokens: endpoint?.max_llm_input_tokens ?? 100_000, max_llm_output_tokens: endpoint?.max_llm_output_tokens ?? 10_000, stream: endpoint?.stream ?? true, api_key: revealedApiKey, http_headers: endpoint?.http_headers ?? {} }));
+  const [headerRows, setHeaderRows] = useState<StructuredRow[]>(() => structuredRows(endpoint?.http_headers ?? {}));
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [showHeaders, setShowHeaders] = useState(!endpoint);
+  useEffect(() => { if (revealedApiKey !== undefined) setDraft((current) => ({ ...current, api_key: revealedApiKey })); }, [revealedApiKey]);
+  useEffect(() => {
+    if (!revealedHeaders) return;
+    setHeaderRows((rows) => rows.map((row) => ({ ...row, value: revealedHeaders[row.key] ?? row.value })));
+  }, [revealedHeaders]);
+  useEffect(() => { setShowApiKey(false); setShowHeaders(!endpoint); }, [endpoint?.id]);
+  const apiKey = draft.api_key ?? "";
+  const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(apiKey, { idle: "复制 API Key", copied: "API Key 已复制", failed: "API Key 复制失败" });
+  const apiKeyVisibilityLabel = showApiKey ? "隐藏 API Key" : "显示 API Key";
+  const headers = structuredRecord(headerRows);
+  const endpointDraft = { ...draft, http_headers: headers };
+  const duplicateHeaderNames = hasDuplicateStructuredKeys(headerRows);
+  const save = () => { if (!duplicateHeaderNames && endpointDraftValid(endpointDraft)) onSave(endpointDraft); };
+  return <div className="endpoint-editor"><div className="endpoint-editor-heading"><strong>{endpoint ? "编辑接入点" : "新增接入点"}</strong><button type="button" aria-label="Close endpoint editor" onClick={onClose}><X size={14}/></button></div><div className="endpoint-editor-grid">
+    <label>名称<input autoFocus value={draft.name} placeholder="例如：生产环境 GPT" onChange={(event) => setDraft({ ...draft, name: event.target.value })}/></label><label>模型<input value={draft.model} placeholder="gpt-4.1" onChange={(event) => setDraft({ ...draft, model: event.target.value })}/></label>
+    <div className="endpoint-api-protocol"><label>API 协议<select value={draft.api_protocol} onChange={(event) => { const api_protocol = event.target.value; setDraft({ ...draft, api_protocol, stream: api_protocol === "openai-compatible" }); }}><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select></label><label className="endpoint-stream-toggle" title="以流式 SSE 接收 OpenAI-compatible 响应"><input type="checkbox" checked={draft.stream} disabled={draft.api_protocol !== "openai-compatible"} onChange={(event) => setDraft({ ...draft, stream: event.target.checked })}/><span>Stream</span></label></div><label>响应协议<select value={draft.response_protocol} onChange={(event) => setDraft({ ...draft, response_protocol: event.target.value })}><option value="xml">xml</option><option value="json">json</option></select></label>
+    <label className="wide">Base URL<input value={draft.base_url} placeholder="https://api.example.com/v1" onChange={(event) => setDraft({ ...draft, base_url: event.target.value })}/></label>
+    <label>最大上下文窗口<select value={draft.max_llm_input_tokens} onChange={(event) => setDraft({ ...draft, max_llm_input_tokens: Number(event.target.value) })}>{MODEL_CONTEXT_WINDOW_OPTIONS.map((tokens) => <option key={tokens} value={tokens}>{tokens === 1_000_000 ? "1M" : `${tokens / 1_000}K`}</option>)}</select></label><label>最大输出<select value={draft.max_llm_output_tokens} onChange={(event) => setDraft({ ...draft, max_llm_output_tokens: Number(event.target.value) })}>{MODEL_OUTPUT_TOKEN_OPTIONS.map((tokens) => <option key={tokens} value={tokens}>{tokens / 1_000}K</option>)}</select></label>
+    <label className="wide">API Key<div className="endpoint-api-key"><input type={showApiKey ? "text" : "password"} autoComplete="new-password" spellCheck={false} value={apiKey} placeholder={endpoint?.api_key_configured && revealedApiKey === undefined ? "正在读取…" : "可留空"} onChange={(event) => setDraft({ ...draft, api_key: event.target.value })}/><div className="endpoint-api-key-actions"><button type="button" className={copyClass} title={copyLabel} aria-label={copyLabel} disabled={!apiKey} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={12}/> : <Copy size={12}/>}</button><button type="button" title={apiKeyVisibilityLabel} aria-label={apiKeyVisibilityLabel} onClick={() => setShowApiKey((visible) => !visible)}>{showApiKey ? <EyeOff size={13}/> : <Eye size={13}/>}</button></div></div></label>
+    <div className="wide endpoint-structured-headers"><StructuredKeyValueEditor label="Headers" description="可选。每个 HTTP Header 单独填写，无需输入 JSON 或多行格式文本。" rows={headerRows} keyLabel="Name" keyPlaceholder="Header name" valuePlaceholder="Header value" addLabel="添加 Header" showValues={showHeaders} revealAction={headerRows.length > 0 ? <button type="button" className="structured-field-visibility" title={showHeaders ? "隐藏 Header Value" : "显示 Header Value"} aria-label={showHeaders ? "隐藏 Header Value" : "显示 Header Value"} onClick={() => setShowHeaders((visible) => !visible)}>{showHeaders ? <EyeOff size={14}/> : <Eye size={14}/>}</button> : undefined} onChange={(rows) => { setShowHeaders(true); setHeaderRows(rows); }}/></div>
+  </div><div className="endpoint-editor-buttons"><button type="button" className="secondary compact" onClick={onClose}>取消</button><button type="button" className="primary compact" disabled={duplicateHeaderNames || !endpointDraftValid(endpointDraft)} onClick={save}>保存接入点</button></div></div>;
+}
+
+function RuntimeSettingsPanel({ panelRef, server, session, pendingKeys, credentialPending, revealedApiKey, onUpdate, onApiKeyUpdate, onApiKeyReveal }: {
   panelRef: MutableRefObject<HTMLElement | null>;
   server: Snapshot["server"] | null;
   session?: Session;
@@ -2310,7 +3770,6 @@ function RuntimePanel({ panelRef, server, session, pendingKeys, credentialPendin
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
   const autoRevealSessionRef = useRef("");
-  const previousCredentialPending = useRef(credentialPending);
   const keyConfigured = session?.runtime_profile?.api_key_configured ?? false;
   const sessionWorking = session?.state === "working";
   const runtimeOptions = useMemo(
@@ -2329,13 +3788,6 @@ function RuntimePanel({ panelRef, server, session, pendingKeys, credentialPendin
     setApiKeyDraft(revealedApiKey);
     setShowApiKey(false);
   }, [revealedApiKey]);
-  useEffect(() => {
-    if (previousCredentialPending.current && !credentialPending && revealedApiKey === undefined) {
-      setApiKeyDraft("");
-      setShowApiKey(false);
-    }
-    previousCredentialPending.current = credentialPending;
-  }, [credentialPending, revealedApiKey]);
   useEffect(() => {
     const sessionId = session?.session_id;
     if (!shouldAutoRevealSessionApiKey({ sessionId, configured: keyConfigured, revealedApiKey, pending: credentialPending, requestedSessionId: autoRevealSessionRef.current })) return;
@@ -2356,8 +3808,8 @@ function RuntimePanel({ panelRef, server, session, pendingKeys, credentialPendin
   return <section id="runtime-panel" ref={panelRef} className="runtime-card runtime-settings" tabIndex={-1}><div className="runtime-summary"><Cpu size={16}/><span>Timem {server.version}</span><span>topic protocol v{server.protocol_version}</span><span><FolderOpen size={14}/>{bindLabel}</span>{server.public_access && <span>public · token required</span>}</div>
     <div className="session-credential-settings">
       <div className="session-credential-heading"><KeyRound size={15}/><div><strong>Session API key</strong><small>{session ? session.display_name : "Create or select a session first"}</small></div></div>
-      <div className="session-credential-control"><div className="secret-input"><input type={showApiKey ? "text" : "password"} value={apiKeyDraft} autoComplete="new-password" spellCheck={false} aria-label="API key for current session" placeholder={credentialPending && keyConfigured ? "Loading API key…" : "Enter API key"} disabled={!session || credentialPending || sessionWorking} onChange={(event) => setApiKeyDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && canSaveApiKey) { event.preventDefault(); onApiKeyUpdate(apiKeyDraft); } }}/><button type="button" title={showApiKey ? "Hide API key" : "Show API key"} aria-label={showApiKey ? "Hide API key" : "Show API key"} disabled={!session || credentialPending || sessionWorking} onClick={toggleApiKey}>{showApiKey ? <EyeOff size={15}/> : <Eye size={15}/>}</button></div><button type="button" className="primary compact" disabled={!canSaveApiKey} onClick={() => onApiKeyUpdate(apiKeyDraft)}>{credentialPending ? "Working…" : "Save key"}</button></div>
-      {sessionWorking && <small className="session-credential-note">Finish or stop the active task before changing credentials.</small>}
+      <div className="session-credential-control"><div className="secret-input"><input type={showApiKey ? "text" : "password"} value={apiKeyDraft} autoComplete="new-password" spellCheck={false} aria-label="API key for current session" placeholder={credentialPending && keyConfigured ? "Loading API key…" : "Enter API key"} disabled={!session || credentialPending} readOnly={sessionWorking} onChange={(event) => setApiKeyDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && canSaveApiKey) { event.preventDefault(); onApiKeyUpdate(apiKeyDraft); } }}/><button type="button" title={showApiKey ? "Hide API key" : "Show API key"} aria-label={showApiKey ? "Hide API key" : "Show API key"} disabled={!session || credentialPending} onClick={toggleApiKey}>{showApiKey ? <EyeOff size={15}/> : <Eye size={15}/>}</button></div><button type="button" className="primary compact" disabled={!canSaveApiKey} onClick={() => onApiKeyUpdate(apiKeyDraft)}>{credentialPending ? "Working…" : "Save key"}</button></div>
+      {sessionWorking && <small className="session-credential-note">API key is read-only while working; you can still reveal and copy it. Finish or stop the active task before changing credentials.</small>}
     </div>
     <p>{session ? `Runtime settings for ${session.display_name}. Changes apply only to this Session.` : "Create or select a Session to configure its runtime."}</p><div className="runtime-options">{runtimeOptions.map((option) => {
     const value = drafts[option.key] ?? option.value;
@@ -2368,7 +3820,7 @@ function RuntimePanel({ panelRef, server, session, pendingKeys, credentialPendin
     const applyLabel = pending ? `Applying ${optionLabel}` : dirty ? `Apply ${optionLabel}` : `${optionLabel} has no changes`;
     const resetDraft = () => setDrafts((current) => { const { [option.key]: _removed, ...rest } = current; return rest; });
     const options = runtimeSelectOptions(option.key);
-    return <label key={option.key}><span>{optionLabel}</span><div>{options ? <select value={value} title={inputLabel} aria-label={inputLabel} disabled={pending || sessionWorking} onChange={(event) => setDrafts((current) => ({ ...current, [option.key]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && dirty && !pending && !sessionWorking) { event.preventDefault(); onUpdate(option.key, value); } if (event.key === "Escape" && dirty) { event.preventDefault(); resetDraft(); } }}>{options.map((choice) => <option value={choice} key={choice}>{choice}</option>)}</select> : <input value={value} title={inputLabel} aria-label={inputLabel} disabled={pending || sessionWorking} onChange={(event) => setDrafts((current) => ({ ...current, [option.key]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && dirty && !pending && !sessionWorking) { event.preventDefault(); onUpdate(option.key, value); } if (event.key === "Escape" && dirty) { event.preventDefault(); resetDraft(); } }}/>} {dirty && <button type="button" className="secondary compact runtime-reset" title={`Reset ${optionLabel} to current value`} aria-label={`Reset ${optionLabel} to current value`} disabled={pending} onClick={resetDraft}>Reset</button>}<button type="button" className="secondary compact" title={applyLabel} aria-label={applyLabel} disabled={pending || !dirty || sessionWorking} onClick={() => onUpdate(option.key, value)}>{pending ? "Applying…" : "Apply"}</button></div></label>;
+    return <label key={option.key}><span>{optionLabel}</span><div>{options ? <select value={value} title={inputLabel} aria-label={inputLabel} disabled={pending} onChange={(event) => setDrafts((current) => ({ ...current, [option.key]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && dirty && !pending) { event.preventDefault(); onUpdate(option.key, value); } if (event.key === "Escape" && dirty) { event.preventDefault(); resetDraft(); } }}>{options.map((choice) => <option value={choice} key={choice}>{choice === "unlimited" ? "Unlimited" : choice}</option>)}</select> : <input value={value} title={inputLabel} aria-label={inputLabel} disabled={pending} onChange={(event) => setDrafts((current) => ({ ...current, [option.key]: event.target.value }))} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && dirty && !pending) { event.preventDefault(); onUpdate(option.key, value); } if (event.key === "Escape" && dirty) { event.preventDefault(); resetDraft(); } }}/>} {dirty && <button type="button" className="secondary compact runtime-reset" title={`Reset ${optionLabel} to current value`} aria-label={`Reset ${optionLabel} to current value`} disabled={pending} onClick={resetDraft}>Reset</button>}<button type="button" className="secondary compact" title={applyLabel} aria-label={applyLabel} disabled={pending || !dirty} onClick={() => onUpdate(option.key, value)}>{pending ? "Applying…" : "Apply"}</button></div></label>;
   })}</div>{(pendingRuntimeLabel || credentialPending) && <p className="runtime-pending-status" role="status" aria-live="polite">{credentialPending ? "Saving the Session API key…" : pendingRuntimeLabel}</p>}</section>;
 }
 
@@ -2377,11 +3829,13 @@ function runtimeSelectOptions(key: string): readonly string[] | null {
     case "TIMEM_API_PROTOCOL":
       return ["openai-compatible", "openai-responses", "anthropic"];
     case "TIMEM_RESPONSE_PROTOCOL":
-      return ["xml", "json", "markdown"];
+      return ["xml", "json"];
     case "TIMEM_BASH_APPROVAL":
       return ["approve", "ask"];
     case "TIMEM_WORK_INSTRUCTIONS":
       return ["silent", "ask", "off"];
+    case "TIMEM_MAX_ROUNDS":
+      return ["50", "200", "500", "unlimited"];
     case "TIMEM_ENABLE_THINKING":
     case "TIMEM_STREAM":
       return ["true", "false"];
@@ -2406,6 +3860,18 @@ const SESSION_RUNTIME_FIELDS = [
   ["TIMEM_STREAM", "Stream response", "boolean"],
 ] as const;
 
+function RuntimeUnavailableDialog({ detail, onClose }: { detail: string; onClose: () => void }) {
+  return <div className="modal-backdrop runtime-unavailable-backdrop" role="presentation">
+    <section className="decision-modal runtime-unavailable-dialog" role="dialog" aria-modal="true" aria-labelledby="runtime-unavailable-title" aria-describedby="runtime-unavailable-description" onKeyDown={(event) => {
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
+    }}>
+      <div className="modal-titlebar"><div><span className="eyebrow">RUNTIME STATUS</span><h2 id="runtime-unavailable-title"><TriangleAlert size={20} aria-hidden="true"/> Runtime unavailable</h2></div><button type="button" className="icon-button" autoFocus title="Close runtime unavailable alert" aria-label="Close runtime unavailable alert" onClick={onClose}><X size={16}/></button></div>
+      <p id="runtime-unavailable-description">{detail}</p>
+      <p className="runtime-unavailable-hint">Timem cannot send messages or change sessions until the runtime reconnects. After you close this dialog, the warning banner will remain visible.</p>
+    </section>
+  </div>;
+}
+
 function NewSessionDialog({ workspaces, runtimeDefaults, creating, memSwitching, onClose, onCreate }: {
   workspaces: string[];
   runtimeDefaults: Snapshot["server"]["session_env_defaults"];
@@ -2426,7 +3892,12 @@ function NewSessionDialog({ workspaces, runtimeDefaults, creating, memSwitching,
   const descriptionId = "new-session-dialog-description";
   const statusId = "new-session-dialog-status";
   const describedBy = creating ? `${descriptionId} ${statusId}` : descriptionId;
-  return <div className="modal-backdrop" role="presentation" aria-label="Dismiss create session" onClick={closeIfIdle}><section className="decision-modal session-modal" role="dialog" aria-modal="true" aria-label="Create session" aria-describedby={describedBy} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">NEW SESSION</span><h2>Start a session</h2></div><button type="button" className="icon-button" title="Close create session" aria-label="Close create session" disabled={creating} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>Choose a workspace and optional runtime overrides for this session.</p>{creating && <p id={statusId} className="mem-validation" role="status" aria-live="polite">Creating session…</p>}<div className="session-modal-scroll"><label>Display name<input autoFocus value={displayName} placeholder="Optional name" disabled={creating} onChange={(event) => setDisplayName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); } }}/></label><label>Workspace<select value={workspaceDir} disabled={creating || workspaces.length === 0} onChange={(event) => setWorkspaceDir(event.target.value)}>{workspaces.length === 0 ? <option value="">No workspace available</option> : workspaces.map((workspace) => <option value={workspace} key={workspace} title={workspace}>{tailPath(workspace, 64)}</option>)}</select></label>{workspaces.length === 0 && <p className="mem-hint">No workspace is available from the runtime snapshot. Reconnect Timem Web or check the host workspace configuration.</p>}<details className="session-runtime-overrides"><summary>Runtime environment</summary><div className="session-runtime-grid">{SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => <label key={key}><span>{label}<small>{key}</small></span><div className="session-runtime-control">{kind === "api_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "default"}</option><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select> : kind === "response_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "xml"}</option><option value="xml">xml</option><option value="json">json</option><option value="markdown">markdown</option></select> : kind === "bash_approval" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "ask"}</option><option value="ask">ask</option><option value="approve">approve</option></select> : kind === "work_instructions" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "silent"}</option><option value="silent">silent</option><option value="ask">ask</option><option value="off">off</option></select> : kind === "boolean" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "false"}</option><option value="true">true</option><option value="false">false</option></select> : <input type={kind} value={env[key] ?? ""} min={kind === "number" ? 1 : undefined} disabled={creating} autoComplete={kind === "password" ? "new-password" : undefined} placeholder={kind === "password" ? "Optional session-only key" : `Inherit · ${runtimeDefaults[key] ?? "default"}`} onChange={(event) => updateEnv(key, event.target.value)}/>} {env[key] !== undefined && <button type="button" className="session-runtime-reset" title={`Reset ${label} to inherited value`} aria-label={`Reset ${label} to inherited value`} disabled={creating} onClick={() => resetEnv(key)}>Reset</button>}</div></label>)}</div></details></div><div className="decision-actions"><button type="button" className="secondary" disabled={creating} onClick={closeIfIdle}>Cancel</button><button type="button" className={`primary ${creating ? "sending" : ""}`} disabled={!canCreateSession} onClick={submit}>{creating ? <LoaderCircle size={16}/> : <Plus size={16}/>} {creating ? "Creating…" : "Create session"}</button></div></section></div>;
+  return <div className="modal-backdrop" role="presentation" aria-label="Dismiss create session" onClick={closeIfIdle}><section className="decision-modal session-modal" role="dialog" aria-modal="true" aria-label="Create session" aria-describedby={describedBy} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">NEW SESSION</span><h2>Start a session</h2></div><button type="button" className="icon-button" title="Close create session" aria-label="Close create session" disabled={creating} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>Select a known workspace or enter an existing absolute directory for this session.</p>{creating && <p id={statusId} className="mem-validation" role="status" aria-live="polite">Creating session…</p>}<div className="session-modal-scroll"><label>Display name<input autoFocus value={displayName} placeholder="Optional name" disabled={creating} onChange={(event) => setDisplayName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); } }}/></label><label>Workspace directory<input type="text" list="new-session-workspaces" value={workspaceDir} disabled={creating} placeholder="/absolute/path/to/workspace" autoComplete="off" onChange={(event) => setWorkspaceDir(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); } }}/><datalist id="new-session-workspaces">{workspaces.map((workspace) => <option value={workspace} key={workspace}>{tailPath(workspace, 64)}</option>)}</datalist></label><p className="mem-hint">Choose a suggested workspace or type an absolute directory path that exists on the Timem host.</p><details className="session-runtime-overrides"><summary>Runtime environment</summary><div className="session-runtime-grid">{SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => <label key={key}><span>{label}<small>{key}</small></span><div className="session-runtime-control">{kind === "api_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "default"}</option><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select> : kind === "response_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "xml"}</option><option value="xml">xml</option><option value="json">json</option></select> : kind === "bash_approval" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "ask"}</option><option value="ask">ask</option><option value="approve">approve</option></select> : kind === "work_instructions" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "silent"}</option><option value="silent">silent</option><option value="ask">ask</option><option value="off">off</option></select> : kind === "boolean" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "false"}</option><option value="true">true</option><option value="false">false</option></select> : <input type={kind} value={env[key] ?? ""} min={kind === "number" ? 1 : undefined} disabled={creating} autoComplete={kind === "password" ? "new-password" : undefined} placeholder={kind === "password" ? "Optional session-only key" : `Inherit · ${runtimeDefaults[key] ?? "default"}`} onChange={(event) => updateEnv(key, event.target.value)}/>} {env[key] !== undefined && <button type="button" className="session-runtime-reset" title={`Reset ${label} to inherited value`} aria-label={`Reset ${label} to inherited value`} disabled={creating} onClick={() => resetEnv(key)}>Reset</button>}</div></label>)}</div></details></div><div className="decision-actions"><button type="button" className="secondary" disabled={creating} onClick={closeIfIdle}>Cancel</button><button type="button" className={`primary ${creating ? "sending" : ""}`} disabled={!canCreateSession} onClick={submit}>{creating ? <LoaderCircle size={16}/> : <Plus size={16}/>} {creating ? "Creating…" : "Create session"}</button></div></section></div>;
+}
+
+
+function ModelEndpointDeleteDialog({ endpoint, onClose, onConfirm }: { endpoint: ModelEndpoint; onClose: () => void; onConfirm: () => void }) {
+  return <div className="modal-backdrop" role="presentation" onClick={onClose}><section className="decision-modal session-delete-dialog" role="dialog" aria-modal="true" aria-label={`Delete ${endpoint.name}`} onClick={(event) => event.stopPropagation()}><div className="modal-titlebar"><div><span className="eyebrow">DELETE ENDPOINT</span><h2>Delete “{endpoint.name}”?</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={16}/></button></div><p>This removes the shared endpoint from every Session dropdown. Existing Session settings are not changed.</p><div className="decision-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="button" className="danger" onClick={onConfirm}><Trash2 size={15}/> Delete endpoint</button></div></section></div>;
 }
 
 function SessionDeleteDialog({ session, pending, onClose, onConfirm }: {
@@ -2441,6 +3912,29 @@ function SessionDeleteDialog({ session, pending, onClose, onConfirm }: {
   return <div className="modal-backdrop" role="presentation" aria-label="Dismiss delete session confirmation" onClick={closeIfIdle}><section className="decision-modal session-delete-dialog" role="dialog" aria-modal="true" aria-label={`Delete ${session.display_name}`} aria-describedby={pending ? `${descriptionId} ${statusId}` : descriptionId} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">DELETE SESSION</span><h2>Delete “{session.display_name}”?</h2></div><button type="button" className="icon-button" title="Close delete session confirmation" aria-label="Close delete session confirmation" disabled={pending} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>This permanently deletes the session, its stored task history, settings, and session tools. {session.state === "working" && "Current work will be stopped."} This cannot be undone.</p>{pending && <p id={statusId} className="session-delete-status" role="status" aria-live="polite">Stopping workers and deleting session…</p>}<div className="decision-actions"><button type="button" className="secondary" disabled={pending} onClick={closeIfIdle}>Cancel</button><button type="button" className={`danger ${pending ? "sending" : ""}`} disabled={pending} onClick={onConfirm}>{pending ? <LoaderCircle size={16}/> : <Trash2 size={15}/>} {pending ? "Deleting…" : "Delete session"}</button></div></section></div>;
 }
 
+function ChatMessageDeleteDialog({ candidate, pending, onClose, onConfirm }: {
+  candidate: ChatMessageDeleteCandidate;
+  pending: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const descriptionId = "chat-message-delete-description";
+  const statusId = "chat-message-delete-status";
+  const closeIfIdle = () => { if (!pending) onClose(); };
+  const roleLabel = candidate.role === "user" ? "user message" : "assistant answer";
+  const normalizedPreview = candidate.preview.trim().replace(/\s+/g, " ");
+  const preview = normalizedPreview.slice(0, 180);
+  return <div className="modal-backdrop" role="presentation" aria-label="Dismiss delete message confirmation" onClick={closeIfIdle}>
+    <section className="decision-modal chat-message-delete-dialog" role="dialog" aria-modal="true" aria-label={`Delete ${roleLabel}`} aria-describedby={pending ? `${descriptionId} ${statusId}` : descriptionId} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}>
+      <div className="modal-titlebar"><div><span className="eyebrow">DELETE MESSAGE</span><h2>Delete this {roleLabel}?</h2></div><button type="button" className="icon-button" title="Close delete message confirmation" aria-label="Close delete message confirmation" disabled={pending} onClick={closeIfIdle}><X size={16}/></button></div>
+      <p id={descriptionId}>This permanently removes the content from the conversation and its raw chat log. Runtime activity records for the task are retained. This cannot be undone.</p>
+      {preview && <blockquote className="chat-message-delete-preview">{preview}{normalizedPreview.length > 180 ? "…" : ""}</blockquote>}
+      {pending && <p id={statusId} className="session-delete-status" role="status" aria-live="polite">Deleting message and rewriting raw chat history…</p>}
+      <div className="decision-actions"><button type="button" className="secondary" disabled={pending} onClick={closeIfIdle}>Cancel</button><button type="button" className={`danger ${pending ? "sending" : ""}`} disabled={pending} onClick={onConfirm}>{pending ? <LoaderCircle size={16}/> : <Trash2 size={15}/>} {pending ? "Deleting…" : "Delete message"}</button></div>
+    </section>
+  </div>;
+}
+
 function ToolGenDialog({ pending, onClose, onSubmit }: { pending: boolean; onClose: () => void; onSubmit: (text: string) => void }) {
   const [instruction, setInstruction] = useState("");
   const closeIfIdle = () => { if (!pending) onClose(); };
@@ -2449,6 +3943,18 @@ function ToolGenDialog({ pending, onClose, onSubmit }: { pending: boolean; onClo
   const statusId = "toolgen-dialog-status";
   const describedBy = pending ? `${descriptionId} ${statusId}` : descriptionId;
   return <div className="modal-backdrop" role="presentation" aria-label="Dismiss ToolGen dialog" onClick={closeIfIdle}><section className="decision-modal toolgen-dialog" role="dialog" aria-modal="true" aria-label="Generate reusable tool" aria-describedby={describedBy} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">TOOLGEN</span><h2>Extract reusable tool</h2></div><button type="button" className="icon-button" title="Close ToolGen dialog" aria-label="Close ToolGen dialog" disabled={pending} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>Timem will preserve reusable work from the completed task as one or more standalone script tools. Add optional guidance below.</p>{pending && <p id={statusId} className="toolgen-dialog-status" role="status" aria-live="polite">Starting ToolGen and opening a generating-tools task…</p>}<label>Additional guidance<textarea autoFocus value={instruction} disabled={pending} placeholder="Optional: preferred interface, language, scope, or reusable workflow…" onChange={(event) => setInstruction(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); } }}/><small className="toolgen-dialog-hint">Cmd/Ctrl+Enter to generate; Escape closes before it starts.</small></label><div className="decision-actions"><button type="button" className="secondary" disabled={pending} onClick={closeIfIdle}>Cancel</button><button type="button" className={`primary ${pending ? "sending" : ""}`} disabled={pending} onClick={submit}>{pending ? <LoaderCircle size={16}/> : <Wrench size={15}/>} {pending ? "Starting…" : "Generate tool"}</button></div></section></div>;
+}
+
+function MemSettingsDialog({ memPath, current, pending, onClose, onSave }: {
+  memPath: string;
+  current: 1 | 5 | 10 | null;
+  pending: boolean;
+  onClose: () => void;
+  onSave: (days: 1 | 5 | 10 | null) => void;
+}) {
+  const [days, setDays] = useState<1 | 5 | 10 | null>(current);
+  const closeIfIdle = () => { if (!pending) onClose(); };
+  return <div className="modal-backdrop" role="presentation" aria-label="Dismiss mem settings" onClick={closeIfIdle}><section className="decision-modal mem-settings-modal" role="dialog" aria-modal="true" aria-label="Memory settings" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">MEM SETTINGS</span><h2>Memory settings</h2></div><button type="button" className="icon-button" title="Close mem settings" aria-label="Close mem settings" disabled={pending} onClick={closeIfIdle}><X size={16}/></button></div><p className="mem-settings-current"><strong>Current MEM:</strong> <span>{memPath || "…"}</span></p><label>选择保留天数<select autoFocus value={days === null ? "unlimited" : String(days)} disabled={pending} onChange={(event) => setDays(event.target.value === "unlimited" ? null : Number(event.target.value) as 1 | 5 | 10)}><option value="1">最近 1 天</option><option value="5">最近 5 天</option><option value="10">最近 10 天</option><option value="unlimited">不限</option></select></label>{pending && <p className="mem-validation" role="status" aria-live="polite">Saving and applying temporary-data retention…</p>}<div className="decision-actions"><button type="button" className="secondary" disabled={pending} onClick={closeIfIdle}>Cancel</button><button type="button" className={`primary ${pending ? "sending" : ""}`} disabled={pending || days === current} onClick={() => onSave(days)}>{pending && <LoaderCircle size={16}/>} {pending ? "Saving…" : "Save"}</button></div></section></div>;
 }
 
 function MemSwitchDialog({ current, pending, onClose, onSwitch }: {

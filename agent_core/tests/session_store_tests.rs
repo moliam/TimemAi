@@ -26,14 +26,44 @@ fn chat_history_message_command_id_round_trips_for_exactly_once_recovery() {
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn tmp_dir(name: &str) -> PathBuf {
+struct TestDir(PathBuf);
+
+impl Deref for TestDir {
+    type Target = PathBuf;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for TestDir {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            if error.kind() != std::io::ErrorKind::NotFound && !std::thread::panicking() {
+                panic!(
+                    "failed to clean test directory {}: {error}",
+                    self.0.display()
+                );
+            }
+        }
+    }
+}
+
+fn tmp_dir(name: &str) -> TestDir {
     let mut path = std::env::temp_dir();
     path.push(format!(
         "timem_session_store_test_{}_{}_{}_{}",
@@ -44,7 +74,7 @@ fn tmp_dir(name: &str) -> PathBuf {
     ));
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).unwrap();
-    path
+    TestDir(path)
 }
 
 fn now_ms() -> u128 {
@@ -111,6 +141,173 @@ fn chat_history_records_round_trip_as_jsonl() {
     for line in fs::read_to_string(path).unwrap().lines() {
         serde_json::from_str::<ChatHistoryRecord>(line).unwrap();
     }
+}
+
+#[test]
+fn temporary_retention_prunes_only_selected_old_events() {
+    let root = tmp_dir("temporary_retention");
+    let store = SessionStore::new(&root);
+    let records = [
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "old_message".to_string(),
+            created_at_ms: 1,
+            kind: None,
+            command_id: None,
+            delivery_state: None,
+            content: "old user message must remain".to_string(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "old_action".to_string(),
+            created_at_ms: 1,
+            kind: ChatHistoryEventKind::Action,
+            content: "expired action".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "old_action_result".to_string(),
+            created_at_ms: 2,
+            kind: ChatHistoryEventKind::ActionResult,
+            content: "expired action result".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "old_compact".to_string(),
+            created_at_ms: 3,
+            kind: ChatHistoryEventKind::ContextCompact,
+            content: "expired compact".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "old_repair".to_string(),
+            created_at_ms: 4,
+            kind: ChatHistoryEventKind::Repair,
+            content: "expired repair".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "old_progress".to_string(),
+            created_at_ms: 1,
+            kind: ChatHistoryEventKind::Progress,
+            content: "old durable progress remains".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "boundary_action".to_string(),
+            created_at_ms: 100,
+            kind: ChatHistoryEventKind::Action,
+            content: "boundary remains".to_string(),
+            extra: BTreeMap::new(),
+        },
+    ];
+    for record in &records {
+        store.append_history_record("session_a", record).unwrap();
+    }
+    let path = store.history_path_for_session("session_a");
+    use std::io::Write as _;
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap(),
+        "not-json"
+    )
+    .unwrap();
+
+    assert_eq!(
+        store
+            .prune_temporary_history_events_before("session_a", 100)
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        store
+            .prune_temporary_history_events_before("session_a", 100)
+            .unwrap(),
+        0,
+        "repeating the same rolling cleanup must be idempotent"
+    );
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("old user message must remain"));
+    assert!(text.contains("old durable progress remains"));
+    assert!(text.contains("boundary remains"));
+    assert!(
+        text.contains("not-json"),
+        "malformed evidence must be preserved"
+    );
+    assert!(!text.contains("expired action"));
+    assert!(!text.contains("expired compact"));
+    assert!(!text.contains("expired repair"));
+}
+
+#[test]
+fn temporary_retention_serializes_with_concurrent_appends_without_losing_messages() {
+    let root = tmp_dir("temporary_retention_concurrent_append");
+    let store = SessionStore::new(&root);
+    store
+        .append_history_record(
+            "session_a",
+            &ChatHistoryRecord::Event {
+                role: ChatHistoryRole::System,
+                turn_id: "expired".to_string(),
+                created_at_ms: 1,
+                kind: ChatHistoryEventKind::Action,
+                content: "expired action".to_string(),
+                extra: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+    let writer_store = store.clone();
+    let writer = std::thread::spawn(move || {
+        for index in 0..500 {
+            writer_store
+                .append_history_record(
+                    "session_a",
+                    &ChatHistoryRecord::Message {
+                        role: ChatHistoryRole::User,
+                        turn_id: format!("message-{index}"),
+                        created_at_ms: 1,
+                        kind: None,
+                        command_id: None,
+                        delivery_state: None,
+                        content: format!("durable message {index}"),
+                    },
+                )
+                .unwrap();
+        }
+    });
+    for _ in 0..50 {
+        store
+            .prune_temporary_history_events_before("session_a", 100)
+            .unwrap();
+    }
+    writer.join().unwrap();
+    store
+        .prune_temporary_history_events_before("session_a", 100)
+        .unwrap();
+
+    let records = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert_eq!(records.len(), 500);
+    assert!(records.iter().all(|record| matches!(
+        record,
+        ChatHistoryRecord::Message { content, .. } if content.starts_with("durable message ")
+    )));
+    let turn_ids = records
+        .iter()
+        .map(|record| record.turn_id().to_string())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        turn_ids.len(),
+        500,
+        "no concurrent append may be lost or duplicated"
+    );
 }
 
 #[test]
@@ -485,6 +682,129 @@ fn stored_sessions_are_host_agnostic_and_sorted_by_recent_update() {
 }
 
 #[test]
+fn resilient_session_index_load_preserves_valid_records_and_backs_up_corruption() {
+    let root = tmp_dir("resilient_corrupt_index");
+    let store = SessionStore::new(&root);
+    std::fs::create_dir_all(store.sessions_dir()).unwrap();
+    let valid = new_stored_session(
+        "session_valid",
+        "Recovered",
+        "/tmp/project",
+        profile(),
+        store.history_path_for_session("session_valid"),
+    );
+    let valid_line = serde_json::to_string(&valid).unwrap();
+    let original = format!("{valid_line}\ntruncated-json\n");
+    std::fs::write(store.index_path(), &original).unwrap();
+
+    let recovery = store.list_sessions_resilient().unwrap();
+    assert!(recovery.repaired());
+    assert_eq!(recovery.invalid_records, 1);
+    assert_eq!(recovery.sessions, vec![valid]);
+    let backup = recovery.backup_path.unwrap();
+    assert_eq!(std::fs::read_to_string(backup).unwrap(), original);
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+}
+
+#[test]
+fn resilient_session_index_load_quarantines_non_utf8_records() {
+    let root = tmp_dir("resilient_non_utf8_index");
+    let store = SessionStore::new(&root);
+    std::fs::create_dir_all(store.sessions_dir()).unwrap();
+    let original = [b'{', 0xff, b'}', b'\n'];
+    std::fs::write(store.index_path(), original).unwrap();
+
+    let recovery = store.list_sessions_resilient().unwrap();
+    assert!(recovery.sessions.is_empty());
+    assert_eq!(recovery.invalid_records, 1);
+    assert_eq!(
+        std::fs::read(recovery.backup_path.unwrap()).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn resilient_session_index_load_bounds_oversized_records_and_keeps_following_sessions() {
+    let root = tmp_dir("resilient_oversized_index");
+    let store = SessionStore::new(&root);
+    std::fs::create_dir_all(store.sessions_dir()).unwrap();
+    let valid = new_stored_session(
+        "session_after_large_record",
+        "Recovered after oversized record",
+        "/tmp/project",
+        profile(),
+        store.history_path_for_session("session_after_large_record"),
+    );
+    let valid_line = serde_json::to_string(&valid).unwrap();
+    let mut original = vec![b'x'; 1024 * 1024 + 100];
+    original.push(b'\n');
+    original.extend_from_slice(valid_line.as_bytes());
+    original.push(b'\n');
+    std::fs::write(store.index_path(), &original).unwrap();
+
+    let recovery = store.list_sessions_resilient().unwrap();
+    assert_eq!(recovery.invalid_records, 1);
+    assert_eq!(recovery.sessions, vec![valid]);
+    assert_eq!(
+        std::fs::read(recovery.backup_path.unwrap()).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn resilient_session_index_deduplicates_ids_by_latest_update_and_is_idempotent() {
+    let root = tmp_dir("resilient_duplicate_ids");
+    let store = SessionStore::new(&root);
+    fs::create_dir_all(store.sessions_dir()).unwrap();
+    let mut older = new_stored_session(
+        "session_duplicate",
+        "Older",
+        "/tmp/project",
+        profile(),
+        store.history_path_for_session("session_duplicate"),
+    );
+    older.updated_at_ms = 10;
+    let mut newer = older.clone();
+    newer.display_name = "Newer".to_string();
+    newer.updated_at_ms = 20;
+    let original = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&older).unwrap(),
+        serde_json::to_string(&newer).unwrap()
+    );
+    fs::write(store.index_path(), &original).unwrap();
+
+    let first = store.list_sessions_resilient().unwrap();
+    assert_eq!(first.invalid_records, 1);
+    assert_eq!(first.sessions, vec![newer.clone()]);
+    let backup = first.backup_path.unwrap();
+    assert_eq!(fs::read_to_string(backup).unwrap(), original);
+    assert!(!store.index_path().with_extension("jsonl.tmp").exists());
+
+    let second = store.list_sessions_resilient().unwrap();
+    assert_eq!(second.invalid_records, 0);
+    assert!(second.backup_path.is_none());
+    assert_eq!(second.sessions, vec![newer]);
+}
+
+#[test]
+fn resilient_session_index_load_quarantines_fully_corrupt_index_before_reset() {
+    let root = tmp_dir("resilient_fully_corrupt_index");
+    let store = SessionStore::new(&root);
+    std::fs::create_dir_all(store.sessions_dir()).unwrap();
+    std::fs::write(store.index_path(), b"not-json\n").unwrap();
+
+    let recovery = store.list_sessions_resilient().unwrap();
+    assert!(recovery.sessions.is_empty());
+    assert_eq!(recovery.invalid_records, 1);
+    assert_eq!(
+        std::fs::read(recovery.backup_path.unwrap()).unwrap(),
+        b"not-json\n"
+    );
+    assert!(store.list_sessions().unwrap().is_empty());
+}
+
+#[test]
 fn concurrent_session_store_instances_never_expose_partial_or_lose_index_records() {
     const WRITERS: usize = 4;
     const UPDATES: usize = 12;
@@ -493,7 +813,7 @@ fn concurrent_session_store_instances_never_expose_partial_or_lose_index_records
     let mut workers = Vec::new();
 
     for ordinal in 0..WRITERS {
-        let root = root.clone();
+        let root = root.to_path_buf();
         let barrier = barrier.clone();
         workers.push(std::thread::spawn(move || {
             let store = SessionStore::new(&root);
@@ -533,6 +853,46 @@ fn concurrent_session_store_instances_never_expose_partial_or_lose_index_records
 }
 
 #[test]
+fn legacy_index_migrates_to_session_scoped_metadata_files() {
+    let root = tmp_dir("session_metadata_v2_migration");
+    let store = SessionStore::new(&root);
+    fs::create_dir_all(store.sessions_dir()).unwrap();
+    let first = new_stored_session(
+        "session_first",
+        "First",
+        "/tmp/project-a",
+        profile(),
+        store.history_path_for_session("session_first"),
+    );
+    let second = new_stored_session(
+        "session_second",
+        "Second",
+        "/tmp/project-b",
+        profile(),
+        store.history_path_for_session("session_second"),
+    );
+    fs::write(
+        store.index_path(),
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&first).unwrap(),
+            serde_json::to_string(&second).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let recovery = store.list_sessions_resilient().unwrap();
+    assert_eq!(recovery.sessions.len(), 2);
+    assert!(store.layout_marker_path().is_file());
+    assert!(!store.index_path().exists());
+    assert!(store.sessions_dir().join("index.v1.jsonl").is_file());
+    assert!(store.metadata_path_for_session("session_first").is_file());
+    assert!(store.metadata_path_for_session("session_second").is_file());
+    assert_eq!(store.load_session("session_first").unwrap(), Some(first));
+    assert_eq!(store.load_session("session_second").unwrap(), Some(second));
+}
+
+#[test]
 fn deleting_a_session_removes_its_index_entry_and_persisted_data() {
     let root = tmp_dir("delete_session");
     let store = SessionStore::new(&root);
@@ -563,6 +923,71 @@ fn deleting_a_session_removes_its_index_entry_and_persisted_data() {
     );
 }
 
+#[test]
+fn deleting_one_history_message_rewrites_raw_chat_and_preserves_other_records() {
+    let root = tmp_dir("delete_history_message");
+    let store = SessionStore::new(&root);
+    let records = vec![
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 1,
+            kind: Some("task".to_string()),
+            command_id: None,
+            delivery_state: None,
+            content: "keep first user entry".to_string(),
+        },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 2,
+            kind: Some("supplement".to_string()),
+            command_id: None,
+            delivery_state: None,
+            content: "delete second user entry".to_string(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 3,
+            kind: ChatHistoryEventKind::Progress,
+            content: "keep event".to_string(),
+            extra: BTreeMap::new(),
+        },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::Assistant,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 4,
+            kind: None,
+            command_id: None,
+            delivery_state: None,
+            content: "keep assistant".to_string(),
+        },
+    ];
+    for record in &records {
+        store.append_history_record("session_a", record).unwrap();
+    }
+
+    let deleted = store
+        .delete_history_message("session_a", "turn_1", ChatHistoryRole::User, 1)
+        .unwrap();
+    assert!(matches!(
+        deleted,
+        ChatHistoryRecord::Message { content, .. } if content == "delete second user entry"
+    ));
+    let remaining = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert_eq!(
+        remaining,
+        vec![records[0].clone(), records[2].clone(), records[3].clone()]
+    );
+    assert_eq!(
+        store
+            .delete_history_message("session_a", "turn_1", ChatHistoryRole::User, 1)
+            .unwrap_err(),
+        "chat_message_not_found"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn session_index_permissions_protect_cached_environment() {
@@ -588,7 +1013,7 @@ fn session_index_permissions_protect_cached_environment() {
         .permissions()
         .mode()
         & 0o777;
-    let index_mode = std::fs::metadata(store.index_path())
+    let index_mode = std::fs::metadata(store.metadata_path_for_session("session_secure"))
         .unwrap()
         .permissions()
         .mode()
@@ -614,12 +1039,105 @@ fn resume_notice_references_history_format_without_web_specific_language() {
         current_dir: PathBuf::from("/work/project"),
     };
     let rendered = notice.render();
-    assert!(rendered.starts_with("## SYSTEM"));
-    assert!(rendered
+    assert!(rendered.starts_with("Runtime just restarted."));
+    assert!(!rendered.contains("## RUNTIME"));
+    assert!(!rendered.contains("<RUNTIME>"));
+    assert!(rendered.contains(
+        "Runtime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them."
+    ));
+    assert!(!rendered.contains("Previous audit chat history's runtime info are valid."));
+    assert!(!rendered
         .contains("This session was restored and may not include the full previous context."));
     assert!(rendered.contains("path: /tmp/session/raw_chat_history.jsonl"));
     assert!(rendered.contains("format: JSONL, one record per line."));
-    assert!(rendered.contains("Try to use efficient tools such as tail, rg, jq"));
+    assert!(!rendered.contains("Do not assume the whole previous context is loaded."));
+    assert!(!rendered.contains("Read this file only when needed for the current task."));
+    assert!(!rendered.contains("Try to use efficient tools such as tail, rg, jq"));
+    assert!(!rendered.contains("instead of a huge cat"));
     assert!(rendered.contains("Current cwd: /work/project"));
     assert!(!rendered.to_lowercase().contains("web"));
+}
+
+#[test]
+fn resilient_metadata_load_quarantines_only_corrupt_session_and_keeps_healthy_sessions() {
+    let root = tmp_dir("resilient_corrupt_metadata");
+    let store = SessionStore::new(&root);
+    let healthy = new_stored_session(
+        "session_healthy",
+        "Healthy",
+        "/tmp/project-healthy",
+        profile(),
+        store.history_path_for_session("session_healthy"),
+    );
+    let corrupt = new_stored_session(
+        "session_corrupt",
+        "Corrupt",
+        "/tmp/project-corrupt",
+        profile(),
+        store.history_path_for_session("session_corrupt"),
+    );
+    store.upsert_session(&healthy).unwrap();
+    store.upsert_session(&corrupt).unwrap();
+    fs::write(
+        store.metadata_path_for_session("session_corrupt"),
+        b"{truncated-json",
+    )
+    .unwrap();
+
+    let recovery = store.list_sessions_resilient().unwrap();
+    assert_eq!(recovery.sessions, vec![healthy.clone()]);
+    assert_eq!(recovery.invalid_records, 1);
+    assert_eq!(recovery.backup_paths.len(), 1);
+    assert_eq!(recovery.backup_path, recovery.backup_paths.first().cloned());
+    assert_eq!(
+        fs::read(&recovery.backup_paths[0]).unwrap(),
+        b"{truncated-json"
+    );
+    assert!(!store.metadata_path_for_session("session_corrupt").exists());
+    assert_eq!(
+        store.load_session("session_healthy").unwrap(),
+        Some(healthy)
+    );
+
+    let second = store.list_sessions_resilient().unwrap();
+    assert_eq!(second.invalid_records, 0);
+    assert!(second.backup_paths.is_empty());
+}
+
+#[test]
+fn resilient_metadata_load_quarantines_id_mismatch_without_hiding_other_sessions() {
+    let root = tmp_dir("resilient_metadata_id_mismatch");
+    let store = SessionStore::new(&root);
+    let healthy = new_stored_session(
+        "session_healthy",
+        "Healthy",
+        "/tmp/project-healthy",
+        profile(),
+        store.history_path_for_session("session_healthy"),
+    );
+    let mut mismatched = new_stored_session(
+        "session_expected",
+        "Mismatched",
+        "/tmp/project-mismatch",
+        profile(),
+        store.history_path_for_session("session_expected"),
+    );
+    store.upsert_session(&healthy).unwrap();
+    store.upsert_session(&mismatched).unwrap();
+    mismatched.session_id = "session_other".to_string();
+    fs::write(
+        store.metadata_path_for_session("session_expected"),
+        serde_json::to_vec_pretty(&mismatched).unwrap(),
+    )
+    .unwrap();
+
+    let recovery = store.list_sessions_resilient().unwrap();
+    assert_eq!(recovery.sessions, vec![healthy]);
+    assert_eq!(recovery.invalid_records, 1);
+    assert_eq!(recovery.backup_paths.len(), 1);
+    assert!(recovery.backup_paths[0]
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .contains("session-metadata-corrupt-backup"));
 }

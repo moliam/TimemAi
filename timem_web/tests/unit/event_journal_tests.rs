@@ -79,6 +79,33 @@ fn a_second_host_cannot_open_the_same_journal_until_the_owner_exits() {
 }
 
 #[test]
+fn instance_lock_publishes_recovery_metadata_for_a_second_launch() {
+    let path = journal_path("instance_info");
+    let mut journal = EventJournal::open(&path).unwrap();
+    let info = JournalInstanceInfo {
+        pid: 42,
+        launch_parent_pid: None,
+        port: Some(18080),
+        token: Some("private-token".to_string()),
+        browser_url: Some("http://127.0.0.1:18080/?token=private-token".to_string()),
+        public_access: false,
+        started_at_ms: 123,
+    };
+
+    journal.publish_instance_info(&info).unwrap();
+
+    assert_eq!(EventJournal::read_instance_info(&path), Some(info));
+    assert_eq!(
+        EventJournal::open(&path).unwrap_err(),
+        "event_journal_in_use"
+    );
+
+    drop(journal);
+    let _ = std::fs::remove_file(journal_lock_path(&path));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn snapshot_cursor_plus_replay_covers_an_event_during_snapshot_without_a_gap() {
     let path = journal_path("snapshot_gap");
     let mut journal = EventJournal::open(&path).unwrap();
@@ -141,6 +168,36 @@ fn partial_last_write_does_not_hide_the_prior_durable_prefix() {
         2
     );
     assert_eq!(continued.replay_after(0).unwrap().len(), 2);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn append_repairs_an_incomplete_tail_without_restarting_the_host() {
+    let path = journal_path("live_partial_tail");
+    let mut journal = EventJournal::open(&path).unwrap();
+    journal.append(json!({"type":"durable"})).unwrap();
+
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(journal.path())
+        .unwrap();
+    file.write_all(br#"{"event_seq":2,"event":{"type":"partial"}"#)
+        .unwrap();
+    file.sync_data().unwrap();
+    drop(file);
+
+    let appended = journal.append(json!({"type":"after_live_repair"})).unwrap();
+    assert_eq!(appended.event_seq, 2);
+    assert_eq!(
+        journal
+            .replay_after(0)
+            .unwrap()
+            .iter()
+            .map(|entry| (entry.event_seq, entry.event["type"].as_str().unwrap()))
+            .collect::<Vec<_>>(),
+        vec![(1, "durable"), (2, "after_live_repair")]
+    );
+
     let _ = std::fs::remove_file(path);
 }
 

@@ -14,7 +14,7 @@ cargo run -p timem_web
 
 - Binds only to `127.0.0.1`.
 - Chooses a port in `12345..=23456`; `--port` selects a specific port.
-- Generates a per-process access token for HTTP/WebSocket requests.
+- Generates a rotating 16-character hexadecimal access token per process for HTTP/WebSocket requests.
 - Opens the authenticated local page when a local graphical session is detected;
   SSH/headless sessions print the URL without launching a browser.
 - Keeps model calls, prompt building, memory, tools, and response parsing in
@@ -48,3 +48,5 @@ cargo test -p timem_web
 
 Read [`module_boundary.md`](module_boundary.md) before changing host/core
 responsibilities.
+
+The model selector uses a memory-space-scoped endpoint library shared by all Sessions in that space. Endpoint definitions can be added, edited, deleted, and applied to any idle Session; applying one updates the Session model, API protocol, response protocol, Base URL, and API key together. Secrets remain host-local and are redacted from snapshots.

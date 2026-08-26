@@ -1,4 +1,7 @@
-use agent_core::{model_service_config_from_sources, ModelServiceConfigSource, UsageStats};
+use agent_core::{
+    model_service_config_from_sources, parse_parallel_tool_calls, parse_tool_call_mode,
+    ModelServiceConfigSource, UsageStats,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,37 +14,36 @@ pub use agent_core::{
     append_audit_event as append_audit, apply_runtime_config_value,
     apply_workspace_command_to_path, bash_approval_mode_from_sources, bash_approval_mode_label,
     capabilities_dir_from_sources, collect_storage_profile, combine_additional_contexts,
-    compact_runtime_status_text, default_api_protocol, default_base_url, default_data_root,
-    default_model, estimate_prompt_context_tokens, host_start_audit_event, is_default_base_url,
-    is_default_model, layout_for_space, load_workspace_dirs_from_path, local_time_label,
-    meaningful_latest_usage, model_retry_audit_event, normalize_workspace_dir, parse_api_protocol,
-    parse_token_count, resolve_topic_reply, runtime_active_elapsed_secs,
+    compact_runtime_status_text, create_memory_dir, default_api_protocol, default_base_url,
+    default_config_root, default_model, estimate_prompt_context_tokens, host_start_audit_event,
+    is_default_base_url, is_default_model, layout_for_space, load_reminder_tips_config,
+    load_workspace_dirs_from_path, local_time_label, meaningful_latest_usage,
+    model_retry_audit_event, normalize_workspace_dir, parse_api_protocol, parse_token_count,
+    resolve_memory_dir, resolve_topic_reply, runtime_active_elapsed_secs,
     runtime_config_apply_report, runtime_config_field_value, runtime_config_menu_report,
-    runtime_config_report, runtime_info_context, runtime_profile_report, runtime_retry_status_view,
-    runtime_time_context, runtime_token_status_view, stale_context_decision_request,
-    stale_context_prompt_needed, supporting_context, topic_event_status_hint,
-    work_instruction_load_report, work_instruction_load_request, work_instruction_load_topic_event,
-    work_instruction_mode_from_sources, workspace_config_file, workspace_menu_report,
-    workspace_reference_context, ApiProtocol, CapabilityHostProfile, CoreActionTopic,
-    CoreLifecycleEvent, CoreLifecycleTopic, CoreMemoryActivity, CoreModelResponseTopic,
-    CoreTopicEvent, HostDecision, HostDecisionDefault, HostDecisionRequest, HostStatusLevel,
-    HostStatusMessage, LocalLLMKeyFile, LongRunningCommandContinueRequest, ModelDirection,
-    ModelProfile, ModelServiceConfig, NoopTurnUi, OutputExpansionRequest,
+    runtime_config_report, runtime_profile_report, runtime_retry_status_view, runtime_time_context,
+    runtime_token_status_view, stale_context_decision_request, stale_context_prompt_needed,
+    topic_event_status_hint, work_instruction_load_report, work_instruction_load_request,
+    work_instruction_load_topic_event, work_instruction_mode_from_sources, workspace_config_file,
+    workspace_menu_report, workspace_reference_context, ApiProtocol, CapabilityHostProfile,
+    CoreActionTopic, CoreLifecycleEvent, CoreLifecycleTopic, CoreMemoryActivity,
+    CoreModelResponseTopic, CoreTopicEvent, HostDecision, HostDecisionDefault, HostDecisionRequest,
+    HostStatusLevel, HostStatusMessage, LocalLLMKeyFile, LongRunningCommandContinueRequest,
+    ModelDirection, ModelProfile, ModelServiceConfig, NoopTurnUi, OutputExpansionRequest,
     RoundLimitDecisionRequest, RunningShellJob, RuntimeConfigApplyError, RuntimeConfigApplyMessage,
     RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport, RuntimeConfigEffect,
     RuntimeConfigField, RuntimeConfigMenuItem, RuntimeConfigMenuReport, RuntimeConfigReport,
     RuntimeConfigReportInput, RuntimeConfigReportItem, RuntimeConfigReportRow,
     RuntimeConfigRowKind, RuntimeConfigSection, RuntimeProfiler, RuntimeRetryStatus,
     RuntimeRetryStatusView, RuntimeTokenStatusView, StaleContextDecisionRequest, StorageProfile,
-    SupportingContextInput, TokenUsageBreakdown, TopicReply, TopicReplyError, TurnInput,
-    TurnOutcome, TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi,
-    WorkInstructionLoadMessage, WorkInstructionLoadMessageKind, WorkInstructionLoadMode,
-    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkInstructionLoadStatus,
-    WorkspaceChange, WorkspaceCommand, WorkspaceCommandMessage, WorkspaceCommandMessageKind,
-    WorkspaceCommandOutcome, WorkspaceCommandReport, WorkspaceMenuReport, WorkspaceState,
-    WorkspaceUnchangedReason, CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_RESPONSE,
-    DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, DEFAULT_STALE_CONTEXT_IDLE,
-    DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD, RUNTIME_CONFIG_FIELDS,
+    TokenUsageBreakdown, TopicReply, TopicReplyError, TurnInput, TurnOutcome, TurnStopDetail,
+    TurnStopReason, TurnStopSummary, TurnUi, WorkInstructionLoadMessage,
+    WorkInstructionLoadMessageKind, WorkInstructionLoadMode, WorkInstructionLoadReport,
+    WorkInstructionLoadRequest, WorkInstructionLoadStatus, WorkspaceChange, WorkspaceCommand,
+    WorkspaceCommandMessage, WorkspaceCommandMessageKind, WorkspaceCommandOutcome,
+    WorkspaceCommandReport, WorkspaceMenuReport, WorkspaceState, WorkspaceUnchangedReason,
+    CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_RESPONSE, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
+    DEFAULT_STALE_CONTEXT_IDLE, DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD, RUNTIME_CONFIG_FIELDS,
 };
 pub use agent_core::{cancelled_turn_result, run_session_turn};
 pub use final_answer_renderer::{
@@ -257,31 +259,11 @@ pub fn render_final_response_at(
 }
 
 pub fn render_turn_outcome_text(outcome: &TurnOutcome) -> String {
-    let mut text = outcome
+    outcome
         .stop_summary
         .as_ref()
         .map(render_turn_stop_summary)
-        .unwrap_or_else(|| outcome.text.clone());
-    if !outcome.running_jobs.is_empty() {
-        if !text.trim().is_empty() {
-            text.push_str("\n\n");
-        }
-        text.push_str(&render_running_jobs_for_user(&outcome.running_jobs));
-    }
-    text
-}
-
-pub fn render_running_jobs_for_user(jobs: &[RunningShellJob]) -> String {
-    let mut out = String::from("RUNNING JOB LIST:\n");
-    for job in jobs {
-        out.push_str(&format!(
-            "- pid={}, {}, cmd={}, still running\n",
-            job.pid,
-            job.description(),
-            job.command
-        ));
-    }
-    out.trim_end().to_string()
+        .unwrap_or_else(|| outcome.text.clone())
 }
 
 pub fn render_turn_stop_summary(stop: &TurnStopSummary) -> String {
@@ -583,10 +565,11 @@ pub struct CliOptions {
     pub space: Option<String>,
     pub api_protocol: Option<String>,
     pub response_protocol: Option<String>,
+    pub tool_call_mode: Option<String>,
+    pub parallel_tool_calls: Option<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
-    pub data_dir: Option<String>,
     pub timeout_secs: Option<u64>,
     pub max_llm_output_tokens: Option<u32>,
     pub max_llm_input_tokens: Option<u32>,
@@ -616,6 +599,14 @@ pub fn parse_cli_args(args: &[String]) -> CliOptions {
                 options.response_protocol = Some(v);
                 idx += 2;
             }
+            ("--tool-call-mode", Some(v)) => {
+                options.tool_call_mode = Some(v);
+                idx += 2;
+            }
+            ("--parallel-tool-calls", Some(v)) => {
+                options.parallel_tool_calls = Some(v);
+                idx += 2;
+            }
             ("--api-key", Some(v)) => {
                 options.api_key = Some(v);
                 idx += 2;
@@ -626,10 +617,6 @@ pub fn parse_cli_args(args: &[String]) -> CliOptions {
             }
             ("--base-url", Some(v)) => {
                 options.base_url = Some(v);
-                idx += 2;
-            }
-            ("--data-dir", Some(v)) => {
-                options.data_dir = Some(v);
                 idx += 2;
             }
             ("--timeout", Some(v)) => {
@@ -678,8 +665,19 @@ pub fn model_service_config_from_env(
 ) -> Result<ModelServiceConfig, String> {
     model_service_config_from_sources(
         &ModelServiceConfigSource {
+            tool_call_mode: options
+                .tool_call_mode
+                .as_deref()
+                .map(parse_tool_call_mode)
+                .transpose()?,
+            parallel_tool_calls: options
+                .parallel_tool_calls
+                .as_deref()
+                .map(parse_parallel_tool_calls)
+                .transpose()?,
             api_protocol: options.api_protocol.clone(),
             api_key: options.api_key.clone(),
+            http_headers: None,
             model: options.model.clone(),
             base_url: options.base_url.clone(),
             timeout_secs: options.timeout_secs,
@@ -688,6 +686,7 @@ pub fn model_service_config_from_env(
             enable_thinking: None,
             reasoning_effort: None,
             stream: None,
+            openai_cache_mode: None,
             local_api_key: LocalLLMKeyFile::load(&local_llm_key_file_path())
                 .ok()
                 .map(|file| file.api_key),

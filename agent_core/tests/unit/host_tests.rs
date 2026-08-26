@@ -156,19 +156,27 @@ fn turn_ui_request_topic_requires_matching_topic_reply_before_resuming() {
 
 #[test]
 fn context_compact_topic_round_trips_structured_payload() {
-    let event = context_compact_topic_event(
-        "session_a",
-        82_000,
-        14_000,
-        &["pd_1".to_string()],
-        &["pd_2".to_string()],
-        Some("scratch_1"),
-    );
+    let report = CoreContextCompactTopic {
+        estimated_before_tokens: 82_000,
+        estimated_after_tokens: 14_000,
+        estimated_text_before_tokens: 12_000,
+        estimated_text_after_tokens: 4_000,
+        estimated_native_before_tokens: 70_000,
+        estimated_native_after_tokens: 10_000,
+        discarded_delta_ids: vec!["pd_1".to_string()],
+        offloaded_delta_ids: vec!["pd_2".to_string()],
+        scratch_id: Some("scratch_1".to_string()),
+    };
+    let event = context_compact_topic_event("session_a", &report);
 
     assert_eq!(event.topic.name, CORE_TOPIC_CONTEXT_COMPACT);
     let topic = event.as_context_compact().expect("context compact topic");
     assert_eq!(topic.estimated_before_tokens, 82_000);
     assert_eq!(topic.estimated_after_tokens, 14_000);
+    assert_eq!(topic.estimated_text_before_tokens, 12_000);
+    assert_eq!(topic.estimated_text_after_tokens, 4_000);
+    assert_eq!(topic.estimated_native_before_tokens, 70_000);
+    assert_eq!(topic.estimated_native_after_tokens, 10_000);
     assert_eq!(topic.discarded_delta_ids, vec!["pd_1"]);
     assert_eq!(topic.offloaded_delta_ids, vec!["pd_2"]);
     assert_eq!(topic.scratch_id.as_deref(), Some("scratch_1"));
@@ -526,6 +534,7 @@ fn core_notifications_can_be_published_as_topic_events() {
         },
         CoreNotification::Action {
             action: "run_bash".to_string(),
+            action_id: "action_test".to_string(),
             input: serde_json::json!({"cmd": "pwd"}),
             kind: crate::CoreActionKind::Bash {
                 command: "pwd".to_string(),
@@ -567,6 +576,7 @@ fn core_notifications_can_be_published_as_topic_events() {
                 "continue_work": true,
                 "global": {
                     "working_worker_count": 1,
+                    "session_working_worker_count": 1,
                 },
             },
         })
@@ -596,6 +606,7 @@ fn core_notifications_can_be_published_as_topic_events() {
                 "attributes": {
                     "name": CORE_TOPIC_ACTION,
                     "action": "run_bash",
+                    "action_id": "action_test",
                     "active": true,
                     "event": "start",
                 },
@@ -605,6 +616,7 @@ fn core_notifications_can_be_published_as_topic_events() {
             },
             "payload": {
                 "action": "run_bash",
+                "action_id": "action_test",
                 "input": {
                     "cmd": "pwd",
                 },
@@ -628,6 +640,7 @@ fn core_notifications_can_be_published_as_topic_events() {
         events[1].as_action(),
         Some(CoreActionTopic {
             action: "run_bash".to_string(),
+            action_id: "action_test".to_string(),
             input: serde_json::json!({"cmd": "pwd"}),
             kind: CoreActionKind::Bash {
                 command: "pwd".to_string(),
@@ -655,8 +668,30 @@ fn core_notifications_can_be_published_as_topic_events() {
 }
 
 #[test]
+fn runtime_root_repair_help_topic_is_nonblocking_and_separate_from_model_repair() {
+    let event = runtime_root_repair_help_topic_event("session_a");
+
+    assert_eq!(event.topic.name, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP);
+    assert_eq!(
+        event.topic.attributes["name"],
+        CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP
+    );
+    assert_eq!(event.state, CoreSessionState::Running);
+    assert_eq!(event.payload["count"], 1);
+    assert!(event.as_model_repair().is_none());
+    assert!(!event.expects_reply());
+    assert!(!event.is_blocking_request());
+}
+
+#[test]
 fn model_repair_topic_round_trips_protocol_issue_and_attempt() {
-    let event = model_repair_topic_event("session_a", "invalid_xml", 2, 5);
+    let event = model_repair_topic_event(
+        "session_a",
+        "invalid_xml",
+        "模型回复不是有效的 XML 协议消息。",
+        2,
+        5,
+    );
 
     assert_eq!(event.session_id, "session_a");
     assert_eq!(event.topic.name, CORE_TOPIC_MODEL_REPAIR);
@@ -668,6 +703,7 @@ fn model_repair_topic_round_trips_protocol_issue_and_attempt() {
         event.as_model_repair(),
         Some(CoreModelRepairTopic {
             issue: "invalid_xml".to_string(),
+            reason: "模型回复不是有效的 XML 协议消息。".to_string(),
             attempt: 2,
             max_attempts: 5,
         })
@@ -687,6 +723,7 @@ fn model_repair_topic_round_trips_protocol_issue_and_attempt() {
             },
             "payload": {
                 "issue": "invalid_xml",
+                "reason": "模型回复不是有效的 XML 协议消息。",
                 "attempt": 2,
                 "max_attempts": 5,
             },
@@ -700,7 +737,7 @@ fn core_init_lifecycle_topic_is_structured_and_ui_neutral() {
         model: "qwen-plus".to_string(),
     };
 
-    let event = core_initialized_topic_event("session_a", &profile, "markdown", 100_000, 50, 6, 2);
+    let event = core_initialized_topic_event("session_a", &profile, "json", 100_000, 50, 6, 2);
 
     assert_eq!(event.session_id, "session_a");
     assert_eq!(event.topic.name, CORE_TOPIC_LIFECYCLE);
@@ -715,7 +752,7 @@ fn core_init_lifecycle_topic_is_structured_and_ui_neutral() {
             event: CoreLifecycleEvent::Initialized,
             version: env!("CARGO_PKG_VERSION").to_string(),
             profile,
-            response_protocol: "markdown".to_string(),
+            response_protocol: "json".to_string(),
             max_llm_input_tokens: 100_000,
             max_rounds: 50,
             tool_count: 6,
@@ -745,7 +782,7 @@ fn core_init_lifecycle_topic_is_structured_and_ui_neutral() {
                 "profile": {
                     "model": "qwen-plus",
                 },
-                "response_protocol": "markdown",
+                "response_protocol": "json",
                 "max_llm_input_tokens": 100000,
                 "max_rounds": 50,
                 "capabilities": {
@@ -807,7 +844,7 @@ fn core_lifecycle_topic_round_trips_worker_identity_workspace_and_context() {
     let event = core_initialized_topic_event_with_worker(
         "session_child",
         &profile,
-        "markdown",
+        "json",
         100_000,
         50,
         6,
@@ -845,6 +882,7 @@ fn core_lifecycle_topic_round_trips_worker_identity_workspace_and_context() {
 fn topic_callbacks_can_copy_owned_snapshots_for_async_hosts() {
     let notifications = vec![CoreNotification::Action {
         action: "run_bash".to_string(),
+        action_id: "action_test".to_string(),
         input: serde_json::json!({"cmd": "pwd"}),
         kind: CoreActionKind::Bash {
             command: "pwd".to_string(),
@@ -921,10 +959,9 @@ fn action_topic_kind_wire_payload_is_explicit_and_round_trips() {
         ),
         (
             CoreActionKind::SelfTool {
-                self_type: "about_me".to_string(),
-                op: "read".to_string(),
+                self_type: "params".to_string(),
             },
-            json!({"kind": "self_tool", "self_type": "about_me", "op": "read"}),
+            json!({"kind": "self_tool", "self_type": "params"}),
         ),
         (
             CoreActionKind::ChatHistory {

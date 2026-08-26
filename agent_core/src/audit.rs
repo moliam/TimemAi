@@ -1,11 +1,11 @@
 use crate::{
-    bash_approval_mode_label, ApiProtocol, ApprovalRequest, BashApprovalMode, MemGuard,
-    TurnStopSummary, UsageStats,
+    atomic_write_file, bash_approval_mode_label, ApiProtocol, ApprovalRequest, BashApprovalMode,
+    MemGuard, TurnStopSummary, UsageStats,
 };
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::Path;
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const AUDIT_SIDECAR_THRESHOLD_BYTES: u64 = 1024 * 1024;
@@ -17,16 +17,18 @@ pub fn append_audit_event(path: &Path, event: &Value) -> std::io::Result<()> {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
+            let now_ms = audit_now_ms();
+            let event = timestamp_audit_event(event, now_ms);
             if should_append_audit_sidecar(path) {
-                return append_audit_jsonl(&audit_sidecar_path(path), event);
+                return append_audit_jsonl(&audit_sidecar_path(path), &event);
             }
             let mut doc = read_audit_doc(path)?;
             doc["events"]
                 .as_array_mut()
                 .expect("audit doc events must be an array")
-                .push(event.clone());
+                .push(event);
             let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
-            fs::write(path, format!("{text}\n"))
+            atomic_write_file(path, format!("{text}\n").as_bytes())
         })
         .map_err(std::io::Error::other)?
 }
@@ -45,9 +47,123 @@ pub fn append_repair_output_event(api_audit_file: &Path, event: &Value) -> std::
                 .push(event.clone());
             doc["updated_at_ms"] = json!(audit_now_ms());
             let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
-            fs::write(&repair_file, format!("{text}\n"))
+            atomic_write_file(&repair_file, format!("{text}\n").as_bytes())
         })
         .map_err(std::io::Error::other)?
+}
+
+fn timestamp_audit_event(event: &Value, now_ms: i64) -> Value {
+    let mut event = event.clone();
+    if let Some(object) = event.as_object_mut() {
+        let valid_time = object
+            .get("time_ms")
+            .and_then(Value::as_i64)
+            .is_some_and(|time_ms| time_ms <= now_ms);
+        if !valid_time {
+            object.insert("time_ms".into(), json!(now_ms));
+        }
+        return event;
+    }
+    json!({"time_ms": now_ms, "event": event})
+}
+
+/// Removes API-audit events older than `cutoff_ms` from the JSON document and
+/// its JSONL sidecar. Events at the cutoff are retained.
+pub fn prune_api_audit_before(path: &Path, cutoff_ms: i64, now_ms: i64) -> std::io::Result<usize> {
+    MemGuard::for_audit_file(path)
+        .with_write(|| prune_api_audit_before_unlocked(path, cutoff_ms, now_ms))
+        .map_err(std::io::Error::other)?
+}
+
+fn prune_api_audit_before_unlocked(
+    path: &Path,
+    cutoff_ms: i64,
+    now_ms: i64,
+) -> std::io::Result<usize> {
+    let mut removed = 0usize;
+    if path.exists() {
+        let mut doc = read_audit_doc_single(path)?;
+        let events = doc["events"]
+            .as_array_mut()
+            .expect("audit doc events must be an array");
+        let before = events.len();
+        events.retain(|event| retained_audit_time_ms(event, cutoff_ms, now_ms).is_some());
+        removed = removed.saturating_add(before.saturating_sub(events.len()));
+        let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
+        atomic_write_file(path, format!("{text}\n").as_bytes())?;
+    }
+    let sidecar = audit_sidecar_path(path);
+    if sidecar != path && sidecar.exists() {
+        removed = removed.saturating_add(prune_audit_jsonl(&sidecar, cutoff_ms, now_ms)?);
+    }
+    Ok(removed)
+}
+
+fn retained_audit_time_ms(event: &Value, cutoff_ms: i64, now_ms: i64) -> Option<i64> {
+    let time_ms = event.get("time_ms").and_then(Value::as_i64)?;
+    if !(cutoff_ms..=now_ms).contains(&time_ms) {
+        return None;
+    }
+    Some(time_ms)
+}
+
+fn prune_audit_jsonl(path: &Path, cutoff_ms: i64, now_ms: i64) -> std::io::Result<usize> {
+    let input = fs::File::open(path)?;
+    let temporary = audit_retention_temp_path(path);
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let output = options.open(&temporary)?;
+    let mut writer = BufWriter::new(output);
+    let mut removed = 0usize;
+
+    let result = (|| -> std::io::Result<()> {
+        let mut reader = BufReader::new(input);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            if reader.read_until(b'\n', &mut line)? == 0 {
+                break;
+            }
+            let Ok(event) = serde_json::from_slice::<Value>(&line) else {
+                removed = removed.saturating_add(1);
+                continue;
+            };
+            if retained_audit_time_ms(&event, cutoff_ms, now_ms).is_none() {
+                removed = removed.saturating_add(1);
+                continue;
+            }
+            serde_json::to_writer(&mut writer, &event).map_err(std::io::Error::other)?;
+            writer.write_all(b"\n")?;
+        }
+        writer.flush()?;
+        writer.get_ref().sync_all()
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(removed)
+}
+
+fn audit_retention_temp_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("api_audit.jsonl");
+    path.with_file_name(format!(
+        ".{file_name}.retention.tmp-{}-{}",
+        std::process::id(),
+        audit_now_ms()
+    ))
 }
 
 fn repair_output_file_for_api_audit(api_audit_file: &Path) -> std::path::PathBuf {
@@ -82,7 +198,7 @@ fn empty_repair_output_doc() -> Value {
         "kind": "timem_realtime_repair_output_log",
         "notes": [
             "Realtime model-output protocol repair diagnostics.",
-            "Each record includes the malformed assistant response and the SYSTEM repair message shown to the model.",
+            "Each record includes the malformed assistant response and the RUNTIME repair message shown to the model.",
             "assistant_response may be capped to avoid unbounded diagnostic growth."
         ],
         "records": []
@@ -240,6 +356,7 @@ pub fn model_repair_output_event(
     truncated: bool,
     repair_calls: u32,
     repair_calls_delta: u32,
+    spec: &crate::response_protocol::PromptBoundarySpec,
 ) -> Value {
     let (assistant_response, capped) =
         cap_repair_output_text(assistant_response, REPAIR_OUTPUT_RESPONSE_LIMIT_CHARS);
@@ -261,8 +378,8 @@ pub fn model_repair_output_event(
         "repair_calls": repair_calls,
         "repair_calls_delta": repair_calls_delta,
         "rendered": format!(
-            "---- {} / {} ----\n## assistant:\n{}\n\n## SYSTEM\n{}",
-            time_ms, turn_id, assistant_response, system_message
+            "---- {} / {} ----\n## {}:\n{}\n\n## {}\n{}",
+            time_ms, turn_id, spec.assistant_role, assistant_response, spec.runtime_role, system_message
         ),
         "summary": format!("{} repair for {}", issue_text, turn_id),
     })

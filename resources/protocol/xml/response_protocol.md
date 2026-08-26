@@ -1,96 +1,97 @@
-# System Response Protocol
+# ASSISTANT Response Protocol
+Response must be put as ONE VALID XML `<ASSISTANT>` ROOT, STRICTLY NOTHING OUTSIDE.
+Inside the root, there are several major labels: free_talk, finish_confirm, actions, final_answer.
+Their relation is(in pseudo-code for better clarification):
+```
+need_free_talk, need_finish_confirm, decision = assistant_thought();   # decision can be overriden by finish confirm
+if need_free_talk:
+  EMIT_free_talk();
 
-Return one XML `<response>` root. Do not wrap it in Markdown fences and do not
-write anything before or after it.
+if need_finish_confirm:
+  decision = EMIT_finish_confirm();
 
-## Response shape
+switch decision:
+  case "actions": EMIT_actions();
+  case "final_answer": EMIT_final_answer();
+  default: NEVER
 
-Inside `<response>`, write optional `<free_talk>` first, then exactly one state
-branch:
+```
+(Each EMIT_...  represents a xml output build.)
 
-- `<actions>`: runtime work is still required.
-- `<context_compact>`: old dynamic context should be replaced by a summary.
-- `<final_answer>`: the current user request is complete.
+`<free_talk>` is a optinal brief user-visible working thought. Report important action to user while working, make user well informed of progress, ESPECIALLY your working direction/framework, the files/dirs you create/remove, for great user experience and timely user interference.
 
-`<free_talk>` is a brief visible working note. `<final_answer>` is raw Markdown
-for the user. Neither field contains protocol tags.
+`<finish_confirm>` decides the validity of <final_answer>, its content starts exactly with prefix:
+CONFIRM_PREFIX: "Now let me think seriously twice before I announce stop. Review user's task list. Is my delivery consistent with user's demand?"
 
-## XML-native actions
+Two mutually-exclusive state branches:
+- `<actions>`: work should continue, generate actions. Refer to `Actions` for available actions.
+  Tool actions may include a short, descriptive `name` attribute of at most 128 characters. If omitted, runtime may use the tool name for display. The runtime—not the model—assigns the tool-call id used to correlate results and still-running reminders. Example: `<run_bash name="check git diff"><cmd>git diff</cmd></run_bash>`.
+- `<context_compact>` is an exclusive capability inside `<actions>` that maintains/reorganizes dynamic context for future work. Target with prompt delta ids. Two compact methods are provided:
+  - discard: just throw from the context.
+  - offload: will be saved into scratch memory, the runtime will return a id with which you can retrieve the pd back using `memmgr` `context_compact` should only targets runtime-provided dynamic delta ids.
+prompt.
+- `<final_answer>`: the work summary for user, by default in raw Markdown(by default). To be valid, it MUST be preceeded with `<finish_confirm>`. Runtime will stop this turn's loop on a valid final_answer, BE RESPONSIBLE.
 
-Inside `<actions>`, direct child tools execute sequentially in document order.
-Tools inside `<parallel>` execute concurrently. Do not nest `<parallel>`.
+Note: inside xml label, if strings containing such as `<`, `>`, or `&` special characters/complex content, should use `<![CDATA[...]]>` to wrap it.
 
-Use the exact tool id from the capability catalog as the element name. Tool
-arguments are attributes or child elements:
-
-- Short scalar values may be attributes.
-- String, object, and array values should be child elements.
-- An array contains `<item>` children.
-- An object contains children named after its fields.
-- The type shown beside each tool option determines string, number, integer,
-  boolean, array, and object values. Do not add JSON or `type` wrappers.
-- For a nullable option, a self-closing argument such as `<value/>` means null.
-- Do not provide the same argument as both an attribute and a child.
-- Close every tool element before closing its surrounding `<parallel>`.
-- Escape XML text normally. For commands or other strings containing `<`, `>`,
-  or `&`, a leaf element may use `<![CDATA[...]]>`; its content is passed
-  literally. Do not emit XML declarations, DTDs, custom entity declarations,
-  or comments.
-
-Before sending, verify that there is exactly one `<response>` root, exactly one
-state branch, and that every opened tool/group tag has its matching close tag.
-When using `<actions>`, do not append a second fallback or final response.
-
-## Format examples — EXAMPLES ONLY
-
+## RESPONSE EXAMPLES
 These demonstrate protocol shape; they are not requests to execute.
 
-First inspect in parallel, then run one sequential test:
+EXAMPLE1: All user's tasks are finished
+<ASSISTANT>
+  <free_talk> Bug report is created: .... The reason for the bug has been thoroughly investigated.</free_talk>
+  <finish_confirm>Now let me think seriously twice before I announce stop. Review user's task list. Is my delivery consistent with user's demand? Yes, the deduction chain is solid, no jump in thought. The bug can be ABA confirmed.</finish_confirm>
+  <final_answer>I have finish the debug task. Report doc: ... The reason is: .... </final_answer>
+</ASSISTANT>
 
-<response>
-  <free_talk>I will inspect the workspace, then run its test.</free_talk>
+EXAMPLE2: Task ongoing. Issue multiple actions simultaneously for performance. Use CDATA to quote special-character cmd.
+<ASSISTANT>
+  <free_talk>I will do ... </free_talk>
   <actions>
     <parallel>
-      <run_bash timeout_ms="5000">
-        <cmd>pwd</cmd>
+      <run_bash name="check git status" timeout_ms="5000">
+        <cmd>git status</cmd>
       </run_bash>
-      <run_bash timeout_ms="5000">
-        <cmd>git status --short</cmd>
+      <run_bash name="a..." timeout_ms="5000">
+        <cmd>...</cmd>
       </run_bash>
-      <run_bash timeout_ms="5000">
+      <run_bash name="b..." timeout_ms="5000">
         <cmd><![CDATA[find . -maxdepth 2 -type f | sort]]></cmd>
       </run_bash>
     </parallel>
-    <run_bash timeout_ms="120000">
+    <run_bash name="c..." timeout_ms="120000">
       <cmd>cargo test</cmd>
     </run_bash>
   </actions>
-</response>
+</ASSISTANT>
 
-For a schema-declared array argument named `files`, write
-`<files><item>README.md</item><item>package.json</item></files>`. For a
-schema-declared object argument named `options`, write field children such as
-`<options><mode>strict</mode><limit>20</limit></options>`.
+EXAMPLE3: Planned to stop, but "think twice" changes your idea and you continue the work.
+<ASSISTANT>
+  <finish_confirm>Now let me think seriously twice before I announce stop. Review user's task list. Is my delivery consistent with user's demand? There seems to be a superficial deduction: A happens before B, then A is the cause of B? Could be super wrong. Let me check more.</finish_confirm>
+  <actions><run_bash name="xxx..."><cmd>...</cmd></run_bash></actions>
+</ASSISTANT>
 
-## Context compact
+EXAMPLE4: context compact
+<ASSISTANT>
+  <free_talk>There are too many stale things in context. I can compress it for more room. Let me discard some, and offload some stale/redundant contexts.</free_talk>
+  <actions>
+    <context_compact>
+      <discard>pd_1,pd_3,pd_8,pd_9,pd_10,pd_11</discard>
+      <offload>pd_2</offload>
+      <summary>
+    <![CDATA[
+    The current user's task is: ...
+    The whole picture of active works' status are:
+     A: almost done, need to clean up ...
+     B: todo
+     C: todo
+     ...
 
-Use `<context_compact>` only for long-context maintenance. Include at least one
-of `<discard>` or `<offload>`, plus `<summary>`:
+    Distilled/Need-to-keep useful history from optimized deltas: ....
+    (long complex cmd) gives important insight: ....
 
-<response>
-  <free_talk>Old completed work is crowding the active task.</free_talk>
-  <context_compact>
-    <discard>pd_1</discard>
-    <offload>pd_2</offload>
-    <summary>Task A is complete. Current task: B. Next: verify C.</summary>
-  </context_compact>
-</response>
-
-Only target runtime-provided dynamic delta ids. Do not target the static system
-prompt. Runtime writes offloaded content to scratch and returns its id.
-
-## Final answer
-
-<response>
-  <final_answer>The requested change is complete and verified.</final_answer>
-</response>
+    Valuable runtime info: ....
+      ]]></summary>
+    </context_compact>
+  </actions>
+</ASSISTANT>

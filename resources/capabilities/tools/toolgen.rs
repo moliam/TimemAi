@@ -1,6 +1,6 @@
 use crate::response_protocol::ParsedAction;
 use crate::{
-    ActionExecution, AgentCore, ApprovalRequest, BashApprovalMode, PendingApproval,
+    ActionExecution, ActionOutcome, AgentCore, ApprovalRequest, BashApprovalMode, PendingApproval,
     PendingApprovedAction, SessionToolRepo,
 };
 use std::path::Path;
@@ -9,9 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(crate) fn execute_action(core: &mut AgentCore, action: &ParsedAction) -> ActionExecution {
     let op = action.input_lower("op");
     if op != "publish" {
-        return ActionExecution::Completed(format!(
+        return ActionExecution::Completed(ActionOutcome::failed(format!(
             "Action result: toolgen\nop: {op}\nerror: unsupported_op"
-        ));
+        )));
     }
     let draft_path = action.input_raw_str("draft_path");
     let repo = core.tool_repo();
@@ -28,10 +28,12 @@ pub(crate) fn execute_action(core: &mut AgentCore, action: &ParsedAction) -> Act
                 repo,
                 draft_path: draft_path.trim().into(),
             },
+            action_name: action.name.clone(),
+            action_call_id: action.call_id.clone(),
             continuation: None,
         });
     }
-    ActionExecution::Completed(publish_result(&repo, Path::new(draft_path.trim()), None))
+    ActionExecution::Completed(publish_outcome(&repo, Path::new(draft_path.trim()), None))
 }
 
 fn now_ms() -> u128 {
@@ -41,19 +43,19 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
-pub(crate) fn execute_approved_publish(
+pub(crate) fn execute_approved_publish_outcome(
     repo: &SessionToolRepo,
     draft_path: &Path,
     request: &ApprovalRequest,
-) -> String {
-    publish_result(repo, draft_path, Some(request))
+) -> ActionOutcome {
+    publish_outcome(repo, draft_path, Some(request))
 }
 
-fn publish_result(
+fn publish_outcome(
     repo: &SessionToolRepo,
     draft_path: &Path,
     approval: Option<&ApprovalRequest>,
-) -> String {
+) -> ActionOutcome {
     let approval_suffix = approval
         .map(|request| {
             format!(
@@ -63,7 +65,7 @@ fn publish_result(
         })
         .unwrap_or_default();
     match repo.publish(draft_path) {
-        Ok(result) => format!(
+        Ok(result) => ActionOutcome::completed(format!(
             "Action result: toolgen\nop: publish\nstatus: ready\ntool_id: {}\nname: {}\npath: {}\nupdated_existing: {}\nvalidation_output:\n{}{}",
             result.summary.tool_id,
             result.summary.name,
@@ -75,13 +77,13 @@ fn publish_result(
                 result.validation_output.trim()
             },
             approval_suffix,
-        ),
-        Err(error) => format!(
+        )),
+        Err(error) => ActionOutcome::failed(format!(
             "Action result: toolgen\nop: publish\nstatus: validation_failed\ndraft_path: {}\nerror: {}\nThe draft remains unpublished. Correct it before retrying.{}",
             draft_path.display(),
             error,
             approval_suffix,
-        ),
+        )),
     }
 }
 

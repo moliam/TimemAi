@@ -15,6 +15,14 @@ on:
 permissions:
   contents: read
 
+# CI-only compiler policy. Local Cargo commands keep their normal profiles;
+# install.sh continues to produce optimized release binaries.
+env:
+  CI: "true"
+  CARGO_INCREMENTAL: "0"
+  RUSTFLAGS: "-D warnings"
+  RUSTDOCFLAGS: "-D warnings"
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

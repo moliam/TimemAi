@@ -1,6 +1,84 @@
 use super::*;
 
 #[test]
+fn cache_planner_splits_xml_static_prompt_boundary_from_xml_deltas() {
+    let prompt = "<Timem System Prompt>\nSTATIC XML\n</Timem System Prompt>\n<prompt_delta id=\"pd_1\" time_ms=\"1\">\n<USER>\ndelta1\n</USER>\n</prompt_delta>\n<prompt_delta id=\"pd_2\" time_ms=\"2\">\n<RUNTIME>\ndelta2\n</RUNTIME>\n</prompt_delta>";
+
+    let (static_prompt, dynamic_prompt) = split_prompt(prompt);
+    assert_eq!(static_prompt, "STATIC XML");
+    assert!(dynamic_prompt.starts_with("<prompt_delta id=\"pd_1\""));
+    assert!(!dynamic_prompt.contains("<Timem System Prompt>"));
+
+    let parts = prompt_parts_from_rendered_prompt(prompt);
+    assert_eq!(parts.static_prompt, "STATIC XML");
+    assert!(parts.old_deltas.contains("pd_1"));
+    assert!(parts.new_delta.contains("pd_2"));
+
+    let blocks = plan_prompt_cache(prompt);
+    assert_eq!(blocks.len(), 3);
+    assert_eq!(blocks[0].role, PromptBlockRole::System);
+    assert_eq!(blocks[0].text, "STATIC XML");
+    assert!(blocks[1].text.contains("pd_1"));
+    assert!(blocks[2].text.contains("pd_2"));
+}
+
+#[test]
+fn cache_planner_does_not_treat_dynamic_tool_output_as_static_prompt() {
+    let prompt = r#"<prompt_delta id="pd_31" time_ms="1">
+
+## RUNTIME
+agent_core/tests/unit/prompt_render_tests.rs:86: assert!(rendered.starts_with("<Timem System Prompt>\n"));
+agent_core/tests/unit/prompt_render_tests.rs:89: assert!(rendered.ends_with("\n</Timem System Prompt>"));
+
+</prompt_delta>"#;
+
+    let (static_prompt, dynamic_prompt) = split_prompt(prompt);
+    assert!(static_prompt.is_empty());
+    assert_eq!(dynamic_prompt, prompt);
+
+    let parts = prompt_parts_from_rendered_prompt(prompt);
+    assert_eq!(parts.static_prompt, prompt);
+    assert_ne!(
+        parts.static_prompt,
+        "\"));\nagent_core/tests/unit/prompt_render_tests.rs:89: assert!(rendered.ends_with(\"\n"
+    );
+}
+
+#[test]
+fn cache_planner_keeps_outer_static_boundary_when_dynamic_output_repeats_markers() {
+    let prompt = r#"<Timem System Prompt>
+STATIC XML
+</Timem System Prompt>
+<prompt_delta id="pd_31" time_ms="1">
+
+## RUNTIME
+assert!(rendered.starts_with("<Timem System Prompt>\n"));
+assert!(rendered.ends_with("\n</Timem System Prompt>"));
+
+</prompt_delta>"#;
+
+    let (static_prompt, dynamic_prompt) = split_prompt(prompt);
+    assert_eq!(static_prompt, "STATIC XML");
+    assert!(dynamic_prompt.starts_with("<prompt_delta id=\"pd_31\""));
+    assert!(dynamic_prompt.contains("<Timem System Prompt>"));
+    assert!(dynamic_prompt.contains("</Timem System Prompt>"));
+}
+
+#[test]
+fn cache_planner_supports_xml_style_prompt_delta_boundaries() {
+    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n<prompt_delta id=\"pd_1\" time_ms=\"1\">\n<USER>\ndelta1\n</USER>\n</prompt_delta>\n<prompt_delta id=\"pd_2\" time_ms=\"2\">\n<USER>\ndelta2\n</USER>\n</prompt_delta>";
+
+    let parts = prompt_parts_from_rendered_prompt(prompt);
+    assert!(parts.old_deltas.contains("pd_1"));
+    assert!(parts.new_delta.contains("pd_2"));
+
+    let blocks = plan_prompt_cache(prompt);
+    assert_eq!(blocks.len(), 3);
+    assert!(blocks[1].text.contains("pd_1"));
+    assert!(blocks[2].text.contains("pd_2"));
+}
+
+#[test]
 fn cache_planner_splits_static_and_dynamic_prompt() {
     let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\ndelta1\n[END DELTA]";
 
@@ -40,7 +118,7 @@ fn cache_planner_marks_only_recent_dynamic_tail() {
 
 #[test]
 fn cache_planner_keeps_one_delta_as_one_addressable_block() {
-    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nslice one\n\n## SYSTEM\nslice two\n[END DELTA]";
+    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nslice one\n\n## RUNTIME\nslice two\n[END DELTA]";
 
     let blocks = plan_prompt_cache(prompt);
 
@@ -54,7 +132,7 @@ fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
     let prompt = format!(
             "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\ndelta1\n[END DELTA]\n\n{}",
             crate::prompt_render::formatted_response_trailer(
-                "one-root label <response>...</response>",
+                "one-root label <ASSISTANT>...</ASSISTANT>",
                 "Ai3",
             )
         );
@@ -63,18 +141,18 @@ fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
     assert!(parts.new_delta.contains("delta1"));
     assert!(!parts
         .new_delta
-        .contains("Now please fulfill your response part"));
+        .contains("Please continue the work and respond as protocol requires"));
 
     let blocks = plan_prompt_cache(&prompt);
     assert_eq!(blocks.len(), 3);
     assert!(blocks[1].text.contains("delta1"));
     assert!(!blocks[1]
         .text
-        .contains("Now please fulfill your response part"));
+        .contains("Please continue the work and respond as protocol requires"));
     assert_eq!(blocks[1].cache, CacheControl::Ephemeral);
     assert_eq!(
         blocks[2].text,
-        "Now please fulfill your response part like one-root label <response>...</response>:"
+        "Please continue the work and respond as protocol requires in user's language:"
     );
     assert_eq!(blocks[2].cache, CacheControl::None);
 }
@@ -82,7 +160,7 @@ fn formatted_response_trailer_is_not_cached_or_merged_into_delta() {
 #[test]
 fn temporary_repair_delta_is_not_cache_controlled() {
     let prompt = format!(
-            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nnormal delta\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: temp_repair_123_1\n\n## TIMEM_ASSISTANT\nwrong\n\n## SYSTEM\nrepair\n[END DELTA]\n\n{}",
+            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nnormal delta\n[END DELTA]\n[BEGIN DELTA]\ndelta_id: temp_repair_123_1\n\n## TIMEM_ASSISTANT\nwrong\n\n## RUNTIME\nrepair\n[END DELTA]\n\n{}",
             crate::prompt_render::formatted_response_trailer(
                 "one Markdown response with one state branch",
                 "TIMEM_ASSISTANT",
@@ -240,5 +318,85 @@ fn growing_old_delta_block_would_keep_cache_hits_low() {
     assert!(
         reads.iter().skip(1).all(|chars| *chars < created[0] * 2),
         "legacy strategy mostly reuses only the small static block"
+    );
+}
+
+#[test]
+fn appending_delta_preserves_existing_cache_block_text_and_order() {
+    fn rendered(delta_count: usize) -> String {
+        let mut prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n".to_string();
+        for idx in 1..=delta_count {
+            prompt.push_str(&format!(
+                "[BEGIN DELTA]\ndelta_id: pd_{idx}\n\n## USER\nstable delta {idx}\n[END DELTA]\n"
+            ));
+        }
+        prompt.push('\n');
+        prompt.push_str(crate::prompt_render::RESPONSE_TRAILER);
+        prompt
+    }
+
+    let before = plan_prompt_cache(&rendered(5));
+    let after = plan_prompt_cache(&rendered(6));
+
+    let before_without_trailer = &before[..before.len() - 1];
+    let after_without_new_delta_and_trailer = &after[..before_without_trailer.len()];
+
+    assert_eq!(
+        before_without_trailer.len(),
+        after_without_new_delta_and_trailer.len()
+    );
+    for (old, new) in before_without_trailer
+        .iter()
+        .zip(after_without_new_delta_and_trailer)
+    {
+        assert_eq!(old.role, new.role);
+        assert_eq!(
+            old.text, new.text,
+            "cache-control eligibility may slide, but existing model-visible text must not change"
+        );
+    }
+
+    assert!(after[after.len() - 2].text.contains("pd_6"));
+    assert_eq!(before.last().unwrap().text, RESPONSE_TRAILER);
+    assert_eq!(after.last().unwrap().text, RESPONSE_TRAILER);
+    assert_eq!(before.last().unwrap().cache, CacheControl::None);
+    assert_eq!(after.last().unwrap().cache, CacheControl::None);
+}
+
+#[test]
+fn appending_delta_keeps_model_visible_token_text_as_a_prefix_before_trailer() {
+    fn rendered(delta_count: usize) -> String {
+        let mut prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n".to_string();
+        for idx in 1..=delta_count {
+            prompt.push_str(&format!(
+                "[BEGIN DELTA]\ndelta_id: pd_{idx}\n\n## USER\nstable delta {idx}\n[END DELTA]\n"
+            ));
+        }
+        prompt.push('\n');
+        prompt.push_str(crate::prompt_render::RESPONSE_TRAILER);
+        prompt
+    }
+
+    fn visible_text_without_trailer(blocks: &[PromptBlock]) -> String {
+        blocks
+            .iter()
+            .filter(|block| block.text != RESPONSE_TRAILER)
+            .map(|block| {
+                let role = match block.role {
+                    PromptBlockRole::System => "<system>",
+                    PromptBlockRole::User => "<user>",
+                };
+                format!("{role}\n{}", block.text)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    let before = visible_text_without_trailer(&plan_prompt_cache(&rendered(5)));
+    let after = visible_text_without_trailer(&plan_prompt_cache(&rendered(6)));
+
+    assert!(
+        after.starts_with(&before),
+        "appending a delta must preserve the exact prior model-visible token prefix"
     );
 }

@@ -36,7 +36,6 @@ pub enum CoreActionKind {
     },
     SelfTool {
         self_type: String,
-        op: String,
     },
     ChatHistory {
         operation: String,
@@ -56,6 +55,7 @@ pub enum CoreNotification {
     },
     Action {
         action: String,
+        action_id: String,
         input: Value,
         kind: CoreActionKind,
         active: bool,
@@ -104,6 +104,7 @@ pub fn notifications_from_envelope(envelope: &ParsedEnvelope) -> Vec<CoreNotific
 pub fn notification_from_action(action: &ParsedAction) -> CoreNotification {
     CoreNotification::Action {
         action: action.action.clone(),
+        action_id: action.call_id.clone(),
         input: action.raw_input.clone(),
         kind: action_kind(action),
         active: action_active(action),
@@ -158,7 +159,6 @@ fn action_kind(action: &ParsedAction) -> CoreActionKind {
         },
         "self_tool" => CoreActionKind::SelfTool {
             self_type: action.input_str("type"),
-            op: action.input_str("op"),
         },
         "chat_history_query" => CoreActionKind::ChatHistory {
             operation: "query".to_string(),

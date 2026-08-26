@@ -49,6 +49,36 @@ the Session is configured.
 Each Session keeps its own model service configuration, so different Sessions
 can use different models or endpoints without changing the others.
 
+### Reminder tips configuration
+
+The default schedules live in `resources/reminder_tips.json`. `install.sh` installs that file under the installation prefix, normally `~/.local/share/timem/resources/reminder_tips.json`, and both `timem` and `timem-web` load it at startup.
+
+To customize tips globally for the current user, create `reminder_tips.json` in one of these locations. A user file takes precedence over the installed resource and is never overwritten or removed by install/uninstall:
+
+- macOS: `~/Library/Application Support/TimemAi/reminder_tips.json`
+- Linux: `${XDG_CONFIG_HOME:-~/.config}/timem/reminder_tips.json`
+- Config override: set `TIMEM_CONFIG_DIR` to the directory containing the user file.
+- Resource override: set `TIMEM_RESOURCES_DIR` to an alternate resources directory.
+
+A schedule may trigger by active minutes or completed model rounds; when `NONE` is randomly selected, that period is consumed without adding anything to the prompt. Project-local `.timem_data` directories never hold this program configuration. Restart Timem after editing either the user override or installed resource.
+
+```json
+{
+  "schedules": [
+    {
+      "every_minutes": 10,
+      "tips": ["TIPS: Review the goal.", "NONE"]
+    },
+    {
+      "every_rounds": 8,
+      "tips": ["TIPS: Check the deduction chain.", "NONE"]
+    }
+  ]
+}
+```
+
+Each schedule must set exactly one of `every_minutes` or `every_rounds` to a positive integer and provide a non-empty `tips` list. Invalid user or resource configuration is reported as a warning and safely falls through to the next valid source or the embedded safety fallback; it never prevents Timem from starting.
+
 ## Optional Environment Configuration
 
 The Web UI is the recommended place to configure each Session. Environment
@@ -70,7 +100,7 @@ export TIMEM_API_KEY=your_api_key_here
 export TIMEM_MODEL=qwen-plus
 export TIMEM_API_PROTOCOL=openai-compatible
 export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-export TIMEM_SPACE=.test_mem
+export TIMEM_SPACE=/absolute/path/to/mem
 ```
 
 The environment file can be stored elsewhere:
@@ -78,6 +108,13 @@ The environment file can be stored elsewhere:
 ```bash
 source /path/to/your/env
 ```
+
+MEM data defaults to `~/.timem/mem`; Timem creates that directory on first
+startup. To use another MEM, pass an absolute directory path through
+`--space /absolute/path/to/mem` or `TIMEM_SPACE`. Relative `--space` paths are
+rejected. A MEM can hold many Sessions: each Session keeps its own metadata and
+history files and uses a Session-scoped lock, so unrelated Sessions can read,
+write, and run concurrently without rewriting one global Session index.
 
 Use `timem --help` or `timem-web --help` to inspect available startup
 options. After the first successful configuration, Timem caches the effective
@@ -92,7 +129,7 @@ timem
 ```
 
 The `source ./env` step is needed for the initial configuration or when you
-intentionally select a different data root/mem space. The selected Session
+intentionally select a different MEM workspace. The selected Session
 restores its cached model service settings on later starts.
 
 Example terminal session:
@@ -115,16 +152,21 @@ Common controls:
 - `Ctrl+C` or `Esc`: cancel the current input, menu, or thinking turn.
 - `Ctrl+D` or `/exit`: exit the shell.
 
-While the model is working, type an additional instruction and press Enter to
-send it as a supplement to the current task.
+While the model is working, type another question and press Enter to queue it as
+a separate next turn. The current final answer stays visible before the queued turn starts.
 
 ## Timem Web Details
 
 The Web UI provides session switching, Markdown rendering, live work updates,
-attachments, runtime status, context usage, and per-session MCP tools in the
-browser. Open the plug control in the header to add a local stdio, remote
+attachments, runtime status, context usage, persistent Session groups, a
+MEM-wide Role library, and per-session MCP tools in the browser. Create and
+group reusable Roles, then select one or more for the next message to apply
+specialized working methods to that task. Session groups can be created, renamed,
+reordered, collapsed, or deleted. Drag a Session by its handle into another group
+or **Unsorted**; deleting a group leaves its Sessions intact under **Unsorted**. Open the plug control in the header to add a local stdio, remote
 Streamable HTTP, or legacy SSE MCP server and choose which Sessions may use it.
-Timem Web can start without a model API key so configuration remains available
+New Sessions start with no MCP servers selected, so MCP access is enabled
+explicitly per Session. Timem Web can start without a model API key so configuration remains available
 in the browser. Click the current model name to edit the selected Session. A
 Session must have a valid API key before Send can start model work; the New
 Session dialog also accepts Session-specific model service settings and caches
@@ -149,8 +191,11 @@ timem-web --public
 ```
 
 Open the complete URL printed in the terminal, including `?token=...`, from
-your local browser. The port is selected automatically. To choose a fixed
-port or advertised host:
+your local browser. With the default MEM directory (`~/.timem/mem`), automatic
+selection tries port `13764` first and falls back to another port in the
+supported range if it is occupied. A custom MEM keeps the rotating automatic
+selection strategy. An explicit `--port` always takes priority. To choose a
+fixed port or advertised host:
 
 ```bash
 timem-web --public --port 20699 --public-host 10.125.112.83
@@ -160,6 +205,19 @@ Public mode does not open a browser on the server. HTTP access may show a
 browser "Not secure" warning because it uses plain HTTP; the access token is
 still required. For production exposure, place Timem behind HTTPS and an
 appropriate network access control layer.
+
+A MEM directory is the complete Timem workspace. It contains Sessions, memory,
+audit data, workspace configuration, capability overlays, and Web lifecycle
+diagnostics. The default is `~/.timem/mem`; select another absolute directory
+with `--space` or `TIMEM_SPACE`. One Timem Web or Shell host may own a MEM at a
+time, while different MEM directories can run concurrently. Timem Web keeps
+bounded, low-overhead lifecycle diagnostics under
+`<MEM>/diagnostics/timem-web/`. Separate completed runs use independent records,
+so one run cannot erase another run's crash evidence. The recorder captures process milestones and the
+actual graceful-shutdown trigger without storing prompts, replies, API keys, or
+HTTP header values. After an unexpected exit, see
+[Install and configuration](docs/install-and-configuration.md#timem-web-lifecycle-diagnostics)
+for the files to inspect.
 
 ## More Documentation
 
@@ -172,6 +230,7 @@ appropriate network access control layer.
 - [Feature and test management](docs/feature-test-management.md)
 - [Release management](docs/release-management.md)
 - [Release smoke checklist](docs/manual-release-smoke.md)
+- [TimemAi 1.2.0 release notes](docs/release-notes-v1.2.0.md)
 - [TimemAi 1.1.3 release notes](docs/release-notes-v1.1.3.md)
 - [TimemAi 1.1.2 release notes](docs/release-notes-v1.1.2.md)
 - [TimemAi 1.1.1 release notes](docs/release-notes-v1.1.1.md)

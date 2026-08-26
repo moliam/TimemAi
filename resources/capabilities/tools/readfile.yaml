@@ -1,0 +1,81 @@
+kind: tool
+id: readfile
+binding_type: builtin
+binding_name: readfile
+summary: Read a bounded range from a normal text file.
+prompt_synopsis: |
+  {"readfile":{"path":"src/main.rs","starter":{"line_nr":20},"ender":{"line_nr":80},"max_bytes":32768}}
+  {"readfile":{"path":"logs/app.log","starter":{"byte_nr":0},"ender":{"byte_nr":4095},"max_bytes":4096}}
+  {"readfile":{"path":"logs/app.log","max_bytes":4096,"tail_out":true}}
+  {"readfile":{"path":"src/main.rs","starter":{"match":"fn main"},"ender":{"match":"}"},"max_bytes":32768}}
+description: |
+  Prefer `readfile` over shell commands for reading normal text files. Relative
+  paths resolve from the current session cwd. The tool is read-only, rejects
+  directories and special files, decodes text strictly, and always bounds the
+  returned content. Set `tail_out=true` to retain the end of an oversized
+  selected range instead of its beginning. Each read has a default execution
+  timeout of 10 seconds.
+prompt_input: |
+  Provide path. Omit starter and ender to read from the beginning, or give each
+  selector as an object containing exactly one of line_nr, byte_nr, or match.
+  Never combine selector fields in the same starter or ender object. line_nr is
+  1-based; byte_nr is a 0-based byte offset in the original file.
+prompt_result: |
+  Returns the selected text plus canonical path, encoding, byte and line range,
+  and whether the selected content was limited. Invalid selectors or unsafe,
+  binary, oversized, missing, or undecodable files return structured errors.
+input_schema: |
+  {
+    "type": "object",
+    "required": ["path"],
+    "additionalProperties": false,
+    "properties": {
+      "path": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty absolute path or path relative to the current session cwd."},
+      "encoding": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "WHATWG encoding label such as utf-8, utf-16le, utf-16be, gbk, big5, shift_jis, or windows-1252. Default: utf-8 with BOM detection."},
+      "starter": {
+        "type": "object",
+        "description": "Inclusive start selector. Set exactly one property; never send line_nr, byte_nr, and match together.",
+        "minProperties": 1,
+        "maxProperties": 1,
+        "additionalProperties": false,
+        "properties": {
+          "line_nr": {"type": "integer", "minimum": 1, "description": "1-based inclusive line number."},
+          "byte_nr": {"type": "integer", "minimum": 0, "description": "0-based inclusive original-file byte number."},
+          "match": {"type": "string", "minLength": 1, "description": "Non-empty exact string; at most 65536 UTF-8 bytes. Start at its first match."}
+        },
+        "oneOf": [
+          {"required": ["line_nr"]},
+          {"required": ["byte_nr"]},
+          {"required": ["match"]}
+        ]
+      },
+      "ender": {
+        "type": "object",
+        "description": "Inclusive end selector. Set exactly one property; never send line_nr, byte_nr, and match together.",
+        "minProperties": 1,
+        "maxProperties": 1,
+        "additionalProperties": false,
+        "properties": {
+          "line_nr": {"type": "integer", "minimum": 1, "description": "1-based inclusive line number; values beyond EOF clamp to the actual last line."},
+          "byte_nr": {"type": "integer", "minimum": 0, "description": "0-based inclusive original-file byte number."},
+          "match": {"type": "string", "minLength": 1, "description": "Non-empty exact string; at most 65536 UTF-8 bytes. End after its last complete match in the max_bytes window."}
+        },
+        "oneOf": [
+          {"required": ["line_nr"]},
+          {"required": ["byte_nr"]},
+          {"required": ["match"]}
+        ]
+      },
+      "max_bytes": {"type": "integer", "minimum": 1, "maximum": 32768, "description": "Maximum returned UTF-8 content bytes. Default and maximum 32768."},
+      "tail_out": {"type": "boolean", "description": "When true, an oversized selected range retains its ending and places a truncation notice before the content. Default: false."}
+    }
+  }
+example_json: |
+  {
+    "readfile": {
+      "path": "src/main.rs",
+      "starter": {"line_nr": 20},
+      "ender": {"line_nr": 80},
+      "max_bytes": 32768
+    }
+  }

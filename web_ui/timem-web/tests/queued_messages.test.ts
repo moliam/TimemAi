@@ -1,20 +1,92 @@
 import { describe, expect, it } from "vitest";
-import { applyQueuedMessagesAck, claimQueuedMessage, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, removeQueuedMessage, reorderQueuedMessages, saveQueuedMessages, selectQueuedDispatches } from "../src/queued_messages";
+import { applyQueuedMessagesAck, claimQueuedMessage, clearSessionQueuedMessages, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, QueuedMessage, queuedMessageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, selectQueuedDispatches, clearQueuedMessagesPause, loadQueuedMessagesPause, queuedMessagesPauseSessionId, queuedMessagesPauseStorageKey, saveQueuedMessagesPause, shouldDirectManualMessage, stopQueuedAutoSend, unclaimedQueuedMessages } from "../src/queued_messages";
 
 const messages: QueuedMessage[] = ["a", "b", "c", "d", "e"].map((id, index) => ({
   id,
   text: `message ${id}`,
   createdAtMs: index,
-}));
+attachmentIds: index === 0 ? ["upload-a"] : [], }));
 
 describe("queued messages", () => {
+  it("direct-sends from ready, stopped, or error without backlog or pause", () => {
+    expect(shouldDirectManualMessage("ready", 0, false)).toBe(true);
+    expect(shouldDirectManualMessage("working", 0, false)).toBe(false);
+    expect(shouldDirectManualMessage("error", 0, false)).toBe(true);
+    expect(shouldDirectManualMessage("stopped", 0, false)).toBe(true);
+    expect(shouldDirectManualMessage("ready", 1, false)).toBe(false);
+    expect(shouldDirectManualMessage("ready", 0, true)).toBe(false);
+  });
+
+  it("requires a new ready-state decision after a direct submission is occupied", () => {
+    expect(shouldDirectManualMessage("ready", 0, false)).toBe(true);
+    expect(shouldDirectManualMessage("working", 0, false)).toBe(false);
+  });
+
+  it("changes automatic sending only from an explicit user switch action", () => {
+    const stoppedByUser = stopQueuedAutoSend(
+      null,
+      "user disabled automatic sending",
+      "user",
+      200,
+    );
+    expect(stoppedByUser).toEqual({
+      paused: true,
+      source: "user",
+      reason: "user disabled automatic sending",
+      stoppedAtMs: 200,
+    });
+    expect(stopQueuedAutoSend(
+      stoppedByUser,
+      "duplicate user action",
+      "user",
+      300,
+    )).toBe(stoppedByUser);
+  });
+
+  it("hides claimed messages without removing them from the durable queue", () => {
+    const claims = new Set([queuedMessageKey("session_a", "a")]);
+    expect(unclaimedQueuedMessages(messages.slice(0, 3), claims, "session_a").map(({ id }) => id)).toEqual(["b", "c"]);
+    expect(messages.slice(0, 3).map(({ id }) => id)).toEqual(["a", "b", "c"]);
+    releaseQueuedMessageClaim(claims, "session_a", "a");
+    expect(unclaimedQueuedMessages(messages.slice(0, 3), claims, "session_a").map(({ id }) => id)).toEqual(["a", "b", "c"]);
+  });
+
+ it("keeps multiple per-message worker roles bound through durable queue storage", () => {
+ const values = new Map<string, string>();
+ const storage = {
+ get length() { return values.size; },
+ key: (index: number) => Array.from(values.keys())[index] ?? null,
+ getItem: (key: string) => values.get(key) ?? null,
+ setItem: (key: string, value: string) => { values.set(key, value); },
+ removeItem: (key: string) => { values.delete(key); },
+ };
+ const message: QueuedMessage = { id: "role-message", text: "review this", createdAtMs: 1, attachmentIds: [], roleIds: ["role-reviewer", "role-tester"] };
+ expect(saveQueuedMessages(storage, "scope", { session_a: [message] })).toBe(true);
+ expect(loadQueuedMessages(storage, "scope")).toEqual({ session_a: [message] });
+ });
+ it("upgrades a legacy single worker role while loading durable queue storage", () => {
+ const values = new Map<string, string>();
+ const scope = "legacy-role";
+ const key = queuedMessagesStorageKey(scope, "legacy-message");
+ values.set(key, JSON.stringify({ sessionId: "session_a", position: 0, message: { id: "legacy-message", text: "review", createdAtMs: 1, attachmentIds: [], roleId: "role-reviewer" } }));
+ const storage = { get length() { return values.size; }, key: (index: number) => Array.from(values.keys())[index] ?? null, getItem: (storageKey: string) => values.get(storageKey) ?? null };
+ expect(loadQueuedMessages(storage, scope).session_a[0].roleIds).toEqual(["role-reviewer"]);
+ });
+ it("keeps attachment ids bound to their queued message", () => {
+ const ids = reservedQueuedAttachmentIds([
+ { id: "one", text: "first", createdAtMs: 1, attachmentIds: ["upload-a", "upload-b"] },
+ { id: "two", text: "second", createdAtMs: 2, attachmentIds: ["upload-b", "upload-c"] },
+ ]);
+ expect(ids).toEqual(new Set(["upload-a", "upload-b", "upload-c"]));
+ });
   it("limits the collapsed queue to four rows", () => {
     expect(COLLAPSED_QUEUE_LIMIT).toBe(4);
     expect(messages.slice(0, COLLAPSED_QUEUE_LIMIT).map(({ id }) => id)).toEqual(["a", "b", "c", "d"]);
   });
 
-  it("moves a dragged message to the target position without mutation", () => {
+  it("moves a dragged message to the sortable target position without mutation", () => {
     expect(reorderQueuedMessages(messages, "d", "b").map(({ id }) => id)).toEqual(["a", "d", "b", "c", "e"]);
+    expect(reorderQueuedMessages(messages, "b", "d").map(({ id }) => id)).toEqual(["a", "c", "d", "b", "e"]);
     expect(messages.map(({ id }) => id)).toEqual(["a", "b", "c", "d", "e"]);
   });
 
@@ -30,6 +102,25 @@ describe("queued messages", () => {
     expect(claimQueuedMessage(claims, "session_a", messages, "missing")).toBe(false);
     expect(releaseQueuedMessageClaim(claims, "session_a", "a")).toBe(true);
     expect(claimQueuedMessage(claims, "session_a", messages, "a")).toBe(true);
+  });
+
+  it("clears only the stopped session queue and releases its claims", () => {
+    const queues = {
+      session_a: messages.slice(0, 2),
+      session_b: messages.slice(2, 4),
+    };
+    const claims = new Set([
+      queuedMessageKey("session_a", "a"),
+      queuedMessageKey("session_a", "b"),
+      queuedMessageKey("session_b", "c"),
+    ]);
+
+    expect(clearSessionQueuedMessages(queues, "session_a")).toEqual({
+      session_b: messages.slice(2, 4),
+    });
+    expect(releaseSessionQueuedMessageClaims(claims, "session_a")).toBe(2);
+    expect(claims).toEqual(new Set([queuedMessageKey("session_b", "c")]));
+    expect(queues.session_a.map(({ id }) => id)).toEqual(["a", "b"]);
   });
 
   it("blocks delete and reorder while a stable message id is claimed", () => {
@@ -74,8 +165,8 @@ describe("queued messages", () => {
     expect(saveQueuedMessages(storage, scope, { session_a: [{ id: "tab-a", text: "A", createdAtMs: 1 }] })).toBe(true);
     expect(saveQueuedMessages(storage, scope, { session_b: [{ id: "tab-b", text: "B", createdAtMs: 2 }] })).toBe(true);
     expect(loadQueuedMessages(storage, scope)).toEqual({
-      session_a: [{ id: "tab-a", text: "A", createdAtMs: 1 }],
-      session_b: [{ id: "tab-b", text: "B", createdAtMs: 2 }],
+      session_a: [{ id: "tab-a", text: "A", createdAtMs: 1, attachmentIds: [] }],
+      session_b: [{ id: "tab-b", text: "B", createdAtMs: 2, attachmentIds: [] }],
     });
   });
 
@@ -142,6 +233,17 @@ describe("queued messages", () => {
     expect(reorderQueuedMessages(original, "c", "a", claims, "session_a")).toEqual(original);
   });
 
+  it("does not dispatch from ready state without a successful completion grant", () => {
+    const queues = {
+      session_a: [{ id: "a1", text: "A next", createdAtMs: 1 }],
+    };
+    expect(selectQueuedDispatches(
+      [{ session_id: "session_a", state: "ready" }],
+      queues,
+      new Set(),
+    )).toEqual([]);
+  });
+
   it("routes background auto-dispatch by owning session rather than active UI session", () => {
     const sessions = [
       { session_id: "session_a", state: "ready" },
@@ -153,7 +255,14 @@ describe("queued messages", () => {
       session_b: [{ id: "b1", text: "B next", createdAtMs: 2 }],
       session_c: [{ id: "c1", text: "C retry", createdAtMs: 3, deliveryError: "rejected" }],
     };
-    expect(selectQueuedDispatches(sessions, queues, new Set(), "session_b")).toEqual([
+    expect(selectQueuedDispatches(
+      sessions,
+      queues,
+      new Set(),
+      "session_b",
+      new Set(),
+      new Set(["session_a"]),
+    )).toEqual([
       { sessionId: "session_a", message: queues.session_a[0] },
     ]);
   });
@@ -163,7 +272,14 @@ describe("queued messages", () => {
     const dispatching = new Set(["session_a"]);
     expect(selectQueuedDispatches([{ session_id: "session_a", state: "ready" }], queues, dispatching)).toEqual([]);
     expect(selectQueuedDispatches([{ session_id: "session_a", state: "working" }], queues, new Set())).toEqual([]);
-    expect(selectQueuedDispatches([{ session_id: "session_a", state: "ready" }], queues, new Set())).toEqual([
+    expect(selectQueuedDispatches(
+      [{ session_id: "session_a", state: "ready" }],
+      queues,
+      new Set(),
+      undefined,
+      new Set(),
+      new Set(["session_a"]),
+    )).toEqual([
       { sessionId: "session_a", message: queues.session_a[0] },
     ]);
   });
@@ -185,7 +301,14 @@ describe("queued messages", () => {
     // A finishes while B is still working. Neither B nor C's rejected item can
     // prevent A from becoming independently dispatchable.
     sessions = sessions.map((session) => session.session_id === "session_a" ? { ...session, state: "ready" } : session);
-    expect(selectQueuedDispatches(sessions, queues, dispatching)).toEqual([
+    expect(selectQueuedDispatches(
+      sessions,
+      queues,
+      dispatching,
+      undefined,
+      new Set(),
+      new Set(["session_a"]),
+    )).toEqual([
       { sessionId: "session_a", message: queues.session_a[0] },
     ]);
     dispatching.add("session_a");
@@ -193,7 +316,14 @@ describe("queued messages", () => {
     // B finishing remains independently dispatchable while A awaits its
     // authoritative working transition/terminal lifecycle event.
     sessions = sessions.map((session) => session.session_id === "session_b" ? { ...session, state: "ready" } : session);
-    expect(selectQueuedDispatches(sessions, queues, dispatching)).toEqual([
+    expect(selectQueuedDispatches(
+      sessions,
+      queues,
+      dispatching,
+      undefined,
+      new Set(),
+      new Set(["session_b"]),
+    )).toEqual([
       { sessionId: "session_b", message: queues.session_b[0] },
     ]);
     dispatching.add("session_b");
@@ -204,4 +334,82 @@ describe("queued messages", () => {
     expect(dispatching).toEqual(new Set(["session_b"]));
     expect(selectQueuedDispatches(sessions, queues, dispatching)).toEqual([]);
   });
+
+ it("persists and clears pauses independently for each session without changing queued messages", () => {
+ const values = new Map<string, string>();
+ const storage = {
+ get length() { return values.size; },
+ key: (index: number) => Array.from(values.keys())[index] ?? null,
+ getItem: (key: string) => values.get(key) ?? null,
+ setItem: (key: string, value: string) => { values.set(key, value); },
+ removeItem: (key: string) => { values.delete(key); },
+ };
+ expect(saveQueuedMessages(storage, "scope-a", { session_a: messages.slice(0, 2) })).toBe(true);
+ expect(saveQueuedMessagesPause(storage, "scope-a", "session_a", {
+ paused: true,
+ source: "user",
+ reason: "用户关闭了自动发送",
+ stoppedAtMs: 123,
+ })).toBe(true);
+ expect(loadQueuedMessagesPause(storage, "scope-a", "session_a")).toEqual({
+ paused: true,
+ source: "user",
+ reason: "用户关闭了自动发送",
+ stoppedAtMs: 123,
+ });
+ expect(loadQueuedMessagesPause(storage, "scope-a", "session_b")).toBeNull();
+ expect(loadQueuedMessagesPause(storage, "scope-b", "session_a")).toBeNull();
+ expect(loadQueuedMessages(storage, "scope-a").session_a.map(({ id }) => id)).toEqual(["a", "b"]);
+ expect(clearQueuedMessagesPause(storage, "scope-a", "session_a")).toBe(true);
+ expect(loadQueuedMessagesPause(storage, "scope-a", "session_a")).toBeNull();
+ expect(loadQueuedMessages(storage, "scope-a").session_a.map(({ id }) => id)).toEqual(["a", "b"]);
+ });
+
+ it("keeps other sessions dispatchable when one session is paused", () => {
+ const sessions = [
+ { session_id: "session_a", state: "ready" },
+ { session_id: "session_b", state: "ready" },
+ ];
+ const queues = {
+ session_a: [{ id: "a1", text: "A next", createdAtMs: 1 }],
+ session_b: [{ id: "b1", text: "B next", createdAtMs: 2 }],
+ };
+ expect(selectQueuedDispatches(
+ sessions,
+ queues,
+ new Set(),
+ undefined,
+ new Set(["session_a"]),
+ new Set(["session_a", "session_b"]),
+ )).toEqual([
+ { sessionId: "session_b", message: queues.session_b[0] },
+ ]);
+ });
+
+ it("parses a session pause storage key without scanning other sessions", () => {
+ const key = queuedMessagesPauseStorageKey("scope-a", "session / 中文");
+ expect(queuedMessagesPauseSessionId("scope-a", key)).toBe("session / 中文");
+ expect(queuedMessagesPauseSessionId("scope-b", key)).toBeNull();
+ expect(queuedMessagesPauseSessionId("scope-a", `${key}%`)).toBeNull();
+ expect(queuedMessagesPauseSessionId("scope-a", "unrelated")).toBeNull();
+ });
+
+ it("ignores malformed session queue pause records", () => {
+ const values = new Map<string, string>();
+ const storage = { getItem: (key: string) => values.get(key) ?? null };
+ const key = queuedMessagesPauseStorageKey("scope-a", "session_a");
+ for (const malformed of [
+ "not-json",
+ "{}",
+ JSON.stringify({ paused: false, stoppedAtMs: 1 }),
+ JSON.stringify({ paused: true, stoppedAtMs: "now" }),
+ JSON.stringify({ paused: true, stoppedAtMs: -1 }),
+ JSON.stringify({ paused: true, stoppedAtMs: 1, reason: 42 }),
+ JSON.stringify({ paused: true, stoppedAtMs: 1, source: "system" }),
+ JSON.stringify({ paused: true, stoppedAtMs: 1, source: "error" }),
+ ]) {
+ values.set(key, malformed);
+ expect(loadQueuedMessagesPause(storage, "scope-a", "session_a")).toBeNull();
+ }
+ });
 });

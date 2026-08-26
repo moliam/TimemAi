@@ -2,98 +2,58 @@ kind: tool
 id: self_tool
 binding_type: builtin
 binding_name: self_tool
-summary: Inspect or adjust Timem runtime self information.
+summary: Locate Timem runtime resources, change cwd, or inspect effective configuration.
+prompt_synopsis: |
+  {"self_tool":{"type":"path"}}
+  {"self_tool":{"type":"cwd"}}
+  {"self_tool":{"type":"cwd","new_path":"path/to/workspace"}}
+  {"self_tool":{"type":"params"}}
 description: |
-  Use when the user asks about Timem itself, current runtime environment
-  variables, memory/audit paths, or wants to adjust a non-secret process env
-  value for this running Timem session. It can also change the current prompt
-  context cwd used by later run_bash actions.
+  Use this tool when work requires information about Timem itself or when the
+  current prompt context working directory should be queried or changed.
+  Ask for path when you need to know where runtime resources are. Use cwd without
+  new_path to query the current prompt-context directory, or with new_path to
+  change the directory used by later local tools. Ask for params when you need to
+  know how the current runtime is configured.
 prompt_input: |
-  Always include type and op. type=env supports op=read/write; read may include
-  key or omit key to list non-sensitive env values. write requires key and
-  value and only changes current process runtime env. type=mem_path supports
-  op=read. type=about_me supports op=read. type=cwd supports op=read/chg_cwd;
-  chg_cwd requires new_path and changes the prompt context cwd used by later
-  run_bash actions in this context. You should shorten your 'cd' command output
-  with this ability.
-  API key/token/secret/password-like env
-  variables are not readable or writable. Memory path env variables such as
-  TIMEM_DATA_DIR and TIMEM_SPACE are startup-only and are not writable through
-  self_tool.
+  Use type=path for runtime-resource locations. Use type=cwd without new_path to
+  query the current prompt-context directory. To change it, set new_path to an
+  absolute path or a path relative to the current prompt-context cwd. Use
+  type=params for effective runtime configuration and limits.
 prompt_result: |
-  Returns current runtime env values, memory/audit paths, or Timem about
-  information. Sensitive env requests return sensitive_env_denied. Env writes
-  update the current process only; model service config may still need /config
-  or restart. Memory path env writes return protected_env_denied because those
-  resources are selected at startup. about_me also returns project/star info,
-  current process id, current directory, and executable path. cwd chg_cwd returns
-  the new prompt context cwd; future run_bash actions in the same prompt context
-  run from that directory.
+  path returns relevant runtime file and directory locations. cwd without
+  new_path returns `CWD: ...` without changing state. cwd with new_path changes
+  the prompt-context directory and returns `CWD changed to: ...`; later run_bash
+  and readfile actions in the same context use the canonical path. params returns
+  relevant effective, non-sensitive runtime values. Secrets are never returned.
 input_schema: |
   {
     "type": "object",
-    "required": ["type", "op"],
+    "additionalProperties": false,
     "properties": {
       "type": {
         "type": "string",
-        "enum": ["env", "mem_path", "about_me", "cwd"],
-        "description": "Self information surface."
-      },
-      "op": {
-        "type": "string",
-        "enum": ["read", "write", "chg_cwd"],
-        "description": "Operation. env supports read/write; mem_path/about_me support read; cwd supports read/chg_cwd."
-      },
-      "key": {
-        "type": "string",
-        "description": "Environment variable name for type=env."
-      },
-      "value": {
-        "type": "string",
-        "description": "Environment variable value for type=env op=write."
+        "enum": ["path", "cwd", "params"],
+        "description": "Self-information class or cwd-change operation."
       },
       "new_path": {
         "type": "string",
-        "description": "Directory path for type=cwd op=chg_cwd. Relative paths are resolved from the current prompt context cwd."
+        "minLength": 1,
+        "pattern": "\\S",
+        "description": "Optional new prompt-context directory for type=cwd. Omit to query the current directory. Relative paths resolve from the current prompt-context cwd."
       }
     },
-    "x-required-when": [
-      {"field": "op", "values": ["write"], "required": ["key", "value"]},
-      {"field": "op", "values": ["chg_cwd"], "required": ["new_path"]}
+    "required": ["type"],
+    "allOf": [
+      {
+        "if": {"properties": {"type": {"enum": ["path", "params"]}}, "required": ["type"]},
+        "then": {"not": {"required": ["new_path"]}}
+      }
     ]
-  }
-output_schema: |
-  {
-    "type": "object",
-    "properties": {
-      "type": {"type": "string", "description": "Echoed self surface."},
-      "op": {"type": "string", "description": "Echoed operation."},
-      "key": {"type": "string", "description": "Environment key when relevant."},
-      "value": {"type": "string", "description": "Environment value when non-sensitive."},
-      "results": {"type": "string", "description": "Environment list when no key is provided."},
-      "space_dir": {"type": "string", "description": "Current memory space directory."},
-      "memory_dir": {"type": "string", "description": "Memory data directory."},
-      "memory_file": {"type": "string", "description": "Durable memory file."},
-      "scratch_file": {"type": "string", "description": "Scratch notes file."},
-      "api_audit_file": {"type": "string", "description": "API audit JSON file."},
-      "action_audit_file": {"type": "string", "description": "Action audit JSON file."},
-      "name": {"type": "string", "description": "Software name."},
-      "version": {"type": "string", "description": "Software version."},
-      "author": {"type": "string", "description": "Author/contact."},
-      "summary": {"type": "string", "description": "Short software summary."},
-      "project": {"type": "string", "description": "Public project URL."},
-      "star_message": {"type": "string", "description": "Optional project star request."},
-      "pid": {"type": "integer", "description": "Current Timem process id."},
-      "current_dir": {"type": "string", "description": "Current process working directory."},
-      "cwd": {"type": "string", "description": "Current prompt context cwd used by run_bash."},
-      "executable": {"type": "string", "description": "Current Timem executable path."},
-      "error": {"type": "string", "description": "sensitive_env_denied|protected_env_denied|key_required|unsupported_type_or_op"}
-    }
   }
 example_json: |
   {
     "self_tool": {
-      "type": "mem_path",
-      "op": "read"
+      "type": "path"
     }
   }

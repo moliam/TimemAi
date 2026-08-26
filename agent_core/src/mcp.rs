@@ -69,11 +69,19 @@ pub struct McpTool {
     pub input_schema: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerCapabilities {
+    pub instructions: Option<String>,
+    pub tools: Vec<McpTool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct McpServerReport {
     pub config: McpServerConfig,
     pub state: String,
     pub error: Option<String>,
+    #[serde(skip)]
+    pub instructions: Option<String>,
     pub tools: Vec<McpTool>,
 }
 
@@ -159,15 +167,26 @@ impl McpRuntime {
     }
 
     pub fn connect(&self, config: &McpServerConfig) -> Result<Vec<McpTool>, String> {
+        self.connect_with_capabilities(config)
+            .map(|capabilities| capabilities.tools)
+    }
+
+    pub fn connect_with_capabilities(
+        &self,
+        config: &McpServerConfig,
+    ) -> Result<McpServerCapabilities, String> {
         validate_server_config(config)?;
         let mut connection = McpConnection::open(config.clone())?;
-        connection.initialize()?;
+        let instructions = connection.initialize()?;
         let tools = connection.list_tools()?;
         self.inner
             .lock()
             .map_err(|_| "mcp_runtime_poisoned".to_string())?
             .insert(config.id.clone(), Arc::new(Mutex::new(connection)));
-        Ok(tools)
+        Ok(McpServerCapabilities {
+            instructions,
+            tools,
+        })
     }
 
     pub fn list_tools(&self, config: &McpServerConfig) -> Result<Vec<McpTool>, String> {
@@ -192,13 +211,30 @@ impl McpRuntime {
         tool_name: &str,
         args: &Value,
     ) -> Result<String, String> {
+        self.call_tool_outcome(config, tool_name, args)
+            .map(|outcome| outcome.text)
+    }
+
+    pub(crate) fn call_tool_outcome(
+        &self,
+        config: &McpServerConfig,
+        tool_name: &str,
+        args: &Value,
+    ) -> Result<crate::ActionOutcome, String> {
         let connection = self.connection(config)?;
         let result = connection
             .lock()
             .map_err(|_| "mcp_connection_poisoned".to_string())?
             .call_tool(tool_name, args);
         match result {
-            Ok(result) => Ok(render_call_result(&config.name, tool_name, &result)),
+            Ok(result) => {
+                let text = render_call_result(&config.name, tool_name, &result);
+                if result.get("isError").and_then(Value::as_bool) == Some(true) {
+                    Ok(crate::ActionOutcome::failed(text))
+                } else {
+                    Ok(crate::ActionOutcome::completed(text))
+                }
+            }
             Err(error) => {
                 // A failed transport may still deliver a late response for this
                 // request, so it must not be reused by a later tool call.
@@ -262,7 +298,7 @@ impl McpConnection {
         }
     }
 
-    fn initialize(&mut self) -> Result<(), String> {
+    fn initialize(&mut self) -> Result<Option<String>, String> {
         let result = self.request(
             "initialize",
             json!({
@@ -278,7 +314,14 @@ impl McpConnection {
         {
             return Err("mcp_initialize_missing_protocol_version".to_string());
         }
-        self.notify("notifications/initialized", json!({}))
+        let instructions = result
+            .get("instructions")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|instructions| !instructions.is_empty())
+            .map(str::to_string);
+        self.notify("notifications/initialized", json!({}))?;
+        Ok(instructions)
     }
 
     fn list_tools(&mut self) -> Result<Vec<McpTool>, String> {
@@ -311,8 +354,8 @@ impl McpConnection {
                     .get("inputSchema")
                     .cloned()
                     .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
-                let action_name = mcp_action_name(&config.id, name);
-                if action_name.ends_with('.') || !action_names.insert(action_name.clone()) {
+                let action_name = mcp_action_name(&config.name, name);
+                if action_name.ends_with('_') || !action_names.insert(action_name.clone()) {
                     return Err(format!("mcp_tool_action_name_collision:{action_name}"));
                 }
                 tools.push(McpTool {
@@ -793,18 +836,34 @@ fn resolve_legacy_sse_endpoint(base: &str, endpoint: &str) -> Result<String, Str
     Ok(format!("{base_dir}/{endpoint}"))
 }
 
-pub fn mcp_action_name(server_id: &str, tool_name: &str) -> String {
+pub fn mcp_action_name(server_name: &str, tool_name: &str) -> String {
+    // Use the conservative `[A-Za-z0-9_]+` subset accepted by native model APIs.
+    // The double underscore separates the MCP server name from its function name.
+    // One identifier format is shared by native tools, JSON, XML, prompts, and execution.
     format!(
-        "mcp.{}.{}",
-        action_component(server_id),
+        "mcp_{}__{}",
+        action_component(server_name),
         action_component(tool_name)
     )
 }
 
 fn action_component(value: &str) -> String {
+    normalized_component(value, false)
+}
+
+fn canonical_server_id(value: &str) -> String {
+    // Server IDs are persisted user configuration. Keep accepting the existing
+    // kebab-case form while model-visible action names use underscores only.
+    normalized_component(value, true)
+}
+
+fn normalized_component(value: &str, allow_hyphen: bool) -> String {
     let mut out = String::new();
     for character in value.chars() {
-        if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+        if character.is_ascii_alphanumeric()
+            || character == '_'
+            || (allow_hyphen && character == '-')
+        {
             out.push(character.to_ascii_lowercase());
         } else {
             out.push('_');
@@ -814,10 +873,10 @@ fn action_component(value: &str) -> String {
 }
 
 fn validate_server_config(config: &McpServerConfig) -> Result<(), String> {
-    if config.id.trim().is_empty() || action_component(&config.id).is_empty() {
+    if config.id.trim().is_empty() || canonical_server_id(&config.id).is_empty() {
         return Err("mcp_server_id_required".to_string());
     }
-    if config.id != action_component(&config.id) {
+    if config.id != canonical_server_id(&config.id) {
         return Err("mcp_server_id_must_be_canonical".to_string());
     }
     if config.name.trim().is_empty() {
@@ -958,20 +1017,17 @@ fn render_call_result(server: &str, tool: &str, result: &Value) -> String {
             match item.get("type").and_then(Value::as_str) {
                 Some("text") => {
                     if let Some(text) = item.get("text").and_then(Value::as_str) {
-                        lines.push(bounded_text(text, 32_000));
+                        lines.push(text.to_string());
                     }
                 }
-                Some(kind) => lines.push(format!(
-                    "[{kind} content: {}]",
-                    bounded_text(&item.to_string(), 4000)
-                )),
-                None => lines.push(bounded_text(&item.to_string(), 4000)),
+                Some(kind) => lines.push(format!("[{kind} content: {}]", item)),
+                None => lines.push(item.to_string()),
             }
         }
     } else if let Some(structured) = result.get("structuredContent") {
-        lines.push(bounded_text(&structured.to_string(), 32_000));
+        lines.push(structured.to_string());
     } else {
-        lines.push(bounded_text(&result.to_string(), 32_000));
+        lines.push(result.to_string());
     }
     lines.join("\n")
 }

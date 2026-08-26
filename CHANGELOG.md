@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-26
+
+### Highlights
+
+- Added adaptive provider-native tool calling for OpenAI-compatible Chat,
+  OpenAI Responses, and Anthropic APIs. The default `auto` mode probes support,
+  preserves ordered tool-call/result history, supports negotiated parallel
+  calls, and falls back to the existing inline XML/JSON protocol when needed.
+- Added a durable MEM-wide Role library for reusable working methodologies.
+  Roles can be created, edited, grouped, reordered, and combined per message so
+  users can assign specialized ways of working across Sessions and tasks.
+
+### Changed
+
+- Refined the Web composer and Session navigation: Session names are smaller,
+  cwd is shown only below the composer text area, and a subtle divider separates
+  the text area from the cwd/actions row.
+- Polished the sidebar brand alignment, made expanded Session worker names use
+  normal weight, and added the shared model glyph to endpoint model summaries.
+- Added a centralized `agent_core::os` abstraction with initial macOS and Linux
+  implementations for host/version detection, shell paths, default config
+  directories, browser and terminal launch commands, and process-group
+  lifecycle operations. The model-facing `run_bash` description now dynamically
+  includes the detected host OS and `/bin/bash` versions.
+
+### Fixed
+
+- Stream large model request bodies through curl stdin instead of embedding them
+  in curl configuration lines, removing the approximately 100 KiB failure mode
+  for long multi-turn contexts while preserving cancellation and inactivity
+  timeout behavior.
+
+### Removed
+
+- Removed unused capability `output_schema` declarations and parser state.
+  Tool manifests now describe fresh model submissions with `input_schema` and
+  describe executor-owned evidence with `prompt_result`.
+
 ## [1.1.3] - 2026-08-15
 
 ### Added

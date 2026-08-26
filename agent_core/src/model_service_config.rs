@@ -1,6 +1,8 @@
 use crate::{
-    default_api_protocol, default_base_url, default_model, parse_api_protocol, parse_token_count,
-    ApiProtocol, ModelServiceConfig, OpenAiCompatibleOptions,
+    default_api_protocol, default_base_url, default_model, parse_api_protocol,
+    parse_openai_compatible_cache_mode, parse_token_count, validate_model_http_headers,
+    ApiProtocol, ModelServiceConfig, OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
+    ParallelToolCalls, ToolCallMode,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -11,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct ModelServiceConfigSource {
     pub api_protocol: Option<String>,
     pub api_key: Option<String>,
+    pub http_headers: Option<std::collections::BTreeMap<String, String>>,
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub timeout_secs: Option<u64>,
@@ -20,6 +23,9 @@ pub struct ModelServiceConfigSource {
     pub enable_thinking: Option<bool>,
     pub reasoning_effort: Option<String>,
     pub stream: Option<bool>,
+    pub openai_cache_mode: Option<String>,
+    pub tool_call_mode: Option<ToolCallMode>,
+    pub parallel_tool_calls: Option<ParallelToolCalls>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,11 +92,16 @@ impl LocalLLMKeyFile {
             model: model.to_string(),
             base_url: default_base_url(&ApiProtocol::OpenAiCompatible).to_string(),
             api_key: self.api_key.clone(),
+            http_headers: Default::default(),
             timeout_secs: 120,
             max_llm_output_tokens: 512,
             max_llm_input_tokens: 100_000,
             api_protocol: ApiProtocol::OpenAiCompatible,
             response_protocol: crate::ResponseProtocolKind::default(),
+            interaction: crate::InteractionConfig {
+                tool_call_mode: ToolCallMode::Auto,
+                ..crate::InteractionConfig::default()
+            },
             openai_compatible: OpenAiCompatibleOptions::default(),
         }
     }
@@ -150,6 +161,18 @@ fn model_service_config_from_sources_with_key_policy(
     } else {
         validate_api_key(&api_key)?;
     }
+    let http_headers = match source.http_headers.clone() {
+        Some(headers) => headers,
+        None => env
+            .get("TIMEM_HTTP_HEADERS")
+            .map(|value| {
+                serde_json::from_str(value)
+                    .map_err(|error| format!("invalid_TIMEM_HTTP_HEADERS:{error}"))
+            })
+            .transpose()?
+            .unwrap_or_default(),
+    };
+    validate_model_http_headers(&http_headers)?;
     let timeout_secs = source
         .timeout_secs
         .or_else(|| env.get("TIMEM_TIMEOUT").and_then(|v| v.parse().ok()))
@@ -188,19 +211,49 @@ fn model_service_config_from_sources_with_key_policy(
             None => false,
         },
     };
+    let cache_mode = source
+        .openai_cache_mode
+        .clone()
+        .or_else(|| env.get("TIMEM_OPENAI_CACHE_MODE").cloned())
+        .map(|value| parse_openai_compatible_cache_mode(&value))
+        .transpose()?
+        .unwrap_or(OpenAiCompatibleCacheMode::Auto);
+    let tool_call_mode = match source.tool_call_mode {
+        Some(mode) => mode,
+        None => env
+            .get("TIMEM_TOOL_CALL_MODE")
+            .map(|value| crate::parse_tool_call_mode(value))
+            .transpose()?
+            .unwrap_or(ToolCallMode::Auto),
+    };
+    let parallel_tool_calls = match source.parallel_tool_calls {
+        Some(mode) => mode,
+        None => env
+            .get("TIMEM_PARALLEL_TOOL_CALLS")
+            .map(|value| crate::parse_parallel_tool_calls(value))
+            .transpose()?
+            .unwrap_or_default(),
+    };
     Ok(ModelServiceConfig {
         model,
         base_url,
         api_key,
+        http_headers,
         timeout_secs,
         max_llm_output_tokens,
         max_llm_input_tokens,
         api_protocol,
         response_protocol: crate::ResponseProtocolKind::default(),
+        interaction: crate::InteractionConfig {
+            tool_call_mode,
+            parallel_tool_calls,
+            ..crate::InteractionConfig::default()
+        },
         openai_compatible: OpenAiCompatibleOptions {
             enable_thinking,
             reasoning_effort,
             stream,
+            cache_mode,
         },
     })
 }
@@ -240,6 +293,9 @@ pub fn apply_openai_compatible_env_value(
         }
         "TIMEM_STREAM" => {
             options.stream = parse_bool_env(key, value)?;
+        }
+        "TIMEM_OPENAI_CACHE_MODE" => {
+            options.cache_mode = parse_openai_compatible_cache_mode(value)?;
         }
         _ => return Ok(false),
     }

@@ -1,0 +1,37 @@
+{
+  "schedules": [
+    {
+      "every_minutes": 10,
+      "tips": [
+        "TIPS: Remind the goal, don't get lost. Clearly manage the picture of your working progress. If you get lost, say so promptly, and stop.",
+        "TIPS: Jump out. Take a look at the whole work's state. Make sure the whole picture is still in your control.",
+        "TIPS: Don't get stuck in a narrow line of thought. Don't be dragged too far by a superficial observation."
+      ]
+    },
+    {
+      "every_rounds": 10,
+      "tips": [
+        "TIPS: A good inference has rigid deduction chain. If you say A causes B, there must be no hidden C in the middle.",
+        "TIPS: Don't make illusion correlation, such as A happens first, B happends later. Then A is the reason of B. This is super dangerous.",
+        "TIPS: A root cause can not only explain the current question, but can also predict real things."
+      ]
+    }
+  ],
+  "_example": {
+    "description": "To add a schedule, copy one example object into the schedules array. Set exactly one of every_minutes or every_rounds. Add NONE when a due period may intentionally inject no tip.",
+    "by_minutes": {
+      "every_minutes": 15,
+      "tips": [
+        "TIPS: Recheck the goal and summarize current progress.",
+        "NONE"
+      ]
+    },
+    "by_rounds": {
+      "every_rounds": 5,
+      "tips": [
+        "TIPS: Verify the evidence before drawing the next conclusion.",
+        "NONE"
+      ]
+    }
+  }
+}

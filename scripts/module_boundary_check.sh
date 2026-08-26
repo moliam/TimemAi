@@ -18,6 +18,37 @@ if grep -RInE 'reedline|crossterm|termimad|nu-ansi-term|nu_ansi_term|syntect|uni
   exit 1
 fi
 
+python3 - <<'PY_BOUNDARY'
+from pathlib import Path
+
+checks = [
+    (
+        Path("agent_core/src"),
+        {Path("agent_core/src/os/unix.rs")},
+        ("libc::getpgid", "libc::getpgrp", "libc::waitpid", ".process_group(0)"),
+        "Core process-group and wait primitives belong in agent_core/src/os/unix.rs",
+    ),
+    (
+        Path("timem_web/src"),
+        {Path("timem_web/src/os/unix.rs")},
+        ("libc::getppid", "tokio::signal::unix", "SignalKind::interrupt", "SignalKind::terminate", "SignalKind::hangup"),
+        "Web parent-process and shutdown-signal primitives belong in timem_web/src/os/unix.rs",
+    ),
+]
+
+violations = []
+for root, allowed, needles, message in checks:
+    for path in root.rglob("*.rs"):
+        if path in allowed:
+            continue
+        text = path.read_text(errors="replace")
+        for needle in needles:
+            if needle in text:
+                violations.append(f"{message}: {path} contains {needle}")
+if violations:
+    raise SystemExit("\n".join(violations))
+PY_BOUNDARY
+
 if ! grep -nF 'agent_core = { path = "../agent_core" }' timem_shell/Cargo.toml >/dev/null; then
   echo "error: timem_shell must depend on agent_core through the crate boundary" >&2
   exit 1

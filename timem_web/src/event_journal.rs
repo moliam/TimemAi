@@ -22,7 +22,7 @@ pub(crate) struct JournalEvent {
 /// acknowledged only after the line and its metadata reach stable storage.
 #[derive(Debug)]
 pub(crate) struct EventJournal {
-    _instance_lock: JournalInstanceLock,
+    instance_lock: JournalInstanceLock,
     path: PathBuf,
     next_seq: u64,
     first_seq: Option<u64>,
@@ -66,7 +66,7 @@ impl EventJournal {
             .checked_add(1)
             .ok_or_else(|| "event_journal_sequence_exhausted".to_string())?;
         let mut journal = Self {
-            _instance_lock: instance_lock,
+            instance_lock,
             bytes: std::fs::metadata(&path)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
@@ -85,6 +85,15 @@ impl EventJournal {
         self.next_seq.saturating_sub(1)
     }
 
+    pub fn publish_instance_info(&mut self, info: &JournalInstanceInfo) -> Result<(), String> {
+        self.instance_lock.write_info(info)
+    }
+
+    pub fn read_instance_info(path: impl AsRef<Path>) -> Option<JournalInstanceInfo> {
+        let raw = std::fs::read(journal_lock_path(path.as_ref())).ok()?;
+        serde_json::from_slice(&raw).ok()
+    }
+
     /// The oldest cursor for which every later event is still replayable.
     /// Clients behind this floor must use the current snapshot as their new
     /// baseline instead of attempting to reconstruct discarded history.
@@ -95,6 +104,10 @@ impl EventJournal {
     }
 
     pub fn append(&mut self, event: Value) -> Result<JournalEvent, String> {
+        // A failed write can leave bytes after the last acknowledged record.
+        // The in-memory byte count is advanced only after write + sync succeeds,
+        // so trim only that unacknowledged suffix without rereading the journal.
+        self.discard_unacknowledged_tail()?;
         if self.needs_compaction() {
             self.compact_to_last(RETAINED_JOURNAL_EVENTS)?;
         }
@@ -116,9 +129,19 @@ impl EventJournal {
         let mut file = options
             .open(&self.path)
             .map_err(|error| format!("event_journal_open_failed:{error}"))?;
-        file.write_all(&encoded)
-            .and_then(|_| file.sync_data())
-            .map_err(|error| format!("event_journal_write_failed:{error}"))?;
+        let original_len = file
+            .metadata()
+            .map_err(|error| format!("event_journal_metadata_failed:{error}"))?
+            .len();
+        if let Err(error) = file.write_all(&encoded).and_then(|_| file.sync_data()) {
+            let rollback = file.set_len(original_len).and_then(|_| file.sync_data());
+            return Err(match rollback {
+                Ok(()) => format!("event_journal_write_failed:{error}"),
+                Err(rollback_error) => format!(
+                    "event_journal_write_failed:{error};event_journal_rollback_failed:{rollback_error}"
+                ),
+            });
+        }
         self.first_seq.get_or_insert(entry.event_seq);
         self.entry_count = self.entry_count.saturating_add(1);
         self.bytes = self.bytes.saturating_add(encoded.len() as u64);
@@ -127,6 +150,33 @@ impl EventJournal {
             .checked_add(1)
             .ok_or_else(|| "event_journal_sequence_exhausted".to_string())?;
         Ok(entry)
+    }
+
+    fn discard_unacknowledged_tail(&self) -> Result<(), String> {
+        let actual_len = match std::fs::metadata(&self.path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && self.bytes == 0 => {
+                return Ok(());
+            }
+            Err(error) => return Err(format!("event_journal_metadata_failed:{error}")),
+        };
+        if actual_len < self.bytes {
+            return Err(format!(
+                "event_journal_truncated:{}:{}",
+                actual_len, self.bytes
+            ));
+        }
+        if actual_len == self.bytes {
+            return Ok(());
+        }
+
+        let file = OpenOptions::new()
+            .write(true)
+            .open(&self.path)
+            .map_err(|error| format!("event_journal_open_failed:{error}"))?;
+        file.set_len(self.bytes)
+            .and_then(|_| file.sync_data())
+            .map_err(|error| format!("event_journal_repair_failed:{error}"))
     }
 
     pub fn replay_after(&self, cursor: u64) -> Result<Vec<JournalEvent>, String> {
@@ -185,9 +235,38 @@ impl EventJournal {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct JournalInstanceInfo {
+    pub pid: u32,
+    #[serde(default)]
+    pub launch_parent_pid: Option<u32>,
+    pub port: Option<u16>,
+    pub token: Option<String>,
+    pub browser_url: Option<String>,
+    pub public_access: bool,
+    pub started_at_ms: u128,
+}
+
+impl JournalInstanceInfo {
+    pub fn starting() -> Self {
+        Self {
+            pid: std::process::id(),
+            launch_parent_pid: crate::os::current_launch_parent_pid(),
+            port: None,
+            token: None,
+            browser_url: None,
+            public_access: false,
+            started_at_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct JournalInstanceLock {
-    _file: File,
+    file: File,
 }
 
 impl JournalInstanceLock {
@@ -215,6 +294,13 @@ impl JournalInstanceLock {
 
         #[cfg(unix)]
         {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("event_journal_lock_permissions_failed:{error}"))?;
+        }
+
+        #[cfg(unix)]
+        {
             use std::os::fd::AsRawFd;
             let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if result != 0 {
@@ -227,7 +313,20 @@ impl JournalInstanceLock {
             }
         }
 
-        Ok(Self { _file: file })
+        let mut instance_lock = Self { file };
+        instance_lock.write_info(&JournalInstanceInfo::starting())?;
+        Ok(instance_lock)
+    }
+
+    fn write_info(&mut self, info: &JournalInstanceInfo) -> Result<(), String> {
+        let encoded = serde_json::to_vec(info)
+            .map_err(|error| format!("event_journal_instance_serialize_failed:{error}"))?;
+        self.file
+            .set_len(0)
+            .and_then(|_| self.file.seek(SeekFrom::Start(0)).map(|_| ()))
+            .and_then(|_| self.file.write_all(&encoded))
+            .and_then(|_| self.file.sync_data())
+            .map_err(|error| format!("event_journal_instance_write_failed:{error}"))
     }
 }
 

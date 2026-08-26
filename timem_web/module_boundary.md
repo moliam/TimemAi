@@ -44,6 +44,13 @@ It may contain:
   the new space.
 - Per-session browser upload storage and attachment metadata. Uploaded bytes
   remain host-local; the host only contributes their paths as session context.
+- Memory-space-scoped Worker Role library ownership. Roles and Role groups are
+  shared by every Session in the active memory space, persisted atomically
+  outside individual Session directories, and projected into snapshots and
+  Session views. Role/group mutations and ordering are global mutations.
+  During restore, legacy per-Session `worker_roles.json` arrays are merged by
+  case-insensitive name; distinct ID collisions receive new IDs. Turn history
+  continues to store immutable Role snapshots so past prompts remain readable.
 - Host-only settings and UI command validation.
 - MCP configuration projection and Session enablement routing. Server
   definitions are persisted in the active mem, secrets remain server-side and

@@ -1,5 +1,3 @@
-use serde_json::json;
-
 use super::*;
 
 fn caps() -> CapabilityRegistry {
@@ -10,58 +8,153 @@ fn parse_json(raw: &str) -> ParsedEnvelope {
     json_suite::parse_envelope(raw, &caps())
 }
 
-fn parse_markdown(raw: &str) -> ParsedEnvelope {
-    markdown_suite::parse_markdown_envelope(raw, &caps())
-}
-
 fn parse_xml(raw: &str) -> ParsedEnvelope {
     xml_suite::parse_xml_envelope(raw, &caps())
 }
 
-fn assert_protocols_equivalent(json_raw: &str, markdown_raw: &str, xml_raw: &str) {
-    let json_env = parse_json(json_raw);
-    let markdown_env = parse_markdown(markdown_raw);
-    let xml_env = parse_xml(xml_raw);
+fn confirmed_xml(body: &str) -> String {
+    format!(
+        "\x3cASSISTANT>\x3cfinish_confirm>{} verified\x3c/finish_confirm>{body}\x3c/ASSISTANT>",
+        xml_suite::FINISH_CONFIRM_PREFIX
+    )
+}
+
+fn actions_without_protocol_metadata(actions: &[ParsedAction]) -> Vec<ParsedAction> {
+    actions
+        .iter()
+        .cloned()
+        .map(|mut action| {
+            action.name = None;
+            action.call_id.clear();
+            action
+        })
+        .collect()
+}
+
+fn groups_without_protocol_metadata(groups: &[ParsedActionGroup]) -> Vec<ParsedActionGroup> {
+    groups
+        .iter()
+        .cloned()
+        .map(|mut group| {
+            for action in &mut group.actions {
+                action.name = None;
+                action.call_id.clear();
+            }
+            group
+        })
+        .collect()
+}
+
+fn assert_protocols_equivalent(json_raw: &str, xml_raw: &str) {
+    let json = parse_json(json_raw);
+    let xml = parse_xml(xml_raw);
+    assert_eq!(json.repair_issue, None, "json env: {json:?}");
+    assert_eq!(xml.repair_issue, None, "xml env: {xml:?}");
+    assert_eq!(xml.continue_work, json.continue_work);
+    assert_eq!(xml.final_answer, json.final_answer);
+    assert_eq!(xml.thought, json.thought);
+    assert_eq!(xml.thought_keep_in_context, json.thought_keep_in_context);
     assert_eq!(
-        markdown_env.repair_issue, None,
-        "markdown env: {markdown_env:?}"
-    );
-    assert_eq!(json_env.repair_issue, None, "json env: {json_env:?}");
-    assert_eq!(xml_env.repair_issue, None, "xml env: {xml_env:?}");
-    assert_eq!(markdown_env.continue_work, json_env.continue_work);
-    assert_eq!(xml_env.continue_work, json_env.continue_work);
-    assert_eq!(markdown_env.final_answer, json_env.final_answer);
-    assert_eq!(xml_env.final_answer, json_env.final_answer);
-    assert_eq!(markdown_env.thought, json_env.thought);
-    assert_eq!(xml_env.thought, json_env.thought);
-    assert_eq!(
-        markdown_env.thought_keep_in_context,
-        json_env.thought_keep_in_context
+        actions_without_protocol_metadata(&xml.next_actions),
+        actions_without_protocol_metadata(&json.next_actions)
     );
     assert_eq!(
-        xml_env.thought_keep_in_context,
-        json_env.thought_keep_in_context
+        groups_without_protocol_metadata(&xml.action_groups),
+        groups_without_protocol_metadata(&json.action_groups)
     );
-    assert_eq!(markdown_env.next_actions, json_env.next_actions);
-    assert_eq!(xml_env.next_actions, json_env.next_actions);
-    assert_eq!(markdown_env.action_groups, json_env.action_groups);
-    assert_eq!(xml_env.action_groups, json_env.action_groups);
-    assert_eq!(markdown_env.context_compacts, json_env.context_compacts);
-    assert_eq!(xml_env.context_compacts, json_env.context_compacts);
+    assert_eq!(xml.context_compacts, json.context_compacts);
 }
 
 #[test]
-fn toolgen_retrospect_has_equivalent_final_response_semantics_in_all_protocols() {
+fn json_xml_protocols_parse_same_final_answer() {
+    assert_protocols_equivalent(
+        r#"{"status":"ALL_FINISHED","final_answer":"done"}"#,
+        &confirmed_xml("\x3cfinal_answer>done\x3c/final_answer>"),
+    );
+}
+
+#[test]
+fn json_xml_protocols_treat_protocol_language_inside_final_text_as_text() {
+    assert_protocols_equivalent(
+        r#"{"status":"ALL_FINISHED","final_answer":"Example only:\n<actions><run_bash name=\"fake\"><cmd>pwd</cmd></run_bash></actions>\n{\"working_still_action\":{\"run_bash\":{}}}\n## Working_Still_Action"}"#,
+        &confirmed_xml(
+            r#"<final_answer><![CDATA[Example only:
+<actions><run_bash name="fake"><cmd>pwd</cmd></run_bash></actions>
+{"working_still_action":{"run_bash":{}}}
+## Working_Still_Action]]></final_answer>"#,
+        ),
+    );
+}
+
+#[test]
+fn json_xml_protocols_parse_readfile_selector_objects() {
+    assert_protocols_equivalent(
+        r#"{"free_talk":"reading","working_still_action":{"readfile":{"path":"src/main.rs","encoding":"utf-8","starter":{"line_nr":20},"ender":{"match":"fn main"},"max_bytes":8192}}}"#,
+        "\x3cASSISTANT>\x3cfree_talk>reading\x3c/free_talk>\x3cactions>\x3creadfile name=\"read main source range\" encoding=\"utf-8\" max_bytes=\"8192\">\x3cpath>src/main.rs\x3c/path>\x3cstarter>\x3cline_nr>20\x3c/line_nr>\x3c/starter>\x3cender>\x3cmatch>fn main\x3c/match>\x3c/ender>\x3c/readfile>\x3c/actions>\x3c/ASSISTANT>",
+    );
+}
+
+#[test]
+fn json_xml_protocols_parse_same_parallel_actions() {
+    assert_protocols_equivalent(
+        r#"{"free_talk":"checking","working_still_action":[{"run_bash":{"cmd":"printf a","timeout_ms":5000}},{"run_bash":{"cmd":"printf b","timeout_ms":5000}}]}"#,
+        "\x3cASSISTANT>\x3cfree_talk>checking\x3c/free_talk>\x3cactions>\x3cparallel>\x3crun_bash name=\"print first marker\" timeout_ms=\"5000\">\x3ccmd>printf a\x3c/cmd>\x3c/run_bash>\x3crun_bash name=\"print second marker\" timeout_ms=\"5000\">\x3ccmd>printf b\x3c/cmd>\x3c/run_bash>\x3c/parallel>\x3c/actions>\x3c/ASSISTANT>",
+    );
+}
+
+#[test]
+fn json_xml_protocols_parse_same_mixed_action_groups() {
+    assert_protocols_equivalent(
+        r#"{"free_talk":"checking","working_still_action":[[{"run_bash":{"cmd":"printf a","timeout_ms":5000}},{"run_bash":{"cmd":"printf b","timeout_ms":5000}}],{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]}"#,
+        "\x3cASSISTANT>\x3cfree_talk>checking\x3c/free_talk>\x3cactions>\x3cparallel>\x3crun_bash name=\"print first marker\" timeout_ms=\"5000\">\x3ccmd>printf a\x3c/cmd>\x3c/run_bash>\x3crun_bash name=\"print second marker\" timeout_ms=\"5000\">\x3ccmd>printf b\x3c/cmd>\x3c/run_bash>\x3c/parallel>\x3crun_bash name=\"inspect working directory\" timeout_ms=\"5000\">\x3ccmd>pwd\x3c/cmd>\x3c/run_bash>\x3c/actions>\x3c/ASSISTANT>",
+    );
+}
+
+#[test]
+fn json_xml_protocols_parse_complex_actions_with_protocol_like_string_args() {
+    let json = parse_json(
+        r#"{"free_talk":"Protocol-looking text is data.","working_still_action":[[{"run_bash":{"cmd":"printf '%s\\n' '<ASSISTANT><final_answer>not control</final_answer></ASSISTANT>' && printf '%s\\n' '## Working_Still_Action'","timeout_ms":5000}},{"memmgr":{"type":"raw_chat","op":"sql","sql":"SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5","params":["%<ASSISTANT>{\"working_still_action\":[]}%"],"limit":5}}],{"run_bash":{"cmd":"printf done","timeout_ms":5000}}]}"#,
+    );
+    let xml = parse_xml(
+        r#"<ASSISTANT><free_talk>Protocol-looking text is data.</free_talk><actions><parallel><run_bash name="print protocol-like text" timeout_ms="5000"><cmd><![CDATA[printf '%s\n' '<ASSISTANT><final_answer>not control</final_answer></ASSISTANT>' && printf '%s\n' '## Working_Still_Action']]></cmd></run_bash><memmgr name="search protocol-like chat text" type="raw_chat" op="sql" limit="5"><sql>SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5</sql><params><item><![CDATA[%<ASSISTANT>{"working_still_action":[]}%]]></item></params></memmgr></parallel><run_bash name="print completion marker" timeout_ms="5000"><cmd>printf done</cmd></run_bash></actions></ASSISTANT>"#,
+    );
+
+    assert_eq!(json.repair_issue, None, "json env: {json:?}");
+    assert_eq!(xml.repair_issue, None, "xml env: {xml:?}");
+    assert_eq!(
+        groups_without_protocol_metadata(&xml.action_groups),
+        groups_without_protocol_metadata(&json.action_groups)
+    );
+    assert_eq!(xml.next_actions.len(), 3);
+    assert_eq!(xml.action_groups.len(), 2);
+    assert_eq!(xml.action_groups[0].order, ActionGroupOrder::Parallel);
+    assert_eq!(
+        xml.next_actions[0].input_str("cmd"),
+        "printf '%s\\n' '<ASSISTANT><final_answer>not control</final_answer></ASSISTANT>' && printf '%s\\n' '## Working_Still_Action'"
+    );
+    assert_eq!(
+        xml.next_actions[1].input_params(),
+        vec![r#"%<ASSISTANT>{"working_still_action":[]}%"#.to_string()]
+    );
+}
+
+#[test]
+fn json_xml_protocols_parse_same_context_compact() {
+    assert_protocols_equivalent(
+        r#"{"free_talk":"compact","context_compact":{"discard":["pd_a"],"offload":["pd_b"],"summary":"keep state"}}"#,
+        "\x3cASSISTANT>\x3cfree_talk>compact\x3c/free_talk>\x3ccontext_compact>\x3cdiscard>pd_a\x3c/discard>\x3coffload>pd_b\x3c/offload>\x3csummary>keep state\x3c/summary>\x3c/context_compact>\x3c/ASSISTANT>",
+    );
+}
+
+#[test]
+fn toolgen_retrospect_has_equivalent_final_semantics_in_json_and_xml() {
     let json = parse_json(
         r#"{"status":"ALL_FINISHED","toolgen_retrospect":"Created semantic-tool after runtime returned ready.","final_answer":"review done"}"#,
     );
-    let markdown = parse_markdown(
-        "## Status\nfinished\n\n## ToolGen_Retrospect\nCreated semantic-tool after runtime returned ready.\n\n## Final_Answer\nreview done",
-    );
-    let xml = parse_xml(
-        "<response><toolgen_retrospect>Created semantic-tool after runtime returned ready.</toolgen_retrospect><final_answer>review done</final_answer></response>",
-    );
-    for envelope in [&json, &markdown, &xml] {
+    let xml = parse_xml(&confirmed_xml(
+        "\x3ctoolgen_retrospect>Created semantic-tool after runtime returned ready.\x3c/toolgen_retrospect>\x3cfinal_answer>review done\x3c/final_answer>",
+    ));
+    for envelope in [&json, &xml] {
         assert!(envelope.repair_issue.is_none());
         assert!(!envelope.continue_work);
         assert_eq!(envelope.final_answer, "review done");
@@ -73,17 +166,14 @@ fn toolgen_retrospect_has_equivalent_final_response_semantics_in_all_protocols()
 }
 
 #[test]
-fn toolgen_retrospect_is_rejected_from_working_responses_in_all_protocols() {
+fn toolgen_retrospect_is_rejected_from_working_json_and_xml_responses() {
     let json = parse_json(
         r#"{"toolgen_retrospect":"premature","working_still_action":{"run_bash":{"cmd":"pwd"}}}"#,
     );
-    let markdown = parse_markdown(
-        "## ToolGen_Retrospect\npremature\n\n## Working_Still_Action\n```action\n{\"run_bash\":{\"cmd\":\"pwd\"}}\n```",
-    );
     let xml = parse_xml(
-        "<response><toolgen_retrospect>premature</toolgen_retrospect><working_still_action><action_json><![CDATA[{\"run_bash\":{\"cmd\":\"pwd\"}}]]></action_json></working_still_action></response>",
+        "\x3cASSISTANT>\x3ctoolgen_retrospect>premature\x3c/toolgen_retrospect>\x3cactions>\x3crun_bash name=\"inspect cwd\">\x3ccmd>pwd\x3c/cmd>\x3c/run_bash>\x3c/actions>\x3c/ASSISTANT>",
     );
-    for (protocol, envelope) in [("json", &json), ("markdown", &markdown), ("xml", &xml)] {
+    for (protocol, envelope) in [("json", &json), ("xml", &xml)] {
         assert_eq!(
             envelope.repair_issue.as_deref(),
             Some("toolgen_retrospect_requires_final_answer"),
@@ -93,160 +183,16 @@ fn toolgen_retrospect_is_rejected_from_working_responses_in_all_protocols() {
 }
 
 #[test]
-fn json_markdown_xml_protocols_parse_same_final_answer() {
-    assert_protocols_equivalent(
-        r#"{"status":"ALL_FINISHED","final_answer":"done"}"#,
-        "## Status\nfinished\n\n## Final_Answer\ndone",
-        "<response><final_answer>done</final_answer></response>",
+fn json_xml_protocols_share_action_input_shape() {
+    let json =
+        parse_json(r#"{"working_still_action":{"run_bash":{"cmd":"pwd","timeout_ms":5000}}}"#);
+    let xml = parse_xml(
+        "\x3cASSISTANT>\x3cactions>\x3crun_bash name=\"inspect working directory\" timeout_ms=\"5000\">\x3ccmd>pwd\x3c/cmd>\x3c/run_bash>\x3c/actions>\x3c/ASSISTANT>",
     );
-}
-
-#[test]
-fn json_markdown_xml_protocols_treat_protocol_language_inside_text_as_text() {
-    assert_protocols_equivalent(
-            r#"{"status":"ALL_FINISHED","final_answer":"Example only:\n<working_still_action><action_json>{\"run_bash\":{}}</action_json></working_still_action>\n{\"working_still_action\":{\"run_bash\":{}}}\n## Working_Still_Action\n```action\n{\"run_bash\":{}}\n```"}"#,
-            "## Status\nfinished\n\n## Final_Answer\nExample only:\n<working_still_action><action_json>{\"run_bash\":{}}</action_json></working_still_action>\n{\"working_still_action\":{\"run_bash\":{}}}\n## Working_Still_Action\n```action\n{\"run_bash\":{}}\n```",
-            r#"<response><final_answer><![CDATA[Example only:
-<working_still_action><action_json>{"run_bash":{}}</action_json></working_still_action>
-{"working_still_action":{"run_bash":{}}}
-## Working_Still_Action
-```action
-{"run_bash":{}}
-```]]></final_answer></response>"#,
-        );
-}
-
-#[test]
-fn json_markdown_xml_protocols_parse_same_working_actions() {
-    assert_protocols_equivalent(
-            r#"{"free_talk":"state","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]}"#,
-            "## Free_talk\nstate\n\n## Working_Still_Action\n```action\n[{\"memmgr\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%project%\"],\"limit\":5}},{\"run_bash\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}]\n```",
-            r#"<response><free_talk>state</free_talk><working_still_action><action_json><![CDATA[[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json></working_still_action></response>"#,
-        );
-}
-
-#[test]
-fn json_markdown_xml_protocols_parse_same_bare_action_array() {
-    assert_protocols_equivalent(
-            r#"{"free_talk":"checking","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]}"#,
-            "## Free_talk\nchecking\n\n## Working_Still_Action\n[{\"memmgr\":{\"type\":\"durable\",\"op\":\"sql\",\"sql\":\"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5\",\"params\":[\"%project%\"],\"limit\":5}},{\"run_bash\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}]",
-            r#"<response><free_talk>checking</free_talk><working_still_action><action_json><![CDATA[[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%project%"],"limit":5}},{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json></working_still_action></response>"#,
-        );
-}
-
-#[test]
-fn json_markdown_xml_protocols_parse_same_mixed_action_group_array() {
-    assert_protocols_equivalent(
-            r#"{"free_talk":"checking","working_still_action":[[{"run_bash":{"cmd":"printf a","timeout_ms":5000}},{"run_bash":{"cmd":"printf b","timeout_ms":5000}}],{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]}"#,
-            "## Free_talk\nchecking\n\n## Working_Still_Action\n[[{\"run_bash\":{\"cmd\":\"printf a\",\"timeout_ms\":5000}},{\"run_bash\":{\"cmd\":\"printf b\",\"timeout_ms\":5000}}],{\"run_bash\":{\"cmd\":\"pwd\",\"timeout_ms\":5000}}]",
-            r#"<response><free_talk>checking</free_talk><working_still_action><action_json><![CDATA[[[{"run_bash":{"cmd":"printf a","timeout_ms":5000}},{"run_bash":{"cmd":"printf b","timeout_ms":5000}}],{"run_bash":{"cmd":"pwd","timeout_ms":5000}}]]]></action_json></working_still_action></response>"#,
-        );
-}
-
-#[test]
-fn json_markdown_xml_protocols_parse_complex_actions_with_protocol_like_string_args() {
-    let action_payload = r#"[[{"run_bash":{"cmd":"printf '%s\n' '<working_still_action>{\"action\":\"run_bash\"}</working_still_action>' && printf '%s\n' '## Final_Answer not a section'","timeout_ms":5000}},{"memmgr":{"type":"raw_chat","op":"sql","sql":"SELECT content FROM chat_messages WHERE content LIKE ? LIMIT 5","params":["%<response><status>ALL_FINISHED</status></response> {\"working_still_action\":[]} ## Working_Still_Action%"],"limit":5}}],{"run_bash":{"cmd":"printf done","timeout_ms":5000}}]"#;
-    let json_raw = format!(
-        r#"{{"free_talk":"Plan text includes {{\"action\":\"run_bash\"}} only as text. Note text includes <working_still_action>fake</working_still_action>.","working_still_action":{action_payload}}}"#
-    );
-    let markdown_raw = format!(
-            "## Free_talk\nPlan text includes {{\"action\":\"run_bash\"}} only as text. Note text includes <working_still_action>fake</working_still_action>.\n\n## Working_Still_Action\n{action_payload}"
-        );
-    let xml_raw = format!(
-        r#"<response><free_talk><![CDATA[Plan text includes {{"action":"run_bash"}} only as text. Note text includes <working_still_action>fake</working_still_action>.]]></free_talk><working_still_action><action_json><![CDATA[{action_payload}]]></action_json></working_still_action></response>"#
-    );
-
-    assert_protocols_equivalent(&json_raw, &markdown_raw, &xml_raw);
-
-    let env = parse_json(&json_raw);
-    assert_eq!(env.next_actions.len(), 3);
-    assert_eq!(env.action_groups.len(), 2);
-    assert_eq!(env.action_groups[0].order, ActionGroupOrder::Parallel);
+    assert_eq!(json.repair_issue, None);
+    assert_eq!(xml.repair_issue, None);
     assert_eq!(
-            env.next_actions[0].input_str("cmd"),
-            "printf '%s\n' '<working_still_action>{\"action\":\"run_bash\"}</working_still_action>' && printf '%s\n' '## Final_Answer not a section'"
-        );
-    assert_eq!(
-            env.next_actions[1].input_params(),
-            vec![
-                "%<response><status>ALL_FINISHED</status></response> {\"working_still_action\":[]} ## Working_Still_Action%".to_string()
-            ]
-        );
-    assert!(env.context_compacts.is_empty());
-}
-
-#[test]
-fn json_markdown_xml_protocols_parse_same_context_compact() {
-    assert_protocols_equivalent(
-            r#"{"free_talk":"compact","context_compact":{"discard":["pd_a"],"offload":["pd_b"],"summary":"keep state"}}"#,
-            "## Free_talk\ncompact\n\n## Context Compact\ndiscard: pd_a\noffload: pd_b\nsummary:\nkeep state",
-            r#"<response><free_talk>compact</free_talk><context_compact><discard>pd_a</discard><offload>pd_b</offload><summary>keep state</summary></context_compact></response>"#,
-        );
-}
-
-#[test]
-fn json_markdown_xml_protocols_repair_same_finished_with_actions() {
-    let json_env = parse_json(
-        r#"{"status":"ALL_FINISHED","final_answer":"done","working_still_action":{"run_bash":{"cmd":"test -s output.txt","timeout_ms":5000}}}"#,
+        actions_without_protocol_metadata(&json.next_actions),
+        actions_without_protocol_metadata(&xml.next_actions)
     );
-    let markdown_env = parse_markdown(
-            "## Status\nfinished\n\n## Working_Still_Action\n```action\n{\"run_bash\":{\"cmd\":\"test -s output.txt\",\"timeout_ms\":5000}}\n```\n\n## Final_Answer\ndone",
-        );
-    let xml_env = parse_xml(
-        r#"<response><final_answer>done</final_answer><working_still_action><action_json><![CDATA[[{"run_bash":{"cmd":"test -s output.txt","timeout_ms":5000}}]]]></action_json></working_still_action></response>"#,
-    );
-    assert_eq!(
-        json_env.repair_issue.as_deref(),
-        Some("status_finished_must_not_include_next_actions")
-    );
-    assert_eq!(markdown_env.repair_issue, json_env.repair_issue);
-    assert_eq!(xml_env.repair_issue, json_env.repair_issue);
-}
-
-#[test]
-fn json_markdown_xml_protocols_repair_same_final_answer_without_finished_status() {
-    let json_env = parse_json(r#"{"final_answer":"done"}"#);
-    let markdown_env = parse_markdown("## Final_Answer\ndone");
-    let xml_env = parse_xml("<response><final_answer>done</final_answer></response>");
-    assert_eq!(
-        json_env.repair_issue.as_deref(),
-        Some("final_answer_requires_status_finished")
-    );
-    assert_eq!(markdown_env.repair_issue, json_env.repair_issue);
-    assert_eq!(xml_env.repair_issue, None);
-    assert!(!xml_env.continue_work);
-    assert_eq!(xml_env.final_answer, "done");
-}
-
-#[test]
-fn json_markdown_xml_protocols_repair_same_working_without_actions() {
-    let json_env = parse_json(r#"{"status":"working"}"#);
-    let markdown_env = parse_markdown("## Status\nworking\n\n## Free_talk\nchecking");
-    let xml_env = parse_xml("<response><free_talk>checking</free_talk></response>");
-    assert_eq!(
-        json_env.repair_issue.as_deref(),
-        Some("next_actions_required_when_status_working")
-    );
-    assert_eq!(markdown_env.repair_issue, json_env.repair_issue);
-    assert_eq!(xml_env.repair_issue, json_env.repair_issue);
-}
-
-#[test]
-fn json_markdown_xml_protocols_share_action_input_shape() {
-    let action = json!({"run_bash": {"cmd": "pwd", "timeout_ms": 5000}
-    });
-    let json_env = parse_json(&json!({"working_still_action":[action.clone()]}).to_string());
-    let markdown_env = parse_markdown(&format!(
-        "## Working_Still_Action\n```action\n{}\n```",
-        action
-    ));
-    let xml_env = parse_xml(&format!(
-            "<response><working_still_action><action_json><![CDATA[[{}]]]></action_json></working_still_action></response>",
-            action
-        ));
-    assert_eq!(json_env.repair_issue, None);
-    assert_eq!(markdown_env.repair_issue, None);
-    assert_eq!(xml_env.repair_issue, None);
-    assert_eq!(json_env.next_actions, markdown_env.next_actions);
-    assert_eq!(json_env.next_actions, xml_env.next_actions);
 }

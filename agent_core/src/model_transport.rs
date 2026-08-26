@@ -1,11 +1,16 @@
 use crate::{
     append_audit_event, interpret_model_http_response, model_request_audit_event,
-    model_response_audit_event, prepare_model_http_request, LlmResponse, ModelClient,
-    ModelServiceConfig,
+    model_response_audit_event, prepare_model_http_request, prepare_model_interaction_http_request,
+    without_openai_compatible_cache_control, ApiProtocol, LlmResponse, ModelClient,
+    ModelHttpResponseInterpretation, ModelInteractionRequest, ModelServiceConfig,
+    OpenAiCompatibleCacheMode, PreparedModelHttpRequest,
 };
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -20,6 +25,22 @@ impl ModelClient for HttpModelClient {
         should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<LlmResponse, String> {
         call_model_with_cancel(config, prompt, audit_file, should_cancel)
+    }
+
+    fn call_model_interaction(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        audit_file: &Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        let http_request = prepare_model_interaction_http_request(config, request);
+        execute_prepared_request_with_cache_fallback(
+            config,
+            http_request,
+            audit_file,
+            should_cancel,
+        )
     }
 }
 
@@ -38,17 +59,46 @@ pub fn call_model_with_cancel(
     should_cancel: &mut dyn FnMut() -> bool,
 ) -> Result<LlmResponse, String> {
     let http_request = prepare_model_http_request(config, prompt);
+    execute_prepared_request_with_cache_fallback(config, http_request, audit_file, should_cancel)
+}
+
+fn execute_prepared_request_with_cache_fallback(
+    config: &ModelServiceConfig,
+    http_request: PreparedModelHttpRequest,
+    audit_file: &Path,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> Result<LlmResponse, String> {
+    let first = execute_model_http_request(config, &http_request, audit_file, should_cancel)?;
+
+    if should_retry_without_openai_cache_control(config, &http_request, &first) {
+        let fallback_request = without_openai_compatible_cache_control(&http_request);
+        return execute_model_http_request(config, &fallback_request, audit_file, should_cancel)?
+            .result;
+    }
+
+    first.result
+}
+
+fn execute_model_http_request(
+    config: &ModelServiceConfig,
+    http_request: &PreparedModelHttpRequest,
+    audit_file: &Path,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> Result<ModelHttpResponseInterpretation, String> {
     let _ = append_audit_event(
         audit_file,
         &model_request_audit_event(config, &http_request.model_request),
     );
-
     let body =
         serde_json::to_string(&http_request.model_request.body).map_err(|e| e.to_string())?;
-    let command = build_curl_command(config.timeout_secs);
-    let curl_config = build_curl_config(&http_request, &body);
-    let output =
-        run_command_with_input_and_cancel(command, curl_config.into_bytes(), should_cancel)?;
+    let curl_config = CurlConfigFile::create(&build_curl_config(http_request))?;
+    let command = build_curl_command(config.timeout_secs, curl_config.path());
+    let output = run_command_with_input_cancel_and_inactivity_timeout(
+        command,
+        body.into_bytes(),
+        Duration::from_secs(config.timeout_secs),
+        should_cancel,
+    )?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if !output.status.success() && stdout.trim().is_empty() {
@@ -64,23 +114,125 @@ pub fn call_model_with_cancel(
         audit_file,
         &model_response_audit_event(interpreted.status, &interpreted.raw_json),
     );
-    interpreted.result
+    Ok(interpreted)
 }
 
-fn build_curl_command(timeout_secs: u64) -> Command {
+fn should_retry_without_openai_cache_control(
+    config: &ModelServiceConfig,
+    request: &PreparedModelHttpRequest,
+    response: &ModelHttpResponseInterpretation,
+) -> bool {
+    if config.api_protocol != ApiProtocol::OpenAiCompatible
+        || config.openai_compatible.cache_mode != OpenAiCompatibleCacheMode::Ephemeral
+        || request.model_request.cache_fallback
+        || request.model_request.cache_mark_count == 0
+        || !(400..500).contains(&response.status)
+    {
+        return false;
+    }
+
+    let error = response.raw_json.to_string().to_ascii_lowercase();
+    let names_cache_control = error.contains("cache_control") || error.contains("cache control");
+    let rejects_schema = [
+        "unknown field",
+        "unknown parameter",
+        "unknown property",
+        "unrecognized field",
+        "unrecognized parameter",
+        "unsupported field",
+        "unsupported parameter",
+        "not supported",
+        "extra field",
+        "extra input",
+        "additional properties",
+        "not permitted",
+        "not allowed",
+        "unexpected field",
+        "unexpected parameter",
+        "unexpected property",
+    ]
+    .iter()
+    .any(|indicator| error.contains(indicator));
+
+    names_cache_control && rejects_schema
+}
+
+static CURL_CONFIG_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug)]
+struct CurlConfigFile {
+    path: PathBuf,
+}
+
+impl CurlConfigFile {
+    fn create(contents: &str) -> Result<Self, String> {
+        for _ in 0..100 {
+            let sequence = CURL_CONFIG_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "timem-model-curl-{}-{sequence}.conf",
+                std::process::id()
+            ));
+            let mut options = OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.share_mode(0);
+            }
+            match options.open(&path) {
+                Ok(mut file) => {
+                    if let Err(error) = file.write_all(contents.as_bytes()) {
+                        let _ = fs::remove_file(&path);
+                        return Err(format!("model_curl_config_write_failed: {error}"));
+                    }
+                    return Ok(Self { path });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(format!("model_curl_config_create_failed: {error}"));
+                }
+            }
+        }
+        Err("model_curl_config_create_failed: temporary name exhausted".to_string())
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for CurlConfigFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn build_curl_command(timeout_secs: u64, config_path: &Path) -> Command {
     let mut command = Command::new("curl");
     command
         .arg("-sS")
-        .arg("--max-time")
+        // Expose response bytes immediately so Core can measure real transport
+        // progress instead of imposing a total generation-time limit.
+        .arg("--no-buffer")
+        .arg("--connect-timeout")
         .arg(timeout_secs.to_string())
         .arg("-w")
         .arg("\n%{http_code}")
         .arg("--config")
-        .arg("-");
+        .arg(config_path)
+        // Keep the potentially large and sensitive request body out of both
+        // argv and curl's size-limited config parser.
+        .arg("--data-binary")
+        .arg("@-");
     command
 }
 
-fn build_curl_config(http_request: &crate::PreparedModelHttpRequest, body: &str) -> String {
+fn build_curl_config(http_request: &crate::PreparedModelHttpRequest) -> String {
     let mut config = String::new();
     config.push_str("request = \"POST\"\n");
     config.push_str("url = \"");
@@ -91,9 +243,6 @@ fn build_curl_config(http_request: &crate::PreparedModelHttpRequest, body: &str)
         config.push_str(&curl_config_escape(&format!("{key}: {value}")));
         config.push_str("\"\n");
     }
-    config.push_str("data-binary = \"");
-    config.push_str(&curl_config_escape(body));
-    config.push_str("\"\n");
     config
 }
 
@@ -112,17 +261,52 @@ fn curl_config_escape(value: &str) -> String {
     escaped
 }
 
+#[cfg(test)]
 fn run_command_with_input_and_cancel(
     command: Command,
     input: Vec<u8>,
     should_cancel: &mut dyn FnMut() -> bool,
 ) -> Result<Output, String> {
-    run_command_with_optional_input_and_cancel(command, Some(input), should_cancel)
+    run_command_with_optional_input_cancel_and_inactivity_timeout(
+        command,
+        Some(input),
+        None,
+        should_cancel,
+    )
 }
 
+fn run_command_with_input_cancel_and_inactivity_timeout(
+    command: Command,
+    input: Vec<u8>,
+    inactivity_timeout: Duration,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> Result<Output, String> {
+    run_command_with_optional_input_cancel_and_inactivity_timeout(
+        command,
+        Some(input),
+        Some(inactivity_timeout),
+        should_cancel,
+    )
+}
+
+#[cfg(test)]
 fn run_command_with_optional_input_and_cancel(
+    command: Command,
+    input: Option<Vec<u8>>,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> Result<Output, String> {
+    run_command_with_optional_input_cancel_and_inactivity_timeout(
+        command,
+        input,
+        None,
+        should_cancel,
+    )
+}
+
+fn run_command_with_optional_input_cancel_and_inactivity_timeout(
     mut command: Command,
     input: Option<Vec<u8>>,
+    inactivity_timeout: Option<Duration>,
     should_cancel: &mut dyn FnMut() -> bool,
 ) -> Result<Output, String> {
     command.stdin(if input.is_some() {
@@ -139,7 +323,12 @@ fn run_command_with_optional_input_and_cancel(
         let mut stdin = child.stdin.take().expect("piped stdin is available");
         thread::spawn(move || stdin.write_all(&input))
     });
-    let stdout_reader = spawn_reader(child.stdout.take().expect("piped stdout is available"));
+    let last_stdout_progress =
+        inactivity_timeout.map(|_| Arc::new(Mutex::new(std::time::Instant::now())));
+    let stdout_reader = spawn_reader_with_progress(
+        child.stdout.take().expect("piped stdout is available"),
+        last_stdout_progress.clone(),
+    );
     let stderr_reader = spawn_reader(child.stderr.take().expect("piped stderr is available"));
     loop {
         if should_cancel() {
@@ -149,6 +338,24 @@ fn run_command_with_optional_input_and_cancel(
             drop(stdout_reader);
             drop(stderr_reader);
             return Err("cancelled_by_user".to_string());
+        }
+        if let (Some(timeout), Some(last_progress)) = (inactivity_timeout, &last_stdout_progress) {
+            let stalled = last_progress
+                .lock()
+                .map_err(|_| "model_progress_clock_poisoned".to_string())?
+                .elapsed()
+                >= timeout;
+            if stalled {
+                let _ = child.kill();
+                let _ = child.wait();
+                drop(stdin_writer);
+                drop(stdout_reader);
+                drop(stderr_reader);
+                return Err(format!(
+                    "model_timeout: no response progress for {} seconds",
+                    timeout.as_secs()
+                ));
+            }
         }
         match child.try_wait().map_err(|e| e.to_string())? {
             Some(status) => {
@@ -160,11 +367,30 @@ fn run_command_with_optional_input_and_cancel(
 }
 
 fn spawn_reader(
+    reader: impl Read + Send + 'static,
+) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    spawn_reader_with_progress(reader, None)
+}
+
+fn spawn_reader_with_progress(
     mut reader: impl Read + Send + 'static,
+    last_progress: Option<Arc<Mutex<std::time::Instant>>>,
 ) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
     thread::spawn(move || {
         let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes)?;
+        let mut chunk = [0_u8; 8192];
+        loop {
+            let read = reader.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            if let Some(last_progress) = &last_progress {
+                if let Ok(mut progress) = last_progress.lock() {
+                    *progress = std::time::Instant::now();
+                }
+            }
+        }
         Ok(bytes)
     })
 }

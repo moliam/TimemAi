@@ -5,30 +5,44 @@ binding_name: run_bash
 requires_host: local_command_execution
 summary: Run local shell commands.
 prompt_synopsis: |
-  run_bash cmd=<shell_command> timeout_ms=<n> [background=true|mode=background]
-  run_bash loop_cmd=<check_command> interval_ms=<n> loop_timeout_ms=<total_wait_ms> [once_timeout_ms=<n>]
+  {"run_bash":{"cmd":"git status --short","timeout_ms":5000}}
+  {"run_bash":{"cmd":"cargo test","timeout_ms":120000,"tail_out":true}}
+  {"run_bash":{"loop_cmd":"test -f build/done","interval_ms":1000,"loop_timeout_ms":120000,"once_timeout_ms":5000}}
 description: |
-  `run_bash` runs a shell command on the local machine and collects bounded
-  evidence from the command result. It supports normal, background, and
-  polling execution. Bash action is very powerful through which you can execute lots of programs residing in user's system environment.
+  RUNTIME's local command environment is ({{RUN_BASH_HOST_ENVIRONMENT}}).
+  `run_bash` runs a shell command on the local machine and captures its result.
+  Timem applies the shared result gate before adding command evidence to model
+  context. It supports normal, background, and polling execution. Bash is a
+  powerful action through which you can execute programs in the user's system
+  environment.
   `timeout_ms` is only how long Timem waits for a normal command. It is not a
   kill deadline. If the wait budget is reached, Timem returns the pid and stops
-  waiting while the process may still be running.
-  Accomplish your goals by intelligently choosing and organizing your commands. Revert tmp changes in user's environment in a timely manner.
-  Prefer to transform long sleep into loop_cmd or `while` loops with short sleep that can return as soon as cmd is done.
-  The loop command is re-run
-  until it exits with code 0 or loop_timeout_ms is reached. For
-  long local work that should keep running across interaction rounds, use
-  background=true. Background and timeout jobs return a pid; manage them with
+  waiting while the process may still be running. Set `tail_out=true` to
+  retain the end of oversized command output, which is useful for compiler and
+  test summaries.
+  Accomplish your goals by intelligently choosing and organizing your commands.
+  Revert tmp changes in the user's environment in a timely manner. Prefer to
+  transform long sleeps into loop_cmd or `while` loops with short sleeps that
+  can return as soon as the work is done. The loop command is re-run until it
+  exits with code 0 or loop_timeout_ms is reached. For long local work that
+  should keep running across interaction rounds, use background=true. Runtime
+  rejects explicit process-group escape such as `setsid`, `disown`, or daemon
+  launchers, including in background mode.
+  Background and timeout jobs return a pid; manage them with
   normal shell commands if the user asks you to inspect or stop them.
+  NOTE: CAREFULLY USE MULTI-LINE CMD. Try to split them into individual
+  run_bash calls via parallel/serial execution. Properly set 'set -euo pipefail'
+  for better error collection in multi-line cmd.
 prompt_input: |
-  Use cmd for a shell command. Optional: timeout_ms, background=true or
-  mode=background. Use loop_cmd with interval_ms for polling/waiting. loop_cmd
-  is run repeatedly until it exits with code 0 or loop_timeout_ms total wait budget
-  is reached. once_timeout_ms is the per-check command timeout.
+  Choose exactly one mode. For a normal/background command, provide cmd and do
+  not provide loop_cmd or interval_ms; timeout_ms, background, and tail_out are
+  optional. For polling, provide loop_cmd with interval_ms, omit cmd, and keep
+  background false or absent. loop_timeout_ms is the total polling wait budget;
+  once_timeout_ms is the per-check command timeout.
 prompt_result: |
-  Normal/Polling returns status and bounded output. Background returns
-  `pid=..., now keeps running in background`.
+  Normal/Polling captures status plus stdout/stderr; Timem's shared result gate
+  bounds only the model-visible evidence according to tail_out. Background
+  returns `pid=..., now keeps running in background`.
   NOTE: Timeout command won't be killed automatically,
   instead you will receive its pid info.
   !!! YOU MUST REMEMBER TO MANAGE/CLEAN/CHECK THESE STILL RUNNING PIDs.
@@ -36,36 +50,35 @@ prompt_result: |
 input_schema: |
   {
     "type": "object",
+    "additionalProperties": false,
     "properties": {
-      "cmd": {"type": "string", "description": "Shell command to execute."},
-      "loop_cmd": {"type": "string", "description": "Polling check command. Runtime re-runs it until it exits with code 0."},
-      "timeout_ms": {"type": ">0 integer", "description": "Normal command wait budget in milliseconds. Default: 5000"},
-      "loop_timeout_ms": {"type": ">0 integer", "description": "Total polling wait budget in milliseconds when loop_cmd is present."},
-      "once_timeout_ms": {"type": ">0 integer", "description": "Per-check timeout in polling mode."},
-      "interval_ms": {"type": ">0 integer", "description": "Polling interval. Requires loop_cmd."},
+      "cmd": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty shell command for normal or background mode. Mutually exclusive with loop_cmd."},
+      "loop_cmd": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty polling check command. Runtime re-runs it until it exits with code 0. Mutually exclusive with cmd and requires interval_ms."},
+      "timeout_ms": {"type": "integer", "minimum": 1, "description": "Normal command wait budget in milliseconds. Default: 5000."},
+      "loop_timeout_ms": {"type": "integer", "minimum": 1, "description": "Total polling wait budget in milliseconds. Default: 600000 when loop_cmd is present."},
+      "once_timeout_ms": {"type": "integer", "minimum": 1, "description": "Per-check timeout in polling mode. Default: 5000."},
+      "interval_ms": {"type": "integer", "minimum": 1, "description": "Polling interval in milliseconds. Required with loop_cmd and invalid with cmd."},
       "background": {"type": "boolean", "description": "When true, runtime continues interaction without blocking on the action, returning a pid for future reference. Use it for persistent long-running commands that should keep running across interaction rounds."},
-      "mode": {"type": "string", "enum": ["normal", "background"], "description": "Execution mode alias."}
+      "tail_out": {"type": "boolean", "description": "When true, oversized output retains its ending and places the truncation notice before the retained content. Default: false."}
     },
-    "x-required-any": [["cmd", "loop_cmd"]]
-  }
-output_schema: |
-  {
-    "type": "object",
-    "properties": {
-      "command": {"type": "string", "description": "Command actually executed."},
-      "mode": {"type": "string", "description": "poll when interval_ms was used."},
-      "state": {"type": "string", "description": "Polling state: finished|timeout|cancelled."},
-      "attempts": {"type": "integer", "description": "Polling attempts."},
-      "elapsed_ms": {"type": "integer", "description": "Polling elapsed time."},
-      "last_status": {"type": "integer", "description": "Last observed polling exit code."},
-      "status": {"type": "integer", "description": "Process exit code for normal command success."},
-      "output": {"type": "string", "description": "Bounded stdout/stderr text for normal command execution."},
-      "pid": {"type": "integer", "description": "Process id for background jobs and timed-out commands that are still running."},
-      "output_file": {"type": "string", "description": "Path where background output is stored."},
-      "status_file": {"type": "string", "description": "Path where background exit status is stored."},
-      "approval_status": {"type": "string", "enum": ["approved_by_user", "denied_by_user"], "description": "Approval result."},
-      "reason": {"type": "string", "description": "Natural-language reason when a command is not executed, times out, or is cancelled."}
-    }
+    "x-required-any": [["cmd", "loop_cmd"]],
+    "oneOf": [
+      {"required": ["cmd"]},
+      {"required": ["loop_cmd"]}
+    ],
+    "allOf": [
+      {
+        "if": {"required": ["loop_cmd"]},
+        "then": {
+          "required": ["interval_ms"],
+          "properties": {"background": {"enum": [false]}}
+        }
+      },
+      {
+        "if": {"required": ["interval_ms"]},
+        "then": {"required": ["loop_cmd"]}
+      }
+    ]
   }
 example_json: |
   {
