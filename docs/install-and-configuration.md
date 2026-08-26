@@ -85,7 +85,16 @@ $EDITOR env
 source /path/to/your/env
 ```
 
-Command-line options override process env values:
+For Shell startup and Session resume, configuration precedence is:
+
+```text
+command-line option > non-empty process environment > restored Session cache > default
+```
+
+This means `source env` intentionally refreshes a previously cached Shell model
+configuration. Empty environment values do not erase a non-empty cached value;
+use the interactive `/config` flow or an explicit command-line value when you
+intend to change stored Session configuration.
 
 ```bash
 timem --help
