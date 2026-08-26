@@ -1016,7 +1016,22 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
   it("renders completion telemetry below final answers", () => {
     expect(source).toContain("attachTurnCompletion(session, event.outcome.message_id");
     expect(source).toContain('className="turn-final-delivery"');
-    expect(source).toContain("<FinalAnswerDelivery text={turn.final_answer}");
+    expect(source).toContain("<TurnAnswerDelivery turn={turn}");
+    expect(source).toContain('if (availableKeys.length === 1 && selected === "final" && turn.final_answer)');
+    expect(source).toContain('<FinalAnswerDelivery text={turn.final_answer}');
+    expect(source).toContain('{hasInterim && <div className="turn-answer-tabs" role="tablist" aria-label="Turn answers">');
+    expect(source).toContain('>Interim</button>');
+    expect(source).toContain('className="turn-interim-list"');
+    expect(source).toContain('className="turn-interim-item"');
+    expect(source).toContain('className={`turn-answer-view ${selected === "final" ? "selected" : "inactive"}`}');
+    expect(source).toContain('className={`turn-answer-view ${selected === "interim" ? "selected" : "inactive"}`}');
+    expect(source).toContain('aria-hidden={selected !== "final"}');
+    expect(styles).toContain('.turn-answer-panel { display: grid;');
+    expect(styles).toContain('.turn-answer-view { min-width: 0; grid-area: 1 / 1; }');
+    expect(styles).toContain('.turn-answer-view.inactive { visibility: hidden; pointer-events: none; user-select: none; }');
+    expect(source).toContain('<h3><span>{index + 1}.</span> {item.task}</h3>');
+    expect(styles).toContain('.turn-interim-item + .turn-interim-item');
+    expect(source).not.toContain('label: `Answer ${item.ordinal}`');
     expect(source).not.toContain('className="turn-final-toolbar"');
     expect(source).toContain('className="final-answer-actions"');
     expect(source).toContain('const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(text, {');
@@ -1245,7 +1260,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false');
     expect(source).toContain('<ArrowDown size={13} aria-hidden="true"/>');
     expect(styles).toContain(".turn-new-updates:focus-visible");
-    expect(source).toContain("!turn.final_answer && turn.completion");
+    expect(source).toContain("!turn.final_answer && turn.sub_answers.length === 0 && turn.completion");
     expect(viewModelSource).toContain("turnLiveUsage");
     expect(viewModelSource).toContain("sessionContextUsage");
     expect(viewModelSource).toContain('message.kind === "runtime_restart"');

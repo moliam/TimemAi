@@ -572,6 +572,7 @@ export function turnsFromHistoryRecords(records: ChatHistoryRecord[]): WebTurn[]
       created_at_ms: record.created_at_ms,
       user_entries: [],
       events: [],
+      sub_answers: [],
       final_answer: null,
       completion: null,
     };
@@ -588,6 +589,11 @@ export function turnsFromHistoryRecords(records: ChatHistoryRecord[]): WebTurn[]
     } else if (record.type === "event") {
       const payload = typeof record.payload === "object" && record.payload !== null ? record.payload as Record<string, unknown> : { kind: record.kind, content: record.content };
       const source = typeof record.source === "string" ? record.source : "history";
+      const subAnswer = subAnswerFromTurnEventPayload(payload, record.created_at_ms);
+      if (source === "core_topic" && subAnswer && !turn.sub_answers.some((item) => item.sub_answer_id === subAnswer.sub_answer_id)) {
+        turn.sub_answers.push(subAnswer);
+        turn.sub_answers.sort((left, right) => left.ordinal - right.ordinal);
+      }
       turn.events.push({
         event_id: `history_event_${record.turn_id}_${record.created_at_ms}_${turn.events.length}`,
         source,
@@ -647,8 +653,13 @@ export function appendTurnEvent(session: Session, turnId: string | null | undefi
   const target = session.turns[turnIndex];
   if (target.events.some((existing) => existing.event_id === event.event_id)) return session;
   const turns = [...session.turns];
+  const subAnswer = subAnswerFromTurnEventPayload(event.payload, event.created_at_ms);
+  const subAnswers = subAnswer && !target.sub_answers.some((item) => item.sub_answer_id === subAnswer.sub_answer_id)
+    ? [...target.sub_answers, subAnswer].sort((left, right) => left.ordinal - right.ordinal)
+    : target.sub_answers;
   turns[turnIndex] = {
     ...target,
+    sub_answers: subAnswers,
     final_answer: finalAnswerFromTurnEvent(session, event) ?? target.final_answer,
     events: [...target.events, event],
   };
@@ -677,6 +688,17 @@ function turnEventBelongsToSession(session: Session, event: WebTurnEvent): boole
   if (!isLifecycle && topicEvent.worker_id && !session.workers.some((worker) => worker.worker_id === topicEvent.worker_id)) return false;
   if (!isLifecycle && topicEvent.context_id && !session.contexts.some((context) => context.context_id === topicEvent.context_id)) return false;
   return true;
+}
+
+function subAnswerFromTurnEventPayload(payload: Record<string, unknown>, createdAtMs: number) {
+  const topic = payload.topic;
+  const body = payload.payload;
+  if (!topic || typeof topic !== "object" || (topic as Record<string, unknown>).name !== "core.sub_answer") return undefined;
+  if (!body || typeof body !== "object") return undefined;
+  const item = body as Record<string, unknown>;
+  if (typeof item.sub_answer_id !== "string" || typeof item.ordinal !== "number" || typeof item.task !== "string" || typeof item.answer !== "string") return undefined;
+  if (!item.sub_answer_id.trim() || !item.task.trim() || !item.answer.trim()) return undefined;
+  return { sub_answer_id: item.sub_answer_id, ordinal: item.ordinal, task: item.task, answer: item.answer, created_at_ms: createdAtMs };
 }
 
 function finalAnswerFromTurnEvent(session: Session, event: WebTurnEvent) {

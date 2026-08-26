@@ -24,8 +24,8 @@ use agent_core::{
     HostDecisionRequest, ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind,
     RuntimeDataLayout, SessionToolRepo, ToolDetail, ToolGenRequest, ToolSummary, TopicReply,
     WorkInstructionLoadMode, CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE,
-    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
-    CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_SUB_ANSWER, CORE_TOPIC_TOOLGEN,
+    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, self_tool::SelfToolPaths, shell_exec::FileShellJobStore,
@@ -907,8 +907,18 @@ struct WebTurn {
     created_at_ms: u128,
     user_entries: Vec<WebTurnUserEntry>,
     events: Vec<WebTurnEvent>,
+    sub_answers: Vec<WebSubAnswer>,
     final_answer: Option<String>,
     completion: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WebSubAnswer {
+    sub_answer_id: String,
+    ordinal: u64,
+    task: String,
+    answer: String,
+    created_at_ms: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -5315,6 +5325,17 @@ fn persist_restored_session_runtime_cache(
     current_session_store(state)?.upsert_session(&migrated)
 }
 
+fn web_sub_answer_from_topic_payload(payload: &Value, created_at_ms: u128) -> Option<WebSubAnswer> {
+    let body = payload.get("payload")?;
+    Some(WebSubAnswer {
+        sub_answer_id: body.get("sub_answer_id")?.as_str()?.to_string(),
+        ordinal: body.get("ordinal")?.as_u64()?,
+        task: body.get("task")?.as_str()?.to_string(),
+        answer: body.get("answer")?.as_str()?.to_string(),
+        created_at_ms,
+    })
+}
+
 fn restored_messages_from_history_records(records: &[ChatHistoryRecord]) -> Vec<WebChatMessage> {
     records
         .iter()
@@ -5345,6 +5366,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     created_at_ms: created_at_ms as u128,
                     user_entries: Vec::new(),
                     events: Vec::new(),
+                    sub_answers: Vec::new(),
                     final_answer: None,
                     completion: None,
                 });
@@ -5444,6 +5466,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     created_at_ms: created_at_ms as u128,
                     user_entries: Vec::new(),
                     events: Vec::new(),
+                    sub_answers: Vec::new(),
                     final_answer: None,
                     completion: None,
                 });
@@ -5451,6 +5474,26 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                 if let Some(completion) = completion {
                     turn.state = "completed".to_string();
                     turn.completion = Some(completion);
+                }
+                if source == "core_topic"
+                    && payload
+                        .get("topic")
+                        .and_then(|topic| topic.get("name"))
+                        .and_then(Value::as_str)
+                        == Some(CORE_TOPIC_SUB_ANSWER)
+                {
+                    if let Some(sub_answer) =
+                        web_sub_answer_from_topic_payload(&payload, created_at_ms as u128)
+                    {
+                        if !turn
+                            .sub_answers
+                            .iter()
+                            .any(|existing| existing.sub_answer_id == sub_answer.sub_answer_id)
+                        {
+                            turn.sub_answers.push(sub_answer);
+                            turn.sub_answers.sort_by_key(|item| item.ordinal);
+                        }
+                    }
                 }
                 turn.events.push(WebTurnEvent {
                     event_id: format!(
@@ -7217,6 +7260,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
             worker_roles,
         }],
         events: Vec::new(),
+        sub_answers: Vec::new(),
         final_answer: None,
         completion: None,
     };
@@ -7386,6 +7430,7 @@ fn start_web_toolgen_turn(
         created_at_ms,
         user_entries,
         events: Vec::new(),
+        sub_answers: Vec::new(),
         final_answer: None,
         completion: None,
     };
@@ -7842,6 +7887,9 @@ fn chat_history_kind_for_source(source: &str, payload: &Value) -> ChatHistoryEve
         }
         if topic_name == CORE_TOPIC_MODEL_RESPONSE {
             return ChatHistoryEventKind::Progress;
+        }
+        if topic_name == CORE_TOPIC_SUB_ANSWER {
+            return ChatHistoryEventKind::SubAnswer;
         }
     }
     ChatHistoryEventKind::RuntimeNotice
@@ -8607,6 +8655,30 @@ fn handle_scoped_worker_event(
                         }
                     }
                     set_worker_state(state, session_id, worker_id, "ready");
+                }
+                if event.topic.name == CORE_TOPIC_SUB_ANSWER {
+                    if let Some(sub_answer) =
+                        web_sub_answer_from_topic_payload(&wire_payload, now_ms())
+                    {
+                        if let Ok(mut sessions) = state.sessions.lock() {
+                            if let Some(session) = sessions.get_mut(session_id) {
+                                let turn_id = current_turn_id(session).map(str::to_string);
+                                if let Some(turn) = turn_id.as_deref().and_then(|turn_id| {
+                                    session
+                                        .turns
+                                        .iter_mut()
+                                        .find(|turn| turn.turn_id == turn_id)
+                                }) {
+                                    if !turn.sub_answers.iter().any(|existing| {
+                                        existing.sub_answer_id == sub_answer.sub_answer_id
+                                    }) {
+                                        turn.sub_answers.push(sub_answer);
+                                        turn.sub_answers.sort_by_key(|item| item.ordinal);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 let turn_ref = if event.topic.name == agent_core::CORE_TOPIC_LIFECYCLE {
                     None
