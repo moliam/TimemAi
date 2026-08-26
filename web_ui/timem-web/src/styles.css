@@ -2804,8 +2804,9 @@ body {
 }
 .session-row:hover .session,
 .session-row:focus-within .session { padding-left: 56px; }
-.session-row.delete-selecting .session { padding-left: 10px; }
-.session-row.delete-selecting > :is(.session-drag, .session-expand) { display: none; }
+.session-row:is(.delete-selecting, .controls-suppressed) .session { padding-left: 10px; }
+.session-row:is(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand) { display: none; }
+.session-row.dragging .session { transition: none; }
 .session-working-icon { width: 15px; height: 15px; flex: none; }
 .session-identity { flex: 1; min-width: 0; }
 .session-endpoint-reveal {
@@ -2822,6 +2823,14 @@ body {
 .session-endpoint-reveal.pending { transform: translate(0, -50%); }
 :root[data-theme="light"] .session-row::after {
   background: linear-gradient(90deg, transparent, #24342e14 12%, #24342e14 88%, transparent);
+}
+@media (hover: none), (pointer: coarse) {
+  .session-row:not(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand) {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translate(0, -50%);
+  }
+  .session-row:not(.delete-selecting, .controls-suppressed) .session { padding-left: 56px; }
 }
 
 /* Selected endpoint badge sits immediately before the edit action. */
