@@ -9055,60 +9055,6 @@ fn background_exit_event_is_appended_to_its_original_turn() {
 }
 
 #[test]
-fn active_turn_event_windows_are_bounded_and_session_isolated() {
-    const SESSION_COUNT: usize = 5;
-    const EVENTS_PER_SESSION: usize = 575;
-    let state = routing_test_state();
-    {
-        let mut sessions = state.sessions.lock().unwrap();
-        sessions.clear();
-        for ordinal in 0..SESSION_COUNT {
-            let session_id = format!("bounded_{ordinal}");
-            sessions.insert(
-                session_id.clone(),
-                test_web_session(&session_id, ordinal as u32, format!("Agent {ordinal}")),
-            );
-        }
-    }
-
-    let workers = (0..SESSION_COUNT)
-        .map(|ordinal| {
-            let state = state.clone();
-            thread::spawn(move || {
-                let session_id = format!("bounded_{ordinal}");
-                start_web_turn(&state, &session_id, "stress this turn").unwrap();
-                for sequence in 0..EVENTS_PER_SESSION {
-                    let reference = append_active_turn_event(
-                        &state,
-                        &session_id,
-                        "worker_activity",
-                        json!({ "session": session_id, "sequence": sequence }),
-                    )
-                    .unwrap();
-                    assert!(reference.event_id.starts_with("turn_event_"));
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    for worker in workers {
-        worker.join().unwrap();
-    }
-
-    let sessions = state.sessions.lock().unwrap();
-    for ordinal in 0..SESSION_COUNT {
-        let session_id = format!("bounded_{ordinal}");
-        let turn = sessions[&session_id].turns.last().unwrap();
-        assert_eq!(turn.events.len(), EVENTS_PER_SESSION);
-        assert_eq!(turn.events.first().unwrap().payload["sequence"], 0);
-        assert_eq!(
-            turn.events.last().unwrap().payload["sequence"],
-            EVENTS_PER_SESSION - 1
-        );
-        assert!(turn
-            .events
-            .iter()
-            .all(|event| event.payload["session"] == session_id));
-#[test]
 fn polling_action_progress_reaches_web_event_stream_before_loop_finishes() {
     let state = routing_test_state();
     let marker = std::env::temp_dir().join(unique_web_id("polling_progress_marker"));
@@ -9163,6 +9109,60 @@ fn polling_action_progress_reaches_web_event_stream_before_loop_finishes() {
     );
 }
 
+#[test]
+fn active_turn_event_windows_are_bounded_and_session_isolated() {
+    const SESSION_COUNT: usize = 5;
+    const EVENTS_PER_SESSION: usize = 575;
+    let state = routing_test_state();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.clear();
+        for ordinal in 0..SESSION_COUNT {
+            let session_id = format!("bounded_{ordinal}");
+            sessions.insert(
+                session_id.clone(),
+                test_web_session(&session_id, ordinal as u32, format!("Agent {ordinal}")),
+            );
+        }
+    }
+
+    let workers = (0..SESSION_COUNT)
+        .map(|ordinal| {
+            let state = state.clone();
+            thread::spawn(move || {
+                let session_id = format!("bounded_{ordinal}");
+                start_web_turn(&state, &session_id, "stress this turn").unwrap();
+                for sequence in 0..EVENTS_PER_SESSION {
+                    let reference = append_active_turn_event(
+                        &state,
+                        &session_id,
+                        "worker_activity",
+                        json!({ "session": session_id, "sequence": sequence }),
+                    )
+                    .unwrap();
+                    assert!(reference.event_id.starts_with("turn_event_"));
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+
+    let sessions = state.sessions.lock().unwrap();
+    for ordinal in 0..SESSION_COUNT {
+        let session_id = format!("bounded_{ordinal}");
+        let turn = sessions[&session_id].turns.last().unwrap();
+        assert_eq!(turn.events.len(), EVENTS_PER_SESSION);
+        assert_eq!(turn.events.first().unwrap().payload["sequence"], 0);
+        assert_eq!(
+            turn.events.last().unwrap().payload["sequence"],
+            EVENTS_PER_SESSION - 1
+        );
+        assert!(turn
+            .events
+            .iter()
+            .all(|event| event.payload["session"] == session_id));
     }
 }
 
@@ -9187,6 +9187,44 @@ fn active_turn_user_entries_drop_only_the_oldest_entries_at_the_bound() {
         entries.last().unwrap().text,
         format!("supplement-{}", MAX_TURN_USER_ENTRIES + 4)
     );
+}
+
+struct PollingProgressModel {
+    calls: u8,
+    marker: PathBuf,
+}
+
+impl ModelClient for PollingProgressModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls += 1;
+        let content = if self.calls == 1 {
+            format!(
+                "<ASSISTANT><free_talk>Waiting for the polling marker.</free_talk><actions><run_bash name=\"wait for polling marker\" interval_ms=\"20\" loop_timeout_ms=\"2000\" once_timeout_ms=\"500\"><loop_cmd>test -f {}</loop_cmd></run_bash></actions></ASSISTANT>",
+                self.marker.display()
+            )
+        } else {
+            confirmed_xml_response("<final_answer>Polling complete.</final_answer>")
+        };
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content,
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
 }
 
 struct TaggedFinalModel(&'static str);
@@ -9243,44 +9281,6 @@ impl ModelClient for RestoreBarrierModel {
                 prompt_tokens: 10,
                 completion_tokens: 2,
                 total_tokens: 12,
-struct PollingProgressModel {
-    calls: u8,
-    marker: PathBuf,
-}
-
-impl ModelClient for PollingProgressModel {
-    fn call_model(
-        &mut self,
-        _config: &ModelServiceConfig,
-        _prompt: &str,
-        _audit_file: &Path,
-        _should_cancel: &mut dyn FnMut() -> bool,
-    ) -> Result<LlmResponse, String> {
-        self.calls += 1;
-        let content = if self.calls == 1 {
-            format!(
-                "<ASSISTANT><free_talk>Waiting for the polling marker.</free_talk><actions><run_bash name=\"wait for polling marker\" interval_ms=\"20\" loop_timeout_ms=\"2000\" once_timeout_ms=\"500\"><loop_cmd>test -f {}</loop_cmd></run_bash></actions></ASSISTANT>",
-                self.marker.display()
-            )
-        } else {
-            confirmed_xml_response("<final_answer>Polling complete.</final_answer>")
-        };
-        Ok(LlmResponse {
-            tool_calls: Vec::new(),
-            content,
-            model_name: "test-model".to_string(),
-            usage: UsageStats {
-                llm_calls: 1,
-                prompt_tokens: 10,
-                completion_tokens: 2,
-                total_tokens: 12,
-                ..UsageStats::zero()
-            },
-            truncated: false,
-        })
-    }
-}
-
                 ..UsageStats::zero()
             },
             truncated: false,
@@ -9418,60 +9418,6 @@ impl ModelClient for InspectPathModel {
     }
 }
 
-fn register_real_worker(state: &AppState, name: &'static str) -> String {
-    let ordinal = state.sessions.lock().unwrap().len() as u32;
-    let session_id = unique_web_id("test_session");
-    let context_id = test_context_id(&session_id);
-    let worker_dir =
-        std::env::temp_dir().join(format!("timem_web_topic_route_{name}_{}", now_ms()));
-    std::fs::create_dir_all(&worker_dir).unwrap();
-    let core = AgentCore::new(
-        STATIC_PROMPT,
-        CoreProfile {
-            model: "test-model".to_string(),
-        },
-        &worker_dir,
-    );
-    let config = state.template.settings.lock().unwrap().config.clone();
-    let worker_id = state
-        .manager
-        .lock()
-        .unwrap()
-        .spawn_worker_in_session_with_model_client(
-            core,
-            config,
-            CoreSessionWorkerWorkspace::new(
-                &worker_dir,
-                worker_dir.join("audit.json"),
-                "test-web",
-                "local",
-            ),
-            session_id.clone(),
-            context_id.clone(),
-            Some(name.to_string()),
-            None,
-            TaggedFinalModel(name),
-        )
-        .unwrap();
-    let mut session = test_web_session(&session_id, ordinal, name.to_string());
-    session.current_dir = worker_dir.display().to_string();
-    session.contexts[0] = WebContext {
-        context_id: context_id.clone(),
-        current_dir: worker_dir.display().to_string(),
-        worker_ids: vec![worker_id.clone()],
-    };
-    session.workers[0].worker_id = worker_id.clone();
-    session.workers[0].context_id = context_id;
-    session.active_context_id = session.contexts[0].context_id.clone();
-    session.primary_worker_id = worker_id;
-    state
-        .sessions
-        .lock()
-        .unwrap()
-        .insert(session_id.clone(), session);
-    session_id
-}
-
 fn register_polling_progress_worker(state: &AppState, marker: PathBuf) -> String {
     let ordinal = state.sessions.lock().unwrap().len() as u32;
     let session_id = unique_web_id("polling_progress_session");
@@ -9517,6 +9463,60 @@ fn register_polling_progress_worker(state: &AppState, marker: PathBuf) -> String
     session.workers[0].worker_id = worker_id.clone();
     session.workers[0].context_id = context_id.clone();
     session.active_context_id = context_id;
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    session_id
+}
+
+fn register_real_worker(state: &AppState, name: &'static str) -> String {
+    let ordinal = state.sessions.lock().unwrap().len() as u32;
+    let session_id = unique_web_id("test_session");
+    let context_id = test_context_id(&session_id);
+    let worker_dir =
+        std::env::temp_dir().join(format!("timem_web_topic_route_{name}_{}", now_ms()));
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &worker_dir,
+    );
+    let config = state.template.settings.lock().unwrap().config.clone();
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            config,
+            CoreSessionWorkerWorkspace::new(
+                &worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some(name.to_string()),
+            None,
+            TaggedFinalModel(name),
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, ordinal, name.to_string());
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id;
+    session.active_context_id = session.contexts[0].context_id.clone();
     session.primary_worker_id = worker_id;
     state
         .sessions
