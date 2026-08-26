@@ -215,7 +215,7 @@ fn linux_child_running_distinguishes_running_and_reaped_children() {
     assert_eq!(exit_signal(&status), Some(libc::SIGTERM));
     assert!(!process_running(running_pid));
 
-    let exited = std::process::Command::new("/bin/sh")
+    let mut exited = std::process::Command::new("/bin/sh")
         .args(["-c", "exit 7"])
         .spawn()
         .expect("spawn exiting Linux child");
@@ -223,6 +223,10 @@ fn linux_child_running_distinguishes_running_and_reaped_children() {
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert!(!child_process_running(exited_pid));
     assert!(!process_running(exited_pid));
+    let wait_error = exited
+        .wait()
+        .expect_err("child_process_running should have reaped the exited child");
+    assert_eq!(wait_error.raw_os_error(), Some(libc::ECHILD));
 }
 
 #[cfg(target_os = "linux")]
