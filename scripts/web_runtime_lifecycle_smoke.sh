@@ -40,7 +40,7 @@ wait_for_url() {
       sed -n '1,120p' "$log_path" >&2
       return 1
     fi
-    url="$(sed -n 's/^Timem Web is ready at //p' "$log_path" | head -n 1)"
+    url="$(sed -n '/^http:\/\/.*[?&]token=/p; /^https:\/\/.*[?&]token=/p' "$log_path" | tail -n 1)"
     if [ -n "$url" ]; then
       printf '%s\n' "$url"
       return 0

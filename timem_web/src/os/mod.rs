@@ -55,6 +55,7 @@ impl ShutdownSignalMonitor {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn shutdown_signal_names() -> &'static [&'static str] {
     #[cfg(unix)]
     {

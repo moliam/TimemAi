@@ -56,7 +56,7 @@ for _ in $(seq 1 300); do
     sed -n '1,180p' "$log_path" >&2
     exit 1
   fi
-  url="$(sed -n 's/^Timem Web is ready at //p' "$log_path" | head -n 1)"
+  url="$(sed -n '/^http:\/\/.*[?&]token=/p; /^https:\/\/.*[?&]token=/p' "$log_path" | tail -n 1)"
   [ -n "$url" ] && break
   sleep 0.05
 done
