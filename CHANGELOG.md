@@ -19,11 +19,20 @@
 - Refined the Web composer and Session navigation: Session names are smaller,
   cwd is shown only below the composer text area, and a subtle divider separates
   the text area from the cwd/actions row.
+- Polished the sidebar brand alignment, made expanded Session worker names use
+  normal weight, and added the shared model glyph to endpoint model summaries.
 - Added a centralized `agent_core::os` abstraction with initial macOS and Linux
   implementations for host/version detection, shell paths, default config
   directories, browser and terminal launch commands, and process-group
   lifecycle operations. The model-facing `run_bash` description now dynamically
   includes the detected host OS and `/bin/bash` versions.
+
+### Fixed
+
+- Stream large model request bodies through curl stdin instead of embedding them
+  in curl configuration lines, removing the approximately 100 KiB failure mode
+  for long multi-turn contexts while preserving cancellation and inactivity
+  timeout behavior.
 
 ### Removed
 

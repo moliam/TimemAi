@@ -126,7 +126,11 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("Ask Timem to investigate, write, or work with you.");
     expect(source).not.toContain("work with your local environment");
     expect(source).not.toContain("<small>local</small>");
-    expect(styles).toContain(".brand > span { font-size: 34px; font-weight: 900; line-height: 41px; letter-spacing: .015em; }");
+    expect(styles).toContain('.brand { display: grid; grid-template-columns: 41px minmax(0, 1fr); align-items: center; column-gap: 9px;');
+    expect(styles).toContain('.brand > span { width: 100%; height: 41px; display: inline-flex; align-items: center; justify-content: center; padding-top: 2px;');
+    expect(styles).toContain('font-size: 28px; font-weight: 800; line-height: 1; letter-spacing: .12em; text-align: center; text-shadow: 0 1px 0 #000, 0 3px 6px #000b, 0 0 12px #68b8a740; }');
+    expect(styles).toContain('.brand { grid-template-columns: 41px minmax(0, 1fr) 30px; }');
+    expect(styles).toContain(':root[data-theme="light"] .brand > span { text-shadow: 0 1px 0 #fff, 0 3px 6px #31564b45; }');
   });
 
   it("uses assistant-ui thread primitives for the primary conversation surface", () => {
@@ -1304,6 +1308,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain("worker.display_name || `ID${worker.ordinal}`");
     expect(styles).toContain(".worker-row");
     expect(styles).toContain(".worker-state-dot.working");
+    expect(styles).toContain(".worker-name { overflow: hidden; color: #aaa; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }");
   });
 
   it("keeps cwd in the composer footer instead of repeating it in session navigation", () => {
@@ -1599,6 +1604,9 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('className="endpoint-management-actions"');
     expect(source).toContain('className={`endpoint-delete-manage ${deleteMode ? "confirm" : ""}`}');
     expect(source).toContain('className={`endpoint-row ${active ? "active" : ""} ${deleteMode ? "delete-selecting" : ""} ${deleteSelected ? "delete-selected" : ""}`}');
+    expect(source).toContain('<small className="endpoint-model-summary"><Sparkles size={10} className="session-model-icon" aria-hidden="true"/><span>{endpoint.model}');
+    expect(styles).toContain('.endpoint-model-summary { min-width: 0; display: flex; align-items: center; gap: 5px; }');
+    expect(styles).toContain('.endpoint-model-summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }');
     expect(source).toContain('className="endpoint-actions">{active && <span className="endpoint-selected-badge" role="img" aria-label="当前选中的接入点"><Check size={13} strokeWidth={3}/></span>}<button');
     expect(source).not.toContain(': active && <Check size={13}/>');
     expect(styles).toContain('/* Selected endpoint badge sits immediately before the edit action. */');
