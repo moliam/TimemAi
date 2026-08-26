@@ -37,6 +37,10 @@ shape how work is carried out across Sessions.
 
 ## More in 1.2.0
 
+- Large model request bodies now stream through curl stdin instead of a
+  size-limited curl configuration line. Long multi-turn contexts no longer
+  collapse into empty HTTP requests after roughly 100 KiB; the transport is
+  covered by a 2 MiB end-to-end regression test on macOS and Linux.
 - Timem Web adds streaming controls for OpenAI-compatible endpoints, connection
   and inactivity timeouts, shared endpoint management, and safer secret reveal
   and copy controls.
@@ -46,8 +50,9 @@ shape how work is carried out across Sessions.
   reconnect/replay behavior, and cross-platform process supervision are more
   resilient on macOS and Linux.
 - Web management now includes Session groups, improved message navigation,
-  ToolRepo and MCP controls, attachment handling, runtime diagnostics, and a
-  committed production bundle embedded in `timem-web`.
+  ToolRepo and MCP controls, attachment handling, runtime diagnostics, clearer
+  endpoint model identification, and a committed production bundle embedded in
+  `timem-web`.
 - The production gate covers strict Rust checks, frontend tests and reproducible
   builds, release/performance/edge guards, Web lifecycle and public-mode smokes,
   Linux platform checks, and real pseudo-TTY interaction tests.
