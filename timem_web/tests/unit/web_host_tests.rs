@@ -223,6 +223,56 @@ fn worker_role_snapshots_survive_raw_history_reconstruction() {
 }
 
 #[test]
+fn structured_sub_answers_survive_raw_history_reconstruction() {
+    let records = vec![
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_sub_answer".to_string(),
+            created_at_ms: 1,
+            kind: Some("task".to_string()),
+            command_id: None,
+            delivery_state: None,
+            content: "answer both questions".to_string(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "turn_sub_answer".to_string(),
+            created_at_ms: 2,
+            kind: ChatHistoryEventKind::SubAnswer,
+            content: "shown".to_string(),
+            extra: BTreeMap::from([
+                (
+                    "source".to_string(),
+                    Value::String("core_topic".to_string()),
+                ),
+                (
+                    "payload".to_string(),
+                    json!({
+                        "session_id": "session_a",
+                        "topic": {"name": CORE_TOPIC_SUB_ANSWER},
+                        "state": {"name": "running"},
+                        "payload": {
+                            "sub_answer_id": "sub_answer_1",
+                            "ordinal": 1,
+                            "task": "First question",
+                            "answer": "First answer"
+                        }
+                    }),
+                ),
+            ]),
+        },
+    ];
+
+    let restored = restored_turns_from_history_records(&records);
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].sub_answers.len(), 1);
+    assert_eq!(restored[0].sub_answers[0].sub_answer_id, "sub_answer_1");
+    assert_eq!(restored[0].sub_answers[0].ordinal, 1);
+    assert_eq!(restored[0].sub_answers[0].task, "First question");
+    assert_eq!(restored[0].sub_answers[0].answer, "First answer");
+}
+
+#[test]
 fn multiple_worker_roles_resolve_in_message_order_and_render_all_contexts() {
     let state = routing_test_state();
     let roles = vec![
@@ -1162,6 +1212,7 @@ fn restore_does_not_revive_an_old_unfinished_turn_after_a_newer_turn_completed()
                 worker_roles: Vec::new(),
             }],
             events: Vec::new(),
+            sub_answers: Vec::new(),
             // A turn can finish without an assistant message, for example after
             // a protocol/model error. Its persisted completion is still terminal.
             final_answer: None,
@@ -3759,6 +3810,7 @@ fn session_runtime_update_is_allowed_during_an_active_turn() {
             created_at_ms: now_ms(),
             user_entries: Vec::new(),
             events: Vec::new(),
+            sub_answers: Vec::new(),
             final_answer: None,
             completion: None,
         });
@@ -3821,6 +3873,7 @@ fn session_api_key_update_is_rejected_during_an_active_turn() {
         created_at_ms: now_ms(),
         user_entries: Vec::new(),
         events: Vec::new(),
+        sub_answers: Vec::new(),
         final_answer: None,
         completion: None,
     });
@@ -8995,6 +9048,7 @@ fn background_exit_event_is_appended_to_its_original_turn() {
             created_at_ms: now_ms(),
             user_entries: Vec::new(),
             events: Vec::new(),
+            sub_answers: Vec::new(),
             final_answer: None,
             completion: None,
         });
