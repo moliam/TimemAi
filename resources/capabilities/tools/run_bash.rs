@@ -593,7 +593,11 @@ impl FileShellJobStore {
             if record.owner_id.as_deref() != Some(owner_id) || self.record_finished(&record) {
                 continue;
             }
-            terminate_process(record.pid);
+            if !self.record_still_owned_process(&record) {
+                write_status_if_empty(Path::new(&record.status_file), "pid_identity_changed");
+                continue;
+            }
+            crate::os::terminate_process_group(record.pid);
             write_status_if_empty(Path::new(&record.status_file), "cancelled");
             terminated += 1;
         }
@@ -615,11 +619,26 @@ impl FileShellJobStore {
             {
                 continue;
             }
-            terminate_process(record.pid);
+            if !self.record_still_owned_process(&record) {
+                write_status_if_empty(Path::new(&record.status_file), "pid_identity_changed");
+                continue;
+            }
+            crate::os::terminate_process_group(record.pid);
             write_status_if_empty(Path::new(&record.status_file), "cancelled");
             cancelled.push(record.id);
         }
         cancelled
+    }
+
+    fn record_still_owned_process(&self, record: &ShellJobRecord) -> bool {
+        self.watcher.refresh_pid(record.pid);
+        if self.watcher.is_watching(record.pid) {
+            return true;
+        }
+        record.process_identity.as_deref().is_some_and(|expected| {
+            crate::os::process_identity(record.pid).as_deref() == Some(expected)
+                && is_runtime_child_pid(record.pid)
+        })
     }
 
     pub fn running_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
@@ -943,6 +962,9 @@ fn validate_bash_lifecycle(command: &str, background: bool) -> Result<(), String
     if contains_explicit_process_detach(command) {
         return Err("explicit_process_detach".to_string());
     }
+    for script in nested_shell_scripts(command) {
+        validate_bash_lifecycle(&script, background)?;
+    }
     Ok(())
 }
 
@@ -1025,15 +1047,68 @@ fn contains_explicit_process_detach(command: &str) -> bool {
         let Some(executable) = shell_executable_index(&words, index) else {
             continue;
         };
+        let executable_name = shell_command_basename(&words[executable]);
         if matches!(
-            words[executable].as_str(),
+            executable_name,
             "setsid" | "disown" | "daemon" | "daemonize" | "start-stop-daemon"
         ) {
+            return true;
+        }
+        if is_shell_interpreter(executable_name)
+            && nested_shell_script(&words, executable + 1)
+                .is_some_and(contains_explicit_process_detach)
+        {
             return true;
         }
         index = executable + 1;
     }
     false
+}
+
+fn nested_shell_scripts(command: &str) -> Vec<String> {
+    let words = shell_words_for_safety_scan(command);
+    let mut scripts = Vec::new();
+    let mut index = 0;
+    while index < words.len() {
+        if !is_command_separator(&words[index]) {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let Some(executable) = shell_executable_index(&words, index) else {
+            continue;
+        };
+        if is_shell_interpreter(shell_command_basename(&words[executable])) {
+            if let Some(script) = nested_shell_script(&words, executable + 1) {
+                scripts.push(script.to_string());
+            }
+        }
+        index = executable + 1;
+    }
+    scripts
+}
+
+fn shell_command_basename(command: &str) -> &str {
+    command.rsplit('/').next().unwrap_or(command)
+}
+
+fn is_shell_interpreter(command: &str) -> bool {
+    matches!(command, "sh" | "bash" | "dash" | "ksh" | "zsh")
+}
+
+fn nested_shell_script(words: &[String], mut index: usize) -> Option<&str> {
+    while index < words.len() && !is_command_separator(&words[index]) {
+        let word = words[index].as_str();
+        if word == "-c" || (word.starts_with('-') && !word.starts_with("--") && word.contains('c'))
+        {
+            return words.get(index + 1).map(String::as_str);
+        }
+        if word == "--" {
+            return None;
+        }
+        index += 1;
+    }
+    None
 }
 
 fn shell_executable_index(words: &[String], mut index: usize) -> Option<usize> {

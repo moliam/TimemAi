@@ -912,6 +912,62 @@ fn timeout_job_reports_pid_and_later_exit_update() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn timed_out_job_remains_cancellable_after_launcher_exits() {
+    let dir = tmp_memory_dir("timeout_group_cancel_after_launcher");
+    let store = FileShellJobStore::new(&dir);
+    let descendant_pid_file = dir.join("descendant.pid");
+    let command = format!(
+        r#"tail -f /dev/null & child=$!; printf '%s' "$child" > {}; exit 0"#,
+        shell_quote_path(&descendant_pid_file)
+    );
+    let mut runtime = NeverCancelRuntime;
+    let result = store.run_with_timeout(
+        &command,
+        &dir,
+        100,
+        "timeout-group-session",
+        "timeout-group-turn",
+        &mut runtime,
+    );
+    assert!(result.contains("timeout, but is still running"), "{result}");
+    let leader_pid = result
+        .lines()
+        .find_map(|line| line.strip_prefix("pid="))
+        .and_then(|rest| rest.split(',').next())
+        .and_then(|pid| pid.parse::<u32>().ok())
+        .expect("managed group leader pid");
+    let descendant_pid = fs::read_to_string(&descendant_pid_file)
+        .expect("descendant pid file")
+        .trim()
+        .parse::<u32>()
+        .expect("numeric descendant pid");
+
+    assert!(crate::os::process_group_running(leader_pid));
+    assert!(process_running(descendant_pid));
+    assert_eq!(
+        store
+            .cancel_unfinished_for_session("timeout-group-session")
+            .len(),
+        1
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while process_running(descendant_pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        !process_running(descendant_pid),
+        "descendant {descendant_pid} survived timeout-job cancellation"
+    );
+    assert!(!crate::os::process_group_running(leader_pid));
+    assert!(store
+        .running_for_session("timeout-group-session")
+        .is_empty());
+    let _ = fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn timeout_job_supports_heredoc_with_backticks() {
     let dir = tmp_memory_dir("timeout_heredoc_backticks");
@@ -1269,6 +1325,51 @@ fn shutdown_ignores_shell_job_record_owned_by_another_process() {
 
 #[cfg(unix)]
 #[test]
+fn shutdown_and_session_cancel_refuse_pid_identity_mismatch() {
+    let dir = tmp_memory_dir("owned_identity_mismatch");
+    let store = FileShellJobStore::new(&dir);
+    let status_file = dir.join("identity-mismatch.status");
+    let record = ShellJobRecord {
+        id: "identity-mismatch-job".to_string(),
+        created_at_ms: now_ms(),
+        kind: "timeout".to_string(),
+        session_id: "identity-session".to_string(),
+        turn_id: "identity-turn".to_string(),
+        pid: std::process::id(),
+        process_identity: Some("not-the-current-process".to_string()),
+        tool_call_id: "identity-call".to_string(),
+        owner_id: Some(crate::runtime_process_owner_id().to_string()),
+        command: "must-not-be-signalled".to_string(),
+        cwd: dir.display().to_string(),
+        output_file: dir.join("identity-mismatch.out").display().to_string(),
+        stderr_file: dir.join("identity-mismatch.err").display().to_string(),
+        status_file: status_file.display().to_string(),
+        tail_out: false,
+    };
+    store.append(&record).unwrap();
+
+    assert_eq!(store.terminate_owned_running(), 0);
+    assert_eq!(
+        fs::read_to_string(&status_file).unwrap(),
+        "pid_identity_changed"
+    );
+    assert_eq!(unsafe { libc::kill(libc::getpid(), 0) }, 0);
+
+    fs::remove_file(&status_file).unwrap();
+    assert!(store
+        .cancel_unfinished_for_session("identity-session")
+        .is_empty());
+    assert_eq!(
+        fs::read_to_string(&status_file).unwrap(),
+        "pid_identity_changed"
+    );
+    assert_eq!(unsafe { libc::kill(libc::getpid(), 0) }, 0);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
 fn session_cancel_and_running_list_ignore_foreign_runtime_records() {
     let dir = tmp_memory_dir("foreign_session_record");
     let store = FileShellJobStore::new(&dir);
@@ -1393,6 +1494,13 @@ fn shell_lifecycle_validation_rejects_unmanaged_background_without_wait() {
     assert!(
         validate_bash_lifecycle(r#"tail -f /dev/null & child=$!; wait "$child""#, false).is_ok()
     );
+    assert_eq!(
+        validate_bash_lifecycle("bash -c 'sleep 30 &'", false),
+        Err("unmanaged_background_process".to_string())
+    );
+    assert!(
+        validate_bash_lifecycle(r#"bash -c 'sleep 0.1 & child=$!; wait "$child"'"#, false).is_ok()
+    );
 }
 
 #[test]
@@ -1405,6 +1513,10 @@ fn shell_lifecycle_validation_rejects_explicit_detach() {
         "sudo -n -- setsid sleep 30",
         "disown",
         "daemon server",
+        "/usr/bin/setsid sleep 30",
+        "bash -c 'setsid sleep 30'",
+        "/bin/sh -c '/usr/bin/setsid sleep 30'",
+        "env FOO=bar bash -lc 'nohup setsid sleep 30'",
     ] {
         assert_eq!(
             validate_bash_lifecycle(command, true),

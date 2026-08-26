@@ -7,6 +7,8 @@ use std::sync::OnceLock;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(unix)]
+mod unix;
 
 pub const BASH_EXECUTABLE: &str = "/bin/bash";
 pub const POSIX_SHELL_EXECUTABLE: &str = "/bin/sh";
@@ -69,20 +71,16 @@ pub fn graphical_session_available() -> bool {
 }
 
 pub fn configure_child_process_group(command: &mut Command) {
-    #[cfg(target_os = "macos")]
-    macos::configure_child_process_group(command);
-    #[cfg(target_os = "linux")]
-    linux::configure_child_process_group(command);
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(unix)]
+    unix::configure_child_process_group(command);
+    #[cfg(not(unix))]
     let _ = command;
 }
 
 pub fn exit_signal(status: &ExitStatus) -> Option<i32> {
-    #[cfg(target_os = "macos")]
-    return macos::exit_signal(status);
-    #[cfg(target_os = "linux")]
-    return linux::exit_signal(status);
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(unix)]
+    return unix::exit_signal(status);
+    #[cfg(not(unix))]
     {
         let _ = status;
         None
@@ -90,11 +88,9 @@ pub fn exit_signal(status: &ExitStatus) -> Option<i32> {
 }
 
 pub fn process_is_alive(pid: u64) -> Option<bool> {
-    #[cfg(target_os = "macos")]
-    return macos::process_is_alive(pid);
-    #[cfg(target_os = "linux")]
-    return linux::process_is_alive(pid);
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(unix)]
+    return unix::process_is_alive(pid);
+    #[cfg(not(unix))]
     {
         let _ = pid;
         None
@@ -151,62 +147,57 @@ pub fn process_identity(pid: u32) -> Option<String> {
 }
 
 pub fn child_process_running(pid: u32) -> bool {
-    #[cfg(target_os = "macos")]
-    return macos::child_process_running(pid);
-    #[cfg(target_os = "linux")]
-    return linux::child_process_running(pid);
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(unix)]
+    return unix::child_process_running(pid);
+    #[cfg(not(unix))]
     {
         process_running(pid)
     }
 }
 
 pub fn is_runtime_child_process_group(pid: u32) -> bool {
-    #[cfg(target_os = "macos")]
-    return macos::is_runtime_child_process_group(pid);
-    #[cfg(target_os = "linux")]
-    return linux::is_runtime_child_process_group(pid);
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(unix)]
+    return unix::is_runtime_child_process_group(pid);
+    #[cfg(not(unix))]
     {
         pid > 1 && pid != std::process::id()
     }
 }
 
 pub fn runtime_child_pid_kind() -> &'static str {
-    #[cfg(target_os = "macos")]
-    return macos::runtime_child_pid_kind();
-    #[cfg(target_os = "linux")]
-    return linux::runtime_child_pid_kind();
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(unix)]
+    return unix::runtime_child_pid_kind();
+    #[cfg(not(unix))]
     {
         "runtime_child_process"
     }
 }
 
 pub fn terminate_process(pid: u32) {
-    #[cfg(target_os = "macos")]
-    macos::terminate_process(pid);
-    #[cfg(target_os = "linux")]
-    linux::terminate_process(pid);
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(unix)]
+    unix::terminate_process(pid);
+    #[cfg(not(unix))]
     let _ = pid;
 }
 
+pub fn terminate_process_group(group_leader_pid: u32) {
+    #[cfg(unix)]
+    unix::terminate_process_group(group_leader_pid);
+    #[cfg(not(unix))]
+    let _ = group_leader_pid;
+}
+
 pub fn kill_process_group(pid: u32) {
-    #[cfg(target_os = "macos")]
-    macos::kill_process_group(pid);
-    #[cfg(target_os = "linux")]
-    linux::kill_process_group(pid);
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(unix)]
+    unix::kill_process_group(pid);
+    #[cfg(not(unix))]
     let _ = pid;
 }
 
 pub fn process_group_running(group_leader_pid: u32) -> bool {
-    #[cfg(target_os = "macos")]
-    return macos::process_group_running(group_leader_pid);
-    #[cfg(target_os = "linux")]
-    return linux::process_group_running(group_leader_pid);
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(unix)]
+    return unix::process_group_running(group_leader_pid);
+    #[cfg(not(unix))]
     {
         process_running(group_leader_pid)
     }

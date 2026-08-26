@@ -251,7 +251,7 @@ impl JournalInstanceInfo {
     pub fn starting() -> Self {
         Self {
             pid: std::process::id(),
-            launch_parent_pid: current_launch_parent_pid(),
+            launch_parent_pid: crate::os::current_launch_parent_pid(),
             port: None,
             token: None,
             browser_url: None,
@@ -261,19 +261,6 @@ impl JournalInstanceInfo {
                 .unwrap_or_default()
                 .as_millis(),
         }
-    }
-}
-
-fn current_launch_parent_pid() -> Option<u32> {
-    #[cfg(unix)]
-    {
-        u32::try_from(unsafe { libc::getppid() })
-            .ok()
-            .filter(|pid| *pid > 1)
-    }
-    #[cfg(not(unix))]
-    {
-        None
     }
 }
 

@@ -136,13 +136,22 @@ flowchart LR
 `agent_core/src/os/` is the centralized operating-system policy boundary.
 Its common interface owns host/version detection, executable conventions,
 default configuration roots, browser/terminal launch commands, and reusable
-process/process-group lifecycle operations. Platform policy implementations
-currently live in `os/macos.rs` and `os/linux.rs`. Business modules consume the
-common interface and must not add direct macOS/Linux branches or fixed system
-command paths. Low-level Unix mechanisms intrinsic to a subsystem—such as
+process/process-group lifecycle operations. Shared Unix process primitives live
+in `os/unix.rs`; platform-specific identity and host policy live in
+`os/macos.rs` and `os/linux.rs`. Business modules consume the common interface
+and must not add direct macOS/Linux branches or fixed system command paths. Low-level Unix mechanisms intrinsic to a subsystem—such as
 terminal `termios`, file permission bits, nonblocking file descriptors, and
 file locking—remain beside that subsystem rather than being hidden behind an
 OS policy facade.
+
+The selected MEM root is a shared security boundary for Shell and Web. On Unix,
+Core creates or tightens that root to `0700`; narrower files and subsystem
+directories use `0600`/`0700` as appropriate. Linux CI separately exercises the
+`/proc` process identity, liveness, `waitpid`, process-group termination, and
+safety guards. The Linux-only gate also proves `run_bash` timeout/background
+tracking, nested detach rejection, PID-identity-safe cancellation, and cleanup
+after a launcher exits while descendants remain. A real headless Timem Web
+process runs with no TTY or graphical display.
 
 - Provides reusable capability functions and state-machine functions. Host
   adapters call core functions instead of reimplementing agent behavior.
@@ -273,6 +282,11 @@ belongs in `agent_core` or `resources` instead of being implemented as a
 shell-only shortcut.
 
 ### `timem_web/`
+
+`timem_web/src/os/` is the Web host operating-system adapter. Unix parent-process
+capture, launcher-exit monitoring, and SIGINT/SIGTERM/SIGHUP registration stay
+there; `server.rs` consumes platform-neutral shutdown triggers. Storage-specific
+permissions and event-journal locking remain in their owning storage modules.
 
 `timem_web` is a local-first host adapter, not a second agent runtime. It binds
 to `127.0.0.1` by default and binds to `0.0.0.0` only after the explicit

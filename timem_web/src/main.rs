@@ -1,6 +1,7 @@
 mod debug_session;
 mod event_journal;
 mod lifecycle_diagnostics;
+mod os;
 mod server;
 mod session_groups;
 mod worker_roles;
