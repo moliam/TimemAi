@@ -210,7 +210,8 @@ describe("assistant-ui thread integration", () => {
   it("keeps previous-message and thread-bottom navigation beside the thread", () => {
     expect(source).toContain('className="turn-user-frame" data-user-message-anchor');
     expect(source).not.toMatch(/className=\{`turn-user-entry \.\{entry\.kind\}`\} data-user-message-anchor/);
-    expect(source).toContain('className="user-message-navigation" aria-label="用户消息导航"');
+    expect(source).toContain('className={`user-message-navigation ${userMessageNavigationVisible ? "visible" : ""}`}');
+    expect(source).toContain('aria-hidden={!userMessageNavigationVisible}');
     expect(source).toContain('title="上一条用户消息" aria-label="上一条用户消息"');
     expect(source).toContain('title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"}');
     expect(source).toContain('disabled={!userMessageNavigation.previous}');
@@ -227,10 +228,33 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const durationMs = 180;');
     expect(source).toContain('requestAnimationFrame(animate)');
     expect(source).toContain('const eased = 1 - Math.pow(1 - progress, 3);');
-    expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 42px); right: max(10px, calc((100% - 900px) / 2));');
-    expect(styles).toContain('.user-message-navigation button { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0;');
-    expect(styles).toContain('background: #263746;');
-    expect(styles).toContain(':root[data-theme="light"] .user-message-navigation button { background: #d9edff;');
+    expect(source).toContain('const [userMessageNavigationVisible, setUserMessageNavigationVisible] = useState(false);');
+    expect(source).toContain('}, 1200);');
+    expect(source).toContain('revealUserMessageNavigation();');
+    expect(source).toContain('onWheelCapture={revealUserMessageNavigation}');
+    expect(source).toContain('onTouchMove={revealUserMessageNavigation}');
+    expect(source).toContain('if (event.clientX >= bounds.right - 18) revealUserMessageNavigation();');
+    expect(source).toContain('["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)');
+    expect(source).toContain('onMouseEnter={() => { cancelUserMessageNavigationHide(); setUserMessageNavigationVisible(true); }}');
+    expect(source).toContain('onMouseLeave={scheduleUserMessageNavigationHide}');
+    expect(source).toContain('tabIndex={userMessageNavigationVisible ? 0 : -1}');
+    expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 42px); right: max(10px, calc((100% - 900px) / 2)); display: grid; gap: 0; opacity: 0; visibility: hidden; pointer-events: none;');
+    expect(styles).toContain('.user-message-navigation.visible { opacity: 1; visibility: visible; pointer-events: auto;');
+    expect(source).toContain('className="user-message-navigation-triangle up"');
+    expect(source).toContain('className="user-message-navigation-triangle down"');
+    expect(source).not.toContain('<ChevronUp size={17} aria-hidden="true"/>');
+    expect(source).not.toContain('<ChevronDown size={17} aria-hidden="true"/>');
+    expect(styles).toContain('.user-message-navigation button { display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #429cff; box-shadow: none;');
+    expect(styles).toContain('.user-message-navigation button:hover:not(:disabled) { background: #ffffff08; box-shadow: 0 7px 20px #0008;');
+    expect(styles).toContain('.user-message-navigation button + button { margin-top: -6px; }');
+    expect(styles).not.toContain('box-shadow: 0 0 0 1px #429cff38');
+    expect(styles).not.toContain('box-shadow: 0 0 0 2px #429cff80');
+    expect(styles).toContain('.user-message-navigation button:disabled { color: #9abbd7; opacity: .62; cursor: default; box-shadow: none; }');
+    expect(styles).toContain('.user-message-navigation-triangle { width: 0; height: 0; border-right: 8px solid transparent; border-left: 8px solid transparent;');
+    expect(styles).toContain('.user-message-navigation-triangle.up { border-bottom: 11px solid currentColor; transform: translateY(-2px); }');
+    expect(styles).toContain('.user-message-navigation-triangle.down { border-top: 11px solid currentColor; transform: translateY(2px); }');
+    expect(styles).toContain(':root[data-theme="light"] .user-message-navigation button { background: transparent; color: #1677d2; box-shadow: none; }');
+    expect(styles).toContain(':root[data-theme="light"] .user-message-navigation button:disabled { color: #8eabc3; opacity: .68; }');
     expect(styles).toContain('@media (max-width: 720px) { .user-message-navigation { right: 6px; }');
   });
 
@@ -1744,7 +1768,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('<Gauge size={13}/>');
     expect(source).toContain('<span>Dynamic context</span>');
     expect(source).toContain('Text ${formatTokens(activity.text_before_tokens)');
-    expect(source).toContain('Native ${formatTokens(activity.native_before_tokens)');
+    expect(source).toContain('Tool ${formatTokens(activity.native_before_tokens)');
     expect(source).toContain('aria-label={label} title={breakdown}');
     expect(styles).toContain(".context-compact-notice");
     expect(styles).toContain("width: fit-content");
