@@ -97,6 +97,32 @@ fn memory_directory_is_created_recursively() {
 
     create_memory_dir(&memory_dir).unwrap();
     assert!(memory_dir.is_dir());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&memory_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn existing_memory_directory_permissions_are_tightened() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = unique_test_root("tighten_memory_dir");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o775)).unwrap();
+
+    create_memory_dir(&root).unwrap();
+    assert_eq!(
+        std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
 
     let _ = std::fs::remove_dir_all(root);
 }

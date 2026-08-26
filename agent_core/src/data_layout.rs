@@ -85,7 +85,20 @@ pub fn resolve_memory_dir(space: Option<&str>) -> Result<PathBuf, String> {
 
 pub fn create_memory_dir(path: &Path) -> Result<(), String> {
     std::fs::create_dir_all(path)
-        .map_err(|error| format!("mem_directory_create_failed:{}:{error}", path.display()))
+        .map_err(|error| format!("mem_directory_create_failed:{}:{error}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                format!(
+                    "mem_directory_permissions_failed:{}:{error}",
+                    path.display()
+                )
+            },
+        )?;
+    }
+    Ok(())
 }
 
 pub fn default_data_root() -> PathBuf {
