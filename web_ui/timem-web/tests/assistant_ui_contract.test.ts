@@ -168,7 +168,6 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('<FolderPlus size={16}/>');
     expect(source).toContain('className={`session-management-actions ${sessionDeleteMode ? "deleting" : ""}`}');
     expect(styles).toContain('.session-management-actions { min-height: 34px; display: flex; align-items: center; justify-content: space-between; padding: 0 2px 0 21px; }');
-    expect(styles).toContain('.session-row .session { padding-right: 2px; }');
     expect(styles).toContain('.session-row.delete-selecting .session { padding-right: 34px; }');
     expect(styles).toContain('font-size: 13px; font-weight: 720; letter-spacing: .025em; }');
     expect(source).toContain('collapsed ? <Folder className="session-group-folder" size={14}/> : <FolderOpen className="session-group-folder" size={14}/>');
@@ -194,14 +193,20 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('.session-group.drop-target .session-group-list');
     expect(styles).toContain('.session-row.dragging');
     expect(styles).toContain('.session-drag {');
-    expect(styles).toContain('.session-group-list .session-row > .session-drag { margin-left: 12px; }');
+    expect(styles).toContain('.session-group-list .session-row > .session-drag { margin-left: 0; }');
     expect(source).toContain('className={`session-endpoint-reveal ${renamingSession ? "pending" : ""}`}');
     expect(styles).toContain('.session-row:hover .session-endpoint-reveal, .session-row:focus-within .session-endpoint-reveal, .session-endpoint-reveal.pending');
     expect(styles).toContain('.session-row.delete-selecting .session-endpoint-reveal { display: none; }');
     expect(styles).toContain('/* Compact Session rows: hidden endpoint labels never reserve name width. */');
     expect(styles).toContain('.session-row { min-height: 32px; border-radius: 4px; }');
     expect(styles).toContain('.session-row::after {');
-    expect(styles).toContain('.session-row .session {\n  min-height: 32px;\n  padding-block: 2px;');
+    expect(styles).toContain('.session-row .session {\n  min-height: 32px;\n  padding: 2px 2px 2px 10px;');
+    expect(styles).toContain('.session-drag,\n.session-expand {\n  position: absolute;');
+    expect(styles).toContain('opacity: 0;\n  pointer-events: none;');
+    expect(styles).toContain('.session-row:hover > :is(.session-drag, .session-expand),');
+    expect(styles).toContain('.session-row > :is(.session-drag, .session-expand):focus-visible {');
+    expect(styles).toContain('.session-row:hover .session,\n.session-row:focus-within .session { padding-left: 56px; }');
+    expect(styles).toContain('.session-row.delete-selecting > :is(.session-drag, .session-expand) { display: none; }');
     expect(styles).toContain('.session-identity { flex: 1; min-width: 0; }');
     expect(styles).toContain('.session-endpoint-reveal {\n  position: absolute;');
     expect(styles).toContain('transform: translate(3px, -50%);');
@@ -229,7 +234,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('requestAnimationFrame(animate)');
     expect(source).toContain('const eased = 1 - Math.pow(1 - progress, 3);');
     expect(source).toContain('const [userMessageNavigationVisible, setUserMessageNavigationVisible] = useState(false);');
-    expect(source).toContain('}, 1200);');
+    expect(source).toContain('}, 5000);');
     expect(source).toContain('revealUserMessageNavigation();');
     expect(source).toContain('onWheelCapture={revealUserMessageNavigation}');
     expect(source).toContain('onTouchMove={revealUserMessageNavigation}');
@@ -1321,6 +1326,9 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('className={`session-endpoint-reveal ${renamingSession ? "pending" : ""}`} title={renamingSession ? "Saving name" : sessionEndpointName}');
     expect(source).not.toContain('className="session-detail session-profile"');
     expect(source).toContain('className="session-working-icon" size={15} aria-label="Session working"');
+    expect(source).toContain('session.state === "working" && <LoaderCircle className="session-working-icon"');
+    expect(source).not.toContain('className={`session-dot ${session.state}`}');
+    expect(styles).not.toContain('.session-dot {');
     expect(source).not.toContain('className="session-state">busy</span>');
     expect(styles).not.toContain(".session-state");
     expect(source).toContain('className="composer-cwd-inline"');
@@ -1409,7 +1417,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain(".connection.offline { background: #d77b75; box-shadow: 0 0 0 3px #d77b7522; animation: connection-retry 1.1s ease-in-out infinite; }");
     expect(styles).toContain("@keyframes connection-retry");
     expect(styles).toContain("@media (prefers-reduced-motion: reduce) { .chat-scroll { scroll-behavior: auto; }");
-    expect(styles).toContain(".pulse, .connection.offline, .session-dot.working");
+    expect(styles).toContain(".pulse, .connection.offline, .session-row.working");
   });
 
   it("uses session terminology consistently for the creation workflow", () => {
