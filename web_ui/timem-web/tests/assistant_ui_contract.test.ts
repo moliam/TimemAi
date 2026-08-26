@@ -222,8 +222,7 @@ describe("assistant-ui thread integration", () => {
   it("keeps previous-message and thread-bottom navigation beside the thread", () => {
     expect(source).toContain('className="turn-user-frame" data-user-message-anchor');
     expect(source).not.toMatch(/className=\{`turn-user-entry \.\{entry\.kind\}`\} data-user-message-anchor/);
-    expect(source).toContain('className={`user-message-navigation ${userMessageNavigationVisible ? "visible" : ""}`}');
-    expect(source).toContain('aria-hidden={!userMessageNavigationVisible}');
+    expect(source).toContain('className="user-message-navigation" aria-label="用户消息导航"');
     expect(source).toContain('title="上一条用户消息" aria-label="上一条用户消息"');
     expect(source).toContain('title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"}');
     expect(source).toContain('disabled={!userMessageNavigation.previous}');
@@ -240,20 +239,11 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const durationMs = 180;');
     expect(source).toContain('requestAnimationFrame(animate)');
     expect(source).toContain('const eased = 1 - Math.pow(1 - progress, 3);');
-    expect(source).toContain('const [userMessageNavigationVisible, setUserMessageNavigationVisible] = useState(false);');
-    expect(source).toContain('}, 6000);');
-    expect(source).toContain('revealUserMessageNavigation();');
-    expect(source).toContain('onWheelCapture={revealUserMessageNavigation}');
-    expect(source).toContain('onTouchMove={revealUserMessageNavigation}');
-    expect(source).toContain('if (event.clientX >= bounds.right - 18) revealUserMessageNavigation();');
-    expect(source).toContain('["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)');
-    expect(source).toContain('onMouseEnter={() => { cancelUserMessageNavigationHide(); setUserMessageNavigationVisible(true); }}');
-    expect(source).toContain('onMouseLeave={(event) => { if (!event.currentTarget.contains(document.activeElement)) scheduleUserMessageNavigationHide(); }}');
-    expect(source).toContain('onFocusCapture={() => { cancelUserMessageNavigationHide(); setUserMessageNavigationVisible(true); }}');
-    expect(source).toContain('onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) scheduleUserMessageNavigationHide(); }}');
-    expect(source).toContain('tabIndex={userMessageNavigationVisible ? 0 : -1}');
-    expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 42px); right: max(10px, calc((100% - 900px) / 2)); display: grid; gap: 0; opacity: 0; visibility: hidden; pointer-events: none;');
-    expect(styles).toContain('.user-message-navigation.visible { opacity: 1; visibility: visible; pointer-events: auto;');
+    expect(source).not.toContain('userMessageNavigationVisible');
+    expect(source).not.toContain('userMessageNavigationHideTimerRef');
+    expect(source).not.toContain('revealUserMessageNavigation');
+    expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 42px); right: max(10px, calc((100% - 900px) / 2)); display: grid; gap: 0; transform: translateY(-50%); }');
+    expect(styles).not.toContain('.user-message-navigation.visible');
     expect(source).toContain('className="user-message-navigation-triangle up"');
     expect(source).toContain('className="user-message-navigation-triangle down"');
     expect(source).not.toContain('<ChevronUp size={17} aria-hidden="true"/>');
