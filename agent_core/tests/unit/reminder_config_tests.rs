@@ -245,3 +245,22 @@ fn global_config_path_honors_explicit_override() {
         PathBuf::from("/opt/timem-config")
     );
 }
+
+#[test]
+fn shipped_file_includes_non_runtime_schedule_examples() {
+    let document = serde_json::from_str::<serde_json::Value>(SHIPPED_REMINDER_TIPS).unwrap();
+    let example = document
+        .get("_example")
+        .and_then(serde_json::Value::as_object)
+        .expect("shipped reminder tips should include an _example section");
+
+    assert_eq!(example["by_minutes"]["every_minutes"], 15);
+    assert_eq!(example["by_rounds"]["every_rounds"], 5);
+
+    let config = serde_json::from_value::<ReminderTipsConfig>(document)
+        .unwrap()
+        .validate()
+        .unwrap();
+    assert_eq!(config.schedules.len(), 2);
+    assert_eq!(config, ReminderTipsConfig::default());
+}
