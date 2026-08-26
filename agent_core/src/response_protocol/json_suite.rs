@@ -1,6 +1,9 @@
 use serde_json::Value;
 
-use super::{ParsedContextCompact, ParsedEnvelope, ResponseProtocolSuite};
+use super::{
+    ParsedContextCompact, ParsedEnvelope, PromptBoundarySpec, ResponseProtocolSuite,
+    BRACKETED_PROMPT_BOUNDARIES,
+};
 use crate::capability::CapabilityRegistry;
 
 /// JSON envelope v1 response protocol.
@@ -15,8 +18,14 @@ impl ResponseProtocolSuite for JsonSuiteV1 {
     fn name(&self) -> &str {
         "json_v1"
     }
+    fn prompt_boundaries(&self) -> &'static PromptBoundarySpec {
+        &BRACKETED_PROMPT_BOUNDARIES
+    }
     fn lang_format(&self) -> &str {
         "JSON"
+    }
+    fn action_result_heading(&self) -> Option<&str> {
+        Some("The following are results of the actions generated in response:")
     }
     fn response_shape_hint(&self) -> &str {
         "one JSON object {...}"
@@ -51,28 +60,8 @@ impl ResponseProtocolSuite for JsonSuiteV1 {
 }
 
 pub fn can_show_plain_text_after_repair_failure(content: &str) -> bool {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    if matches!(trimmed.chars().next(), Some('{') | Some('[')) {
-        return false;
-    }
-    if trimmed.contains("```") || trimmed.contains('{') || trimmed.contains('}') {
-        return false;
-    }
-    if extract_balanced_json_object(trimmed).is_some() {
-        return false;
-    }
-    let lowered = trimmed.to_lowercase();
-    ![
-        "next_actions",
-        "memory_candidates",
-        "\"action\"",
-        "'action'",
-    ]
-    .iter()
-    .any(|needle| lowered.contains(needle))
+    let _ = content;
+    false
 }
 
 pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> ParsedEnvelope {
@@ -88,13 +77,14 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
                 next_actions: vec![],
                 action_groups: vec![],
                 context_compacts: vec![],
+                accepted_response: None,
                 memory_candidates: vec![],
                 runtime_note: None,
+                recovered_issue: None,
                 repair_issue: Some("invalid_json".to_string()),
             };
         }
     };
-    let value = unwrap_fields_envelope(value);
     if !value.is_object() {
         return ParsedEnvelope {
             final_answer: String::new(),
@@ -105,8 +95,10 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
             next_actions: vec![],
             action_groups: vec![],
             context_compacts: vec![],
+            accepted_response: None,
             memory_candidates: vec![],
             runtime_note: None,
+            recovered_issue: None,
             repair_issue: Some("root_must_be_json_object".to_string()),
         };
     }
@@ -133,7 +125,7 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
     let status_normalized = status.map(|raw| raw.trim().to_ascii_lowercase());
     let continue_work = match status_normalized.as_deref() {
         Some("working") => true,
-        Some("all_finished") | Some("finished") => false,
+        Some("all_finished") => false,
         Some(_) => {
             repair_issue =
                 repair_issue.or_else(|| Some("status_must_be_working_or_all_finished".to_string()));
@@ -141,38 +133,26 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
         }
         None => true,
     };
-    let (thought, thought_keep_in_context) = {
-        let v = value.get("free_talk");
-        if let Some(obj) = v.and_then(Value::as_object) {
-            let content = obj
-                .get("content")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-                .map(ToString::to_string)
-                .unwrap_or_default();
-            let keep_in_context = !content.is_empty();
-            (content, keep_in_context)
-        } else {
-            let s = v
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-                .map(ToString::to_string)
-                .unwrap_or_default();
-            let keep_in_context = !s.is_empty();
-            (s, keep_in_context)
-        }
-    };
+    let thought = value
+        .get("free_talk")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    if value
+        .get("free_talk")
+        .is_some_and(|value| !value.is_string())
+    {
+        repair_issue = repair_issue.or_else(|| Some("free_talk_must_be_string".to_string()));
+    }
+    let thought_keep_in_context = !thought.is_empty();
     let runtime_note: Option<String> = None;
     let context_compacts = parse_context_compacts(&value, &mut repair_issue);
 
     let mut next_actions = Vec::new();
     let mut action_groups = Vec::new();
-    let action_value = value
-        .get("working_still_action")
-        .or_else(|| value.get("next_actions"))
-        .or_else(|| super::is_tool_action_object(&value).then_some(&value));
+    let action_value = value.get("working_still_action");
     if let Some(action_value) = action_value {
         match super::parse_action_workflow_value(action_value, "actions", capabilities) {
             Ok(groups) => {
@@ -254,31 +234,18 @@ pub fn parse_envelope(content: &str, capabilities: &CapabilityRegistry) -> Parse
         action_groups,
         context_compacts,
         memory_candidates,
+        accepted_response: None,
         runtime_note,
+        recovered_issue: None,
         repair_issue,
     }
-}
-
-fn unwrap_fields_envelope(value: Value) -> Value {
-    let Some(object) = value.as_object() else {
-        return value;
-    };
-    if object.len() == 1 {
-        if let Some(fields) = object.get("fields").filter(|fields| fields.is_object()) {
-            return fields.clone();
-        }
-    }
-    value
 }
 
 fn parse_context_compacts(
     value: &Value,
     repair_issue: &mut Option<String>,
 ) -> Vec<ParsedContextCompact> {
-    let Some(raw) = value
-        .get("context_compact")
-        .or_else(|| value.get("context_compacts"))
-    else {
+    let Some(raw) = value.get("context_compact") else {
         return Vec::new();
     };
     let items = if let Some(array) = raw.as_array() {
@@ -296,13 +263,10 @@ fn parse_context_compacts(
         };
         let discard_delta_ids = object
             .get("discard")
-            .or_else(|| object.get("discard_delta_ids"))
-            .or_else(|| object.get("delta_ids"))
             .map(super::json_string_list)
             .unwrap_or_default();
         let offload_delta_ids = object
             .get("offload")
-            .or_else(|| object.get("offload_delta_ids"))
             .map(super::json_string_list)
             .unwrap_or_default();
         let mut delta_ids = discard_delta_ids.clone();
@@ -354,11 +318,9 @@ fn is_allowed_response_top_level_key(key: &str) -> bool {
             | "final_answer"
             | "toolgen_retrospect"
             | "working_still_action"
-            | "next_actions"
             | "free_talk"
             | "memory_candidates"
             | "context_compact"
-            | "context_compacts"
     )
 }
 
@@ -370,6 +332,9 @@ pub fn protocol_repair_instruction(issue: &str) -> &'static str {
         return "检查到刚刚的输出格式有点问题：final_answer/final_response 不是工具 action。最终回答请使用 status:\"ALL_FINISHED\" 和 final_answer 顶层字段，不要放在 working_still_action/action 中。Return exactly one valid JSON object. Do not use markdown fences.";
     }
     match issue {
+        "truncated_model_output" => {
+            "检查到刚刚的输出被 max output token 截断，未形成完整 JSON。请返回更短的、完整的 JSON object；长报告可用 run_bash 写入文件后在 final_answer 中给出路径。Return exactly one valid JSON object. Do not use markdown fences."
+        }
         "final_answer_requires_status_finished" => {
             "检查到刚刚的输出格式有点问题：你提供了 final_answer，但缺少 status:\"ALL_FINISHED\"。如果所有用户的 open/pending 请求已经完成，请同时提供 status:\"ALL_FINISHED\" 和 final_answer；这不会关闭 Timem session。如果仍需要 runtime 继续工作，请去掉 final_answer，并提供 working_still_action。Return exactly one valid JSON object. Do not use markdown fences."
         }
@@ -501,293 +466,6 @@ fn char_window_around_focus(text: &str, focus: usize, context_chars: usize) -> S
     )
 }
 
-/// Strip markdown code fences (```json ... ``` or ``` ... ```) from model output.
-fn strip_markdown_code_fences(input: &str) -> Option<&str> {
-    let trimmed = input.trim();
-    let rest = trimmed.strip_prefix("```")?;
-    let after_tag = rest.find('\n').map(|i| &rest[i + 1..]).unwrap_or("");
-    let body = after_tag.strip_suffix("```").map(str::trim)?;
-    if body.is_empty() {
-        None
-    } else {
-        Some(body)
-    }
-}
-
-/// Repair unescaped ASCII double-quotes inside JSON string values.
-fn repair_unescaped_quotes_in_values(input: &str) -> Option<String> {
-    let trimmed = input.trim();
-    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
-        return None;
-    }
-    let chars: Vec<char> = trimmed.chars().collect();
-    let len = chars.len();
-    if len < 2 {
-        return None;
-    }
-    let mut result = String::with_capacity(len + 64);
-    let mut i = 0;
-    let mut in_string = false;
-    let mut string_is_key = false;
-    let mut last_structural: char = '\0';
-    let mut changed = false;
-    while i < len {
-        let ch = chars[i];
-        if !in_string {
-            result.push(ch);
-            if ch == '"' {
-                in_string = true;
-                string_is_key =
-                    last_structural == '{' || last_structural == ',' || last_structural == '[';
-            }
-            if matches!(ch, '{' | '}' | '[' | ']' | ':' | ',') {
-                last_structural = ch;
-            }
-            i += 1;
-        } else if ch == '\\' {
-            result.push(ch);
-            i += 1;
-            if i < len {
-                result.push(chars[i]);
-                i += 1;
-            }
-        } else if ch == '"' {
-            let rest: String = chars[i + 1..].iter().collect();
-            let after = rest.trim_start();
-            let is_close = after.starts_with(',')
-                || after.starts_with('}')
-                || after.starts_with(']')
-                || after.starts_with(':')
-                || after.is_empty();
-            if is_close || string_is_key {
-                result.push(ch);
-                in_string = false;
-            } else {
-                result.push('\\');
-                result.push('"');
-                changed = true;
-            }
-            i += 1;
-        } else {
-            result.push(ch);
-            i += 1;
-        }
-    }
-    if changed {
-        Some(result)
-    } else {
-        None
-    }
-}
 fn parse_json_value_from_model_text(content: &str) -> Result<Value, serde_json::Error> {
-    let trimmed = content.trim();
-    if let Ok(value) = serde_json::from_str(trimmed) {
-        return Ok(value);
-    }
-    if let Some(repaired) = repair_known_string_field_quotes(trimmed) {
-        if let Ok(value) = serde_json::from_str(&repaired) {
-            return Ok(value);
-        }
-    }
-    // Strip markdown code fences and retry
-    if let Some(stripped) = strip_markdown_code_fences(trimmed) {
-        if let Ok(value) = serde_json::from_str(stripped) {
-            return Ok(value);
-        }
-        if let Some(repaired) = repair_known_string_field_quotes(stripped) {
-            if let Ok(value) = serde_json::from_str(&repaired) {
-                return Ok(value);
-            }
-        }
-    }
-    let mut last_ok = None;
-    for (idx, ch) in trimmed.char_indices() {
-        if ch != '{' {
-            continue;
-        }
-        let candidate = &trimmed[idx..];
-        if let Ok(value) = serde_json::from_str(candidate) {
-            if is_likely_response_envelope(&value) {
-                last_ok = Some(value);
-            }
-        }
-        if let Some(repaired) = repair_known_string_field_quotes(candidate) {
-            if let Ok(value) = serde_json::from_str(&repaired) {
-                if is_likely_response_envelope(&value) {
-                    last_ok = Some(value);
-                }
-            }
-        }
-        if let Some(object_text) = extract_balanced_json_object(candidate) {
-            if let Ok(value) = serde_json::from_str(&object_text) {
-                if is_likely_response_envelope(&value) {
-                    last_ok = Some(value);
-                }
-            }
-            if let Some(repaired) = repair_known_string_field_quotes(&object_text) {
-                if let Ok(value) = serde_json::from_str(&repaired) {
-                    if is_likely_response_envelope(&value) {
-                        last_ok = Some(value);
-                    }
-                }
-            }
-        }
-    }
-    if let Some(value) = last_ok {
-        Ok(value)
-    } else {
-        if let Some(repaired) = repair_unescaped_quotes_in_values(trimmed) {
-            if let Ok(value) = serde_json::from_str(&repaired) {
-                return Ok(value);
-            }
-        }
-        serde_json::from_str(trimmed)
-    }
-}
-
-pub(crate) fn is_likely_response_envelope(value: &Value) -> bool {
-    let normalized = unwrap_fields_envelope(value.clone());
-    normalized.as_object().is_some_and(|object| {
-        object.contains_key("working_still_action")
-            || object.contains_key("next_actions")
-            || object.contains_key("final_answer")
-            || object.contains_key("status")
-            || object.contains_key("free_talk")
-    })
-}
-
-fn extract_balanced_json_object(input: &str) -> Option<String> {
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (idx, ch) in input.char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-                continue;
-            }
-            match ch {
-                '\\' => escaped = true,
-                '"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_string = true,
-            '{' => depth = depth.saturating_add(1),
-            '}' => {
-                if depth == 0 {
-                    return None;
-                }
-                depth -= 1;
-                if depth == 0 {
-                    return Some(input[..idx + ch.len_utf8()].to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn repair_known_string_field_quotes(input: &str) -> Option<String> {
-    let mut output = input.to_string();
-    let mut changed = false;
-    for key in ["free_talk", "search_text", "content", "command", "sql"] {
-        let (next, key_changed) = repair_unescaped_quotes_for_key(&output, key);
-        output = next;
-        changed |= key_changed;
-    }
-    changed.then_some(output)
-}
-
-fn repair_unescaped_quotes_for_key(input: &str, key: &str) -> (String, bool) {
-    let marker = format!("\"{key}\"");
-    let bytes = input.as_bytes();
-    let mut output = String::with_capacity(input.len());
-    let mut pos = 0;
-    let mut changed = false;
-    while let Some(rel) = input[pos..].find(&marker) {
-        let marker_start = pos + rel;
-        output.push_str(&input[pos..marker_start]);
-        output.push_str(&marker);
-        let mut cursor = marker_start + marker.len();
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            output.push(bytes[cursor] as char);
-            cursor += 1;
-        }
-        if cursor >= bytes.len() || bytes[cursor] != b':' {
-            pos = cursor;
-            continue;
-        }
-        output.push(':');
-        cursor += 1;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-            output.push(bytes[cursor] as char);
-            cursor += 1;
-        }
-        if cursor >= bytes.len() || bytes[cursor] != b'"' {
-            pos = cursor;
-            continue;
-        }
-        output.push('"');
-        cursor += 1;
-        let value_start = cursor;
-        let mut segment = String::new();
-        let mut ended = false;
-        while cursor < input.len() {
-            let Some(ch) = input[cursor..].chars().next() else {
-                break;
-            };
-            let ch_len = ch.len_utf8();
-            if ch == '\\' {
-                segment.push(ch);
-                cursor += ch_len;
-                if cursor < input.len() {
-                    if let Some(next_ch) = input[cursor..].chars().next() {
-                        segment.push(next_ch);
-                        cursor += next_ch.len_utf8();
-                    }
-                }
-                continue;
-            }
-            if ch == '"' {
-                let next = next_non_ws_char(input, cursor + ch_len);
-                if matches!(next, Some(',') | Some('}') | Some(']') | None) {
-                    output.push_str(&segment);
-                    output.push('"');
-                    cursor += ch_len;
-                    ended = true;
-                    break;
-                }
-                output.push_str(&segment);
-                output.push('\\');
-                output.push('"');
-                segment.clear();
-                cursor += ch_len;
-                changed = true;
-                continue;
-            }
-            segment.push(ch);
-            cursor += ch_len;
-        }
-        if !ended {
-            output.push_str(&input[value_start..cursor]);
-        }
-        pos = cursor;
-    }
-    output.push_str(&input[pos..]);
-    (output, changed)
-}
-
-fn next_non_ws_char(input: &str, mut pos: usize) -> Option<char> {
-    while pos < input.len() {
-        let ch = input[pos..].chars().next()?;
-        if !ch.is_whitespace() {
-            return Some(ch);
-        }
-        pos += ch.len_utf8();
-    }
-    None
+    serde_json::from_str(content.trim())
 }

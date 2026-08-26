@@ -7,7 +7,7 @@ assistant-ui primitives for the chat surface and renders structured events from
 The UI owns:
 
 - session list, rename, mem-space display, and session switching
-- composer behavior, attachments, active-turn supplements, and inline decisions
+- composer behavior, attachments, queued next-turn questions, explicit active-turn supplements, and inline decisions
 - process frames for free talk, actions, repairs, context compaction, and
   runtime requests
 - final answer Markdown rendering, code highlighting, token/time telemetry,
@@ -41,9 +41,13 @@ under `web_ui/vendor`.
 The browser reducer is deliberately session-aware. Every WebSocket event must be
 scoped by `session_id`, and worker/context scoped core topics must be rejected
 when they do not belong to the target Session. Tests in
-`web_ui/timem-web/tests` cover active-turn supplements, duplicate cancel/submit
+`web_ui/timem-web/tests` cover queued next-turn questions, explicit active-turn supplements, duplicate cancel/submit
 pressure, concurrent sessions, inline decisions, attachments, bounded event
 windows, rendering contracts, and long-history behavior.
 
 Read [`module_boundary.md`](module_boundary.md) before changing Web/core
 responsibilities.
+
+## Shared model endpoints
+
+The model label in the chat header opens a mem-scoped endpoint list shared by all Sessions. Users can add, edit, delete, and select endpoints. Selecting one applies its model, API/response protocols, Base URL, API key, maximum context window, and maximum output to the current idle Session. Endpoint editors offer context windows of `100K`, `200K`, or `1M`, and output limits of `10K`, `20K`, or `50K`; older saved endpoints load as `100K` / `10K`. Endpoint API keys are stored in the host memory directory with private file permissions and are redacted from snapshots and browser-persistent command queues.

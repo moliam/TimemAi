@@ -353,6 +353,7 @@ pub struct CoreTopicEvent {
 
 pub const CORE_TOPIC_MODEL_RESPONSE: &str = "core.model.response";
 pub const CORE_TOPIC_MODEL_REPAIR: &str = "core.model.repair";
+pub const CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP: &str = "core.runtime_root_repair_help";
 pub const CORE_TOPIC_ACTION: &str = "core.action";
 pub const CORE_TOPIC_CONTEXT_COMPACT: &str = "core.context.compact";
 pub const CORE_TOPIC_TOOLGEN: &str = "core.toolgen";
@@ -377,6 +378,7 @@ pub struct CoreModelResponseTopic {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreModelRepairTopic {
     pub issue: String,
+    pub reason: String,
     pub attempt: u32,
     pub max_attempts: u32,
 }
@@ -385,6 +387,10 @@ pub struct CoreModelRepairTopic {
 pub struct CoreContextCompactTopic {
     pub estimated_before_tokens: u32,
     pub estimated_after_tokens: u32,
+    pub estimated_text_before_tokens: u32,
+    pub estimated_text_after_tokens: u32,
+    pub estimated_native_before_tokens: u32,
+    pub estimated_native_after_tokens: u32,
     pub discarded_delta_ids: Vec<String>,
     pub offloaded_delta_ids: Vec<String>,
     pub scratch_id: Option<String>,
@@ -401,12 +407,24 @@ pub struct CoreWorkInstructionLoadTopic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CoreGlobalWorkerStatus {
     pub working_worker_count: usize,
+    pub session_working_worker_count: usize,
 }
 
 impl CoreGlobalWorkerStatus {
     pub fn new(working_worker_count: usize) -> Self {
         Self {
             working_worker_count,
+            session_working_worker_count: working_worker_count,
+        }
+    }
+
+    pub fn with_session_working_worker_count(
+        working_worker_count: usize,
+        session_working_worker_count: usize,
+    ) -> Self {
+        Self {
+            working_worker_count,
+            session_working_worker_count,
         }
     }
 }
@@ -414,6 +432,7 @@ impl CoreGlobalWorkerStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreActionTopic {
     pub action: String,
+    pub action_id: String,
     pub input: Value,
     pub kind: CoreActionKind,
     pub active: bool,
@@ -680,6 +699,12 @@ impl CoreTopicEvent {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
+            reason: self
+                .payload
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             attempt: self
                 .payload
                 .get("attempt")
@@ -702,6 +727,18 @@ impl CoreTopicEvent {
         Some(CoreContextCompactTopic {
             estimated_before_tokens: self.payload["estimated_before_tokens"].as_u64()? as u32,
             estimated_after_tokens: self.payload["estimated_after_tokens"].as_u64()? as u32,
+            estimated_text_before_tokens: self.payload["estimated_text_before_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32,
+            estimated_text_after_tokens: self.payload["estimated_text_after_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32,
+            estimated_native_before_tokens: self.payload["estimated_native_before_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32,
+            estimated_native_after_tokens: self.payload["estimated_native_after_tokens"]
+                .as_u64()
+                .unwrap_or(0) as u32,
             discarded_delta_ids: string_array_payload(&self.payload["discarded_delta_ids"]),
             offloaded_delta_ids: string_array_payload(&self.payload["offloaded_delta_ids"]),
             scratch_id: self.payload["scratch_id"].as_str().map(str::to_string),
@@ -719,6 +756,10 @@ impl CoreTopicEvent {
         }
         Some(CoreActionTopic {
             action: self.payload["action"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            action_id: self.payload["action_id"]
                 .as_str()
                 .unwrap_or_default()
                 .to_string(),
@@ -808,13 +849,31 @@ impl CoreTopicEvent {
     }
 }
 
+pub fn runtime_root_repair_help_topic_event(session_id: impl Into<String>) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        session_id,
+        CoreTopic::new(
+            CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
+            json!({
+                "name": CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "count": 1,
+        }),
+    )
+}
+
 pub fn model_repair_topic_event(
     session_id: impl Into<String>,
     issue: impl Into<String>,
+    reason: impl Into<String>,
     attempt: u32,
     max_attempts: u32,
 ) -> CoreTopicEvent {
     let issue = issue.into();
+    let reason = reason.into();
     CoreTopicEvent::new(
         session_id,
         CoreTopic::new(
@@ -826,6 +885,7 @@ pub fn model_repair_topic_event(
         CoreSessionState::WaitingModel,
         json!({
             "issue": issue,
+            "reason": reason,
             "attempt": attempt,
             "max_attempts": max_attempts,
         }),
@@ -834,11 +894,7 @@ pub fn model_repair_topic_event(
 
 pub fn context_compact_topic_event(
     session_id: impl Into<String>,
-    estimated_before_tokens: u32,
-    estimated_after_tokens: u32,
-    discarded_delta_ids: &[String],
-    offloaded_delta_ids: &[String],
-    scratch_id: Option<&str>,
+    report: &CoreContextCompactTopic,
 ) -> CoreTopicEvent {
     CoreTopicEvent::new(
         session_id,
@@ -850,11 +906,15 @@ pub fn context_compact_topic_event(
         ),
         CoreSessionState::Running,
         json!({
-            "estimated_before_tokens": estimated_before_tokens,
-            "estimated_after_tokens": estimated_after_tokens,
-            "discarded_delta_ids": discarded_delta_ids,
-            "offloaded_delta_ids": offloaded_delta_ids,
-            "scratch_id": scratch_id,
+            "estimated_before_tokens": report.estimated_before_tokens,
+            "estimated_after_tokens": report.estimated_after_tokens,
+            "estimated_text_before_tokens": report.estimated_text_before_tokens,
+            "estimated_text_after_tokens": report.estimated_text_after_tokens,
+            "estimated_native_before_tokens": report.estimated_native_before_tokens,
+            "estimated_native_after_tokens": report.estimated_native_after_tokens,
+            "discarded_delta_ids": report.discarded_delta_ids,
+            "offloaded_delta_ids": report.offloaded_delta_ids,
+            "scratch_id": report.scratch_id,
         }),
     )
 }
@@ -1064,12 +1124,17 @@ fn dynamic_context_summary_payload(context: CoreDynamicContextSummary) -> Value 
 fn global_worker_status_payload(status: CoreGlobalWorkerStatus) -> Value {
     json!({
         "working_worker_count": status.working_worker_count,
+        "session_working_worker_count": status.session_working_worker_count,
     })
 }
 
 fn parse_global_worker_status(value: &Value) -> CoreGlobalWorkerStatus {
+    let working_worker_count = value["working_worker_count"].as_u64().unwrap_or(0) as usize;
     CoreGlobalWorkerStatus {
-        working_worker_count: value["working_worker_count"].as_u64().unwrap_or(0) as usize,
+        working_worker_count,
+        session_working_worker_count: value["session_working_worker_count"]
+            .as_u64()
+            .unwrap_or(working_worker_count as u64) as usize,
     }
 }
 
@@ -1383,6 +1448,7 @@ pub(crate) fn notification_topic_event(
         }
         CoreNotification::Action {
             action,
+            action_id,
             input,
             kind,
             active,
@@ -1394,6 +1460,7 @@ pub(crate) fn notification_topic_event(
                 json!({
                     "name": CORE_TOPIC_ACTION,
                     "action": action,
+                    "action_id": action_id,
                     "active": active,
                     "event": "start",
                 }),
@@ -1401,6 +1468,7 @@ pub(crate) fn notification_topic_event(
             CoreSessionState::Running,
             json!({
                 "action": action,
+                "action_id": action_id,
                 "input": input,
                 "kind": action_kind_topic_payload(kind),
                 "active": active,
@@ -1410,6 +1478,59 @@ pub(crate) fn notification_topic_event(
             }),
         ),
     }
+}
+
+pub fn running_shell_job_exit_topic_event(update: &crate::ShellJobExitUpdate) -> CoreTopicEvent {
+    let status = match update.status.as_str() {
+        "0" => "completed",
+        "cancelled" => "cancelled",
+        _ => "failed",
+    };
+    let input = match update.kind.as_str() {
+        "background" => json!({
+            "cmd": update.command,
+            "background": true,
+        }),
+        _ => json!({
+            "cmd": update.command,
+        }),
+    };
+    CoreTopicEvent::new(
+        update.session_id.clone(),
+        CoreTopic::new(
+            CORE_TOPIC_ACTION,
+            json!({
+                "name": CORE_TOPIC_ACTION,
+                "action": "run_bash",
+                "action_id": update.tool_call_id,
+                "active": false,
+                "event": "finish",
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "action": "run_bash",
+            "action_id": update.tool_call_id,
+            "turn_id": update.turn_id,
+            "input": input,
+            "kind": {
+                "kind": "bash",
+                "command": update.command,
+                "mode": update.kind,
+                "interval_ms": null,
+                "timeout_ms": null,
+                "loop_timeout_ms": null,
+                "once_timeout_ms": null,
+            },
+            "active": false,
+            "event": "finish",
+            "status": status,
+            "pid": update.pid,
+            "exit_status": update.status,
+            "elapsed_ms": update.elapsed_ms,
+            "memory_activity": "none",
+        }),
+    )
 }
 
 pub fn topic_event_status_hint(events: &[CoreTopicEvent]) -> Option<CoreTopicStatusHint> {
@@ -1459,10 +1580,9 @@ fn action_kind_topic_payload(kind: &CoreActionKind) -> Value {
             "capability_kind": kind,
             "id": id,
         }),
-        CoreActionKind::SelfTool { self_type, op } => json!({
+        CoreActionKind::SelfTool { self_type } => json!({
             "kind": "self_tool",
             "self_type": self_type,
-            "op": op,
         }),
         CoreActionKind::ChatHistory { operation } => json!({
             "kind": "chat_history",
@@ -1502,7 +1622,6 @@ fn action_kind_from_topic_payload(value: &Value, fallback_action: &str) -> CoreA
         },
         "self_tool" => CoreActionKind::SelfTool {
             self_type: value["self_type"].as_str().unwrap_or_default().to_string(),
-            op: value["op"].as_str().unwrap_or_default().to_string(),
         },
         "chat_history" => CoreActionKind::ChatHistory {
             operation: value["operation"].as_str().unwrap_or_default().to_string(),
@@ -1655,9 +1774,61 @@ pub trait TurnUi {
         Vec::new()
     }
 
+    fn drain_user_supplements_with_context(&mut self) -> Vec<UserSupplement> {
+        self.drain_user_supplements()
+            .into_iter()
+            .map(UserSupplement::from)
+            .collect()
+    }
+
+    /// Whether supplements discovered after a final model response may reopen
+    /// the same host-visible turn for another model call. Turn-based UIs can
+    /// return `false` so the completed answer stays attached to its original
+    /// turn and the host can resubmit the late input as a distinct follow-up.
+    fn continue_supplements_after_final_answer(&self) -> bool {
+        true
+    }
+
+    fn apply_pending_runtime_updates(
+        &mut self,
+        _core: &mut crate::AgentCore,
+        _config: &mut crate::ModelServiceConfig,
+    ) -> bool {
+        false
+    }
+
     fn on_model_request(&mut self, _round: u32, _prompt: &str) {}
 
+    fn on_model_interaction_request(
+        &mut self,
+        round: u32,
+        request: &crate::ModelInteractionRequest,
+    ) {
+        self.on_model_request(round, &request.rendered_prompt);
+    }
+
+    /// Reports the exact request body prepared for the model API. Hosts may use
+    /// this for opt-in diagnostics; transport and payload semantics remain Core-owned.
+    fn on_model_api_request(
+        &mut self,
+        round: u32,
+        request: &crate::ModelInteractionRequest,
+        _api_payload: &serde_json::Value,
+    ) {
+        self.on_model_interaction_request(round, request);
+    }
+
+    fn on_model_request_completed(&mut self, _latency: Duration) {}
+
     fn on_model_response(&mut self, _round: u32, _usage: &UsageStats, _content: &str) {}
+
+    fn on_model_interaction_response(&mut self, round: u32, response: &crate::LlmResponse) {
+        self.on_model_response(round, &response.usage, &response.content);
+    }
+
+    fn on_model_response_parsed(&mut self, _tool_count: usize) {}
+
+    fn on_interaction_profile(&mut self, _profile: &crate::InteractionProfile) {}
 
     fn on_core_topic_events(&mut self, _events: &[CoreTopicEvent]) {}
 
@@ -1733,11 +1904,51 @@ pub trait TurnUi {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserSupplement {
+    pub text: String,
+    pub additional_context: Option<String>,
+}
+
+impl UserSupplement {
+    pub fn new(text: impl Into<String>, additional_context: Option<String>) -> Self {
+        Self {
+            text: text.into(),
+            additional_context,
+        }
+    }
+}
+
+impl From<String> for UserSupplement {
+    fn from(text: String) -> Self {
+        Self::new(text, None)
+    }
+}
+
 pub fn normalize_user_supplements(supplements: Vec<String>) -> Vec<String> {
     supplements
         .into_iter()
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
+        .collect()
+}
+
+pub fn normalize_user_supplements_with_context(
+    supplements: Vec<UserSupplement>,
+) -> Vec<UserSupplement> {
+    supplements
+        .into_iter()
+        .filter_map(|mut supplement| {
+            supplement.text = supplement.text.trim().to_string();
+            if supplement.text.is_empty() {
+                return None;
+            }
+            supplement.additional_context = supplement
+                .additional_context
+                .map(|context| context.trim().to_string())
+                .filter(|context| !context.is_empty());
+            Some(supplement)
+        })
         .collect()
 }
 

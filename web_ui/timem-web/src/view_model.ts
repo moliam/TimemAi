@@ -1,12 +1,11 @@
 import { Activity, ChatHistoryRecord, ChatMessage, ClientCommand, clientId, CoreTopicEvent, Decision, Session, TurnCompletion, WebTurn, WebTurnEvent } from "./protocol";
+import { humanizeToolStatus, TOOL_STATUS_BACKGROUND_RUNNING } from "./tool_status";
 
 export const MAX_RENDERED_MESSAGES = 1000;
 // The host delivers restored history in 200-turn pages.  Keep several pages in
 // the browser so scrolling upward actually reveals the page just requested,
 // while the thread component still renders only its visible window.
 export const MAX_CLIENT_TURNS = 1200;
-export const MAX_CLIENT_TURN_EVENTS = 500;
-export const MAX_RESTORED_TURN_EVENTS = 80;
 
 const USAGE_FIELDS = ["llm_calls", "repair_calls", "tool_calls", "mem_reads", "mem_writes", "prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "cache_created_tokens", "shrunk_tokens"] as const;
 
@@ -14,16 +13,103 @@ export function trimMessages<T>(messages: T[]) {
   return messages.length > MAX_RENDERED_MESSAGES ? messages.slice(-MAX_RENDERED_MESSAGES) : messages;
 }
 
-export function trimTurnEvents<T>(events: T[]) {
-  return events.length > MAX_CLIENT_TURN_EVENTS ? events.slice(-MAX_CLIENT_TURN_EVENTS) : events;
+export function normalizeCopiedUserMessageText(text: string): string {
+  return text.replace(/(?:\r?\n)+$/, "");
 }
 
-function trimRestoredTurnEvents<T>(events: T[]) {
-  return events.length > MAX_RESTORED_TURN_EVENTS ? events.slice(-MAX_RESTORED_TURN_EVENTS) : events;
+export function applySessionRuntimeProfile(
+  session: Session,
+  runtimeProfile: NonNullable<Session["runtime_profile"]>,
+): Session {
+  return {
+    ...session,
+    runtime_profile: runtimeProfile,
+    max_llm_input_tokens: runtimeProfile.max_llm_input_tokens,
+  };
 }
 
 export function trimTurns<T>(turns: T[]) {
   return turns.length > MAX_CLIENT_TURNS ? turns.slice(-MAX_CLIENT_TURNS) : turns;
+}
+
+export type TurnTimelinePlacement = {
+  createdAtMs: number;
+  resumedAfterRestart: boolean;
+};
+
+export function turnTimelinePlacement(
+  turn: WebTurn,
+  restartMarkers: ChatMessage[],
+): TurnTimelinePlacement {
+  let resumedAtMs: number | undefined;
+  for (const marker of restartMarkers) {
+    if (marker.created_at_ms <= turn.created_at_ms) continue;
+    const hasActivityAfterRestart = turn.state === "working"
+      || turn.user_entries.some((entry) => entry.created_at_ms >= marker.created_at_ms)
+      || turn.events.some((event) => event.created_at_ms >= marker.created_at_ms);
+    if (hasActivityAfterRestart && (resumedAtMs === undefined || marker.created_at_ms > resumedAtMs)) {
+      resumedAtMs = marker.created_at_ms;
+    }
+  }
+  return resumedAtMs === undefined
+    ? { createdAtMs: turn.created_at_ms, resumedAfterRestart: false }
+    : { createdAtMs: resumedAtMs, resumedAfterRestart: true };
+}
+
+export type TurnTimelineOrderItem = {
+  type: "turn" | "restart";
+  createdAtMs: number;
+  resumedAfterRestart: boolean;
+  id: string;
+};
+
+export function compareTurnTimelineItems(
+  left: TurnTimelineOrderItem,
+  right: TurnTimelineOrderItem,
+): number {
+  const timeOrder = left.createdAtMs - right.createdAtMs;
+  if (timeOrder !== 0) return timeOrder;
+  if (left.type !== right.type) {
+    const turn = left.type === "turn" ? left : right;
+    if (turn.resumedAfterRestart) return left.type === "restart" ? -1 : 1;
+    return left.type === "turn" ? -1 : 1;
+  }
+  return left.id.localeCompare(right.id);
+}
+
+export function visibleRuntimeRestartMarkers(turns: WebTurn[], markers: ChatMessage[]): ChatMessage[] {
+  const timeline = [
+    ...turns.map((turn) => ({
+      type: "turn" as const,
+      createdAtMs: turn.created_at_ms,
+      id: turn.turn_id,
+    })),
+    ...markers.map((marker) => ({
+      type: "restart" as const,
+      createdAtMs: marker.created_at_ms,
+      id: marker.id,
+      marker,
+    })),
+  ].sort((left, right) => (
+    left.createdAtMs - right.createdAtMs
+    || (left.type === right.type ? left.id.localeCompare(right.id) : left.type === "turn" ? -1 : 1)
+  ));
+
+  const visible: ChatMessage[] = [];
+  let workSinceLastRestart = true;
+  for (const item of timeline) {
+    if (item.type === "turn") {
+      workSinceLastRestart = true;
+      continue;
+    }
+    if (!workSinceLastRestart && visible.length > 0) {
+      visible[visible.length - 1] = item.marker;
+    } else {
+      visible.push(item.marker);
+    }
+    workSinceLastRestart = false;
+  }
+  return visible;
 }
 
 export function tailPath(path: string, maxChars = 28) {
@@ -166,11 +252,23 @@ export function resolveActiveSessionId(currentSessionId: string, sessions: Pick<
   return sessions[0]?.session_id ?? "";
 }
 
+export function composerPrimaryAction(
+  sessionState: Pick<Session, "state">["state"] | undefined,
+  text: string,
+  isCancelling: boolean,
+): "send" | "stop" {
+  if (isCancelling) return "stop";
+  return sessionState === "working" && !text.trim() ? "stop" : "send";
+}
+
 export function composerSendDecision(
   session: Pick<Session, "session_id" | "state"> | undefined,
   text: string,
   isCancelling: boolean,
   isMemSwitching = false,
+attachmentIds?: readonly string[],
+forceSupplement = false,
+forceNewTurn = false,
 ): ComposerSendDecision {
   if (!session) return { kind: "skip", reason: "no_session" };
   const trimmed = text.trim();
@@ -181,9 +279,9 @@ export function composerSendDecision(
     kind: "send",
     text: trimmed,
     clearDraftOnSuccess: true,
-    command: session.state === "working"
-      ? { type: "turn_supplement", session_id: session.session_id, text: trimmed }
-      : { type: "turn_submit", session_id: session.session_id, text: trimmed },
+    command: forceSupplement && !forceNewTurn
+ ? { type: "turn_supplement", session_id: session.session_id, text: trimmed, ...(attachmentIds === undefined ? {} : { attachment_ids: [...attachmentIds] }) }
+ : { type: "turn_submit", session_id: session.session_id, text: trimmed, ...(attachmentIds === undefined ? {} : { attachment_ids: [...attachmentIds] }) },
   };
 }
 
@@ -286,6 +384,7 @@ function toolgenLifecycle(event: WebTurnEvent) {
 export function coalesceActionLifecycle(events: WebTurnEvent[]) {
   const visible: WebTurnEvent[] = [];
   const pendingStarts = new Map<string, number[]>();
+  const pendingBackgroundFinishes = new Map<string, number[]>();
   const pendingToolGen = new Set<string>();
   for (const event of events) {
     const toolgen = toolgenLifecycle(event);
@@ -313,15 +412,35 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
       continue;
     }
     if (lifecycle === "finish") {
-      const indexes = pendingStarts.get(key);
-      const index = indexes?.shift();
-      if (index !== undefined) {
-        const started = visible[index];
+      const status = typeof topicEvent.payload.status === "string" ? topicEvent.payload.status : "";
+      const startIndexes = pendingStarts.get(key);
+      const startIndex = startIndexes?.[0];
+      if (startIndex !== undefined) {
+        const started = visible[startIndex];
         const elapsedMs = event.created_at_ms - started.created_at_ms;
-        visible[index] = elapsedMs >= 0 ? withActionElapsed(event, elapsedMs) : event;
+        visible[startIndex] = elapsedMs >= 0 ? withActionElapsed(event, elapsedMs) : event;
+        if (status !== TOOL_STATUS_BACKGROUND_RUNNING) startIndexes?.shift();
+      } else {
+        // A trimmed history may no longer contain the action start. Only a
+        // structured action id is unique enough to settle its background row;
+        // legacy action+input keys can collide across repeated commands.
+        const canSettleTrimmedBackground = key.startsWith("id:");
+        const backgroundIndexes = canSettleTrimmedBackground
+          ? pendingBackgroundFinishes.get(key)
+          : undefined;
+        const backgroundIndex = backgroundIndexes?.[0];
+        if (status !== TOOL_STATUS_BACKGROUND_RUNNING && backgroundIndex !== undefined) {
+          visible[backgroundIndex] = event;
+          backgroundIndexes?.shift();
+        } else {
+          const index = visible.push(event) - 1;
+          if (canSettleTrimmedBackground && status === TOOL_STATUS_BACKGROUND_RUNNING) {
+            pendingBackgroundFinishes.set(key, [...(backgroundIndexes ?? []), index]);
+          }
+        }
+        if (backgroundIndexes?.length === 0) pendingBackgroundFinishes.delete(key);
       }
-      else visible.push(event);
-      if (indexes?.length === 0) pendingStarts.delete(key);
+      if (startIndexes?.length === 0) pendingStarts.delete(key);
       continue;
     }
     visible.push(event);
@@ -349,7 +468,7 @@ export function boundSessionHistory(session: Session): Session {
     messages: trimMessages(session.messages),
     turns: trimTurns(session.turns).map((turn) => ({
       ...turn,
-      events: turn.state === "restored" ? trimRestoredTurnEvents(turn.events) : trimTurnEvents(turn.events),
+      events: turn.events,
     })),
   };
 }
@@ -369,7 +488,7 @@ export function removePendingAttachment(session: Session, attachmentId: string):
 }
 
 export function upsertTurn(session: Session, incoming: WebTurn): Session {
-  const boundedIncoming = { ...incoming, events: trimTurnEvents(incoming.events) };
+  const boundedIncoming = incoming;
   const turns = trimTurns(session.turns.some((turn) => turn.turn_id === incoming.turn_id)
     ? session.turns.map((turn) => turn.turn_id === incoming.turn_id ? boundedIncoming : turn)
     : [...session.turns, boundedIncoming]);
@@ -381,29 +500,72 @@ export function upsertTurn(session: Session, incoming: WebTurn): Session {
   };
 }
 
+export function applyChatMessageDeleted(
+  session: Session,
+  turnId: string,
+  role: "user" | "assistant",
+  roleIndex: number,
+): Session {
+  const previous = session.turns.find((turn) => turn.turn_id === turnId);
+  if (!previous) return session;
+  const deleted = role === "user"
+    ? previous.user_entries[roleIndex] && {
+        text: previous.user_entries[roleIndex].text,
+        createdAtMs: previous.user_entries[roleIndex].created_at_ms,
+      }
+    : roleIndex === 0 && previous.final_answer
+      ? { text: previous.final_answer, createdAtMs: previous.created_at_ms }
+      : undefined;
+  const updatedTurn = role === "user"
+    ? { ...previous, user_entries: previous.user_entries.filter((_entry, index) => index !== roleIndex) }
+    : { ...previous, final_answer: null };
+  const updated = {
+    ...session,
+    turns: session.turns.map((turn) => turn.turn_id === turnId ? updatedTurn : turn),
+  };
+  if (!deleted) return updated;
+  let candidate = -1;
+  let candidateDistance = Number.POSITIVE_INFINITY;
+  updated.messages.forEach((message, index) => {
+    if (message.role !== role || message.text !== deleted.text) return;
+    const distance = Math.abs(message.created_at_ms - deleted.createdAtMs);
+    if (distance < candidateDistance) {
+      candidate = index;
+      candidateDistance = distance;
+    }
+  });
+  if (candidate < 0) return updated;
+  return {
+    ...updated,
+    messages: updated.messages.filter((_message, index) => index !== candidate),
+  };
+}
+
 export function prependHistoryRecords(session: Session, records: ChatHistoryRecord[]): Session {
   const historicalTurns = turnsFromHistoryRecords(records).map((turn) => ({
     ...turn,
-    events: trimRestoredTurnEvents(turn.events),
+    events: turn.events,
   }));
-  if (historicalTurns.length === 0) return session;
-  const existing = new Set(session.turns.map((turn) => turn.turn_id));
-  const earlier = historicalTurns.filter((turn) => !existing.has(turn.turn_id));
-  if (earlier.length === 0) return session;
+  const existingTurnIds = new Set(session.turns.map((turn) => turn.turn_id));
+  const earlier = historicalTurns.filter((turn) => !existingTurnIds.has(turn.turn_id));
   const earlierTurnIds = new Set(earlier.map((turn) => turn.turn_id));
+  const existingMessageIds = new Set(session.messages.map((message) => message.id));
+  const earlierMessages = messagesFromHistoryRecords(records.filter((record) => (
+    earlierTurnIds.has(record.turn_id)
+    || (record.type === "message" && record.role === "system" && record.kind === "runtime_restart")
+  ))).filter((message) => !existingMessageIds.has(message.id));
+  if (earlier.length === 0 && earlierMessages.length === 0) return session;
   return {
     ...session,
     turns: trimTurns([...earlier, ...session.turns]),
-    messages: trimMessages([
-      ...messagesFromHistoryRecords(records.filter((record) => earlierTurnIds.has(record.turn_id))),
-      ...session.messages,
-    ]),
+    messages: trimMessages([...earlierMessages, ...session.messages]),
   };
 }
 
 export function turnsFromHistoryRecords(records: ChatHistoryRecord[]): WebTurn[] {
   const turns = new Map<string, WebTurn>();
   for (const record of records) {
+    if (record.type === "message" && record.role === "system") continue;
     const turn = turns.get(record.turn_id) ?? {
       turn_id: record.turn_id,
       state: "restored",
@@ -444,10 +606,13 @@ export function turnsFromHistoryRecords(records: ChatHistoryRecord[]): WebTurn[]
     .sort((left, right) => left.created_at_ms - right.created_at_ms);
 }
 
-type ChatMessageHistoryRecord = Extract<ChatHistoryRecord, { type: "message" }> & { role: "user" | "assistant" };
+type ChatMessageHistoryRecord = Extract<ChatHistoryRecord, { type: "message" }>;
 
 function isChatMessageHistoryRecord(record: ChatHistoryRecord): record is ChatMessageHistoryRecord {
-  return record.type === "message" && (record.role === "user" || record.role === "assistant");
+  return record.type === "message"
+    && (record.role === "user"
+      || record.role === "assistant"
+      || (record.role === "system" && record.kind === "runtime_restart"));
 }
 
 function messagesFromHistoryRecords(records: ChatHistoryRecord[]): ChatMessage[] {
@@ -459,7 +624,19 @@ function messagesFromHistoryRecords(records: ChatHistoryRecord[]): ChatMessage[]
       role: record.role,
       text: record.content,
       created_at_ms: record.created_at_ms,
+      kind: record.kind,
     }));
+}
+
+export function appendActivityToCurrentTurn(session: Session, activity: Activity): Session {
+  const turnId = session.active_turn_id ?? session.turns.at(-1)?.turn_id;
+  if (!turnId) return session;
+  return appendTurnEvent(session, turnId, {
+    event_id: activity.id,
+    source: "ui_activity",
+    payload: { ...activity, sessionId: session.session_id },
+    created_at_ms: activity.createdAt,
+  });
 }
 
 export function appendTurnEvent(session: Session, turnId: string | null | undefined, event: WebTurnEvent): Session {
@@ -473,7 +650,7 @@ export function appendTurnEvent(session: Session, turnId: string | null | undefi
   turns[turnIndex] = {
     ...target,
     final_answer: finalAnswerFromTurnEvent(session, event) ?? target.final_answer,
-    events: trimTurnEvents([...target.events, event]),
+    events: [...target.events, event],
   };
   return {
     ...session,
@@ -551,10 +728,14 @@ function aggregateSessionState(workers: Session["workers"], fallback: string) {
   return "ready";
 }
 
-export function turnLiveUsage(turn: WebTurn): { total: import("./protocol").UsageStats; latest: import("./protocol").UsageStats } | undefined {
+function turnLiveUsageSince(
+  turn: WebTurn,
+  createdAtOrAfterMs?: number,
+): { total: import("./protocol").UsageStats; latest: import("./protocol").UsageStats } | undefined {
   let latest: import("./protocol").UsageStats | undefined;
   const total: import("./protocol").UsageStats = {};
   for (const event of turn.events) {
+    if (createdAtOrAfterMs !== undefined && event.created_at_ms < createdAtOrAfterMs) continue;
     if (event.source !== "worker_activity" || event.payload.kind !== "model_response") continue;
     const usage = event.payload.usage;
     if (!usage || typeof usage !== "object") continue;
@@ -568,12 +749,32 @@ export function turnLiveUsage(turn: WebTurn): { total: import("./protocol").Usag
   return latest ? { total, latest } : undefined;
 }
 
+export function turnLiveUsage(turn: WebTurn): { total: import("./protocol").UsageStats; latest: import("./protocol").UsageStats } | undefined {
+  return turnLiveUsageSince(turn);
+}
+
 export function sessionContextUsage(session: Session): import("./protocol").UsageStats | undefined {
+  const runtimeRestartAtMs = session.messages.reduce<number | undefined>((latest, message) => (
+    message.role === "system"
+      && message.kind === "runtime_restart"
+      && (latest === undefined || message.created_at_ms > latest)
+      ? message.created_at_ms
+      : latest
+  ), undefined);
+
   for (let index = session.turns.length - 1; index >= 0; index -= 1) {
     const turn = session.turns[index];
     if (turn.state === "restored") continue;
-    const live = turnLiveUsage(turn);
+
+    // A restarted host restores historical turns for display, but Core starts
+    // with a fresh context. Only model responses emitted by the new runtime
+    // instance may refill the context meter.
+    const live = turnLiveUsageSince(turn, runtimeRestartAtMs);
     if (live) return live.latest;
+
+    // Completion telemetry has no independent timestamp. It is safe only when
+    // the whole turn began after the latest runtime restart boundary.
+    if (runtimeRestartAtMs !== undefined && turn.created_at_ms < runtimeRestartAtMs) continue;
     const latest = turn.completion?.latest_usage;
     if (latest) return latest;
   }
@@ -741,22 +942,165 @@ export function attachTurnCompletion(
   return updated ? { ...session, state, messages } : { ...session, state };
 }
 
+function protocolRepairDisplayReason(payload: Record<string, unknown>): string {
+  const issue = typeof payload.issue === "string" ? payload.issue : "";
+  const knownReasons: Record<string, string> = {
+    xml_recovered_final_answer_requires_retry:
+      "回复根节点外包含了额外内容。系统虽然识别出了最终回答，但无法将它安全地视为完整响应，因此正在重新请求。",
+    invalid_xml:
+      "模型回复不是有效的 XML 协议消息，因此正在重新请求。",
+    invalid_xml_response_root:
+      "回复没有使用唯一且完整的 response 根节点，因此正在重新请求。",
+    xml_response_root_missing:
+      "回复缺少必需的 response 根节点，因此正在重新请求。",
+    missing_response_root:
+      "回复缺少必需的 response 根节点，因此正在重新请求。",
+    xml_response_root_unclosed:
+      "回复的 response 根节点没有完整闭合，因此正在重新请求。",
+    xml_content_before_response:
+      "response 根节点前存在额外内容，因此正在重新请求。",
+    xml_content_after_response:
+      "response 根节点后存在额外内容，因此正在重新请求。",
+    empty_response:
+      "模型没有返回可解析的内容，因此正在重新请求。",
+    truncated_model_output:
+      "模型输出在完整响应生成前被截断，因此正在重新请求。",
+    finish_confirm_required_before_final_answer:
+      "最终回答前缺少协议要求的完成确认，因此正在重新请求。",
+    finish_confirm_prefix_invalid:
+      "最终回答前的完成确认格式不正确，因此正在重新请求。",
+  };
+  const knownReason = knownReasons[issue];
+  if (knownReason) return knownReason;
+
+  const reason = typeof payload.reason === "string" ? payload.reason.trim() : "";
+  return reason || "模型回复格式不符合当前协议要求，系统正在自动重新请求。";
+}
+
+export type ActiveModelRetryStatus = {
+  kind: "network-error" | "response-timeout" | "rate-limited" | "service-error" | "retrying";
+  label: string;
+  progress?: string;
+  detail: string;
+};
+
+type ModelSystemRetryDisplay = Pick<ActiveModelRetryStatus, "kind" | "label"> & {
+  summary: string;
+};
+
+function modelSystemRetryDisplay(error: string): ModelSystemRetryDisplay {
+  const normalized = error.toLowerCase();
+  if (normalized.startsWith("model_timeout") || normalized.includes("operation timed out") || normalized.includes("curl: (28)")) {
+    return {
+      kind: "response-timeout",
+      label: "响应超时",
+      summary: "模型服务在超时期限内没有返回新的响应数据，系统正在自动重试。",
+    };
+  }
+  if (normalized.startsWith("model_http_429")) {
+    return {
+      kind: "rate-limited",
+      label: "服务限流",
+      summary: "模型接入点返回限流错误，可能与请求频率、并发限制或额度有关；系统正在自动重试。",
+    };
+  }
+  if (/^model_http_(408|409|425|5\d\d)/.test(normalized)) {
+    return {
+      kind: "service-error",
+      label: "上游异常",
+      summary: "模型接入点或其上游服务返回可重试错误，系统正在自动重试。",
+    };
+  }
+  if (normalized.startsWith("model_network_error")
+    || normalized.startsWith("curl_failed")
+    || normalized.includes("curl:")
+    || normalized.includes("http2 framing")
+    || normalized.includes("connection reset")
+    || normalized.includes("could not resolve host")) {
+    return {
+      kind: "network-error",
+      label: "网络异常",
+      summary: "连接模型服务时发生网络异常，系统正在自动重连。",
+    };
+  }
+  return {
+    kind: "service-error",
+    label: "模型服务异常",
+    summary: "模型请求发生可重试错误，系统正在自动重试。",
+  };
+}
+
+function retryProgress(payload: Record<string, unknown>): string | undefined {
+  const attempt = typeof payload.attempt === "number" ? payload.attempt : undefined;
+  const maxAttempts = typeof payload.max_attempts === "number" ? payload.max_attempts : undefined;
+  if (attempt === undefined) return undefined;
+  return maxAttempts === undefined ? `第 ${attempt} 次` : `${attempt}/${maxAttempts}`;
+}
+
+export function activeModelRetryStatus(turn: WebTurn): ActiveModelRetryStatus | null {
+  if (turn.state !== "working") return null;
+
+  let status: ActiveModelRetryStatus | null = null;
+  for (const event of turn.events) {
+    if (event.source === "worker_activity") {
+      const kind = event.payload.kind;
+      if (kind === "model_request" || kind === "model_response") {
+        status = null;
+        continue;
+      }
+      if (kind !== "model_retry") continue;
+
+      const progress = retryProgress(event.payload);
+      const error = typeof event.payload.error === "string" ? event.payload.error.trim() : "";
+      const display = modelSystemRetryDisplay(error);
+      const delayMs = typeof event.payload.delay_ms === "number" ? event.payload.delay_ms : undefined;
+      const detail = [
+        display.summary,
+        progress ? `重试进度：${progress}` : "",
+        delayMs !== undefined ? `下次尝试：约 ${Math.ceil(delayMs / 1000)} 秒后` : "",
+        error ? `错误详情：${error}` : "",
+      ].filter(Boolean).join("\n\n");
+      status = { kind: display.kind, label: display.label, progress, detail };
+      continue;
+    }
+
+    if (event.source !== "core_topic") continue;
+    const topic = event.payload as unknown as CoreTopicEvent;
+    if (topic.topic?.name !== "core.model.repair") continue;
+
+    const progress = retryProgress(topic.payload);
+    status = {
+      kind: "retrying",
+      label: "retrying",
+      progress,
+      detail: [
+        "模型回复偏离当前响应协议，系统正在自动重新请求。",
+        progress ? `修复进度：${progress}` : "",
+        protocolRepairDisplayReason(topic.payload),
+      ].filter(Boolean).join("\n\n"),
+    };
+  }
+  return status;
+}
+
 export function activityFromTopic(event: CoreTopicEvent): Activity | null {
   const payload = event.payload;
   const label = (value: unknown) => typeof value === "string" ? value : "";
   switch (event.topic.name) {
     case "core.model.response": {
+      const finalAnswer = label(payload.final_answer).trim();
+      if (finalAnswer && payload.runtime_phase !== "toolgen") return null;
       const freeTalk = label(payload.free_talk);
       const progress = label(payload.progress);
       const detail = [freeTalk, progress].filter((text) => text.trim()).join("\n\n");
-      return detail ? { id: clientId(), sessionId: event.session_id, tone: "thinking", title: "", detail, createdAt: Date.now() } : null;
+      return detail ? { id: clientId(), sessionId: event.session_id, tone: "thinking", kind: "free_talk", title: "", detail, createdAt: Date.now() } : null;
     }
     case "core.model.repair":
-      return { id: clientId(), sessionId: event.session_id, tone: "warning", title: `⚠️ 模型回复偏离协议，重试 (${payload.attempt ?? 0}/${payload.max_attempts ?? 5})`, detail: label(payload.issue), createdAt: Date.now() };
+      return null;
     case "core.action": {
       const action = label(payload.action) || "action";
       const status = label(payload.status) || label(payload.event) || "running";
-      const statusText = displayToolStatus(status);
+      const statusText = humanizeToolStatus(status);
       const input = payload.input && typeof payload.input === "object" ? payload.input as Record<string, unknown> : undefined;
       const kind = payload.kind && typeof payload.kind === "object" ? payload.kind as Record<string, unknown> : undefined;
       const command = action === "run_bash"
@@ -780,15 +1124,23 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
     case "core.context.compact": {
       const before = typeof payload.estimated_before_tokens === "number" ? payload.estimated_before_tokens : undefined;
       const after = typeof payload.estimated_after_tokens === "number" ? payload.estimated_after_tokens : undefined;
+      const textBefore = typeof payload.estimated_text_before_tokens === "number" ? payload.estimated_text_before_tokens : undefined;
+      const textAfter = typeof payload.estimated_text_after_tokens === "number" ? payload.estimated_text_after_tokens : undefined;
+      const nativeBefore = typeof payload.estimated_native_before_tokens === "number" ? payload.estimated_native_before_tokens : undefined;
+      const nativeAfter = typeof payload.estimated_native_after_tokens === "number" ? payload.estimated_native_after_tokens : undefined;
       return {
         id: clientId(),
         sessionId: event.session_id,
         tone: "notice",
         kind: "context_compact",
-        title: "Context compacted",
-        detail: `${before ?? "?"} tokens → ${after ?? "?"} tokens`,
+        title: "Dynamic context compacted",
+        detail: `Dynamic context ${before ?? "?"} tokens → ${after ?? "?"} tokens`,
         before_tokens: before,
         after_tokens: after,
+        text_before_tokens: textBefore,
+        text_after_tokens: textAfter,
+        native_before_tokens: nativeBefore,
+        native_after_tokens: nativeAfter,
         createdAt: Date.now(),
       };
     }
@@ -831,14 +1183,8 @@ export function toolDisplayName(name: string) {
   if (name === "run_bash") return "Bash";
   if (name === "memmgr") return "MemMgr";
   if (name === "capmgr") return "CapMgr";
-  if (name === "self_tool") return "Self tool";
+  if (name === "self_tool") return "Self Tool";
   return name;
-}
-
-function displayToolStatus(status: string) {
-  if (status === "background_running") return "background running";
-  if (status === "timeout") return "timed out";
-  return status.replaceAll("_", " ");
 }
 
 function formatToolArguments(input: Record<string, unknown> | undefined) {

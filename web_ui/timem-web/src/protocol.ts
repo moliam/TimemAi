@@ -1,8 +1,9 @@
 export type ChatMessage = {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   text: string;
   created_at_ms: number;
+  kind?: string;
   completion?: TurnCompletion;
 };
 
@@ -66,12 +67,19 @@ export type ToolDetail = {
   files: Array<{ path: string; bytes: number }>;
 };
 
+export type WorkerRole = { id: string; name: string; description: string };
+export type WorkerRoleGroup = { id: string; name: string; role_ids: string[] };
+export type WorkerRoleLibrary = { roles: WorkerRole[]; groups: WorkerRoleGroup[] };
+export type SessionGroup = { id: string; name: string };
+
 export type Session = {
   session_id: string;
   display_name: string;
+  group_id?: string | null;
   ordinal: number;
   state: "ready" | "working" | "error" | "stopped" | string;
   current_dir: string;
+  debug_dir?: string | null;
   max_llm_input_tokens: number;
   tools: ToolSummary[];
   mcp_server_ids: string[];
@@ -83,6 +91,8 @@ export type Session = {
     timeout_secs: number;
     max_llm_input_tokens: number;
     max_llm_output_tokens: number;
+    stream: boolean;
+    max_rounds: string;
     bash_approval: string;
     work_instructions: string;
     api_key_configured: boolean;
@@ -92,6 +102,7 @@ export type Session = {
   active_context_id: string;
   primary_worker_id: string;
   attachments: Attachment[];
+  roles: WorkerRole[];
   messages: ChatMessage[];
   turns: WebTurn[];
   history_before_cursor?: string | null;
@@ -125,6 +136,7 @@ export type SessionWorker = {
   worker_id: string;
   context_id: string;
   display_name: string;
+  group_id?: string | null;
   ordinal: number;
   state: "ready" | "working" | "error" | "stopped" | string;
   parent_worker_id?: string | null;
@@ -140,7 +152,7 @@ export type WebTurn = {
   completion?: TurnCompletion | null;
 };
 
-export type WebTurnUserEntry = { kind: "task" | "supplement" | "approval" | string; text: string; attachments?: Attachment[]; created_at_ms: number };
+export type WebTurnUserEntry = { kind: "task" | "supplement" | "approval" | string; text: string; attachments?: Attachment[]; worker_roles?: WorkerRole[]; /** Legacy history compatibility. */ worker_role?: WorkerRole; created_at_ms: number };
 export type WebTurnEvent = { event_id: string; source: "core_topic" | "worker_activity" | string; payload: Record<string, unknown>; created_at_ms: number };
 
 export type Attachment = { id: string; name: string; path: string; bytes: number };
@@ -169,10 +181,14 @@ export type Activity = {
   tool_name?: string;
   tool_status?: string;
   elapsed_ms?: number;
-  kind?: "context_compact" | "toolgen";
+  kind?: "context_compact" | "toolgen" | "free_talk" | "user_supplement";
   toolgen_phase?: string;
   before_tokens?: number;
   after_tokens?: number;
+  text_before_tokens?: number;
+  text_after_tokens?: number;
+  native_before_tokens?: number;
+  native_after_tokens?: number;
   createdAt: number;
 };
 
@@ -181,6 +197,20 @@ export type Decision = {
   turnId?: string;
   title: string;
   detail: string;
+};
+
+export type ModelEndpoint = {
+  id: string;
+  name: string;
+  model: string;
+  api_protocol: string;
+  response_protocol: string;
+  base_url: string;
+  max_llm_input_tokens: number;
+  max_llm_output_tokens: number;
+  stream: boolean;
+  api_key_configured: boolean;
+  http_headers: Record<string, string>;
 };
 
 export type Snapshot = {
@@ -195,13 +225,17 @@ export type Snapshot = {
       data_dir: string;
       space_dir: string;
       memory_dir: string;
+      temporary_retention_days: 1 | 5 | 10 | null;
     };
     runtime_options: Array<{ key: string; value: string; applies_to: "new_sessions" | string }>;
     session_env_defaults: Record<string, string>;
     workspace_dirs: string[];
     mcp_servers: McpServerReport[];
+    model_endpoints: ModelEndpoint[];
   };
   sessions: Session[];
+  role_library: WorkerRoleLibrary;
+  session_groups: SessionGroup[];
 };
 
 export type WireEvent =
@@ -211,15 +245,23 @@ export type WireEvent =
   | { type: "session_created"; session: Session }
   | { type: "session_renamed"; session_id: string; display_name: string }
   | { type: "session_deleted"; session_id: string }
+  | { type: "session_groups_updated"; groups: SessionGroup[] }
+  | { type: "session_group_changed"; session_id: string; group_id?: string | null }
+  | { type: "worker_roles_updated"; session_id: string; roles: WorkerRole[] }
+  | { type: "worker_role_library_updated"; library: WorkerRoleLibrary; command_id?: string }
+  | { type: "chat_message_deleted"; session_id: string; turn_id: string; role: "user" | "assistant"; role_index: number }
   | { type: "session_runtime_updated"; session_id: string; runtime_profile: NonNullable<Session["runtime_profile"]> }
   | { type: "session_runtime_config_updated"; session_id: string; key: string; value: string; runtime_profile: NonNullable<Session["runtime_profile"]> }
   | { type: "session_api_key_revealed"; session_id: string; api_key: string }
   | { type: "core_topic"; turn_id?: string | null; turn_event_id?: string | null; event: CoreTopicEvent }
   | { type: "worker_activity"; session_id: string; context_id: string; worker_id: string; turn_id?: string | null; turn_event_id?: string | null; event: Record<string, unknown> }
   | { type: "turn_finished"; session_id: string; turn_id?: string | null; outcome: { text?: string; message_id?: string | null; completion?: TurnCompletion } }
+  | { type: "turn_started"; session_id: string; context_id: string; worker_id: string; turn: WebTurn }
   | { type: "turn_updated"; session_id: string; turn: WebTurn }
   | { type: "host_error"; message: string }
+  | { type: "runtime_notice"; session_id: string; level: "notice" | "warning" | "error" | string; title: string; message: string }
   | { type: "host_config_updated"; key: string; value: string; session_env_defaults: Record<string, string> }
+  | { type: "mem_settings_updated"; temporary_retention_days: 1 | 5 | 10 | null }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
   | { type: "attachment_removed"; session_id: string; attachment_id: string }
   | { type: "history_page"; session_id: string; records: ChatHistoryRecord[]; before_cursor?: string | null; has_more: boolean }
@@ -227,17 +269,32 @@ export type WireEvent =
   | { type: "tool_repo_search_result"; session_id: string; query: string; tools: ToolSummary[] }
   | { type: "tool_repo_detail"; session_id: string; detail: ToolDetail }
   | { type: "mcp_updated"; session_id?: string | null; servers: McpServerReport[]; enabled_server_ids: string[] }
-  | { type: "mcp_server_secrets_revealed"; server_id: string; values: Record<string, string> };
+  | { type: "mcp_server_secrets_revealed"; server_id: string; values: Record<string, string> }
+  | { type: "model_endpoints_updated"; endpoints: ModelEndpoint[] }
+  | { type: "model_endpoint_secret_revealed"; endpoint_id: string; api_key: string; http_headers: Record<string, string> };
 
 export type ClientCommand =
   | { type: "session_create"; display_name?: string; workspace_dir?: string; env?: Record<string, string> }
   | { type: "session_rename"; session_id: string; display_name: string }
+  | { type: "session_group_create"; name: string }
+  | { type: "session_group_update"; group_id: string; name: string }
+  | { type: "session_group_delete"; group_id: string }
+  | { type: "session_groups_reorder"; groups: SessionGroup[] }
+  | { type: "session_group_move"; session_id: string; group_id?: string | null }
   | { type: "session_api_key_update"; session_id: string; api_key: string }
   | { type: "session_api_key_reveal"; session_id: string }
   | { type: "session_stop"; session_id: string }
   | { type: "session_delete"; session_id: string }
-  | { type: "turn_submit"; session_id: string; text: string; input_kind?: "toolgen"; source_turn_id?: string }
-  | { type: "turn_supplement"; session_id: string; text: string }
+  | { type: "chat_message_delete"; session_id: string; turn_id: string; role: "user" | "assistant"; role_index: number }
+  | { type: "worker_role_create"; session_id: string; role_id?: string; name: string; description: string }
+  | { type: "worker_role_update"; session_id: string; role_id: string; name: string; description: string }
+  | { type: "worker_role_delete"; session_id: string; role_id: string }
+  | { type: "worker_role_group_create"; session_id: string; name: string }
+  | { type: "worker_role_group_update"; session_id: string; group_id: string; name: string }
+  | { type: "worker_role_group_delete"; session_id: string; group_id: string }
+  | { type: "worker_role_library_reorder"; session_id: string; groups: WorkerRoleGroup[]; ungrouped_role_ids: string[] }
+  | { type: "turn_submit"; session_id: string; text: string; attachment_ids?: string[]; role_ids?: string[]; input_kind?: "toolgen"; source_turn_id?: string }
+  | { type: "turn_supplement"; session_id: string; text: string; attachment_ids?: string[]; role_ids?: string[] }
   | { type: "turn_cancel"; session_id: string }
   | { type: "attachment_remove"; session_id: string; attachment_id: string }
   | { type: "history_page"; session_id: string; before_cursor?: string | null; /** Maximum complete tasks (turns), not JSONL records. */ limit?: number }
@@ -247,12 +304,17 @@ export type ClientCommand =
   | { type: "tool_repo_open_terminal"; session_id: string; tool_id: string }
   | { type: "runtime_update"; key: string; value: string }
   | { type: "session_runtime_update"; session_id: string; key: string; value: string }
+  | { type: "model_endpoint_upsert"; endpoint: { id?: string; name: string; model: string; api_protocol: string; response_protocol: string; base_url: string; max_llm_input_tokens: number; max_llm_output_tokens: number; stream: boolean; api_key?: string; http_headers: Record<string, string> } }
+  | { type: "model_endpoint_delete"; endpoint_id: string }
+  | { type: "model_endpoint_apply"; session_id: string; endpoint_id: string }
+  | { type: "model_endpoint_secret_reveal"; endpoint_id: string }
   | { type: "mcp_server_upsert"; session_id: string; config: McpServerConfig }
   | { type: "mcp_server_delete"; server_id: string }
   | { type: "mcp_session_toggle"; session_id: string; server_id: string; enabled: boolean }
   | { type: "mcp_server_reconnect"; session_id: string; server_id: string }
   | { type: "mcp_server_secrets_reveal"; server_id: string }
   | { type: "mem_switch"; path: string }
+  | { type: "mem_temporary_retention_update"; days: 1 | 5 | 10 | null }
   | {
       type: "topic_reply";
       session_id: string;

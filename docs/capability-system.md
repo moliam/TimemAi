@@ -25,8 +25,10 @@ builtin resources/capabilities/tools/{tool}.yaml + {tool}.rs
 optional TIMEM_CAPABILITIES_DIR overlay
         ↓ load at runtime
 CapabilityRegistry
-        ↓ render
-{{TOOL_CATALOG}} / {{SKILL_HEADERS}} in the Markdown static prompt
+        ↓ render by interaction mode
+inline: builtin/overlay catalog in Static + persistent MCP update deltas
+native: builtin/overlay descriptions in Static; builtin schemas plus current MCP
+        descriptions/schemas in API tools
         ↓ generic parse
 parse model next_actions action/intent/args
         ↓ resolve binding
@@ -34,6 +36,23 @@ ExecutorTarget
         ↓ dispatch
 paired builtin tool callback or overlay command
 ```
+
+MCP tools are deliberately excluded from the inline Static catalog: a Session
+can enable, disable, or reconnect an MCP server between requests. Initial
+enablement and definition/instruction changes append canonical JSON catalogs to
+ordinary persistent prompt deltas for inline rendering. In native mode those
+inline-only slices are filtered from messages. Stable builtin descriptions are
+rendered into the static system prompt, while builtin API tool entries retain
+only their names and input schemas. Current MCP definitions form the dynamic
+portion of the provider API tool list, with each MCP description, schema, and
+server instructions kept together there. Disabling MCP removes those definitions from
+the next API tools field without injecting an enable/disable RUNTIME notice.
+Historical inline deltas remain immutable and become visible again if the
+session switches back to inline mode.
+Prompt updates are keyed to the model-visible definitions rather than the raw
+server configuration. Runtime-only changes such as transport, timeout, endpoint,
+headers, credentials, or display metadata do not consume prompt context when the
+callable names, descriptions, input schemas, and server instructions are unchanged.
 
 The manifest is the human-maintained source for:
 
@@ -50,13 +69,34 @@ The manifest is the human-maintained source for:
 - enum field constraints derived from property `enum` values
 - examples
 
+The complete standard JSON Schema document is retained for native provider
+requests, including nested and top-level `oneOf`/`allOf`, numeric and collection
+bounds, patterns, and `additionalProperties`. Timem's `x-required-*` extensions
+are removed from the provider payload and translated to standard conditional
+schema clauses. Provider generation avoids emitting an additional any-of clause
+when every branch of an existing sibling `oneOf` already requires a member of
+the same `x-required-any` group. The optimization pass is recursive, so the same
+rule applies to nested object schemas. This keeps runtime validation metadata as the
+single manifest source without sending duplicate constraints to the model.
+MCP schemas follow the same lossless path instead of being reduced to only
+top-level properties. Native builtin descriptions in the static system prompt
+include valid argument-object examples (without the inline tool-name wrapper),
+while their API tool entries contain only names and schemas. Dynamic MCP API
+tool entries continue to contain descriptions and schemas together, so usage
+text must never refer to an example that is absent from both the static prompt
+and the dynamic API definition.
+Builtin manifests close their input objects when the paired runtime rejects
+unknown fields, and tool-specific schemas must encode the same mutually
+exclusive modes, required combinations, and numeric limits enforced by the
+paired Rust callback.
+
 Normal/background execution is part of the capability interface:
 
 - Built-in tools can own specialized lifecycle semantics when needed. `run_bash`
   keeps a dedicated path because it includes approval policy and local shell
   safety checks.
 - Command-bound registered tools run in normal mode by default. If their
-  YAML declares `background` or `mode=background` in `input_schema`, core may
+  YAML declares `background` in `input_schema`, core may
   start the command as a background `tool_job`, persist its status under the
   runtime memory directory, and return a `job_id`.
 - Background command-bound tools are checked or cancelled through
@@ -74,6 +114,11 @@ Normal/background execution is part of the capability interface:
   bounds each individual check command. The model owns the check command; core
   owns the fixed success condition, interval/timeout bounds, cancellation
   checks, bounded output, approval, audit, and the structured action result.
+- The built-in `run_bash` manifest contains a host-environment placeholder.
+  During capability registration, core replaces it with the OS and `/bin/bash`
+  versions reported by the centralized `agent_core::os` interface. Detection is
+  cached for the process lifetime and degrades to `unknown` without leaving
+  template syntax in the model prompt.
 - Normal `run_bash` uses a positive model-provided `timeout_ms`. Core still owns
   the process and emits a structured host decision request after the
   long-command threshold, so a UI can render elapsed/remaining time and let the
@@ -94,12 +139,11 @@ errors become protocol repair before execution. Tool executors return natural
 language action results for runtime semantics such as storage conflicts, SQL
 safety failures, shell approval, missing files, timeouts, or invalid prompt
 references. A manifest can expose only capabilities with an existing binding.
-Built-in tools must document both input and output schema; runtime overlay
-tools may omit output schema while they are experimental.
-The IDL is intentionally data, not Rust code: the same `input_schema` and
-`output_schema` blocks drive generic runtime validation and are exposed by
-`capmgr op=load kind=tool`. The static prompt receives a shorter Markdown
-capability guide derived from the manifests, not a full schema dump.
+The `input_schema` is intentionally data, not Rust code: it drives generic
+model-action validation and is exposed by `capmgr op=load kind=tool`. Tool
+results remain executor-owned evidence described by `prompt_result`; manifests
+do not declare an unused output contract. The static prompt receives a shorter
+Markdown capability guide derived from the manifests, not a full schema dump.
 
 Built-in tools live as capability packages under
 `resources/capabilities/tools/`. Each package has a `{tool}.yaml` manifest and,
@@ -207,8 +251,6 @@ Current operations:
 - `list`: list capability headers
 - `load`: load a skill body or tool details into prompt context
 
-`inspect` currently aliases `load` for implemented kinds.
-
 Planned operations:
 
 - `resource`: load skill sub-documents, scratch records, workspace summaries,
@@ -226,24 +268,38 @@ the example capability root.
 
 ## `self_tool`
 
-`self_tool` exposes Timem runtime self-information to the model through the same
-manifest and executor path as other builtin tools. It is intentionally narrow:
+`self_tool` exposes Timem runtime self-information and prompt-context cwd
+control through three classes:
 
-- `type=env, op=read|write`: current process env only; API key/token variables
-  and secret/password-like variables are denied. Memory path env variables such
-  as `TIMEM_DATA_DIR` and `TIMEM_SPACE` are startup-only and writes are denied.
-- `type=mem_path, op=read`: current memory/audit paths.
-- `type=about_me, op=read`: software name, version, author/contact, project/star
-  info, summary, current process id, working directory, and executable path.
-- `type=cwd, op=read|chg_cwd`: current prompt context cwd. `chg_cwd` requires
-  `new_path`; relative paths resolve from the current prompt context cwd. Future
-  `run_bash` actions in that same prompt context execute from this cwd.
+- `type=path`: use for questions about where Timem runtime resources are. The
+  result returns the relevant known file and directory locations; the model may
+  then use normal `run_bash` policy if file contents are actually needed.
+- `type=cwd`: omit `new_path` to read the current prompt-context directory as
+  `CWD: ...` without changing state. Set `new_path` to an absolute path or a
+  path relative to the current prompt-context cwd to change it; on success the
+  result contains `CWD changed to: ...`. Later `run_bash` and `readfile` actions
+  use the canonical directory. Only a successful change adds
+  `context_state.cwd` to the action finish event so hosts can synchronize their
+  Session display.
+- `type=params`: use for questions about how the current Timem runtime is
+  configured. The result returns the relevant effective runtime values.
+
+API keys, tokens, passwords, secrets, credentials, and similarly named env
+values are excluded. `params` is an explicit allowlist and never dumps arbitrary
+Session environment entries; Base URL userinfo, query, and fragment data are
+redacted. `cwd` mutates prompt-context state only when `new_path` is supplied;
+`cwd` without it, `path`, and `params` remain read-only.
+
+Successful runtime configuration changes set one Core-side pending notice.
+Regardless of how many fields the user changes before the next interaction,
+the next model prompt receives exactly one SYSTEM component telling it to
+retrieve runtime parameters again when needed.
 
 Do not use `self_tool` for user memory, shell commands, project file edits, or
 model service model calls. Those remain owned by `memmgr`, `run_bash`, and the
 session runtime respectively. Future additions should stay within Timem runtime
-self-state, such as config inspection, workspace references, capability overlay
-status, or recent diagnostics.
+self-state. New inspection information belongs under `path` or `params`; cwd
+changes remain under `cwd` with `new_path`.
 
 ## Iteration Rule
 

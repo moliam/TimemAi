@@ -1,15 +1,18 @@
 use super::*;
+use crate::{NativeExchange, NativeToolChoice, NativeToolResult, ToolCallMode};
 
 fn config(api_protocol: ApiProtocol) -> ModelServiceConfig {
     ModelServiceConfig {
+        interaction: Default::default(),
         model: "test-model".to_string(),
         base_url: "https://example.invalid/v1".to_string(),
         api_key: "dummy".to_string(),
+        http_headers: Default::default(),
         timeout_secs: 1,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         api_protocol,
-        response_protocol: ResponseProtocolKind::Markdown,
+        response_protocol: ResponseProtocolKind::Json,
         openai_compatible: crate::OpenAiCompatibleOptions::default(),
     }
 }
@@ -32,6 +35,34 @@ fn model_service_defaults_are_protocol_based() {
 
     assert_eq!(default_api_protocol(), ApiProtocol::OpenAiCompatible);
     assert_eq!(default_model(), "qwen-plus");
+}
+
+#[test]
+fn custom_model_headers_override_protocol_defaults_case_insensitively() {
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config
+        .http_headers
+        .insert("authorization".to_string(), "Basic custom".to_string());
+    config
+        .http_headers
+        .insert("X-Tenant".to_string(), "tenant-one".to_string());
+    let request = prepare_model_http_request(&config, "hello");
+    assert!(request
+        .headers
+        .iter()
+        .any(|(name, value)| name == "Authorization" && value == "Basic custom"));
+    assert!(request
+        .headers
+        .iter()
+        .any(|(name, value)| name == "X-Tenant" && value == "tenant-one"));
+    assert_eq!(
+        request
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -59,6 +90,7 @@ fn model_and_base_url_defaults_do_not_require_service_identity() {
 #[test]
 fn openai_compatible_request_uses_messages_and_structured_output() {
     let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.openai_compatible.cache_mode = OpenAiCompatibleCacheMode::Ephemeral;
     config.model = "qwen-plus".to_string();
     config.max_llm_output_tokens = 2048;
     let body = build_model_request(
@@ -79,6 +111,76 @@ fn openai_compatible_request_uses_messages_and_structured_output() {
 }
 
 #[test]
+fn openai_compatible_cache_mode_auto_uses_server_side_prefix_caching_without_wire_marks() {
+    let config = config(ApiProtocol::OpenAiCompatible);
+    let body = build_model_request(
+        &config,
+        &[ModelPromptBlock {
+            role: ModelPromptRole::System,
+            text: "stable prefix".to_string(),
+            cache: ModelCacheControl::Ephemeral,
+        }],
+        StructuredOutputHint::None,
+    );
+
+    assert!(body["messages"][0].get("cache_control").is_none());
+    let prepared = prepare_model_request(
+        &config,
+        "[BEGIN SYSTEM PROMPT]\nstable prefix\n[END SYSTEM PROMPT]",
+    );
+    assert_eq!(prepared.cache_wire_mode, "auto");
+    assert_eq!(prepared.cache_mark_count, 0);
+    assert!(!prepared.cache_fallback);
+}
+
+#[test]
+fn openai_compatible_cache_mode_off_does_not_send_wire_marks() {
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.openai_compatible.cache_mode = OpenAiCompatibleCacheMode::Off;
+    let body = build_model_request(
+        &config,
+        &[ModelPromptBlock {
+            role: ModelPromptRole::System,
+            text: "stable prefix".to_string(),
+            cache: ModelCacheControl::Ephemeral,
+        }],
+        StructuredOutputHint::None,
+    );
+
+    assert!(body["messages"][0].get("cache_control").is_none());
+    let prepared = prepare_model_request(
+        &config,
+        "[BEGIN SYSTEM PROMPT]\nstable prefix\n[END SYSTEM PROMPT]",
+    );
+    assert_eq!(prepared.cache_wire_mode, "off");
+    assert_eq!(prepared.cache_mark_count, 0);
+}
+
+#[test]
+fn openai_compatible_cache_mode_ephemeral_sends_planned_wire_marks() {
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.openai_compatible.cache_mode = OpenAiCompatibleCacheMode::Ephemeral;
+    let prepared = prepare_model_request(
+        &config,
+        "[BEGIN SYSTEM PROMPT]\nstable prefix\n[END SYSTEM PROMPT]",
+    );
+
+    assert_eq!(
+        prepared.body["messages"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    assert_eq!(prepared.cache_wire_mode, "ephemeral");
+    let actual_mark_count = prepared.body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| message.get("cache_control").is_some())
+        .count();
+    assert!(actual_mark_count > 0);
+    assert_eq!(prepared.cache_mark_count, actual_mark_count);
+}
+
+#[test]
 fn openai_compatible_request_supports_official_thinking_stream_options() {
     let mut config = config(ApiProtocol::OpenAiCompatible);
     config.model = "ZHIPU/GLM-5.2".to_string();
@@ -86,6 +188,7 @@ fn openai_compatible_request_supports_official_thinking_stream_options() {
         enable_thinking: Some(true),
         reasoning_effort: Some("max".to_string()),
         stream: true,
+        cache_mode: OpenAiCompatibleCacheMode::Auto,
     };
 
     let body = build_model_request(
@@ -112,19 +215,6 @@ fn structured_output_strategy_is_response_and_api_protocol_specific() {
         plan_structured_output(&aliyun),
         StructuredOutputHint::JsonObject
     );
-
-    aliyun.response_protocol = ResponseProtocolKind::Markdown;
-    assert_eq!(plan_structured_output(&aliyun), StructuredOutputHint::None);
-    let markdown_body = build_model_request(
-        &aliyun,
-        &[ModelPromptBlock {
-            role: ModelPromptRole::System,
-            text: "The top-level response is Markdown, not JSON.".to_string(),
-            cache: ModelCacheControl::None,
-        }],
-        plan_structured_output(&aliyun),
-    );
-    assert!(markdown_body.get("response_format").is_none());
 
     aliyun.response_protocol = ResponseProtocolKind::Xml;
     assert_eq!(plan_structured_output(&aliyun), StructuredOutputHint::None);
@@ -195,28 +285,23 @@ fn anthropic_request_maps_cache_strategy_blocks_to_content_blocks() {
 }
 
 #[test]
-fn anthropic_request_sends_formatted_response_trailer_without_cache_control() {
+fn anthropic_request_sends_the_current_response_trailer_as_an_uncached_tail() {
     let config = config(ApiProtocol::Anthropic);
-    let prompt = format!(
-            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\n{}",
-            crate::prompt_render::formatted_response_trailer(
-                "one-root label <response>...</response>",
-                "Ai4",
-            )
-        );
+    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\nPlease continue the work and respond as protocol requires in user's language:";
 
-    let prepared = prepare_model_request(&config, &prompt);
+    let prepared = prepare_model_request(&config, prompt);
     let content = prepared.body["messages"][0]["content"].as_array().unwrap();
 
+    assert!(content.iter().any(|block| {
+        block["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("hello"))
+    }));
     assert_eq!(
         content.last().unwrap()["text"],
-        "Now please fulfill your response part like one-root label <response>...</response>:"
+        "Please continue the work and respond as protocol requires in user's language:"
     );
-    assert_eq!(content.last().unwrap().get("cache_control"), None);
-    assert!(!content[0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("Now please fulfill your response part"));
+    assert!(content.last().unwrap().get("cache_control").is_none());
 }
 
 #[test]
@@ -243,7 +328,8 @@ fn openai_responses_request_uses_official_shape() {
 
 #[test]
 fn openai_compatible_request_splits_static_and_dynamic_prompt() {
-    let config = config(ApiProtocol::OpenAiCompatible);
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.openai_compatible.cache_mode = OpenAiCompatibleCacheMode::Ephemeral;
     let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC_GLOBAL\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nsecret\n[END DELTA]";
 
     let prepared = prepare_model_request(&config, prompt);
@@ -264,6 +350,7 @@ fn openai_compatible_request_splits_static_and_dynamic_prompt() {
 fn openai_compatible_request_maps_cache_strategy_to_messages() {
     let mut config = config(ApiProtocol::OpenAiCompatible);
     config.model = "qwen-plus".to_string();
+    config.openai_compatible.cache_mode = OpenAiCompatibleCacheMode::Ephemeral;
     let mut prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n".to_string();
     for idx in 1..=5 {
         prompt.push_str(&format!(
@@ -293,28 +380,24 @@ fn openai_compatible_request_maps_cache_strategy_to_messages() {
 }
 
 #[test]
-fn openai_compatible_request_sends_formatted_response_trailer_without_cache_control() {
-    let config = config(ApiProtocol::OpenAiCompatible);
-    let prompt = format!(
-            "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\n{}",
-            crate::prompt_render::formatted_response_trailer(
-                "one Markdown response with one state branch",
-                "Ai9",
-            )
-        );
+fn openai_compatible_request_sends_the_current_response_trailer_as_an_uncached_tail() {
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.openai_compatible.cache_mode = OpenAiCompatibleCacheMode::Ephemeral;
+    let prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n[BEGIN DELTA]\ndelta_id: pd_1\n\n## USER\nhello\n[END DELTA]\n\nPlease continue the work and respond as protocol requires in user's language:";
 
-    let prepared = prepare_model_request(&config, &prompt);
+    let prepared = prepare_model_request(&config, prompt);
     let messages = prepared.body["messages"].as_array().unwrap();
 
+    assert!(messages.iter().any(|message| {
+        message["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("hello"))
+    }));
     assert_eq!(
         messages.last().unwrap()["content"],
-        "Now please fulfill your response part like one Markdown response with one state branch:"
+        "Please continue the work and respond as protocol requires in user's language:"
     );
-    assert_eq!(messages.last().unwrap().get("cache_control"), None);
-    assert!(!messages[messages.len() - 2]["content"]
-        .as_str()
-        .unwrap()
-        .contains("Now please fulfill your response part"));
+    assert!(messages.last().unwrap().get("cache_control").is_none());
 }
 
 #[test]
@@ -424,15 +507,15 @@ fn openai_compatible_sse_collects_content_and_usage_without_exposing_reasoning()
     let config = config(ApiProtocol::OpenAiCompatible);
     let body = concat!(
         "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"private plan\"},\"finish_reason\":null}]}\n\n",
-        "data: {\"choices\":[{\"delta\":{\"content\":\"<response>\"},\"finish_reason\":null}]}\n\n",
-        "data: {\"choices\":[{\"delta\":{\"content\":\"ok</response>\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"<ASSISTANT>\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok</ASSISTANT>\"},\"finish_reason\":\"stop\"}]}\n\n",
         "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":16,\"completion_tokens\":7,\"total_tokens\":23,\"completion_tokens_details\":{\"reasoning_tokens\":5}}}\n\n",
         "data: [DONE]\n",
     );
 
     let interpreted = interpret_model_http_response(&config, 200, body, "");
     let response = interpreted.result.unwrap();
-    assert_eq!(response.content, "<response>ok</response>");
+    assert_eq!(response.content, "<ASSISTANT>ok</ASSISTANT>");
     assert_eq!(response.usage.prompt_tokens, 16);
     assert_eq!(response.usage.completion_tokens, 7);
     assert_eq!(interpreted.raw_json["stream_metadata"]["event_count"], 4);
@@ -473,6 +556,9 @@ fn model_request_audit_event_is_redacted_and_ui_neutral() {
     assert_eq!(audit["endpoint"], config.endpoint());
     assert_eq!(audit["structured_output"], "json_object");
     assert!(audit["prompt_cache_plan"].is_array());
+    assert_eq!(audit["prompt_cache_wire"]["mode"], "auto");
+    assert_eq!(audit["prompt_cache_wire"]["mark_count"], 0);
+    assert_eq!(audit["prompt_cache_wire"]["fallback"], false);
     let audit_text = audit.to_string();
     assert!(audit_text.contains("***REDACTED***"));
     assert!(!audit_text.contains("sk-sensitive-token"));
@@ -498,6 +584,37 @@ fn model_response_audit_event_is_redacted() {
     let audit_text = audit.to_string();
     assert!(audit_text.contains("***REDACTED***"));
     assert!(!audit_text.contains("sk-sensitive-token"));
+}
+
+#[test]
+fn openai_compatible_response_counts_cache_creation_token_variants() {
+    for (details, top_level, expected) in [
+        (json!({"cached_creation_tokens": 321}), json!({}), 321),
+        (json!({"cache_creation_tokens": 654}), json!({}), 654),
+        (json!({}), json!({"cache_creation_input_tokens": 987}), 987),
+    ] {
+        let mut usage = json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 10,
+            "total_tokens": 1010,
+            "prompt_tokens_details": details,
+        });
+        for (key, value) in top_level.as_object().unwrap() {
+            usage[key] = value.clone();
+        }
+        let response = parse_model_response(
+            &config(ApiProtocol::OpenAiCompatible),
+            &json!({
+                "choices": [{
+                    "message": {"content": "ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": usage,
+            }),
+        )
+        .unwrap();
+        assert_eq!(response.usage.cache_created_tokens, expected);
+    }
 }
 
 #[test]
@@ -747,5 +864,209 @@ fn model_http_error_is_resilient_to_unusual_bodies() {
         let rendered = model_http_error_message(500, &body);
         assert!(rendered.starts_with("model_http_500"));
         assert!(rendered.len() < 280);
+    }
+}
+
+fn native_request() -> ModelInteractionRequest {
+    ModelInteractionRequest {
+        rendered_prompt: "SYSTEM PROMPT\n\n---USER---\ncount files".to_string(),
+        static_tool_count: 1,
+        tools: vec![ToolDefinition {
+            name: "count_lines".to_string(),
+            description: "Count source lines.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"language": {"type": "string"}},
+                "required": ["language"]
+            }),
+        }],
+        native_exchanges: Vec::new(),
+        resolved_mode: ToolCallMode::Native,
+        parallel_tool_calls: true,
+        tool_choice: NativeToolChoice::Auto,
+    }
+}
+
+#[test]
+fn native_tool_wires_are_provider_specific_and_parallel_is_explicit() {
+    let mut request = native_request();
+    request.tools.push(ToolDefinition {
+        name: "mcp_demo__search".to_string(),
+        description: "Dynamic MCP search.".to_string(),
+        input_schema: json!({"type": "object"}),
+    });
+    let chat_body =
+        prepare_model_interaction_http_request(&config(ApiProtocol::OpenAiCompatible), &request)
+            .model_request
+            .body;
+    assert_eq!(chat_body["parallel_tool_calls"], json!(true));
+    assert_eq!(chat_body["tools"][0]["function"]["name"], "count_lines");
+    assert!(chat_body["tools"][0]["function"]
+        .get("description")
+        .is_none());
+    assert!(chat_body["tools"][0]["function"]
+        .get("parameters")
+        .is_some());
+    assert_eq!(
+        chat_body["tools"][1]["function"]["description"],
+        "Dynamic MCP search."
+    );
+
+    let responses_body =
+        prepare_model_interaction_http_request(&config(ApiProtocol::OpenAiResponses), &request)
+            .model_request
+            .body;
+    assert_eq!(responses_body["tools"][0]["name"], "count_lines");
+    assert!(responses_body["tools"][0].get("description").is_none());
+    assert!(responses_body["tools"][0].get("parameters").is_some());
+    assert_eq!(
+        responses_body["tools"][1]["description"],
+        "Dynamic MCP search."
+    );
+    assert!(responses_body["input"].is_array());
+
+    let anthropic_body =
+        prepare_model_interaction_http_request(&config(ApiProtocol::Anthropic), &request)
+            .model_request
+            .body;
+    assert_eq!(anthropic_body["tools"][0]["name"], "count_lines");
+    assert!(anthropic_body["tools"][0].get("description").is_none());
+    assert!(anthropic_body["tools"][0].get("input_schema").is_some());
+    assert_eq!(
+        anthropic_body["tools"][1]["description"],
+        "Dynamic MCP search."
+    );
+    assert_eq!(
+        anthropic_body["tools"][0]["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+    assert_eq!(
+        anthropic_body["tool_choice"]["disable_parallel_tool_use"],
+        json!(false)
+    );
+}
+
+#[test]
+fn anthropic_native_cache_breakpoint_ends_at_static_builtin_tool_prefix() {
+    let mut request = native_request();
+    request.tools.push(ToolDefinition {
+        name: "mcp_demo__search".to_string(),
+        description: "Dynamic MCP search.".to_string(),
+        input_schema: json!({"type": "object"}),
+    });
+    let prepared =
+        prepare_model_interaction_http_request(&config(ApiProtocol::Anthropic), &request);
+    let tools = prepared.model_request.body["tools"].as_array().unwrap();
+    assert_eq!(tools[0]["name"], "count_lines");
+    assert_eq!(tools[0]["cache_control"], json!({"type": "ephemeral"}));
+    assert_eq!(tools[1]["name"], "mcp_demo__search");
+    assert_eq!(tools[1]["description"], "Dynamic MCP search.");
+    assert!(tools[1].get("input_schema").is_some());
+    assert!(tools[1].get("cache_control").is_none());
+    assert!(prepared.model_request.cache_mark_count >= 1);
+}
+
+#[test]
+fn openai_compatible_tool_calls_do_not_depend_on_finish_reason() {
+    let response = parse_model_response(
+        &config(ApiProtocol::OpenAiCompatible),
+        &json!({
+            "choices": [{
+                "message": {"content": null, "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "count_lines", "arguments": "{\"language\":\"Rust\"}"}
+                }]},
+                "finish_reason": "stop"
+            }],
+            "usage": {}
+        }),
+    )
+    .unwrap();
+    assert_eq!(response.tool_calls.len(), 1);
+    assert_eq!(response.tool_calls[0].arguments["language"], "Rust");
+}
+
+#[test]
+fn openai_compatible_sse_assembles_parallel_tool_arguments_by_index() {
+    let first = json!({"choices":[{"delta":{"tool_calls":[
+        {"index":0,"id":"a","function":{"name":"count_lines","arguments":"{\"lang\""}},
+        {"index":1,"id":"b","function":{"name":"count_lines","arguments":"{\"lang\""}}
+    ]}}]});
+    let second = json!({"choices":[{"delta":{"tool_calls":[
+        {"index":0,"function":{"arguments":":\"Rust\"}"}},
+        {"index":1,"function":{"arguments":":\"Go\"}"}}
+    ]},"finish_reason":"tool_calls"}],"usage":{}});
+    let body = format!("data: {first}\n\ndata: {second}\n\ndata: [DONE]\n");
+    let response =
+        interpret_model_http_response(&config(ApiProtocol::OpenAiCompatible), 200, &body, "")
+            .result
+            .unwrap();
+    assert_eq!(response.tool_calls.len(), 2);
+    assert_eq!(response.tool_calls[0].arguments["lang"], "Rust");
+    assert_eq!(response.tool_calls[1].arguments["lang"], "Go");
+}
+
+#[test]
+fn native_exchanges_follow_owning_delta_order_for_all_providers() {
+    let rendered_prompt = concat!(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n",
+        "[BEGIN DELTA delta_id: pd_1, time_ms: 1]\n\n## USER\nQ1\n",
+        "[BEGIN DELTA delta_id: pd_2, time_ms: 2]\n\n## USER\nQ2\n\n",
+        "Continue the work in the user's language. Call API tools when more evidence or actions are needed; otherwise give the final user-facing answer:"
+    ).to_string();
+    let exchange = |delta_id: &str, call_id: &str, result: &str| NativeExchange {
+        delta_id: delta_id.to_string(),
+        assistant_text: format!("work {call_id}"),
+        calls: vec![NativeToolCall {
+            id: call_id.to_string(),
+            name: "demo".to_string(),
+            arguments: json!({"id": call_id}),
+            raw_arguments: format!(r#"{{"id":"{call_id}"}}"#),
+        }],
+        results: vec![NativeToolResult {
+            call_id: call_id.to_string(),
+            name: "demo".to_string(),
+            content: result.to_string(),
+            is_error: false,
+        }],
+    };
+    let request = ModelInteractionRequest {
+        rendered_prompt,
+        static_tool_count: 0,
+        tools: Vec::new(),
+        native_exchanges: vec![
+            exchange("pd_1", "call_1", "R1"),
+            exchange("pd_2", "call_2", "R2"),
+        ],
+        resolved_mode: ToolCallMode::Native,
+        parallel_tool_calls: false,
+        tool_choice: NativeToolChoice::Auto,
+    };
+    for protocol in [
+        ApiProtocol::OpenAiCompatible,
+        ApiProtocol::OpenAiResponses,
+        ApiProtocol::Anthropic,
+    ] {
+        let body = prepare_model_interaction_http_request(&config(protocol), &request)
+            .model_request
+            .body;
+        let text = body.to_string();
+        assert!(
+            text.find("Q1").unwrap() < text.find("call_1").unwrap(),
+            "{protocol:?}: {text}"
+        );
+        assert!(
+            text.find("R1").unwrap() < text.find("Q2").unwrap(),
+            "{protocol:?}: {text}"
+        );
+        assert!(
+            text.find("Q2").unwrap() < text.find("call_2").unwrap(),
+            "{protocol:?}: {text}"
+        );
+        assert!(
+            text.find("R2").unwrap() < text.find("Continue the work").unwrap(),
+            "{protocol:?}: {text}"
+        );
     }
 }

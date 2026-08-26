@@ -7,6 +7,7 @@ fn builtin_registry_loads_manifest_tools() {
 
     assert!(registry.contains_tool("memmgr"));
     assert!(registry.contains_tool("capmgr"));
+    assert!(registry.contains_tool("readfile"));
     assert!(registry.contains_tool("run_bash"));
     assert!(!registry.contains_tool("shell_job_status"));
     assert!(registry.contains_tool("self_tool"));
@@ -22,6 +23,7 @@ fn host_profile_filters_local_command_capabilities() {
 
     assert!(registry.contains_tool("memmgr"));
     assert!(registry.contains_tool("capmgr"));
+    assert!(registry.contains_tool("readfile"));
     assert!(registry.contains_tool("self_tool"));
     assert!(!registry.contains_tool("run_bash"));
     assert!(!registry.contains_tool("shell_job_status"));
@@ -47,9 +49,49 @@ fn host_profile_can_enable_local_command_capabilities_without_shell_ui() {
         CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
 
     assert!(registry.contains_tool("run_bash"));
+    assert!(registry.contains_tool("readfile"));
     assert!(!registry.contains_tool("shell_job_status"));
     assert!(!registry.contains_tool("tool_job_status"));
     assert_eq!(registry.binding_name("run_bash"), Some("run_bash"));
+}
+
+#[test]
+fn run_bash_host_environment_placeholder_is_replaced() {
+    let description =
+        "`run_bash` runs locally ({{RUN_BASH_HOST_ENVIRONMENT}}) and returns evidence.";
+
+    let rendered =
+        replace_run_bash_host_environment(description, "OS: ExampleOS 1.2; Bash: 5.2.0-release");
+
+    assert_eq!(
+        rendered,
+        "`run_bash` runs locally (OS: ExampleOS 1.2; Bash: 5.2.0-release) and returns evidence."
+    );
+    assert!(!rendered.contains(RUN_BASH_HOST_ENVIRONMENT_PLACEHOLDER));
+}
+
+#[test]
+fn builtin_run_bash_description_includes_dynamic_os_and_bash_versions() {
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
+    let rendered = registry.render_tool_catalog_markdown();
+    let run_bash = rendered
+        .split("#### `run_bash`")
+        .nth(1)
+        .and_then(|tail| tail.split("\n#### `").next())
+        .expect("run_bash catalog section");
+
+    let os_version = crate::os::version().expect("local OS version should be detectable");
+    let bash_version = crate::os::bash_version().expect("/bin/bash version should be detectable");
+    let expected_environment = format!("(OS: {os_version}; Bash: {bash_version})");
+
+    assert!(run_bash.contains(&expected_environment), "{run_bash}");
+    assert!(!run_bash.contains("(OS: unknown"), "{run_bash}");
+    assert!(!run_bash.contains("; Bash: unknown"), "{run_bash}");
+    assert!(
+        !run_bash.contains(RUN_BASH_HOST_ENVIRONMENT_PLACEHOLDER),
+        "{run_bash}"
+    );
 }
 
 #[test]
@@ -58,7 +100,8 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     let rendered = registry.render_tool_catalog_markdown();
 
     assert!(rendered.contains("#### `memmgr`"));
-    assert!(rendered.contains("#### `capmgr`"));
+    assert!(!rendered.contains("#### `capmgr`"));
+    assert!(rendered.contains("#### `readfile`"));
     assert!(rendered.contains("#### `run_bash`"));
     assert!(!rendered.contains("#### `shell_job_status`"));
     assert!(!rendered.contains("#### `tool_job_status`"));
@@ -70,7 +113,17 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(rendered.contains("**Synopsis**"));
     assert!(rendered.contains("**Options**"));
     assert!(rendered.contains("Unified local memory manager"));
-    assert!(rendered.contains("Use when the user asks about Timem itself"));
+    assert!(rendered.contains("Read a bounded range from a normal text file"));
+    assert!(!rendered.contains("Byte numbers address the original"));
+    assert!(!rendered.contains("macOS and Linux"));
+    assert!(rendered.contains("Ask for path when you need to know where runtime resources are"));
+    assert!(rendered.contains("Use cwd without"));
+    assert!(rendered.contains("Ask for params when"));
+    assert!(rendered.contains("Allowed: `path`, `cwd`, `params`"));
+    assert!(rendered.contains("`new_path`:"));
+    assert!(rendered.contains("type=cwd"));
+    assert!(!rendered.contains("reminder_tips_file"));
+    assert!(!rendered.contains("max_llm_input_tokens"));
     assert!(rendered.contains("Conditional:"));
     assert!(rendered.contains("Use sql for durable reads"));
     assert!(!rendered.contains("durable: query|schema"));
@@ -85,20 +138,81 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(!rendered.contains("large_readback"));
     assert!(!rendered.contains("check_timeout_ms"));
     assert!(rendered.contains("`background`:"));
-    assert!(rendered.contains("Normal/Polling returns status and bounded output"));
+    assert!(rendered.contains("Normal/Polling captures status plus stdout/stderr"));
     assert!(rendered.contains("Background returns"));
     assert!(rendered.contains("Timeout command won't be killed automatically"));
     assert!(rendered.contains("`timeout_ms` is only how long Timem waits"));
     assert!(rendered.contains("It is not a kill deadline"));
-    assert!(rendered.contains("Use loop_cmd with interval_ms"));
+    assert!(rendered.contains("provide loop_cmd with interval_ms"));
     assert!(rendered.contains("`op`:"));
     assert!(rendered.contains("`kind`:"));
     assert!(rendered.contains("`id`:"));
-    assert!(rendered.contains("`inspect`"));
+    assert!(!rendered.contains("`inspect`"));
     assert!(rendered.contains("memory_conflict"));
     assert!(!rendered.contains("\"output\": {"));
     assert!(!rendered.contains("\"description\""));
     assert!(!rendered.contains("Background job id when background=true."));
+}
+
+#[test]
+fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
+    let registry = CapabilityRegistry::builtin();
+
+    let json = registry.render_tool_catalog_markdown_for_protocol("JSON");
+    let markdown = registry.render_tool_catalog_markdown_for_protocol("Markdown");
+    let xml = registry.render_tool_catalog_markdown_for_protocol("XML");
+
+    let json_action = r#"{"readfile":{"path":"src/main.rs","starter":{"line_nr":20},"ender":{"line_nr":80},"max_bytes":32768}}"#;
+    assert!(json.contains(json_action), "{json}");
+    assert!(markdown.contains(json_action), "{markdown}");
+    assert!(xml.contains("<readfile><path>src/main.rs</path><starter><line_nr>20</line_nr></starter><ender><line_nr>80</line_nr></ender><max_bytes>32768</max_bytes></readfile>"), "{xml}");
+    assert!(
+        !json.contains("It is supported on macOS and Linux."),
+        "{json}"
+    );
+    assert!(
+        !json.contains("`path` is required. `encoding` defaults to UTF-8"),
+        "{json}"
+    );
+    let readfile_catalog = json
+        .split("#### `readfile`")
+        .nth(1)
+        .and_then(|tail| tail.split("\n#### `").next())
+        .expect("readfile catalog section");
+    assert!(
+        readfile_catalog.contains("**Result**"),
+        "{readfile_catalog}"
+    );
+    assert!(
+        readfile_catalog.contains("If args do not match this tool spec"),
+        "{readfile_catalog}"
+    );
+    assert!(
+        xml.contains(
+            "<run_bash><cmd>git status --short</cmd><timeout_ms>5000</timeout_ms></run_bash>"
+        ),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("<self_tool><type>path</type></self_tool>"),
+        "{xml}"
+    );
+    assert!(!xml.contains(json_action), "{xml}");
+    assert!(!xml.contains("run_bash cmd=<shell_command>"), "{xml}");
+}
+
+#[test]
+fn tool_catalog_is_injected_for_the_active_protocol() {
+    let registry = CapabilityRegistry::builtin();
+
+    let tools_only = registry.enrich_static_prompt_for_protocol("{{TOOL_CATALOG}}", "XML");
+
+    assert!(tools_only.contains("#### `readfile`"), "{tools_only}");
+    assert!(
+        tools_only.contains("`<readfile><path>src/main.rs</path>"),
+        "{tools_only}"
+    );
+    assert!(!tools_only.contains("{{TOOL_CATALOG}}"));
 }
 
 #[test]
@@ -107,6 +221,7 @@ fn registry_exposes_executor_binding_names() {
 
     assert_eq!(registry.binding_name("memmgr"), Some("memmgr"));
     assert_eq!(registry.binding_name("capmgr"), Some("capmgr"));
+    assert_eq!(registry.binding_name("readfile"), Some("readfile"));
     assert_eq!(registry.binding_name("run_bash"), Some("run_bash"));
     assert_eq!(registry.binding_name("shell_job_status"), None);
     assert_eq!(registry.binding_name("tool_job_status"), None);
@@ -122,6 +237,25 @@ fn registry_validates_required_input_fields_from_manifest() {
         .validate_action_input("capmgr", &json_object([]))
         .unwrap_err()
         .contains("input.op_required"));
+    assert!(registry
+        .validate_action_input("readfile", &json_object([]))
+        .unwrap_err()
+        .contains("input.path_required"));
+    assert!(registry
+        .validate_action_input(
+            "self_tool",
+            &json_object([("type", Value::String("cwd".to_string()))]),
+        )
+        .is_ok());
+    assert!(registry
+        .validate_action_input(
+            "self_tool",
+            &json_object([
+                ("type", Value::String("cwd".to_string())),
+                ("new_path", Value::String(".".to_string())),
+            ]),
+        )
+        .is_ok());
     assert!(registry
         .validate_action_input(
             "memmgr",
@@ -236,23 +370,49 @@ fn registry_validates_required_input_fields_from_manifest() {
     assert!(registry
         .validate_action_input(
             "self_tool",
-            &json_object([
-                ("type", Value::String("env".to_string())),
-                ("op", Value::String("write".to_string())),
-                ("key", Value::String("TIMEM_TEST_FLAG".to_string())),
-            ])
+            &json_object([("type", Value::String("unknown".to_string()))])
         )
         .unwrap_err()
-        .contains("input.value_required_when_op=write"));
+        .contains("input.type_unsupported:unknown"));
     assert!(registry
         .validate_action_input(
             "self_tool",
             &json_object([
-                ("type", Value::String("mem_path".to_string())),
-                ("op", Value::String("read".to_string())),
+                ("type", Value::String("path".to_string())),
+                ("unexpected", Value::Bool(true)),
             ])
         )
+        .unwrap_err()
+        .contains("input.unexpected_unsupported"));
+    assert!(registry
+        .validate_action_input(
+            "self_tool",
+            &json_object([("type", Value::String("path".to_string()))])
+        )
         .is_ok());
+    assert!(registry
+        .validate_action_input(
+            "self_tool",
+            &json_object([("type", Value::String("params".to_string()))])
+        )
+        .is_ok());
+    assert!(registry
+        .validate_action_input(
+            "self_tool",
+            &json_object([
+                ("type", Value::String("params".to_string())),
+                ("unexpected", Value::String("value".to_string())),
+            ])
+        )
+        .unwrap_err()
+        .contains("input.unexpected_unsupported"));
+    assert!(registry
+        .validate_action_input(
+            "self_tool",
+            &json_object([("type", Value::String("runtime".to_string()))])
+        )
+        .unwrap_err()
+        .contains("input.type_unsupported:runtime"));
     assert!(registry
         .validate_action_input(
             "run_bash",
@@ -293,12 +453,12 @@ fn registry_validates_required_input_fields_from_manifest() {
         .validate_action_input(
             "capmgr",
             &json_object([
-                ("op", Value::String("inspect".to_string())),
+                ("op", Value::String("load".to_string())),
                 ("kind", Value::String("skill".to_string())),
             ])
         )
         .unwrap_err()
-        .contains("input.id_required_when_op=inspect"));
+        .contains("input.id_required_when_op=load"));
     assert!(registry
         .validate_action_input(
             "capmgr",
@@ -345,6 +505,7 @@ fn registry_derives_validation_rules_from_json_schema_idl() {
         .expect("capmgr op enum");
     assert!(op_enum.contains(&Value::String("list".to_string())));
     assert!(op_enum.contains(&Value::String("load".to_string())));
+    assert!(!op_enum.contains(&Value::String("inspect".to_string())));
     assert!(capmgr
         .get("required_when")
         .and_then(Value::as_array)
@@ -359,16 +520,16 @@ fn registry_derives_validation_rules_from_json_schema_idl() {
     assert!(registry
         .validate_action_input(
             "capmgr",
-            &json_object([("op", Value::String("inspect".to_string()))])
+            &json_object([("op", Value::String("unknown".to_string()))])
         )
         .unwrap_err()
-        .contains("input.kind_required_when_op=inspect"));
+        .contains("input.op_unsupported:unknown"));
     assert!(registry
         .validate_action_input(
             "run_bash",
             &json_object([
                 ("cmd", Value::String("pwd".to_string())),
-                ("mode", Value::String("normal".to_string())),
+                ("background", Value::Bool(false)),
             ])
         )
         .is_ok());
@@ -377,35 +538,23 @@ fn registry_derives_validation_rules_from_json_schema_idl() {
             "run_bash",
             &json_object([
                 ("cmd", Value::String("pwd".to_string())),
-                ("mode", Value::String("foreground".to_string())),
+                ("unexpected", Value::String("foreground".to_string())),
             ])
         )
         .unwrap_err()
-        .contains("input.mode_unsupported:foreground"));
-    assert!(registry
-        .validate_action_input(
-            "run_bash",
-            &json_object([
-                ("cmd", Value::String("pwd".to_string())),
-                ("mode", Value::String("daemon".to_string())),
-            ])
-        )
-        .unwrap_err()
-        .contains("input.mode_unsupported:daemon"));
+        .contains("input.unexpected_unsupported"));
 }
 
 #[test]
 fn registry_enriches_static_prompt_tool_catalog() {
     let registry = CapabilityRegistry::builtin();
-    let enriched =
-        registry.enrich_static_prompt("## Tools\n{{TOOL_CATALOG}}\n## Skills\n{{SKILL_HEADERS}}");
+    let enriched = registry.enrich_static_prompt("## Tools\n{{TOOL_CATALOG}}");
 
     assert!(enriched.contains("#### `memmgr`"));
     assert!(!enriched.contains("\"release_quality_gate\""));
     assert!(enriched.contains("#### `run_bash`"));
-    assert!(enriched.contains("No optional skills are currently loaded."));
+    assert!(!enriched.contains("No optional skills are currently loaded."));
     assert!(!enriched.contains("{{TOOL_CATALOG}}"));
-    assert!(!enriched.contains("{{SKILL_HEADERS}}"));
 }
 
 #[test]
@@ -448,8 +597,8 @@ fn run_bash_idl_uses_cmd_loop_cmd_without_removed_expect_fields() {
     }));
 
     let prompt = registry.render_tool_catalog_markdown();
-    assert!(prompt.contains("run_bash cmd=<shell_command>"));
-    assert!(prompt.contains("run_bash loop_cmd=<check_command>"));
+    assert!(prompt.contains(r#"{"run_bash":{"cmd":"git status --short","timeout_ms":5000}}"#));
+    assert!(prompt.contains(r#"{"run_bash":{"loop_cmd":"test -f build/done""#));
     assert!(prompt.contains("loop_timeout_ms"));
     assert!(prompt.contains("once_timeout_ms"));
     assert!(!prompt.contains("check_timeout_ms"));
@@ -477,7 +626,7 @@ fn capmgr_can_list_and_load_skill_content() {
     assert!(loaded_tool.contains("manual:"));
     assert!(loaded_tool.contains("#### `run_bash`"));
     assert!(loaded_tool.contains("**Options**"));
-    assert!(loaded_tool.contains("run_bash cmd=<shell_command>"));
+    assert!(loaded_tool.contains(r#"{"run_bash":{"cmd":"git status --short","timeout_ms":5000}}"#));
     assert!(!loaded_tool.contains("read_back_command"));
     assert!(!loaded_tool.contains("large_readback"));
     assert!(!loaded_tool.contains("expect_timeout_ms"));
@@ -689,16 +838,13 @@ description: |
   Runtime-added test tool {i} for capability registry stress coverage.
 input_properties:
   type: string
-  op: string
 required:
   - type
-  - op
 example_json: |
   {{
     "action": "overlay_tool_{i:03}",
     "args": {{
-      "type": "about_me",
-      "op": "read"
+      "type": "path"
     }}
   }}
 "#
@@ -742,10 +888,7 @@ when_to_use: |
     assert!(registry
         .validate_action_input(
             "overlay_tool_079",
-            &json_object([
-                ("type", Value::String("about_me".to_string())),
-                ("op", Value::String("read".to_string())),
-            ])
+            &json_object([("type", Value::String("path".to_string()))])
         )
         .is_ok());
     let rendered = registry.render_tool_catalog_markdown();
@@ -794,6 +937,123 @@ example_json: |
 
     let err = CapabilityRegistry::builtin_with_overlay_dir(&dir).unwrap_err();
     assert!(err.contains("ghost:unsupported_builtin_binding"));
+}
+
+#[test]
+fn native_tool_schemas_use_gateway_compatible_single_value_enums() {
+    let registry = CapabilityRegistry::builtin();
+    let tools = registry.native_tool_definitions();
+    for tool in &tools {
+        let schema = serde_json::to_string(&tool.input_schema).unwrap();
+        assert!(
+            !schema.contains("\"const\":"),
+            "native schema for {} contains unsupported const: {schema}",
+            tool.name
+        );
+        assert!(
+            tool.description.contains("Valid argument examples:"),
+            "{} native description must carry self-contained examples",
+            tool.name
+        );
+        assert!(
+            !tool.description.contains(&format!("{{\"{}\":", tool.name)),
+            "{} native examples must contain arguments, not the inline tool wrapper",
+            tool.name
+        );
+    }
+    let memmgr = tools.iter().find(|tool| tool.name == "memmgr").unwrap();
+    let condition = memmgr.input_schema["allOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|rule| rule.get("if"))
+        .find(|condition| condition["required"] == serde_json::json!(["op", "type"]))
+        .expect("combined memmgr type/op condition");
+    assert!(condition.get("properties").is_some());
+    assert_eq!(condition["required"], serde_json::json!(["op", "type"]));
+}
+
+#[test]
+fn native_schema_generation_avoids_redundant_required_any_expansion() {
+    let tools = CapabilityRegistry::builtin().native_tool_definitions();
+    let run_bash = tools.iter().find(|tool| tool.name == "run_bash").unwrap();
+
+    assert_eq!(
+        run_bash.input_schema["oneOf"],
+        serde_json::json!([
+            {"required": ["cmd"]},
+            {"required": ["loop_cmd"]}
+        ])
+    );
+    assert!(run_bash.input_schema["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|branch| branch.get("not").is_none()));
+    assert!(run_bash.input_schema["allOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|rule| rule.get("anyOf").is_none()));
+
+    let compact = tools
+        .iter()
+        .find(|tool| tool.name == "context_compact")
+        .unwrap();
+    assert!(compact.input_schema["allOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule.get("anyOf").is_some()));
+}
+
+#[test]
+fn builtin_native_schemas_preserve_runtime_constraints_and_argument_examples() {
+    let tools = CapabilityRegistry::builtin().native_tool_definitions();
+    for tool in &tools {
+        assert_eq!(
+            tool.input_schema["additionalProperties"],
+            Value::Bool(false),
+            "{} must reject undeclared fields like the builtin runtime",
+            tool.name
+        );
+    }
+
+    let readfile = tools.iter().find(|tool| tool.name == "readfile").unwrap();
+    let starter = &readfile.input_schema["properties"]["starter"];
+    assert_eq!(starter["minProperties"], 1);
+    assert_eq!(starter["maxProperties"], 1);
+    assert_eq!(starter["additionalProperties"], false);
+    assert_eq!(starter["oneOf"].as_array().unwrap().len(), 3);
+    assert_eq!(starter["properties"]["line_nr"]["minimum"], 1);
+    assert_eq!(starter["properties"]["byte_nr"]["minimum"], 0);
+    assert_eq!(
+        readfile.input_schema["properties"]["max_bytes"]["maximum"],
+        32768
+    );
+    assert!(readfile.description.contains("Valid argument examples:"));
+    assert!(readfile.description.contains(r#""path":"src/main.rs""#));
+    assert!(!readfile.description.contains(r#"{"readfile":{"#));
+
+    let run_bash = tools.iter().find(|tool| tool.name == "run_bash").unwrap();
+    assert_eq!(run_bash.input_schema["oneOf"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        run_bash.input_schema["properties"]["interval_ms"]["minimum"],
+        1
+    );
+
+    let compact = tools
+        .iter()
+        .find(|tool| tool.name == "context_compact")
+        .unwrap();
+    assert_eq!(compact.input_schema["properties"]["discard"]["minItems"], 1);
+
+    let memmgr = tools.iter().find(|tool| tool.name == "memmgr").unwrap();
+    assert!(memmgr.input_schema["properties"]["op"]["enum"]
+        .as_array()
+        .unwrap()
+        .contains(&Value::String("schema".to_string())));
+    assert_eq!(memmgr.input_schema["properties"]["limit"]["maximum"], 200);
 }
 
 fn temp_capability_dir(name: &str) -> PathBuf {

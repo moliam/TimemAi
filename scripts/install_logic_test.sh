@@ -98,4 +98,35 @@ if ! grep -q 'Cargo downloads Rust crates' "$ROOT_DIR/README.md"; then
   exit 1
 fi
 
+
+resource_source="$atomic_test_dir/reminder_tips.json"
+resource_destination="$atomic_test_dir/share/timem/resources/reminder_tips.json"
+printf '{"schedules":[]}\n' > "$resource_source"
+install_resource_atomically "$resource_source" "$resource_destination"
+
+if [ "$(cat "$resource_destination")" != '{"schedules":[]}' ]; then
+  echo "atomic resource install did not preserve source contents" >&2
+  exit 1
+fi
+if [ -x "$resource_destination" ]; then
+  echo "installed reminder tips resource must not be executable" >&2
+  exit 1
+fi
+if find "$(dirname "$resource_destination")" -maxdepth 1 -name 'reminder_tips.json.tmp.*' | grep -q .; then
+  echo "atomic resource install left a temporary file behind" >&2
+  exit 1
+fi
+if ! grep -Fq 'install_resource_atomically "$REMINDER_TIPS_SOURCE" "$RESOURCE_DIR/reminder_tips.json"' "$ROOT_DIR/install.sh"; then
+  echo "install script should install reminder tips into the shared resources directory" >&2
+  exit 1
+fi
+if ! grep -Fq 'rm -f "$RESOURCE_DIR/reminder_tips.json"' "$ROOT_DIR/uninstall.sh"; then
+  echo "uninstall script should remove the installed reminder tips resource" >&2
+  exit 1
+fi
+if grep -Eq 'rm .*TIMEM_CONFIG_DIR|rm .*reminder_tips_config_path' "$ROOT_DIR/uninstall.sh"; then
+  echo "uninstall script must not remove user reminder tips overrides" >&2
+  exit 1
+fi
+
 echo "install_logic_test: ok"

@@ -108,14 +108,16 @@ fn parse_cli_args_reads_model_service_and_limits() {
         "openai-compatible",
         "--response-protocol",
         "xml",
+        "--tool-call-mode",
+        "native",
+        "--parallel-tool-calls",
+        "false",
         "--api-key",
         "cli-key",
         "--model",
         "gpt-x",
         "--base-url",
         "http://local/v1",
-        "--data-dir",
-        "/tmp/timem-data",
         "--timeout",
         "33",
         "--max-llm-output",
@@ -140,10 +142,11 @@ fn parse_cli_args_reads_model_service_and_limits() {
     assert_eq!(options.space.as_deref(), Some(".x"));
     assert_eq!(options.api_protocol.as_deref(), Some("openai-compatible"));
     assert_eq!(options.response_protocol.as_deref(), Some("xml"));
+    assert_eq!(options.tool_call_mode.as_deref(), Some("native"));
+    assert_eq!(options.parallel_tool_calls.as_deref(), Some("false"));
     assert_eq!(options.api_key.as_deref(), Some("cli-key"));
     assert_eq!(options.model.as_deref(), Some("gpt-x"));
     assert_eq!(options.base_url.as_deref(), Some("http://local/v1"));
-    assert_eq!(options.data_dir.as_deref(), Some("/tmp/timem-data"));
     assert_eq!(options.timeout_secs, Some(33));
     assert_eq!(options.max_llm_output_tokens, Some(10_000));
     assert_eq!(options.max_llm_input_tokens, Some(100_000));
@@ -276,7 +279,7 @@ fn shell_renders_stopped_turn_text_from_core_summary() {
 }
 
 #[test]
-fn shell_appends_running_job_list_after_final_answer() {
+fn shell_does_not_append_running_job_list_after_final_answer() {
     let outcome = TurnOutcome::final_response(
         "任务完成。",
         UsageStats::zero(),
@@ -286,6 +289,7 @@ fn shell_appends_running_job_list_after_final_answer() {
     )
     .with_running_jobs(vec![RunningShellJob {
         pid: 12345,
+        tool_call_id: "call_test".to_string(),
         kind: "timeout".to_string(),
         command: "sleep 30".to_string(),
         cwd: "/tmp".to_string(),
@@ -295,9 +299,9 @@ fn shell_appends_running_job_list_after_final_answer() {
     }]);
 
     let rendered = render_turn_outcome_text(&outcome);
-    assert!(rendered.starts_with("任务完成。"));
-    assert!(rendered.contains("RUNNING JOB LIST:"));
-    assert!(rendered.contains("pid=12345, old job timeout, cmd=sleep 30, still running"));
+    assert_eq!(rendered, "任务完成。");
+    assert!(!rendered.contains("RUNNING JOB LIST:"));
+    assert!(!rendered.contains("pid=12345"));
 }
 
 #[test]
@@ -1061,7 +1065,7 @@ fn shell_renders_worker_identity_from_lifecycle_topic() {
     let event = agent_core::core_initialized_topic_event_with_worker(
         "session_worker",
         &profile,
-        "markdown",
+        "json",
         100_000,
         50,
         6,

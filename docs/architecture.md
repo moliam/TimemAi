@@ -43,7 +43,7 @@ agent_core
 
 The Web surface includes per-Session model/API configuration, multi-session
 profiles, paged history,
-attachments, active-turn supplements, inline decisions, live action lifecycle
+attachments, queued next-turn questions, explicit active-turn supplements, inline decisions, live action lifecycle
 rows, reconnect/runtime-exit states, context-compact visualization, Markdown
 rendering, syntax highlighting, responsive layout, and final usage telemetry.
 These are host renderings of core data; they must not be reimplemented as a
@@ -58,7 +58,12 @@ Version 1.1 also defines a durable browser/Host/Core delivery boundary:
 - authoritative UI events are journaled per memory space with monotonic
   `event_seq` values and replayed from a client cursor after reconnect;
 - commands are FIFO within a Session while independent Sessions may work in
-  parallel, and memory-space changes use an epoch barrier;
+  parallel; Session-group mutations use their own lane, and memory-space
+  changes use an epoch barrier;
+- Session metadata is sharded as `sessions/<id>/session.json`; metadata and
+  history share one per-Session lock domain, while group definitions, Roles,
+  jobs, and audit state have independent lock domains. No ordinary Session
+  update rewrites a MEM-wide Session index;
 - API keys and MCP secrets remain request-scoped direct replies and never enter
   snapshots, semantic event journals, prompts, history, or audit.
 
@@ -116,7 +121,7 @@ flowchart LR
     Runtime --> Model service["agent_core::model_transport\nmodel service I/O"]
     Model service --> Wire["agent_core::model_api\nwire-format adapter"]
     Model service --> LLM["LLM service"]
-    Core --> Guard["MemGuard\nper data root + space"]
+    Core --> Guard["MemGuard\nper MEM"]
     Guard --> Store["Local data\nmemory + chat history + audit"]
     Core --> Caps["Capability registry\nYAML IDL + tool callbacks"]
     Caps --> Tools["resources/capabilities/tools\n{tool}.yaml + {tool}.rs"]
@@ -127,6 +132,26 @@ flowchart LR
 ### `agent_core/`
 
 `agent_core` owns the agent loop and is platform independent.
+
+`agent_core/src/os/` is the centralized operating-system policy boundary.
+Its common interface owns host/version detection, executable conventions,
+default configuration roots, browser/terminal launch commands, and reusable
+process/process-group lifecycle operations. Shared Unix process primitives live
+in `os/unix.rs`; platform-specific identity and host policy live in
+`os/macos.rs` and `os/linux.rs`. Business modules consume the common interface
+and must not add direct macOS/Linux branches or fixed system command paths. Low-level Unix mechanisms intrinsic to a subsystem—such as
+terminal `termios`, file permission bits, nonblocking file descriptors, and
+file locking—remain beside that subsystem rather than being hidden behind an
+OS policy facade.
+
+The selected MEM root is a shared security boundary for Shell and Web. On Unix,
+Core creates or tightens that root to `0700`; narrower files and subsystem
+directories use `0600`/`0700` as appropriate. Linux CI separately exercises the
+`/proc` process identity, liveness, `waitpid`, process-group termination, and
+safety guards. The Linux-only gate also proves `run_bash` timeout/background
+tracking, nested detach rejection, PID-identity-safe cancellation, and cleanup
+after a launcher exits while descendants remain. A real headless Timem Web
+process runs with no TTY or graphical display.
 
 - Provides reusable capability functions and state-machine functions. Host
   adapters call core functions instead of reimplementing agent behavior.
@@ -204,15 +229,16 @@ flowchart LR
   command execution, registered tool job lifecycle, evidence shaping, and tool
   audit are core responsibilities.
 - Routes memory-space file access through `MemGuard` so multiple CLI processes
-  using the same data root and space do not corrupt or lose writes.
+  using the same MEM do not corrupt or lose writes.
 - Tracks per-turn stats: model calls, token usage, memory reads/writes, tool
   calls, and prompt shrink counters.
-- Tracks long-running turn focus independently for every active Session worker.
-  For each ten minutes of active turn time, the next model request receives one
-  randomly selected `SYSTEM` focus reminder through the normal prompt-component
-  queue. Time paused for a host decision is excluded, a blocking model/tool call
-  is never interrupted, and missed periods collapse to one current reminder
-  instead of producing a backlog.
+- Tracks reminder schedules independently for every active Session worker.
+  Terminal and Web hosts load one user-global `reminder_tips.json` at startup;
+  Core evaluates its active-minute and completed-round schedules before model
+  requests and routes random selections through the normal `SYSTEM`
+  prompt-component queue. `NONE` consumes a due interval without injection.
+  Time paused for a host decision is excluded, blocking model/tool calls are not
+  interrupted, and missed time periods collapse instead of producing a backlog.
 - Exposes a JSON-in/JSON-out C ABI for host integrations.
 
 ### `timem_shell/`
@@ -230,7 +256,7 @@ flowchart LR
   agent reasoning, memory actions, or tool protocol cooperation.
 - Chooses local API/action audit paths and records host turn events through
   core-owned audit document writers and redaction helpers.
-- Loads shell history and runtime data from the selected data root.
+- Loads shell history and runtime data from the selected MEM.
 
 Key shell-side modules:
 
@@ -256,6 +282,11 @@ belongs in `agent_core` or `resources` instead of being implemented as a
 shell-only shortcut.
 
 ### `timem_web/`
+
+`timem_web/src/os/` is the Web host operating-system adapter. Unix parent-process
+capture, launcher-exit monitoring, and SIGINT/SIGTERM/SIGHUP registration stay
+there; `server.rs` consumes platform-neutral shutdown triggers. Storage-specific
+permissions and event-journal locking remain in their owning storage modules.
 
 `timem_web` is a local-first host adapter, not a second agent runtime. It binds
 to `127.0.0.1` by default and binds to `0.0.0.0` only after the explicit
@@ -347,7 +378,7 @@ format is JSONL with explicit `message` and `event` records so a future host can
 page and replay the same data. The first resume implementation intentionally
 does not persist live Worker/Context runtime state or running action queues:
 when a Session is restored, the host creates a fresh primary Worker and Context,
-then injects one `## SYSTEM` notice pointing the model to the raw chat history
+then injects one `## RUNTIME` notice pointing the model to the raw chat history
 file and its exact format. The model should read that file only when needed for
 the current task, using bounded tools such as `tail`, `rg`, `jq`, or short
 scripts instead of loading the whole file into prompt context. Web restores the
@@ -357,7 +388,21 @@ history file so Web and Shell can continue the same mem-space work. The Session
 also caches the effective allowlisted TIMEM runtime environment. This permits a
 restart without re-entering model service settings while keeping explicit launch CLI
 options authoritative. On Unix, the Session directory and index use `0700` and
-`0600` permissions because the index may contain the Session API key.
+`0600` permissions because the index may contain the Session API key. Startup
+loads that JSONL index through the shared Core recovery path: malformed,
+non-UTF-8, truncated, oversized, and duplicate-ID records are skipped with bounded
+memory. For duplicate IDs the newest `updated_at_ms` record wins deterministically,
+valid Session records remain usable, and the exact original index is preserved
+as a timestamped sibling backup before the repaired index is installed. Shell
+prints the backup path and continues with a recovered or fresh Session; Web uses
+the same recovery result. Web also treats the semantic event journal, command
+dedup cache, MCP configuration, and global worker-role library as independently
+recoverable stores. Corrupt worker-role data is quarantined, valid roles are
+salvaged where possible, and the UI starts with the recovered library instead of
+being blocked by optional configuration. Permission, storage, or replacement
+failures remain hard errors because safe repair cannot be proven; those errors
+include the affected path and concrete manual recovery guidance rather than only
+an internal code.
 
 ### `web_ui/`
 
@@ -376,9 +421,9 @@ conversation mounts only a progressive turn window, memoizes that turn subtree
 away from composer keystrokes, and applies browser `content-visibility` only to
 completed offscreen turns. The active working turn remains fully rendered.
 
-The Web session snapshot includes the prompt context's cwd. A successful
-`self_tool type=cwd op=chg_cwd` action adds `context_state.cwd` to the existing
-`core.action` finish topic. `timem_web` updates the authoritative session before
+The Web session snapshot includes the prompt context's cwd. When Core reports a
+successful prompt-context cwd change, its existing `core.action` finish topic
+includes `context_state.cwd`. `timem_web` updates the authoritative session before
 forwarding the event, and the browser reducer updates only the matching session.
 This keeps reconnects, navigation, the composer, and later `run_bash` execution
 on the same cwd without creating a separate fine-grained topic.
@@ -417,8 +462,6 @@ protocol prompt prose.
 - `resources/system_prompt/system_prompt.md`: Markdown static prompt shell.
   It is the stable model-visible outer contract and contains placeholders for
   protocol and capability injection.
-- `resources/protocol/markdown/`: Markdown response protocol prompt
-  injection and schema summary.
 - `resources/protocol/json/`: JSON response protocol prompt injection, schema
   summary.
 - `resources/protocol/xml/`: XML response protocol prompt injection, schema
@@ -439,8 +482,10 @@ source of truth. At runtime, `agent_core` replaces it with a catalog generated f
 ### Dynamic MCP capabilities
 
 MCP server definitions are persisted under the active mem. A Session stores
-only the server ids enabled for that Session. UI edits update this desired set,
-but do not mutate a running context. External MCP discovery is never on the Web
+only the server ids enabled for that Session. New Sessions start with an empty
+MCP selection and do not inherit mem-level enabled definitions; users opt in per
+Session. UI edits update this desired set, but do not mutate a running context.
+External MCP discovery is never on the Web
 startup, Session restore, worker creation, or turn-submission critical path.
 Those paths apply only an exact connected cache and schedule missing discovery
 on a deduplicated background task. A successful discovery advances the
@@ -449,6 +494,26 @@ server becomes connection-status evidence and does not stall agent work.
 `agent_core::mcp` then projects the discovered tools into the same capability
 registry used by prompt rendering, response validation, executor routing, and
 action topics. Names are namespaced as `mcp.<server>.<tool>` to avoid collisions.
+
+MCP definitions never enter the cacheable static system prompt. Inline mode
+stores complete canonical JSON definitions, MCP initialize `instructions`, and
+enable/disable updates in the ordinary persistent prompt-delta sequence. Later
+inline requests reuse those append-only deltas instead of regenerating a
+synthetic catalog for every render. Native mode filters those inline-only
+catalog/update slices out of the rendered messages. Stable builtin descriptions are rendered in the cacheable static system
+prompt, while builtin entries in the provider API `tools` field contain only
+the tool name and input schema. Currently enabled MCP definitions exist only in
+the provider API `tools` field, and retain both their descriptions and schemas;
+MCP server-wide instructions are carried by the corresponding native tool
+descriptions.
+Enabling, disabling, or changing an MCP definition therefore changes the next
+native API tools field without adding a redundant RUNTIME availability notice.
+Core decides whether to append this delta from the model-visible tool
+definitions (`name`, `description`, and `input_schema`) plus server
+`instructions`, not from raw MCP
+configuration equality. Transport, timeout, endpoint/header, credential, and
+display-metadata changes update runtime state silently when callable definitions
+are unchanged.
 
 The worker command channel orders the capability update before the user turn.
 Core compares complete MCP tool definitions with the previously applied set. A
@@ -482,12 +547,10 @@ Timem separates model-facing protocol instructions from runtime parsing:
 
 ```text
 resources/protocol/<suite>/
-├─ response_protocol.md          model-facing instructions injected into prompt_0
-└─ response_schema_summary.*     compact schema summary injected by prompt render
+└─ response_protocol.md          model-facing instructions injected into prompt_0
 
 agent_core/src/response_protocol/
 ├─ mod.rs                        protocol-independent ParsedEnvelope/ParsedAction
-├─ markdown_suite.rs             Markdown response parser and repair policy
 ├─ json_suite.rs                 JSON response parser and repair policy
 └─ xml_suite.rs                  XML response parser and repair policy
 ```
@@ -501,20 +564,21 @@ with the resource text and generated expanded prompt output from
 
 The XML suite uses a protocol-specific tag scanner rather than a general XML
 tree parser. It recognizes only the small response vocabulary under the single
-`<response>` root. Once it enters a raw text field (`free_talk`,
+`<ASSISTANT>` root. Once it enters a raw text field (`free_talk`,
 `final_answer`, or compact `summary`), it extracts that field as text and does
 not scan its contents for nested protocol tags. This prevents XML/JSON/Markdown
 examples inside user-visible text from being re-parsed as runtime actions.
-The XML parser also accepts a whole model response wrapped in a single
-documentation-style ```xml fence, then parses the inner `<response>` with the
-same protocol scanner. XML state branches are strict:
-`working_still_action`, `final_answer`, and `context_compact` are mutually
-exclusive in one response; `<status>` is rejected by the XML suite because
-completion is represented by the `<final_answer>` branch.
+For non-terminal action rounds, the XML parser can recover accidental prose
+outside the root and emits a model-visible `SYSTEM TIPS` correction for the next
+round. Recovered terminal answers are never accepted. XML state branches are
+strict: `actions`, `final_answer`, and `context_compact` are mutually exclusive
+in one response; `<status>` is rejected. A terminal `<final_answer>` is accepted
+only when preceded by one `<finish_confirm>` whose content starts with the
+protocol's exact confirmation prefix.
 
-The selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL` or
-`--response-protocol`. The default is `xml`; `markdown` and `json` remain
-available. All suites must produce the same internal `ParsedEnvelope` semantics
+In inline mode, the selected suite is controlled by `TIMEM_RESPONSE_PROTOCOL`
+or `--response-protocol`. The default is `xml`; `json` is also available. Both
+suites must produce the same internal `ParsedEnvelope` semantics
 for the same user-visible capability: status/final answer, free_talk retention,
 actions, and `context_compact`.
 
@@ -522,16 +586,6 @@ The prompt must not tell the model that multiple suites exist. It should only
 show the currently selected response protocol. This keeps model service-facing text
 small and avoids making runtime implementation choices part of the user's task.
 
-Markdown protocol recovery is intentionally bounded:
-
-- If the model emits a natural-language preface before a valid Markdown
-  protocol section, the parser may recover from the first recognized protocol
-  heading such as `## Status`, `## Free_talk`, `## Final_Answer`,
-  `## Working_Still_Action`, or `## Context Compact`.
-- A standalone fenced `action` block is treated as working protocol output.
-- Ordinary Markdown headings such as `## Notes` are not protocol. They remain a
-  plain final answer unless they contain JSON/action-looking syntax that should
-  trigger repair.
 - Malformed action blocks are never downgraded to a final answer. They produce
   a protocol repair slice so the model can correct the response.
 
@@ -734,9 +788,14 @@ Web command handling is deliberately idempotent under high-pressure human
 clicking. The browser uses same-event-loop local guards for Stop, Create
 Session, attachment removal, inline decisions, rename, and runtime config
 updates so repeated clicks show immediate feedback instead of issuing duplicate
-commands. The server remains authoritative: repeated Stop is harmless, Send
-during an active turn becomes a supplement, stale supplements can start a new
-turn after cancellation/completion, repeated attachment removal for the same
+commands. The server remains authoritative: repeated Stop is harmless; ordinary
+Send during an active turn is durably queued as the next task; only an explicit
+supplement command joins the active turn. For Web workers, a final answer is a
+host-visible turn boundary: any explicit supplement still pending when that
+answer arrives is handed back to the Host and starts a distinct follow-up turn,
+so the first answer remains attached to its original bubble; stale supplements
+can also start a new turn
+after cancellation/completion; repeated attachment removal for the same
 session is treated as success, and stale decision replies after a turn has
 finished are ignored before they reach a worker.
 
@@ -760,7 +819,7 @@ cross-host command result state.
 A Timem memory space is the unit of shared memory state:
 
 ```text
-identity = realpath(TIMEM_DATA_DIR) + TIMEM_SPACE
+identity = realpath(resolved MEM path)
 ```
 
 Within one identity, durable memory, scratch memory, chat history, SQL snapshots,
@@ -772,13 +831,14 @@ Current CLI implementation uses an in-process `MemGuard` object plus a
 cross-process lock directory under the selected space:
 
 ```text
-data/
-└─ .test_mem/
-   ├─ .guard/mem.lock.d/
-   ├─ memory/memory.jsonl
-   ├─ memory/scratch_notes.jsonl
-   ├─ memory/shell_jobs/jobs.jsonl
-   └─ audit/
+<MEM>/
+├─ .guard/
+│  ├─ workspace-instance.lock
+│  └─ mem.lock.d/
+├─ memory.jsonl
+├─ scratch_notes.jsonl
+├─ shell_jobs/jobs.jsonl
+└─ audit/
       ├─ api_audit.json
       └─ action_audit.json
 ```
@@ -839,9 +899,7 @@ growth between model request N and model request N+1. The model-visible prompt
 keeps `delta_id` as the stable maintenance handle:
 
 ```text
-[BEGIN DELTA]
-delta_id: pd_1
-time: 1782200000000
+[BEGIN DELTA delta_id: pd_1, time_ms: 1782200000000]
 
 ## USER
 new user input or mid-turn supplement
@@ -849,15 +907,13 @@ new user input or mid-turn supplement
 ## {{ASSSISTANT_ID}}
 raw model output recorded for continuity by default
 
-## SYSTEM
+## RUNTIME
 The following are results of {{ASSSISTANT_ID}} newly initiated actions:
 
 Action result: run_bash
 ...
 
 runtime notes such as response repair, compaction result, or work instructions
-
-[END DELTA]
 ```
 
 Runtime assigns normal dynamic delta ids as a simple monotonic sequence:
@@ -902,16 +958,16 @@ Runtime shrink review and context maintenance should use `delta_id`:
   pending prompt components, the candidate Delta, and conservative render
   overhead. If that projection exceeds 95% of `TIMEM_MAX_LLM_INPUT`, core does
   not commit that candidate Delta or same-batch action-result components. It
-  commits a bounded SYSTEM note reporting the output size and remaining
+  commits a bounded RUNTIME note reporting the output size and remaining
   context budget instead. Non-ASCII action output is conservatively estimated at no
   less than one token per character instead of using the general `chars / 4`
   approximation. `build_next_prompt` applies the same guard to pending runtime
   action results such as memory precheck output while retaining the new USER
-  input and unrelated SYSTEM metadata.
+  input and unrelated RUNTIME metadata.
 - A model service may still reject input because its tokenizer or effective limit
   differs from the local estimate. For explicit `E2BIG`, HTTP 413, or
   input/context-length errors, session runtime removes the newest Delta that
-  contains action results, replaces it with the same bounded SYSTEM guidance,
+  contains action results, replaces it with the same bounded RUNTIME guidance,
   records `model_input_overflow_recovery`, and retries the model once through
   the normal turn loop. If no action-result Delta remains, the error stops the
   turn; this prevents an unbounded recovery loop and avoids silently deleting
@@ -936,7 +992,7 @@ logical prompt stream
 Delta blocks make the rendered boundary explicit:
 
 - The model can audit evidence because runtime action results are visible in
-  rendered `## SYSTEM` blocks.
+  rendered `## RUNTIME` blocks.
 - The runtime can keep model service cache behavior stable by isolating `prompt_0`.
 - Debug logs can identify which event introduced a piece of context.
 - Protocol repair can be represented as another runtime delta instead of a
@@ -947,34 +1003,43 @@ Delta blocks make the rendered boundary explicit:
 Prompt rendering uses explicit segments:
 
 ```text
-[BEGIN SYSTEM PROMPT]
-static prompt
-[END SYSTEM PROMPT]
+JSON suite: [BEGIN SYSTEM PROMPT] ... [END SYSTEM PROMPT]
+            [BEGIN DELTA delta_id: pd_1, time_ms: ...] ...
+            (continues until the next BEGIN DELTA or input end)
 
-[BEGIN DELTA]
-delta_id: pd_1
-time: 1782200000000
-
-## USER
-...
-[END DELTA]
+XML suite:  <Timem System Prompt> ... </Timem System Prompt>
+            <prompt_delta id="pd_1" time_ms="1782200000000"> ... </prompt_delta>
 ```
 
 Important invariants:
 
 - `prompt_0` is static global guidance only. It must not contain user input,
   runtime time, session context, API keys, or model-service-specific secrets.
-- Dynamic context belongs in logical prompt deltas that render as
-  `[BEGIN DELTA]` blocks.
+- Dynamic context belongs in logical prompt deltas rendered with the active
+  response suite's boundary markers.
 - Every rendered dynamic delta has `delta_id` so runtime shrink review can refer
   to exact logical deltas.
+- JSON Delta boundaries are start-only. `USER`, assistant, `RUNTIME`, and
+  provider-native assistant/tool-call/tool-result messages inherit the currently
+  open Delta until the next `[BEGIN DELTA ...]` marker or the end of model input.
+  Native exchanges therefore remain attached to their owning `delta_id` and are
+  interleaved at that point in provider payloads rather than appended at the tail.
 - Valid model-visible role blocks are `## USER`, the current assistant/session-worker
   heading represented as `## {{ASSSISTANT_ID}}` in prompt examples, and
-  `## SYSTEM`. Runtime replaces it with the actual worker role, such as `## ID0`.
+  `## RUNTIME`. Runtime replaces the assistant placeholder with the actual worker
+  role, such as `## ID0`.
 - The static prefix is sent through model service system-role/system-field support
   when available. Dynamic deltas go in the user message.
+- In native mode, `prompt_0` contains stable behavior, protocol guidance, and
+  builtin tool descriptions, but no tool input schemas or dynamic MCP
+  definitions. Builtin entries in the native API `tools` field contain only
+  names and input schemas; currently enabled MCP entries retain names,
+  descriptions, and schemas there. Inline-only MCP catalog and enable/disable
+  slices remain persistent for lossless mode switching but are filtered out of
+  native messages.
 - Anthropic-protocol requests attach `cache_control: {"type": "ephemeral"}` to
-  the static system block and to the latest three dynamic prompt deltas. The
+  the static system block, the last built-in API tool, and the latest three
+  dynamic prompt deltas. The
   newest prompt delta can be marked cacheable because model service prefix-cache
   lookup can look backward from the newest breakpoint to prior cached prefixes
   in append-only conversations. This keeps model service cache boundaries near the
@@ -1000,10 +1065,11 @@ Algorithm:
    exact slice boundaries.
 4. Mark the latest `DYNAMIC_TAIL_CACHE_BLOCKS = 3` dynamic blocks cacheable.
 5. Leave older dynamic blocks unmarked.
-6. Append a temporary response trailer as the final user block without cache
-   control: every suite expands `Now please fulfill your response part like <SHAPE>:`
-   with its own concise response shape. XML uses
-   `one-root label <response>...</response>`. It is not followed by an assistant heading.
+6. Append the protocol-neutral temporary trailer
+   `Please continue the work and respond as protocol requires:` as the final
+   user block without cache control. The concrete response shape remains only
+   in the system protocol; the trailer must not repeat XML labels or invite a
+   format-confirmation final answer. It is not followed by an assistant heading.
    This trailer is not a prompt delta and must not be merged into the latest
    delta cache block.
 
@@ -1050,23 +1116,57 @@ Limitations:
 
 ## Response Protocol And Action Execution
 
-The model does not call Rust functions directly. It sends one response in the
-currently selected response protocol. `TIMEM_RESPONSE_PROTOCOL` selects the
-model response protocol (`xml` by default; `markdown` and `json` optional). This
-is separate from `TIMEM_API_PROTOCOL`, which selects model HTTP payload shape.
+Core owns one provider-independent interaction IR: tool definitions, structured
+tool calls, structured tool results, assistant text, and sequential/parallel
+action groups. Provider codecs serialize that IR as OpenAI Chat Completions,
+OpenAI Responses, or Anthropic messages. This keeps provider wire details out of
+the action executor and allows a session to switch native/inline modes without
+losing structured history.
 
-Each response parses into the same runtime envelope: optional `status`, optional
-`free_talk`, optional `working_still_action`, optional `context_compact`, and
-optional `final_answer`. Protocols may express completion differently: JSON and
-Markdown use their status field/section, while XML uses `<final_answer>` as the
-completion branch.
+`TIMEM_TOOL_CALL_MODE` selects `auto`, `native`, or `inline`. Auto negotiation is
+single-flight per normalized gateway/model/protocol configuration: it probes one
+required call and then two parallel calls. Temporary transport failures receive
+only a short fallback cache, while verified capabilities are process-cached.
+The resolved mode and parallel capability are published to hosts and written to
+the auto-refreshing web debug `statistics.html`. The report groups request
+outcomes and detailed latency/CPU/repair metrics by model, gateway, and resolved
+tool-call protocol. `TIMEM_PARALLEL_TOOL_CALLS` controls whether the
+resolved parallel flag is enabled; provider adapters always send it explicitly.
+
+Web debug diagnostics retain the latest request as `llm_prompt.html` and the
+newest ten responses per session. Core supplies the request body produced by the
+provider adapter; the prompt HTML renders only its ordered `system`, `messages`,
+or `input` entries. It preserves prompt text and the role/type plus tool-call and
+tool-result correlation fields, while omitting transport/configuration details
+such as model selection, token limits, tool schemas, and cache-control markers.
+The separate tool-schema and response dumps retain request/worker correlation;
+response dumps include assistant text and structured tool calls with lossless raw
+arguments. `statistics.html` aggregates explicit response usage fields per
+endpoint and reports KVC hit rate as cached input tokens divided by prompt input
+tokens, alongside cache-read and cache-creation totals.
+
+Inline mode sends one response in the selected response protocol.
+`TIMEM_RESPONSE_PROTOCOL` selects `xml` (default) or `json`; native mode omits
+that protocol section, uses the API tool-call channel, and automatically renders
+the static prompt plus prompt deltas with JSON boundaries. The configured inline
+protocol is retained separately and restored if negotiation later falls back to
+inline. This is separate from `TIMEM_API_PROTOCOL`, which selects the HTTP
+payload shape.
+
+Each inline response parses into the same runtime envelope: optional `status`,
+optional `free_talk`, optional `working_still_action`, and optional
+`final_answer`. `context_compact` is an intrinsic action capability and must be
+exclusive with other actions. Protocols may express completion differently:
+JSON uses its status field, while XML uses a validated
+`<finish_confirm>` followed by `<final_answer>` as the completion branch.
 `free_talk` is the visible working note for the Thought/Action panel while
 the job is working. It is emitted to the host/UI as part of the accepted model
 response topic; replay context keeps command/input, action results, runtime
 notes, compact summaries, free_talk, and final answers. For protocols with a
 status field, missing `status` defaults to `working`; `status:"finished"` means
-the current task is complete and must be paired with `final_answer`. In XML,
-`<final_answer>` directly means the current task is complete. After a completion
+the current task is complete and must be paired with `final_answer`. In XML, a
+valid `<finish_confirm>` followed by `<final_answer>` means the current task is
+complete. After a completion
 envelope, runtime ends the current model/action interaction and shows the final
 answer as the closing user-visible answer.
 
@@ -1075,7 +1175,7 @@ stateDiagram-v2
     [*] --> ModelResponse
     ModelResponse --> Final: completion branch + final_answer
     ModelResponse --> ValidateActions: working/default + working_still_action
-    ValidateActions --> Repair: invalid JSON or invalid action shape
+    ValidateActions --> Repair: invalid response or action shape
     Repair --> ModelResponse: one repair prompt_delta
     ValidateActions --> ExecuteActions: valid action protocol
     ExecuteActions --> AppendResults: bounded results
@@ -1085,19 +1185,18 @@ stateDiagram-v2
 
 ### Response Envelope
 
-Each protocol directory owns its model-facing schema summary and examples:
+Each protocol directory owns its model-facing protocol and examples:
 
-- [`resources/protocol/markdown/response_protocol.md`](../resources/protocol/markdown/response_protocol.md)
 - [`resources/protocol/json/response_protocol.md`](../resources/protocol/json/response_protocol.md)
 - [`resources/protocol/xml/response_protocol.md`](../resources/protocol/xml/response_protocol.md)
 
 Keep protocol examples short; the runtime parser and capability registry are
 the authoritative executable boundary.
 
-In the JSON protocol, the envelope has this shape. In the Markdown protocol,
-the same fields are represented as sections. In the XML protocol, the same
-fields are represented as tags under one `<response>` root; tool action payloads
-remain JSON objects inside `<action_json>` blocks.
+In the JSON protocol, the envelope has this shape. In the XML protocol, the
+same fields are represented as tags under one `<ASSISTANT>` root. XML actions use the
+exact capability id as the tool element name; direct children are sequential and
+tools inside one `<parallel>` group execute concurrently.
 
 ```json
 {
@@ -1117,20 +1216,21 @@ With omitted `status` or `status:"working"` in status-based protocols,
 `working_still_action` or `context_compact` is required and `free_talk` is shown
 in the Thought/Action panel. With `status:"finished"`, `final_answer` is
 required and shown as the closing answer before runtime stops this task's
-action/model loop. In XML, `<final_answer>` is the completion branch and must
-not appear together with `<working_still_action>` or `<context_compact>`. If the
+action/model loop. In XML, `<final_answer>` is the completion branch, requires a
+valid preceding `<finish_confirm>`, and must not appear together with `<actions>`
+or `<context_compact>`. If the
 model still needs evidence, it must stay working, run actions, and answer after
 the action result is visible. The parser also tolerates common model service drift
 such as a valid JSON envelope embedded in Markdown text, but it never shows raw
 protocol fragments to the user.
 
-Action sections accept the equivalent runtime shapes across JSON, Markdown, and
-XML suites: tool-name action objects such as `{ "run_bash": { ... } }`, direct
-arrays of action objects as one parallel group, and outer workflow arrays mixing
-inner parallel arrays and single sequential action objects. XML `<action_json>`
-requires the payload to be a top-level JSON array. Old `{ "action": ..., "args":
-... }` and `{ "order": ..., "actions": ... }` objects are rejected for protocol
-repair. Order is preserved; outer workflow entries execute in model-provided
+JSON and Markdown action sections accept tool-name action objects such as
+`{ "run_bash": { ... } }`, direct arrays as one parallel group, and outer workflow
+arrays mixing inner parallel arrays and single sequential actions. XML expresses
+the same execution plan with native tool elements under `<actions>` and explicit
+`<parallel>` groups. Old `{ "action": ..., "args": ... }` and
+`{ "order": ..., "actions": ... }` objects are rejected for protocol repair.
+Order is preserved; outer workflow entries execute in model-provided
 order.
 
 ### Context Compact
@@ -1154,13 +1254,17 @@ Runtime validates `discard` and `offload` delta ids against currently visible
 dynamic prompt refs. If all refs exist, it writes offloaded deltas into scratch,
 hides discarded/offloaded refs, and appends the summary as a new
 `context_compact` dynamic delta. The next prompt delta records the scratch id for
-offloaded deltas. When the worker currently has applied MCP tools, the same new
-SYSTEM delta also carries one bounded, deterministic snapshot of active MCP
-action names and server labels. It contains no endpoint, header, environment, or
-credential data; complete argument definitions remain in the current static
-capability catalog. Pending Web MCP edits are excluded until the next new-turn
-boundary applies them. If any ref is missing, runtime returns a
-repairable action result and does not silently discard context.
+offloaded deltas. If compaction targets the active persistent MCP catalog, Core
+appends exactly one replacement catalog delta using the currently applied tool
+definitions. It contains no endpoint, header, environment, or credential data.
+Pending Web MCP edits are excluded until the next new-turn
+boundary applies them. Dynamic-context token accounting uses one provider-neutral
+estimator for both visible text slices and provider-native exchanges owned by each
+visible delta. Compact telemetry reports the combined total plus text/native
+breakdowns, and the same combined estimate updates `shrunk_tokens`; this keeps the
+reported reduction aligned with the history actually removed from model input.
+If any ref is missing, runtime returns a repairable action result and does not
+silently discard context.
 
 ### Action Object
 
@@ -1202,17 +1306,64 @@ produce a protocol repair slice instead of being bridged to an old tool.
 ### Action Result Prompt Component
 
 After an action runs, `agent_core` appends the action result into the current
-runtime increment's prompt delta as a `## SYSTEM` block. That system evidence is
-the only action-result evidence the model may claim it has seen.
+runtime increment's prompt delta as a `## RUNTIME` block. For XML prompts,
+ordinary tool output bodies are enclosed by matching
+`<output_id_HASH>...</output_id_HASH>` pairs. Runtime derives the generic hash
+when the result enters prompt context from the original return content and
+generation time, rendering exactly six lowercase hexadecimal digits.
+
+`run_bash`, `readfile`, `memmgr`, and `self_tool` have dedicated XML results.
+`readfile_result` carries path, selected line/matcher data, encoding, byte
+counts, and truncation metadata supplied by the execution layer.
+`memmgr_result` carries the memory surface and operation, while
+`self_tool_result` carries its requested type and the resulting cwd when
+available. Their bodies use collision-safe four-digit `CONTENT_HASH` or
+`ERROR_HASH` boundaries. Prompt-budget truncation applies only inside the
+boundary so the marker pair and root element remain complete.
+
+All dedicated result statuses are lifecycle-only: `finished`, `timeout`, or
+`running`. A finished lifecycle does not mean the operation succeeded;
+execution failures carry a structured `error_type` when available. Runtime
+does not infer status or metadata from the body text. XML attributes are
+escaped, while boundary-delimited bodies remain opaque evidence.
+
+`run_bash` is rendered as `<bash_result task="..." status="...">`.
+The execution layer retains stdout and stderr independently instead of
+reconstructing them from merged display text. A result with one non-empty
+stream uses an opaque `<<<OUTPUT_HASH ... OUTPUT_HASH` block. When both streams
+are non-empty, `<stdout>` and `<stderr>` contain `OUT_HASH` and `ERR_HASH`
+blocks sharing one four-digit lowercase hexadecimal hash. The hash derives
+from task, original stdout, original stderr, generation time, and collision
+salt; runtime rejects a candidate whose marker already appears in either
+stream. The `status` attribute is lifecycle-only: `finished`, `timeout`, or
+`running`. Waiting timeout and process liveness are orthogonal: a managed
+child that remains alive is rendered as `status="running" timed_out="true"`,
+whereas `status="timeout"` means no task remains running. Known exit code,
+Unix signal, still-running pid, PID kind, and Runtime `error_type` are separate
+attributes; Runtime does not encode process or business success as the
+lifecycle status.
+
+A model-visible Bash PID must belong to a child launched and tracked by the
+current Runtime owner. Unix jobs are placed in independent child process
+groups, and the process-group leader PID is distinct from Timem's process and
+process group. Session cancellation, running-job refresh, and model context
+filter out historical or foreign-owner records before inspecting or
+terminating a PID. Bounded truncation occurs inside
+stream boundaries and preserves all closing
+markers and XML result tags. Background and timeout job records write stdout
+and stderr to separate files; historical merged records are treated as stdout
+without guessing old stderr boundaries. JSON, audit, and host-facing output
+retain the existing readable text rendering. Later prompt re-rendering
+preserves the committed evidence boundary. That runtime evidence is the only
+action-result evidence the model may claim it has
+seen.
 
 Example:
 
 ```text
-[BEGIN DELTA]
-delta_id: pd_4
-time: 1782200001000
+[BEGIN DELTA delta_id: pd_4, time_ms: 1782200001000]
 
-## SYSTEM
+## RUNTIME
 The following are results of {{ASSSISTANT_ID}} newly initiated actions:
 
 Action result: memmgr
@@ -1223,7 +1374,6 @@ rows:
   role: user
   content: ...
 time: 1782200001000
-[END DELTA]
 ```
 
 The model then receives another prompt containing this result and decides
@@ -1241,18 +1391,18 @@ Model output is untrusted. The runtime validates:
 - SQL and bash actions pass their own safety checks.
 
 If validation fails, the runtime builds a temporary, non-cache-controlled repair
-delta containing the malformed assistant response and a `## SYSTEM` block with
+delta containing the malformed assistant response and a `## RUNTIME` block with
 the concrete protocol error:
 
 ```text
 ## <ASSSISTANT_ID>
 <the malformed model response>
 
-## SYSTEM
+## RUNTIME
 <ASSSISTANT_ID>'s previous response is not protocol compliant.
 error: invalid_xml_response_root
 
-The response must be in format '<response><free_talk>...</free_talk><working_still_action>...</working_still_action></response>'.
+The response must begin with '<ASSISTANT>', end with '</ASSISTANT>', and contain one XML state branch such as '<actions>...</actions>'.
 ```
 
 Repair is retried a bounded number of times for one model response failure. Each
@@ -1260,7 +1410,7 @@ repair attempt emits a structured repair topic for hosts to render, and each
 attempt is audited. In addition to the generic `model_repair_request` API audit
 event, core appends a realtime diagnostic record to
 `audit/api_output_repair.json`. That record contains the session/turn id, issue,
-malformed assistant response, SYSTEM repair message shown to the model, and a
+malformed assistant response, RUNTIME repair message shown to the model, and a
 human-readable rendered block:
 
 ```text
@@ -1268,7 +1418,7 @@ human-readable rendered block:
 ## assistant:
 <malformed model response>
 
-## SYSTEM
+## RUNTIME
 <repair message>
 ```
 
@@ -1318,28 +1468,26 @@ Current implemented surface:
 
 ### Timem Self Tool
 
-`self_tool` is for questions or requests about Timem itself, not user memory or
-local project work. Current surfaces:
-
-- `type=env, op=read|write`: read or update non-sensitive environment values in
-  the current Timem process. API key, token, secret, password, credential, and
-  access-key-like variables are denied. Memory path variables such as
-  `TIMEM_DATA_DIR` and `TIMEM_SPACE` are startup-only and cannot be changed via
-  `self_tool`; use CLI/env at startup instead.
-- `type=mem_path, op=read`: list the current memory space, memory files, and
-  API/action audit files.
-- `type=about_me, op=read`: report TimemAi name, version, author/contact,
-  project/star info, and a short software summary, plus current process id,
-  working directory, and executable path.
-- `type=cwd, op=read|chg_cwd`: inspect or change the active prompt context
-  working directory. Relative paths resolve from that prompt context's current
-  cwd. This is prompt-context metadata, not process-global state.
-
-Candidate future surfaces are `config` for runtime config inspection,
-`workspace` for loaded workspace references, `capabilities` for active
-capability overlays, and `diagnostics` for recent retry/repair counters. These
-should stay scoped to Timem runtime state; file work remains `run_bash`, and
+`self_tool` is for Timem self-information and prompt-context cwd control, not
+user memory or arbitrary local project edits. Its public contract is
+`type=path|cwd|params`, with no operation argument. `path` answers where runtime
+resources are and returns all relevant known locations. `cwd` without
+`new_path` reads the current prompt-context directory and returns `CWD: ...`
+without changing state. With `new_path`, it resolves relative paths from the
+current prompt-context cwd and returns `CWD changed to: ...` on success. Only a
+successful change adds `context_state.cwd` to the Core action finish event,
+allowing hosts such as Web to synchronize the owning Session. `params` answers
+how the current runtime is configured and returns all
+relevant effective non-sensitive values. It uses an explicit parameter
+allowlist rather than dumping the Session environment; URL userinfo, query, and
+fragment data are removed before a Base URL is shown. Sensitive env values are
+excluded. `path` and `params` remain read-only; file work remains `run_bash`, and
 memory work remains `memmgr`.
+
+Runtime configuration mutation and model notification are separate concerns.
+Hosts update the owning Session worker; Core coalesces any number of successful
+changes into one pending RUNTIME notice consumed by the next model interaction.
+The notice is never repeated once per changed field.
 
 ### Read-only SQL
 
@@ -1367,8 +1515,8 @@ Current local-command approval is configured at startup:
 - `TIMEM_BASH_APPROVAL=ask`: ask before running bash actions.
 - `TIMEM_BASH_APPROVAL=approve`: run bash actions directly.
 
-Each prompt context owns its own `run_bash` cwd. At session start, after
-`self_tool type=cwd op=chg_cwd`, and after context compaction, core injects a
+Each prompt context owns its own `run_bash` cwd. At session start, after a
+host-requested prompt-context cwd change, and after context compaction, core injects a
 short `SYSTEM` note such as `[!!!NOTE] cwd now set to: ...` so the model can
 avoid redundant `cd` prefixes. `run_bash` execution uses the same cwd recorded in
 that prompt context, including normal, polling, background, approval, and
@@ -1393,15 +1541,25 @@ keep waiting. If the host/user stops waiting, core terminates the active process
 and adds a `user_supplement` delta that tells the model the user cancelled the
 command and may request a status check or a new action if still necessary.
 Long-running shell work that should survive later prompt deltas should use
-`background=true` or `mode=background`, or a normal command with a positive
+`background=true`, or a normal command with a positive
 `timeout_ms`. Runtime returns a process id and tracks it in the session
 running-pid set. The start/timeout transition is present in the action result
 once; later exits are injected once as `RUNNING_JOB_UPDATE`. When
-discard/offload/compact references prompt deltas whose SYSTEM section recorded
+discard/offload/compact references prompt deltas whose RUNTIME section recorded
 a still-running job pid, runtime refreshes those jobs at prompt-build time and
 adds a `RUNNING JOB LIST` snapshot only for pids that are still running. The
 model inspects or stops those jobs through ordinary `run_bash` commands such as
-`ps -p <pid>` or `kill <pid>`.
+`ps -p <pid>` or, for a managed process group, `kill -- -<pid>`.
+
+Normal and polling commands reject unquoted shell background operators such as
+`cmd &` and direct the model to use `background=true`. All modes reject explicit
+process-group escape commands such as `setsid`, `disown`, and daemon launchers.
+This validation runs before approval and again after approval. Managed Bash jobs
+are completed only after both the launcher has exited and its Runtime-created
+process group is empty, so an in-group child cannot be mistaken for a completed
+task merely because the outer Bash process exited. This is a cooperative local
+process boundary, not arbitrary daemon discovery: indirect daemonization inside
+an opaque program and remote jobs still require a structured task handle.
 
 Waiting on external state is a structured `run_bash` mode, not a separate tool.
 The model uses `loop_cmd` with `interval_ms`; core repeatedly runs that check
@@ -1479,7 +1637,12 @@ a default local key-file path, but key-file parsing and conversion into model se
 configuration are core `model_service_config` responsibilities.
 
 OpenAI-compatible Session profiles may additionally set
-`TIMEM_ENABLE_THINKING`, `TIMEM_REASONING_EFFORT`, and `TIMEM_STREAM`. Core owns
+`TIMEM_ENABLE_THINKING`, `TIMEM_REASONING_EFFORT`, `TIMEM_STREAM`, and
+`TIMEM_OPENAI_CACHE_MODE`. The cache mode accepts `auto` (default), `off`, or
+`ephemeral`. `auto` relies on the provider's stable-prefix prompt cache and sends
+no Anthropic-style message field. `ephemeral` enables the compatibility
+extension and performs one unmarked retry only when a 4xx response explicitly
+rejects the `cache_control` schema. Core owns
 validation and request-body injection. When streaming is enabled, model service
 transport collects SSE `delta.content` and the final usage event into the same
 `LlmResponse` contract used by non-streaming model services. It counts but does not
@@ -1516,21 +1679,25 @@ operations, but repository validation and publication remain core-owned.
 
 ## Runtime Data
 
-By default, new environments keep data in a hidden directory scoped to where
-`timem-shell` starts. An existing unconfigured `data/` remains the fallback
-until `.timem_data/` exists only when it has a Timem-specific workspace,
-Session-index, or audit-file fingerprint; the directory name alone is not
-enough:
+The MEM directory is the complete runtime workspace. The default is
+`~/.timem/mem`, independent of the launch directory. Select another absolute
+MEM with `TIMEM_SPACE` or `--space`. Existing project-local `.timem_data` and
+legacy `data` directories remain untouched and are not selected implicitly.
 
 ```text
-.timem_data/<space>/audit/api_audit.json
-.timem_data/<space>/audit/action_audit.json
-.timem_data/<space>/memory/
-.timem_data/<space>/memory/shell_jobs/
-.timem_data/<space>/shell_history.txt
+~/.timem/mem/
+  .guard/workspace-instance.lock
+  workspace.json
+  sessions/
+  audit/
+  capabilities/
+  diagnostics/timem-web/
 ```
 
-Use `TIMEM_DATA_DIR=/path/to/data` for a fixed data root.
+Only one Timem Web or Shell host may own a MEM at a time. The shared workspace
+instance lock prevents Web-Web, Shell-Shell, and Web-Shell overlap; hosts using
+different MEM paths can run concurrently. `TIMEM_DATA_DIR` and `--data-dir` are
+rejected so runtime state cannot be split across two roots.
 
 The API audit file is a JSON document with a `version` field and an `events`
 array. `agent_core::audit` owns the guarded append path and legacy JSONL

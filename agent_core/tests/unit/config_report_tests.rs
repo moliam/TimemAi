@@ -3,14 +3,16 @@ use crate::ApiProtocol;
 
 fn config() -> ModelServiceConfig {
     ModelServiceConfig {
+        interaction: Default::default(),
         model: "qwen-plus".to_string(),
         base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
         api_key: "secret".to_string(),
+        http_headers: Default::default(),
         timeout_secs: 120,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         api_protocol: ApiProtocol::OpenAiCompatible,
-        response_protocol: crate::ResponseProtocolKind::Markdown,
+        response_protocol: crate::ResponseProtocolKind::Json,
         openai_compatible: crate::OpenAiCompatibleOptions::default(),
     }
 }
@@ -18,7 +20,6 @@ fn config() -> ModelServiceConfig {
 fn input() -> RuntimeConfigReportInput {
     RuntimeConfigReportInput {
         space: ".test_mem".to_string(),
-        data_dir: "/tmp/timem/data".to_string(),
         api_audit_path: "/tmp/timem/data/.test_mem/audit/api_audit.json".to_string(),
         action_audit_path: "/tmp/timem/data/.test_mem/audit/action_audit.json".to_string(),
         bash_approval_mode: BashApprovalMode::Approve,
@@ -41,11 +42,11 @@ fn config_report_is_ui_neutral_and_groups_effective_values() {
         RuntimeConfigReportItem::Section(RuntimeConfigSection::Model)
     ));
     assert!(matches!(
-        report.items[4],
+        report.items[5],
         RuntimeConfigReportItem::Section(RuntimeConfigSection::Runtime)
     ));
     assert!(matches!(
-        report.items[9],
+        report.items[10],
         RuntimeConfigReportItem::Section(RuntimeConfigSection::Data)
     ));
     assert!(report.items.iter().any(|item| matches!(
@@ -62,6 +63,13 @@ fn config_report_is_ui_neutral_and_groups_effective_values() {
         item,
         RuntimeConfigReportItem::Row(row)
             if row.key == "TIMEM_WORK_INSTRUCTIONS" && row.value == "silent"
+    )));
+    assert!(report.items.iter().any(|item| matches!(
+        item,
+        RuntimeConfigReportItem::Row(row)
+            if row.kind == RuntimeConfigRowKind::ResponseProtocol
+                && row.key == "TIMEM_RESPONSE_PROTOCOL"
+                && row.value == "json"
     )));
     assert!(report.items.iter().any(|item| matches!(
         item,

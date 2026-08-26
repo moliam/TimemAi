@@ -45,9 +45,11 @@ describe("production wire delivery contract", () => {
   it.each([
     { type: "command_ack", command_id: "cmd-a", status: "committed" },
     { type: "host_error", message: "query_failed" },
+    { type: "runtime_notice", session_id: "session-a", level: "warning", title: "Runtime warning", message: "persist_failed" },
     { type: "history_page", session_id: "session-a", records: [], has_more: false },
     { type: "session_api_key_revealed", session_id: "session-a", api_key: "secret" },
     { type: "mcp_server_secrets_revealed", server_id: "mcp-a", values: {} },
+    { type: "model_endpoint_secret_revealed", endpoint_id: "endpoint-a", api_key: "secret" },
     { type: "tool_repo_search_result", session_id: "session-a", query: "q", tools: [] },
     { type: "tool_repo_detail", session_id: "session-a", detail: {} },
   ] as WireEvent[])("continues reducing direct $type responses in semantic mode", (event) => {
@@ -64,6 +66,7 @@ describe("production wire delivery contract", () => {
     "core_topic",
     "worker_activity",
     "turn_finished",
+    "turn_started",
     "turn_updated",
     "host_config_updated",
     "file_uploaded",

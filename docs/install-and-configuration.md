@@ -38,6 +38,9 @@ It installs:
 - `timem-native-rs`: terminal release binary
 - `timem`: thin wrapper for the terminal UI
 - `timem-web`: local browser UI with embedded production assets
+- `resources/reminder_tips.json`: runtime-loaded default reminder schedules, normally under `~/.local/share/timem/resources`
+
+`TIMEM_SHELL_INSTALL_DIR` changes the binary directory. Resources follow the same prefix at `../share/timem/resources` unless `TIMEM_RESOURCES_DIR` is set explicitly. User-level `reminder_tips.json` overrides are separate and are never overwritten by installation.
 
 Binary updates are installed with an atomic file replacement. This allows
 `./install.sh` to update an installation even while an older `timem-web`
@@ -131,16 +134,23 @@ export TIMEM_MODEL=...
 - `openai-responses`
 - `anthropic`
 
-`TIMEM_RESPONSE_PROTOCOL` chooses the model response format parsed by the local
-runtime. Supported values are `xml`, `markdown`, and `json`; default is `xml`.
+`TIMEM_TOOL_CALL_MODE` chooses `auto`, `native`, or `inline` (default `auto`).
+Auto mode probes the configured gateway/model and falls back to inline when
+native tool calls are unsupported. `TIMEM_PARALLEL_TOOL_CALLS` accepts `auto`,
+`true`, or `false`; Timem sends the resolved parallel flag explicitly to the API.
+
+`TIMEM_RESPONSE_PROTOCOL` chooses the inline response format parsed by the local
+runtime. Supported values are `xml` and `json`; default is `xml`. Native mode
+uses provider tool-call structures, does not inject this inline protocol, and
+automatically uses JSON prompt serialization. The configured inline protocol is
+restored if the runtime later switches back to inline mode.
 
 ## Runtime Options
 
 Common values:
 
 ```bash
-export TIMEM_SPACE=.test_mem
-export TIMEM_DATA_DIR=/path/to/data
+export TIMEM_SPACE=/absolute/path/to/mem
 export TIMEM_BASH_APPROVAL=approve
 export TIMEM_WORK_INSTRUCTIONS=silent
 ```
@@ -158,32 +168,152 @@ export TIMEM_WORK_INSTRUCTIONS=silent
 
 ## Runtime Data
 
-New environments use a hidden data root by default:
+By default, Timem stores MEM data in the user's home directory:
 
 ```text
-.timem_data/<space>/
+~/.timem/mem/
   audit/api_audit.json
   audit/action_audit.json
-  memory/
+  memory.jsonl
+  scratch_notes.jsonl
   sessions/
+    <session-id>/
+      session.json
+      raw_chat_history.jsonl
+  session_groups.json
+  worker_roles.json
+  web_events.ndjson
   shell_history.txt
 ```
 
-If an unconfigured existing environment already has a recognizable Timem
-layout under `data/` (Timem workspace, Session index, or audit files) and does
-not yet have `.timem_data/`, Timem continues using it so upgrades do not hide
-or split existing Sessions. An unrelated directory merely named `data` is not
-treated as Timem storage. `TIMEM_DATA_DIR` always takes precedence.
+The directory is created automatically on first startup. Each MEM has a temporary-data
+retention setting: 1, 5, 10 days, or unlimited (default: 5 days). Timem applies the
+moving cutoff when the MEM opens, immediately after the setting changes, and once per
+hour while Timem Web is running. Only these temporary data are covered:
 
-Use a fixed data root if you do not want data under the current directory:
+- raw-chat event kinds `action`, `action_result`, `context_compact`, and `repair`;
+- finished shell-job records and their stdout/stderr/status files;
+- API audit events in `audit/api_audit.json` and its JSONL sidecar.
+
+User/assistant messages and all other history event kinds are never removed by this
+setting. Running shell jobs are retained regardless of age. Unlimited mode skips all
+retention cleanup. Cleanup uses the same MEM lock domains as writers, installs rewritten
+files atomically, retains records exactly on the cutoff boundary, and is safe to repeat.
+
+Session metadata is stored per Session rather than in one shared mutable index. If one
+`sessions/<session-id>/session.json` is malformed or carries a mismatched ID,
+Timem quarantines that file beside the Session directory and restores the other
+healthy Sessions. Existing `sessions/index.jsonl` stores are repaired if
+necessary, migrated automatically
+to `sessions/<session-id>/session.json`, and retained as `index.v1.jsonl` for
+manual recovery.
+
+Writes use narrow lock domains: each Session owns one data lock for its metadata
+and history; Session groups, Roles, tool jobs, and audit data use separate locks.
+Independent Sessions therefore do not wait on each other's metadata or chat
+writes. Cross-collection group changes release in-memory locks before filesystem or
+worker operations. Group moves persist a candidate Session snapshot before
+committing memory. Group deletion persists affected Session metadata first,
+rolls those writes back if a later write fails, and removes the group definition
+only after all Session writes succeed.
+
+`--space` and `TIMEM_SPACE` select another MEM directory. Their value must be
+an absolute path, and the path itself is the MEM directory; Timem does not add
+an extra `memory` component:
+
+On Unix, Timem creates the selected MEM directory with owner-only `0700`
+permissions and tightens an existing selected MEM directory to `0700` at
+startup. The parent directory is not modified. This protects Session runtime
+configuration, cached credentials, memory, audit data, event journals, and Web
+lifecycle diagnostics on multi-user Linux and macOS hosts.
 
 ```bash
-export TIMEM_DATA_DIR=/path/to/data
-export TIMEM_SPACE=my_project
+timem --space /absolute/path/to/project-mem
+export TIMEM_SPACE=/absolute/path/to/project-mem
 ```
 
-Env files are independent from runtime data. Private env files are
-user-managed and are not touched by install or uninstall scripts.
+Relative paths such as `--space .test_mem` are rejected.
+
+When `timem-web` resolves the MEM directory to the system default
+`~/.timem/mem` and no `--port` is supplied, it tries port `13764` first. If that
+port is unavailable, it continues through the existing automatic port range
+(`12345`–`23456`). A custom MEM uses the rotating automatic selection order,
+and an explicit `--port` always has priority over either automatic strategy.
+
+The selected MEM is the complete workspace root. Workspace configuration,
+capability overlays, Sessions, memory, audit files, and Web diagnostics all live
+under that one directory. `TIMEM_DATA_DIR` and `--data-dir` are no longer
+supported and are rejected rather than silently splitting state across roots.
+Existing project-local `.timem_data`, `data`, and other legacy directories are
+not migrated or deleted automatically. Env files are independent from MEM data
+and are not touched by install or uninstall scripts.
+
+A MEM is exclusively owned by one running Timem host. A second Web or Shell
+process using the same MEM exits with an ownership error; choose another
+absolute `--space` to run concurrently. Different MEM directories remain
+independent and may run at the same time.
+
+### Timem Web lifecycle diagnostics
+
+`timem-web` enables a small process-lifecycle recorder by default. Its purpose is
+to preserve evidence for a later investigation when the Web host exits
+unexpectedly, without continuously logging model or browser traffic.
+
+Files are stored under:
+
+```text
+<MEM>/diagnostics/timem-web/
+  current-runs/
+    <run-id>.json
+  run-archive/
+    <run-id>-exit.json
+    <run-id>-panic.txt
+    <run-id>-abnormal.json
+  last-exit.json
+  last-panic.txt
+  previous-abnormal-exit.json
+```
+
+The recorder has fixed bounds:
+
+- at most 64 recent lifecycle events are kept in memory;
+- disk checkpoints occur only at process start, configuration completion,
+  listener binding, graceful exit, or panic;
+- files are atomically replaced rather than appended, so storage does not grow
+  with uptime or request count; completed-run archives retain only a bounded
+  recent set;
+- panic messages are limited to 4 KiB and backtraces to 128 KiB;
+- Unix directories and files use owner-only `0700` and `0600` permissions.
+
+Each `current-runs/<run-id>.json` contains the process version, PID,
+PID-reuse-resistant process identity where supported, operating system,
+architecture, option names, and the latest low-frequency milestone. Successive
+Web runs use separate files. A process removes only its own marker, and a new
+process promotes only markers whose owner is confirmed stale. Argument
+values are not stored. In particular, API keys, URLs, paths, prompts, model
+replies, Web access tokens, HTTP header values, and tool inputs/outputs are not
+part of the default lifecycle report.
+
+On a graceful exit, `last-exit.json` records the actual selected trigger:
+`ctrl_c`, `sigterm`, `sighup`, `parent_process_exited`, `server_completed`, or
+`help_requested`. It also records whether runtime cleanup completed. A startup
+or runtime error is recorded separately as `startup_or_runtime_error`, with a
+bounded best-effort redaction of common credential shapes.
+
+A Rust panic produces `last-panic.txt` with its thread, source location, recent
+lifecycle milestones, and a forced backtrace. Backtrace capture occurs only on
+panic. If the process cannot run cleanup—for example after SIGKILL, host reboot,
+or some OOM terminations—its file under `current-runs/` remains. A later start
+copies a confirmed-stale record to `run-archive/<run-id>-abnormal.json` and
+updates `previous-abnormal-exit.json` with `exact_cause: unknown`. This proves
+only that the prior process did not complete its exit protocol; it does **not**
+by itself prove a panic, OOM, or any particular external signal.
+
+For an unexpected exit, preserve these files before reproducing again. Start
+with `last-exit.json`, `last-panic.txt`, and `previous-abnormal-exit.json`.
+Review their contents before sharing them. The separate `--debug` mode remains
+opt-in and may contain prompts, model replies, and tool data; it is intended for
+model-interaction diagnosis rather than ordinary process-exit diagnosis.
 
 ## Interactive Notes
 
@@ -195,13 +325,20 @@ Shell:
 - `/workspace` manages workspace reference directories.
 - `Ctrl+C` / `Esc` cancel the current input/menu/turn; use `/exit` or `Ctrl+D`
   to exit.
-- While the model is working, typing and pressing Enter submits a supplement to
-  the active turn.
+- While the model is working, typing another question and pressing Enter queues a
+  separate next turn; it does not replace the current turn’s final answer.
 
 Web:
 
+- When creating a Session, choose a registered Workspace or enter an existing
+  absolute directory on the Timem host. The selected directory becomes that
+  Session's CWD.
 - Sessions can use different model/API/runtime settings.
-- Attachments are stored under the active data space and passed to the active
+- The sidebar supports persistent Session groups. Groups can be created,
+  renamed, reordered, collapsed, and deleted; deleting a group moves its
+  Sessions to **Unsorted** without deleting them. A Session can be moved between
+  groups while other Sessions continue working.
+- Attachments are stored under the active MEM and passed to the active
   turn.
 - Stop cancels all workers in the active Session; the next send starts from the
   primary worker.
@@ -220,8 +357,22 @@ git pull --ff-only
 ./uninstall.sh
 ```
 
+Uninstall removes the binaries and installed reminder resource. It does not remove user configuration, including a user-level `reminder_tips.json` override.
 If Rust was installed only for Timem, remove it separately:
 
 ```bash
 rustup self uninstall
 ```
+
+## MEM 历史记录保留
+
+Timem Web 左下角的 **Memory** 卡片用于打开当前 MEM 的设置；卡片右侧的独立切换按钮仅用于切换 MEM 目录。
+
+每个 MEM 可以单独设置 Session 聊天历史的保留期限：
+
+- 最近 1 天
+- 最近 5 天（默认）
+- 最近 10 天
+- 不限
+
+设置保存在当前 MEM 的 `mem_settings.json` 中。选择有限期限后，Timem 会立即删除早于期限的 Session 聊天历史，并在以后启动或切换到该 MEM 时再次应用该策略。该操作不会删除 Session、ToolRepo 工具、角色、MCP 或模型接入点。为避免与正在写入的历史冲突，存在运行中任务时不能修改保留期限。

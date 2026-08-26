@@ -58,10 +58,12 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   for prompt assembly order and must not be rendered into the model prompt.
 - Active-turn context updates such as user supplements entered while a model
   turn is in progress, including their prompt-slice insertion and audit events.
-- Active-turn focus reminders. Core measures each turn's active time separately
-  and, at ten-minute intervals, submits one randomly selected SYSTEM reminder
-  before the next model request. Host-decision wait time is excluded and long
-  blocking calls are not interrupted merely to deliver a reminder.
+- Active-turn reminders. Core evaluates the host-loaded, user-global reminder
+  schedules independently for active-time and completed-round intervals, then
+  submits each due random selection as a SYSTEM component before the next model
+  request. Selecting `NONE` consumes that interval without prompt injection.
+  Host-decision wait time is excluded, long blocking calls are not interrupted,
+  and missed time intervals collapse rather than building a stale backlog.
 - Host-decision results once chosen by the UI, such as applying user approval
   decisions to pending actions and recording their runtime audit events.
 - Round-limit decisions after the host chooses continue/stop, including audit
@@ -74,7 +76,7 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   repair issue classification, repair counter updates, repair prompt-slice
   injection, generic repair audit events, and realtime
   `audit/api_output_repair.json` diagnostics containing malformed output plus
-  the SYSTEM repair message.
+  the RUNTIME repair message.
 - Turn supporting-context assembly, including runtime identity and host-provided
   additional context. Hosts provide source values; core owns how they are
   combined for the model.
@@ -82,7 +84,7 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   structured turn input. Core consumes these values when assembling model
   context; reusable runtime loops should not hard-code a terminal host identity.
 - Memory, scratch, raw chat, context shrink/compact, and conflict handling.
-  A successful compact re-injects one bounded SYSTEM snapshot of currently
+  A successful compact re-injects one bounded RUNTIME snapshot of currently
   applied MCP actions when any are active; pending host configuration and MCP
   secrets are never included.
 - Cross-host Session persistence schemas. Core owns `StoredSession`,

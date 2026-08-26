@@ -5,7 +5,7 @@ binding_name: toolgen
 requires_host: local_command_execution
 summary: Validate and publish a reusable Session tool draft.
 prompt_synopsis: |
-  toolgen op=publish draft_path=<absolute_draft_directory>
+  {"toolgen":{"op":"publish","draft_path":"/absolute/draft/directory"}}
 description: |
   `toolgen` is used only while Timem asks you to retrospect and preserve a
   reusable script. Build the candidate folder in the provided draft path, then
@@ -29,22 +29,10 @@ input_schema: |
   {
     "type": "object",
     "required": ["op", "draft_path"],
+    "additionalProperties": false,
     "properties": {
       "op": {"type": "string", "enum": ["publish"], "description": "Publish a validated ToolGen draft."},
-      "draft_path": {"type": "string", "description": "Absolute draft directory supplied by runtime."}
-    }
-  }
-output_schema: |
-  {
-    "type": "object",
-    "properties": {
-      "status": {"type": "string", "description": "ready on successful validation and publish."},
-      "tool_id": {"type": "string", "description": "Stable tool identity."},
-      "name": {"type": "string", "description": "Semantic folder name."},
-      "path": {"type": "string", "description": "Published tool directory."},
-      "updated_existing": {"type": "boolean", "description": "Whether an existing tool was replaced."},
-      "validation_output": {"type": "string", "description": "Bounded self-test evidence."},
-      "error": {"type": "string", "description": "Validation or publication failure."}
+      "draft_path": {"type": "string", "minLength": 1, "pattern": "^/", "description": "Absolute session draft directory supplied by runtime; arbitrary directories are rejected."}
     }
   }
 example_json: |

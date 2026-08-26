@@ -32,10 +32,12 @@ Examples below are format examples ONLY:
 
 {
   "free_talk": "刚刚已经完成了任务 A，总结如下。现在继续进行工作 B，但由于上下文太长且混杂，我先压缩一下。",
-  "context_compact": {
-    "discard": ["pd_1"],
-    "offload": ["pd_2"],
-    "summary": "This is the summary...."
+  "working_still_action": {
+    "context_compact": {
+      "discard": ["pd_1"],
+      "offload": ["pd_2"],
+      "summary": "This is the summary...."
+    }
   }
 }
 

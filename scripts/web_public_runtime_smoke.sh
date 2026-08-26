@@ -37,7 +37,7 @@ wait_for_url() {
       sed -E 's/token=[^[:space:]]+/token=[REDACTED]/g' "$log_path" >&2
       return 1
     fi
-    url="$(sed -n 's/^Timem Web is ready at //p' "$log_path" | head -n 1)"
+    url="$(sed -n '/^http:\/\/.*[?&]token=/p; /^https:\/\/.*[?&]token=/p' "$log_path" | tail -n 1)"
     if [ -n "$url" ]; then
       printf '%s\n' "$url"
       return 0
@@ -47,6 +47,14 @@ wait_for_url() {
   echo "public timem-web did not become ready in time" >&2
   sed -E 's/token=[^[:space:]]+/token=[REDACTED]/g' "$log_path" >&2
   return 1
+}
+
+assert_token_shape() {
+  local token="$1"
+  if [[ ! "$token" =~ ^[[:xdigit:]]{16}$ ]]; then
+    echo "public Web runtime token must be exactly 16 hexadecimal characters" >&2
+    exit 1
+  fi
 }
 
 stop_host() {
@@ -104,13 +112,14 @@ curl_common=(
 
 first_log="$test_root/first.log"
 "$binary" --public --public-host 127.0.0.1 --no-open \
-  --data-dir "$test_root/data" --space public-lifecycle >"$first_log" 2>&1 &
+  --space "$test_root/public-lifecycle-mem" >"$first_log" 2>&1 &
 host_pid=$!
 first_url="$(wait_for_url "$first_log")"
 first_authority="${first_url#http://}"
 first_authority="${first_authority%%/*}"
 first_port="${first_authority##*:}"
 first_token="${first_url##*token=}"
+assert_token_shape "$first_token"
 
 case "$first_url" in
   "http://127.0.0.1:$first_port/?token="*) ;;
@@ -155,13 +164,14 @@ assert_websocket_hello "ws://127.0.0.1:$first_port/ws?token=$first_token"
 stop_host
 
 # Public mode must release its listener and journal ownership on shutdown, and
-# rotate credentials when the same data root and port are started again.
+# rotate credentials when the same MEM and port are started again.
 second_log="$test_root/second.log"
 "$binary" --public --public-host 127.0.0.1 --no-open --port "$first_port" \
-  --data-dir "$test_root/data" --space public-lifecycle >"$second_log" 2>&1 &
+  --space "$test_root/public-lifecycle-mem" >"$second_log" 2>&1 &
 host_pid=$!
 second_url="$(wait_for_url "$second_log")"
 second_token="${second_url##*token=}"
+assert_token_shape "$second_token"
 if [ "$first_token" = "$second_token" ]; then
   echo "a restarted public runtime must rotate its access token" >&2
   exit 1

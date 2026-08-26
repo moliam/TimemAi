@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activityFromTopic, appendTurnEvent, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURN_EVENTS, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, MAX_RESTORED_TURN_EVENTS, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnsFromHistoryRecords, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
+import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnTimelinePlacement, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -64,6 +64,21 @@ const actionEvent = (
   },
 });
 
+describe("user message clipboard normalization", () => {
+  it("removes only trailing line breaks added by DOM selection serialization", () => {
+    expect(normalizeCopiedUserMessageText("hello\n\n\n")).toBe("hello");
+    expect(normalizeCopiedUserMessageText("第一行\n\n第二行\n\n")).toBe("第一行\n\n第二行");
+    expect(normalizeCopiedUserMessageText("first\r\nsecond\r\n\r\n")).toBe("first\r\nsecond");
+  });
+
+  it("preserves internal line breaks, trailing spaces, and text without trailing line breaks", () => {
+    expect(normalizeCopiedUserMessageText("hello   ")).toBe("hello   ");
+    expect(normalizeCopiedUserMessageText("first\n\nsecond")).toBe("first\n\nsecond");
+    expect(normalizeCopiedUserMessageText("")).toBe("");
+    expect(normalizeCopiedUserMessageText("\n\r\n")).toBe("");
+  });
+});
+
 describe("web topic view model", () => {
   it("reconstructs unresolved decisions from a working snapshot turn", () => {
     const waiting = topic("core.request", { request_id: "req-1", request: { command: "git status" } }, "waiting_user");
@@ -90,15 +105,36 @@ describe("web topic view model", () => {
     expect(decisionsFromSessions([completed])).toEqual([]);
   });
 
+  it("routes local runtime errors into the current task work stream", () => {
+    const active = session("session_1");
+    active.turns = [turn("turn_1")];
+    active.active_turn_id = "turn_1";
+
+    const updated = appendActivityToCurrentTurn(active, {
+      id: "runtime-warning-1",
+      sessionId: "session_1",
+      tone: "warning",
+      title: "Runtime persistence warning",
+      detail: "semantic_event_persist_failed",
+      createdAt: 2,
+    });
+
+    expect(updated.turns[0].events).toHaveLength(1);
+    expect(updated.turns[0].events[0]).toMatchObject({
+      event_id: "runtime-warning-1",
+      source: "ui_activity",
+      created_at_ms: 2,
+    });
+  });
+
   it("defaults completed work to collapsed only when its process contains free talk alone", () => {
     const freeTalk = activityFromTopic(topic("core.model.response", { free_talk: "Simple reasoning." }));
     const action = activityFromTopic(topic("core.action", { action: "run_bash", status: "completed", input: { cmd: "pwd" } }));
-    const repair = activityFromTopic(topic("core.model.repair", { attempt: 1, max_attempts: 5, issue: "invalid_xml" }));
 
+    expect(freeTalk).toMatchObject({ tone: "thinking", kind: "free_talk", detail: "Simple reasoning." });
     expect(hasOnlyFreeTalkActivity(freeTalk ? [freeTalk] : [], 0)).toBe(true);
     expect(hasOnlyFreeTalkActivity([], 0)).toBe(false);
     expect(hasOnlyFreeTalkActivity([freeTalk, action].filter((activity): activity is NonNullable<typeof activity> => activity !== null), 0)).toBe(false);
-    expect(hasOnlyFreeTalkActivity(repair ? [repair] : [], 0)).toBe(false);
     expect(hasOnlyFreeTalkActivity(freeTalk ? [freeTalk] : [], 1)).toBe(false);
   });
 
@@ -111,6 +147,7 @@ describe("web topic view model", () => {
     expect(failed).toMatchObject({ tone: "warning", kind: "toolgen", title: "ToolGen: 生成失败", detail: "self-test failed" });
     expect(activityFromTopic(topic("core.model.response", { runtime_phase: "toolgen", free_talk: "Building a reusable parser.", final_answer: "internal completion" }))).toMatchObject({
       tone: "thinking",
+      kind: "free_talk",
       detail: "Building a reusable parser.",
     });
     expect(activityFromTopic(topic("core.action", { runtime_phase: "toolgen", action: "run_bash", status: "running", input: { cmd: "bash tool.sh --self-test" } }))).toMatchObject({
@@ -118,10 +155,28 @@ describe("web topic view model", () => {
       code: "bash tool.sh --self-test",
       code_language: "bash",
     });
-    expect(activityFromTopic(topic("core.model.repair", { runtime_phase: "toolgen", attempt: 1, max_attempts: 5, issue: "invalid_xml" }))).toMatchObject({
-      tone: "warning",
-      title: "⚠️ 模型回复偏离协议，重试 (1/5)",
-    });
+    expect(activityFromTopic(topic("core.model.repair", {
+      runtime_phase: "toolgen",
+      attempt: 1,
+      max_attempts: 5,
+      issue: "invalid_xml",
+    }))).toBeNull();
+  });
+
+  it("switches one composer action between stop and send across typing and turn-state races", () => {
+    expect(composerPrimaryAction("working", "", false)).toBe("stop");
+    expect(composerPrimaryAction("working", "  \n\t", false)).toBe("stop");
+    expect(composerPrimaryAction("working", "follow-up", false)).toBe("send");
+    expect(composerPrimaryAction("working", "", false)).toBe("stop");
+
+    // Once cancellation has started, do not make newly typed text look sendable.
+    expect(composerPrimaryAction("working", "typed during cancellation", true)).toBe("stop");
+    expect(composerPrimaryAction("ready", "typed during cancellation completion", true)).toBe("stop");
+
+    // Authoritative completion can race with local typing; after cancellation clears, a ready Session uses Send.
+    expect(composerPrimaryAction("ready", "follow-up", false)).toBe("send");
+    expect(composerPrimaryAction("ready", "", false)).toBe("send");
+    expect(composerPrimaryAction(undefined, "draft without a Session", false)).toBe("send");
   });
 
   it("submits a new user turn when the active session is ready", () => {
@@ -134,24 +189,69 @@ describe("web topic view model", () => {
     });
   });
 
-  it("sends working-session text as a supplement instead of disabling input", () => {
+  it("keeps ordinary working-session text as a separate next turn", () => {
     const current = { ...session("session_1"), state: "working" };
-    expect(composerSendDecision(current, "  add this constraint  ", false)).toEqual({
+    expect(composerSendDecision(current, "  ask this next  ", false)).toEqual({
       kind: "send",
-      text: "add this constraint",
+      text: "ask this next",
       clearDraftOnSuccess: true,
-      command: { type: "turn_supplement", session_id: "session_1", text: "add this constraint" },
+      command: { type: "turn_submit", session_id: "session_1", text: "ask this next" },
     });
   });
 
-  it("keeps rapid repeated sends during a working turn as separate supplements", () => {
+  it("forces ready-session text to send immediately as a supplement with attachments", () => {
+ const current = session("session_1");
+ expect(composerSendDecision(
+ current,
+ " urgent context ",
+ false,
+ false,
+ ["attachment_1", "attachment_2"],
+ true,
+ )).toEqual({
+ kind: "send",
+ text: "urgent context",
+ clearDraftOnSuccess: true,
+ command: {
+ type: "turn_supplement",
+ session_id: "session_1",
+ text: "urgent context",
+ attachment_ids: ["attachment_1", "attachment_2"],
+ },
+ });
+ });
+
+ it("forces a paused queued message to start a new turn even while the session is working", () => {
+ const current = { ...session("session_1"), state: "working" };
+ expect(composerSendDecision(
+ current,
+ " start this as a separate task ",
+ false,
+ false,
+ ["attachment_1"],
+ false,
+ true,
+ )).toEqual({
+ kind: "send",
+ text: "start this as a separate task",
+ clearDraftOnSuccess: true,
+ command: {
+ type: "turn_submit",
+ session_id: "session_1",
+ text: "start this as a separate task",
+ attachment_ids: ["attachment_1"],
+ },
+ });
+ });
+
+ it("keeps rapid ordinary sends during a working turn as separate next-turn submissions", () => {
     const current = { ...session("session_1"), state: "working" };
-    const decisions = ["first correction", "second correction", "third correction"].map((text) => composerSendDecision(current, text, false));
+    const decisions = ["second question", "third question", "fourth question"].map((text) => composerSendDecision(current, text, false));
     expect(decisions.map((decision) => decision.kind)).toEqual(["send", "send", "send"]);
     expect(decisions.map((decision) => decision.kind === "send" ? decision.command : undefined)).toEqual([
-      { type: "turn_supplement", session_id: "session_1", text: "first correction" },
-      { type: "turn_supplement", session_id: "session_1", text: "second correction" },
-      { type: "turn_supplement", session_id: "session_1", text: "third correction" },
+      { type: "turn_submit", session_id: "session_1", text: "second question" },
+      { type: "turn_submit", session_id: "session_1", text: "third question" },
+      { type: "turn_submit", session_id: "session_1", text: "fourth question" },
     ]);
   });
 
@@ -173,10 +273,11 @@ describe("web topic view model", () => {
     expect(restored.turns.at(-1)?.turn_id).toBe("current_199");
   });
 
-  it("keeps restored action history bounded without reducing the live turn event budget", () => {
+  it("retains complete restored and live action history", () => {
+    const eventCount = 530;
     const restored = {
       ...turn("restored_turn", "restored"),
-      events: Array.from({ length: MAX_RESTORED_TURN_EVENTS + 30 }, (_, index) => ({
+      events: Array.from({ length: eventCount }, (_, index) => ({
         event_id: `restored_event_${index}`,
         source: "worker_activity",
         payload: { kind: "action", index },
@@ -185,7 +286,7 @@ describe("web topic view model", () => {
     };
     const live = {
       ...turn("live_turn", "finished"),
-      events: Array.from({ length: MAX_RESTORED_TURN_EVENTS + 30 }, (_, index) => ({
+      events: Array.from({ length: eventCount }, (_, index) => ({
         event_id: `live_event_${index}`,
         source: "worker_activity",
         payload: { kind: "action", index },
@@ -193,10 +294,12 @@ describe("web topic view model", () => {
       })),
     };
 
-    const bounded = boundSessionHistory({ ...session("session_1"), turns: [restored, live] });
+    const retained = boundSessionHistory({ ...session("session_1"), turns: [restored, live] });
 
-    expect(bounded.turns[0]?.events).toHaveLength(MAX_RESTORED_TURN_EVENTS);
-    expect(bounded.turns[1]?.events).toHaveLength(MAX_RESTORED_TURN_EVENTS + 30);
+    expect(retained.turns[0]?.events).toHaveLength(eventCount);
+    expect(retained.turns[0]?.events[0]?.event_id).toBe("restored_event_0");
+    expect(retained.turns[1]?.events).toHaveLength(eventCount);
+    expect(retained.turns[1]?.events[0]?.event_id).toBe("live_event_0");
   });
 
   it("guards one browser draft submission while preserving text typed during the pending send", () => {
@@ -515,6 +618,69 @@ describe("web topic view model", () => {
     expect((events[0].payload.payload as Record<string, unknown>).status).toBe("background_running");
   });
 
+  it("replaces a background-running action with its later process exit", () => {
+    const events = coalesceActionLifecycle([
+      actionEvent("event_1", "start", "running", { cmd: "cargo test", background: true }, "call_bg"),
+      actionEvent("event_2", "finish", "background_running", { cmd: "cargo test", background: true }, "call_bg"),
+      actionEvent("event_3", "finish", "completed", { cmd: "cargo test", background: true }, "call_bg"),
+    ]);
+    expect(events).toHaveLength(1);
+    expect((events[0].payload.payload as Record<string, unknown>).status).toBe("completed");
+  });
+
+  it("settles a restored background action when its start event was trimmed", () => {
+    const events = coalesceActionLifecycle([
+      actionEvent("turn_event_1787626168440_155", "finish", "background_running", { cmd: "cargo test -p timem_web", tail_out: true, timeout_ms: 300000 }, "call_TNTIyS9Gv3eSjDujSijCLyUD"),
+      actionEvent("turn_event_1787626188091_162", "finish", "failed", { cmd: "cargo test -p timem_web" }, "call_TNTIyS9Gv3eSjDujSijCLyUD"),
+    ]);
+    expect(events).toHaveLength(1);
+    expect(events[0].event_id).toBe("turn_event_1787626188091_162");
+    expect((events[0].payload.payload as Record<string, unknown>).status).toBe("failed");
+  });
+
+  it("does not guess that legacy background events without action ids belong together", () => {
+    const events = coalesceActionLifecycle([
+      actionEvent("event_legacy_background", "finish", "background_running", { cmd: "cargo test" }),
+      actionEvent("event_legacy_terminal", "finish", "failed", { cmd: "cargo test" }),
+    ]);
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => (event.payload.payload as Record<string, unknown>).status)).toEqual(["background_running", "failed"]);
+  });
+
+  it("does not settle one trimmed background action with another action id", () => {
+    const events = coalesceActionLifecycle([
+      actionEvent("event_background_a", "finish", "background_running", { cmd: "cargo test" }, "call_a"),
+      actionEvent("event_terminal_b", "finish", "failed", { cmd: "cargo test" }, "call_b"),
+    ]);
+    expect(events).toHaveLength(2);
+    expect(events.map((event) => (event.payload.payload as Record<string, unknown>).action_id)).toEqual(["call_a", "call_b"]);
+    expect(events.map((event) => (event.payload.payload as Record<string, unknown>).status)).toEqual(["background_running", "failed"]);
+  });
+
+  it("settles a trimmed background action after compacted history reconstruction", () => {
+    const actionId = "call_compacted_background";
+    const actionTopic = (status: string, input: Record<string, unknown>) => ({
+      session_id: "session_1",
+      context_id: "context_1",
+      worker_id: "worker_session_1",
+      topic: { name: "core.action", attributes: { event: "finish", action_id: actionId } },
+      state: { name: "running" },
+      payload: { action: "run_bash", action_id: actionId, event: "finish", status, input },
+    });
+    const records: ChatHistoryRecord[] = [
+      { type: "event", role: "system", turn_id: "turn_compacted", created_at_ms: 10, kind: "action", content: "background", source: "core_topic", payload: actionTopic("background_running", { cmd: "cargo test", timeout_ms: 300000 }) },
+      { type: "event", role: "system", turn_id: "turn_compacted", created_at_ms: 20, kind: "context_compact", content: "compacted", source: "core_topic", payload: topic("core.context.compact", { estimated_before_tokens: 180000, estimated_after_tokens: 20000 }) },
+      { type: "event", role: "system", turn_id: "turn_compacted", created_at_ms: 30, kind: "action", content: "failed", source: "core_topic", payload: actionTopic("failed", { cmd: "cargo test" }) },
+    ];
+
+    const [restored] = turnsFromHistoryRecords(records);
+    const visible = coalesceActionLifecycle(restored.events);
+
+    expect(visible).toHaveLength(2);
+    expect((visible[0].payload.payload as Record<string, unknown>).status).toBe("failed");
+    expect((visible[1].payload.topic as Record<string, unknown>).name).toBe("core.context.compact");
+  });
+
   it("replaces the ToolGen start row with one terminal failure row", () => {
     const toolgenEvent = (id: string, phase: string): WebTurnEvent => ({
       event_id: id,
@@ -641,6 +807,188 @@ describe("web topic view model", () => {
     ]);
   });
 
+  it("restores runtime restart markers as system timeline messages without creating turns", () => {
+    const current = {
+      ...session("session_1"),
+      turns: [turn("turn_2", "finished")],
+      messages: [assistantMessage("current answer")],
+    };
+    const records: ChatHistoryRecord[] = [
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 10, kind: "task", content: "older task" },
+      { type: "message", role: "assistant", turn_id: "turn_1", created_at_ms: 20, content: "older answer" },
+      { type: "message", role: "system", turn_id: "runtime_restart_30", created_at_ms: 30, kind: "runtime_restart", content: "Timem Web 已重新启动，以下内容来自新的运行实例" },
+      { type: "message", role: "system", turn_id: "other_system_notice", created_at_ms: 31, kind: "other_notice", content: "not a chat divider" },
+    ];
+
+    const updated = prependHistoryRecords(current, records);
+    expect(updated.turns.map((item) => item.turn_id)).toEqual(["turn_1", "turn_2"]);
+    expect(updated.messages.map((message) => `${message.role}:${message.kind ?? ""}:${message.text}`)).toEqual([
+      "user:task:older task",
+      "assistant::older answer",
+      "system:runtime_restart:Timem Web 已重新启动，以下内容来自新的运行实例",
+      "assistant::current answer",
+    ]);
+
+    const markerOnly = prependHistoryRecords(session("session_2"), [records[2]]);
+    expect(markerOnly.turns).toEqual([]);
+    expect(markerOnly.messages).toHaveLength(1);
+    expect(markerOnly.messages[0]).toMatchObject({
+      role: "system",
+      kind: "runtime_restart",
+      created_at_ms: 30,
+    });
+  });
+
+  it("shows only the latest restart marker when repeated restarts contain no work", () => {
+    const markers: ChatMessage[] = [
+      { id: "restart_10", role: "system", kind: "runtime_restart", text: "restart 1", created_at_ms: 10 },
+      { id: "restart_20", role: "system", kind: "runtime_restart", text: "restart 2", created_at_ms: 20 },
+      { id: "restart_30", role: "system", kind: "runtime_restart", text: "restart 3", created_at_ms: 30 },
+    ];
+
+    expect(visibleRuntimeRestartMarkers([], markers).map((marker) => marker.id)).toEqual(["restart_30"]);
+  });
+
+  it("orders turn work before a restart marker at the same timestamp", () => {
+    const marker: ChatMessage = {
+      id: "restart_same_time",
+      role: "system",
+      kind: "runtime_restart",
+      text: "restart",
+      created_at_ms: 30,
+    };
+    const completedWork = { ...turn("zz_turn", "finished"), created_at_ms: 30 };
+
+    expect(visibleRuntimeRestartMarkers([completedWork], [marker])).toEqual([marker]);
+  });
+
+  it("places a restarted unfinished turn after the runtime restart divider as soon as it resumes", () => {
+    const marker: ChatMessage = {
+      id: "restart_100",
+      role: "system",
+      kind: "runtime_restart",
+      text: "restart",
+      created_at_ms: 100,
+    };
+    const restored = {
+      ...turn("turn_before_restart", "restored"),
+      created_at_ms: 10,
+      events: [{
+        event_id: "historical_thinking",
+        source: "core_topic",
+        payload: {},
+        created_at_ms: 20,
+      }],
+    };
+
+    expect(turnTimelinePlacement(restored, [marker])).toEqual({
+      createdAtMs: 10,
+      resumedAfterRestart: false,
+    });
+    expect(turnTimelinePlacement({ ...restored, state: "working" }, [marker])).toEqual({
+      createdAtMs: 100,
+      resumedAfterRestart: true,
+    });
+  });
+
+  it("sorts the restart divider before a resumed pre-restart turn", () => {
+    const timeline = [
+      {
+        type: "turn" as const,
+        createdAtMs: 100,
+        resumedAfterRestart: true,
+        id: "old_turn",
+      },
+      {
+        type: "restart" as const,
+        createdAtMs: 100,
+        resumedAfterRestart: false,
+        id: "restart_100",
+      },
+    ].sort(compareTurnTimelineItems);
+
+    expect(timeline.map((item) => item.type)).toEqual(["restart", "turn"]);
+  });
+
+  it("keeps ordinary turn work before a same-time restart marker", () => {
+    const timeline = [
+      {
+        type: "restart" as const,
+        createdAtMs: 100,
+        resumedAfterRestart: false,
+        id: "restart_100",
+      },
+      {
+        type: "turn" as const,
+        createdAtMs: 100,
+        resumedAfterRestart: false,
+        id: "new_turn",
+      },
+    ].sort(compareTurnTimelineItems);
+
+    expect(timeline.map((item) => item.type)).toEqual(["turn", "restart"]);
+  });
+
+  it("keeps a resumed turn below the latest restart divider after new activity arrives", () => {
+    const markers: ChatMessage[] = [
+      { id: "restart_100", role: "system", kind: "runtime_restart", text: "restart 1", created_at_ms: 100 },
+      { id: "restart_200", role: "system", kind: "runtime_restart", text: "restart 2", created_at_ms: 200 },
+    ];
+    const resumed = {
+      ...turn("turn_before_restarts", "finished"),
+      created_at_ms: 10,
+      events: [
+        { event_id: "old_event", source: "core_topic", payload: {}, created_at_ms: 20 },
+        { event_id: "new_event", source: "core_topic", payload: {}, created_at_ms: 220 },
+      ],
+    };
+
+    expect(turnTimelinePlacement(resumed, markers)).toEqual({
+      createdAtMs: 200,
+      resumedAfterRestart: true,
+    });
+  });
+
+  it("does not move completed historical turns across a later restart divider", () => {
+    const marker: ChatMessage = {
+      id: "restart_100",
+      role: "system",
+      kind: "runtime_restart",
+      text: "restart",
+      created_at_ms: 100,
+    };
+    const completed = {
+      ...turn("old_completed_turn", "finished"),
+      created_at_ms: 10,
+      events: [{
+        event_id: "old_completion",
+        source: "core_topic",
+        payload: {},
+        created_at_ms: 50,
+      }],
+    };
+
+    expect(turnTimelinePlacement(completed, [marker])).toEqual({
+      createdAtMs: 10,
+      resumedAfterRestart: false,
+    });
+  });
+
+  it("keeps restart markers separated by actual turn work", () => {
+    const markers: ChatMessage[] = [
+      { id: "restart_10", role: "system", kind: "runtime_restart", text: "restart 1", created_at_ms: 10 },
+      { id: "restart_20", role: "system", kind: "runtime_restart", text: "restart 2", created_at_ms: 20 },
+      { id: "restart_40", role: "system", kind: "runtime_restart", text: "restart 3", created_at_ms: 40 },
+      { id: "restart_50", role: "system", kind: "runtime_restart", text: "restart 4", created_at_ms: 50 },
+    ];
+    const completedWork = { ...turn("turn_30", "finished"), created_at_ms: 30 };
+
+    expect(visibleRuntimeRestartMarkers([completedWork], markers).map((marker) => marker.id)).toEqual([
+      "restart_20",
+      "restart_50",
+    ]);
+  });
+
   it("keeps one session working when a subworker finishes and hides its final answer", () => {
     let current = session("session_1");
     current.contexts.push({ context_id: "context_sub", current_dir: "/work/sub", worker_ids: ["worker_sub"] });
@@ -693,6 +1041,29 @@ describe("web topic view model", () => {
     const afterCwd = applyCoreTopicToSession(current, unknownContextCwd, assistantMessage);
     expect(afterCwd).toBe(current);
     expect(afterCwd.current_dir).toBe("/work");
+  });
+
+  it("synchronizes the context meter denominator when a runtime profile is updated", () => {
+    const current = session("session_1");
+    const runtimeProfile: NonNullable<Session["runtime_profile"]> = {
+      model: "gpt-4.1",
+      api_protocol: "openai-compatible",
+      response_protocol: "xml",
+      base_url: "https://api.example.test/v1",
+      timeout_secs: 60,
+      max_llm_input_tokens: 1_000_000,
+      max_llm_output_tokens: 50_000,
+      max_rounds: "50",
+      bash_approval: "ask",
+      work_instructions: "silent",
+      api_key_configured: true,
+    };
+
+    const updated = applySessionRuntimeProfile(current, runtimeProfile);
+
+    expect(updated.runtime_profile).toBe(runtimeProfile);
+    expect(updated.max_llm_input_tokens).toBe(1_000_000);
+    expect(current.max_llm_input_tokens).toBe(100_000);
   });
 
   it("accepts lifecycle topics that introduce a new scoped worker and context", () => {
@@ -784,6 +1155,41 @@ describe("web topic view model", () => {
     expect(sessionContextUsage(session("session_2"))).toBeUndefined();
   });
 
+  it("resets session context usage at the latest runtime restart boundary", () => {
+    const restarted = session("session_restarted");
+    const oldTurn = turn("old", "finished");
+    oldTurn.created_at_ms = 100;
+    oldTurn.events = [
+      { event_id: "old_usage", source: "worker_activity", created_at_ms: 120, payload: { kind: "model_response", usage: { prompt_tokens: 24_000, completion_tokens: 500 } } },
+    ];
+    oldTurn.completion = { latest_usage: { prompt_tokens: 24_000, completion_tokens: 500 } };
+    restarted.turns = [oldTurn];
+    restarted.messages = [{
+      id: "restart",
+      role: "system",
+      kind: "runtime_restart",
+      text: "Timem Web 已重新启动，以下内容来自新的运行实例",
+      created_at_ms: 200,
+    }];
+
+    expect(sessionContextUsage(restarted)).toBeUndefined();
+
+    const resumedTurn = turn("resumed", "working");
+    resumedTurn.created_at_ms = 150;
+    resumedTurn.events = [
+      { event_id: "restored_old_usage", source: "worker_activity", created_at_ms: 180, payload: { kind: "model_response", usage: { prompt_tokens: 30_000 } } },
+      { event_id: "new_runtime_usage", source: "worker_activity", created_at_ms: 220, payload: { kind: "model_response", usage: { prompt_tokens: 4_600, completion_tokens: 30 } } },
+    ];
+    restarted.turns.push(resumedTurn);
+    expect(sessionContextUsage(restarted)).toEqual({ prompt_tokens: 4_600, completion_tokens: 30 });
+
+    const newCompletedTurn = turn("new_completed", "finished");
+    newCompletedTurn.created_at_ms = 240;
+    newCompletedTurn.completion = { latest_usage: { prompt_tokens: 6_200, completion_tokens: 45 } };
+    restarted.turns.push(newCompletedTurn);
+    expect(sessionContextUsage(restarted)).toEqual({ prompt_tokens: 6_200, completion_tokens: 45 });
+  });
+
   it("does not treat restored history telemetry as current context usage", () => {
     const restored = session("session_restored");
     const historicalTurn = turn("old", "restored");
@@ -804,9 +1210,154 @@ describe("web topic view model", () => {
     expect(sessionContextUsage(restored)?.prompt_tokens).toBe(4_200);
   });
 
-  it("renders response repair as a visible warning", () => {
-    const activity = activityFromTopic(topic("core.model.repair", { attempt: 2, max_attempts: 5, issue: "missing_response_root" }));
-    expect(activity).toMatchObject({ tone: "warning", title: "⚠️ 模型回复偏离协议，重试 (2/5)", detail: "missing_response_root" });
+  it("keeps model recovery out of the thought stream and exposes the active header status", () => {
+    expect(activityFromTopic(topic("core.model.repair", {
+      attempt: 1,
+      issue: "missing_response_root",
+    }))).toBeNull();
+
+    const retrying = turn("repairing", "working");
+    retrying.events = [{
+      event_id: "repair",
+      source: "core_topic",
+      created_at_ms: 2,
+      payload: topic("core.model.repair", {
+        attempt: 2,
+        max_attempts: 20,
+        issue: "missing_response_root",
+      }) as unknown as Record<string, unknown>,
+    }];
+
+    expect(activeModelRetryStatus(retrying)).toMatchObject({
+      kind: "retrying",
+      label: "retrying",
+      progress: "2/20",
+    });
+    expect(activeModelRetryStatus(retrying)?.detail)
+      .toContain("回复缺少必需的 response 根节点");
+
+    const serviceFailure = turn("service-failure", "working");
+    serviceFailure.events = [{
+      event_id: "retry",
+      source: "worker_activity",
+      created_at_ms: 2,
+      payload: {
+        kind: "model_retry",
+        attempt: 3,
+        max_attempts: 100,
+        delay_ms: 10_000,
+        error: "model_http_503: upstream unavailable",
+      },
+    }];
+
+    expect(activeModelRetryStatus(serviceFailure)).toMatchObject({
+      kind: "service-error",
+      label: "上游异常",
+      progress: "3/100",
+    });
+    expect(activeModelRetryStatus(serviceFailure)?.detail)
+      .toContain("模型接入点或其上游服务返回可重试错误");
+    expect(activeModelRetryStatus(serviceFailure)?.detail)
+      .toContain("重试进度：3/100");
+    expect(activeModelRetryStatus(serviceFailure)?.detail)
+      .toContain("model_http_503");
+
+    const changingFailure = turn("changing-failure", "working");
+    changingFailure.events = [
+      retrying.events[0],
+      serviceFailure.events[0],
+    ];
+    expect(activeModelRetryStatus(changingFailure)?.kind).toBe("service-error");
+
+    changingFailure.events.push({
+      ...retrying.events[0],
+      event_id: "later-repair",
+      created_at_ms: 4,
+    });
+    expect(activeModelRetryStatus(changingFailure)?.kind).toBe("retrying");
+  });
+
+  it("labels retryable model failures by their actual cause", () => {
+    const statusFor = (error: string) => {
+      const active = turn(`retry-${error}`, "working");
+      active.events = [{
+        event_id: "retry",
+        source: "worker_activity",
+        created_at_ms: 2,
+        payload: { kind: "model_retry", attempt: 1, max_attempts: 100, delay_ms: 10_000, error },
+      }];
+      return activeModelRetryStatus(active);
+    };
+
+    expect(statusFor("model_timeout: no response progress for 120 seconds")).toMatchObject({
+      kind: "response-timeout",
+      label: "响应超时",
+    });
+    expect(statusFor("model_http_429: too many requests")).toMatchObject({
+      kind: "rate-limited",
+      label: "服务限流",
+    });
+    expect(statusFor("curl: (6) Could not resolve host: gateway.example")).toMatchObject({
+      kind: "network-error",
+      label: "网络异常",
+    });
+    expect(statusFor("model_network_error: connection reset")).toMatchObject({
+      kind: "network-error",
+      label: "网络异常",
+    });
+    expect(statusFor("curl: (28) Operation timed out")).toMatchObject({
+      kind: "response-timeout",
+      label: "响应超时",
+    });
+    expect(statusFor("unexpected_retryable_failure")).toMatchObject({
+      kind: "service-error",
+      label: "模型服务异常",
+    });
+    expect(statusFor("model_http_429: too many requests")?.detail).not.toContain("网络异常");
+    expect(statusFor("model_http_503: unavailable")?.detail).not.toContain("自动重连");
+  });
+
+  it("clears the temporary recovery status after recovery or turn completion", () => {
+    const recovered = turn("recovered", "working");
+    recovered.events = [
+      {
+        event_id: "retry",
+        source: "worker_activity",
+        created_at_ms: 2,
+        payload: {
+          kind: "model_retry",
+          attempt: 1,
+          max_attempts: 100,
+          error: "model_timeout",
+        },
+      },
+      {
+        event_id: "response",
+        source: "worker_activity",
+        created_at_ms: 3,
+        payload: { kind: "model_response" },
+      },
+    ];
+    expect(activeModelRetryStatus(recovered)).toBeNull();
+
+    const nextRequestStarted = turn("next-request-started", "working");
+    nextRequestStarted.events = [
+      recovered.events[0],
+      {
+        event_id: "next-request",
+        source: "worker_activity",
+        created_at_ms: 3,
+        payload: { kind: "model_request", round: 2 },
+      },
+    ];
+    expect(activeModelRetryStatus(nextRequestStarted)).toBeNull();
+
+    const completed = {
+      ...recovered,
+      state: "finished",
+      events: [recovered.events[0]],
+    };
+    expect(activeModelRetryStatus(completed)).toBeNull();
   });
 
   it("renders model free talk verbatim without an invented completion label", () => {
@@ -819,6 +1370,15 @@ describe("web topic view model", () => {
       title: "",
       detail: "User sent a simple greeting. No tools needed.",
     });
+  });
+
+  it("keeps a completed final answer out of the thought and action timeline", () => {
+    expect(activityFromTopic(topic("core.model.response", {
+      status: "finished",
+      free_talk: "这是完成前的总结。",
+      progress: "已经完成。",
+      final_answer: "这是只应出现在最终答案区域的内容。",
+    }))).toBeNull();
   });
 
   it("renders model progress even when free talk is omitted", () => {
@@ -852,12 +1412,21 @@ describe("web topic view model", () => {
     const activity = activityFromTopic(topic("core.context.compact", {
       estimated_before_tokens: 82_000,
       estimated_after_tokens: 14_000,
+      estimated_text_before_tokens: 12_000,
+      estimated_text_after_tokens: 4_000,
+      estimated_native_before_tokens: 70_000,
+      estimated_native_after_tokens: 10_000,
     }));
     expect(activity).toMatchObject({
       kind: "context_compact",
       tone: "notice",
+      title: "Dynamic context compacted",
       before_tokens: 82_000,
       after_tokens: 14_000,
+      text_before_tokens: 12_000,
+      text_after_tokens: 4_000,
+      native_before_tokens: 70_000,
+      native_after_tokens: 10_000,
     });
   });
 
@@ -1069,10 +1638,11 @@ describe("web topic view model", () => {
   });
 
   it("bounds a reconnect snapshot with many turns and high-frequency events", () => {
+    const eventCount = 550;
     const current = session("session_pressure");
     current.turns = Array.from({ length: MAX_CLIENT_TURNS + 40 }, (_, turnIndex) => ({
       ...turn(`turn_${turnIndex}`, "finished"),
-      events: Array.from({ length: MAX_CLIENT_TURN_EVENTS + 50 }, (_, eventIndex) => ({
+      events: Array.from({ length: eventCount }, (_, eventIndex) => ({
         event_id: `event_${turnIndex}_${eventIndex}`,
         source: "worker_activity",
         payload: { kind: "progress", marker: `${turnIndex}:${eventIndex}` },
@@ -1083,13 +1653,14 @@ describe("web topic view model", () => {
     const bounded = boundSessionHistory(current);
     expect(bounded.turns).toHaveLength(MAX_CLIENT_TURNS);
     expect(bounded.turns[0]?.turn_id).toBe("turn_40");
-    expect(bounded.turns.every((item) => item.events.length === MAX_CLIENT_TURN_EVENTS)).toBe(true);
-    expect(bounded.turns.at(-1)?.events[0]?.payload.marker).toBe(`${MAX_CLIENT_TURNS + 39}:50`);
+    expect(bounded.turns.every((item) => item.events.length === eventCount)).toBe(true);
+    expect(bounded.turns.at(-1)?.events[0]?.payload.marker).toBe(`${MAX_CLIENT_TURNS + 39}:0`);
   });
 
   it("keeps repeated live event bursts bounded and isolated across sessions", () => {
+    const totalEvents = 1500;
     let sessions = Array.from({ length: 5 }, (_, index) => upsertTurn(session(`pressure_${index}`), turn(`turn_${index}`)));
-    for (let eventIndex = 0; eventIndex < MAX_CLIENT_TURN_EVENTS * 3; eventIndex += 1) {
+    for (let eventIndex = 0; eventIndex < totalEvents; eventIndex += 1) {
       const target = eventIndex % sessions.length;
       sessions = sessions.map((current, index) => index === target ? appendTurnEvent(current, `turn_${index}`, {
         event_id: `event_${index}_${eventIndex}`,
@@ -1101,7 +1672,7 @@ describe("web topic view model", () => {
 
     for (const current of sessions) {
       const events = current.turns[0]?.events ?? [];
-      expect(events.length).toBeLessThanOrEqual(MAX_CLIENT_TURN_EVENTS);
+      expect(events.length).toBe(totalEvents / sessions.length);
       expect(events.every((event) => event.payload.owner === current.session_id)).toBe(true);
     }
   });
@@ -1111,7 +1682,7 @@ describe("web topic view model", () => {
       const active = upsertTurn(session(`storm_${index}`), turn(`turn_${index}`));
       return updateSessionWorkerState(active, active.primary_worker_id, "working");
     });
-    const acceptedSupplements = new Map<string, string[]>();
+    const acceptedNextTurns = new Map<string, string[]>();
 
     for (let index = 0; index < 600; index += 1) {
       const targetIndex = index % sessions.length;
@@ -1124,10 +1695,10 @@ describe("web topic view model", () => {
       } else {
         expect(decision).toMatchObject({
           kind: "send",
-          command: { type: "turn_supplement", session_id: target.session_id, text },
+          command: { type: "turn_submit", session_id: target.session_id, text },
         });
-        acceptedSupplements.set(target.session_id, [
-          ...(acceptedSupplements.get(target.session_id) ?? []),
+        acceptedNextTurns.set(target.session_id, [
+          ...(acceptedNextTurns.get(target.session_id) ?? []),
           text,
         ]);
       }
@@ -1141,11 +1712,11 @@ describe("web topic view model", () => {
 
     for (const current of sessions) {
       const events = current.turns[0]?.events ?? [];
-      expect(events.length).toBeLessThanOrEqual(MAX_CLIENT_TURN_EVENTS);
+      expect(events.length).toBe(120);
       expect(events.every((event) => event.payload.owner === current.session_id)).toBe(true);
       expect(current.state).toBe("working");
       expect(current.workers.every((worker) => worker.state === "working")).toBe(true);
-      expect(acceptedSupplements.get(current.session_id)?.length).toBeGreaterThan(80);
+      expect(acceptedNextTurns.get(current.session_id)?.length).toBeGreaterThan(80);
       const finished = finishTurn(current, current.active_turn_id, { elapsed_ms: 42_000, stop_reason: "CancelledByUser" });
       expect(finished.state).toBe("ready");
       expect(finished.active_turn_id).toBeNull();
@@ -1361,5 +1932,30 @@ describe("web topic view model", () => {
   it("does not recreate a session when a worker repeats its current state", () => {
     const current = updateSessionWorkerState(session("session_1"), "worker_session_1", "working");
     expect(updateSessionWorkerState(current, "worker_session_1", "working")).toBe(current);
+  });
+
+  it("applies user and assistant message deletion to both turn and chat projections", () => {
+    const current = session("session_1");
+    current.turns = [{
+      ...turn("turn_1", "finished"),
+      user_entries: [
+        { kind: "task", text: "same", created_at_ms: 10 },
+        { kind: "supplement", text: "same", created_at_ms: 20 },
+      ],
+      final_answer: "answer",
+    }];
+    current.messages = [
+      { id: "u1", role: "user", text: "same", created_at_ms: 10 },
+      { id: "u2", role: "user", text: "same", created_at_ms: 20 },
+      { id: "a1", role: "assistant", text: "answer", created_at_ms: 30 },
+    ];
+
+    const withoutSupplement = applyChatMessageDeleted(current, "turn_1", "user", 1);
+    expect(withoutSupplement.turns[0].user_entries.map((entry) => entry.created_at_ms)).toEqual([10]);
+    expect(withoutSupplement.messages.map((message) => message.id)).toEqual(["u1", "a1"]);
+
+    const withoutAnswer = applyChatMessageDeleted(withoutSupplement, "turn_1", "assistant", 0);
+    expect(withoutAnswer.turns[0].final_answer).toBeNull();
+    expect(withoutAnswer.messages.map((message) => message.id)).toEqual(["u1"]);
   });
 });

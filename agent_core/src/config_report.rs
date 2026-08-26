@@ -25,13 +25,13 @@ pub enum RuntimeConfigSection {
 pub enum RuntimeConfigRowKind {
     Model,
     ApiProtocol,
+    ResponseProtocol,
     BaseUrl,
     MaxLlmInput,
     MaxLlmOutput,
     BashApproval,
     WorkInstructions,
     Space,
-    DataDir,
     ApiAudit,
     ActionAudit,
 }
@@ -47,7 +47,6 @@ pub struct RuntimeConfigReportRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfigReportInput {
     pub space: String,
-    pub data_dir: String,
     pub api_audit_path: String,
     pub action_audit_path: String,
     pub bash_approval_mode: BashApprovalMode,
@@ -73,6 +72,12 @@ pub fn runtime_config_report(
                 "TIMEM_API_PROTOCOL",
                 config.api_protocol.label().to_string(),
                 config.api_protocol != default_protocol,
+            ),
+            row(
+                RuntimeConfigRowKind::ResponseProtocol,
+                "TIMEM_RESPONSE_PROTOCOL",
+                config.response_protocol.name().to_string(),
+                false,
             ),
             row(
                 RuntimeConfigRowKind::BaseUrl,
@@ -110,12 +115,6 @@ pub fn runtime_config_report(
                 RuntimeConfigRowKind::Space,
                 "TIMEM_SPACE",
                 input.space,
-                false,
-            ),
-            row(
-                RuntimeConfigRowKind::DataDir,
-                "TIMEM_DATA_DIR",
-                input.data_dir,
                 false,
             ),
             row(

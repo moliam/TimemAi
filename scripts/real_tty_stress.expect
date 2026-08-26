@@ -14,7 +14,12 @@ log_user 0
 set repo_root [file normalize [file join [file dirname [info script]] ".."]]
 set binary [file join $repo_root "target" "release" "timem-native-rs"]
 set model_server_script [file join $repo_root "scripts" "fake_openai_server.py"]
-set data_dir [file join "/private/tmp" "timem_tty_stress_[pid]"]
+if {[info exists env(TMPDIR)] && $env(TMPDIR) ne ""} {
+    set temp_root $env(TMPDIR)
+} else {
+    set temp_root "/tmp"
+}
+set memory_dir [file join $temp_root "timem_tty_stress_[pid]"]
 set port 0
 
 if {![file executable $binary]} {
@@ -81,8 +86,7 @@ spawn env \
     TIMEM_BASE_URL=http://127.0.0.1:$port/v1 \
     TIMEM_MODEL=fake-stress-model \
     TIMEM_BASH_APPROVAL=approve \
-    TIMEM_DATA_DIR=$data_dir \
-    $binary --space .tty_stress_smoke
+    $binary --space $memory_dir
 expect {
     -re "\033\\\[\\?2004h" {}
     timeout {
@@ -149,7 +153,8 @@ expect {
             if {!$saw_action_render && [string first "STRESS_ACTION_DONE" $output] < 0} {
                 error "stress scenario did not render command action"
             }
-            send "/exit"
+            send "/exit
+"
             catch {close}
             puts "real_tty_stress: ok (after escape stripping)"
             exit 0

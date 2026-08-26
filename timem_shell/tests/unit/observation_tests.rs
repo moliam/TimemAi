@@ -108,6 +108,25 @@ fn model_response_topic(free_talk: &str, _progress: &str) -> CoreTopicEvent {
     )
 }
 
+fn final_model_response_topic(free_talk: &str, final_answer: &str) -> CoreTopicEvent {
+    CoreTopicEvent::new(
+        "session_test",
+        CoreTopic::new(
+            CORE_TOPIC_MODEL_RESPONSE,
+            json!({
+                "name": CORE_TOPIC_MODEL_RESPONSE,
+            }),
+        ),
+        CoreSessionState::Running,
+        json!({
+            "status": "finished",
+            "free_talk": free_talk,
+            "final_answer": final_answer,
+            "continue_work": false,
+        }),
+    )
+}
+
 fn model_response_topic_with_worker_count(
     free_talk: &str,
     _progress: &str,
@@ -485,6 +504,52 @@ fn action_finish_topic_updates_existing_bash_line() {
 }
 
 #[test]
+fn background_exit_updates_the_same_action_id_after_the_running_label_changed() {
+    let kind = CoreActionKind::Bash {
+        command: "sleep 0.1".to_string(),
+        mode: "background".to_string(),
+        interval_ms: None,
+        timeout_ms: None,
+        loop_timeout_ms: None,
+        once_timeout_ms: None,
+    };
+    let with_id = |mut event: CoreTopicEvent, status: &str| {
+        event.topic.attributes["action_id"] = json!("call_background_1");
+        event.payload["action_id"] = json!("call_background_1");
+        event.payload["status"] = json!(status);
+        event
+    };
+    let start = with_id(action_topic("run_bash", kind.clone(), true), "running");
+    let launched = with_id(
+        action_topic_with_status(
+            "run_bash",
+            kind.clone(),
+            false,
+            "finish",
+            "background_running",
+        ),
+        "background_running",
+    );
+    let exited = with_id(
+        action_topic_with_status("run_bash", kind, false, "finish", "completed"),
+        "completed",
+    );
+
+    let mut panel = ObservationPanel::new(8, 80);
+    panel.apply_all(observation_events_from_core_topic_events(&[start]));
+    panel.apply_all(observation_events_from_core_topic_events(&[launched]));
+    assert!(strip_ansi(&render_observation_panel(&panel)).contains("后台执行"));
+    panel.apply_all(observation_events_from_core_topic_events(&[exited]));
+
+    let rendered = render_observation_panel(&panel);
+    let plain = strip_ansi(&rendered);
+    assert!(plain.contains("[✔] sleep 0.1"), "{plain}");
+    assert_eq!(plain.matches("sleep 0.1").count(), 1, "{plain}");
+    assert!(!plain.contains("后台执行 pid="), "{plain}");
+    assert!(!rendered.contains("\x1b[38;5;245m"), "{rendered:?}");
+}
+
+#[test]
 fn background_action_and_exit_status_render_user_facing_state() {
     let background_kind = CoreActionKind::Bash {
         command: "sleep 30".to_string(),
@@ -572,6 +637,18 @@ fn core_topic_events_map_action_without_protocol_parsing() {
         vec![ObservationEvent::Active(
             "`git log --oneline v0.5.2..HEAD`".to_string()
         )]
+    );
+}
+
+#[test]
+fn final_model_response_does_not_render_in_thought_action_panel() {
+    let events = observation_events_from_core_topic_events(&[final_model_response_topic(
+        "最后补充说明。",
+        "这是最终答复。",
+    )]);
+    assert!(
+        events.is_empty(),
+        "final response leaked into observations: {events:?}"
     );
 }
 
@@ -723,16 +800,14 @@ fn self_tool_action_maps_to_user_readable_observation_events() {
         action_topic(
             "self_tool",
             CoreActionKind::SelfTool {
-                self_type: "mem_path".to_string(),
-                op: "read".to_string(),
+                self_type: "path".to_string(),
             },
             false,
         ),
         action_topic(
             "self_tool",
             CoreActionKind::SelfTool {
-                self_type: "about_me".to_string(),
-                op: "read".to_string(),
+                self_type: "params".to_string(),
             },
             false,
         ),
@@ -740,8 +815,8 @@ fn self_tool_action_maps_to_user_readable_observation_events() {
     assert_eq!(
         events,
         vec![
-            ObservationEvent::Persistent("Timem: 查看记忆路径".to_string()),
-            ObservationEvent::Persistent("Timem: 查看自身信息".to_string()),
+            ObservationEvent::Persistent("Timem: 查看自身路径".to_string()),
+            ObservationEvent::Persistent("Timem: 查看运行参数".to_string()),
         ]
     );
 }

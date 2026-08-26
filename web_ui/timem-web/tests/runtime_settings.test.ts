@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   reconcileRuntimeDrafts,
@@ -7,10 +8,13 @@ import {
   updateRevealedSessionApiKeys,
 } from "../src/runtime_settings";
 
+const mainSource = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+
 describe("runtime setting labels", () => {
   it("hides the Timem namespace prefix without changing other keys", () => {
     expect(runtimeOptionLabel("TIMEM_MODEL")).toBe("MODEL");
     expect(runtimeOptionLabel("TIMEM_BASE_URL")).toBe("BASE_URL");
+    expect(runtimeOptionLabel("TIMEM_MAX_ROUNDS")).toBe("MAX STEPS");
     expect(runtimeOptionLabel("CUSTOM_OPTION")).toBe("CUSTOM_OPTION");
   });
 });
@@ -41,15 +45,18 @@ describe("session runtime settings", () => {
       base_url: "https://session.example/v1",
       max_llm_input_tokens: 64000,
       max_llm_output_tokens: 8000,
+      max_rounds: "unlimited",
       bash_approval: "ask",
       work_instructions: "silent",
     }, [
       { key: "TIMEM_MODEL", value: "host-model" },
       { key: "TIMEM_BASE_URL", value: "https://host.example/v1" },
+      { key: "TIMEM_MAX_ROUNDS", value: "50" },
     ]);
     expect(options).toEqual([
       { key: "TIMEM_MODEL", value: "session-model" },
       { key: "TIMEM_BASE_URL", value: "https://session.example/v1" },
+      { key: "TIMEM_MAX_ROUNDS", value: "unlimited" },
     ]);
   });
 });
@@ -77,5 +84,20 @@ describe("session API key presentation", () => {
       "session-2": "other-secret",
     });
     expect(updateRevealedSessionApiKeys(current, "session-1")).toEqual({ "session-2": "other-secret" });
+  });
+});
+
+
+describe("active session runtime controls", () => {
+  it("keeps working API keys revealable and copyable but prevents credential changes", () => {
+    expect(mainSource).toContain('disabled={!session || credentialPending} readOnly={sessionWorking}');
+    expect(mainSource).toContain('disabled={!session || credentialPending} onClick={toggleApiKey}');
+    expect(mainSource).toContain('const canSaveApiKey = !!session && apiKeyDirty && !credentialPending && !sessionWorking;');
+    expect(mainSource).not.toContain('disabled={!session || credentialPending || sessionWorking}');
+    expect(mainSource).toContain('disabled={pending}');
+    expect(mainSource).toContain('disabled={pending || !dirty}');
+    expect(mainSource).not.toContain('disabled={pending || sessionWorking}');
+    expect(mainSource).not.toContain('disabled={pending || !dirty || sessionWorking}');
+    expect(mainSource).not.toContain('dirty && !pending && !sessionWorking');
   });
 });

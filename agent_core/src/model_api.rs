@@ -1,8 +1,11 @@
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
+use crate::response_protocol::KNOWN_PROMPT_BOUNDARIES;
 use crate::{
     plan_prompt_cache, redact_value, stable_text_fingerprint, CacheControl, CoreProfile,
-    LlmResponse, PromptBlock, PromptBlockRole, ResponseProtocolKind, UsageStats,
+    LlmResponse, ModelInteractionRequest, NativeToolCall, PromptBlock, PromptBlockRole,
+    ResponseProtocolKind, ToolDefinition, UsageStats,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,12 +66,43 @@ pub struct ModelServiceConfig {
     pub model: String,
     pub base_url: String,
     pub api_key: String,
+    pub http_headers: BTreeMap<String, String>,
     pub timeout_secs: u64,
     pub max_llm_output_tokens: u32,
     pub max_llm_input_tokens: u32,
     pub api_protocol: ApiProtocol,
     pub response_protocol: ResponseProtocolKind,
+    pub interaction: crate::InteractionConfig,
     pub openai_compatible: OpenAiCompatibleOptions,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OpenAiCompatibleCacheMode {
+    #[default]
+    Auto,
+    Off,
+    Ephemeral,
+}
+
+impl OpenAiCompatibleCacheMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+            Self::Ephemeral => "ephemeral",
+        }
+    }
+}
+
+pub fn parse_openai_compatible_cache_mode(
+    value: &str,
+) -> Result<OpenAiCompatibleCacheMode, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(OpenAiCompatibleCacheMode::Auto),
+        "off" => Ok(OpenAiCompatibleCacheMode::Off),
+        "ephemeral" => Ok(OpenAiCompatibleCacheMode::Ephemeral),
+        _ => Err("invalid_TIMEM_OPENAI_CACHE_MODE: expected auto, off, or ephemeral".to_string()),
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -76,6 +110,7 @@ pub struct OpenAiCompatibleOptions {
     pub enable_thinking: Option<bool>,
     pub reasoning_effort: Option<String>,
     pub stream: bool,
+    pub cache_mode: OpenAiCompatibleCacheMode,
 }
 
 impl ModelServiceConfig {
@@ -129,6 +164,9 @@ pub struct PreparedModelRequest {
     pub body: Value,
     pub prompt_cache_plan: Value,
     pub structured_output: StructuredOutputHint,
+    pub cache_wire_mode: String,
+    pub cache_mark_count: usize,
+    pub cache_fallback: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,10 +220,15 @@ pub fn prepare_model_request(
     let prompt_blocks = plan_prompt_cache(rendered_prompt);
     let structured_output = plan_structured_output(config);
     let model_blocks = model_prompt_blocks(&prompt_blocks);
+    let body = build_model_request(config, &model_blocks, structured_output);
+    let cache_mark_count = count_cache_control_marks(&body);
     PreparedModelRequest {
-        body: build_model_request(config, &model_blocks, structured_output),
+        body,
         prompt_cache_plan: prompt_cache_plan_audit(&prompt_blocks),
         structured_output,
+        cache_wire_mode: cache_wire_mode(config).to_string(),
+        cache_mark_count,
+        cache_fallback: false,
     }
 }
 
@@ -198,6 +241,345 @@ pub fn prepare_model_http_request(
         headers: model_http_headers(config),
         model_request: prepare_model_request(config, rendered_prompt),
     }
+}
+
+pub fn prepare_model_interaction_http_request(
+    config: &ModelServiceConfig,
+    interaction: &ModelInteractionRequest,
+) -> PreparedModelHttpRequest {
+    let mut request = prepare_model_http_request(config, &interaction.rendered_prompt);
+    if interaction.is_native() {
+        apply_native_interaction(config, &mut request.model_request.body, interaction);
+        request.model_request.cache_mark_count =
+            count_cache_control_marks(&request.model_request.body);
+        request.model_request.structured_output = StructuredOutputHint::None;
+        request
+            .model_request
+            .body
+            .as_object_mut()
+            .map(|body| body.remove("response_format"));
+    }
+    request
+}
+
+fn apply_native_interaction(
+    config: &ModelServiceConfig,
+    body: &mut Value,
+    interaction: &ModelInteractionRequest,
+) {
+    match config.api_protocol {
+        ApiProtocol::OpenAiCompatible => {
+            body["tools"] = Value::Array(
+                interaction
+                    .tools
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tool)| {
+                        openai_chat_tool_definition(tool, index >= interaction.static_tool_count)
+                    })
+                    .collect(),
+            );
+            body["tool_choice"] = json!(native_tool_choice_label(interaction.tool_choice));
+            body["parallel_tool_calls"] = json!(interaction.parallel_tool_calls);
+            if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+                append_openai_chat_exchanges(messages, interaction);
+            }
+        }
+        ApiProtocol::OpenAiResponses => {
+            body["tools"] = Value::Array(
+                interaction
+                    .tools
+                    .iter()
+                    .enumerate()
+                    .map(|(index, tool)| {
+                        openai_responses_tool_definition(
+                            tool,
+                            index >= interaction.static_tool_count,
+                        )
+                    })
+                    .collect(),
+            );
+            body["tool_choice"] = json!(native_tool_choice_label(interaction.tool_choice));
+            body["parallel_tool_calls"] = json!(interaction.parallel_tool_calls);
+            let mut input = match body.get("input") {
+                Some(Value::Array(items)) => items.clone(),
+                Some(Value::String(text)) => vec![json!({
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                })],
+                _ => Vec::new(),
+            };
+            append_openai_responses_exchanges(&mut input, interaction);
+            body["input"] = Value::Array(input);
+        }
+        ApiProtocol::Anthropic => {
+            let mut tools = interaction
+                .tools
+                .iter()
+                .enumerate()
+                .map(|(index, tool)| {
+                    anthropic_tool_definition(tool, index >= interaction.static_tool_count)
+                })
+                .collect::<Vec<_>>();
+            mark_anthropic_static_tool_prefix(&mut tools, interaction.static_tool_count);
+            body["tools"] = Value::Array(tools);
+            body["tool_choice"] = json!({
+                "type": anthropic_tool_choice_label(interaction.tool_choice),
+                "disable_parallel_tool_use": !interaction.parallel_tool_calls,
+            });
+            if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+                append_anthropic_exchanges(messages, interaction);
+            }
+        }
+    }
+}
+
+fn native_tool_choice_label(choice: crate::NativeToolChoice) -> &'static str {
+    match choice {
+        crate::NativeToolChoice::Auto => "auto",
+        crate::NativeToolChoice::Required => "required",
+    }
+}
+
+fn anthropic_tool_choice_label(choice: crate::NativeToolChoice) -> &'static str {
+    match choice {
+        crate::NativeToolChoice::Auto => "auto",
+        crate::NativeToolChoice::Required => "any",
+    }
+}
+
+fn openai_chat_tool_definition(tool: &ToolDefinition, include_description: bool) -> Value {
+    let mut function = serde_json::Map::from_iter([
+        ("name".to_string(), json!(tool.name)),
+        ("parameters".to_string(), tool.input_schema.clone()),
+    ]);
+    if include_description {
+        function.insert("description".to_string(), json!(tool.description));
+    }
+    json!({"type": "function", "function": function})
+}
+
+fn openai_responses_tool_definition(tool: &ToolDefinition, include_description: bool) -> Value {
+    let mut definition = serde_json::Map::from_iter([
+        ("type".to_string(), json!("function")),
+        ("name".to_string(), json!(tool.name)),
+        ("parameters".to_string(), tool.input_schema.clone()),
+    ]);
+    if include_description {
+        definition.insert("description".to_string(), json!(tool.description));
+    }
+    Value::Object(definition)
+}
+
+fn anthropic_tool_definition(tool: &ToolDefinition, include_description: bool) -> Value {
+    let mut definition = serde_json::Map::from_iter([
+        ("name".to_string(), json!(tool.name)),
+        ("input_schema".to_string(), tool.input_schema.clone()),
+    ]);
+    if include_description {
+        definition.insert("description".to_string(), json!(tool.description));
+    }
+    Value::Object(definition)
+}
+
+fn mark_anthropic_static_tool_prefix(tools: &mut [Value], static_tool_count: usize) {
+    let Some(last_static) = static_tool_count
+        .checked_sub(1)
+        .and_then(|index| tools.get_mut(index))
+    else {
+        return;
+    };
+    if let Some(tool) = last_static.as_object_mut() {
+        tool.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
+    }
+}
+
+fn prompt_delta_id(text: &str) -> Option<String> {
+    KNOWN_PROMPT_BOUNDARIES
+        .iter()
+        .find_map(|boundaries| boundaries.parse_delta_id(text))
+}
+
+fn exchanges_for_delta<'a>(
+    interaction: &'a ModelInteractionRequest,
+    delta_id: &'a str,
+) -> impl Iterator<Item = &'a crate::NativeExchange> + 'a {
+    interaction
+        .native_exchanges
+        .iter()
+        .filter(move |exchange| exchange.delta_id == delta_id)
+}
+
+fn openai_chat_exchange_messages(exchange: &crate::NativeExchange) -> Vec<Value> {
+    let mut messages = vec![
+        json!({"role":"assistant","content":optional_text(&exchange.assistant_text),"tool_calls":exchange.calls.iter().map(|call| json!({"id":call.id,"type":"function","function":{"name":call.name,"arguments":call.raw_arguments}})).collect::<Vec<_>>()}),
+    ];
+    messages.extend(exchange.results.iter().map(
+        |result| json!({"role":"tool","tool_call_id":result.call_id,"content":result.content}),
+    ));
+    messages
+}
+
+fn append_openai_chat_exchanges(messages: &mut Vec<Value>, interaction: &ModelInteractionRequest) {
+    let original = std::mem::take(messages);
+    let mut ordered = Vec::new();
+    let mut tail = Vec::new();
+    for message in original {
+        let text = message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if text.trim() == crate::prompt_render::NATIVE_RESPONSE_TRAILER {
+            tail.push(message);
+            continue;
+        }
+        let delta_id = prompt_delta_id(text);
+        ordered.push(message);
+        if let Some(delta_id) = delta_id {
+            for exchange in exchanges_for_delta(interaction, &delta_id) {
+                ordered.extend(openai_chat_exchange_messages(exchange));
+            }
+        }
+    }
+    ordered.extend(tail);
+    *messages = ordered;
+}
+
+fn openai_responses_exchange_items(exchange: &crate::NativeExchange) -> Vec<Value> {
+    let mut items = Vec::new();
+    if !exchange.assistant_text.trim().is_empty() {
+        items.push(json!({"role":"assistant","content":[{"type":"output_text","text":exchange.assistant_text}]}));
+    }
+    items.extend(exchange.calls.iter().map(|call| json!({"type":"function_call","call_id":call.id,"name":call.name,"arguments":call.raw_arguments})));
+    items.extend(exchange.results.iter().map(|result| json!({"type":"function_call_output","call_id":result.call_id,"output":result.content})));
+    items
+}
+
+fn append_openai_responses_exchanges(
+    input: &mut Vec<Value>,
+    interaction: &ModelInteractionRequest,
+) {
+    let blocks = plan_prompt_cache(&interaction.rendered_prompt);
+    let mut ordered = Vec::new();
+    let mut tail = Vec::new();
+    for block in blocks
+        .into_iter()
+        .filter(|block| block.role == PromptBlockRole::User)
+    {
+        let delta_id = prompt_delta_id(&block.text);
+        let is_tail = block.text.trim() == crate::prompt_render::NATIVE_RESPONSE_TRAILER;
+        let item = json!({"role":"user","content":[{"type":"input_text","text":block.text}]});
+        if is_tail {
+            tail.push(item);
+            continue;
+        }
+        ordered.push(item);
+        if let Some(delta_id) = delta_id {
+            for exchange in exchanges_for_delta(interaction, &delta_id) {
+                ordered.extend(openai_responses_exchange_items(exchange));
+            }
+        }
+    }
+    ordered.extend(tail);
+    *input = ordered;
+}
+
+fn anthropic_exchange_messages(exchange: &crate::NativeExchange) -> Vec<Value> {
+    let mut assistant_content = Vec::new();
+    if !exchange.assistant_text.trim().is_empty() {
+        assistant_content.push(json!({"type":"text","text":exchange.assistant_text}));
+    }
+    assistant_content.extend(exchange.calls.iter().map(
+        |call| json!({"type":"tool_use","id":call.id,"name":call.name,"input":call.arguments}),
+    ));
+    vec![
+        json!({"role":"assistant","content":assistant_content}),
+        json!({"role":"user","content":exchange.results.iter().map(|result| json!({"type":"tool_result","tool_use_id":result.call_id,"content":result.content,"is_error":result.is_error})).collect::<Vec<_>>()}),
+    ]
+}
+
+fn append_anthropic_exchanges(messages: &mut Vec<Value>, interaction: &ModelInteractionRequest) {
+    let Some(initial_content) = messages
+        .first()
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+        .cloned()
+    else {
+        return;
+    };
+    let mut ordered = Vec::new();
+    let mut pending = Vec::new();
+    let mut tail = Vec::new();
+    for block in initial_content {
+        let text = block
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if text.trim() == crate::prompt_render::NATIVE_RESPONSE_TRAILER {
+            tail.push(block);
+            continue;
+        }
+        let delta_id = prompt_delta_id(text);
+        pending.push(block);
+        if let Some(delta_id) = delta_id {
+            ordered.push(json!({"role":"user","content":std::mem::take(&mut pending)}));
+            for exchange in exchanges_for_delta(interaction, &delta_id) {
+                ordered.extend(anthropic_exchange_messages(exchange));
+            }
+        }
+    }
+    pending.extend(tail);
+    if !pending.is_empty() {
+        ordered.push(json!({"role":"user","content":pending}));
+    }
+    *messages = ordered;
+}
+
+fn optional_text(text: &str) -> Value {
+    if text.trim().is_empty() {
+        Value::Null
+    } else {
+        Value::String(text.to_string())
+    }
+}
+
+pub fn validate_model_http_headers(headers: &BTreeMap<String, String>) -> Result<(), String> {
+    if headers.len() > 32 {
+        return Err("too_many_model_http_headers".to_string());
+    }
+    let mut normalized_names = std::collections::BTreeSet::new();
+    for (name, value) in headers {
+        let valid_name = !name.is_empty()
+            && name.len() <= 128
+            && name.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'!' | b'#'
+                            | b'$'
+                            | b'%'
+                            | b'&'
+                            | b'\''
+                            | b'*'
+                            | b'+'
+                            | b'-'
+                            | b'.'
+                            | b'^'
+                            | b'_'
+                            | b'`'
+                            | b'|'
+                            | b'~'
+                    )
+            });
+        let valid_value = value.len() <= 8 * 1024
+            && !value.chars().any(|ch| {
+                ch == '\r' || ch == '\n' || ch == '\0' || (ch.is_control() && ch != '\t')
+            });
+        if !valid_name || !valid_value || !normalized_names.insert(name.to_ascii_lowercase()) {
+            return Err("invalid_model_http_header".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn model_http_headers(config: &ModelServiceConfig) -> Vec<(String, String)> {
@@ -214,6 +596,16 @@ fn model_http_headers(config: &ModelServiceConfig) -> Vec<(String, String)> {
             headers.push(("anthropic-version".to_string(), "2023-06-01".to_string()));
         }
     }
+    for (name, value) in &config.http_headers {
+        if let Some((_, existing_value)) = headers
+            .iter_mut()
+            .find(|(existing_name, _)| existing_name.eq_ignore_ascii_case(name))
+        {
+            *existing_value = value.clone();
+        } else {
+            headers.push((name.clone(), value.clone()));
+        }
+    }
     headers
 }
 
@@ -228,6 +620,11 @@ pub fn model_request_audit_event(
         "endpoint": config.endpoint(),
         "prompt_cache_plan": prepared_request.prompt_cache_plan,
         "structured_output": structured_output_label(prepared_request.structured_output),
+        "prompt_cache_wire": {
+            "mode": prepared_request.cache_wire_mode,
+            "mark_count": prepared_request.cache_mark_count,
+            "fallback": prepared_request.cache_fallback,
+        },
         "body": redact_value(&prepared_request.body),
     })
 }
@@ -313,7 +710,9 @@ fn build_openai_compatible_request(
                 "role": role_label(block.role),
                 "content": block.text,
             });
-            apply_cache_control(&mut message, block.cache);
+            if config.openai_compatible.cache_mode == OpenAiCompatibleCacheMode::Ephemeral {
+                apply_cache_control(&mut message, block.cache);
+            }
             message
         })
         .collect::<Vec<_>>();
@@ -402,6 +801,50 @@ fn apply_cache_control(value: &mut Value, cache: ModelCacheControl) {
     }
 }
 
+fn cache_wire_mode(config: &ModelServiceConfig) -> &'static str {
+    match config.api_protocol {
+        ApiProtocol::OpenAiCompatible => config.openai_compatible.cache_mode.label(),
+        ApiProtocol::Anthropic => "ephemeral",
+        ApiProtocol::OpenAiResponses => "auto",
+    }
+}
+
+fn count_cache_control_marks(value: &Value) -> usize {
+    match value {
+        Value::Array(values) => values.iter().map(count_cache_control_marks).sum(),
+        Value::Object(values) => {
+            usize::from(values.contains_key("cache_control"))
+                + values
+                    .values()
+                    .map(count_cache_control_marks)
+                    .sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
+pub fn without_openai_compatible_cache_control(
+    request: &PreparedModelHttpRequest,
+) -> PreparedModelHttpRequest {
+    let mut request = request.clone();
+    if let Some(messages) = request
+        .model_request
+        .body
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+    {
+        for message in messages {
+            if let Some(object) = message.as_object_mut() {
+                object.remove("cache_control");
+            }
+        }
+    }
+    request.model_request.cache_wire_mode = "auto-fallback".to_string();
+    request.model_request.cache_mark_count = count_cache_control_marks(&request.model_request.body);
+    request.model_request.cache_fallback = true;
+    request
+}
+
 fn apply_structured_output(value: &mut Value, structured_output: StructuredOutputHint) {
     if structured_output == StructuredOutputHint::JsonObject {
         if let Some(map) = value.as_object_mut() {
@@ -414,6 +857,14 @@ pub fn parse_model_response(
     config: &ModelServiceConfig,
     raw: &Value,
 ) -> Result<LlmResponse, String> {
+    let tool_calls = parse_native_tool_calls(config.api_protocol, raw)?;
+    if tool_calls.len() > config.interaction.max_tool_calls_per_response {
+        return Err(format!(
+            "too_many_tool_calls: received {}, limit {}",
+            tool_calls.len(),
+            config.interaction.max_tool_calls_per_response
+        ));
+    }
     let (content, usage, truncated) = match config.api_protocol {
         ApiProtocol::OpenAiCompatible => {
             let content = raw
@@ -444,6 +895,20 @@ pub fn parse_model_response(
                 .and_then(Value::as_u64)
                 .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
                 .unwrap_or(0) as u32;
+            let cache_created_tokens = usage
+                .pointer("/prompt_tokens_details/cached_creation_tokens")
+                .and_then(Value::as_u64)
+                .or_else(|| {
+                    usage
+                        .pointer("/prompt_tokens_details/cache_creation_tokens")
+                        .and_then(Value::as_u64)
+                })
+                .or_else(|| {
+                    usage
+                        .get("cache_creation_input_tokens")
+                        .and_then(Value::as_u64)
+                })
+                .unwrap_or(0) as u32;
             (
                 content,
                 UsageStats {
@@ -452,7 +917,7 @@ pub fn parse_model_response(
                     completion_tokens,
                     total_tokens,
                     cached_tokens,
-                    cache_created_tokens: 0,
+                    cache_created_tokens,
                     ..UsageStats::zero()
                 },
                 finish_reason == "length" || finish_reason == "max_tokens",
@@ -544,6 +1009,7 @@ pub fn parse_model_response(
     };
     Ok(LlmResponse {
         content,
+        tool_calls,
         model_name: config.model.clone(),
         usage,
         truncated,
@@ -574,6 +1040,7 @@ pub fn interpret_model_http_response(
         Err(model_http_error_message(status, &raw_json))
     } else if !parsed_json {
         Ok(LlmResponse {
+            tool_calls: Vec::new(),
             content: body_text.to_string(),
             model_name: config.model.clone(),
             usage: UsageStats::zero(),
@@ -587,6 +1054,133 @@ pub fn interpret_model_http_response(
         raw_json,
         result,
     }
+}
+
+fn parse_native_tool_calls(
+    api_protocol: ApiProtocol,
+    raw: &Value,
+) -> Result<Vec<NativeToolCall>, String> {
+    match api_protocol {
+        ApiProtocol::OpenAiCompatible => raw
+            .pointer("/choices/0/message/tool_calls")
+            .and_then(Value::as_array)
+            .map(|calls| {
+                calls
+                    .iter()
+                    .enumerate()
+                    .map(|(index, call)| {
+                        parse_string_arguments_tool_call(
+                            call.get("id").and_then(Value::as_str),
+                            call.pointer("/function/name").and_then(Value::as_str),
+                            call.pointer("/function/arguments"),
+                            index,
+                        )
+                    })
+                    .collect()
+            })
+            .transpose()
+            .map(Option::unwrap_or_default),
+        ApiProtocol::OpenAiResponses => raw
+            .get("output")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| {
+                        item.get("type").and_then(Value::as_str) == Some("function_call")
+                    })
+                    .enumerate()
+                    .map(|(index, call)| {
+                        parse_string_arguments_tool_call(
+                            call.get("call_id")
+                                .and_then(Value::as_str)
+                                .or_else(|| call.get("id").and_then(Value::as_str)),
+                            call.get("name").and_then(Value::as_str),
+                            call.get("arguments"),
+                            index,
+                        )
+                    })
+                    .collect()
+            })
+            .transpose()
+            .map(Option::unwrap_or_default),
+        ApiProtocol::Anthropic => raw
+            .get("content")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_use"))
+                    .enumerate()
+                    .map(|(index, call)| {
+                        let id = required_tool_call_field(
+                            call.get("id").and_then(Value::as_str),
+                            "id",
+                            index,
+                        )?;
+                        let name = required_tool_call_field(
+                            call.get("name").and_then(Value::as_str),
+                            "name",
+                            index,
+                        )?;
+                        let arguments = call.get("input").cloned().unwrap_or_else(|| json!({}));
+                        if !arguments.is_object() {
+                            return Err(format!("invalid_tool_call[{index}].input_must_be_object"));
+                        }
+                        Ok(NativeToolCall {
+                            id,
+                            name,
+                            raw_arguments: serde_json::to_string(&arguments)
+                                .unwrap_or_else(|_| "{}".to_string()),
+                            arguments,
+                        })
+                    })
+                    .collect()
+            })
+            .transpose()
+            .map(Option::unwrap_or_default),
+    }
+}
+
+fn parse_string_arguments_tool_call(
+    id: Option<&str>,
+    name: Option<&str>,
+    raw_arguments: Option<&Value>,
+    index: usize,
+) -> Result<NativeToolCall, String> {
+    let id = required_tool_call_field(id, "id", index)?;
+    let name = required_tool_call_field(name, "name", index)?;
+    let raw_arguments = match raw_arguments {
+        Some(Value::String(value)) => value.clone(),
+        Some(Value::Object(value)) => Value::Object(value.clone()).to_string(),
+        None | Some(Value::Null) => "{}".to_string(),
+        _ => return Err(format!("invalid_tool_call[{index}].arguments_must_be_json")),
+    };
+    let arguments: Value = serde_json::from_str(&raw_arguments)
+        .map_err(|error| format!("invalid_tool_call[{index}].arguments_json:{error}"))?;
+    if !arguments.is_object() {
+        return Err(format!(
+            "invalid_tool_call[{index}].arguments_must_be_object"
+        ));
+    }
+    Ok(NativeToolCall {
+        id,
+        name,
+        arguments,
+        raw_arguments,
+    })
+}
+
+fn required_tool_call_field(
+    value: Option<&str>,
+    field: &str,
+    index: usize,
+) -> Result<String, String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("invalid_tool_call[{index}].{field}_required"))
 }
 
 fn looks_like_sse(body: &str) -> bool {
@@ -607,6 +1201,7 @@ fn interpret_openai_compatible_sse(
     let mut event_count = 0_u64;
     let mut reasoning_chunk_count = 0_u64;
     let mut parse_error = None;
+    let mut streamed_calls: Vec<(String, String, String)> = Vec::new();
 
     for line in body_text.lines() {
         let line = line.trim_start();
@@ -637,6 +1232,32 @@ fn interpret_openai_compatible_sse(
         {
             content.push_str(text);
         }
+        if let Some(chunks) = event
+            .pointer("/choices/0/delta/tool_calls")
+            .and_then(Value::as_array)
+        {
+            for chunk in chunks {
+                let index = chunk
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or(streamed_calls.len());
+                if streamed_calls.len() <= index {
+                    streamed_calls
+                        .resize_with(index + 1, || (String::new(), String::new(), String::new()));
+                }
+                let (id, name, arguments) = &mut streamed_calls[index];
+                if let Some(value) = chunk.get("id").and_then(Value::as_str) {
+                    id.push_str(value);
+                }
+                if let Some(value) = chunk.pointer("/function/name").and_then(Value::as_str) {
+                    name.push_str(value);
+                }
+                if let Some(value) = chunk.pointer("/function/arguments").and_then(Value::as_str) {
+                    arguments.push_str(value);
+                }
+            }
+        }
         if let Some(reason) = event
             .pointer("/choices/0/finish_reason")
             .and_then(Value::as_str)
@@ -648,6 +1269,16 @@ fn interpret_openai_compatible_sse(
         }
     }
 
+    let tool_calls = streamed_calls
+        .into_iter()
+        .map(|(id, name, arguments)| {
+            json!({
+                "id": id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            })
+        })
+        .collect::<Vec<_>>();
     let raw_json = json!({
         "stream": true,
         "stream_metadata": {
@@ -655,7 +1286,7 @@ fn interpret_openai_compatible_sse(
             "reasoning_chunk_count": reasoning_chunk_count,
         },
         "choices": [{
-            "message": {"content": content},
+            "message": {"content": content, "tool_calls": tool_calls},
             "finish_reason": finish_reason,
         }],
         "usage": usage,

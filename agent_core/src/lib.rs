@@ -14,6 +14,17 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+type ParallelActionResult = (usize, ParsedAction, ActionOutcome, Option<Duration>);
+type ApprovedParallelBashResult = (
+    usize,
+    ParsedAction,
+    PendingApproval,
+    ActionOutcome,
+    Option<Duration>,
+);
+type ParallelActionHandle = thread::JoinHandle<ParallelActionResult>;
+type ApprovedParallelBashHandle = thread::JoinHandle<ApprovedParallelBashResult>;
+
 pub mod audit;
 pub mod capability;
 #[path = "../../resources/capabilities/tools/capmgr.rs"]
@@ -24,25 +35,34 @@ use capability::CapabilityRegistry;
 pub mod config_edit;
 pub mod config_report;
 pub mod context;
+#[path = "../../resources/capabilities/tools/context_compact.rs"]
+pub mod context_compact;
 pub mod context_policy;
 pub mod data_layout;
 pub mod executor;
 pub mod host;
+pub mod interaction;
 #[path = "../../resources/capabilities/tools/memmgr.rs"]
 pub mod memmgr;
 pub mod model_api;
 pub mod model_service_config;
 pub mod model_transport;
+pub mod negotiation;
 mod notification;
+pub mod os;
 pub mod profiler;
 pub mod prompt_cache;
 pub mod prompt_components;
 pub mod prompt_render;
 pub mod prompt_spec;
+#[path = "../../resources/capabilities/tools/readfile.rs"]
+pub mod readfile;
 pub mod redaction;
+pub mod reminder_config;
 pub mod response_protocol;
 pub mod retry_policy;
 pub mod runtime_context;
+mod schema_optimizer;
 #[path = "../../resources/capabilities/tools/self_tool.rs"]
 pub mod self_tool;
 pub mod session_runtime;
@@ -56,6 +76,7 @@ pub mod tool_jobs;
 #[path = "../../resources/capabilities/tools/registry.rs"]
 pub(crate) mod tool_registry;
 pub mod tool_repo;
+mod tool_result_gate;
 #[path = "../../resources/capabilities/tools/toolgen.rs"]
 pub mod toolgen;
 pub mod work_instructions;
@@ -64,9 +85,9 @@ pub use audit::{
     append_audit_event, append_repair_output_event, host_start_audit_event,
     max_llm_output_increased_audit_event, model_input_overflow_recovery_audit_event,
     model_repair_output_event, model_repair_request_audit_event, model_retry_audit_event,
-    read_audit_doc, round_limit_audit_event, stale_context_choice_audit_event,
-    turn_error_audit_event, turn_final_audit_event, turn_start_audit_event,
-    user_approval_audit_event, user_supplement_audit_event,
+    prune_api_audit_before, read_audit_doc, round_limit_audit_event,
+    stale_context_choice_audit_event, turn_error_audit_event, turn_final_audit_event,
+    turn_start_audit_event, user_approval_audit_event, user_supplement_audit_event,
 };
 pub use config_edit::{
     apply_runtime_config_value, bash_approval_mode_from_sources, capabilities_dir_from_sources,
@@ -86,35 +107,46 @@ pub use context_policy::{
     StaleContextPolicy, DEFAULT_STALE_CONTEXT_IDLE, DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD,
 };
 pub use data_layout::{
-    default_data_root, layout_for_space, workspace_config_file, RuntimeDataLayout,
+    create_memory_dir, default_data_root, default_memory_dir, layout_for_space, resolve_memory_dir,
+    workspace_config_file, RuntimeDataLayout,
 };
 pub use host::{
     context_compact_topic_event, core_initialized_topic_event,
-    core_initialized_topic_event_with_worker, normalize_user_supplements, resolve_topic_reply,
-    session_worker_default_display_name, toolgen_topic_event, topic_event_status_hint,
-    work_instruction_load_topic_event, CoreActionTopic, CoreContextCompactTopic,
-    CoreDynamicContextSummary, CoreGlobalWorkerStatus, CoreHostDecisionRequestTopic,
-    CoreLifecycleEvent, CoreLifecycleTopic, CoreModelRepairTopic, CoreModelResponseTopic,
-    CoreSessionState, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopic,
-    CoreTopicEvent, CoreTopicEventSink, CoreTopicStatusHint, CoreWorkInstructionLoadTopic,
-    HostDecision, HostDecisionDefault, HostDecisionRequest, LongRunningCommandContinueRequest,
-    NoopTurnUi, OutputExpansionRequest, OutputExpansionResolution, RoundLimitDecisionRequest,
-    RoundLimitResolution, StoppedTurn, TopicReply, TopicReplyError, TurnInput, TurnOutcome,
-    TurnStopDetail, TurnStopReason, TurnStopSummary, TurnUi, CORE_TOPIC_ACTION,
-    CORE_TOPIC_CONTEXT_COMPACT, CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST,
-    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
-    CORE_TOPIC_ROUND_LIMIT_REQUEST, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN,
+    core_initialized_topic_event_with_worker, normalize_user_supplements,
+    normalize_user_supplements_with_context, resolve_topic_reply,
+    runtime_root_repair_help_topic_event, session_worker_default_display_name, toolgen_topic_event,
+    topic_event_status_hint, work_instruction_load_topic_event, CoreActionTopic,
+    CoreContextCompactTopic, CoreDynamicContextSummary, CoreGlobalWorkerStatus,
+    CoreHostDecisionRequestTopic, CoreLifecycleEvent, CoreLifecycleTopic, CoreModelRepairTopic,
+    CoreModelResponseTopic, CoreSessionState, CoreSessionWorkerIdentity,
+    CoreSessionWorkerWorkspace, CoreTopic, CoreTopicEvent, CoreTopicEventSink, CoreTopicStatusHint,
+    CoreWorkInstructionLoadTopic, HostDecision, HostDecisionDefault, HostDecisionRequest,
+    LongRunningCommandContinueRequest, NoopTurnUi, OutputExpansionRequest,
+    OutputExpansionResolution, RoundLimitDecisionRequest, RoundLimitResolution, StoppedTurn,
+    TopicReply, TopicReplyError, TurnInput, TurnOutcome, TurnStopDetail, TurnStopReason,
+    TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPACT,
+    CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MODEL_REPAIR,
+    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
+    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN,
     CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
+};
+pub use interaction::{
+    parse_parallel_tool_calls, parse_tool_call_mode, CapabilityProbeSource, InteractionConfig,
+    InteractionProfile, ModelInteractionRequest, NativeExchange, NativeToolCall, NativeToolChoice,
+    NativeToolResult, ParallelToolCalls, ToolCallMode, ToolDefinition,
+    DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE,
 };
 pub use model_api::{
     build_model_request, default_api_protocol, default_base_url, default_model,
     interpret_model_http_response, is_default_base_url, is_default_model, model_http_error_message,
     model_prompt_blocks, model_request_audit_event, model_response_audit_event, parse_api_protocol,
-    parse_model_response, plan_structured_output, prepare_model_http_request,
-    prepare_model_request, prompt_cache_plan_audit, ApiProtocol, ModelCacheControl,
-    ModelHttpResponseInterpretation, ModelPromptBlock, ModelPromptRole, ModelServiceConfig,
-    OpenAiCompatibleOptions, PreparedModelHttpRequest, PreparedModelRequest, StructuredOutputHint,
+    parse_model_response, parse_openai_compatible_cache_mode, plan_structured_output,
+    prepare_model_http_request, prepare_model_interaction_http_request, prepare_model_request,
+    prompt_cache_plan_audit, validate_model_http_headers, without_openai_compatible_cache_control,
+    ApiProtocol, ModelCacheControl, ModelHttpResponseInterpretation, ModelPromptBlock,
+    ModelPromptRole, ModelServiceConfig, OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
+    PreparedModelHttpRequest, PreparedModelRequest, StructuredOutputHint,
 };
 pub use model_service_config::{
     apply_openai_compatible_env_value, model_service_config_from_sources,
@@ -122,6 +154,7 @@ pub use model_service_config::{
     ModelServiceConfigSource,
 };
 pub use model_transport::{call_model, call_model_with_cancel, HttpModelClient};
+pub use negotiation::negotiate_interaction;
 use notification::CoreNotification;
 pub use notification::{CoreActionKind, CoreMemoryActivity};
 pub use profiler::{
@@ -136,6 +169,11 @@ pub use prompt_cache::{
 };
 pub use prompt_components::{PromptComponent, PromptComponentRole};
 pub use redaction::{redact_value, REDACTED};
+pub use reminder_config::{
+    default_config_root, default_resources_dir, load_reminder_tips_config,
+    reminder_tips_config_path, ReminderScheduleConfig, ReminderTipsConfig, REMINDER_TIPS_FILE_NAME,
+    TIMEM_RESOURCES_DIR_ENV,
+};
 pub use response_protocol::ResponseProtocolKind;
 use response_protocol::{ActionGroupOrder, ParsedAction, ParsedActionGroup, ParsedEnvelope};
 pub use retry_policy::{
@@ -143,10 +181,7 @@ pub use retry_policy::{
     ModelCallOutcome, ModelRetryDecision, ModelSystemRetryPolicy,
     DEFAULT_MODEL_SYSTEM_ERROR_RETRIES, DEFAULT_MODEL_SYSTEM_ERROR_RETRY_DELAY,
 };
-pub use runtime_context::{
-    format_supporting_context, local_time_label, runtime_info_context, runtime_time_context,
-    supporting_context, turn_supporting_context, LocalTimeParts, SupportingContextInput,
-};
+pub use runtime_context::{local_time_label, runtime_time_context, LocalTimeParts};
 use self_tool::{SelfToolAbout, SelfToolPaths, SelfToolProcess, SelfToolState};
 pub use session_runtime::{
     cancelled_turn_result, run_session_turn, run_session_turn_with_model_client, ModelClient,
@@ -192,8 +227,6 @@ pub use workspace::{
 static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const ACTION_OUTPUT_CONTEXT_SAFETY_PERCENT: u32 = 95;
 const PROMPT_DELTA_RENDER_OVERHEAD_TOKENS: u32 = 64;
-const MAX_MCP_COMPACT_NOTE_CHARS: usize = 8_000;
-const MAX_MCP_COMPACT_ACTIONS: usize = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CoreProfile {
@@ -253,6 +286,8 @@ impl UsageStats {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LlmResponse {
     pub content: String,
+    #[serde(default)]
+    pub tool_calls: Vec<NativeToolCall>,
     pub model_name: String,
     pub usage: UsageStats,
     pub truncated: bool,
@@ -303,29 +338,46 @@ fn normalize_assistant_speaker_name(name: &str) -> String {
 fn role_for_prompt_type(prompt_type: &str, assistant_speaker_name: &str) -> PromptComponentRole {
     match prompt_type {
         "user_question" | "user_supplement" => PromptComponentRole::user(),
-        "llm_response" | "llm_free_talk" => {
+        "llm_response" | "llm_response_raw_xml" | "llm_free_talk" => {
             PromptComponentRole::assistant(assistant_speaker_name.to_string())
         }
         _ => PromptComponentRole::system(),
     }
 }
 
-fn context_reduction_delta_ids_from_action_groups(groups: &[ParsedActionGroup]) -> Vec<String> {
-    let _ = groups;
-    Vec::new()
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpServerUpdate {
+    Enabled,
+    Disabled,
 }
 
-fn extract_pid_after_marker(text: &str, marker: &str) -> Option<u32> {
-    let start = text.find(marker)? + marker.len();
-    let digits = text[start..]
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit())
-        .collect::<String>();
-    if digits.is_empty() {
-        None
+fn mcp_server_update_line(server: &mcp::McpServerConfig, update: McpServerUpdate) -> String {
+    let label = mcp_server_label(server);
+    let state = match update {
+        McpServerUpdate::Enabled => "IS ENABLED",
+        McpServerUpdate::Disabled => "IS DISABLED",
+    };
+    format!("MCP update: MCP {label} {state} by user !!!")
+}
+
+fn mcp_server_label(server: &mcp::McpServerConfig) -> String {
+    if server.name.trim().is_empty() || server.name == server.id {
+        server.id.clone()
     } else {
-        digits.parse::<u32>().ok()
+        format!("{} ({})", server.name, server.id)
     }
+}
+
+fn bounded_mcp_server_instructions(instructions: &str) -> String {
+    let instructions = instructions.trim();
+    if instructions.chars().count() <= MAX_MCP_SERVER_INSTRUCTIONS_CHARS {
+        return instructions.to_string();
+    }
+    let retained = instructions
+        .chars()
+        .take(MAX_MCP_SERVER_INSTRUCTIONS_CHARS)
+        .collect::<String>();
+    format!("{retained}\n...[MCP server instructions truncated by Timem]")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -361,6 +413,49 @@ pub struct ModelInputOverflowRecovery {
     pub removed_delta_id: String,
     pub removed_action_output_bytes: usize,
 }
+pub const WORKER_ROLE_CONTEXT_PREFIX: &str = "TIMEM_WORKER_ROLE_CONTEXT: ";
+
+pub fn worker_role_supporting_context(name: &str, description: &str) -> String {
+    format!(
+        "{WORKER_ROLE_CONTEXT_PREFIX}{}",
+        serde_json::json!({
+            "name": name,
+            "description": description,
+        })
+    )
+}
+
+fn worker_role_display_name(name: &str) -> String {
+    name.replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+}
+
+fn worker_role_full_instruction(
+    name: &str,
+    description: &str,
+    spec: &crate::response_protocol::PromptBoundarySpec,
+) -> String {
+    format!(
+        "{}\nUser involves the worker role ‘{}’ for this round input's related task. When you work for this task, comply this worker's methodology: {}",
+        spec.runtime_heading_line(),
+        worker_role_display_name(name),
+        description
+    )
+}
+
+fn worker_role_reference_instruction(
+    name: &str,
+    spec: &crate::response_protocol::PromptBoundarySpec,
+) -> String {
+    format!(
+        "{}\nUser involves the worker role ‘{}’ for this round input's related task (also used in the above). Refer to this role's description above for working methodology.",
+        spec.runtime_heading_line(),
+        worker_role_display_name(name)
+    )
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromptDelta {
     pub delta_id: String,
@@ -373,6 +468,8 @@ pub struct PromptDelta {
 pub(crate) struct PromptSlice {
     pub(crate) delta_id: String,
     pub(crate) slice_id: String,
+    #[serde(default)]
+    pub(crate) component_id: String,
     pub(crate) prompt_type: String,
     pub(crate) time_ms: i64,
     pub(crate) text: String,
@@ -418,6 +515,8 @@ pub(crate) struct RawChatHistoryRecord {
 pub(crate) struct PendingApproval {
     request: ApprovalRequest,
     approved_action: PendingApprovedAction,
+    action_name: Option<String>,
+    action_call_id: String,
     continuation: Option<PendingApprovalContinuation>,
 }
 
@@ -442,7 +541,9 @@ pub(crate) enum PendingApprovedAction {
         once_timeout_ms: u64,
         session_id: String,
         turn_id: String,
+        tool_call_id: String,
         cwd: PathBuf,
+        tail_out: bool,
     },
     ToolgenPublish {
         repo: SessionToolRepo,
@@ -460,6 +561,10 @@ impl PendingApprovedAction {
         }
     }
 
+    fn tail_out(&self) -> bool {
+        matches!(self, PendingApprovedAction::RunBash { tail_out: true, .. })
+    }
+
     fn audit_input(&self, approval_id: &str, risk: &str, reason: &str) -> Value {
         match self {
             PendingApprovedAction::RunBash {
@@ -470,7 +575,9 @@ impl PendingApprovedAction {
                 once_timeout_ms,
                 session_id,
                 turn_id,
+                tool_call_id,
                 cwd,
+                tail_out,
             } => json!({
                 "command": command,
                 "background": background,
@@ -480,7 +587,9 @@ impl PendingApprovedAction {
                 "once_timeout_ms": if interval_ms.is_some() { Some(*once_timeout_ms) } else { None },
                 "session_id": session_id,
                 "turn_id": turn_id,
+                "tool_call_id": tool_call_id,
                 "cwd": cwd,
+                "tail_out": tail_out,
                 "approval_id": approval_id,
                 "risk": risk,
                 "reason": reason,
@@ -496,28 +605,191 @@ impl PendingApprovedAction {
 }
 
 const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;
-const DEFAULT_ROUND_BUDGET: u32 = 50;
-const MAX_PROTOCOL_REPAIR_ATTEMPTS: u32 = 5;
+const MAX_MCP_SERVER_INSTRUCTIONS_CHARS: usize = 32_000;
+pub const UNLIMITED_ROUND_BUDGET: u32 = u32::MAX;
+const DEFAULT_ROUND_BUDGET: u32 = UNLIMITED_ROUND_BUDGET;
+const MAX_CONFIGURED_ROUND_BUDGET: u32 = 10_000;
+pub const MAX_PROTOCOL_REPAIR_ATTEMPTS: u32 = 20;
+const RUNTIME_CONFIG_CHANGED_NOTICE: &str =
+    "User changes some runtime config, retrieve again when you need it.";
 const MEM_GUARD_WAIT_STEP: Duration = Duration::from_millis(25);
 const MEM_GUARD_TIMEOUT: Duration = Duration::from_secs(30);
 const MEM_GUARD_STALE_AFTER: Duration = Duration::from_secs(60 * 60 * 6);
+
+fn configured_round_budget(value: Option<&str>) -> u32 {
+    let Some(value) = value.map(str::trim) else {
+        return DEFAULT_ROUND_BUDGET;
+    };
+    if value.eq_ignore_ascii_case("unlimited") {
+        return UNLIMITED_ROUND_BUDGET;
+    }
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|rounds| (1..=MAX_CONFIGURED_ROUND_BUDGET).contains(rounds))
+        .unwrap_or(DEFAULT_ROUND_BUDGET)
+}
+
+pub(crate) fn runtime_process_owner_id() -> &'static str {
+    static OWNER_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    OWNER_ID
+        .get_or_init(|| {
+            let started_at_ns = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            format!("{}-{started_at_ns}", std::process::id())
+        })
+        .as_str()
+}
+
+fn configured_round_budget_from_env() -> u32 {
+    configured_round_budget(std::env::var("TIMEM_MAX_ROUNDS").ok().as_deref())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct WorkspaceInstanceOwner {
+    pub schema_version: u32,
+    pub pid: u32,
+    #[serde(default)]
+    pub process_identity: Option<String>,
+    pub host: String,
+    pub acquired_at_ms: i64,
+}
+
+#[derive(Debug)]
+pub struct WorkspaceInstanceLock {
+    file: fs::File,
+    path: PathBuf,
+}
+
+impl WorkspaceInstanceLock {
+    pub fn lock_path(memory_dir: impl AsRef<Path>) -> PathBuf {
+        let memory_dir = fs::canonicalize(memory_dir.as_ref())
+            .unwrap_or_else(|_| memory_dir.as_ref().to_path_buf());
+        memory_dir.join(".guard").join("workspace-instance.lock")
+    }
+
+    pub fn read_owner(memory_dir: impl AsRef<Path>) -> Option<WorkspaceInstanceOwner> {
+        fs::read(Self::lock_path(memory_dir))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    }
+
+    pub fn acquire(memory_dir: impl AsRef<Path>, host: &str) -> Result<Self, String> {
+        let memory_dir = fs::canonicalize(memory_dir.as_ref())
+            .unwrap_or_else(|_| memory_dir.as_ref().to_path_buf());
+        let guard_dir = memory_dir.join(".guard");
+        fs::create_dir_all(&guard_dir)
+            .map_err(|error| format!("workspace_instance_lock_dir_failed:{error}"))?;
+        let path = Self::lock_path(&memory_dir);
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(0);
+        }
+        let mut file = options
+            .open(&path)
+            .map_err(|error| format!("workspace_instance_lock_open_failed:{error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
+                    "workspace_already_in_use".to_string()
+                } else {
+                    format!("workspace_instance_lock_failed:{error}")
+                });
+            }
+        }
+        let owner = WorkspaceInstanceOwner {
+            schema_version: 1,
+            pid: std::process::id(),
+            process_identity: os::process_identity(std::process::id()),
+            host: host.to_string(),
+            acquired_at_ms: now_ms(),
+        };
+        let encoded = serde_json::to_vec_pretty(&owner)
+            .map_err(|error| format!("workspace_instance_owner_serialize_failed:{error}"))?;
+        use std::io::{Seek, SeekFrom};
+        file.set_len(0)
+            .and_then(|_| file.seek(SeekFrom::Start(0)).map(|_| ()))
+            .and_then(|_| file.write_all(&encoded))
+            .and_then(|_| file.sync_data())
+            .map_err(|error| format!("workspace_instance_owner_write_failed:{error}"))?;
+        Ok(Self { file, path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for WorkspaceInstanceLock {
+    fn drop(&mut self) {
+        let _ = self.file.sync_data();
+        // Keep the inode: removing a locked file can let another process lock a
+        // replacement inode before this handle is dropped.
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct MemGuard {
     lock_dir: PathBuf,
 }
 
+fn sanitize_mem_guard_domain(domain: &str) -> String {
+    let mut clean = domain
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while clean.contains("--") {
+        clean = clean.replace("--", "-");
+    }
+    clean = clean.trim_matches(['-', '.']).to_string();
+    if clean.is_empty() {
+        "default".to_string()
+    } else {
+        clean
+    }
+}
+
 impl MemGuard {
     pub fn for_memory_dir(memory_dir: impl AsRef<Path>) -> Self {
+        Self::for_memory_domain(memory_dir, "legacy")
+    }
+
+    pub fn for_memory_domain(memory_dir: impl AsRef<Path>, domain: impl AsRef<str>) -> Self {
         let space_dir = space_dir_for_memory_dir(memory_dir.as_ref()).to_path_buf();
-        Self::for_space_dir(space_dir)
+        Self::for_space_domain(space_dir, domain)
     }
 
     pub fn for_space_dir(space_dir: impl AsRef<Path>) -> Self {
+        Self::for_space_domain(space_dir, "legacy")
+    }
+
+    pub fn for_space_domain(space_dir: impl AsRef<Path>, domain: impl AsRef<str>) -> Self {
         let space_dir = fs::canonicalize(space_dir.as_ref())
             .unwrap_or_else(|_| space_dir.as_ref().to_path_buf());
+        let domain = sanitize_mem_guard_domain(domain.as_ref());
         Self {
-            lock_dir: space_dir.join(".guard").join("mem.lock.d"),
+            lock_dir: space_dir.join(".guard").join(format!("{domain}.lock.d")),
         }
     }
 
@@ -533,11 +805,22 @@ impl MemGuard {
                 }
             })
             .unwrap_or_else(|| Path::new("."));
-        Self::for_space_dir(space_dir)
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("audit");
+        let logical_file_name = file_name
+            .strip_suffix(".jsonl")
+            .map(|stem| format!("{stem}.json"))
+            .unwrap_or_else(|| file_name.to_string());
+        Self::for_space_domain(space_dir, format!("audit-{logical_file_name}"))
     }
 
+    /// Reads do not acquire a cross-process lock. Writers publish complete
+    /// snapshots atomically or append complete JSONL records, so a reader may
+    /// observe an older consistent state without blocking unrelated work.
     pub fn with_read<T>(&self, f: impl FnOnce() -> T) -> Result<T, String> {
-        self.with_lock(f)
+        Ok(f())
     }
 
     pub fn with_write<T>(&self, f: impl FnOnce() -> T) -> Result<T, String> {
@@ -585,6 +868,9 @@ impl MemGuard {
     }
 
     fn is_stale_lock(&self) -> bool {
+        if let Some(owner_alive) = self.lock_owner_alive() {
+            return !owner_alive;
+        }
         fs::metadata(&self.lock_dir)
             .and_then(|metadata| metadata.modified())
             .ok()
@@ -592,6 +878,55 @@ impl MemGuard {
             .map(|age| age >= MEM_GUARD_STALE_AFTER)
             .unwrap_or(false)
     }
+
+    fn lock_owner_alive(&self) -> Option<bool> {
+        let owner = fs::read_to_string(self.lock_dir.join("owner.json")).ok()?;
+        let pid = serde_json::from_str::<Value>(&owner)
+            .ok()?
+            .get("pid")?
+            .as_u64()?;
+        process_is_alive(pid)
+    }
+}
+
+fn process_is_alive(pid: u64) -> Option<bool> {
+    os::process_is_alive(pid)
+}
+
+pub fn atomic_write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("snapshot");
+    let temporary = path.with_file_name(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        unique_id("write")
+    ));
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    if let Err(error) = file.write_all(bytes).and_then(|_| file.sync_all()) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -605,10 +940,147 @@ impl Drop for MemGuardLock {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActionStatus {
+    Completed,
+    Failed,
+    Timeout,
+    Cancelled,
+    BackgroundRunning,
+    BackgroundFinished,
+}
+
+impl ActionStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::BackgroundRunning => "background_running",
+            Self::BackgroundFinished => "background_finished",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BashResultEvidence {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub pid: Option<u32>,
+    pub timed_out: bool,
+    pub pid_kind: Option<String>,
+    pub error_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReadfileResultEvidence {
+    pub path: String,
+    pub matcher: Option<String>,
+    pub start_line: Option<u64>,
+    pub end_line: Option<u64>,
+    pub total_lines: Option<u64>,
+    pub encoding: Option<String>,
+    pub file_bytes: Option<u64>,
+    pub content_bytes: Option<usize>,
+    pub limited: Option<bool>,
+    pub tail_out: Option<bool>,
+    pub content: String,
+    pub error_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MemmgrResultEvidence {
+    pub memory_type: String,
+    pub op: String,
+    pub content: String,
+    pub error_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SelfToolResultEvidence {
+    pub self_type: String,
+    pub cwd: Option<String>,
+    pub content: String,
+    pub error_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActionOutcome {
+    pub status: ActionStatus,
+    pub text: String,
+    pub bash_result: Option<BashResultEvidence>,
+    pub readfile_result: Option<ReadfileResultEvidence>,
+    pub memmgr_result: Option<MemmgrResultEvidence>,
+    pub self_tool_result: Option<SelfToolResultEvidence>,
+}
+
+impl ActionOutcome {
+    pub(crate) fn new(status: ActionStatus, text: impl Into<String>) -> Self {
+        Self {
+            status,
+            text: text.into(),
+            bash_result: None,
+            readfile_result: None,
+            memmgr_result: None,
+            self_tool_result: None,
+        }
+    }
+
+    pub(crate) fn with_bash_result(mut self, bash_result: BashResultEvidence) -> Self {
+        self.bash_result = Some(bash_result);
+        self
+    }
+
+    pub(crate) fn with_readfile_result(mut self, readfile_result: ReadfileResultEvidence) -> Self {
+        self.readfile_result = Some(readfile_result);
+        self
+    }
+
+    pub(crate) fn with_memmgr_result(mut self, memmgr_result: MemmgrResultEvidence) -> Self {
+        self.memmgr_result = Some(memmgr_result);
+        self
+    }
+
+    pub(crate) fn with_self_tool_result(
+        mut self,
+        self_tool_result: SelfToolResultEvidence,
+    ) -> Self {
+        self.self_tool_result = Some(self_tool_result);
+        self
+    }
+
+    pub(crate) fn completed(text: impl Into<String>) -> Self {
+        Self::new(ActionStatus::Completed, text)
+    }
+
+    pub(crate) fn failed(text: impl Into<String>) -> Self {
+        Self::new(ActionStatus::Failed, text)
+    }
+
+    pub(crate) fn timeout(text: impl Into<String>) -> Self {
+        Self::new(ActionStatus::Timeout, text)
+    }
+
+    pub(crate) fn cancelled(text: impl Into<String>) -> Self {
+        Self::new(ActionStatus::Cancelled, text)
+    }
+
+    pub(crate) fn background_running(text: impl Into<String>) -> Self {
+        Self::new(ActionStatus::BackgroundRunning, text)
+    }
+
+    pub(crate) fn background_finished(text: impl Into<String>) -> Self {
+        Self::new(ActionStatus::BackgroundFinished, text)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum ActionExecution {
-    Completed(String),
+    Completed(ActionOutcome),
     NeedsApproval(PendingApproval),
 }
 
@@ -622,14 +1094,46 @@ pub enum LongRunningCommandDecision {
 pub struct LongRunningCommandStatus {
     pub action: String,
     pub command: String,
+    pub pid: u32,
     pub elapsed: Duration,
     pub timeout_ms: Option<i64>,
+}
+
+fn thread_cpu_time() -> Option<Duration> {
+    #[cfg(unix)]
+    {
+        let mut value = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut value) };
+        if result != 0 || value.tv_sec < 0 || value.tv_nsec < 0 {
+            return None;
+        }
+        Some(Duration::new(value.tv_sec as u64, value.tv_nsec as u32))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+fn elapsed_thread_cpu(start: Option<Duration>) -> Option<Duration> {
+    thread_cpu_time().and_then(|end| end.checked_sub(start?))
 }
 
 pub trait ActionRuntime {
     fn should_cancel(&mut self) -> bool;
 
     fn on_core_topic_events(&mut self, _events: &[host::CoreTopicEvent]) {}
+
+    fn on_model_response_parsed(
+        &mut self,
+        _tool_count: usize,
+        _has_free_talk: bool,
+        _has_tool_call: bool,
+    ) {
+    }
 
     fn on_long_running_command(
         &mut self,
@@ -702,10 +1206,8 @@ impl FileActionAuditStore {
     fn new(memory_dir: &Path) -> Self {
         let space_dir = space_dir_for_memory_dir(memory_dir);
         let file = space_dir.join("audit").join("action_audit.json");
-        Self {
-            file,
-            guard: MemGuard::for_memory_dir(memory_dir),
-        }
+        let guard = MemGuard::for_audit_file(&file);
+        Self { file, guard }
     }
 
     fn begin_turn(&self, turn_id: &str, started_at_ms: i64, user_question: &str) {
@@ -772,7 +1274,7 @@ impl FileActionAuditStore {
         let Ok(text) = serde_json::to_string_pretty(doc) else {
             return;
         };
-        let _ = fs::write(&self.file, format!("{text}\n"));
+        let _ = atomic_write_file(&self.file, format!("{text}\n").as_bytes());
     }
 
     fn empty_doc() -> ActionAuditDocument {
@@ -827,11 +1329,14 @@ pub struct AgentCore {
     memory_dir: PathBuf,
     static_prompt: String,
     rendered_static_prompt: String,
+    startup_stamp: String,
     profile: CoreProfile,
     pub(crate) capabilities: CapabilityRegistry,
     mcp_runtime: mcp::McpRuntime,
     mcp_servers: BTreeMap<String, mcp::McpServerConfig>,
     mcp_tools: BTreeMap<String, mcp::McpTool>,
+    mcp_instructions: BTreeMap<String, String>,
+    configured_inline_response_protocol: ResponseProtocolKind,
     response_protocol: ResponseProtocolKind,
     pub(crate) memory: FileMemoryStore,
     pub(crate) scratch: FileScratchStore,
@@ -843,8 +1348,11 @@ pub struct AgentCore {
     deltas: Vec<PromptDelta>,
     max_llm_input_tokens: u32,
     last_observed_prompt_tokens: u32,
+    context_compact_required: bool,
     configured_round_budget: u32,
     round_budget: u32,
+    reminder_tips_config: ReminderTipsConfig,
+    runtime_config_changed_notice_pending: bool,
     current_round: u32,
     pub(crate) current_stats: UsageStats,
     repair_attempted: bool,
@@ -858,6 +1366,7 @@ pub struct AgentCore {
     last_notifications: Vec<CoreNotification>,
     loaded_work_instruction_fingerprints: HashSet<String>,
     pending_prompt_components: Vec<PromptComponent>,
+    pending_user_interruption_note: bool,
     prompt_component_sequence: u64,
     next_delta_sequence: u64,
     assistant_speaker_name: String,
@@ -865,6 +1374,10 @@ pub struct AgentCore {
     current_prompt_cwd: PathBuf,
     cwd_note_pending: bool,
     tool_repo_session_id: String,
+    resolved_tool_call_mode: ToolCallMode,
+    native_parallel_tool_calls: bool,
+    native_exchanges: Vec<NativeExchange>,
+    pending_native_exchange: Option<(String, String, Vec<NativeToolCall>, Vec<String>)>,
 }
 impl AgentCore {
     pub fn new(
@@ -882,23 +1395,30 @@ impl AgentCore {
         let static_prompt = static_prompt.into();
         let capabilities = CapabilityRegistry::builtin().without_tool("toolgen");
         let response_protocol = ResponseProtocolKind::default();
+        let configured_round_budget = configured_round_budget_from_env();
         let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
+        let startup_stamp = runtime_time_context();
         let current_prompt_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let rendered_static_prompt = prompt_render::render_static_prompt(
+        let rendered_static_prompt = prompt_render::render_static_prompt_for_mode(
             &static_prompt,
             &capabilities,
             response_protocol.suite(),
             &assistant_speaker_name,
+            &startup_stamp,
+            ToolCallMode::Inline,
         );
         Self {
             memory_dir: memory_dir.to_path_buf(),
             static_prompt,
             rendered_static_prompt,
+            startup_stamp,
             profile,
             capabilities,
             mcp_runtime: mcp::McpRuntime::default(),
             mcp_servers: BTreeMap::new(),
             mcp_tools: BTreeMap::new(),
+            mcp_instructions: BTreeMap::new(),
+            configured_inline_response_protocol: response_protocol,
             response_protocol,
             memory: FileMemoryStore::new(memory_dir),
             scratch: FileScratchStore::new(memory_dir),
@@ -910,8 +1430,11 @@ impl AgentCore {
             deltas: Vec::new(),
             max_llm_input_tokens: 100_000,
             last_observed_prompt_tokens: 0,
-            configured_round_budget: DEFAULT_ROUND_BUDGET,
-            round_budget: DEFAULT_ROUND_BUDGET,
+            context_compact_required: false,
+            configured_round_budget,
+            round_budget: configured_round_budget,
+            reminder_tips_config: ReminderTipsConfig::default(),
+            runtime_config_changed_notice_pending: false,
             current_round: 0,
             current_stats: UsageStats::zero(),
             repair_attempted: false,
@@ -925,6 +1448,7 @@ impl AgentCore {
             last_notifications: Vec::new(),
             loaded_work_instruction_fingerprints: HashSet::new(),
             pending_prompt_components: Vec::new(),
+            pending_user_interruption_note: false,
             prompt_component_sequence: 0,
             next_delta_sequence: 1,
             assistant_speaker_name,
@@ -932,6 +1456,82 @@ impl AgentCore {
             current_prompt_cwd,
             cwd_note_pending: true,
             tool_repo_session_id: "default".to_string(),
+            resolved_tool_call_mode: ToolCallMode::Inline,
+            native_parallel_tool_calls: false,
+            native_exchanges: Vec::new(),
+            pending_native_exchange: None,
+        }
+    }
+
+    pub fn set_interaction_profile(&mut self, profile: &InteractionProfile) {
+        if self.resolved_tool_call_mode == ToolCallMode::Native
+            && profile.resolved_mode != ToolCallMode::Native
+        {
+            self.materialize_native_exchanges();
+        }
+        self.resolved_tool_call_mode = profile.resolved_mode;
+        self.response_protocol = if profile.resolved_mode == ToolCallMode::Native {
+            ResponseProtocolKind::Json
+        } else {
+            self.configured_inline_response_protocol
+        };
+        self.native_parallel_tool_calls = profile.parallel_enabled;
+        self.refresh_rendered_static_prompt();
+    }
+
+    pub fn model_interaction_request(
+        &self,
+        rendered_prompt: impl Into<String>,
+    ) -> ModelInteractionRequest {
+        if self.resolved_tool_call_mode != ToolCallMode::Native {
+            return ModelInteractionRequest::inline(rendered_prompt);
+        }
+        let mut tools = self.capabilities.native_builtin_tool_definitions();
+        let mut static_tool_count = tools.len();
+        let mut dynamic_tools = self.capabilities.native_dynamic_tool_definitions();
+        self.attach_mcp_instructions_to_native_tools(&mut dynamic_tools);
+        tools.extend(dynamic_tools);
+        if self.context_compact_required {
+            tools.retain(|tool| tool.name == "context_compact");
+            static_tool_count = tools.len();
+        }
+        ModelInteractionRequest {
+            rendered_prompt: rendered_prompt.into(),
+            static_tool_count,
+            tools,
+            native_exchanges: self.native_exchanges.clone(),
+            resolved_mode: ToolCallMode::Native,
+            parallel_tool_calls: self.native_parallel_tool_calls,
+            tool_choice: if self.context_compact_required {
+                NativeToolChoice::Required
+            } else {
+                NativeToolChoice::Auto
+            },
+        }
+    }
+
+    fn attach_mcp_instructions_to_native_tools(&self, tools: &mut [ToolDefinition]) {
+        let mut described_servers = HashSet::new();
+        for tool in tools {
+            let Some(mcp_tool) = self.mcp_tools.get(&tool.name) else {
+                continue;
+            };
+            let server_id = &mcp_tool.server_id;
+            if described_servers.contains(server_id) {
+                continue;
+            }
+            let Some(instructions) = self.mcp_instructions.get(server_id) else {
+                continue;
+            };
+            let server_label = self
+                .mcp_servers
+                .get(server_id)
+                .map(mcp_server_label)
+                .unwrap_or_else(|| server_id.clone());
+            tool.description.push_str(&format!(
+                "\n\nMCP server-wide instructions for {server_label}; apply these instructions to every tool from this server:\n{instructions}"
+            ));
+            described_servers.insert(server_id.clone());
         }
     }
 
@@ -953,6 +1553,7 @@ impl AgentCore {
             &self.memory_dir,
         );
         fork.capabilities = self.capabilities.clone();
+        fork.configured_inline_response_protocol = self.configured_inline_response_protocol;
         fork.response_protocol = self.response_protocol;
         fork.max_llm_input_tokens = self.max_llm_input_tokens;
         fork.configured_round_budget = self.configured_round_budget;
@@ -1041,10 +1642,6 @@ impl AgentCore {
         }
     }
 
-    fn cwd_note_slice(&self) -> (String, String) {
-        ("runtime_note".to_string(), self.cwd_prompt_note())
-    }
-
     pub fn set_bash_approval_mode(&mut self, mode: BashApprovalMode) {
         self.bash_approval_mode = mode;
     }
@@ -1069,13 +1666,42 @@ impl AgentCore {
         &mut self,
         session_id: &str,
     ) -> Vec<RunningShellJob> {
+        self.refresh_running_shell_jobs_for_session_with_runtime(session_id, None)
+    }
+
+    fn refresh_running_shell_jobs_for_session_with_runtime(
+        &mut self,
+        session_id: &str,
+        runtime: Option<&mut dyn ActionRuntime>,
+    ) -> Vec<RunningShellJob> {
         let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
-        self.submit_running_job_updates(updates);
+        self.submit_running_job_updates_with_runtime(updates, runtime);
         running
     }
 
-    fn submit_running_job_updates_for_session(&mut self, session_id: &str) {
+    fn submit_running_job_updates_for_session(
+        &mut self,
+        session_id: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) {
         let (_, updates) = self.shell_jobs.refresh_for_session(session_id);
+        self.submit_running_job_updates_with_runtime(updates, Some(runtime));
+    }
+
+    fn submit_running_job_updates_with_runtime(
+        &mut self,
+        updates: Vec<ShellJobExitUpdate>,
+        runtime: Option<&mut dyn ActionRuntime>,
+    ) {
+        if let Some(runtime) = runtime {
+            let events = updates
+                .iter()
+                .map(host::running_shell_job_exit_topic_event)
+                .collect::<Vec<_>>();
+            if !events.is_empty() {
+                runtime.on_core_topic_events(&events);
+            }
+        }
         self.submit_running_job_updates(updates);
     }
 
@@ -1106,78 +1732,84 @@ impl AgentCore {
         );
     }
 
-    fn submit_running_job_list_if_any(&mut self, session_id: &str) {
-        let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
-        self.submit_running_job_updates(updates);
+    fn still_running_cmds_context_from(&self, running: Vec<RunningShellJob>) -> Option<String> {
         if running.is_empty() {
-            return;
+            return None;
         }
-        let mut text = String::from("RUNNING JOB LIST:");
+        let mut text = String::from(
+            "still running cmds:
+
+### STILL RUNNING
+| pid | created by tool_call id |
+|---:|---|",
+        );
         for job in running {
+            let call_id = markdown_table_cell(if job.tool_call_id.trim().is_empty() {
+                "unknown_tool_call"
+            } else {
+                &job.tool_call_id
+            });
             text.push_str(&format!(
-                "\npid={}, {}, cmd={}, still running",
-                job.pid,
-                job.description(),
-                compact_text(&job.command, 500),
+                "
+| {} | `{}` |",
+                job.pid, call_id
             ));
         }
-        self.submit_prompt_component(
-            PromptComponentRole::system(),
-            "running_job_list",
-            text,
-            "runtime",
-        );
+        Some(text)
     }
 
-    fn referenced_system_slices_running_pids(&self, delta_ids: &[String]) -> BTreeSet<u32> {
-        let target_delta_ids = delta_ids
-            .iter()
-            .map(|id| id.trim().to_string())
-            .filter(|id| !id.is_empty())
-            .collect::<HashSet<_>>();
-        if target_delta_ids.is_empty() {
-            return BTreeSet::new();
-        }
-
-        let mut pids = BTreeSet::new();
-        for delta in &self.deltas {
-            if !target_delta_ids.contains(&delta.delta_id) {
-                continue;
-            }
-            for slice in prompt_render::render_delta_slices(delta) {
-                if role_for_prompt_type(&slice.prompt_type, &self.assistant_speaker_name)
-                    != PromptComponentRole::system()
-                {
-                    continue;
-                }
-                for line in slice.text.lines() {
-                    let lower = line.to_ascii_lowercase();
-                    let is_running_line = lower.contains("still running")
-                        || lower.contains("keeps running")
-                        || lower.contains("is still running");
-                    if is_running_line {
-                        if let Some(pid) = extract_pid_after_marker(line, "pid=") {
-                            pids.insert(pid);
-                        }
-                    }
-                }
-            }
-        }
-        pids
+    pub fn build_model_request_prompt(&mut self, current_prompt: &str) -> String {
+        self.build_model_request_prompt_inner(current_prompt, None)
     }
 
-    fn referenced_deltas_have_current_running_jobs(
+    pub(crate) fn build_model_request_prompt_with_runtime(
         &mut self,
-        session_id: &str,
-        delta_ids: &[String],
-    ) -> bool {
-        let referenced_pids = self.referenced_system_slices_running_pids(delta_ids);
-        if referenced_pids.is_empty() {
+        current_prompt: &str,
+        runtime: &mut dyn ActionRuntime,
+    ) -> String {
+        self.build_model_request_prompt_inner(current_prompt, Some(runtime))
+    }
+
+    fn build_model_request_prompt_inner(
+        &mut self,
+        current_prompt: &str,
+        runtime: Option<&mut dyn ActionRuntime>,
+    ) -> String {
+        let session_id = self.current_session_id();
+        let (running, updates) = self.shell_jobs.refresh_for_session(&session_id);
+        self.submit_running_job_updates_with_runtime(updates, runtime);
+        let still_running = self.still_running_cmds_context_from(running);
+        if still_running.is_none() && !self.context_compact_required {
+            return current_prompt.to_string();
+        }
+        let (body, trailer) = prompt_render::split_formatted_response_trailer(current_prompt);
+        let mut prompt = body.trim_end().to_string();
+        if let Some(still_running) = still_running {
+            prompt.push_str("\n\n");
+            prompt.push_str(&still_running);
+        }
+        prompt.push_str("\n\n");
+        if self.context_compact_required {
+            prompt.push_str(prompt_render::CONTEXT_COMPACT_REQUIRED_TRAILER);
+        } else if let Some(trailer) = trailer {
+            prompt.push_str(&trailer);
+        }
+        prompt
+    }
+
+    pub fn should_suppress_model_response(&self, response: &LlmResponse) -> bool {
+        if !self.context_compact_required {
             return false;
         }
-        let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
-        self.submit_running_job_updates(updates);
-        running.iter().any(|job| referenced_pids.contains(&job.pid))
+        let mut parsed = if self.resolved_tool_call_mode == ToolCallMode::Native {
+            self.parse_native_response(response)
+        } else {
+            self.response_protocol
+                .suite()
+                .parse(&response.content, &self.capabilities)
+        };
+        self.normalize_intrinsic_actions(&mut parsed);
+        parsed.context_compacts.len() != 1 || parsed.repair_issue.is_some()
     }
 
     pub fn set_max_llm_input_tokens(&mut self, max_llm_input_tokens: u32) {
@@ -1212,24 +1844,58 @@ impl AgentCore {
             RuntimeConfigEffect::BashApprovalChanged(mode) => self.set_bash_approval_mode(mode),
             RuntimeConfigEffect::WorkInstructionsChanged(_) => {}
         }
-        Ok(runtime_config_apply_report(
+        let report = runtime_config_apply_report(
             config,
             *bash_approval_mode,
             *work_instruction_mode,
             field,
             effect,
-        ))
+        );
+        self.self_tool
+            .set_env_value(report.key, report.value.clone());
+        if field == RuntimeConfigField::ApiProtocol {
+            self.self_tool
+                .set_env_value("TIMEM_BASE_URL", config.base_url.clone());
+        }
+        self.notify_runtime_config_changed();
+        Ok(report)
     }
     pub fn set_max_rounds(&mut self, max_rounds: u32) {
         self.configured_round_budget = max_rounds.max(1);
         self.round_budget = self.configured_round_budget;
+        self.self_tool.set_env_value(
+            "TIMEM_MAX_ROUNDS",
+            if self.configured_round_budget == UNLIMITED_ROUND_BUDGET {
+                "unlimited".to_string()
+            } else {
+                self.configured_round_budget.to_string()
+            },
+        );
+    }
+    pub fn set_reminder_tips_config(&mut self, config: ReminderTipsConfig) {
+        self.reminder_tips_config = config;
+    }
+    pub fn reminder_tips_config(&self) -> &ReminderTipsConfig {
+        &self.reminder_tips_config
+    }
+    pub fn notify_runtime_config_changed(&mut self) {
+        self.runtime_config_changed_notice_pending = true;
+    }
+    pub fn set_self_tool_runtime_param(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) {
+        self.self_tool.set_env_value(key, value);
     }
     fn refresh_rendered_static_prompt(&mut self) {
-        self.rendered_static_prompt = prompt_render::render_static_prompt(
+        self.rendered_static_prompt = prompt_render::render_static_prompt_for_mode(
             &self.static_prompt,
             &self.capabilities,
             self.response_protocol.suite(),
             &self.assistant_speaker_name,
+            &self.startup_stamp,
+            self.resolved_tool_call_mode,
         );
     }
     pub fn set_capability_registry(&mut self, capabilities: CapabilityRegistry) {
@@ -1244,6 +1910,36 @@ impl AgentCore {
         servers: Vec<mcp::McpServerConfig>,
         tools: Vec<mcp::McpTool>,
     ) -> Result<(), String> {
+        self.configure_mcp_with_instructions(
+            base_capabilities,
+            runtime,
+            servers,
+            tools,
+            BTreeMap::new(),
+        )
+    }
+
+    pub fn configure_mcp_with_instructions(
+        &mut self,
+        base_capabilities: CapabilityRegistry,
+        runtime: mcp::McpRuntime,
+        servers: Vec<mcp::McpServerConfig>,
+        tools: Vec<mcp::McpTool>,
+        instructions: BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        self.replace_mcp_state(base_capabilities, runtime, servers, tools, instructions)?;
+        self.append_initial_mcp_state_delta();
+        Ok(())
+    }
+
+    fn replace_mcp_state(
+        &mut self,
+        base_capabilities: CapabilityRegistry,
+        runtime: mcp::McpRuntime,
+        servers: Vec<mcp::McpServerConfig>,
+        tools: Vec<mcp::McpTool>,
+        instructions: BTreeMap<String, String>,
+    ) -> Result<(), String> {
         self.capabilities = base_capabilities
             .with_mcp_tools(&tools)?
             .without_tool("toolgen");
@@ -1256,8 +1952,84 @@ impl AgentCore {
             .into_iter()
             .map(|tool| (tool.action_name.clone(), tool))
             .collect();
+        self.mcp_instructions = instructions
+            .into_iter()
+            .filter_map(|(server_id, instructions)| {
+                let instructions = instructions.trim();
+                (!instructions.is_empty() && self.mcp_servers.contains_key(&server_id))
+                    .then(|| (server_id, bounded_mcp_server_instructions(instructions)))
+            })
+            .collect();
         self.refresh_rendered_static_prompt();
         Ok(())
+    }
+
+    fn append_initial_mcp_state_delta(&mut self) {
+        let visible_server_ids = self
+            .mcp_tools
+            .values()
+            .map(|tool| tool.server_id.as_str())
+            .chain(self.mcp_instructions.keys().map(String::as_str))
+            .collect::<HashSet<_>>();
+        let mut lines = self
+            .mcp_servers
+            .values()
+            .filter(|server| visible_server_ids.contains(server.id.as_str()))
+            .map(|server| mcp_server_update_line(server, McpServerUpdate::Enabled))
+            .collect::<Vec<_>>();
+        let catalog = self.current_mcp_catalog_text();
+        if let Some(catalog) = catalog.as_ref() {
+            lines.push(catalog.clone());
+        }
+        if lines.is_empty() {
+            return;
+        }
+        self.append_delta(vec![(
+            if catalog.is_some() {
+                "mcp_capability_catalog"
+            } else {
+                "mcp_capability_update"
+            }
+            .to_string(),
+            lines.join("\n"),
+        )]);
+    }
+
+    fn current_mcp_catalog_text(&self) -> Option<String> {
+        let tools = self.capabilities.render_native_dynamic_tool_catalog_json();
+        if tools.is_none() && self.mcp_instructions.is_empty() {
+            return None;
+        }
+        let instructions = self
+            .mcp_instructions
+            .iter()
+            .map(|(server_id, instructions)| {
+                let server_name = self
+                    .mcp_servers
+                    .get(server_id)
+                    .map(|server| server.name.as_str())
+                    .unwrap_or(server_id);
+                json!({
+                    "server_id": server_id,
+                    "server_name": server_name,
+                    "instructions": instructions,
+                })
+            })
+            .collect::<Vec<_>>();
+        let tools = tools
+            .as_deref()
+            .map(serde_json::from_str::<Value>)
+            .transpose()
+            .expect("rendered MCP tool definitions must be valid JSON")
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let catalog = serde_json::to_string_pretty(&json!({
+            "server_instructions": instructions,
+            "tools": tools,
+        }))
+        .expect("MCP prompt catalog must serialize");
+        Some(format!(
+            "MCP update: the following MCP capabilities are enabled. Server instructions in this catalog are authoritative. This newer catalog overrides earlier entries for the same server or action name.\n\n```json\n{catalog}\n```"
+        ))
     }
 
     pub fn apply_mcp_update(
@@ -1267,14 +2039,50 @@ impl AgentCore {
         servers: Vec<mcp::McpServerConfig>,
         tools: Vec<mcp::McpTool>,
     ) -> Result<bool, String> {
-        let previous = self.mcp_tools.clone();
-        self.configure_mcp(base_capabilities, runtime, servers, tools)?;
-        if previous == self.mcp_tools {
+        self.apply_mcp_update_with_instructions(
+            base_capabilities,
+            runtime,
+            servers,
+            tools,
+            self.mcp_instructions.clone(),
+        )
+    }
+
+    pub fn apply_mcp_update_with_instructions(
+        &mut self,
+        base_capabilities: CapabilityRegistry,
+        runtime: mcp::McpRuntime,
+        servers: Vec<mcp::McpServerConfig>,
+        tools: Vec<mcp::McpTool>,
+        instructions: BTreeMap<String, String>,
+    ) -> Result<bool, String> {
+        let previous_tools = self.mcp_tools.clone();
+        let previous_servers = self.mcp_servers.clone();
+        let previous_instructions = self.mcp_instructions.clone();
+        let previous_model_tools = self
+            .capabilities
+            .native_dynamic_tool_definitions()
+            .into_iter()
+            .map(|tool| (tool.name.clone(), tool))
+            .collect::<BTreeMap<_, _>>();
+        self.replace_mcp_state(base_capabilities, runtime, servers, tools, instructions)?;
+        let current_model_tools = self
+            .capabilities
+            .native_dynamic_tool_definitions()
+            .into_iter()
+            .map(|tool| (tool.name.clone(), tool))
+            .collect::<BTreeMap<_, _>>();
+        if previous_model_tools == current_model_tools
+            && previous_instructions == self.mcp_instructions
+        {
             return Ok(false);
         }
 
-        let previous_names = previous.keys().cloned().collect::<BTreeSet<_>>();
-        let current_names = self.mcp_tools.keys().cloned().collect::<BTreeSet<_>>();
+        let previous_names = previous_model_tools
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let current_names = current_model_tools.keys().cloned().collect::<BTreeSet<_>>();
         let added = current_names
             .difference(&previous_names)
             .cloned()
@@ -1285,75 +2093,116 @@ impl AgentCore {
             .collect::<Vec<_>>();
         let updated = current_names
             .intersection(&previous_names)
-            .filter(|name| previous.get(*name) != self.mcp_tools.get(*name))
+            .filter(|name| previous_model_tools.get(*name) != current_model_tools.get(*name))
             .cloned()
             .collect::<Vec<_>>();
+        let previous_visible_server_ids = previous_tools
+            .values()
+            .map(|tool| tool.server_id.as_str())
+            .chain(previous_instructions.keys().map(String::as_str))
+            .collect::<HashSet<_>>();
+        let current_visible_server_ids = self
+            .mcp_tools
+            .values()
+            .map(|tool| tool.server_id.as_str())
+            .chain(self.mcp_instructions.keys().map(String::as_str))
+            .collect::<HashSet<_>>();
+        let removed_servers = previous_servers
+            .keys()
+            .filter(|id| {
+                previous_visible_server_ids.contains(id.as_str())
+                    && !self.mcp_servers.contains_key(*id)
+            })
+            .map(|id| &previous_servers[id])
+            .collect::<Vec<_>>();
+        let added_servers = self
+            .mcp_servers
+            .keys()
+            .filter(|id| {
+                current_visible_server_ids.contains(id.as_str())
+                    && !previous_servers.contains_key(*id)
+            })
+            .map(|id| &self.mcp_servers[id])
+            .collect::<Vec<_>>();
 
-        let mut lines = vec!["MCP capabilities changed for this user request.".to_string()];
+        let mut lines = Vec::new();
+        for server in removed_servers {
+            lines.push(mcp_server_update_line(server, McpServerUpdate::Disabled));
+        }
+        for server in added_servers {
+            lines.push(mcp_server_update_line(server, McpServerUpdate::Enabled));
+        }
         if !added.is_empty() {
-            lines.push(format!("Newly available actions: {}.", added.join(", ")));
+            lines.push(format!(
+                "MCP update: newly available actions: {}.",
+                added.join(", ")
+            ));
         }
         if !updated.is_empty() {
             lines.push(format!(
-                "Updated action definitions: {}.",
+                "MCP update: updated action definitions: {}.",
                 updated.join(", ")
             ));
         }
         if !removed.is_empty() {
             lines.push(format!(
-                "Actions no longer available: {}.",
+                "MCP update: actions no longer available: {}.",
                 removed.join(", ")
             ));
         }
-        lines.push("Use only actions in the current capability catalog.".to_string());
-        self.submit_prompt_component(
-            PromptComponentRole::system(),
-            "mcp_capability_update",
-            lines.join("\n"),
-            "mcp_runtime",
-        );
+        let removed_instruction_ids = previous_instructions
+            .keys()
+            .filter(|id| !self.mcp_instructions.contains_key(*id))
+            .filter(|id| self.mcp_servers.contains_key(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let changed_instruction_ids = self
+            .mcp_instructions
+            .keys()
+            .filter(|id| previous_instructions.get(*id) != self.mcp_instructions.get(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for server_id in &removed_instruction_ids {
+            let label = self
+                .mcp_servers
+                .get(server_id)
+                .map(mcp_server_label)
+                .unwrap_or_else(|| server_id.clone());
+            lines.push(format!(
+                "MCP update: instructions for MCP {label} ARE NO LONGER ACTIVE !!!"
+            ));
+        }
+        for server_id in &changed_instruction_ids {
+            let label = self
+                .mcp_servers
+                .get(server_id)
+                .map(mcp_server_label)
+                .unwrap_or_else(|| server_id.clone());
+            lines.push(format!(
+                "MCP update: instructions for MCP {label} ARE UPDATED."
+            ));
+        }
+        let includes_catalog =
+            !added.is_empty() || !updated.is_empty() || !changed_instruction_ids.is_empty();
+        if includes_catalog {
+            if let Some(catalog) = self.current_mcp_catalog_text() {
+                lines.push(catalog);
+            }
+        }
+        if !lines.is_empty() {
+            self.append_delta(vec![(
+                if includes_catalog {
+                    "mcp_capability_catalog"
+                } else {
+                    "mcp_capability_update"
+                }
+                .to_string(),
+                lines.join("\n"),
+            )]);
+        }
         Ok(true)
     }
 
-    fn active_mcp_compact_note(&self) -> Option<String> {
-        if self.mcp_tools.is_empty() {
-            return None;
-        }
-
-        let total = self.mcp_tools.len();
-        let mut note =
-            format!("Active MCP capabilities after context compaction ({total} actions):");
-        let mut shown = 0usize;
-        for tool in self.mcp_tools.values().take(MAX_MCP_COMPACT_ACTIONS) {
-            let server_name = tool
-                .server_name
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            let line = format!("\n- {} ({server_name})", tool.action_name);
-            if note
-                .chars()
-                .count()
-                .saturating_add(line.chars().count())
-                .saturating_add(256)
-                > MAX_MCP_COMPACT_NOTE_CHARS
-            {
-                break;
-            }
-            note.push_str(&line);
-            shown += 1;
-        }
-        if shown < total {
-            note.push_str(&format!(
-                "\n- {} additional active MCP actions are omitted from this compact reminder.",
-                total - shown
-            ));
-        }
-        note.push_str(
-            "\nThese actions remain available. Refer to the current capability catalog for complete argument definitions.",
-        );
-        Some(note)
-    }
     pub(crate) fn enable_toolgen_capability(&mut self) -> Result<(), String> {
         self.capabilities.enable_toolgen()?;
         self.refresh_rendered_static_prompt();
@@ -1364,7 +2213,10 @@ impl AgentCore {
         self.refresh_rendered_static_prompt();
     }
     pub fn set_response_protocol(&mut self, protocol: ResponseProtocolKind) {
-        self.response_protocol = protocol;
+        self.configured_inline_response_protocol = protocol;
+        if self.resolved_tool_call_mode != ToolCallMode::Native {
+            self.response_protocol = protocol;
+        }
         self.refresh_rendered_static_prompt();
     }
     pub fn set_self_tool_state(&mut self, self_tool: SelfToolState) {
@@ -1375,12 +2227,21 @@ impl AgentCore {
         env: BTreeMap<String, String>,
         paths: SelfToolPaths,
     ) {
-        self.self_tool = SelfToolState::new(
+        let mut self_tool = SelfToolState::new(
             env,
             paths,
             default_self_tool_about(),
             default_self_tool_process(),
         );
+        self_tool.set_env_value(
+            "TIMEM_MAX_ROUNDS",
+            if self.configured_round_budget == UNLIMITED_ROUND_BUDGET {
+                "unlimited".to_string()
+            } else {
+                self.configured_round_budget.to_string()
+            },
+        );
+        self.self_tool = self_tool;
     }
     pub fn profile(&self) -> &CoreProfile {
         &self.profile
@@ -1435,30 +2296,37 @@ impl AgentCore {
             self.capabilities.skill_count(),
         )
     }
-    pub fn dynamic_context_summary(&self) -> CoreDynamicContextSummary {
-        let mut delta_ids = BTreeSet::new();
+    fn dynamic_context_token_estimate(&self) -> DynamicContextTokenEstimate {
+        let mut visible_delta_ids = BTreeSet::new();
         let mut visible_slice_count = 0usize;
-        let mut estimated_tokens = 0_u32;
+        let mut text_tokens = 0_u32;
         for delta in &self.deltas {
-            let hidden = delta.hidden_slice_ids.iter().collect::<HashSet<_>>();
-            let mut delta_visible = false;
-            for slice in &delta.slices {
-                if hidden.contains(&slice.slice_id) {
-                    continue;
-                }
-                delta_visible = true;
+            for slice in prompt_render::render_delta_slices(delta) {
+                visible_delta_ids.insert(delta.delta_id.clone());
                 visible_slice_count += 1;
-                estimated_tokens =
-                    estimated_tokens.saturating_add(estimate_prompt_tokens(&slice.text));
-            }
-            if delta_visible {
-                delta_ids.insert(delta.delta_id.clone());
+                text_tokens = text_tokens.saturating_add(estimate_prompt_tokens(&slice.text));
             }
         }
-        CoreDynamicContextSummary {
-            visible_delta_count: delta_ids.len(),
+        let native_tokens = self
+            .native_exchanges
+            .iter()
+            .filter(|exchange| visible_delta_ids.contains(&exchange.delta_id))
+            .map(estimate_native_exchange_tokens)
+            .fold(0_u32, u32::saturating_add);
+        DynamicContextTokenEstimate {
+            visible_delta_count: visible_delta_ids.len(),
             visible_slice_count,
-            estimated_tokens,
+            text_tokens,
+            native_tokens,
+        }
+    }
+
+    pub fn dynamic_context_summary(&self) -> CoreDynamicContextSummary {
+        let estimate = self.dynamic_context_token_estimate();
+        CoreDynamicContextSummary {
+            visible_delta_count: estimate.visible_delta_count,
+            visible_slice_count: estimate.visible_slice_count,
+            estimated_tokens: estimate.total_tokens(),
         }
     }
     pub fn dynamic_context_estimated_tokens(&self) -> u32 {
@@ -1467,6 +2335,7 @@ impl AgentCore {
     pub fn clear_dynamic_context(&mut self) {
         self.deltas.clear();
         self.last_observed_prompt_tokens = 0;
+        self.context_compact_required = false;
         self.current_round = 0;
         self.current_stats = UsageStats::zero();
         self.repair_attempted = false;
@@ -1504,6 +2373,96 @@ impl AgentCore {
         self.memory.git_commit_count()
     }
 
+    fn text_contains_complete_worker_role_instruction(text: &str, instruction: &str) -> bool {
+        text.match_indices(instruction).any(|(start, _)| {
+            let before = &text[..start];
+            let after = &text[start + instruction.len()..];
+            (before.is_empty() || before.ends_with("\n\n"))
+                && (after.is_empty() || after.starts_with("\n\n") || after.starts_with("\n## "))
+        })
+    }
+
+    fn current_visible_context_contains(&self, instruction: &str) -> bool {
+        if instruction.is_empty() {
+            return true;
+        }
+        if self.pending_prompt_components.iter().any(|component| {
+            Self::text_contains_complete_worker_role_instruction(&component.content, instruction)
+        }) {
+            return true;
+        }
+        self.deltas.iter().any(|delta| {
+            let hidden = delta.hidden_slice_ids.iter().collect::<HashSet<_>>();
+            let mut visible_component = String::new();
+            let mut current_component_id: Option<&str> = None;
+            for slice in &delta.slices {
+                let component_id = if slice.component_id.is_empty() {
+                    slice.slice_id.as_str()
+                } else {
+                    slice.component_id.as_str()
+                };
+                let component_changed = current_component_id
+                    .map(|current| current != component_id)
+                    .unwrap_or(false);
+                if component_changed || hidden.contains(&slice.slice_id) {
+                    if Self::text_contains_complete_worker_role_instruction(
+                        &visible_component,
+                        instruction,
+                    ) {
+                        return true;
+                    }
+                    visible_component.clear();
+                }
+                current_component_id = Some(component_id);
+                if hidden.contains(&slice.slice_id) {
+                    current_component_id = None;
+                } else {
+                    visible_component.push_str(&slice.text);
+                }
+            }
+            Self::text_contains_complete_worker_role_instruction(&visible_component, instruction)
+        })
+    }
+
+    fn filter_repeated_worker_roles(&self, supporting_context: &str) -> String {
+        let mut rendered_in_this_context = HashSet::new();
+        supporting_context
+            .lines()
+            .map(|line| {
+                let Some(payload) = line.strip_prefix(WORKER_ROLE_CONTEXT_PREFIX) else {
+                    return line.to_string();
+                };
+                let Ok(payload) = serde_json::from_str::<Value>(payload) else {
+                    return line.to_string();
+                };
+                let Some(name) = payload.get("name").and_then(Value::as_str) else {
+                    return line.to_string();
+                };
+                let Some(description) = payload.get("description").and_then(Value::as_str) else {
+                    return line.to_string();
+                };
+                let spec = self.response_protocol.suite().prompt_boundaries();
+                let full = worker_role_full_instruction(name, description, spec);
+                if self.current_visible_context_contains(&full)
+                    || rendered_in_this_context.contains(&full)
+                {
+                    worker_role_reference_instruction(name, spec)
+                } else {
+                    rendered_in_this_context.insert(full.clone());
+                    full
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    }
+
+    fn filter_supporting_context(&mut self, supporting_context: &str) -> String {
+        let context = self.filter_repeated_work_instructions(supporting_context);
+        self.filter_repeated_worker_roles(&context)
+    }
+
     fn filter_repeated_work_instructions(&mut self, supporting_context: &str) -> String {
         let Some((start, end, block)) = work_instruction_context_block(supporting_context) else {
             return supporting_context.trim().to_string();
@@ -1524,6 +2483,10 @@ impl AgentCore {
         }
         filtered.push_str(tail);
         filtered.trim().to_string()
+    }
+
+    pub(crate) fn mark_user_interrupted_work(&mut self) {
+        self.pending_user_interruption_note = true;
     }
 
     pub fn begin_turn(&mut self, user_input: &str, supporting_context: Option<&str>) -> CoreStep {
@@ -1549,12 +2512,25 @@ impl AgentCore {
             .map(|component| estimate_prompt_tokens(&component.content))
             .sum::<u32>();
         let text = user_input.trim().to_string();
+        if self.pending_user_interruption_note && !text.is_empty() {
+            // Pending components belong to the interrupted work. Commit them
+            // first so the next prompt has an unambiguous chronology:
+            // old work -> interruption note -> new user input -> new runtime context.
+            self.flush_pending_prompt_components();
+            self.pending_user_interruption_note = false;
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "user_interrupted_work",
+                "NOTE: User interrupted the above work. Continue it based on the user's new input's intent. If not sure, ask the user.",
+                "runtime",
+            );
+        }
         let should_memory_precheck = !text.is_empty()
             && supporting_context
                 .map(should_run_memory_precheck)
                 .unwrap_or(false);
         let filtered_supporting_context = supporting_context
-            .map(|ctx| self.filter_repeated_work_instructions(ctx))
+            .map(|ctx| self.filter_supporting_context(ctx))
             .filter(|ctx| !ctx.trim().is_empty());
         let mut system_texts = Vec::new();
         if let Some(ctx) = filtered_supporting_context.as_deref() {
@@ -1652,6 +2628,50 @@ impl AgentCore {
         })
     }
 
+    pub fn append_user_supplements_with_context_and_audit(
+        &mut self,
+        supplements: impl IntoIterator<Item = UserSupplement>,
+        audit_file: &Path,
+        session: &str,
+        turn_id: &str,
+    ) -> Option<CoreStep> {
+        let mut added = false;
+        for supplement in supplements {
+            let text = supplement.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let _ = append_audit_event(
+                audit_file,
+                &user_supplement_audit_event(session, turn_id, text),
+            );
+            if let Some(context) = supplement
+                .additional_context
+                .as_deref()
+                .map(|context| self.filter_supporting_context(context))
+                .filter(|context| !context.trim().is_empty())
+            {
+                self.submit_prompt_component(
+                    PromptComponentRole::system(),
+                    "user_supplement_context",
+                    context,
+                    "host_context",
+                );
+            }
+            self.submit_prompt_component(
+                PromptComponentRole::user(),
+                "user_supplement",
+                text,
+                "user_input",
+            );
+            added = true;
+        }
+        added.then(|| CoreStep::NeedModel {
+            prompt: self.build_next_prompt(),
+            rounds_remaining: self.remaining_rounds(),
+        })
+    }
+
     pub fn apply_model_response(&mut self, response: LlmResponse) -> CoreStep {
         self.apply_model_response_with_cancel(response, &mut || false)
     }
@@ -1677,8 +2697,24 @@ impl AgentCore {
             .last_observed_prompt_tokens
             .max(response.usage.prompt_tokens);
         let raw_model_output = response.content.clone();
+        let protocol_suite = self.response_protocol.suite();
+        let native_calls = response.tool_calls.clone();
+        let mut parsed = if self.resolved_tool_call_mode == ToolCallMode::Native {
+            self.parse_native_response(&response)
+        } else {
+            protocol_suite.parse(&response.content, &self.capabilities)
+        };
+        self.normalize_intrinsic_actions(&mut parsed);
+        if self.context_compact_required
+            && (parsed.context_compacts.len() != 1 || parsed.repair_issue.is_some())
+        {
+            self.current_round = self.current_round.saturating_sub(1);
+            return CoreStep::NeedModel {
+                prompt: self.render_prompt(),
+                rounds_remaining: self.remaining_rounds(),
+            };
+        }
         if response.truncated && self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
-            let protocol_suite = self.response_protocol.suite();
             let instruction = protocol_suite
                 .repair_instruction_for_response("truncated_model_output", &response.content);
             return self.request_protocol_repair(
@@ -1688,9 +2724,24 @@ impl AgentCore {
                 runtime,
             );
         }
-        let protocol_suite = self.response_protocol.suite();
-        let parsed = protocol_suite.parse(&response.content, &self.capabilities);
         let mut slices = Vec::new();
+        if parsed.repair_issue.is_none() {
+            let tool_count = parsed
+                .action_groups
+                .iter()
+                .map(|group| group.actions.len())
+                .sum();
+            runtime.on_model_response_parsed(
+                tool_count,
+                !parsed.thought.trim().is_empty(),
+                tool_count > 0 || !parsed.context_compacts.is_empty() || !native_calls.is_empty(),
+            );
+            if parsed.recovered_issue.as_deref() == Some("runtime_root_repair_help") {
+                runtime.on_core_topic_events(&[host::runtime_root_repair_help_topic_event(
+                    self.current_session_id(),
+                )]);
+            }
+        }
         if let Some(issue) = parsed.repair_issue.clone() {
             if self.repair_attempts < MAX_PROTOCOL_REPAIR_ATTEMPTS {
                 let instruction =
@@ -1763,20 +2814,26 @@ impl AgentCore {
             );
             runtime.on_core_topic_events(&events);
         }
-        let compact_delta_ids = parsed
-            .context_compacts
-            .iter()
-            .flat_map(|compact| compact.delta_ids.iter().cloned())
-            .collect::<Vec<_>>();
-        let compact_refs_current_running_jobs = self.referenced_deltas_have_current_running_jobs(
-            &self.current_session_id(),
-            &compact_delta_ids,
-        );
-        let mut active_mcp_compact_note = self.active_mcp_compact_note();
+        if parsed.continue_work && self.resolved_tool_call_mode != ToolCallMode::Native {
+            // Preserve the actual turn chronology in the replayed prompt: the
+            // assistant requested the compact before the runtime reported its
+            // result. Prompt components with the same logical timestamp retain
+            // this insertion order through their sequence number.
+            slices.extend(self.assistant_replay_slices(&raw_model_output, Some(&parsed), None));
+        }
+        let compact_refs_mcp_catalog = parsed.context_compacts.iter().any(|compact| {
+            self.prompt_refs_include_type(
+                &compact.delta_ids,
+                &compact.slice_ids,
+                "mcp_capability_catalog",
+            )
+        });
+        let mut compacted_successfully = false;
+        let mut successful_compact_summaries = Vec::new();
         for compact in &parsed.context_compacts {
             let missing = self.missing_prompt_refs(&compact.delta_ids, &compact.slice_ids);
             if missing.is_empty() {
-                let estimated_before_tokens = self.dynamic_context_summary().estimated_tokens;
+                let estimated_before = self.dynamic_context_token_estimate();
                 let offload_record = if compact.offload_delta_ids.is_empty() {
                     None
                 } else {
@@ -1812,50 +2869,34 @@ impl AgentCore {
                         }
                     }
                 };
-                let shrink_result = self.apply_prompt_shrink(
+                let _ = self.apply_prompt_shrink(
                     "Action result: context_compact",
                     &compact.delta_ids,
                     &compact.slice_ids,
                 );
-                let estimated_after_tokens = self
-                    .dynamic_context_summary()
-                    .estimated_tokens
-                    .saturating_add(estimate_prompt_tokens(&compact.summary))
-                    .saturating_add(
-                        active_mcp_compact_note
-                            .as_deref()
-                            .map(estimate_prompt_tokens)
-                            .unwrap_or_default(),
-                    );
+                let estimated_after = self.dynamic_context_token_estimate();
+                let summary_tokens = estimate_prompt_tokens(&compact.summary);
+                let compact_report = host::CoreContextCompactTopic {
+                    estimated_before_tokens: estimated_before.total_tokens(),
+                    estimated_after_tokens: estimated_after
+                        .total_tokens()
+                        .saturating_add(summary_tokens),
+                    estimated_text_before_tokens: estimated_before.text_tokens,
+                    estimated_text_after_tokens: estimated_after
+                        .text_tokens
+                        .saturating_add(summary_tokens),
+                    estimated_native_before_tokens: estimated_before.native_tokens,
+                    estimated_native_after_tokens: estimated_after.native_tokens,
+                    discarded_delta_ids: compact.discard_delta_ids.clone(),
+                    offloaded_delta_ids: compact.offload_delta_ids.clone(),
+                    scratch_id: offload_record.as_ref().map(|record| record.id.clone()),
+                };
                 runtime.on_core_topic_events(&[host::context_compact_topic_event(
                     self.current_session_id(),
-                    estimated_before_tokens,
-                    estimated_after_tokens,
-                    &compact.discard_delta_ids,
-                    &compact.offload_delta_ids,
-                    offload_record.as_ref().map(|record| record.id.as_str()),
+                    &compact_report,
                 )]);
-                let scratch_line = offload_record
-                    .as_ref()
-                    .map(|record| {
-                        format!("\nThe scratch id for offloaded deltas is: {}", record.id)
-                    })
-                    .unwrap_or_default();
-                slices.push((
-                    "context_compacted".to_string(),
-                    format!(
-                        "Context compact summary replacing discarded_delta_ids=[{}], offloaded_delta_ids=[{}]:\n{}{}",
-                        compact.discard_delta_ids.join(","),
-                        compact.offload_delta_ids.join(","),
-                        compact.summary,
-                        scratch_line
-                    ),
-                ));
-                slices.push(("result_of_llm_action".to_string(), shrink_result));
-                slices.push(self.cwd_note_slice());
-                if let Some(note) = active_mcp_compact_note.take() {
-                    slices.push(("context_compacted".to_string(), note));
-                }
+                successful_compact_summaries.push(compact.summary.trim().to_string());
+                compacted_successfully = true;
             } else {
                 slices.push((
                     "result_of_llm_action".to_string(),
@@ -1864,6 +2905,34 @@ impl AgentCore {
                         missing.join(", ")
                     ),
                 ));
+            }
+        }
+        if compacted_successfully {
+            self.context_compact_required = false;
+        }
+        if compacted_successfully && !native_calls.is_empty() {
+            // A native context_compact call can discard the delta that would have
+            // owned its structured exchange. Persist each successful summary as a
+            // fresh assistant slice instead: the summary is the replacement context
+            // baseline and must never depend on a discarded/offloaded delta.
+            slices.extend(
+                successful_compact_summaries
+                    .into_iter()
+                    .map(|summary| ("llm_response".to_string(), summary)),
+            );
+        }
+        if compacted_successfully {
+            slices.push((
+                "context_compacted".to_string(),
+                format!(
+                    "context compacted successfully.\nCWD: {}",
+                    self.current_prompt_cwd.display()
+                ),
+            ));
+        }
+        if compacted_successfully && compact_refs_mcp_catalog {
+            if let Some(catalog) = self.current_mcp_catalog_text() {
+                slices.push(("mcp_capability_catalog".to_string(), catalog));
             }
         }
         if !parsed.continue_work {
@@ -1879,6 +2948,9 @@ impl AgentCore {
                 Some(&parsed),
                 Some(&final_text),
             ));
+            // Keep native exchanges structured across turn boundaries. Their
+            // delta_id places them on the same append-only context timeline, so
+            // provider projection stays byte-stable and cacheable.
             self.defer_next_turn_slices(slices);
             return CoreStep::Final(TurnFinal {
                 final_answer: final_text,
@@ -1897,22 +2969,22 @@ impl AgentCore {
         }
 
         // Omitted status is an intentional shorthand for status:working.
-        slices.extend(self.assistant_replay_slices(&raw_model_output, Some(&parsed), None));
         if let Some(note) = parsed.runtime_note.as_deref() {
             slices.push(("runtime_note".to_string(), note.to_string()));
         }
 
         if !parsed.action_groups.is_empty() {
-            let context_reduction_delta_ids =
-                context_reduction_delta_ids_from_action_groups(&parsed.action_groups);
-            let should_snapshot_running_jobs = self.referenced_deltas_have_current_running_jobs(
-                &self.current_session_id(),
-                &context_reduction_delta_ids,
-            );
             let result_lines = match self.execute_action_groups(parsed.action_groups, runtime) {
                 Ok(result_lines) => result_lines,
                 Err((result_lines, pending)) => {
-                    if !result_lines.is_empty() {
+                    if !native_calls.is_empty() {
+                        self.pending_native_exchange = Some((
+                            self.current_native_delta_id(),
+                            response.content.clone(),
+                            native_calls,
+                            result_lines,
+                        ));
+                    } else if !result_lines.is_empty() {
                         slices.push((
                             "result_of_llm_action".to_string(),
                             result_lines.join("\n\n"),
@@ -1924,17 +2996,30 @@ impl AgentCore {
                     return CoreStep::NeedsUserApproval { request };
                 }
             };
-            if !result_lines.is_empty() {
+            if !result_lines.is_empty() && native_calls.is_empty() {
                 slices.push((
                     "result_of_llm_action".to_string(),
                     result_lines.join("\n\n"),
                 ));
             }
-            if should_snapshot_running_jobs {
-                self.submit_running_job_list_if_any(&self.current_session_id());
-            } else {
-                self.submit_running_job_updates_for_session(&self.current_session_id());
+            if !native_calls.is_empty() {
+                self.native_exchanges.push(NativeExchange {
+                    delta_id: self.current_native_delta_id(),
+                    assistant_text: response.content.clone(),
+                    results: native_calls
+                        .iter()
+                        .zip(result_lines.iter())
+                        .map(|(call, result)| NativeToolResult {
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            content: result.clone(),
+                            is_error: result.contains("\nerror:"),
+                        })
+                        .collect(),
+                    calls: native_calls,
+                });
             }
+            self.submit_running_job_updates_for_session(&self.current_session_id(), runtime);
             self.append_delta_with_action_output_budget(slices);
             self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {
@@ -1948,11 +3033,11 @@ impl AgentCore {
             };
         }
         if !parsed.context_compacts.is_empty() {
-            if compact_refs_current_running_jobs {
-                self.submit_running_job_list_if_any(&self.current_session_id());
-            } else {
-                self.submit_running_job_updates_for_session(&self.current_session_id());
-            }
+            // context_compact is an intrinsic state rewrite. In native mode, do not
+            // retain its tool exchange: its owning delta may be removed by the same
+            // operation. The independently persisted summary and runtime confirmation
+            // below are the canonical continuation context.
+            self.submit_running_job_updates_for_session(&self.current_session_id(), runtime);
             self.append_delta_with_action_output_budget(slices);
             self.append_in_turn_shrink_review_if_needed();
             if self.remaining_rounds() == 0 {
@@ -1998,6 +3083,173 @@ impl AgentCore {
         self.current_stats.add(usage);
         self.last_observed_prompt_tokens =
             self.last_observed_prompt_tokens.max(usage.prompt_tokens);
+    }
+
+    fn parse_native_response(&self, response: &LlmResponse) -> ParsedEnvelope {
+        let actions = response
+            .tool_calls
+            .iter()
+            .map(|call| ParsedAction {
+                action: call.name.clone(),
+                name: None,
+                call_id: call.id.clone(),
+                raw_input: call.arguments.clone(),
+            })
+            .collect::<Vec<_>>();
+        let action_groups = if actions.is_empty() {
+            Vec::new()
+        } else {
+            vec![ParsedActionGroup {
+                order: if self.native_parallel_tool_calls && actions.len() > 1 {
+                    ActionGroupOrder::Parallel
+                } else {
+                    ActionGroupOrder::Sequential
+                },
+                actions,
+            }]
+        };
+        let has_calls = !response.tool_calls.is_empty();
+        ParsedEnvelope {
+            final_answer: if has_calls {
+                String::new()
+            } else {
+                response.content.clone()
+            },
+            toolgen_retrospect: String::new(),
+            continue_work: has_calls,
+            thought: response.content.clone(),
+            thought_keep_in_context: has_calls && !response.content.trim().is_empty(),
+            next_actions: Vec::new(),
+            action_groups,
+            context_compacts: Vec::new(),
+            memory_candidates: Vec::new(),
+            accepted_response: None,
+            runtime_note: None,
+            recovered_issue: None,
+            repair_issue: None,
+        }
+    }
+
+    fn current_native_delta_id(&self) -> String {
+        self.deltas
+            .last()
+            .map(|delta| delta.delta_id.clone())
+            .unwrap_or_else(|| "pd_0".to_string())
+    }
+
+    fn materialize_native_exchanges(&mut self) {
+        let exchanges = std::mem::take(&mut self.native_exchanges);
+        for exchange in exchanges {
+            let mut assistant = exchange.assistant_text.trim().to_string();
+            if !exchange.calls.is_empty() {
+                let calls = exchange
+                    .calls
+                    .iter()
+                    .map(|call| {
+                        json!({
+                            "id": call.id,
+                            "name": call.name,
+                            "arguments": call.arguments,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if !assistant.is_empty() {
+                    assistant.push('\n');
+                }
+                assistant.push_str("Tool calls:\n");
+                assistant.push_str(&serde_json::to_string(&calls).unwrap_or_default());
+            }
+            self.submit_prompt_component(
+                PromptComponentRole::assistant(self.assistant_speaker_name.clone()),
+                "llm_response",
+                assistant,
+                "native_interaction",
+            );
+            for result in exchange.results {
+                self.submit_prompt_component(
+                    PromptComponentRole::system(),
+                    "result_of_llm_action",
+                    result.content,
+                    "native_interaction",
+                );
+            }
+        }
+    }
+
+    fn complete_pending_native_exchange(&mut self, new_results: Vec<String>) -> bool {
+        let Some((delta_id, assistant_text, calls, mut results)) =
+            self.pending_native_exchange.take()
+        else {
+            return false;
+        };
+        results.extend(new_results);
+        let tool_results = calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| {
+                let content = results.get(index).cloned().unwrap_or_else(|| {
+                    format!(
+                        "Action result: {}\nerror: not_executed_after_approval_boundary",
+                        call.name
+                    )
+                });
+                NativeToolResult {
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    is_error: content.contains("\nerror:"),
+                    content,
+                }
+            })
+            .collect();
+        self.native_exchanges.push(NativeExchange {
+            delta_id,
+            assistant_text,
+            calls,
+            results: tool_results,
+        });
+        true
+    }
+
+    fn normalize_intrinsic_actions(&self, parsed: &mut ParsedEnvelope) {
+        if parsed.repair_issue.is_some() {
+            return;
+        }
+        let total_actions = parsed
+            .action_groups
+            .iter()
+            .map(|group| group.actions.len())
+            .sum::<usize>();
+        let compact_count = parsed
+            .action_groups
+            .iter()
+            .flat_map(|group| group.actions.iter())
+            .filter(|action| action.action == "context_compact")
+            .count();
+        if compact_count == 0 {
+            return;
+        }
+        if compact_count != 1 || total_actions != 1 || !parsed.context_compacts.is_empty() {
+            parsed.repair_issue = Some("context_compact_must_be_exclusive".to_string());
+            return;
+        }
+        let action = parsed
+            .action_groups
+            .iter()
+            .flat_map(|group| group.actions.iter())
+            .find(|action| action.action == "context_compact")
+            .expect("counted intrinsic action")
+            .clone();
+        match context_compact::from_action(&action) {
+            Ok(compact) => {
+                parsed.action_groups.clear();
+                parsed.context_compacts.push(compact);
+                parsed.continue_work = true;
+            }
+            Err(issue) if self.resolved_tool_call_mode == ToolCallMode::Native => {
+                parsed.runtime_note = Some(issue);
+            }
+            Err(issue) => parsed.repair_issue = Some(issue),
+        }
     }
 
     pub fn apply_model_response_with_repair_audit(
@@ -2128,6 +3380,7 @@ impl AgentCore {
                     response_truncated,
                     repair_calls_after,
                     repair_calls_after.saturating_sub(repair_calls_before),
+                    self.response_protocol.suite().prompt_boundaries(),
                 ),
             );
         }
@@ -2225,7 +3478,8 @@ impl AgentCore {
                 runtime,
             );
         }
-        let result = if approved {
+        let action_cpu_start = thread_cpu_time();
+        let outcome = if approved {
             match &pending.approved_action {
                 PendingApprovedAction::RunBash {
                     command,
@@ -2235,8 +3489,10 @@ impl AgentCore {
                     once_timeout_ms,
                     session_id,
                     turn_id,
+                    tool_call_id,
                     cwd,
-                } => shell_exec::execute_approved_bash(
+                    tail_out,
+                } => shell_exec::execute_approved_bash_with_tail(
                     command,
                     cwd,
                     *background,
@@ -2245,29 +3501,54 @@ impl AgentCore {
                     *once_timeout_ms,
                     session_id,
                     turn_id,
+                    tool_call_id,
                     interval_ms.is_none(),
+                    *tail_out,
                     &pending.request,
                     &self.shell_jobs,
                     runtime,
                 ),
                 PendingApprovedAction::ToolgenPublish { repo, draft_path } => {
-                    toolgen::execute_approved_publish(repo, draft_path, &pending.request)
+                    toolgen::execute_approved_publish_outcome(repo, draft_path, &pending.request)
                 }
             }
         } else {
-            format!(
+            ActionOutcome::failed(format!(
                 "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: denied_by_user\nreason: {}",
                 pending.request.action,
                 pending.approved_action.command(),
                 pending.request.approval_id,
                 pending.request.reason
-            )
+            ))
         };
-        self.record_pending_approval_audit(&pending, approved, &result);
-        self.append_delta_with_action_output_budget(vec![(
-            "result_of_llm_action".to_string(),
-            result,
-        )]);
+        self.record_pending_approval_audit(&pending, approved, &outcome.text);
+        self.emit_action_finish_topic(
+            &ParsedAction {
+                action: pending.request.action.clone(),
+                name: pending.action_name.clone(),
+                call_id: pending.action_call_id.clone(),
+                raw_input: pending.approved_action.audit_input(
+                    &pending.request.approval_id,
+                    &pending.request.risk,
+                    &pending.request.reason,
+                ),
+            },
+            &outcome,
+            match &pending.approved_action {
+                PendingApprovedAction::RunBash { .. } => None,
+                PendingApprovedAction::ToolgenPublish { .. } => {
+                    elapsed_thread_cpu(action_cpu_start)
+                }
+            },
+            runtime,
+        );
+        let prompt_result = self.format_pending_action_result(&pending, &outcome.text);
+        if !self.complete_pending_native_exchange(vec![prompt_result.clone()]) {
+            self.append_delta_with_action_output_budget(vec![(
+                "result_of_llm_action".to_string(),
+                prompt_result,
+            )]);
+        }
         self.append_in_turn_shrink_review_if_needed();
         if self.remaining_rounds() == 0 {
             return CoreStep::RoundLimitReached {
@@ -2307,28 +3588,39 @@ impl AgentCore {
             }
         }
 
-        let mut handles = Vec::new();
+        let mut approved_bash_handles = Vec::new();
         for (idx, pending) in approved {
-            handles.push(self.spawn_approved_parallel_bash_action(
+            approved_bash_handles.push(self.spawn_approved_parallel_bash_action(
                 idx,
                 pending,
                 Arc::clone(&cancel_requested),
             ));
         }
 
+        let mut action_handles = Vec::new();
         for (idx, action) in actions.iter().cloned().enumerate() {
             if results.get(idx).is_some_and(Option::is_some) || action.action == "run_bash" {
                 continue;
             }
-            match self.execute_action(action, runtime) {
-                ActionExecution::Completed(result) => {
+            if self.can_spawn_parallel_readfile_action(&action) {
+                action_handles.push(self.spawn_parallel_readfile_action(idx, action));
+                continue;
+            }
+            match self.execute_action(action.clone(), runtime) {
+                ActionExecution::Completed(outcome) => {
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(result);
+                        *slot = Some(self.format_action_outcome(&action, &outcome));
                     }
                 }
                 ActionExecution::NeedsApproval(pending) => {
+                    self.collect_parallel_action_handles(
+                        action_handles,
+                        &mut results,
+                        runtime,
+                        &cancel_requested,
+                    );
                     self.collect_approved_parallel_bash_handles(
-                        handles,
+                        approved_bash_handles,
                         &mut results,
                         runtime,
                         &cancel_requested,
@@ -2338,8 +3630,14 @@ impl AgentCore {
             }
         }
 
+        self.collect_parallel_action_handles(
+            action_handles,
+            &mut results,
+            runtime,
+            &cancel_requested,
+        );
         self.collect_approved_parallel_bash_handles(
-            handles,
+            approved_bash_handles,
             &mut results,
             runtime,
             &cancel_requested,
@@ -2373,7 +3671,8 @@ impl AgentCore {
         } else {
             let result = self.denied_approval_result(&pending);
             self.record_pending_approval_audit(&pending, false, &result);
-            denied_results.push((current_index, result));
+            let prompt_result = self.format_pending_action_result(&pending, &result);
+            denied_results.push((current_index, prompt_result));
         }
 
         for next_index in (current_index + 1)..actions.len() {
@@ -2381,9 +3680,10 @@ impl AgentCore {
             if action.action != "run_bash" {
                 continue;
             }
-            match self.execute_action(action, runtime) {
-                ActionExecution::Completed(result) => {
-                    completed_results.push((next_index, result));
+            match self.execute_action(action.clone(), runtime) {
+                ActionExecution::Completed(outcome) => {
+                    completed_results
+                        .push((next_index, self.format_action_outcome(&action, &outcome)));
                 }
                 ActionExecution::NeedsApproval(next_pending) => {
                     let pending = Self::pending_approval_with_parallel_continuation(
@@ -2411,20 +3711,26 @@ impl AgentCore {
             Ok(results) => results,
             Err((partial, pending)) => {
                 self.pending_approval = Some(pending.clone());
-                self.append_delta_with_action_output_budget(vec![(
-                    "result_of_llm_action".to_string(),
-                    partial.join("\n\n"),
-                )]);
+                if let Some((_, _, _, results)) = self.pending_native_exchange.as_mut() {
+                    results.extend(partial);
+                } else {
+                    self.append_delta_with_action_output_budget(vec![(
+                        "result_of_llm_action".to_string(),
+                        partial.join("\n\n"),
+                    )]);
+                }
                 return CoreStep::NeedsUserApproval {
                     request: pending.request,
                 };
             }
         };
 
-        self.append_delta_with_action_output_budget(vec![(
-            "result_of_llm_action".to_string(),
-            result_lines.join("\n\n"),
-        )]);
+        if !self.complete_pending_native_exchange(result_lines.clone()) {
+            self.append_delta_with_action_output_budget(vec![(
+                "result_of_llm_action".to_string(),
+                result_lines.join("\n\n"),
+            )]);
+        }
         self.append_in_turn_shrink_review_if_needed();
         if self.remaining_rounds() == 0 {
             return CoreStep::RoundLimitReached {
@@ -2557,11 +3863,12 @@ impl AgentCore {
     }
 
     pub fn render_prompt(&self) -> String {
-        prompt_render::render_prompt_with_rendered_static(
+        prompt_render::render_prompt_with_rendered_static_for_mode(
             &self.rendered_static_prompt,
             &self.deltas,
             &self.assistant_speaker_name,
-            self.response_protocol.suite().response_shape_hint(),
+            self.response_protocol.suite(),
+            self.resolved_tool_call_mode,
         )
     }
 
@@ -2577,6 +3884,15 @@ impl AgentCore {
     }
 
     pub fn build_next_prompt(&mut self) -> String {
+        if self.runtime_config_changed_notice_pending {
+            self.runtime_config_changed_notice_pending = false;
+            self.submit_prompt_component(
+                PromptComponentRole::system(),
+                "runtime_config_changed",
+                RUNTIME_CONFIG_CHANGED_NOTICE,
+                "runtime_config",
+            );
+        }
         self.guard_pending_action_output_budget();
         self.flush_pending_prompt_components();
         self.render_prompt()
@@ -2640,7 +3956,11 @@ impl AgentCore {
         prompt_render::render_prompt_slices(&self.deltas)
     }
     fn remaining_rounds(&self) -> u32 {
-        self.round_budget.saturating_sub(self.current_round)
+        if self.round_budget == UNLIMITED_ROUND_BUDGET {
+            UNLIMITED_ROUND_BUDGET
+        } else {
+            self.round_budget.saturating_sub(self.current_round)
+        }
     }
 
     fn request_protocol_repair(
@@ -2654,9 +3974,15 @@ impl AgentCore {
         self.repair_attempts = self.repair_attempts.saturating_add(1);
         self.last_repair_issue = Some(issue.to_string());
         self.current_stats.repair_calls = self.current_stats.repair_calls.saturating_add(1);
+        let repair_reason = self
+            .response_protocol
+            .suite()
+            .repair_reason(issue)
+            .to_string();
         runtime.on_core_topic_events(&[host::model_repair_topic_event(
             self.current_session_id(),
             issue,
+            repair_reason,
             self.repair_attempts,
             MAX_PROTOCOL_REPAIR_ATTEMPTS,
         )]);
@@ -2703,6 +4029,7 @@ impl AgentCore {
                         delta_id.trim_start_matches("pd_"),
                         slice_index
                     ),
+                    component_id: format!("temp_component_{slice_index}"),
                     prompt_type,
                     time_ms,
                     text,
@@ -2718,11 +4045,12 @@ impl AgentCore {
             slices,
             hidden_slice_ids: Vec::new(),
         });
-        prompt_render::render_prompt_with_rendered_static(
+        prompt_render::render_prompt_with_rendered_static_for_mode(
             &self.rendered_static_prompt,
             &deltas,
             &self.assistant_speaker_name,
-            self.response_protocol.suite().response_shape_hint(),
+            self.response_protocol.suite(),
+            self.resolved_tool_call_mode,
         )
     }
 
@@ -2735,6 +4063,35 @@ impl AgentCore {
         }
     }
 
+    fn inline_tool_call_labels(&self, parsed: &ParsedEnvelope) -> Vec<(String, String)> {
+        if self.resolved_tool_call_mode == ToolCallMode::Native {
+            return Vec::new();
+        }
+        parsed
+            .action_groups
+            .iter()
+            .flat_map(|group| group.actions.iter())
+            .map(|action| (action.call_id.clone(), action.action.clone()))
+            .collect()
+    }
+
+    fn append_inline_tool_call_labels(&self, replay: &mut String, parsed: &ParsedEnvelope) {
+        let calls = self.inline_tool_call_labels(parsed);
+        if calls.is_empty() {
+            return;
+        }
+        replay.push_str(
+            "
+Runtime tool_call ids:",
+        );
+        for (call_id, action) in calls {
+            replay.push_str(&format!(
+                "
+- {call_id}: {action}"
+            ));
+        }
+    }
+
     fn assistant_replay_slices(
         &self,
         raw_response: &str,
@@ -2743,18 +4100,55 @@ impl AgentCore {
     ) -> Vec<(String, String)> {
         match self.assistant_replay_mode {
             AssistantReplayMode::RawOutput => {
-                let raw = raw_response.trim();
-                if raw.is_empty() {
+                let accepted_response =
+                    parsed.and_then(|parsed| parsed.accepted_response.as_deref());
+                let mut replay = accepted_response.unwrap_or(raw_response).trim().to_string();
+                if let Some(parsed) = parsed {
+                    self.append_inline_tool_call_labels(&mut replay, parsed);
+                }
+                if replay.is_empty() {
                     Vec::new()
                 } else {
-                    vec![("llm_response".to_string(), raw.to_string())]
+                    let prompt_type = if accepted_response.is_some()
+                        && self.response_protocol == ResponseProtocolKind::Xml
+                    {
+                        "llm_response_raw_xml"
+                    } else {
+                        "llm_response"
+                    };
+                    vec![(prompt_type.to_string(), replay)]
                 }
             }
             AssistantReplayMode::ExtractedFields => {
+                if let Some(accepted_response) =
+                    parsed.and_then(|parsed| parsed.accepted_response.as_deref())
+                {
+                    let mut replay = accepted_response.trim().to_string();
+                    if let Some(parsed) = parsed {
+                        self.append_inline_tool_call_labels(&mut replay, parsed);
+                    }
+                    if !replay.is_empty() {
+                        let prompt_type = if self.response_protocol == ResponseProtocolKind::Xml {
+                            "llm_response_raw_xml"
+                        } else {
+                            "llm_response"
+                        };
+                        return vec![(prompt_type.to_string(), replay)];
+                    }
+                }
+
                 let mut slices = Vec::new();
                 if let Some(parsed) = parsed {
                     if !parsed.thought.is_empty() {
                         slices.push(("llm_free_talk".to_string(), parsed.thought.to_string()));
+                    }
+                    for compact in &parsed.context_compacts {
+                        if !compact.summary.trim().is_empty() {
+                            slices.push((
+                                "llm_response".to_string(),
+                                compact.summary.trim().to_string(),
+                            ));
+                        }
                     }
                 }
                 if let Some(final_text) = final_text {
@@ -2778,7 +4172,14 @@ impl AgentCore {
         source: impl Into<String>,
         logical_time_ms: i64,
     ) -> Option<String> {
-        let content = content.into();
+        let kind = kind.into();
+        let mut content = content.into();
+        if role.prompt_type_hint(&kind) == "result_of_llm_action" {
+            // Defensive ingress for legacy/internal producers that do not originate
+            // from a typed action. Normal tool execution has already selected its
+            // per-call retention policy before reaching this point.
+            content = tool_result_gate::gate(&content, tool_result_gate::Retention::Head);
+        }
         if content.trim().is_empty() {
             return None;
         }
@@ -2789,7 +4190,7 @@ impl AgentCore {
         self.pending_prompt_components.push(PromptComponent {
             id: id.clone(),
             role,
-            kind: kind.into(),
+            kind,
             content,
             source: source.into(),
             created_at_ms: logical_time_ms,
@@ -2975,10 +4376,18 @@ impl AgentCore {
             .into_iter()
             .flat_map(|component| {
                 let prompt_type = component.prompt_type();
+                let component_id = component.id;
                 let slice_time_ms = component.created_at_ms;
                 split_text_for_prompt_slices(&component.content, PROMPT_SLICE_TEXT_LIMIT)
                     .into_iter()
-                    .map(move |chunk| (prompt_type.clone(), slice_time_ms, chunk))
+                    .map(move |chunk| {
+                        (
+                            component_id.clone(),
+                            prompt_type.clone(),
+                            slice_time_ms,
+                            chunk,
+                        )
+                    })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -2986,7 +4395,7 @@ impl AgentCore {
         let slices = chunks
             .into_iter()
             .enumerate()
-            .map(|(idx, (prompt_type, time_ms, text))| {
+            .map(|(idx, (component_id, prompt_type, time_ms, text))| {
                 let slice_index = idx + 1;
                 PromptSlice {
                     delta_id: delta_id.clone(),
@@ -2995,6 +4404,7 @@ impl AgentCore {
                         delta_id.trim_start_matches("pd_"),
                         slice_index
                     ),
+                    component_id,
                     prompt_type,
                     time_ms,
                     text,
@@ -3027,23 +4437,22 @@ impl AgentCore {
     ) -> Option<String> {
         let estimated_prompt_tokens = self.estimate_rendered_prompt_tokens(incoming_prompt_tokens);
         let force_threshold = self.max_llm_input_tokens.saturating_mul(90) / 100;
+        if !self.context_compact_required && estimated_prompt_tokens < force_threshold {
+            return None;
+        }
+        // Native exchanges remain structured and keep their original delta
+        // ownership. Forced compaction may remove complete delta closures
+        // without rewriting provider-native history into text.
         let slices = self.render_prompt_slices();
         if slices.is_empty() {
             return None;
         }
+        self.context_compact_required = true;
         let dynamic_tokens = slices
             .iter()
             .map(|slice| estimate_prompt_tokens(&slice.text))
             .sum::<u32>()
             .saturating_add(pending_dynamic_tokens);
-        if estimated_prompt_tokens < force_threshold {
-            return None;
-        }
-        let excess_tokens = estimated_prompt_tokens.saturating_sub(force_threshold);
-        let practical_shrink_capacity = dynamic_tokens.saturating_mul(8) / 10;
-        if practical_shrink_capacity < excess_tokens {
-            return None;
-        }
         let current_count = self.deltas.len();
         let delta_refs = self
             .deltas
@@ -3066,9 +4475,10 @@ impl AgentCore {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0.";
+        let tip = "TIPS: You can update your job list plan, steer and optimize your work based on the above work.";
+        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0. Until compaction succeeds, every response except one exclusive context_compact call is ignored without being shown or executed.";
         Some(format!(
-            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{instruction}",
+            "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\ndynamic_context_tokens={dynamic_tokens}\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{tip}\n{instruction}",
             self.max_llm_input_tokens
         ))
     }
@@ -3148,6 +4558,93 @@ impl AgentCore {
         rows
     }
 
+    fn format_action_outcome_body(&self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
+        let retention = tool_result_gate::Retention::from_tail_out(action.input_bool("tail_out"));
+        if self.response_protocol == ResponseProtocolKind::Xml {
+            let output_time_ms = now_ms();
+            if action.action == "run_bash" {
+                if let Some(bash_result) = outcome.bash_result.as_ref() {
+                    return prompt_render::render_xml_bash_result_with_retention(
+                        action.name.as_deref(),
+                        outcome.status,
+                        bash_result,
+                        output_time_ms,
+                        retention,
+                    );
+                }
+            }
+            if action.action == "readfile" {
+                if let Some(readfile_result) = outcome.readfile_result.as_ref() {
+                    return prompt_render::render_xml_readfile_result_with_retention(
+                        action.name.as_deref(),
+                        outcome.status,
+                        readfile_result,
+                        output_time_ms,
+                        retention,
+                    );
+                }
+            }
+            if action.action == "memmgr" {
+                if let Some(memmgr_result) = outcome.memmgr_result.as_ref() {
+                    return prompt_render::render_xml_memmgr_result_with_retention(
+                        action.name.as_deref(),
+                        outcome.status,
+                        memmgr_result,
+                        output_time_ms,
+                        retention,
+                    );
+                }
+            }
+            if action.action == "self_tool" {
+                if let Some(self_tool_result) = outcome.self_tool_result.as_ref() {
+                    return prompt_render::render_xml_self_tool_result_with_retention(
+                        action.name.as_deref(),
+                        outcome.status,
+                        self_tool_result,
+                        output_time_ms,
+                        retention,
+                    );
+                }
+            }
+            prompt_render::render_xml_action_result_with_retention(
+                &action.action,
+                action.name.as_deref(),
+                &outcome.text,
+                now_ms(),
+                retention,
+            )
+        } else {
+            tool_result_gate::gate(&outcome.text, retention)
+        }
+    }
+
+    fn format_action_outcome(&self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
+        let body = self.format_action_outcome_body(action, outcome);
+        if self.response_protocol == ResponseProtocolKind::Xml {
+            format!("<tool_call_id>{}</tool_call_id>{body}", action.call_id)
+        } else {
+            format!(
+                "tool_call_id: {}
+{body}",
+                action.call_id
+            )
+        }
+    }
+
+    fn format_action_result(&self, action: &ParsedAction, result: &str) -> String {
+        self.format_action_outcome(action, &ActionOutcome::completed(result))
+    }
+
+    fn format_pending_action_result(&self, pending: &PendingApproval, result: &str) -> String {
+        let action = ParsedAction {
+            action: pending.request.action.clone(),
+            name: pending.action_name.clone(),
+            call_id: pending.action_call_id.clone(),
+            raw_input: json!({ "tail_out": pending.approved_action.tail_out() }),
+        };
+        self.format_action_result(&action, result)
+    }
+
     #[allow(clippy::result_large_err)]
     fn execute_action_groups(
         &mut self,
@@ -3167,8 +4664,10 @@ impl AgentCore {
                 continue;
             }
             for action in group.actions {
-                match self.execute_action(action, runtime) {
-                    ActionExecution::Completed(result) => result_lines.push(result),
+                match self.execute_action(action.clone(), runtime) {
+                    ActionExecution::Completed(outcome) => {
+                        result_lines.push(self.format_action_outcome(&action, &outcome));
+                    }
                     ActionExecution::NeedsApproval(pending) => {
                         return Err((result_lines, pending));
                     }
@@ -3182,14 +4681,80 @@ impl AgentCore {
         self.bash_approval_mode == BashApprovalMode::Approve && action.action == "run_bash"
     }
 
+    fn can_spawn_parallel_readfile_action(&self, action: &ParsedAction) -> bool {
+        if action.action != "readfile"
+            || self
+                .capabilities
+                .validate_action_input(&action.action, &action.raw_input)
+                .is_err()
+        {
+            return false;
+        }
+        matches!(
+            executor::resolve_action(&self.capabilities, &action.action),
+            Ok(executor::ExecutorTarget::Builtin { binding_name })
+                if binding_name == "readfile"
+        )
+    }
+
+    fn spawn_parallel_readfile_action(
+        &mut self,
+        idx: usize,
+        action: ParsedAction,
+    ) -> ParallelActionHandle {
+        let action_for_thread = action.clone();
+        let cwd = self.current_prompt_cwd().to_path_buf();
+        self.current_stats.tool_calls += 1;
+        thread::spawn(move || {
+            let cpu_start = thread_cpu_time();
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                readfile::execute_with_timeout_outcome(
+                    &cwd,
+                    &action_for_thread.raw_input,
+                    readfile::DEFAULT_TIMEOUT,
+                )
+            }))
+            .unwrap_or_else(|_| {
+                let path = action_for_thread
+                    .raw_input
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<unknown>")
+                    .to_string();
+                let message =
+                    "The tool failed internally. Timem isolated the failure and remains available.";
+                ActionOutcome::failed(format!(
+                    "Action result: readfile\nerror: builtin_action_panicked\nmessage: {message}"
+                ))
+                .with_readfile_result(ReadfileResultEvidence {
+                    path,
+                    matcher: None,
+                    start_line: None,
+                    end_line: None,
+                    total_lines: None,
+                    encoding: None,
+                    file_bytes: None,
+                    content_bytes: None,
+                    limited: None,
+                    tail_out: None,
+                    content: message.to_string(),
+                    error_type: Some("InternalError".to_string()),
+                })
+            });
+            (idx, action, outcome, elapsed_thread_cpu(cpu_start))
+        })
+    }
+
     fn spawn_approved_parallel_bash_action(
         &mut self,
         idx: usize,
         pending: PendingApproval,
         cancel_requested: Arc<AtomicBool>,
-    ) -> thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)> {
+    ) -> ApprovedParallelBashHandle {
         let action = ParsedAction {
             action: pending.request.action.clone(),
+            name: pending.action_name.clone(),
+            call_id: pending.action_call_id.clone(),
             raw_input: pending.approved_action.audit_input(
                 &pending.request.approval_id,
                 &pending.request.risk,
@@ -3209,11 +4774,13 @@ impl AgentCore {
                     once_timeout_ms,
                     session_id,
                     turn_id,
+                    tool_call_id,
                     cwd,
+                    tail_out,
                 } => {
                     let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
                     let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
-                    shell_exec::execute_approved_bash(
+                    shell_exec::execute_approved_bash_with_tail(
                         command,
                         cwd,
                         *background,
@@ -3222,17 +4789,23 @@ impl AgentCore {
                         *once_timeout_ms,
                         session_id,
                         turn_id,
+                        tool_call_id,
                         interval_ms.is_none(),
+                        *tail_out,
                         &pending_for_thread.request,
                         &shell_jobs,
                         &mut runtime,
                     )
                 }
                 PendingApprovedAction::ToolgenPublish { repo, draft_path } => {
-                    toolgen::execute_approved_publish(repo, draft_path, &pending_for_thread.request)
+                    toolgen::execute_approved_publish_outcome(
+                        repo,
+                        draft_path,
+                        &pending_for_thread.request,
+                    )
                 }
             };
-            (idx, action, pending_for_thread, result)
+            (idx, action, pending_for_thread, result, None)
         })
     }
 
@@ -3241,7 +4814,7 @@ impl AgentCore {
         idx: usize,
         action: ParsedAction,
         cancel_requested: Arc<AtomicBool>,
-    ) -> thread::JoinHandle<(usize, ParsedAction, String)> {
+    ) -> ParallelActionHandle {
         let action_for_audit = action.clone();
         let shell_jobs = self.shell_jobs.clone();
         let session_id = self.current_session_id();
@@ -3258,13 +4831,13 @@ impl AgentCore {
                 loop_command.clone()
             };
             let result = if !loop_command.is_empty() && !cmd_command.is_empty() {
-                ActionExecution::Completed(
-                    "Action result: run_bash\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.".to_string(),
-                )
+                ActionExecution::Completed(ActionOutcome::failed(
+                    "Action result: run_bash\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.",
+                ))
             } else {
                 let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
                 let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
-                shell_exec::execute_run_bash(
+                shell_exec::execute_run_bash_with_tail(
                     &command,
                     &cwd,
                     action.background(),
@@ -3279,24 +4852,26 @@ impl AgentCore {
                     &shell_jobs,
                     &session_id,
                     &turn_id,
+                    action.call_id.as_str(),
                     is_regular_command,
+                    action.input_bool("tail_out"),
                     &mut runtime,
                 )
             };
-            let result = match result {
-                ActionExecution::Completed(result) => result,
-                ActionExecution::NeedsApproval(_) => format!(
+            let outcome = match result {
+                ActionExecution::Completed(outcome) => outcome,
+                ActionExecution::NeedsApproval(_) => ActionOutcome::failed(format!(
                     "Action result: run_bash\ncommand: {}\nerror: unexpected_parallel_approval_request",
                     command,
-                ),
+                )),
             };
-            (idx, action_for_audit, result)
+            (idx, action_for_audit, outcome, None)
         })
     }
 
-    fn collect_parallel_bash_handles(
+    fn collect_parallel_action_handles(
         &self,
-        mut handles: Vec<thread::JoinHandle<(usize, ParsedAction, String)>>,
+        mut handles: Vec<ParallelActionHandle>,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
         cancel_requested: &Arc<AtomicBool>,
@@ -3311,16 +4886,16 @@ impl AgentCore {
             };
             let handle = handles.swap_remove(position);
             match handle.join() {
-                Ok((idx, action, result)) => {
-                    self.record_action_audit(&action, "completed", Some(&result));
-                    self.emit_action_finish_topic(&action, &result, runtime);
+                Ok((idx, action, outcome, cpu_time)) => {
+                    self.record_action_audit(&action, outcome.status.as_str(), Some(&outcome.text));
+                    self.emit_action_finish_topic(&action, &outcome, cpu_time, runtime);
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(result);
+                        *slot = Some(self.format_action_outcome(&action, &outcome));
                     }
                 }
                 Err(_) => {
                     let result =
-                        "Action result: run_bash\nerror: parallel_action_panicked".to_string();
+                        "Action result: parallel\nerror: parallel_action_panicked".to_string();
                     if let Some(slot) = results.iter_mut().find(|slot| slot.is_none()) {
                         *slot = Some(result);
                     }
@@ -3331,7 +4906,7 @@ impl AgentCore {
 
     fn collect_approved_parallel_bash_handles(
         &self,
-        mut handles: Vec<thread::JoinHandle<(usize, ParsedAction, PendingApproval, String)>>,
+        mut handles: Vec<ApprovedParallelBashHandle>,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
         cancel_requested: &Arc<AtomicBool>,
@@ -3346,11 +4921,11 @@ impl AgentCore {
             };
             let handle = handles.swap_remove(position);
             match handle.join() {
-                Ok((idx, action, pending, result)) => {
-                    self.record_pending_approval_audit(&pending, true, &result);
-                    self.emit_action_finish_topic(&action, &result, runtime);
+                Ok((idx, action, pending, outcome, cpu_time)) => {
+                    self.record_pending_approval_audit(&pending, true, &outcome.text);
+                    self.emit_action_finish_topic(&action, &outcome, cpu_time, runtime);
                     if let Some(slot) = results.get_mut(idx) {
-                        *slot = Some(result);
+                        *slot = Some(self.format_action_outcome(&action, &outcome));
                     }
                 }
                 Err(_) => {
@@ -3405,12 +4980,16 @@ impl AgentCore {
                 ));
                 continue;
             }
-            match self.execute_action(action, runtime) {
-                ActionExecution::Completed(result) => {
-                    results[idx] = Some(result);
+            if self.can_spawn_parallel_readfile_action(&action) {
+                handles.push(self.spawn_parallel_readfile_action(idx, action));
+                continue;
+            }
+            match self.execute_action(action.clone(), runtime) {
+                ActionExecution::Completed(outcome) => {
+                    results[idx] = Some(self.format_action_outcome(&action, &outcome));
                 }
                 ActionExecution::NeedsApproval(pending) => {
-                    self.collect_parallel_bash_handles(
+                    self.collect_parallel_action_handles(
                         handles,
                         &mut results,
                         runtime,
@@ -3432,7 +5011,7 @@ impl AgentCore {
                 }
             }
         }
-        self.collect_parallel_bash_handles(handles, &mut results, runtime, &cancel_requested);
+        self.collect_parallel_action_handles(handles, &mut results, runtime, &cancel_requested);
         Ok(Self::ordered_parallel_results(results))
     }
 
@@ -3441,58 +5020,92 @@ impl AgentCore {
         action: ParsedAction,
         runtime: &mut dyn ActionRuntime,
     ) -> ActionExecution {
+        let action_cpu_start = thread_cpu_time();
         let action_for_audit = action.clone();
         let executor_target = match executor::resolve_action(&self.capabilities, &action.action) {
             Ok(target) => target,
             Err(err) => {
-                let result = format!("Action result: {}\nerror: {}", action.action, err);
-                self.record_action_audit(&action_for_audit, "completed", Some(&result));
-                self.emit_action_finish_topic(&action_for_audit, &result, runtime);
-                return ActionExecution::Completed(result);
+                let outcome = ActionOutcome::failed(format!(
+                    "Action result: {}\nerror: {}",
+                    action.action, err
+                ));
+                self.record_action_audit(
+                    &action_for_audit,
+                    outcome.status.as_str(),
+                    Some(&outcome.text),
+                );
+                self.emit_action_finish_topic(
+                    &action_for_audit,
+                    &outcome,
+                    elapsed_thread_cpu(action_cpu_start),
+                    runtime,
+                );
+                return ActionExecution::Completed(outcome);
             }
         };
+
         if let Err(issue) = self
             .capabilities
             .validate_action_input(&action.action, &action.raw_input)
         {
-            let result = format!(
+            let outcome = ActionOutcome::failed(format!(
                 "Action result: {}\nerror: invalid_input\nmessage: {}",
                 action.action, issue
+            ));
+            self.record_action_audit(&action_for_audit, "invalid_input", Some(&outcome.text));
+            self.emit_action_finish_topic(
+                &action_for_audit,
+                &outcome,
+                elapsed_thread_cpu(action_cpu_start),
+                runtime,
             );
-            self.record_action_audit(&action_for_audit, "invalid_input", Some(&result));
-            self.emit_action_finish_topic(&action_for_audit, &result, runtime);
-            return ActionExecution::Completed(result);
+            return ActionExecution::Completed(outcome);
         }
+
         if let executor::ExecutorTarget::Command { path, .. } = &executor_target {
-            let result = self.execute_command_capability(&action, path);
-            self.record_action_audit(&action_for_audit, "completed", Some(&result));
-            return ActionExecution::Completed(result);
+            let outcome = self.execute_command_capability(&action, path);
+            self.record_action_audit(
+                &action_for_audit,
+                outcome.status.as_str(),
+                Some(&outcome.text),
+            );
+            self.emit_action_finish_topic(&action_for_audit, &outcome, None, runtime);
+            return ActionExecution::Completed(outcome);
         }
+
         if let executor::ExecutorTarget::Mcp {
             server_id,
             tool_name,
         } = &executor_target
         {
             self.current_stats.tool_calls += 1;
-            let result = match self.mcp_servers.get(server_id) {
-                Some(config) => self
-                    .mcp_runtime
-                    .call_tool(config, tool_name, &action.raw_input)
-                    .unwrap_or_else(|error| {
-                        format!(
+            let outcome = match self.mcp_servers.get(server_id) {
+                Some(config) => {
+                    match self
+                        .mcp_runtime
+                        .call_tool_outcome(config, tool_name, &action.raw_input)
+                    {
+                        Ok(outcome) => outcome,
+                        Err(error) => ActionOutcome::failed(format!(
                             "Action result: {}\nstatus: failed\nerror: {}",
                             action.action, error
-                        )
-                    }),
-                None => format!(
+                        )),
+                    }
+                }
+                None => ActionOutcome::failed(format!(
                     "Action result: {}\nstatus: failed\nerror: mcp_server_not_enabled",
                     action.action
-                ),
+                )),
             };
-            self.record_action_audit(&action_for_audit, "completed", Some(&result));
-            self.emit_action_finish_topic(&action_for_audit, &result, runtime);
-            return ActionExecution::Completed(result);
+            self.record_action_audit(
+                &action_for_audit,
+                outcome.status.as_str(),
+                Some(&outcome.text),
+            );
+            self.emit_action_finish_topic(&action_for_audit, &outcome, None, runtime);
+            return ActionExecution::Completed(outcome);
         }
+
         let dispatch_name = match &executor_target {
             executor::ExecutorTarget::Builtin { binding_name } => binding_name.as_str(),
             executor::ExecutorTarget::Command { .. } => {
@@ -3502,6 +5115,7 @@ impl AgentCore {
                 unreachable!("MCP target returned early")
             }
         };
+
         self.current_stats.tool_calls += 1;
         let execution = match tool_registry::execute_builtin_tool(
             self,
@@ -3510,27 +5124,44 @@ impl AgentCore {
             runtime,
         ) {
             Ok(Some(execution)) => execution,
-            Ok(None) => ActionExecution::Completed(format!(
+            Ok(None) => ActionExecution::Completed(ActionOutcome::failed(format!(
                 "Action result: {}\nunsupported native action",
                 dispatch_name
-            )),
+            ))),
             Err(_) => {
-                let result = format!(
+                let outcome = ActionOutcome::failed(format!(
                     "Action result: {}\nerror: builtin_action_panicked\nmessage: The tool failed internally. Timem isolated the failure and remains available.",
                     dispatch_name
+                ));
+                self.record_action_audit(&action_for_audit, "internal_error", Some(&outcome.text));
+                self.emit_action_finish_topic(
+                    &action_for_audit,
+                    &outcome,
+                    elapsed_thread_cpu(action_cpu_start),
+                    runtime,
                 );
-                self.record_action_audit(&action_for_audit, "internal_error", Some(&result));
-                self.emit_action_finish_topic(&action_for_audit, &result, runtime);
-                return ActionExecution::Completed(result);
+                return ActionExecution::Completed(outcome);
             }
         };
+
         match execution {
-            ActionExecution::Completed(result) => {
-                self.record_action_audit(&action_for_audit, "completed", Some(&result));
-                self.emit_action_finish_topic(&action_for_audit, &result, runtime);
-                ActionExecution::Completed(result)
+            ActionExecution::Completed(outcome) => {
+                self.record_action_audit(
+                    &action_for_audit,
+                    outcome.status.as_str(),
+                    Some(&outcome.text),
+                );
+                let cpu_time = if action_for_audit.action == "run_bash" {
+                    None
+                } else {
+                    elapsed_thread_cpu(action_cpu_start)
+                };
+                self.emit_action_finish_topic(&action_for_audit, &outcome, cpu_time, runtime);
+                ActionExecution::Completed(outcome)
             }
-            ActionExecution::NeedsApproval(pending) => {
+            ActionExecution::NeedsApproval(mut pending) => {
+                pending.action_name = action_for_audit.name.clone();
+                pending.action_call_id = action_for_audit.call_id.clone();
                 let result = format!(
                     "Action result: {}\ncommand: {}\napproval_id: {}\nstatus: needs_user_approval\nrisk: {}\nreason: {}",
                     action_for_audit.action,
@@ -3548,7 +5179,8 @@ impl AgentCore {
     fn emit_action_finish_topic(
         &self,
         action: &ParsedAction,
-        result: &str,
+        outcome: &ActionOutcome,
+        cpu_time: Option<Duration>,
         runtime: &mut dyn ActionRuntime,
     ) {
         let notification = notification::notification_from_action(action);
@@ -3557,73 +5189,47 @@ impl AgentCore {
         event.topic.attributes["active"] = json!(false);
         event.payload["event"] = json!("finish");
         event.payload["active"] = json!(false);
-        event.payload["status"] = json!(Self::action_finish_status(action, result));
+        event.payload["status"] = json!(outcome.status.as_str());
+        match cpu_time {
+            Some(duration) => {
+                event.payload["cpu_time_ns"] =
+                    json!(duration.as_nanos().min(u64::MAX as u128) as u64);
+                event.payload["cpu_time_available"] = json!(true);
+            }
+            None => {
+                event.payload["cpu_time_available"] = json!(false);
+            }
+        }
         if action.action == "self_tool"
             && action.input_lower("type") == "cwd"
-            && action.input_lower("op") == "chg_cwd"
-            && result.contains("status: updated_prompt_context_cwd")
+            && action.raw_input.get("new_path").is_some()
+            && outcome.status == ActionStatus::Completed
         {
             event.payload["context_state"] = json!({
                 "cwd": self.current_prompt_cwd().display().to_string(),
             });
         }
-        if let Some(pid) = action_result_pid(result) {
+        if let Some(pid) = managed_running_bash_pid(outcome) {
             event.payload["pid"] = json!(pid);
         }
         runtime.on_core_topic_events(&[event]);
     }
 
-    fn execute_command_capability(&mut self, action: &ParsedAction, path: &Path) -> String {
+    fn execute_command_capability(&mut self, action: &ParsedAction, path: &Path) -> ActionOutcome {
         self.current_stats.tool_calls += 1;
         let payload = json!({
             "action": action.action,
             "args": action.raw_input,
         });
         if action.background() {
-            return self.tool_jobs.spawn(&action.action, path, &payload);
+            return self.tool_jobs.spawn_outcome(&action.action, path, &payload);
         }
-        executor::execute_command_action(&action.action, path, &payload, action.shell_timeout_ms())
-    }
-
-    fn action_finish_status(action: &ParsedAction, result: &str) -> &'static str {
-        let lower = result.to_lowercase();
-        if action.action == "run_bash" && action.background() {
-            return "background_running";
-        }
-        if action.action == "capmgr" && action.input_lower("op") == "job_status" {
-            if lower.contains("state: finished") || lower.contains("has finished") {
-                return "background_finished";
-            }
-            if lower.contains("state: cancelled") || lower.contains("was cancelled") {
-                return "cancelled";
-            }
-            if lower.contains("state: running") || lower.contains("still running") {
-                return "background_running";
-            }
-        }
-        if lower.contains("polling state: finished")
-            || lower.contains("exit code: 0")
-            || lower.contains("status: 0")
-            || lower.contains("the command finished")
-        {
-            return "completed";
-        }
-        if lower.contains("polling state: timeout")
-            || lower.contains("timed out")
-            || lower.contains("timeout")
-        {
-            return "timeout";
-        }
-        if lower.contains("cancelled") {
-            return "cancelled";
-        }
-        if lower.contains("not executed")
-            || lower.contains("invalid_input")
-            || lower.contains("error:")
-        {
-            return "failed";
-        }
-        "completed"
+        executor::execute_command_action_outcome(
+            &action.action,
+            path,
+            &payload,
+            action.shell_timeout_ms(),
+        )
     }
 
     fn record_action_audit(&self, action: &ParsedAction, status: &str, result: Option<&str>) {
@@ -3705,6 +5311,7 @@ impl AgentCore {
             .map(|delta| delta.delta_id.clone())
             .collect::<HashSet<_>>();
         let mut matched_delta_ids = HashSet::new();
+        let spec = self.response_protocol.suite().prompt_boundaries();
         let mut matched_slice_ids = HashSet::new();
         let mut sections = Vec::new();
         for delta in &self.deltas {
@@ -3717,7 +5324,14 @@ impl AgentCore {
                 ));
                 for slice in rendered {
                     matched_slice_ids.insert(slice.slice_id.clone());
-                    sections.push(format_prompt_slice_for_scratch(&slice));
+                    sections.push(format_prompt_slice_for_scratch(&slice, spec));
+                }
+                for exchange in self
+                    .native_exchanges
+                    .iter()
+                    .filter(|exchange| exchange.delta_id == delta.delta_id)
+                {
+                    sections.push(format_native_exchange_for_scratch(exchange));
                 }
                 sections.push(format!("[END SCRATCH OFFLOAD DELTA {}]", delta.delta_id));
                 continue;
@@ -3725,7 +5339,7 @@ impl AgentCore {
             for slice in rendered {
                 if slice_id_set.contains(&slice.slice_id) {
                     matched_slice_ids.insert(slice.slice_id.clone());
-                    sections.push(format_prompt_slice_for_scratch(&slice));
+                    sections.push(format_prompt_slice_for_scratch(&slice, spec));
                 }
             }
         }
@@ -3783,19 +5397,13 @@ impl AgentCore {
             .iter()
             .map(|delta| delta.delta_id.clone())
             .collect::<HashSet<_>>();
-        let mut shrunk_tokens_estimate = 0u32;
-        for delta in &self.deltas {
-            if delta_id_set.contains(&delta.delta_id) {
-                for slice in prompt_render::render_delta_slices(delta) {
-                    shrunk_tokens_estimate =
-                        shrunk_tokens_estimate.saturating_add(estimate_prompt_tokens(&slice.text));
-                }
-            }
-        }
+        let estimated_before_tokens = self.dynamic_context_token_estimate().total_tokens();
         let before_delta_count = self.deltas.len();
         if !delta_id_set.is_empty() {
             self.deltas
                 .retain(|delta| !delta_id_set.contains(&delta.delta_id));
+            self.native_exchanges
+                .retain(|exchange| !delta_id_set.contains(&exchange.delta_id));
         }
         let removed_delta_count = before_delta_count.saturating_sub(self.deltas.len());
 
@@ -3808,8 +5416,6 @@ impl AgentCore {
                     if slice_id_set.contains(&slice.slice_id) {
                         matched_slice_ids.insert(slice.slice_id.clone());
                         if !delta.hidden_slice_ids.contains(&slice.slice_id) {
-                            shrunk_tokens_estimate = shrunk_tokens_estimate
-                                .saturating_add(estimate_prompt_tokens(&slice.text));
                             delta.hidden_slice_ids.push(slice.slice_id);
                             hidden_slice_count += 1;
                         }
@@ -3829,6 +5435,8 @@ impl AgentCore {
         missing.sort();
         missing.dedup();
 
+        let shrunk_tokens_estimate = estimated_before_tokens
+            .saturating_sub(self.dynamic_context_token_estimate().total_tokens());
         self.current_stats.shrunk_tokens = self
             .current_stats
             .shrunk_tokens
@@ -3885,17 +5493,47 @@ impl AgentCore {
         missing.dedup();
         missing
     }
+
+    fn prompt_refs_include_type(
+        &self,
+        delta_ids: &[String],
+        slice_ids: &[String],
+        prompt_type: &str,
+    ) -> bool {
+        let delta_ids = delta_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+        let slice_ids = slice_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+        self.deltas.iter().any(|delta| {
+            prompt_render::render_delta_slices(delta)
+                .iter()
+                .any(|slice| {
+                    slice.prompt_type == prompt_type
+                        && (delta_ids.contains(delta.delta_id.as_str())
+                            || slice_ids.contains(slice.slice_id.as_str()))
+                })
+        })
+    }
 }
 
-fn action_result_pid(result: &str) -> Option<u32> {
-    result.lines().find_map(|line| {
-        let rest = line.trim().strip_prefix("pid=")?;
-        let pid = rest
-            .split(|ch: char| !ch.is_ascii_digit())
-            .next()
-            .unwrap_or_default();
-        pid.parse::<u32>().ok()
-    })
+fn managed_running_bash_pid(outcome: &ActionOutcome) -> Option<u32> {
+    if outcome.status != ActionStatus::BackgroundRunning {
+        return None;
+    }
+    let evidence = outcome.bash_result.as_ref()?;
+    if evidence.pid_kind.as_deref() != Some(managed_bash_pid_kind()) {
+        return None;
+    }
+    evidence.pid
+}
+
+fn managed_bash_pid_kind() -> &'static str {
+    #[cfg(unix)]
+    {
+        "runtime_child_process_group"
+    }
+    #[cfg(not(unix))]
+    {
+        "runtime_child_process"
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -3910,7 +5548,7 @@ impl FileMemoryStore {
         Self {
             dir: dir.to_path_buf(),
             file: dir.join("memory.jsonl"),
-            guard: MemGuard::for_memory_dir(dir),
+            guard: MemGuard::for_memory_domain(dir, "durable-memory"),
         }
     }
     fn write(&self, content: &str) -> std::io::Result<()> {
@@ -3920,7 +5558,9 @@ impl FileMemoryStore {
         }
         self.guard
             .with_write(|| self.write_clean_unlocked(clean))
-            .map_err(std::io::Error::other)?
+            .map_err(std::io::Error::other)??;
+        self.snapshot_with_git("memory write");
+        Ok(())
     }
 
     fn write_clean_unlocked(&self, clean: &str) -> std::io::Result<()> {
@@ -3941,14 +5581,11 @@ impl FileMemoryStore {
             "{}",
             serde_json::to_string(&record).unwrap_or_default()
         )?;
-        self.snapshot_with_git("memory write");
         Ok(())
     }
 
     fn query(&self, query: &str, limit: usize) -> std::io::Result<Vec<MemoryRecord>> {
-        self.guard
-            .with_read(|| self.query_unlocked(query, limit))
-            .map_err(std::io::Error::other)?
+        self.query_unlocked(query, limit)
     }
 
     fn query_unlocked(&self, query: &str, limit: usize) -> std::io::Result<Vec<MemoryRecord>> {
@@ -3976,20 +5613,14 @@ impl FileMemoryStore {
         Ok(rows)
     }
     fn recent(&self, limit: usize) -> std::io::Result<Vec<MemoryRecord>> {
-        self.guard
-            .with_read(|| {
-                let mut rows = self.read_all_unlocked()?;
-                rows.sort_by_key(|row| std::cmp::Reverse(row.created_at_ms));
-                rows.truncate(limit.clamp(1, 50));
-                Ok(rows)
-            })
-            .map_err(std::io::Error::other)?
+        let mut rows = self.read_all_unlocked()?;
+        rows.sort_by_key(|row| std::cmp::Reverse(row.created_at_ms));
+        rows.truncate(limit.clamp(1, 50));
+        Ok(rows)
     }
 
     fn count(&self) -> std::io::Result<usize> {
-        self.guard
-            .with_read(|| self.read_all_unlocked().map(|rows| rows.len()))
-            .map_err(std::io::Error::other)?
+        self.read_all_unlocked().map(|rows| rows.len())
     }
     fn update(
         &self,
@@ -3998,9 +5629,14 @@ impl FileMemoryStore {
         content: &str,
         expected_version: Option<u64>,
     ) -> Result<String, String> {
-        self.guard
+        let result = self
+            .guard
             .with_write(|| self.update_unlocked(operation, id, content, expected_version))
-            .map_err(|err| err.to_string())?
+            .map_err(|err| err.to_string())?;
+        if result.is_ok() {
+            self.snapshot_with_git("memory update");
+        }
+        result
     }
 
     fn update_unlocked(
@@ -4131,16 +5767,15 @@ impl FileMemoryStore {
     }
 
     fn write_all_unlocked(&self, rows: &[MemoryRecord]) -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.file)?;
+        let mut bytes = Vec::new();
         for row in rows {
-            writeln!(file, "{}", serde_json::to_string(row).unwrap_or_default())?;
+            writeln!(
+                &mut bytes,
+                "{}",
+                serde_json::to_string(row).unwrap_or_default()
+            )?;
         }
-        self.snapshot_with_git("memory update");
-        Ok(())
+        atomic_write_file(&self.file, &bytes)
     }
 
     fn snapshot_with_git(&self, message: &str) {
@@ -4241,8 +5876,7 @@ impl FileMemoryStore {
         params: &[String],
         limit: usize,
     ) -> Result<Vec<Vec<(String, String)>>, String> {
-        self.guard
-            .with_read(|| self.sql_read_unlocked(chat_history, sql, params, limit))?
+        self.sql_read_unlocked(chat_history, sql, params, limit)
     }
 
     fn sql_read_unlocked(
@@ -4371,7 +6005,7 @@ impl FileScratchStore {
         let _ = fs::create_dir_all(dir);
         Self {
             file: dir.join("scratch_notes.jsonl"),
-            guard: MemGuard::for_memory_dir(dir),
+            guard: MemGuard::for_memory_domain(dir, "scratch-notes"),
         }
     }
 
@@ -4463,16 +6097,14 @@ impl FileScratchStore {
         if clean_id.is_empty() {
             return Err("id_required".to_string());
         }
-        self.guard.with_read(|| {
-            Ok(self
-                .read_all_unlocked()?
-                .into_iter()
-                .find(|record| record.id == clean_id))
-        })?
+        Ok(self
+            .read_all_unlocked()?
+            .into_iter()
+            .find(|record| record.id == clean_id))
     }
 
     fn query(&self, query: &str, limit: usize) -> Result<Vec<ScratchNoteRecord>, String> {
-        self.guard.with_read(|| self.query_unlocked(query, limit))?
+        self.query_unlocked(query, limit)
     }
 
     fn query_unlocked(&self, query: &str, limit: usize) -> Result<Vec<ScratchNoteRecord>, String> {
@@ -4522,17 +6154,16 @@ impl FileScratchStore {
     }
 
     fn write_all_unlocked(&self, rows: &[ScratchNoteRecord]) -> Result<(), String> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.file)
-            .map_err(|_| "scratch_open_failed".to_string())?;
+        let mut bytes = Vec::new();
         for row in rows {
-            writeln!(file, "{}", serde_json::to_string(row).unwrap_or_default())
-                .map_err(|_| "scratch_write_failed".to_string())?;
+            writeln!(
+                &mut bytes,
+                "{}",
+                serde_json::to_string(row).unwrap_or_default()
+            )
+            .map_err(|_| "scratch_write_failed".to_string())?;
         }
-        Ok(())
+        atomic_write_file(&self.file, &bytes).map_err(|_| "scratch_write_failed".to_string())
     }
 }
 
@@ -4540,7 +6171,6 @@ impl FileScratchStore {
 struct FileChatHistoryStore {
     audit_file: PathBuf,
     legacy_audit_file: PathBuf,
-    guard: MemGuard,
 }
 impl FileChatHistoryStore {
     fn new(memory_dir: &Path) -> Self {
@@ -4550,7 +6180,6 @@ impl FileChatHistoryStore {
         Self {
             audit_file,
             legacy_audit_file,
-            guard: MemGuard::for_memory_dir(memory_dir),
         }
     }
 
@@ -4573,9 +6202,7 @@ impl FileChatHistoryStore {
         after_ms: Option<i64>,
         before_ms: Option<i64>,
     ) -> std::io::Result<Vec<RawChatHistoryRecord>> {
-        self.guard
-            .with_read(|| self.query_unlocked(query, limit, after_ms, before_ms))
-            .map_err(std::io::Error::other)?
+        self.query_unlocked(query, limit, after_ms, before_ms)
     }
 
     fn query_unlocked(
@@ -4605,21 +6232,21 @@ impl FileChatHistoryStore {
         before_ms: Option<i64>,
     ) -> Result<usize, String> {
         let clean_id = id.trim();
-        self.guard.with_write(|| {
-            let targets = if clean_id.is_empty() {
-                self.query_unlocked(query, limit, after_ms, before_ms)
-                    .map_err(|_| "chat_history_read_failed".to_string())?
-                    .into_iter()
-                    .map(|record| record.turn_id)
-                    .collect::<HashSet<_>>()
-            } else {
-                let mut ids = HashSet::new();
-                ids.insert(clean_id.to_string());
-                ids
-            };
-            if targets.is_empty() {
-                return Ok(0);
-            }
+        let targets = if clean_id.is_empty() {
+            self.query_unlocked(query, limit, after_ms, before_ms)
+                .map_err(|_| "chat_history_read_failed".to_string())?
+                .into_iter()
+                .map(|record| record.turn_id)
+                .collect::<HashSet<_>>()
+        } else {
+            let mut ids = HashSet::new();
+            ids.insert(clean_id.to_string());
+            ids
+        };
+        if targets.is_empty() {
+            return Ok(0);
+        }
+        MemGuard::for_audit_file(&self.audit_file).with_write(|| {
             let mut deleted_turn_ids = HashSet::new();
             for audit_file in self.audit_files() {
                 if !audit_file.exists() {
@@ -4636,21 +6263,19 @@ impl FileChatHistoryStore {
                         .to_string();
                     if !turn_id.is_empty() && targets.contains(&turn_id) {
                         deleted_turn_ids.insert(turn_id);
-                        continue;
+                    } else {
+                        retained.push(value);
                     }
-                    retained.push(value);
                 }
                 write_audit_events_unlocked(&audit_file, &retained)
                     .map_err(|_| "chat_history_write_failed".to_string())?;
             }
-            Ok(deleted_turn_ids.len())
+            Ok::<_, String>(deleted_turn_ids.len())
         })?
     }
 
     fn read_all(&self) -> std::io::Result<Vec<RawChatHistoryRecord>> {
-        self.guard
-            .with_read(|| self.read_all_unlocked())
-            .map_err(std::io::Error::other)?
+        self.read_all_unlocked()
     }
 
     fn read_all_unlocked(&self) -> std::io::Result<Vec<RawChatHistoryRecord>> {
@@ -4753,23 +6378,21 @@ fn read_audit_events_unlocked(path: &Path) -> std::io::Result<Vec<Value>> {
 }
 
 fn write_audit_events_unlocked(path: &Path, events: &[Value]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    let mut bytes = Vec::new();
     if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)?;
         for event in events {
-            writeln!(file, "{}", serde_json::to_string(event).unwrap_or_default())?;
+            writeln!(
+                &mut bytes,
+                "{}",
+                serde_json::to_string(event).unwrap_or_default()
+            )?;
         }
-        return Ok(());
+    } else {
+        let doc = json!({"version": 1, "events": events});
+        let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
+        bytes.extend_from_slice(format!("{text}\n").as_bytes());
     }
-    let doc = json!({"version": 1, "events": events});
-    let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
-    fs::write(path, format!("{text}\n"))
+    atomic_write_file(path, &bytes)
 }
 
 fn validate_memory_sql(sql: &str) -> Result<(), String> {
@@ -4867,6 +6490,52 @@ fn work_instruction_context_block(supporting_context: &str) -> Option<(usize, us
     } else {
         None
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DynamicContextTokenEstimate {
+    visible_delta_count: usize,
+    visible_slice_count: usize,
+    text_tokens: u32,
+    native_tokens: u32,
+}
+
+impl DynamicContextTokenEstimate {
+    fn total_tokens(self) -> u32 {
+        self.text_tokens.saturating_add(self.native_tokens)
+    }
+}
+
+fn estimate_native_exchange_tokens(exchange: &NativeExchange) -> u32 {
+    let calls = exchange
+        .calls
+        .iter()
+        .map(|call| {
+            json!({
+                "id": call.id,
+                "name": call.name,
+                "arguments": call.raw_arguments,
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = exchange
+        .results
+        .iter()
+        .map(|result| {
+            json!({
+                "tool_call_id": result.call_id,
+                "name": result.name,
+                "content": result.content,
+                "is_error": result.is_error,
+            })
+        })
+        .collect::<Vec<_>>();
+    let normalized = json!({
+        "assistant": exchange.assistant_text,
+        "tool_calls": calls,
+        "tool_results": results,
+    });
+    estimate_prompt_tokens(&normalized.to_string())
 }
 
 fn estimate_prompt_tokens(text: &str) -> u32 {
@@ -4985,7 +6654,15 @@ fn memory_missing_expected_version_result(
 fn should_run_memory_precheck(supporting_context: &str) -> bool {
     supporting_context.contains("memory_lookup_hint:")
 }
-pub(crate) fn compact_text(text: &str, max_chars: usize) -> String {
+fn markdown_table_cell(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('`', "\\`")
+        .replace(['\r', '\n'], " ")
+}
+
+fn compact_text(text: &str, max_chars: usize) -> String {
     let mut out = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if out.chars().count() > max_chars {
         out = out.chars().take(max_chars).collect::<String>();
@@ -5024,22 +6701,61 @@ pub(crate) fn format_scratch_read_result(record: &ScratchNoteRecord) -> String {
     )
 }
 
-fn prompt_type_role_for_scratch(prompt_type: &str) -> &'static str {
+fn prompt_type_role_for_scratch(
+    prompt_type: &str,
+    spec: &crate::response_protocol::PromptBoundarySpec,
+) -> &'static str {
     match prompt_type {
-        "user_question" | "user_supplement" => "USER",
-        "llm_response" | "llm_free_talk" => "ASSISTANT",
-        "result_of_llm_action" => "SYSTEM",
-        _ => "SYSTEM",
+        "user_question" | "user_supplement" => spec.user_role,
+        "llm_response" | "llm_response_raw_xml" | "llm_free_talk" => spec.assistant_role,
+        "result_of_llm_action" => spec.runtime_role,
+        _ => spec.runtime_role,
     }
 }
 
-fn format_prompt_slice_for_scratch(slice: &PromptSlice) -> String {
+fn format_prompt_slice_for_scratch(
+    slice: &PromptSlice,
+    spec: &crate::response_protocol::PromptBoundarySpec,
+) -> String {
     format!(
         "[BEGIN SCRATCH OFFLOAD BLOCK]\ndelta_id: {}\ntime_ms: {}\nrole: {}\n{}\n[END SCRATCH OFFLOAD BLOCK]",
         slice.delta_id,
         slice.time_ms,
-        prompt_type_role_for_scratch(&slice.prompt_type),
+        prompt_type_role_for_scratch(&slice.prompt_type, spec),
         slice.text
+    )
+}
+
+fn format_native_exchange_for_scratch(exchange: &NativeExchange) -> String {
+    let calls = exchange
+        .calls
+        .iter()
+        .map(|call| {
+            json!({
+                "id": call.id,
+                "name": call.name,
+                "arguments": call.arguments,
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = exchange
+        .results
+        .iter()
+        .map(|result| {
+            json!({
+                "tool_call_id": result.call_id,
+                "name": result.name,
+                "content": result.content,
+                "is_error": result.is_error,
+            })
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "[BEGIN SCRATCH OFFLOAD NATIVE EXCHANGE]\ndelta_id: {}\nassistant_text: {}\ncalls: {}\nresults: {}\n[END SCRATCH OFFLOAD NATIVE EXCHANGE]",
+        exchange.delta_id,
+        exchange.assistant_text,
+        serde_json::to_string(&calls).unwrap_or_default(),
+        serde_json::to_string(&results).unwrap_or_default(),
     )
 }
 
@@ -5143,6 +6859,7 @@ pub extern "C" fn timem_core_apply_model_response(
     };
     let response = match serde_json::from_str::<FfiLlmResponse>(&response_text) {
         Ok(value) => LlmResponse {
+            tool_calls: Vec::new(),
             content: value.content,
             model_name: value
                 .model_name

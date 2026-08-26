@@ -16,6 +16,7 @@ describe("reliable command outbox", () => {
   it("keeps one-shot mutations reliable while allowing read-only requests to be best effort", () => {
     expect(commandNeedsReliableDelivery({ type: "turn_submit", session_id: "s", text: "work" })).toBe(true);
     expect(commandNeedsReliableDelivery({ type: "session_delete", session_id: "s" })).toBe(true);
+    expect(commandNeedsReliableDelivery({ type: "chat_message_delete", session_id: "s", turn_id: "t", role: "user", role_index: 0 })).toBe(true);
     expect(commandNeedsReliableDelivery({ type: "history_page", session_id: "s" })).toBe(false);
   });
 
@@ -78,5 +79,17 @@ describe("reliable command outbox", () => {
     const storage = { setItem: () => { throw new Error("quota"); } };
     const item = addCommandToOutbox([], { type: "turn_submit", session_id: "a", text: "A" }, "a-1", 1)[0];
     expect(saveCommandOutboxItem(storage, "scope", item)).toBe(false);
+  });
+});
+
+describe("model endpoint command delivery", () => {
+  it("keeps endpoint API keys out of persistent browser storage", () => {
+    const command = { type: "model_endpoint_upsert", endpoint: { name: "prod", model: "gpt", api_protocol: "openai-compatible", response_protocol: "xml", base_url: "https://api.example", max_llm_input_tokens: 200_000, max_llm_output_tokens: 20_000, stream: true, api_key: "secret" } } as const;
+    expect(commandNeedsReliableDelivery(command)).toBe(true);
+    expect(commandMayPersist(command)).toBe(false);
+  });
+
+  it("treats endpoint secret reveal as best effort", () => {
+    expect(commandNeedsReliableDelivery({ type: "model_endpoint_secret_reveal", endpoint_id: "one" })).toBe(false);
   });
 });

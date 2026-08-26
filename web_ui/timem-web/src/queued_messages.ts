@@ -1,10 +1,14 @@
 export const COLLAPSED_QUEUE_LIMIT = 4;
 
 export type QueuedMessage = {
-  id: string;
-  text: string;
-  createdAtMs: number;
-  deliveryError?: string;
+ id: string;
+ text: string;
+ createdAtMs: number;
+ attachmentIds: string[];
+ roleIds?: string[];
+ /** Legacy queue compatibility. */
+ roleId?: string;
+ deliveryError?: string;
 };
 
 const STORAGE_PREFIX = "timem-web-queued-messages:v2";
@@ -16,25 +20,135 @@ export function queuedMessagesStorageKey(scope: string, messageId?: string) {
   return messageId === undefined ? base : `${base}:${encodeURIComponent(messageId)}`;
 }
 
+export type QueuedMessagesPauseSource = "user";
+
+export type QueuedMessagesPauseState = {
+ paused: true;
+ source?: QueuedMessagesPauseSource;
+ reason?: string;
+ stoppedAtMs: number;
+};
+
+export function stopQueuedAutoSend(
+ current: QueuedMessagesPauseState | null,
+ reason: string,
+ source: QueuedMessagesPauseSource,
+ stoppedAtMs: number,
+): QueuedMessagesPauseState {
+ return current ?? { paused: true, source, reason, stoppedAtMs };
+}
+
+export function queuedMessagesPauseStorageKey(scope: string, sessionId: string) {
+ return `${queuedMessagesStorageKey(scope)}-pause:${encodeURIComponent(sessionId)}`;
+}
+
+export function queuedMessagesPauseSessionId(scope: string, storageKey: string) {
+ const prefix = `${queuedMessagesStorageKey(scope)}-pause:`;
+ if (!storageKey.startsWith(prefix)) return null;
+ try {
+ const sessionId = decodeURIComponent(storageKey.slice(prefix.length));
+ if (!sessionId || queuedMessagesPauseStorageKey(scope, sessionId) !== storageKey) return null;
+ return sessionId;
+ } catch {
+ return null;
+ }
+}
+
+export function loadQueuedMessagesPause(
+ storage: Pick<Storage, "getItem">,
+ scope: string,
+ sessionId: string,
+): QueuedMessagesPauseState | null {
+ try {
+ const raw = storage.getItem(queuedMessagesPauseStorageKey(scope, sessionId));
+ if (!raw || raw.length > MAX_STORED_MESSAGE_BYTES) return null;
+ const value = JSON.parse(raw) as Partial<QueuedMessagesPauseState>;
+ if (
+ value?.paused !== true
+ || typeof value.stoppedAtMs !== "number"
+ || !Number.isFinite(value.stoppedAtMs)
+ || value.stoppedAtMs < 0
+ || (value.reason !== undefined && typeof value.reason !== "string")
+ || (value.source !== undefined && value.source !== "user")
+ ) return null;
+ return {
+ paused: true,
+ stoppedAtMs: value.stoppedAtMs,
+ ...(value.source === undefined ? {} : { source: value.source }),
+ ...(value.reason === undefined ? {} : { reason: value.reason }),
+ };
+ } catch {
+ return null;
+ }
+}
+
+export function saveQueuedMessagesPause(
+ storage: Pick<Storage, "setItem">,
+ scope: string,
+ sessionId: string,
+ pause: QueuedMessagesPauseState,
+) {
+ try {
+ storage.setItem(queuedMessagesPauseStorageKey(scope, sessionId), JSON.stringify(pause));
+ return true;
+ } catch {
+ return false;
+ }
+}
+
+export function clearQueuedMessagesPause(
+ storage: Pick<Storage, "removeItem">,
+ scope: string,
+ sessionId: string,
+) {
+ try {
+ storage.removeItem(queuedMessagesPauseStorageKey(scope, sessionId));
+ return true;
+ } catch {
+ return false;
+ }
+}
+
+
 type StoredQueuedMessage = { sessionId: string; position: number; message: QueuedMessage };
 
 function parseStoredQueuedMessage(raw: string | null): StoredQueuedMessage | null {
-  try {
-    if (!raw || raw.length > MAX_STORED_MESSAGE_BYTES) return null;
-    const value = JSON.parse(raw) as Partial<StoredQueuedMessage>;
-    const message = value?.message;
-    return typeof value?.sessionId === "string"
-      && typeof value.position === "number"
-      && !!message
-      && typeof message.id === "string"
-      && typeof message.text === "string"
-      && typeof message.createdAtMs === "number"
-      && (message.deliveryError === undefined || typeof message.deliveryError === "string")
-      ? value as StoredQueuedMessage
-      : null;
-  } catch {
-    return null;
-  }
+ try {
+ if (!raw || raw.length > MAX_STORED_MESSAGE_BYTES) return null;
+ const value = JSON.parse(raw) as Partial<StoredQueuedMessage>;
+ const message = value?.message as Partial<QueuedMessage> | undefined;
+ if (
+ typeof value?.sessionId !== "string"
+ || typeof value.position !== "number"
+ || !message
+ || typeof message.id !== "string"
+ || typeof message.text !== "string"
+ || typeof message.createdAtMs !== "number"
+ || (message.roleId !== undefined && typeof message.roleId !== "string")
+ || (message.roleIds !== undefined && (!Array.isArray(message.roleIds) || message.roleIds.some((id) => typeof id !== "string")))
+ || (message.deliveryError !== undefined && typeof message.deliveryError !== "string")
+ ) return null;
+ if (
+ message.attachmentIds !== undefined
+ && (!Array.isArray(message.attachmentIds) || message.attachmentIds.some((id) => typeof id !== "string"))
+ ) return null;
+ return {
+ sessionId: value.sessionId,
+ position: value.position,
+ message: {
+ id: message.id,
+ text: message.text,
+ createdAtMs: message.createdAtMs,
+ attachmentIds: Array.from(new Set(message.attachmentIds ?? [])),
+ ...((message.roleIds?.length ?? 0) > 0 || message.roleId !== undefined
+   ? { roleIds: Array.from(new Set([...(message.roleIds ?? []), ...(message.roleId === undefined ? [] : [message.roleId])])) }
+   : {}),
+ ...(message.deliveryError === undefined ? {} : { deliveryError: message.deliveryError }),
+ },
+ };
+ } catch {
+ return null;
+ }
 }
 
 export function loadQueuedMessages(storage: Pick<Storage, "length" | "key" | "getItem">, scope: string): Record<string, QueuedMessage[]> {
@@ -85,6 +199,18 @@ export function saveQueuedMessages(
   }
 }
 
+export function reservedQueuedAttachmentIds(messages: readonly QueuedMessage[]) {
+ return new Set(messages.flatMap((message) => message.attachmentIds));
+}
+
+export function shouldDirectManualMessage(
+ sessionState: string,
+ queuedMessageCount: number,
+ paused: boolean,
+) {
+ return (sessionState === "ready" || sessionState === "stopped" || sessionState === "error") && queuedMessageCount === 0 && !paused;
+}
+
 export type QueuedMessageClaims = Set<string>;
 
 export function queuedMessageKey(sessionId: string, messageId: string) {
@@ -106,6 +232,39 @@ export function claimQueuedMessage(
 
 export function releaseQueuedMessageClaim(claims: QueuedMessageClaims, sessionId: string, messageId: string) {
   return claims.delete(queuedMessageKey(sessionId, messageId));
+}
+
+export function unclaimedQueuedMessages(
+ messages: readonly QueuedMessage[],
+ claims: ReadonlySet<string>,
+ sessionId: string,
+) {
+ return messages.filter((message) => !claims.has(queuedMessageKey(sessionId, message.id)));
+}
+
+export function releaseSessionQueuedMessageClaims(
+  claims: QueuedMessageClaims,
+  sessionId: string,
+) {
+  const prefix = `${sessionId}\u0000`;
+  let released = 0;
+  for (const key of Array.from(claims)) {
+    if (!key.startsWith(prefix)) continue;
+    claims.delete(key);
+    released += 1;
+  }
+  return released;
+}
+
+export function clearSessionQueuedMessages(
+  queues: Readonly<Record<string, readonly QueuedMessage[]>>,
+  sessionId: string,
+): Record<string, QueuedMessage[]> {
+  return Object.fromEntries(
+    Object.entries(queues)
+      .filter(([candidateSessionId]) => candidateSessionId !== sessionId)
+      .map(([candidateSessionId, messages]) => [candidateSessionId, [...messages]]),
+  );
 }
 
 export function applyQueuedMessageAck(
@@ -143,9 +302,17 @@ export function selectQueuedDispatches(
   queues: Readonly<Record<string, readonly QueuedMessage[]>>,
   dispatchingSessionIds: ReadonlySet<string>,
   editingSessionId?: string,
+  pausedSessionIds: ReadonlySet<string> = new Set(),
+  autoContinueSessionIds: ReadonlySet<string> = new Set(),
 ) {
   return sessions.flatMap((session) => {
-    if (session.state === "working" || dispatchingSessionIds.has(session.session_id) || editingSessionId === session.session_id) return [];
+    if (
+      session.state === "working"
+      || dispatchingSessionIds.has(session.session_id)
+      || editingSessionId === session.session_id
+      || pausedSessionIds.has(session.session_id)
+      || !autoContinueSessionIds.has(session.session_id)
+    ) return [];
     const message = queues[session.session_id]?.[0];
     return message && !message.deliveryError ? [{ sessionId: session.session_id, message }] : [];
   });

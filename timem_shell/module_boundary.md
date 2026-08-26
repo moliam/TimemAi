@@ -143,8 +143,8 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 - Registered tool job lifecycle management. For command-bound registered tools,
   core owns job ids/status/output files and cancel semantics. For `run_bash`,
   core owns the session running-pid set for background jobs and timed-out
-  normal commands, one-time job-exit updates, and running-job snapshots after
-  large context shrink/compact. Shell may display the resulting core topics or
+  normal commands, one-time job-exit updates, PID-reuse-safe process identities, and a request-scoped
+  `STILL RUNNING` table before every model call while commands remain active. Shell may display the resulting core topics or
   action evidence, but must not manage those jobs itself.
 - Long-command process waiting and cancellation. Shell may prompt the user for
   a decision, but core owns the process lifecycle and resulting prompt evidence.
@@ -157,7 +157,7 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   values, not decide how runtime identity and additional context are combined.
 - Session prompt component assembly. Shell may submit user input, user
   supplements, and host-provided context values through core APIs, but it must
-  not build dynamic prompt deltas itself or format `## USER` / `## SYSTEM` /
+  not build dynamic prompt deltas itself or format `## USER` / `## RUNTIME` /
   assistant blocks. The per-session pending component buffer and
   `build_next_prompt()` belong to `agent_core`.
 - Long-lived runtime state that another UI would need to reproduce.

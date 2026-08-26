@@ -7,7 +7,7 @@ describe("web appearance preferences", () => {
       theme: "light",
       userFont: "system",
       userChineseFont: "system",
-      userBold: false,
+      userBold: true,
       agentFont: "system",
       agentChineseFont: "system",
       agentBold: false,
@@ -39,12 +39,17 @@ describe("web appearance preferences", () => {
       theme: "light",
       userFont: "mono",
       userChineseFont: "system",
-      userBold: false,
+      userBold: true,
       agentFont: "mono",
       agentChineseFont: "system",
       agentBold: false,
       textSize: "small",
     });
+  });
+
+  it("defaults a missing user bold preference to selected while preserving an explicit opt-out", () => {
+    expect(parseAppearance('{"theme":"dark","userFont":"system"}', false).userBold).toBe(true);
+    expect(parseAppearance('{"theme":"dark","userBold":false}', false).userBold).toBe(false);
   });
 
   it("bounds malformed and unknown persisted values", () => {
