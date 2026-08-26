@@ -2493,12 +2493,25 @@ fn session_turn_parallel_group_spawns_bash_while_running_builtin_actions_in_orde
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = NoopTurnUi;
+    let marker_a = dir.join("group_a.started");
+    let marker_b = dir.join("group_b.started");
+    let command_a = format!(
+        "touch {}; while [ ! -f {} ]; do sleep 0.02; done; printf group_a",
+        shell_quote(&marker_a),
+        shell_quote(&marker_b),
+    );
+    let command_b = format!(
+        "touch {}; while [ ! -f {} ]; do sleep 0.02; done; printf group_b",
+        shell_quote(&marker_b),
+        shell_quote(&marker_a),
+    );
+    let response = format!(
+        r#"{{"free_talk":"并行执行两个 bash，同时执行一个 builtin 查询。","working_still_action":[[{{"run_bash":{{"cmd":{},"timeout_ms":3000}}}},{{"memmgr":{{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}}}},{{"run_bash":{{"cmd":{},"timeout_ms":3000}}}}]]}}"#,
+        serde_json::to_string(&command_a).unwrap(),
+        serde_json::to_string(&command_b).unwrap(),
+    );
     let mut model = ReplayModel::new([
-        Ok(llm(
-            r#"{"free_talk":"并行执行两个 bash，同时执行一个 builtin 查询。","working_still_action":[[{"run_bash":{"cmd":"sleep 1; printf group_a","timeout_ms":3000}},{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},{"run_bash":{"cmd":"sleep 1; printf group_b","timeout_ms":3000}}]]}"#,
-            1_000,
-            false,
-        )),
+        Ok(llm(response, 1_000, false)),
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"混合并行动作完成。"}"#,
             1_200,
@@ -2506,7 +2519,6 @@ fn session_turn_parallel_group_spawns_bash_while_running_builtin_actions_in_orde
         )),
     ]);
 
-    let started = std::time::Instant::now();
     let outcome = run_session_turn_with_model_client(
         &mut core,
         &mut config,
@@ -2522,12 +2534,11 @@ fn session_turn_parallel_group_spawns_bash_while_running_builtin_actions_in_orde
         None,
         &mut model,
     );
-    let elapsed = started.elapsed();
-
     assert_eq!(outcome.text, "混合并行动作完成。");
+    assert!(marker_a.exists(), "first bash action did not start");
     assert!(
-        elapsed < std::time::Duration::from_millis(1800),
-        "parallel group should spawn bash before builtin work; elapsed={elapsed:?}"
+        marker_b.exists(),
+        "second bash action did not start concurrently"
     );
     let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
     let results_start = second_parts
