@@ -158,8 +158,10 @@ a separate next turn. The current final answer stays visible before the queued t
 ## Timem Web Details
 
 The Web UI provides session switching, Markdown rendering, live work updates,
-attachments, runtime status, context usage, persistent Session groups, and
-per-session MCP tools in the browser. Session groups can be created, renamed,
+attachments, runtime status, context usage, persistent Session groups, a
+MEM-wide Role library, and per-session MCP tools in the browser. Create and
+group reusable Roles, then select one or more for the next message to apply
+specialized working methods to that task. Session groups can be created, renamed,
 reordered, collapsed, or deleted. Drag a Session by its handle into another group
 or **Unsorted**; deleting a group leaves its Sessions intact under **Unsorted**. Open the plug control in the header to add a local stdio, remote
 Streamable HTTP, or legacy SSE MCP server and choose which Sessions may use it.
@@ -228,6 +230,7 @@ for the files to inspect.
 - [Feature and test management](docs/feature-test-management.md)
 - [Release management](docs/release-management.md)
 - [Release smoke checklist](docs/manual-release-smoke.md)
+- [TimemAi 1.2.0 release notes](docs/release-notes-v1.2.0.md)
 - [TimemAi 1.1.3 release notes](docs/release-notes-v1.1.3.md)
 - [TimemAi 1.1.2 release notes](docs/release-notes-v1.1.2.md)
 - [TimemAi 1.1.1 release notes](docs/release-notes-v1.1.1.md)

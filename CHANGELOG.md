@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-26
+
+### Highlights
+
+- Added adaptive provider-native tool calling for OpenAI-compatible Chat,
+  OpenAI Responses, and Anthropic APIs. The default `auto` mode probes support,
+  preserves ordered tool-call/result history, supports negotiated parallel
+  calls, and falls back to the existing inline XML/JSON protocol when needed.
+- Added a durable MEM-wide Role library for reusable working methodologies.
+  Roles can be created, edited, grouped, reordered, and combined per message so
+  users can assign specialized ways of working across Sessions and tasks.
+
 ### Changed
 
 - Refined the Web composer and Session navigation: Session names are smaller,
