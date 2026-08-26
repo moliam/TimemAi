@@ -1550,7 +1550,7 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         return Err("unsupported_env:TIMEM_DATA_DIR; MEM is the complete workspace".to_string());
     }
     diagnostics.checkpoint("configuration_parsed", serde_json::Value::Null);
-    let launch_parent = LaunchParent::capture();
+    let launch_parent = crate::os::LaunchParent::capture();
     let template = WorkerTemplate::from_environment(&launch)?;
     let prefer_default_mem_port = uses_system_default_mem(&template.initial_space);
     println!("Starting Timem Web and restoring the selected workspace...");
@@ -1630,7 +1630,7 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         .port();
     // Register signal streams before publishing any readiness milestone so an
     // immediate terminal/service stop cannot fall through to the OS default.
-    let shutdown_monitor = ShutdownSignalMonitor::capture(launch_parent);
+    let shutdown_monitor = crate::os::ShutdownSignalMonitor::capture(launch_parent);
     diagnostics.checkpoint(
         "listener_bound",
         serde_json::json!({
@@ -1707,85 +1707,21 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
     Ok(reason)
 }
 
-#[derive(Debug, Clone, Copy)]
-struct LaunchParent {
-    #[cfg(unix)]
-    pid: libc::pid_t,
-}
-
-impl LaunchParent {
-    fn capture() -> Self {
-        Self {
-            #[cfg(unix)]
-            pid: unsafe { libc::getppid() },
-        }
-    }
-
-    fn pid_u32(self) -> Option<u32> {
-        #[cfg(unix)]
-        {
-            u32::try_from(self.pid).ok().filter(|pid| *pid > 1)
-        }
-        #[cfg(not(unix))]
-        {
-            None
-        }
-    }
-}
-
-struct ShutdownSignalMonitor {
-    launch_parent: LaunchParent,
-    #[cfg(unix)]
-    interrupt: Option<tokio::signal::unix::Signal>,
-    #[cfg(unix)]
-    terminate: Option<tokio::signal::unix::Signal>,
-    #[cfg(unix)]
-    hangup: Option<tokio::signal::unix::Signal>,
-}
-
-impl ShutdownSignalMonitor {
-    fn capture(launch_parent: LaunchParent) -> Self {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{signal, SignalKind};
-            Self {
-                launch_parent,
-                interrupt: signal(SignalKind::interrupt()).ok(),
-                terminate: signal(SignalKind::terminate()).ok(),
-                hangup: signal(SignalKind::hangup()).ok(),
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            Self { launch_parent }
-        }
-    }
-
-    async fn detect(mut self) -> WebExitReason {
-        #[cfg(unix)]
-        {
-            tokio::select! {
-                _ = recv_optional_signal(&mut self.interrupt) => WebExitReason::CtrlC,
-                _ = recv_optional_signal(&mut self.terminate) => WebExitReason::Sigterm,
-                _ = recv_optional_signal(&mut self.hangup) => WebExitReason::Sighup,
-                _ = wait_for_launch_parent_exit(self.launch_parent.pid) => WebExitReason::ParentProcessExited,
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = self.launch_parent;
-            let _ = tokio::signal::ctrl_c().await;
-            WebExitReason::CtrlC
-        }
+fn shutdown_trigger_exit_reason(trigger: crate::os::ShutdownTrigger) -> WebExitReason {
+    match trigger {
+        crate::os::ShutdownTrigger::CtrlC => WebExitReason::CtrlC,
+        crate::os::ShutdownTrigger::Sigterm => WebExitReason::Sigterm,
+        crate::os::ShutdownTrigger::Sighup => WebExitReason::Sighup,
+        crate::os::ShutdownTrigger::ParentProcessExited => WebExitReason::ParentProcessExited,
     }
 }
 
 async fn shutdown_signal(
-    monitor: ShutdownSignalMonitor,
+    monitor: crate::os::ShutdownSignalMonitor,
     selected_reason: Arc<Mutex<Option<WebExitReason>>>,
     diagnostics: LifecycleDiagnostics,
 ) {
-    let reason = monitor.detect().await;
+    let reason = shutdown_trigger_exit_reason(monitor.detect().await);
     diagnostics.event(
         "shutdown_trigger_received",
         serde_json::json!({"reason": reason.label()}),
@@ -1796,52 +1732,12 @@ async fn shutdown_signal(
 }
 
 fn web_shutdown_signal_names() -> &'static [&'static str] {
-    #[cfg(unix)]
-    {
-        &["Ctrl+C", "SIGTERM", "SIGHUP", "parent shell exit"]
-    }
-    #[cfg(not(unix))]
-    {
-        &["Ctrl+C"]
-    }
+    crate::os::shutdown_signal_names()
 }
 
-#[cfg(unix)]
-async fn wait_for_launch_parent_exit(initial_parent_pid: libc::pid_t) {
-    if initial_parent_pid <= 1 {
-        std::future::pending::<()>().await;
-        return;
-    }
-
-    let mut check = tokio::time::interval(Duration::from_millis(250));
-    check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        check.tick().await;
-        let current_parent_pid = unsafe { libc::getppid() };
-        if launch_parent_has_exited(initial_parent_pid, current_parent_pid) {
-            eprintln!(
-                "Timem Web launcher process {initial_parent_pid} exited; shutting down the entire Agent runtime."
-            );
-            return;
-        }
-    }
-}
-
-#[cfg(unix)]
-fn launch_parent_has_exited(
-    initial_parent_pid: libc::pid_t,
-    current_parent_pid: libc::pid_t,
-) -> bool {
-    initial_parent_pid > 1 && current_parent_pid != initial_parent_pid
-}
-
-#[cfg(unix)]
-async fn recv_optional_signal(stream: &mut Option<tokio::signal::unix::Signal>) {
-    if let Some(stream) = stream.as_mut() {
-        let _ = stream.recv().await;
-    } else {
-        std::future::pending::<()>().await;
-    }
+#[cfg(test)]
+fn launch_parent_has_exited(initial_parent_pid: u32, current_parent_pid: u32) -> bool {
+    crate::os::launch_parent_has_exited(initial_parent_pid, current_parent_pid)
 }
 
 struct WebRuntimeCleanupGuard {
@@ -2302,7 +2198,7 @@ fn publish_running_instance_info(
     token: &str,
     browser_url: &str,
     public_access: bool,
-    launch_parent: LaunchParent,
+    launch_parent: crate::os::LaunchParent,
 ) -> Result<(), String> {
     let mut journal = state
         .event_journal
