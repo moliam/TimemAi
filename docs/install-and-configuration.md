@@ -35,10 +35,15 @@ cargo build --locked -p timem_shell -p timem_web --release
 
 It installs:
 
-- `timem-native-rs`: terminal release binary
-- `timem`: thin wrapper for the terminal UI
-- `timem-web`: local browser UI with embedded production assets
+- `timem-web`: recommended local browser UI with embedded production assets
+- `timem`: optional terminal UI command
+- `timem-native-rs`: terminal release binary used by the `timem` wrapper
 - `resources/reminder_tips.json`: runtime-loaded default reminder schedules, normally under `~/.local/share/timem/resources`
+
+The completion message leads with `timem-web`. No env file is required to open
+the Web UI; model and API credentials can be configured in the browser. Env
+files remain available for terminal use, automation, or defaults for new Web
+Sessions.
 
 `TIMEM_SHELL_INSTALL_DIR` changes the binary directory. Resources follow the same prefix at `../share/timem/resources` unless `TIMEM_RESOURCES_DIR` is set explicitly. User-level `reminder_tips.json` overrides are separate and are never overwritten by installation.
 

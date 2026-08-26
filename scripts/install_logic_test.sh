@@ -63,13 +63,40 @@ if find "$atomic_test_dir" -maxdepth 1 -name 'destination.tmp.*' | grep -q .; th
   exit 1
 fi
 
-if ! grep -q 'Run: $COMMAND_NAME"' "$ROOT_DIR/install.sh"; then
-  echo "install prompt should recommend running timem directly after sourcing env" >&2
+install_prompt="$(
+  INSTALL_DIR="/example/bin"
+  RESOURCE_DIR="/example/share/timem/resources"
+  ENV_TEMPLATE="/example/source/env_template"
+  WEB_BIN_NAME="timem-web"
+  COMMAND_NAME="timem"
+  BIN_NAME="timem-native-rs"
+  print_install_success
+)"
+
+for expected in \
+  "TimemAi installation complete." \
+  "Timem Web (recommended): /example/bin/timem-web" \
+  "Start Timem Web:" \
+  "2. Run: timem-web" \
+  "Configure the model and API key in Timem Web" \
+  "No env file is required to open Timem Web." \
+  "Terminal UI (optional):  /example/bin/timem" \
+  "Optional terminal workflow:"; do
+  if ! grep -Fq "$expected" <<< "$install_prompt"; then
+    echo "install prompt is missing Web-first product guidance: $expected" >&2
+    exit 1
+  fi
+done
+
+web_start_line="$(grep -nF "Start Timem Web:" <<< "$install_prompt" | cut -d: -f1)"
+terminal_start_line="$(grep -nF "Optional terminal workflow:" <<< "$install_prompt" | cut -d: -f1)"
+if [ "$web_start_line" -ge "$terminal_start_line" ]; then
+  echo "install prompt should present Timem Web before the optional terminal workflow" >&2
   exit 1
 fi
 
-if grep -q 'Run: $COMMAND_NAME --space' "$ROOT_DIR/install.sh"; then
-  echo "install prompt should not require duplicate --space/--model options" >&2
+if grep -Fq "Create a private env file" <<< "$install_prompt"; then
+  echo "install prompt should not require env-file setup before starting Timem Web" >&2
   exit 1
 fi
 
