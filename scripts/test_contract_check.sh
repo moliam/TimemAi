@@ -84,7 +84,7 @@ required_patterns=(
   "turn_user_entries_are_persisted_with_raw_text_and_semantic_kind"
   "sorts restored entries and events within one turn by creation time"
   "shell_resume_uses_stored_session_cwd_for_core_prompt_context"
-  "shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence"
+  "shell_resume_prefers_non_empty_launch_env_then_cli_over_stored_session_env"
   "shell_can_resume_web_style_session_history"
   "formatted_response_trailer_parser_preserves_assistant_heading"
 )

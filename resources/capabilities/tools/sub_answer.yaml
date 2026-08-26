@@ -1,0 +1,37 @@
+kind: tool
+id: sub_answer
+binding_type: builtin
+binding_name: sub_answer
+summary: Show a complete answer to one or more current-turn questions while continuing the task.
+prompt_synopsis: |
+  {"sub_answer":{"task":"Concise summary of the addressed question or concern","answer":"Complete user-facing Markdown answer"}}
+description: |
+  Optionally answer one or more questions or concerns from the current user turn before
+  the overall task is finished. Use this only for a substantive, complete answer that is
+  useful immediately while you continue working. Do not use it for progress updates,
+  plans, acknowledgements, or placeholders. The task must summarize what is answered;
+  do not use input IDs. After using it, continue the work and eventually provide exactly
+  one normal final answer. The final answer remains authoritative and should coherently
+  include relevant sub-answers, explicitly correcting any contradiction.
+prompt_input: |
+  Provide a non-empty task summarizing one or more current-turn questions or concerns,
+  and a non-empty user-facing Markdown answer. Multiple successful interim answers may
+  be shown in one turn; the UI groups them in one Interim tab with a distinct section
+  for each task. This tool is available only to the primary worker and must not be placed
+  inside a parallel tool group.
+prompt_result: |
+  Success returns `Shown to user successfully.` The answer is visible immediately but
+  does not finish the turn. Failures precisely report invalid input, worker eligibility,
+  or parallel-use errors.
+input_schema: |
+  {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "task": {"type":"string","minLength":1,"pattern":"\\S","description":"Concise model-written summary of the current-turn question(s) or concern(s) answered. Do not use input IDs."},
+      "answer": {"type":"string","minLength":1,"pattern":"\\S","description":"Complete user-facing Markdown answer to show immediately."}
+    },
+    "required": ["task", "answer"]
+  }
+example_json: |
+  {"sub_answer":{"task":"Whether migration preserves session history","answer":"Yes. Existing history remains intact."}}

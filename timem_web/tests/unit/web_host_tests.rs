@@ -223,6 +223,56 @@ fn worker_role_snapshots_survive_raw_history_reconstruction() {
 }
 
 #[test]
+fn structured_sub_answers_survive_raw_history_reconstruction() {
+    let records = vec![
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_sub_answer".to_string(),
+            created_at_ms: 1,
+            kind: Some("task".to_string()),
+            command_id: None,
+            delivery_state: None,
+            content: "answer both questions".to_string(),
+        },
+        ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: "turn_sub_answer".to_string(),
+            created_at_ms: 2,
+            kind: ChatHistoryEventKind::SubAnswer,
+            content: "shown".to_string(),
+            extra: BTreeMap::from([
+                (
+                    "source".to_string(),
+                    Value::String("core_topic".to_string()),
+                ),
+                (
+                    "payload".to_string(),
+                    json!({
+                        "session_id": "session_a",
+                        "topic": {"name": CORE_TOPIC_SUB_ANSWER},
+                        "state": {"name": "running"},
+                        "payload": {
+                            "sub_answer_id": "sub_answer_1",
+                            "ordinal": 1,
+                            "task": "First question",
+                            "answer": "First answer"
+                        }
+                    }),
+                ),
+            ]),
+        },
+    ];
+
+    let restored = restored_turns_from_history_records(&records);
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].sub_answers.len(), 1);
+    assert_eq!(restored[0].sub_answers[0].sub_answer_id, "sub_answer_1");
+    assert_eq!(restored[0].sub_answers[0].ordinal, 1);
+    assert_eq!(restored[0].sub_answers[0].task, "First question");
+    assert_eq!(restored[0].sub_answers[0].answer, "First answer");
+}
+
+#[test]
 fn multiple_worker_roles_resolve_in_message_order_and_render_all_contexts() {
     let state = routing_test_state();
     let roles = vec![
@@ -1162,6 +1212,7 @@ fn restore_does_not_revive_an_old_unfinished_turn_after_a_newer_turn_completed()
                 worker_roles: Vec::new(),
             }],
             events: Vec::new(),
+            sub_answers: Vec::new(),
             // A turn can finish without an assistant message, for example after
             // a protocol/model error. Its persisted completion is still terminal.
             final_answer: None,
@@ -3759,6 +3810,7 @@ fn session_runtime_update_is_allowed_during_an_active_turn() {
             created_at_ms: now_ms(),
             user_entries: Vec::new(),
             events: Vec::new(),
+            sub_answers: Vec::new(),
             final_answer: None,
             completion: None,
         });
@@ -3821,6 +3873,7 @@ fn session_api_key_update_is_rejected_during_an_active_turn() {
         created_at_ms: now_ms(),
         user_entries: Vec::new(),
         events: Vec::new(),
+        sub_answers: Vec::new(),
         final_answer: None,
         completion: None,
     });
@@ -5285,6 +5338,47 @@ fn snapshot_reports_the_active_mem_space_and_paths() {
 }
 
 #[test]
+fn opening_mem_does_not_run_temporary_retention_on_the_startup_path() {
+    let state = routing_test_state();
+    let (data_dir, space, store) = {
+        let mem = state.mem.lock().unwrap();
+        (
+            state.template.data_dir.clone(),
+            mem.space.clone(),
+            mem.session_store.clone(),
+        )
+    };
+    let session = state.sessions.lock().unwrap()["session_a"].clone();
+    store
+        .upsert_session(&stored_session_from_web_session_with_store(
+            &store, &session,
+        ))
+        .unwrap();
+    let expired = ChatHistoryRecord::Event {
+        role: ChatHistoryRole::System,
+        turn_id: "startup-retention-regression".to_string(),
+        created_at_ms: now_ms_i64() - 6 * MILLIS_PER_DAY,
+        kind: ChatHistoryEventKind::Action,
+        content: "must remain until the background pass".to_string(),
+        extra: BTreeMap::new(),
+    };
+    store.append_history_record("session_a", &expired).unwrap();
+
+    WebMemState::new(data_dir, space).unwrap();
+
+    assert!(
+        read_all_history_records(&store.history_path_for_session("session_a"))
+            .unwrap()
+            .iter()
+            .any(|record| matches!(
+                record,
+                ChatHistoryRecord::Event { content, .. }
+                    if content == "must remain until the background pass"
+            ))
+    );
+}
+
+#[test]
 fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_data() {
     let state = routing_test_state();
     let (layout, store) = {
@@ -5855,6 +5949,7 @@ fn routing_test_state() -> AppState {
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
+        temporary_retention_wakeup: Arc::new(Notify::new()),
         debug: None,
     }
 }
@@ -8953,6 +9048,7 @@ fn background_exit_event_is_appended_to_its_original_turn() {
             created_at_ms: now_ms(),
             user_entries: Vec::new(),
             events: Vec::new(),
+            sub_answers: Vec::new(),
             final_answer: None,
             completion: None,
         });
@@ -9010,6 +9106,61 @@ fn background_exit_event_is_appended_to_its_original_turn() {
         .unwrap()
         .events
         .is_empty());
+}
+
+#[test]
+fn polling_action_progress_reaches_web_event_stream_before_loop_finishes() {
+    let state = routing_test_state();
+    let marker = std::env::temp_dir().join(unique_web_id("polling_progress_marker"));
+    let _ = std::fs::remove_file(&marker);
+    let session_id = register_polling_progress_worker(&state, marker.clone());
+    let mut wire_events = state.events.subscribe();
+    submit_turn(&state, &session_id, "wait for marker".to_string()).unwrap();
+
+    let marker_writer = marker.clone();
+    let writer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(500));
+        std::fs::write(marker_writer, b"ready").unwrap();
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut saw_thought_before_finish = false;
+    let mut saw_action_start_before_finish = false;
+    while Instant::now() < deadline
+        && !(saw_thought_before_finish && saw_action_start_before_finish)
+    {
+        for (event_session_id, context_id, worker_id, event) in drain_worker_events(&state) {
+            handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
+        }
+        let loop_finished = marker.exists();
+        for event in drain_wire_events(&mut wire_events) {
+            if let WireEvent::CoreTopic { event, .. } = event {
+                if event["topic"]["name"] == CORE_TOPIC_MODEL_RESPONSE
+                    && event["payload"]["free_talk"] == "Waiting for the polling marker."
+                    && !loop_finished
+                {
+                    saw_thought_before_finish = true;
+                }
+                if event["topic"]["name"] == CORE_TOPIC_ACTION
+                    && event["payload"]["event"] == "start"
+                    && event["payload"]["kind"]["mode"] == "poll"
+                    && !loop_finished
+                {
+                    saw_action_start_before_finish = true;
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    writer.join().unwrap();
+    assert!(
+        saw_thought_before_finish,
+        "free-talk should reach Web before polling completes"
+    );
+    assert!(
+        saw_action_start_before_finish,
+        "poll action start should reach Web before polling completes"
+    );
 }
 
 #[test]
@@ -9090,6 +9241,44 @@ fn active_turn_user_entries_drop_only_the_oldest_entries_at_the_bound() {
         entries.last().unwrap().text,
         format!("supplement-{}", MAX_TURN_USER_ENTRIES + 4)
     );
+}
+
+struct PollingProgressModel {
+    calls: u8,
+    marker: PathBuf,
+}
+
+impl ModelClient for PollingProgressModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls += 1;
+        let content = if self.calls == 1 {
+            format!(
+                "<ASSISTANT><free_talk>Waiting for the polling marker.</free_talk><actions><run_bash name=\"wait for polling marker\" interval_ms=\"20\" loop_timeout_ms=\"2000\" once_timeout_ms=\"500\"><loop_cmd>test -f {}</loop_cmd></run_bash></actions></ASSISTANT>",
+                self.marker.display()
+            )
+        } else {
+            confirmed_xml_response("<final_answer>Polling complete.</final_answer>")
+        };
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content,
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
 }
 
 struct TaggedFinalModel(&'static str);
@@ -9281,6 +9470,60 @@ impl ModelClient for InspectPathModel {
             truncated: false,
         })
     }
+}
+
+fn register_polling_progress_worker(state: &AppState, marker: PathBuf) -> String {
+    let ordinal = state.sessions.lock().unwrap().len() as u32;
+    let session_id = unique_web_id("polling_progress_session");
+    let context_id = test_context_id(&session_id);
+    let worker_dir = std::env::temp_dir().join(format!("timem_web_polling_progress_{}", now_ms()));
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let mut core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &worker_dir,
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let config = state.template.settings.lock().unwrap().config.clone();
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            config,
+            CoreSessionWorkerWorkspace::new(
+                &worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some("Polling progress test".to_string()),
+            None,
+            PollingProgressModel { calls: 0, marker },
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, ordinal, "Polling progress test".to_string());
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id.clone();
+    session.active_context_id = context_id;
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    session_id
 }
 
 fn register_real_worker(state: &AppState, name: &'static str) -> String {

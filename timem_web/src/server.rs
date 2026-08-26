@@ -24,8 +24,8 @@ use agent_core::{
     HostDecisionRequest, ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind,
     RuntimeDataLayout, SessionToolRepo, ToolDetail, ToolGenRequest, ToolSummary, TopicReply,
     WorkInstructionLoadMode, CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE,
-    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
-    CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_SUB_ANSWER, CORE_TOPIC_TOOLGEN,
+    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, self_tool::SelfToolPaths, shell_exec::FileShellJobStore,
@@ -61,7 +61,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{broadcast, mpsc as tokio_mpsc},
+    sync::{broadcast, mpsc as tokio_mpsc, oneshot, Notify},
     time::{sleep, timeout, Instant},
 };
 
@@ -108,6 +108,7 @@ struct AppState {
     command_lanes: Arc<Mutex<HashMap<String, Arc<TicketCommandLane>>>>,
     command_global_barrier: Arc<RwLock<()>>,
     mem_epoch: Arc<RwLock<u64>>,
+    temporary_retention_wakeup: Arc<Notify>,
     debug: Option<Arc<DebugStore>>,
 }
 
@@ -434,12 +435,6 @@ impl WebMemState {
         let session_groups = load_session_groups(&layout.memory_dir())?;
         let settings = load_web_mem_settings(&layout.memory_dir())?;
         let session_store = SessionStore::new(layout.memory_dir());
-        apply_temporary_retention(
-            &layout,
-            &session_store,
-            settings.temporary_retention_days,
-            now_ms_i64(),
-        )?;
         Ok(Self {
             space,
             session_store,
@@ -578,14 +573,31 @@ fn apply_current_mem_temporary_retention(
     apply_temporary_retention(&layout, &store, days, now_ms)
 }
 
+async fn run_temporary_retention_in_file_thread(
+    state: AppState,
+) -> Result<TemporaryRetentionResult, String> {
+    let (result_tx, result_rx) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("timem-web-retention".to_string())
+        .spawn(move || {
+            let result = apply_current_mem_temporary_retention(&state, now_ms_i64());
+            let _ = result_tx.send(result);
+        })
+        .map_err(|error| format!("temporary_retention_worker_spawn_failed:{error}"))?;
+    result_rx
+        .await
+        .map_err(|_| "temporary_retention_worker_stopped".to_string())?
+}
+
 fn spawn_temporary_retention_loop(state: AppState) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(TEMPORARY_RETENTION_INTERVAL);
-        interval.tick().await;
         loop {
-            interval.tick().await;
-            if let Err(error) = apply_current_mem_temporary_retention(&state, now_ms_i64()) {
+            if let Err(error) = run_temporary_retention_in_file_thread(state.clone()).await {
                 eprintln!("[timem_web_warning] temporary_retention_failed error={error}");
+            }
+            tokio::select! {
+                () = sleep(TEMPORARY_RETENTION_INTERVAL) => {}
+                () = state.temporary_retention_wakeup.notified() => {}
             }
         }
     });
@@ -895,8 +907,18 @@ struct WebTurn {
     created_at_ms: u128,
     user_entries: Vec<WebTurnUserEntry>,
     events: Vec<WebTurnEvent>,
+    sub_answers: Vec<WebSubAnswer>,
     final_answer: Option<String>,
     completion: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WebSubAnswer {
+    sub_answer_id: String,
+    ordinal: u64,
+    task: String,
+    answer: String,
+    created_at_ms: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1602,6 +1624,7 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
+        temporary_retention_wakeup: Arc::new(Notify::new()),
         debug,
     };
     let cleanup_guard = WebRuntimeCleanupGuard::new(&state);
@@ -1619,7 +1642,6 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         let _ = default_session;
     }
     spawn_event_bridge(state.clone());
-    spawn_temporary_retention_loop(state.clone());
 
     let listener = bind_web_listener(launch.port, launch.public_access, prefer_default_mem_port)
         .await
@@ -1683,6 +1705,11 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         "{}",
         highlighted_browser_url(&browser_url, stdout_supports_color())
     );
+    // Retention can scan and atomically rewrite large history, shell-job, and
+    // audit files. Start it only after readiness is published and keep that
+    // blocking filesystem work off Tokio runtime threads. A dedicated file
+    // thread also keeps runtime shutdown from waiting for a large rewrite.
+    spawn_temporary_retention_loop(state.clone());
     let shutdown_reason = Arc::new(Mutex::new(None));
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(
@@ -4155,6 +4182,7 @@ fn handle_command_with_id(
                 .map_err(|_| "mem_epoch_poisoned".to_string())?;
             let snapshot = switch_mem_space(state, port, &path)?;
             *epoch = epoch.saturating_add(1);
+            state.temporary_retention_wakeup.notify_one();
             let (event_cursor, event_replay_floor) = state
                 .event_journal
                 .lock()
@@ -5297,6 +5325,17 @@ fn persist_restored_session_runtime_cache(
     current_session_store(state)?.upsert_session(&migrated)
 }
 
+fn web_sub_answer_from_topic_payload(payload: &Value, created_at_ms: u128) -> Option<WebSubAnswer> {
+    let body = payload.get("payload")?;
+    Some(WebSubAnswer {
+        sub_answer_id: body.get("sub_answer_id")?.as_str()?.to_string(),
+        ordinal: body.get("ordinal")?.as_u64()?,
+        task: body.get("task")?.as_str()?.to_string(),
+        answer: body.get("answer")?.as_str()?.to_string(),
+        created_at_ms,
+    })
+}
+
 fn restored_messages_from_history_records(records: &[ChatHistoryRecord]) -> Vec<WebChatMessage> {
     records
         .iter()
@@ -5327,6 +5366,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     created_at_ms: created_at_ms as u128,
                     user_entries: Vec::new(),
                     events: Vec::new(),
+                    sub_answers: Vec::new(),
                     final_answer: None,
                     completion: None,
                 });
@@ -5426,6 +5466,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     created_at_ms: created_at_ms as u128,
                     user_entries: Vec::new(),
                     events: Vec::new(),
+                    sub_answers: Vec::new(),
                     final_answer: None,
                     completion: None,
                 });
@@ -5433,6 +5474,26 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                 if let Some(completion) = completion {
                     turn.state = "completed".to_string();
                     turn.completion = Some(completion);
+                }
+                if source == "core_topic"
+                    && payload
+                        .get("topic")
+                        .and_then(|topic| topic.get("name"))
+                        .and_then(Value::as_str)
+                        == Some(CORE_TOPIC_SUB_ANSWER)
+                {
+                    if let Some(sub_answer) =
+                        web_sub_answer_from_topic_payload(&payload, created_at_ms as u128)
+                    {
+                        if !turn
+                            .sub_answers
+                            .iter()
+                            .any(|existing| existing.sub_answer_id == sub_answer.sub_answer_id)
+                        {
+                            turn.sub_answers.push(sub_answer);
+                            turn.sub_answers.sort_by_key(|item| item.ordinal);
+                        }
+                    }
                 }
                 turn.events.push(WebTurnEvent {
                     event_id: format!(
@@ -7199,6 +7260,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
             worker_roles,
         }],
         events: Vec::new(),
+        sub_answers: Vec::new(),
         final_answer: None,
         completion: None,
     };
@@ -7368,6 +7430,7 @@ fn start_web_toolgen_turn(
         created_at_ms,
         user_entries,
         events: Vec::new(),
+        sub_answers: Vec::new(),
         final_answer: None,
         completion: None,
     };
@@ -7824,6 +7887,9 @@ fn chat_history_kind_for_source(source: &str, payload: &Value) -> ChatHistoryEve
         }
         if topic_name == CORE_TOPIC_MODEL_RESPONSE {
             return ChatHistoryEventKind::Progress;
+        }
+        if topic_name == CORE_TOPIC_SUB_ANSWER {
+            return ChatHistoryEventKind::SubAnswer;
         }
     }
     ChatHistoryEventKind::RuntimeNotice
@@ -8589,6 +8655,30 @@ fn handle_scoped_worker_event(
                         }
                     }
                     set_worker_state(state, session_id, worker_id, "ready");
+                }
+                if event.topic.name == CORE_TOPIC_SUB_ANSWER {
+                    if let Some(sub_answer) =
+                        web_sub_answer_from_topic_payload(&wire_payload, now_ms())
+                    {
+                        if let Ok(mut sessions) = state.sessions.lock() {
+                            if let Some(session) = sessions.get_mut(session_id) {
+                                let turn_id = current_turn_id(session).map(str::to_string);
+                                if let Some(turn) = turn_id.as_deref().and_then(|turn_id| {
+                                    session
+                                        .turns
+                                        .iter_mut()
+                                        .find(|turn| turn.turn_id == turn_id)
+                                }) {
+                                    if !turn.sub_answers.iter().any(|existing| {
+                                        existing.sub_answer_id == sub_answer.sub_answer_id
+                                    }) {
+                                        turn.sub_answers.push(sub_answer);
+                                        turn.sub_answers.sort_by_key(|item| item.ordinal);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 let turn_ref = if event.topic.name == agent_core::CORE_TOPIC_LIFECYCLE {
                     None

@@ -113,6 +113,7 @@ pub enum ChatHistoryEventKind {
     ActionResult,
     ContextCompact,
     Repair,
+    SubAnswer,
     RuntimeNotice,
     Stats,
     Attachment,

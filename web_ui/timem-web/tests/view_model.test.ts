@@ -35,6 +35,7 @@ const turn = (turnId: string, state = "working"): WebTurn => ({
   created_at_ms: 1,
   user_entries: [{ kind: "task", text: "do the work", created_at_ms: 1 }],
   events: [],
+  sub_answers: [],
   final_answer: null,
   completion: null,
 });
@@ -714,6 +715,25 @@ describe("web topic view model", () => {
     expect(turns[0].user_entries[0].text).toBe("old task");
     expect(turns[0].events[0].source).toBe("core_topic");
     expect(turns[0].final_answer).toBe("old answer");
+  });
+
+
+  it("restores structured sub-answers from core topic history", () => {
+    const records: ChatHistoryRecord[] = [
+      { type: "message", role: "user", turn_id: "turn_1", created_at_ms: 1, content: "two questions" },
+      { type: "event", role: "system", turn_id: "turn_1", created_at_ms: 2, kind: "sub_answer", content: "shown", source: "core_topic", payload: { topic: { name: "core.sub_answer" }, payload: { sub_answer_id: "sub_1", ordinal: 1, task: "First question", answer: "First answer" } } },
+    ];
+    const [restored] = turnsFromHistoryRecords(records);
+    expect(restored.sub_answers).toEqual([{ sub_answer_id: "sub_1", ordinal: 1, task: "First question", answer: "First answer", created_at_ms: 2 }]);
+  });
+
+  it("adds each live structured sub-answer once", () => {
+    const active = upsertTurn(session("session_1"), turn("turn_1"));
+    const event: WebTurnEvent = { event_id: "sub_event", source: "core_topic", created_at_ms: 2, payload: { session_id: "session_1", topic: { name: "core.sub_answer" }, payload: { sub_answer_id: "sub_1", ordinal: 1, task: "Question", answer: "Answer" } } };
+    const once = appendTurnEvent(active, "turn_1", event);
+    const replayed = appendTurnEvent(once, "turn_1", event);
+    expect(replayed.turns[0].sub_answers).toHaveLength(1);
+    expect(replayed.turns[0].sub_answers[0].answer).toBe("Answer");
   });
 
   it("preserves the ToolGen topic marker when restoring historical work events", () => {

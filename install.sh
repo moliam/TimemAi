@@ -85,11 +85,11 @@ ensure_build_dependencies() {
       fi
       ;;
     unsupported_windows)
-      echo "error: Windows is not supported yet. Timem shell currently supports macOS and Linux." >&2
+      echo "error: Windows is not supported yet. Timem Web and the optional terminal UI currently support macOS and Linux." >&2
       exit 1
       ;;
     *)
-      echo "error: unsupported OS. Timem shell currently supports macOS and Linux." >&2
+      echo "error: unsupported OS. Timem Web and the optional terminal UI currently support macOS and Linux." >&2
       exit 1
       ;;
   esac
@@ -163,7 +163,7 @@ fetch_rust_dependencies() {
 }
 
 build_release_binary() {
-  echo "Building Timem CLI and Web binaries..."
+  echo "Building Timem Web and the optional terminal UI..."
   if [ ! -f "$ROOT_DIR/web_ui/timem-web/dist/index.html" ]; then
     echo "error: embedded Timem Web assets are missing from this source package." >&2
     exit 1
@@ -203,6 +203,37 @@ install_resource_atomically() {
   fi
 }
 
+print_install_success() {
+  echo
+  echo "TimemAi installation complete."
+  echo
+  echo "Installed applications:"
+  echo "  Timem Web (recommended): $INSTALL_DIR/$WEB_BIN_NAME"
+  echo "  Terminal UI (optional):  $INSTALL_DIR/$COMMAND_NAME"
+  echo "  Terminal binary:         $INSTALL_DIR/$BIN_NAME"
+  echo
+  echo "Installed support files:"
+  echo "  Resources:    $RESOURCE_DIR"
+  echo "  Env template: $ENV_TEMPLATE"
+  echo "  Uninstaller:  $ROOT_DIR/uninstall.sh"
+  echo
+  echo "Start Timem Web:"
+  echo "  1. Ensure $INSTALL_DIR is in PATH."
+  echo "  2. Run: $WEB_BIN_NAME"
+  echo "  3. Your browser should open automatically. Configure the model and API key in Timem Web, then start chatting."
+  echo
+  echo "No env file is required to open Timem Web."
+  echo "For remote access on a trusted network, run: $WEB_BIN_NAME --public"
+  echo
+  echo "Optional terminal workflow:"
+  echo "  Run: $COMMAND_NAME"
+  echo "  To provide environment defaults, copy $ENV_TEMPLATE to a private file, edit it, then source it before launch."
+  echo
+  echo "Update later from this git clone:"
+  echo "  git pull --ff-only"
+  echo "  ./install.sh"
+}
+
 main() {
   OS_KIND="$(detect_os)"
   ensure_build_dependencies "$OS_KIND"
@@ -225,26 +256,7 @@ SH
   rm -f "$INSTALL_DIR/$OLD_WRAPPER_NAME"
   chmod +x "$INSTALL_DIR/$BIN_NAME" "$INSTALL_DIR/$COMMAND_NAME" "$INSTALL_DIR/$WEB_BIN_NAME"
 
-  echo "Installed:"
-  echo "  binary:  $INSTALL_DIR/$BIN_NAME"
-  echo "  command: $INSTALL_DIR/$COMMAND_NAME"
-  echo "  web:     $INSTALL_DIR/$WEB_BIN_NAME"
-  echo "  resources: $RESOURCE_DIR"
-  echo "  env template: $ENV_TEMPLATE"
-  echo "  uninstall: $ROOT_DIR/uninstall.sh"
-  echo
-  echo "Next steps:"
-  echo "  1. Create a private env file from the template:"
-  echo "     cp $ENV_TEMPLATE $ROOT_DIR/env"
-  echo "  2. Edit $ROOT_DIR/env and uncomment the values you need."
-  echo "  3. Ensure $INSTALL_DIR is in PATH."
-  echo "  4. Load env: source /path/to/your/env"
-  echo "  5. Run: $COMMAND_NAME"
-  echo "     Or open the local Web UI: $WEB_BIN_NAME"
-  echo
-  echo "Update later from this git clone:"
-  echo "  git pull --ff-only"
-  echo "  ./install.sh"
+  print_install_success
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
