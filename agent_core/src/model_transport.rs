@@ -5,9 +5,11 @@ use crate::{
     ModelHttpResponseInterpretation, ModelInteractionRequest, ModelServiceConfig,
     OpenAiCompatibleCacheMode, PreparedModelHttpRequest,
 };
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -89,11 +91,11 @@ fn execute_model_http_request(
     );
     let body =
         serde_json::to_string(&http_request.model_request.body).map_err(|e| e.to_string())?;
-    let command = build_curl_command(config.timeout_secs);
-    let curl_config = build_curl_config(http_request, &body);
+    let curl_config = CurlConfigFile::create(&build_curl_config(http_request))?;
+    let command = build_curl_command(config.timeout_secs, curl_config.path());
     let output = run_command_with_input_cancel_and_inactivity_timeout(
         command,
-        curl_config.into_bytes(),
+        body.into_bytes(),
         Duration::from_secs(config.timeout_secs),
         should_cancel,
     )?;
@@ -155,7 +157,62 @@ fn should_retry_without_openai_cache_control(
     names_cache_control && rejects_schema
 }
 
-fn build_curl_command(timeout_secs: u64) -> Command {
+static CURL_CONFIG_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug)]
+struct CurlConfigFile {
+    path: PathBuf,
+}
+
+impl CurlConfigFile {
+    fn create(contents: &str) -> Result<Self, String> {
+        for _ in 0..100 {
+            let sequence = CURL_CONFIG_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "timem-model-curl-{}-{sequence}.conf",
+                std::process::id()
+            ));
+            let mut options = OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.share_mode(0);
+            }
+            match options.open(&path) {
+                Ok(mut file) => {
+                    if let Err(error) = file.write_all(contents.as_bytes()) {
+                        let _ = fs::remove_file(&path);
+                        return Err(format!("model_curl_config_write_failed: {error}"));
+                    }
+                    return Ok(Self { path });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(format!("model_curl_config_create_failed: {error}"));
+                }
+            }
+        }
+        Err("model_curl_config_create_failed: temporary name exhausted".to_string())
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for CurlConfigFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn build_curl_command(timeout_secs: u64, config_path: &Path) -> Command {
     let mut command = Command::new("curl");
     command
         .arg("-sS")
@@ -167,11 +224,15 @@ fn build_curl_command(timeout_secs: u64) -> Command {
         .arg("-w")
         .arg("\n%{http_code}")
         .arg("--config")
-        .arg("-");
+        .arg(config_path)
+        // Keep the potentially large and sensitive request body out of both
+        // argv and curl's size-limited config parser.
+        .arg("--data-binary")
+        .arg("@-");
     command
 }
 
-fn build_curl_config(http_request: &crate::PreparedModelHttpRequest, body: &str) -> String {
+fn build_curl_config(http_request: &crate::PreparedModelHttpRequest) -> String {
     let mut config = String::new();
     config.push_str("request = \"POST\"\n");
     config.push_str("url = \"");
@@ -182,9 +243,6 @@ fn build_curl_config(http_request: &crate::PreparedModelHttpRequest, body: &str)
         config.push_str(&curl_config_escape(&format!("{key}: {value}")));
         config.push_str("\"\n");
     }
-    config.push_str("data-binary = \"");
-    config.push_str(&curl_config_escape(body));
-    config.push_str("\"\n");
     config
 }
 
