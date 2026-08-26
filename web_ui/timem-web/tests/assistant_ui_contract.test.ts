@@ -943,6 +943,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(viewModelSource).toContain('case "core.model.repair":');
     expect(styles).toContain(".model-retry-status");
     expect(styles).toContain(".model-retry-detail");
+    expect(styles).toContain(".turn-assistant-heading:has(.model-retry-status[open]) { z-index: 4; }");
     expect(styles).toContain("font-size: 10px");
     expect(styles).toContain("font-size: 9px");
     expect(styles).toContain("font-size: 11px");

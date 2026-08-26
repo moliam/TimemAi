@@ -1770,6 +1770,8 @@ body {
 .model-retry-status summary::-webkit-details-marker { display: none; }
 .model-retry-status summary svg { transition: transform .16s ease; }
 .model-retry-status[open] summary svg { transform: rotate(90deg); }
+/* Keep expanded recovery details above the sticky composer while the turn is still working. */
+.turn-assistant-heading:has(.model-retry-status[open]) { z-index: 4; }
 .model-retry-status summary small { color: #9f9068; font-size: 9px; font-variant-numeric: tabular-nums; }
 .model-retry-status.network-error summary { border-color: #466079; background: #202b36; color: #8fc5ed; }
 .model-retry-status.network-error summary small { color: #789bb5; }
