@@ -35,10 +35,15 @@ cargo build --locked -p timem_shell -p timem_web --release
 
 It installs:
 
-- `timem-native-rs`: terminal release binary
-- `timem`: thin wrapper for the terminal UI
-- `timem-web`: local browser UI with embedded production assets
+- `timem-web`: recommended local browser UI with embedded production assets
+- `timem`: optional terminal UI command
+- `timem-native-rs`: terminal release binary used by the `timem` wrapper
 - `resources/reminder_tips.json`: runtime-loaded default reminder schedules, normally under `~/.local/share/timem/resources`
+
+The completion message leads with `timem-web`. No env file is required to open
+the Web UI; model and API credentials can be configured in the browser. Env
+files remain available for terminal use, automation, or defaults for new Web
+Sessions.
 
 `TIMEM_SHELL_INSTALL_DIR` changes the binary directory. Resources follow the same prefix at `../share/timem/resources` unless `TIMEM_RESOURCES_DIR` is set explicitly. User-level `reminder_tips.json` overrides are separate and are never overwritten by installation.
 
@@ -80,7 +85,16 @@ $EDITOR env
 source /path/to/your/env
 ```
 
-Command-line options override process env values:
+For Shell startup and Session resume, configuration precedence is:
+
+```text
+command-line option > non-empty process environment > restored Session cache > default
+```
+
+This means `source env` intentionally refreshes a previously cached Shell model
+configuration. Empty environment values do not erase a non-empty cached value;
+use the interactive `/config` flow or an explicit command-line value when you
+intend to change stored Session configuration.
 
 ```bash
 timem --help
@@ -187,9 +201,12 @@ By default, Timem stores MEM data in the user's home directory:
 ```
 
 The directory is created automatically on first startup. Each MEM has a temporary-data
-retention setting: 1, 5, 10 days, or unlimited (default: 5 days). Timem applies the
-moving cutoff when the MEM opens, immediately after the setting changes, and once per
-hour while Timem Web is running. Only these temporary data are covered:
+retention setting: 1, 5, 10 days, or unlimited (default: 5 days). After Timem Web has
+published readiness, it applies the moving cutoff in a background blocking-file task;
+it runs again after a MEM switch and once per hour while Timem Web is running. A direct
+setting change still applies the new cutoff before reporting success. This keeps large
+audit/history rewrites off the listener-startup path. Only these temporary data are
+covered:
 
 - raw-chat event kinds `action`, `action_result`, `context_compact`, and `repair`;
 - finished shell-job records and their stdout/stderr/status files;
@@ -375,4 +392,4 @@ Timem Web 左下角的 **Memory** 卡片用于打开当前 MEM 的设置；卡�
 - 最近 10 天
 - 不限
 
-设置保存在当前 MEM 的 `mem_settings.json` 中。选择有限期限后，Timem 会立即删除早于期限的 Session 聊天历史，并在以后启动或切换到该 MEM 时再次应用该策略。该操作不会删除 Session、ToolRepo 工具、角色、MCP 或模型接入点。为避免与正在写入的历史冲突，存在运行中任务时不能修改保留期限。
+设置保存在当前 MEM 的 `mem_settings.json` 中。用户修改为有限期限时，Timem 会先应用新期限再报告成功。Timem Web 启动时会先完成端口监听并报告 ready，再在后台应用该策略；切换到另一个 MEM 后也会在后台立即应用，运行期间每小时再执行一次。这样大体量历史或审计文件的扫描与原子重写不会阻塞 Web 启动。该操作不会删除 Session、ToolRepo 工具、角色、MCP 或模型接入点。为避免与正在写入的历史冲突，存在运行中任务时不能修改保留期限。

@@ -148,9 +148,12 @@ export type WebTurn = {
   created_at_ms: number;
   user_entries: WebTurnUserEntry[];
   events: WebTurnEvent[];
+  sub_answers: WebSubAnswer[];
   final_answer?: string | null;
   completion?: TurnCompletion | null;
 };
+
+export type WebSubAnswer = { sub_answer_id: string; ordinal: number; task: string; answer: string; created_at_ms: number };
 
 export type WebTurnUserEntry = { kind: "task" | "supplement" | "approval" | string; text: string; attachments?: Attachment[]; worker_roles?: WorkerRole[]; /** Legacy history compatibility. */ worker_role?: WorkerRole; created_at_ms: number };
 export type WebTurnEvent = { event_id: string; source: "core_topic" | "worker_activity" | string; payload: Record<string, unknown>; created_at_ms: number };

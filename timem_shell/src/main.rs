@@ -31,22 +31,22 @@ use timem_shell::{
     default_config_root, estimate_prompt_context_tokens, format_token_count,
     host_start_audit_event, load_reminder_tips_config, load_workspace_dirs_from_path,
     local_time_label, model_service_config_from_env, observation_events_from_core_topic_events,
-    observation_panel_width_for_terminal, parse_cli_args, render_final_response_at,
-    render_prof_report_data, render_shell_status_bar, render_thinking_view_at,
-    render_turn_outcome_text, resolve_memory_dir, run_session_turn, runtime_active_elapsed_secs,
-    runtime_profile_report, shell_status_message_from_core_topic, stale_context_decision_request,
-    topic_event_status_hint, work_instruction_load_report, work_instruction_load_request,
-    work_instruction_load_topic_event, work_instruction_mode_from_sources, workspace_config_file,
-    workspace_reference_context, CoreMemoryActivity, CoreTopicEvent, HostDecision,
-    HostDecisionRequest, HostStatusMessage, ModelDirection, NoopTurnUi, ObservationEvent,
-    ObservationPanel, OutputExpansionRequest, RoundLimitDecisionRequest, RuntimeConfigApplyError,
-    RuntimeConfigApplyMessageKind, RuntimeConfigApplyReport, RuntimeConfigField,
-    RuntimeConfigMenuReport, RuntimeProfiler, RuntimeRetryStatus, ShellStatusSnapshot,
-    StaleContextDecisionRequest, ThinkingViewSnapshot, TurnInput, TurnUi,
-    WorkInstructionLoadMessageKind, WorkInstructionLoadMode, WorkInstructionLoadReport,
-    WorkInstructionLoadRequest, WorkspaceCommand, WorkspaceCommandMessageKind,
-    WorkspaceCommandOutcome, WorkspaceCommandReport, WorkspaceMenuReport, SPINNER_ICONS,
-    TIMEM_LOGO,
+    observation_panel_width_for_terminal, parse_cli_args, render_final_answer_markdown,
+    render_final_response_at, render_prof_report_data, render_shell_status_bar,
+    render_thinking_view_at, render_turn_outcome_text, resolve_memory_dir, run_session_turn,
+    runtime_active_elapsed_secs, runtime_profile_report, shell_status_message_from_core_topic,
+    stale_context_decision_request, topic_event_status_hint, work_instruction_load_report,
+    work_instruction_load_request, work_instruction_load_topic_event,
+    work_instruction_mode_from_sources, workspace_config_file, workspace_reference_context,
+    CoreMemoryActivity, CoreTopicEvent, HostDecision, HostDecisionRequest, HostStatusMessage,
+    ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, OutputExpansionRequest,
+    RoundLimitDecisionRequest, RuntimeConfigApplyError, RuntimeConfigApplyMessageKind,
+    RuntimeConfigApplyReport, RuntimeConfigField, RuntimeConfigMenuReport, RuntimeProfiler,
+    RuntimeRetryStatus, ShellStatusSnapshot, StaleContextDecisionRequest, ThinkingViewSnapshot,
+    TurnInput, TurnUi, WorkInstructionLoadMessageKind, WorkInstructionLoadMode,
+    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkspaceCommand,
+    WorkspaceCommandMessageKind, WorkspaceCommandOutcome, WorkspaceCommandReport,
+    WorkspaceMenuReport, SPINNER_ICONS, TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -647,7 +647,12 @@ fn shell_session_effective_env(
 ) -> HashMap<String, String> {
     let mut merged = launch_env.clone();
     for (key, value) in &session.env {
-        merged.insert(key.clone(), value.clone());
+        let launch_has_non_empty_value = launch_env
+            .get(key)
+            .is_some_and(|launch_value| !launch_value.trim().is_empty());
+        if !launch_has_non_empty_value {
+            merged.insert(key.clone(), value.clone());
+        }
     }
     merged
 }
@@ -911,6 +916,15 @@ impl TurnUi for CliTurnUi<'_> {
 
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
         if let Some(status) = self.status.as_deref_mut() {
+            for event in events {
+                if event.topic.name == agent_core::CORE_TOPIC_SUB_ANSWER {
+                    let task = event.payload["task"].as_str().unwrap_or_default();
+                    let answer = event.payload["answer"].as_str().unwrap_or_default();
+                    if !task.trim().is_empty() && !answer.trim().is_empty() {
+                        status.show_sub_answer(task, answer);
+                    }
+                }
+            }
             if let Some(hint) = topic_event_status_hint(events) {
                 status.set_intent(&hint.action, hint.memory_activity);
             }
@@ -1133,6 +1147,22 @@ impl ThinkingStatus {
     fn settle_active_observations(&mut self) {
         if let Ok(mut state) = self.state.lock() {
             state.observations.apply(ObservationEvent::SettleActive);
+            rerender_thinking(&state, &self.rendered_lines);
+        }
+    }
+
+    fn show_sub_answer(&mut self, task: &str, answer: &str) {
+        if let Ok(state) = self.state.lock() {
+            clear_thinking_block(&self.rendered_lines);
+            let rendered = render_final_answer_markdown(answer);
+            println!(
+                "To: {}
+{}
+",
+                task.trim(),
+                rendered.trim_end()
+            );
+            let _ = io::stdout().flush();
             rerender_thinking(&state, &self.rendered_lines);
         }
     }
@@ -3921,7 +3951,7 @@ fn print_help() {
 }
 
 fn cli_help_text() -> &'static str {
-    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override the restored Session cache; the Session cache overrides process env defaults.\x1b[0m\n\nCreate a private env file from env_template, then load it for initial configuration:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n  export TIMEM_SPACE=/absolute/path/to/mem\n\nCommand line override example:\n  timem --space /absolute/path/to/mem --model qwen-plus\n\nOptions:\n  --space <absolute-path>        env TIMEM_SPACE; MEM directory, default ~/.timem/mem\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; model API format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; inline parser: json|xml, default xml\n  --tool-call-mode <mode>        env TIMEM_TOOL_CALL_MODE; auto|native|inline, default auto\n  --parallel-tool-calls <mode>   env TIMEM_PARALLEL_TOOL_CALLS; auto|true|false, default auto\n  --base-url <url>               env TIMEM_BASE_URL; model API base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --timeout <seconds>            env TIMEM_TIMEOUT; model connect/inactivity timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|20K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 20K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type another question and press Enter to queue a separate next turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai-compatible\n  Tool calling: auto (native when detected, otherwise inline)\n  Response protocol: xml (inline mode only)\n\nAPI key fallback env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
+    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override non-empty process env values; non-empty process env values override the restored Session cache.\x1b[0m\n\nCreate a private env file from env_template, then load it for initial configuration:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n  export TIMEM_SPACE=/absolute/path/to/mem\n\nCommand line override example:\n  timem --space /absolute/path/to/mem --model qwen-plus\n\nOptions:\n  --space <absolute-path>        env TIMEM_SPACE; MEM directory, default ~/.timem/mem\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; model API format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; inline parser: json|xml, default xml\n  --tool-call-mode <mode>        env TIMEM_TOOL_CALL_MODE; auto|native|inline, default auto\n  --parallel-tool-calls <mode>   env TIMEM_PARALLEL_TOOL_CALLS; auto|true|false, default auto\n  --base-url <url>               env TIMEM_BASE_URL; model API base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --timeout <seconds>            env TIMEM_TIMEOUT; model connect/inactivity timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|20K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 20K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type another question and press Enter to queue a separate next turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai-compatible\n  Tool calling: auto (native when detected, otherwise inline)\n  Response protocol: xml (inline mode only)\n\nAPI key fallback env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
 fn runtime_help_text() -> &'static str {

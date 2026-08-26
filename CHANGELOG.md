@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Let non-empty `TIMEM_*` process environment values loaded with `source env`
+  override restored Shell Session configuration, while keeping command-line
+  options highest priority and retaining cached values when the process
+  environment only contains an empty value.
+
 ## [1.2.0] - 2026-08-26
 
 ### Highlights

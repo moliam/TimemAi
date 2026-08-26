@@ -91,6 +91,15 @@ function initialAccessToken() {
 
 const accessToken = initialAccessToken();
 
+function isLiveTurnProgressEvent(event: WireEvent): boolean {
+  if (event.type === "semantic_event") return isLiveTurnProgressEvent(event.event);
+  if (event.type !== "core_topic") return false;
+  const topicName = event.event.topic?.name;
+  if (topicName === "core.model.response") return event.event.payload?.continue_work === true;
+  if (topicName === "core.sub_answer") return true;
+  return topicName === "core.action" && event.event.payload?.event === "start";
+}
+
 function queryToken() {
   return accessToken;
 }
@@ -1149,7 +1158,10 @@ function TimemApp() {
       };
       ws.onerror = () => setConnected(false);
       ws.onmessage = (message) => {
-        try { inboundEvents.enqueue(JSON.parse(String(message.data)) as WireEvent); } catch { /* Ignore malformed transport data. */ }
+        try {
+          const event = JSON.parse(String(message.data)) as WireEvent;
+          inboundEvents.enqueue(event, isLiveTurnProgressEvent(event));
+        } catch { /* Ignore malformed transport data. */ }
       };
     };
     connect();
@@ -3146,8 +3158,8 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
       </div>}
     </section>}
     {persistentToolGenItems.length > 0 && <div className="turn-persistent-toolgen" aria-label="ToolGen result">{persistentToolGenItems.map(({ key, activity }) => activity ? <ActivityView key={key} activity={activity}/> : null)}</div>}
-    {turn.final_answer && <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)} onDelete={canDeleteConversationContent ? () => onRequestMessageDelete({ sessionId, turnId: turn.turn_id, role: "assistant", roleIndex: 0, preview: turn.final_answer ?? "" }) : undefined}/>}
-    {!turn.final_answer && turn.completion && <section className="turn-completion-only"><CompletionCard completion={turn.completion}/></section>}
+    {(turn.sub_answers.length > 0 || turn.final_answer) && <TurnAnswerDelivery turn={turn} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)} onDelete={turn.final_answer && canDeleteConversationContent ? () => onRequestMessageDelete({ sessionId, turnId: turn.turn_id, role: "assistant", roleIndex: 0, preview: turn.final_answer ?? "" }) : undefined}/>}
+    {!turn.final_answer && turn.sub_answers.length === 0 && turn.completion && <section className="turn-completion-only"><CompletionCard completion={turn.completion}/></section>}
   </article>;
 }, areTurnInteractionPropsEqual);
 
@@ -3168,6 +3180,57 @@ function areTurnInteractionPropsEqual(previous: TurnInteractionProps, next: Turn
     return decision === nextDecision
       && previous.pendingDecisionKeys.has(decisionKey(decision)) === next.pendingDecisionKeys.has(decisionKey(nextDecision));
   });
+}
+
+function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, onToolGen, onDelete }: { turn: WebTurn; toolGenPending: boolean; toolGenBlocked: boolean; onToolGen?: () => void; onDelete?: () => void }) {
+  const hasFinal = !!turn.final_answer;
+  const hasInterim = turn.sub_answers.length > 0;
+  const availableKeys = [...(hasFinal ? ["final"] : []), ...(hasInterim ? ["interim"] : [])];
+  const newestKey = hasFinal ? "final" : "interim";
+  const [selectedKey, setSelectedKey] = useState(newestKey);
+  const previousFinal = useRef<string | null | undefined>(turn.final_answer);
+  const previousSubCount = useRef(turn.sub_answers.length);
+  const manualSelection = useRef(false);
+  const interactingUntil = useRef(0);
+  const markInteracting = () => { interactingUntil.current = Date.now() + 1_500; };
+  const selectPanel = (key: string) => {
+    manualSelection.current = true;
+    setSelectedKey(key);
+  };
+
+  useEffect(() => {
+    const finalArrived = !previousFinal.current && !!turn.final_answer;
+    const interimArrived = turn.sub_answers.length > previousSubCount.current;
+    previousFinal.current = turn.final_answer;
+    previousSubCount.current = turn.sub_answers.length;
+    if (manualSelection.current || Date.now() < interactingUntil.current) return;
+    if (finalArrived) setSelectedKey("final");
+    else if (interimArrived && !turn.final_answer) setSelectedKey("interim");
+  }, [turn.final_answer, turn.sub_answers]);
+
+  const selected = availableKeys.includes(selectedKey) ? selectedKey : availableKeys[0];
+  if (!selected) return null;
+  if (availableKeys.length === 1 && selected === "final" && turn.final_answer) {
+    return <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen} onDelete={onDelete}/>;
+  }
+  return <section className="turn-answer-delivery" onPointerDown={markInteracting} onFocus={markInteracting} onCopy={markInteracting}>
+    {hasInterim && <div className="turn-answer-tabs" role="tablist" aria-label="Turn answers">
+      {hasFinal && <button type="button" role="tab" aria-selected={selected === "final"} className={selected === "final" ? "selected" : ""} onClick={() => selectPanel("final")}>Final Answer</button>}
+      {hasInterim && <button type="button" role="tab" aria-selected={selected === "interim"} className={selected === "interim" ? "selected" : ""} onClick={() => selectPanel("interim")}>Interim</button>}
+    </div>}
+    <div className="turn-answer-panel" role="tabpanel">
+      {hasFinal && turn.final_answer && <div className={`turn-answer-view ${selected === "final" ? "selected" : "inactive"}`} aria-hidden={selected !== "final"}>
+        <div className="message-content"><MarkdownContent text={turn.final_answer}/></div>
+        {turn.completion ? <CompletionCard completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen}/> : null}
+      </div>}
+      {hasInterim && <div className={`turn-answer-view ${selected === "interim" ? "selected" : "inactive"}`} aria-hidden={selected !== "interim"}>
+        <div className="turn-interim-list">{turn.sub_answers.map((item, index) => <section className="turn-interim-item" key={item.sub_answer_id}>
+          <h3><span>{index + 1}.</span> {item.task}</h3>
+          <div className="message-content"><MarkdownContent text={item.answer}/></div>
+        </section>)}</div>
+      </div>}
+    </div>
+  </section>;
 }
 
 function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked, onToolGen, onDelete }: { text: string; completion: WebTurn["completion"]; toolGenPending: boolean; toolGenBlocked: boolean; onToolGen?: () => void; onDelete?: () => void }) {

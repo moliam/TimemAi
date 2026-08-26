@@ -967,7 +967,7 @@ fn cli_help_lists_all_env_backed_options() {
     let help = cli_help_text();
     for expected in [
         "\x1b[1mPrecedence:",
-        "command line options override the restored Session cache; the Session cache overrides process env defaults.\x1b[0m",
+        "command line options override non-empty process env values; non-empty process env values override the restored Session cache.\x1b[0m",
         "cp env_template env",
         "source /path/to/your/env",
         "--space",
@@ -2265,13 +2265,14 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
 }
 
 #[test]
-fn shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence() {
+fn shell_resume_prefers_non_empty_launch_env_then_cli_over_stored_session_env() {
     let root = std::env::temp_dir().join(format!("timem_shell_session_env_{}", epoch_millis()));
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let launch_env = HashMap::from([
         ("TIMEM_MODEL".to_string(), "launch-model".to_string()),
         ("TIMEM_RESPONSE_PROTOCOL".to_string(), "json".to_string()),
+        ("TIMEM_API_KEY".to_string(), "launch-key".to_string()),
     ]);
     let session = StoredSession {
         session_id: "web_session_env".to_string(),
@@ -2311,19 +2312,20 @@ fn shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence() {
 
     let merged = shell_session_effective_env(&launch_env, &session);
     let restored = model_service_config_from_env(&CliOptions::default(), &merged).unwrap();
-    assert_eq!(restored.model, "stored-model");
+    assert_eq!(restored.model, "launch-model");
     assert_eq!(restored.base_url, "https://stored.example/v1");
     assert_eq!(restored.timeout_secs, 77);
-    assert_eq!(restored.api_key, "cached-key");
+    assert_eq!(restored.api_key, "launch-key");
     assert_eq!(
         merged.get("TIMEM_RESPONSE_PROTOCOL").map(String::as_str),
-        Some("xml")
+        Some("json")
     );
 
     let cli_override = model_service_config_from_env(
         &CliOptions {
             model: Some("cli-model".to_string()),
             base_url: Some("https://cli.example/v1".to_string()),
+            api_key: Some("cli-key".to_string()),
             ..CliOptions::default()
         },
         &merged,
@@ -2331,8 +2333,46 @@ fn shell_resume_applies_stored_session_env_but_keeps_cli_override_precedence() {
     .unwrap();
     assert_eq!(cli_override.model, "cli-model");
     assert_eq!(cli_override.base_url, "https://cli.example/v1");
+    assert_eq!(cli_override.api_key, "cli-key");
 
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shell_resume_ignores_empty_launch_env_values_instead_of_clearing_cache() {
+    let workspace = std::env::current_dir().unwrap();
+    let session = StoredSession {
+        session_id: "cached_session".to_string(),
+        display_name: "Cached Session".to_string(),
+        group_id: None,
+        created_at_ms: 1,
+        updated_at_ms: 2,
+        current_dir: workspace.display().to_string(),
+        profile: StoredSessionProfile::default(),
+        env: BTreeMap::from([
+            ("TIMEM_API_KEY".to_string(), "cached-key".to_string()),
+            ("TIMEM_MODEL".to_string(), "cached-model".to_string()),
+        ]),
+        env_overrides: None,
+        mcp_server_ids: Vec::new(),
+        state: StoredSessionState::Ready,
+        last_turn_id: None,
+        raw_chat_history_path: String::new(),
+    };
+    let launch_env = HashMap::from([
+        ("TIMEM_API_KEY".to_string(), "".to_string()),
+        ("TIMEM_MODEL".to_string(), "   ".to_string()),
+    ]);
+
+    let merged = shell_session_effective_env(&launch_env, &session);
+    assert_eq!(
+        merged.get("TIMEM_API_KEY").map(String::as_str),
+        Some("cached-key")
+    );
+    assert_eq!(
+        merged.get("TIMEM_MODEL").map(String::as_str),
+        Some("cached-model")
+    );
 }
 
 #[test]
