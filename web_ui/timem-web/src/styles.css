@@ -1771,13 +1771,19 @@ body {
 .model-retry-status summary svg { transition: transform .16s ease; }
 .model-retry-status[open] summary svg { transform: rotate(90deg); }
 .model-retry-status summary small { color: #9f9068; font-size: 9px; font-variant-numeric: tabular-nums; }
-.model-retry-status.reconnecting summary { border-color: #466079; background: #202b36; color: #8fc5ed; }
-.model-retry-status.reconnecting summary small { color: #789bb5; }
+.model-retry-status.network-error summary { border-color: #466079; background: #202b36; color: #8fc5ed; }
+.model-retry-status.network-error summary small { color: #789bb5; }
+.model-retry-status.response-timeout summary { border-color: #765d3b; background: #32291d; color: #e2ba70; }
+.model-retry-status.rate-limited summary { border-color: #725848; background: #32251f; color: #e5aa87; }
+.model-retry-status.service-error summary { border-color: #704b50; background: #302124; color: #e4a0a8; }
 .model-retry-detail { position: absolute; z-index: 8; top: calc(100% + 7px); right: 0; width: min(420px, calc(100vw - 48px)); max-height: 240px; overflow: auto; border: 1px solid #4a4a4a; border-radius: 8px; padding: 10px 12px; background: #242424; box-shadow: 0 12px 30px #0008; color: #d0d0d0; font-size: 11px; line-height: 1.5; }
 .model-retry-detail p { margin: 0 0 8px; overflow-wrap: anywhere; }
 .model-retry-detail p:last-child { margin-bottom: 0; }
 :root[data-theme="light"] .model-retry-status summary { border-color: #b8a26d; background: #fff8e7; color: #806321; }
-:root[data-theme="light"] .model-retry-status.reconnecting summary { border-color: #8eb1ca; background: #edf7fd; color: #286a9b; }
+:root[data-theme="light"] .model-retry-status.network-error summary { border-color: #8eb1ca; background: #edf7fd; color: #286a9b; }
+:root[data-theme="light"] .model-retry-status.response-timeout summary { border-color: #c7a16a; background: #fff7e8; color: #855c1d; }
+:root[data-theme="light"] .model-retry-status.rate-limited summary { border-color: #c79678; background: #fff2ea; color: #8b4f2d; }
+:root[data-theme="light"] .model-retry-status.service-error summary { border-color: #c99198; background: #fff0f2; color: #913d49; }
 :root[data-theme="light"] .model-retry-detail { border-color: #cdd6da; background: #fff; color: #42545c; box-shadow: 0 10px 28px #58707b26; }
 @media (max-width: 720px) {
   .turn-assistant-heading { flex-wrap: wrap; }

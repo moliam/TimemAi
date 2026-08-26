@@ -1236,8 +1236,8 @@ describe("web topic view model", () => {
     expect(activeModelRetryStatus(retrying)?.detail)
       .toContain("回复缺少必需的 response 根节点");
 
-    const reconnecting = turn("reconnecting", "working");
-    reconnecting.events = [{
+    const serviceFailure = turn("service-failure", "working");
+    serviceFailure.events = [{
       event_id: "retry",
       source: "worker_activity",
       created_at_ms: 2,
@@ -1250,20 +1250,24 @@ describe("web topic view model", () => {
       },
     }];
 
-    expect(activeModelRetryStatus(reconnecting)).toMatchObject({
-      kind: "reconnecting",
-      label: "reconnecting",
+    expect(activeModelRetryStatus(serviceFailure)).toMatchObject({
+      kind: "service-error",
+      label: "上游异常",
       progress: "3/100",
     });
-    expect(activeModelRetryStatus(reconnecting)?.detail)
+    expect(activeModelRetryStatus(serviceFailure)?.detail)
+      .toContain("模型接入点或其上游服务返回可重试错误");
+    expect(activeModelRetryStatus(serviceFailure)?.detail)
+      .toContain("重试进度：3/100");
+    expect(activeModelRetryStatus(serviceFailure)?.detail)
       .toContain("model_http_503");
 
     const changingFailure = turn("changing-failure", "working");
     changingFailure.events = [
       retrying.events[0],
-      reconnecting.events[0],
+      serviceFailure.events[0],
     ];
-    expect(activeModelRetryStatus(changingFailure)?.kind).toBe("reconnecting");
+    expect(activeModelRetryStatus(changingFailure)?.kind).toBe("service-error");
 
     changingFailure.events.push({
       ...retrying.events[0],
@@ -1271,6 +1275,46 @@ describe("web topic view model", () => {
       created_at_ms: 4,
     });
     expect(activeModelRetryStatus(changingFailure)?.kind).toBe("retrying");
+  });
+
+  it("labels retryable model failures by their actual cause", () => {
+    const statusFor = (error: string) => {
+      const active = turn(`retry-${error}`, "working");
+      active.events = [{
+        event_id: "retry",
+        source: "worker_activity",
+        created_at_ms: 2,
+        payload: { kind: "model_retry", attempt: 1, max_attempts: 100, delay_ms: 10_000, error },
+      }];
+      return activeModelRetryStatus(active);
+    };
+
+    expect(statusFor("model_timeout: no response progress for 120 seconds")).toMatchObject({
+      kind: "response-timeout",
+      label: "响应超时",
+    });
+    expect(statusFor("model_http_429: too many requests")).toMatchObject({
+      kind: "rate-limited",
+      label: "服务限流",
+    });
+    expect(statusFor("curl: (6) Could not resolve host: gateway.example")).toMatchObject({
+      kind: "network-error",
+      label: "网络异常",
+    });
+    expect(statusFor("model_network_error: connection reset")).toMatchObject({
+      kind: "network-error",
+      label: "网络异常",
+    });
+    expect(statusFor("curl: (28) Operation timed out")).toMatchObject({
+      kind: "response-timeout",
+      label: "响应超时",
+    });
+    expect(statusFor("unexpected_retryable_failure")).toMatchObject({
+      kind: "service-error",
+      label: "模型服务异常",
+    });
+    expect(statusFor("model_http_429: too many requests")?.detail).not.toContain("网络异常");
+    expect(statusFor("model_http_503: unavailable")?.detail).not.toContain("自动重连");
   });
 
   it("clears the temporary recovery status after recovery or turn completion", () => {
