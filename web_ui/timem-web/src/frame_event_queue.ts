@@ -11,7 +11,7 @@ export interface FrameEventQueueOptions<T> {
 }
 
 export interface FrameEventQueue<T> {
-  enqueue(item: T): void;
+  enqueue(item: T, flushImmediately?: boolean): void;
   dispose(): void;
   pending(): number;
 }
@@ -47,10 +47,20 @@ export function createFrameEventQueue<T>({
   };
 
   return {
-    enqueue(item) {
+    enqueue(item, flushImmediately = false) {
       if (disposed) return;
       queue.push(item);
-      requestFlush();
+      if (flushImmediately) {
+        if (scheduled !== null) cancel(scheduled);
+        scheduled = null;
+        while (!disposed && queue.length > 0) {
+          flush();
+          if (scheduled !== null) cancel(scheduled);
+          scheduled = null;
+        }
+      } else {
+        requestFlush();
+      }
     },
     dispose() {
       disposed = true;

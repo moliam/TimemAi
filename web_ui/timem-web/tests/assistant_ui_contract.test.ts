@@ -955,6 +955,13 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain("min-height: 20px");
   });
 
+  it("flushes live Thought/Action progress without waiting for the next animation frame", () => {
+    expect(source).toContain("function isLiveTurnProgressEvent(event: WireEvent): boolean");
+    expect(source).toContain('topicName === "core.model.response"');
+    expect(source).toContain('topicName === "core.action" && event.event.payload?.event === "start"');
+    expect(source).toContain("inboundEvents.enqueue(event, isLiveTurnProgressEvent(event));");
+  });
+
   it("uses dnd-kit sortable motion for queued-message reordering", () => {
     expect(source).toContain('from "@dnd-kit/core"');
     expect(source).toContain('from "@dnd-kit/sortable"');
