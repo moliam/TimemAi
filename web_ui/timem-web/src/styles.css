@@ -2330,9 +2330,7 @@ body {
   transform: translateY(-50%);
   transition: opacity .15s ease, visibility 0s linear .15s;
 }
-.session-group:hover .session-group-actions,
-.session-group-heading:focus-within .session-group-actions,
-.session-group-actions:hover,
+.session-group-heading:hover .session-group-actions,
 .session-group-actions:focus-within {
   visibility: visible;
   opacity: 1;
