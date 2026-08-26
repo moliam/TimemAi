@@ -60,7 +60,8 @@ fn model_api_curl_command_does_not_expose_secret_or_body_in_argv() {
     let config = key_file.to_model_service_config("qwen-test");
     let request = prepare_model_http_request(&config, "prompt with private body");
     let body = serde_json::to_string(&request.model_request.body).unwrap();
-    let command = build_curl_command(config.timeout_secs);
+    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
+    let command = build_curl_command(config.timeout_secs, curl_config_file.path());
     let argv = command
         .get_args()
         .map(|arg| arg.to_string_lossy())
@@ -69,16 +70,19 @@ fn model_api_curl_command_does_not_expose_secret_or_body_in_argv() {
 
     assert!(!argv.contains("sk-test-secret"), "{argv}");
     assert!(!argv.contains("prompt with private body"), "{argv}");
-    assert!(argv.contains("--config -"), "{argv}");
+    assert!(argv.contains("--config"), "{argv}");
+    assert!(argv.contains("--data-binary @-"), "{argv}");
 
-    let curl_config = build_curl_config(&request, &body);
+    let curl_config = build_curl_config(&request);
     assert!(curl_config.contains("Authorization: Bearer sk-test-secret"));
-    assert!(curl_config.contains("prompt with private body"));
+    assert!(!curl_config.contains("prompt with private body"));
+    assert!(body.contains("prompt with private body"));
+    assert!(curl_config_file.path().exists());
 }
 
 #[test]
 fn model_timeout_is_connect_and_inactivity_bound_not_total_duration() {
-    let command = build_curl_command(7);
+    let command = build_curl_command(7, Path::new("curl-test.conf"));
     let argv = command
         .get_args()
         .map(|arg| arg.to_string_lossy())
@@ -126,9 +130,10 @@ fn progressing_response_may_outlive_configured_timeout() {
     request.endpoint = format!("http://{addr}/v1/chat/completions");
     let body = serde_json::to_string(&request.model_request.body).unwrap();
     let started = Instant::now();
+    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
     let output = run_command_with_input_cancel_and_inactivity_timeout(
-        build_curl_command(1),
-        build_curl_config(&request, &body).into_bytes(),
+        build_curl_command(1, curl_config_file.path()),
+        body.into_bytes(),
         Duration::from_secs(1),
         &mut || false,
     )
@@ -177,9 +182,10 @@ fn stalled_response_still_hits_configured_inactivity_timeout() {
     request.endpoint = format!("http://{addr}/v1/chat/completions");
     let body = serde_json::to_string(&request.model_request.body).unwrap();
     let started = Instant::now();
+    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
     let error = run_command_with_input_cancel_and_inactivity_timeout(
-        build_curl_command(1),
-        build_curl_config(&request, &body).into_bytes(),
+        build_curl_command(1, curl_config_file.path()),
+        body.into_bytes(),
         Duration::from_secs(1),
         &mut || false,
     )
@@ -209,14 +215,13 @@ fn curl_config_escapes_custom_header_special_characters() {
         "quoted=\"yes\"; path=C:\\tmp; city=东京".to_string(),
     );
     let request = prepare_model_http_request(&config, "hello");
-    let body = serde_json::to_string(&request.model_request.body).unwrap();
-    let curl_config = build_curl_config(&request, &body);
+    let curl_config = build_curl_config(&request);
     assert!(curl_config
         .contains("header = \"X-Signature: quoted=\\\"yes\\\"; path=C:\\\\tmp; city=东京\""));
 }
 
 #[test]
-fn curl_config_stdin_sends_headers_and_body_without_argv_payload() {
+fn curl_config_file_and_body_stdin_send_headers_and_body_without_argv_payload() {
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(listener) => listener,
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
@@ -253,9 +258,10 @@ fn curl_config_stdin_sends_headers_and_body_without_argv_payload() {
     config.base_url = format!("http://{addr}/v1");
     let request = prepare_model_http_request(&config, "prompt body through curl config");
     let body = serde_json::to_string(&request.model_request.body).unwrap();
+    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
     let output = run_command_with_input_and_cancel(
-        build_curl_command(config.timeout_secs),
-        build_curl_config(&request, &body).into_bytes(),
+        build_curl_command(config.timeout_secs, curl_config_file.path()),
+        body.into_bytes(),
         &mut || false,
     )
     .unwrap();
@@ -267,6 +273,77 @@ fn curl_config_stdin_sends_headers_and_body_without_argv_payload() {
     let captured = server.join().unwrap();
     assert!(captured.contains(&expected_authorization));
     assert!(captured.contains("prompt body through curl config"));
+}
+
+#[test]
+fn two_megabyte_model_body_reaches_http_server_intact() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+            .unwrap();
+        request
+    });
+
+    let mut config = LocalLLMKeyFile {
+        api_key: "large-body-test-key".to_string(),
+        available_models: vec!["large-body-test-model".to_string()],
+    }
+    .to_model_service_config("large-body-test-model");
+    config.base_url = format!("http://{addr}/v1");
+    let marker = "large-body-tail-marker";
+    let prompt = format!("{}{}", "x".repeat(2 * 1024 * 1024), marker);
+    let request = prepare_model_http_request(&config, &prompt);
+    let body = serde_json::to_string(&request.model_request.body).unwrap();
+    assert!(body.len() > 2 * 1024 * 1024);
+
+    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
+    let output = run_command_with_input_and_cancel(
+        build_curl_command(config.timeout_secs, curl_config_file.path()),
+        body.clone().into_bytes(),
+        &mut || false,
+    )
+    .unwrap();
+
+    assert!(output.status.success());
+    let captured = server.join().unwrap();
+    let (_, captured_body) = captured.split_once("\r\n\r\n").unwrap();
+    assert_eq!(captured_body.len(), body.len());
+    assert_eq!(captured_body, body);
+    assert!(captured_body.contains(marker));
+    assert!(captured_body.contains(r#""model":"large-body-test-model""#));
+}
+
+#[test]
+fn curl_config_file_is_removed_when_guard_drops() {
+    let path = {
+        let config_file = CurlConfigFile::create("request = \"POST\"\n").unwrap();
+        let path = config_file.path().to_path_buf();
+        assert!(path.exists());
+        path
+    };
+    assert!(!path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn curl_config_file_is_owner_readable_only_on_unix() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let config_file = CurlConfigFile::create("header = \"Authorization: secret\"\n").unwrap();
+    let mode = std::fs::metadata(config_file.path())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
 }
 
 #[test]
