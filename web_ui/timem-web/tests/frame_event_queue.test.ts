@@ -65,6 +65,25 @@ describe("frame event queue", () => {
     expect(batches.flat()).toEqual([1, 2, 3, 4]);
   });
 
+  it("flushes live progress immediately without reordering earlier events", () => {
+    const frames = manualFrames();
+    const batches: number[][] = [];
+    const queue = createFrameEventQueue<number>({
+      consume: (items) => batches.push([...items]),
+      schedule: frames.schedule,
+      cancel: frames.cancel,
+      now: () => 0,
+    });
+    for (let value = 1; value <= 30; value += 1) queue.enqueue(value);
+    queue.enqueue(31, true);
+    expect(batches).toEqual([
+      Array.from({ length: 24 }, (_, index) => index + 1),
+      Array.from({ length: 7 }, (_, index) => index + 25),
+    ]);
+    expect(frames.size()).toBe(0);
+    expect(queue.pending()).toBe(0);
+  });
+
   it("drops pending UI work after disposal", () => {
     const frames = manualFrames();
     const consumed: number[] = [];

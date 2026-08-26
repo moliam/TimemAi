@@ -91,6 +91,15 @@ function initialAccessToken() {
 
 const accessToken = initialAccessToken();
 
+function isLiveTurnProgressEvent(event: WireEvent): boolean {
+  if (event.type === "semantic_event") return isLiveTurnProgressEvent(event.event);
+  if (event.type !== "core_topic") return false;
+  const topicName = event.event.topic?.name;
+  if (topicName === "core.model.response") return event.event.payload?.continue_work === true;
+  if (topicName === "core.sub_answer") return true;
+  return topicName === "core.action" && event.event.payload?.event === "start";
+}
+
 function queryToken() {
   return accessToken;
 }
@@ -1149,7 +1158,10 @@ function TimemApp() {
       };
       ws.onerror = () => setConnected(false);
       ws.onmessage = (message) => {
-        try { inboundEvents.enqueue(JSON.parse(String(message.data)) as WireEvent); } catch { /* Ignore malformed transport data. */ }
+        try {
+          const event = JSON.parse(String(message.data)) as WireEvent;
+          inboundEvents.enqueue(event, isLiveTurnProgressEvent(event));
+        } catch { /* Ignore malformed transport data. */ }
       };
     };
     connect();
