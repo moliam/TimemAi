@@ -74,6 +74,66 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
 }
 
 #[test]
+fn user_supplement_has_an_explicit_visible_marker() {
+    fn delta(protocol_type: &str) -> PromptDelta {
+        PromptDelta {
+            delta_id: "pd_supplement_marker".to_string(),
+            time_ms: 123,
+            hidden_slice_ids: Vec::new(),
+            slices: vec![
+                PromptSlice {
+                    delta_id: "pd_supplement_marker".to_string(),
+                    slice_id: "ps_supplement_marker_s001".to_string(),
+                    component_id: "question".to_string(),
+                    prompt_type: "user_question".to_string(),
+                    time_ms: 123,
+                    text: "original question".to_string(),
+                    slice_index: 1,
+                    slice_count: 2,
+                },
+                PromptSlice {
+                    delta_id: "pd_supplement_marker".to_string(),
+                    slice_id: "ps_supplement_marker_s002".to_string(),
+                    component_id: "supplement".to_string(),
+                    prompt_type: protocol_type.to_string(),
+                    time_ms: 124,
+                    text: "extra requirement".to_string(),
+                    slice_index: 2,
+                    slice_count: 2,
+                },
+            ],
+        }
+    }
+
+    let json = render_prompt_with_rendered_static(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]",
+        &[delta("user_supplement")],
+        "TIMEM_ASSISTANT",
+        &JsonSuiteV1,
+    );
+    assert!(json.contains("## USER\n\noriginal question"), "{json}");
+    assert!(
+        json.contains("## USER (supplement)\n\nextra requirement"),
+        "{json}"
+    );
+
+    let xml = render_prompt_with_rendered_static(
+        "<Timem System Prompt>\nSTATIC\n</Timem System Prompt>",
+        &[delta("user_supplement")],
+        "TIMEM_ASSISTANT",
+        &XmlSuiteV1,
+    );
+    assert!(
+        xml.contains("<USER>\n\noriginal question\n</USER>"),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("<USER kind=\"supplement\">\n\nextra requirement\n</USER>"),
+        "{xml}"
+    );
+}
+
+#[test]
 fn xml_protocol_wraps_static_prompt_with_timem_system_prompt_boundary() {
     let rendered = render_static_prompt(
         "STATIC",
@@ -1121,6 +1181,7 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
     );
 
     assert!(json.contains("[BEGIN DELTA delta_id: pd_1, time_ms: 123]"));
+    assert!(json.contains("[BEGIN TURN turn_id: turn_1]"));
     assert!(!json.contains("[END DELTA]"));
     assert!(!json.contains("<prompt_delta "));
     assert!(!json.contains("</prompt_delta>"));
@@ -1134,6 +1195,7 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
     assert!(!json.contains("this whole xml-root is your response"));
 
     assert!(xml.contains(r#"<prompt_delta id="pd_1" time_ms="123">"#));
+    assert!(xml.contains("[BEGIN TURN turn_id: turn_1]"));
     assert!(xml.contains("</prompt_delta>"));
     assert!(!xml.contains("[BEGIN DELTA "));
     assert!(!xml.contains("[END DELTA]"));
