@@ -3,7 +3,7 @@ import { closestCenter, DndContext, DragEndEvent, DragOverlay, DragOverEvent, Ke
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { ArrowDown, ArrowLeftRight, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronRight, ChevronUp, CircleStop, Copy, Cpu, Database, Eye, EyeOff, Folder, FolderOpen, FolderPlus, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Sparkles, Terminal, TriangleAlert, Trash2, Wrench, X } from "lucide-react";
-import { Children, CSSProperties, Dispatch, isValidElement, memo, MutableRefObject, ReactNode, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Children, CSSProperties, Dispatch, isValidElement, memo, MutableRefObject, ReactNode, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useId } from "react";
 import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
@@ -14,6 +14,7 @@ import { applyWorkerRoleMutation, isOptimisticWorkerRoleMutation, replayWorkerRo
 import { adjacentUserMessageIndex, canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, UserMessageNavigationDirection, wheelDeltaPixels } from "./scroll";
 import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, manualToolGenCommand, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn } from "./view_model";
 import { safeMarkdownUrl } from "./markdown_security";
+import { extractMarkdownOutline, finalAnswerNeedsOutline, markdownHeadingId, MarkdownOutlineItem } from "./markdown_outline";
 import { createMcpTransportDrafts, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
 import { commandSessionId, isModelSubmissionCommand, modelDisplayName, modelServiceIssue, NO_MODEL_ENDPOINTS_ISSUE, UNCONFIGURED_MODEL_LABEL } from "./model_service_ui";
@@ -3220,7 +3221,7 @@ function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, onToolGen, o
     </div>}
     <div className="turn-answer-panel" role="tabpanel">
       {hasFinal && turn.final_answer && <div className={`turn-answer-view ${selected === "final" ? "selected" : "inactive"}`} aria-hidden={selected !== "final"}>
-        <div className="message-content"><MarkdownContent text={turn.final_answer}/></div>
+        <FinalAnswerContent text={turn.final_answer}/>
         {turn.completion ? <CompletionCard completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen}/> : null}
       </div>}
       {hasInterim && <div className={`turn-answer-view ${selected === "interim" ? "selected" : "inactive"}`} aria-hidden={selected !== "interim"}>
@@ -3244,11 +3245,92 @@ function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked,
     {onDelete && <button type="button" className="chat-message-delete assistant-message-delete" title="Delete this answer from the conversation and raw chat log" aria-label="Delete assistant answer" onClick={onDelete}><Trash2 size={13}/></button>}
   </div>;
   return <section className="turn-final-delivery">
-    <div className="message-content"><MarkdownContent text={text}/></div>
+    <FinalAnswerContent text={text}/>
     {completion
       ? <CompletionCard completion={completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen} answerActions={answerActions}/>
       : answerActions}
   </section>;
+}
+
+
+const FINAL_ANSWER_OUTLINE_MIN_SECTIONS = 2;
+const FINAL_ANSWER_OUTLINE_SCROLL_OFFSET = 24;
+
+function FinalAnswerContent({ text }: { text: string }) {
+  const outline = useMemo(() => extractMarkdownOutline(text), [text]);
+  const reactId = useId();
+  const headingPrefix = `final-heading-${reactId.replaceAll(":", "")}`;
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const [showOutline, setShowOutline] = useState(false);
+  const [activeId, setActiveId] = useState(outline[0]?.id ?? "");
+
+  useEffect(() => setActiveId(outline[0]?.id ?? ""), [outline]);
+
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    const content = contentRef.current;
+    const viewport = root?.closest<HTMLElement>(".chat-scroll");
+    if (!root || !content || !viewport || outline.length < FINAL_ANSWER_OUTLINE_MIN_SECTIONS) {
+      setShowOutline(false);
+      return;
+    }
+    const update = () => setShowOutline(finalAnswerNeedsOutline(content.offsetHeight, viewport.clientHeight, outline.length));
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(update);
+    observer.observe(content);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [outline, text]);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    const viewport = root?.closest<HTMLElement>(".chat-scroll");
+    if (!root || !viewport || !showOutline) return;
+    const updateActive = () => {
+      const threshold = viewport.getBoundingClientRect().top + FINAL_ANSWER_OUTLINE_SCROLL_OFFSET;
+      let next = outline[0]?.id ?? "";
+      for (const item of outline) {
+        const heading = document.getElementById(`${headingPrefix}-${item.id}`);
+        if (!heading || !root.contains(heading)) continue;
+        if (heading.getBoundingClientRect().top <= threshold) next = item.id;
+        else break;
+      }
+      setActiveId((current) => current === next ? current : next);
+    };
+    updateActive();
+    viewport.addEventListener("scroll", updateActive, { passive: true });
+    return () => viewport.removeEventListener("scroll", updateActive);
+  }, [headingPrefix, outline, showOutline]);
+
+  const navigate = (item: MarkdownOutlineItem) => {
+    const root = rootRef.current;
+    const viewport = root?.closest<HTMLElement>(".chat-scroll");
+    const heading = document.getElementById(`${headingPrefix}-${item.id}`);
+    if (!root || !viewport || !heading || !root.contains(heading)) return;
+    const viewportTop = viewport.getBoundingClientRect().top;
+    const targetTop = viewport.scrollTop + heading.getBoundingClientRect().top - viewportTop - FINAL_ANSWER_OUTLINE_SCROLL_OFFSET;
+    viewport.scrollTo({ top: targetTop, behavior: prefersReducedMotion() ? "auto" : "smooth" });
+    setActiveId(item.id);
+  };
+
+  return <div ref={(node) => { rootRef.current = node; contentRef.current = node; }} className={`message-content final-answer-reading${showOutline ? " has-outline" : ""}`}>
+    {showOutline && <aside className="final-answer-outline" aria-label="Final answer table of contents">
+      <div className="final-answer-outline-card">
+        <span>Contents</span>
+        <nav>{outline.map((item) => <button
+          type="button"
+          key={item.id}
+          className={`${activeId === item.id ? "active " : ""}level-${item.level}`}
+          aria-current={activeId === item.id ? "location" : undefined}
+          title={item.title}
+          onClick={() => navigate(item)}
+        >{item.title}</button>)}</nav>
+      </div>
+    </aside>}
+    <MarkdownContent text={text} headingIdPrefix={headingPrefix}/>
+  </div>;
 }
 
 function HeaderContextUsage({ session }: { session: Session | undefined }) {
@@ -3399,11 +3481,21 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
   </section>;
 }
 
-const MarkdownContent = memo(function MarkdownContent({ text }: { text: string }) {
+const MarkdownContent = memo(function MarkdownContent({ text, headingIdPrefix }: { text: string; headingIdPrefix?: string }) {
+  const headingOccurrences = new Map<string, number>();
+  const heading = (level: 1 | 2 | 3) => ({ node: _node, children, ...props }: React.HTMLAttributes<HTMLHeadingElement> & { node?: unknown }) => {
+    const title = textFromNode(children).trim();
+    const id = headingIdPrefix ? `${headingIdPrefix}-${markdownHeadingId(title, headingOccurrences)}` : undefined;
+    const Tag = `h${level}` as const;
+    return <Tag {...props} id={id}>{children}</Tag>;
+  };
   return <div className="markdown-body"><ReactMarkdown
     remarkPlugins={[remarkGfm]}
     rehypePlugins={[rehypeHighlight]}
     components={{
+      h1: heading(1),
+      h2: heading(2),
+      h3: heading(3),
       a: ({ node: _node, href, ...props }) => {
         const safeHref = safeMarkdownUrl(href);
         return safeHref ? <a {...props} href={safeHref} target="_blank" rel="noopener noreferrer"/> : <span {...props}/>;

@@ -3008,3 +3008,34 @@ body {
 :root[data-theme="light"] .turn-interim-item h3 { color: #38515a; }
 :root[data-theme="light"] .turn-interim-item h3 span { color: #237f72; }
 :root[data-theme="light"] .turn-interim-item .message-content { color: #22343b; }
+
+/* Long final answers expose a quiet, floating reading outline in otherwise unused space. */
+.final-answer-reading { position: relative; min-width: 0; }
+.final-answer-reading .markdown-body :is(h1, h2, h3)[id] { scroll-margin-top: 24px; }
+.final-answer-outline { position: absolute; z-index: 2; top: 0; bottom: 0; right: calc(100% + 28px); width: 184px; pointer-events: none; }
+.final-answer-outline-card { position: sticky; top: 22px; max-height: min(64vh, 540px); overflow: hidden; padding: 12px 8px 12px 10px; border: 1px solid #ffffff0a; border-radius: 12px; background: linear-gradient(145deg, #292929d9, #202020bf); box-shadow: 0 14px 42px #00000024, inset 0 1px #ffffff08; color: #858585; pointer-events: auto; backdrop-filter: blur(16px) saturate(115%); }
+.final-answer-outline-card::after { position: absolute; top: 40px; bottom: 12px; left: 10px; width: 1px; background: linear-gradient(180deg, transparent, #ffffff17 10%, #ffffff17 90%, transparent); content: ""; pointer-events: none; }
+.final-answer-outline-card > span { display: block; margin: 0 0 8px 10px; color: #6f6f6f; font-size: 9px; font-weight: 720; letter-spacing: .12em; text-transform: uppercase; }
+.final-answer-outline-card nav { display: grid; max-height: min(56vh, 472px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: none; mask-image: linear-gradient(180deg, transparent 0, #000 7px, #000 calc(100% - 7px), transparent 100%); }
+.final-answer-outline-card nav::-webkit-scrollbar { display: none; }
+.final-answer-outline-card button { position: relative; min-width: 0; overflow: hidden; border: 0; border-radius: 6px; padding: 5px 8px 5px 16px; background: transparent; color: #838383; font-size: 10px; font-weight: 520; line-height: 1.4; text-align: left; text-overflow: ellipsis; white-space: nowrap; transition: color .16s ease, background .16s ease, transform .16s ease; }
+.final-answer-outline-card button::before { position: absolute; z-index: 1; top: 50%; left: 7px; width: 4px; height: 4px; border-radius: 50%; background: #646464; box-shadow: 0 0 0 3px #242424; content: ""; transform: translate(-50%, -50%); transition: width .16s ease, height .16s ease, background .16s ease, box-shadow .16s ease; }
+.final-answer-outline-card button.level-2 { padding-left: 23px; }
+.final-answer-outline-card button.level-2::before { left: 14px; width: 3px; height: 3px; }
+.final-answer-outline-card button.level-3 { padding-left: 30px; color: #707070; font-size: 9px; }
+.final-answer-outline-card button.level-3::before { left: 21px; width: 2px; height: 2px; }
+.final-answer-outline-card button:hover { background: #ffffff09; color: #c5c5c5; transform: translateX(1px); }
+.final-answer-outline-card button.active { background: linear-gradient(90deg, #78b7dc18, transparent); color: #d8ebf7; }
+.final-answer-outline-card button.active::before { width: 6px; height: 6px; background: #91c9e9; box-shadow: 0 0 0 3px #6da9cc20, 0 0 12px #73b9e470; }
+.final-answer-outline-card button:focus-visible { outline: 1px solid #6f9cbb; outline-offset: -1px; }
+:root[data-theme="light"] .final-answer-outline-card { border-color: #18344010; background: linear-gradient(145deg, #fffffff0, #f3f6f7e6); box-shadow: 0 14px 38px #29434d16, inset 0 1px #fff; color: #68757b; }
+:root[data-theme="light"] .final-answer-outline-card::after { background: linear-gradient(180deg, transparent, #31515d1c 10%, #31515d1c 90%, transparent); }
+:root[data-theme="light"] .final-answer-outline-card > span { color: #7a858a; }
+:root[data-theme="light"] .final-answer-outline-card button { color: #68757b; }
+:root[data-theme="light"] .final-answer-outline-card button::before { background: #a6b2b7; box-shadow: 0 0 0 3px #f6f8f9; }
+:root[data-theme="light"] .final-answer-outline-card button.level-3 { color: #899398; }
+:root[data-theme="light"] .final-answer-outline-card button:hover { background: #24404a0a; color: #30464e; }
+:root[data-theme="light"] .final-answer-outline-card button.active { background: linear-gradient(90deg, #287e9f12, transparent); color: #185e78; }
+:root[data-theme="light"] .final-answer-outline-card button.active::before { background: #287e9f; box-shadow: 0 0 0 3px #287e9f18, 0 0 10px #287e9f4a; }
+@media (prefers-reduced-motion: reduce) { .final-answer-outline-card button, .final-answer-outline-card button::before { transition: none; } }
+@media (max-width: 1280px) { .final-answer-outline { display: none; } }
