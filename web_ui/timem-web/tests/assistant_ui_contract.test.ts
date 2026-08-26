@@ -241,24 +241,13 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const eased = 1 - Math.pow(1 - progress, 3);');
     expect(source).not.toContain('userMessageNavigationVisible');
     expect(source).not.toContain('userMessageNavigationHideTimerRef');
-    expect(source).not.toContain('revealUserMessageNavigation');
-    expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 42px); right: max(10px, calc((100% - 900px) / 2)); display: grid; gap: 0; transform: translateY(-50%); }');
-    expect(styles).not.toContain('.user-message-navigation.visible');
-    expect(source).toContain('className="user-message-navigation-triangle up"');
-    expect(source).toContain('className="user-message-navigation-triangle down"');
-    expect(source).not.toContain('<ChevronUp size={17} aria-hidden="true"/>');
-    expect(source).not.toContain('<ChevronDown size={17} aria-hidden="true"/>');
-    expect(styles).toContain('.user-message-navigation button { display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: #429cff; box-shadow: none;');
-    expect(styles).toContain('.user-message-navigation button:hover:not(:disabled) { background: #ffffff08; box-shadow: 0 7px 20px #0008;');
-    expect(styles).toContain('.user-message-navigation button + button { margin-top: -6px; }');
-    expect(styles).not.toContain('box-shadow: 0 0 0 1px #429cff38');
-    expect(styles).not.toContain('box-shadow: 0 0 0 2px #429cff80');
-    expect(styles).toContain('.user-message-navigation button:disabled { color: #9abbd7; opacity: .62; cursor: default; box-shadow: none; }');
-    expect(styles).toContain('.user-message-navigation-triangle { width: 0; height: 0; border-right: 8px solid transparent; border-left: 8px solid transparent;');
-    expect(styles).toContain('.user-message-navigation-triangle.up { border-bottom: 11px solid currentColor; transform: translateY(-2px); }');
-    expect(styles).toContain('.user-message-navigation-triangle.down { border-top: 11px solid currentColor; transform: translateY(2px); }');
-    expect(styles).toContain(':root[data-theme="light"] .user-message-navigation button { background: transparent; color: #1677d2; box-shadow: none; }');
-    expect(styles).toContain(':root[data-theme="light"] .user-message-navigation button:disabled { color: #8eabc3; opacity: .68; }');
+    expect(source).toContain('<ChevronUp size={17} aria-hidden="true"/>');
+    expect(source).toContain('<ChevronDown size={17} aria-hidden="true"/>');
+    expect(source).not.toContain('user-message-navigation-triangle');
+    expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 42px); right: max(10px, calc((100% - 900px) / 2)); display: grid; gap: 7px;');
+    expect(styles).toContain('.user-message-navigation button { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 7px; background: #1f303e;');
+    expect(styles).toContain('.user-message-navigation button:disabled { opacity: .24; cursor: default; box-shadow: none; }');
+    expect(styles).toContain(':root[data-theme="light"] .user-message-navigation button { background: #c9e3f7; color: #286792;');
     expect(styles).toContain('@media (max-width: 720px) { .user-message-navigation { right: 6px; }');
   });
 
@@ -1353,7 +1342,13 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('ref={memSettingsButtonRef} className="mem-card"');
     expect(source).toContain('ref={memSwitchButtonRef} className="mem-switch-action"');
     expect(source).toContain('<ArrowLeftRight size={15} aria-hidden="true"/>');
-    expect(source).toContain('function MemSettingsDialog');
+    expect(source).toContain('function MemSettingsDialog({ memPath, current, pending, onClose, onSave }');
+    expect(source).toContain('<MemSettingsDialog memPath={server?.mem?.space_dir ?? ""}');
+    expect(source).toContain('<p className="mem-settings-current"><strong>Current MEM:</strong> <span>{memPath || "…"}</span></p>');
+    expect(source).toContain('<label>选择保留天数<select');
+    expect(source).not.toContain('Rollingly retain recent temporary data in this MEM');
+    expect(source).not.toContain('action/action-result/context-compact/repair events');
+    expect(source).not.toContain('aria-describedby="mem-settings-description"');
     expect(source).toContain('<option value="1">最近 1 天</option>');
     expect(source).toContain('<option value="5">最近 5 天</option>');
     expect(source).toContain('<option value="10">最近 10 天</option>');
@@ -1364,6 +1359,9 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain(`.mem-card-row .mem-card,\n.mem-switch-action { border: 0; background: #202020; color: #bcbcbc; box-shadow: inset 0 0 0 1px #303030`);
     expect(styles).toContain(`:root[data-theme="light"] .mem-card-row .mem-card,\n:root[data-theme="light"] .mem-switch-action { border: 0; background: #f3f3f3; color: #333; box-shadow: inset 0 0 0 1px #dedede`);
     expect(styles).toContain('.mem-settings-modal');
+    expect(styles).toContain('.mem-settings-current');
+    expect(styles).toContain('.mem-settings-current span { min-width: 0; overflow-wrap: anywhere; color: #e8efec; font-family: var(--ui-font); font-size: 13px; font-weight: 500;');
+    expect(styles).not.toContain('.mem-settings-current span { min-width: 0; overflow-wrap: anywhere; color: #e8efec; font-family: "SFMono-Regular"');
   });
 
   it("announces runtime connection state and explains mem switch availability", () => {
