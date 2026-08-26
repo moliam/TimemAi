@@ -1019,6 +1019,13 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain("<TurnAnswerDelivery turn={turn}");
     expect(source).toContain('if (availableKeys.length === 1 && selected === "final" && turn.final_answer)');
     expect(source).toContain('<FinalAnswerDelivery text={turn.final_answer}');
+    expect(source).toContain('<FinalAnswerContent text={text}/>');
+    expect(source).toContain('<FinalAnswerContent text={turn.final_answer}/>');
+    expect(source).toContain('finalAnswerNeedsOutline(content.offsetHeight, viewport.clientHeight, outline.length)');
+    expect(source).toContain('aria-label="Final answer table of contents"');
+    expect(source).toContain('viewport.scrollTo({ top: targetTop, behavior: prefersReducedMotion() ? "auto" : "smooth" });');
+    expect(styles).toContain('.final-answer-outline { position: absolute;');
+    expect(styles).toContain('@media (max-width: 1280px) { .final-answer-outline { display: none; } }');
     expect(source).toContain('{hasInterim && <div className="turn-answer-tabs" role="tablist" aria-label="Turn answers">');
     expect(source).toContain('>Interim</button>');
     expect(source).toContain('className="turn-interim-list"');
