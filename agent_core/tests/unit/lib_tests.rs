@@ -1453,6 +1453,10 @@ fn workspace_instance_lock_is_exclusive_per_mem_and_reopens_after_release() {
     fs::create_dir_all(&second_root).unwrap();
 
     let first = WorkspaceInstanceLock::acquire(&first_root, "timem-shell").unwrap();
+    let owner = WorkspaceInstanceLock::read_owner(&first_root).unwrap();
+    assert_eq!(owner.pid, std::process::id());
+    assert_eq!(owner.host, "timem-shell");
+    assert_eq!(WorkspaceInstanceLock::lock_path(&first_root), first.path());
     assert_eq!(
         WorkspaceInstanceLock::acquire(&first_root, "timem-web").unwrap_err(),
         "workspace_already_in_use"

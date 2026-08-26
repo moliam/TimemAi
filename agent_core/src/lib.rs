@@ -647,6 +647,16 @@ fn configured_round_budget_from_env() -> u32 {
     configured_round_budget(std::env::var("TIMEM_MAX_ROUNDS").ok().as_deref())
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct WorkspaceInstanceOwner {
+    pub schema_version: u32,
+    pub pid: u32,
+    #[serde(default)]
+    pub process_identity: Option<String>,
+    pub host: String,
+    pub acquired_at_ms: i64,
+}
+
 #[derive(Debug)]
 pub struct WorkspaceInstanceLock {
     file: fs::File,
@@ -654,13 +664,25 @@ pub struct WorkspaceInstanceLock {
 }
 
 impl WorkspaceInstanceLock {
+    pub fn lock_path(memory_dir: impl AsRef<Path>) -> PathBuf {
+        let memory_dir = fs::canonicalize(memory_dir.as_ref())
+            .unwrap_or_else(|_| memory_dir.as_ref().to_path_buf());
+        memory_dir.join(".guard").join("workspace-instance.lock")
+    }
+
+    pub fn read_owner(memory_dir: impl AsRef<Path>) -> Option<WorkspaceInstanceOwner> {
+        fs::read(Self::lock_path(memory_dir))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    }
+
     pub fn acquire(memory_dir: impl AsRef<Path>, host: &str) -> Result<Self, String> {
         let memory_dir = fs::canonicalize(memory_dir.as_ref())
             .unwrap_or_else(|_| memory_dir.as_ref().to_path_buf());
         let guard_dir = memory_dir.join(".guard");
         fs::create_dir_all(&guard_dir)
             .map_err(|error| format!("workspace_instance_lock_dir_failed:{error}"))?;
-        let path = guard_dir.join("workspace-instance.lock");
+        let path = Self::lock_path(&memory_dir);
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true);
         #[cfg(unix)]
@@ -689,13 +711,13 @@ impl WorkspaceInstanceLock {
                 });
             }
         }
-        let owner = json!({
-            "schema_version": 1,
-            "pid": std::process::id(),
-            "process_identity": os::process_identity(std::process::id()),
-            "host": host,
-            "acquired_at_ms": now_ms(),
-        });
+        let owner = WorkspaceInstanceOwner {
+            schema_version: 1,
+            pid: std::process::id(),
+            process_identity: os::process_identity(std::process::id()),
+            host: host.to_string(),
+            acquired_at_ms: now_ms(),
+        };
         let encoded = serde_json::to_vec_pretty(&owner)
             .map_err(|error| format!("workspace_instance_owner_serialize_failed:{error}"))?;
         use std::io::{Seek, SeekFrom};

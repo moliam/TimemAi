@@ -2328,14 +2328,138 @@ Timem Web instances are never reused; each launch must own its own process and r
 }
 
 pub(crate) fn friendly_workspace_instance_error(error: String, space: &str) -> String {
-    if error == "workspace_already_in_use" {
-        format!(
-            "The MEM workspace is already open in another Timem Web or Shell process: {}. Close that process or select a different --space.",
-            absolute_path(Path::new(space)).display()
-        )
-    } else {
-        format!("Could not claim the MEM workspace {space}: {error}")
+    if error != "workspace_already_in_use" {
+        return format!("Could not claim the MEM workspace {space}: {error}");
     }
+
+    let space_dir = absolute_path(Path::new(space));
+    let lock_path = agent_core::WorkspaceInstanceLock::lock_path(&space_dir);
+    let owner = agent_core::WorkspaceInstanceLock::read_owner(&space_dir);
+    let mut message = format!(
+        "The MEM workspace is already open and actively locked by another Timem process. Closing a terminal or application window does not guarantee that its process has exited.
+
+  MEM:  {}
+  Lock: {}",
+        space_dir.display(),
+        lock_path.display(),
+    );
+
+    if let Some(owner) = owner.as_ref() {
+        message.push_str(&format!(
+            "
+  PID:  {}
+  Host: {}",
+            owner.pid, owner.host
+        ));
+        let current_identity = agent_core::os::process_identity(owner.pid);
+        let identity_matches = owner
+            .process_identity
+            .as_deref()
+            .zip(current_identity.as_deref())
+            .is_some_and(|(recorded, current)| recorded == current);
+        let status = if identity_matches {
+            "running; PID identity matches the lock owner"
+        } else if agent_core::os::process_is_definitely_dead(owner.pid) {
+            "recorded PID is no longer running, but another process still holds the lock"
+        } else {
+            "could not safely verify PID identity; inspect it before stopping anything"
+        };
+        message.push_str(&format!(
+            "
+  Status: {status}"
+        ));
+
+        if owner.host == "timem-web" {
+            let journal_path = space_dir.join("web_events.ndjson");
+            if let Some(info) =
+                EventJournal::read_instance_info(&journal_path).filter(|info| info.pid == owner.pid)
+            {
+                if let Some(port) = info.port {
+                    message.push_str(&format!(
+                        "
+  Port: {port}"
+                    ));
+                }
+                if let Some(url) = info.browser_url.as_deref() {
+                    message.push_str(&format!(
+                        "
+  URL:  {url}"
+                    ));
+                }
+            }
+        }
+
+        message.push_str(
+            "
+
+Inspect the owner before taking action:",
+        );
+        #[cfg(unix)]
+        {
+            message.push_str(&format!(
+                "
+  ps -fp {}
+  lsof {}",
+                owner.pid,
+                lock_path.display(),
+            ));
+        }
+        #[cfg(windows)]
+        message.push_str(&format!(
+            "
+  tasklist /FI \"PID eq {}\"",
+            owner.pid
+        ));
+
+        message.push_str(
+            "
+
+If it is the old Timem process, request a graceful stop, verify that it exited, then retry:",
+        );
+        #[cfg(unix)]
+        message.push_str(&format!(
+            "
+  kill -TERM {}
+  while kill -0 {} 2>/dev/null; do sleep 1; done
+  cargo run -p timem_web -- --public --debug",
+            owner.pid, owner.pid,
+        ));
+        #[cfg(windows)]
+        message.push_str(&format!(
+            "
+  taskkill /PID {} /T
+  cargo run -p timem_web -- --public --debug",
+            owner.pid,
+        ));
+    } else {
+        message.push_str(
+            "
+  PID:  unavailable (the lock owner metadata could not be read)",
+        );
+        message.push_str(
+            "
+
+Find the process that currently holds the lock:",
+        );
+        #[cfg(unix)]
+        message.push_str(&format!(
+            "
+  lsof {}
+  fuser -v {}",
+            lock_path.display(),
+            lock_path.display(),
+        ));
+    }
+
+    message.push_str(
+        "
+
+Escape route: start with a different MEM without touching the active one:
+  cargo run -p timem_web -- --public --debug --space /absolute/path/to/another-mem
+
+Do not delete the lock file while a process still holds it. The operating system releases the held lock when the owner process exits; then retry the original MEM.",
+    );
+    message
 }
 
 fn friendly_journal_error(error: String, data_dir: &std::path::Path, space: &str) -> String {
