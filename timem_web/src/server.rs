@@ -61,7 +61,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{broadcast, mpsc as tokio_mpsc},
+    sync::{broadcast, mpsc as tokio_mpsc, oneshot, Notify},
     time::{sleep, timeout, Instant},
 };
 
@@ -108,6 +108,7 @@ struct AppState {
     command_lanes: Arc<Mutex<HashMap<String, Arc<TicketCommandLane>>>>,
     command_global_barrier: Arc<RwLock<()>>,
     mem_epoch: Arc<RwLock<u64>>,
+    temporary_retention_wakeup: Arc<Notify>,
     debug: Option<Arc<DebugStore>>,
 }
 
@@ -434,12 +435,6 @@ impl WebMemState {
         let session_groups = load_session_groups(&layout.memory_dir())?;
         let settings = load_web_mem_settings(&layout.memory_dir())?;
         let session_store = SessionStore::new(layout.memory_dir());
-        apply_temporary_retention(
-            &layout,
-            &session_store,
-            settings.temporary_retention_days,
-            now_ms_i64(),
-        )?;
         Ok(Self {
             space,
             session_store,
@@ -578,14 +573,31 @@ fn apply_current_mem_temporary_retention(
     apply_temporary_retention(&layout, &store, days, now_ms)
 }
 
+async fn run_temporary_retention_in_file_thread(
+    state: AppState,
+) -> Result<TemporaryRetentionResult, String> {
+    let (result_tx, result_rx) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("timem-web-retention".to_string())
+        .spawn(move || {
+            let result = apply_current_mem_temporary_retention(&state, now_ms_i64());
+            let _ = result_tx.send(result);
+        })
+        .map_err(|error| format!("temporary_retention_worker_spawn_failed:{error}"))?;
+    result_rx
+        .await
+        .map_err(|_| "temporary_retention_worker_stopped".to_string())?
+}
+
 fn spawn_temporary_retention_loop(state: AppState) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(TEMPORARY_RETENTION_INTERVAL);
-        interval.tick().await;
         loop {
-            interval.tick().await;
-            if let Err(error) = apply_current_mem_temporary_retention(&state, now_ms_i64()) {
+            if let Err(error) = run_temporary_retention_in_file_thread(state.clone()).await {
                 eprintln!("[timem_web_warning] temporary_retention_failed error={error}");
+            }
+            tokio::select! {
+                () = sleep(TEMPORARY_RETENTION_INTERVAL) => {}
+                () = state.temporary_retention_wakeup.notified() => {}
             }
         }
     });
@@ -1602,6 +1614,7 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
+        temporary_retention_wakeup: Arc::new(Notify::new()),
         debug,
     };
     let cleanup_guard = WebRuntimeCleanupGuard::new(&state);
@@ -1619,7 +1632,6 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         let _ = default_session;
     }
     spawn_event_bridge(state.clone());
-    spawn_temporary_retention_loop(state.clone());
 
     let listener = bind_web_listener(launch.port, launch.public_access, prefer_default_mem_port)
         .await
@@ -1683,6 +1695,11 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         "{}",
         highlighted_browser_url(&browser_url, stdout_supports_color())
     );
+    // Retention can scan and atomically rewrite large history, shell-job, and
+    // audit files. Start it only after readiness is published and keep that
+    // blocking filesystem work off Tokio runtime threads. A dedicated file
+    // thread also keeps runtime shutdown from waiting for a large rewrite.
+    spawn_temporary_retention_loop(state.clone());
     let shutdown_reason = Arc::new(Mutex::new(None));
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(
@@ -4155,6 +4172,7 @@ fn handle_command_with_id(
                 .map_err(|_| "mem_epoch_poisoned".to_string())?;
             let snapshot = switch_mem_space(state, port, &path)?;
             *epoch = epoch.saturating_add(1);
+            state.temporary_retention_wakeup.notify_one();
             let (event_cursor, event_replay_floor) = state
                 .event_journal
                 .lock()
