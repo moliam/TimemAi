@@ -206,7 +206,12 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('.session-row:hover > :is(.session-drag, .session-expand),');
     expect(styles).toContain('.session-row > :is(.session-drag, .session-expand):focus-visible {');
     expect(styles).toContain('.session-row:hover .session,\n.session-row:focus-within .session { padding-left: 56px; }');
-    expect(styles).toContain('.session-row.delete-selecting > :is(.session-drag, .session-expand) { display: none; }');
+    expect(styles).toContain('.session-row:is(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand) { display: none; }');
+    expect(source).toContain('renamingSessionId === session.session_id || runtimeLocked || isDragging ? "controls-suppressed" : ""');
+    expect(source).toContain('session.workers.length === 0 ? "No workers in this session"');
+    expect(source).toContain('session.workers.length > 0 && expandedSessionIds.has(session.session_id)');
+    expect(styles).toContain('@media (hover: none), (pointer: coarse) {');
+    expect(styles).toContain('.session-row:not(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand)');
     expect(styles).toContain('.session-identity { flex: 1; min-width: 0; }');
     expect(styles).toContain('.session-endpoint-reveal {\n  position: absolute;');
     expect(styles).toContain('transform: translate(3px, -50%);');
@@ -1170,9 +1175,9 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('const runtimeLocked = pendingMemSwitch || !runtimeReady;');
     expect(source).toContain('const newSessionLabel = runtimeLocked ? "Session controls are temporarily locked" : "New session";');
     expect(source).toContain('ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked || sessionDeleteMode}');
-    expect(source).toContain('title={runtimeLocked ? "Session controls are temporarily locked" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`}');
+    expect(source).toContain('title={runtimeLocked ? "Session controls are temporarily locked" : session.workers.length === 0 ? "No workers in this session" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`}');
     expect(source).toContain('aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}`');
-    expect(source).toContain('aria-expanded={expandedSessionIds.has(session.session_id)} disabled={runtimeLocked || sessionDeleteMode}');
+    expect(source).toContain('disabled={runtimeLocked || sessionDeleteMode || renamingSessionId === session.session_id || session.workers.length === 0}');
     expect(source).toContain('aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined}');
     expect(source).toContain('disabled={runtimeLocked} onClick={() => { if (sessionDeleteMode) { setSelectedDeleteSessionId((current) => current === session.session_id ? "" : session.session_id); return; } setActiveSessionId(session.session_id);');
     expect(source).toContain('onDoubleClick={() => { if (!runtimeLocked && !sessionDeleteMode && renamingSessionId !== session.session_id) beginRename(session); }}');
