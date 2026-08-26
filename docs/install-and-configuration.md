@@ -221,6 +221,12 @@ only after all Session writes succeed.
 an absolute path, and the path itself is the MEM directory; Timem does not add
 an extra `memory` component:
 
+On Unix, Timem creates the selected MEM directory with owner-only `0700`
+permissions and tightens an existing selected MEM directory to `0700` at
+startup. The parent directory is not modified. This protects Session runtime
+configuration, cached credentials, memory, audit data, event journals, and Web
+lifecycle diagnostics on multi-user Linux and macOS hosts.
+
 ```bash
 timem --space /absolute/path/to/project-mem
 export TIMEM_SPACE=/absolute/path/to/project-mem
