@@ -1,5 +1,5 @@
 use crate::response_protocol::ParsedAction;
-use crate::{capmgr, memmgr, readfile, self_tool, shell_exec, toolgen};
+use crate::{capmgr, memmgr, readfile, self_tool, shell_exec, sub_answer, toolgen};
 use crate::{ActionExecution, ActionRuntime, AgentCore};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -10,6 +10,7 @@ pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
     "readfile",
     "run_bash",
     "self_tool",
+    "sub_answer",
     "toolgen",
 ];
 
@@ -45,6 +46,7 @@ fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
         "memmgr" => Some(execute_memmgr),
         "readfile" => Some(execute_readfile),
         "self_tool" => Some(execute_self_tool),
+        "sub_answer" => Some(execute_sub_answer),
         "run_bash" => Some(execute_run_bash),
         "toolgen" => Some(execute_toolgen),
         _ => None,
@@ -94,6 +96,14 @@ fn execute_self_tool(
     _runtime: &mut dyn ActionRuntime,
 ) -> ActionExecution {
     ActionExecution::Completed(self_tool::execute_action_outcome(core, action))
+}
+
+fn execute_sub_answer(
+    core: &mut AgentCore,
+    action: &ParsedAction,
+    runtime: &mut dyn ActionRuntime,
+) -> ActionExecution {
+    sub_answer::execute_action(core, action, runtime)
 }
 
 fn execute_readfile(
