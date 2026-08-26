@@ -1426,6 +1426,12 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('creating ? "Creating…" : "Create session"');
     expect(source).toContain("disabled={creating}");
     expect(source).toContain('activeModelRetryStatus, activityFromTopic');
+    expect(viewModelSource).toContain('label: "响应超时"');
+    expect(viewModelSource).toContain('label: "服务限流"');
+    expect(viewModelSource).toContain('label: "上游异常"');
+    expect(viewModelSource).toContain('label: "网络异常"');
+    expect(viewModelSource).toContain('progress ? `重试进度：${progress}` : ""');
+    expect(viewModelSource).not.toContain('模型服务连接暂时失败，系统正在自动重连。');
     expect(source).toContain('sessionCreateDecision');
     expect(source).toContain("const canCreateSession = createDecision.kind === \"send\";");
     expect(source).toContain('value={workspaceDir} disabled={creating} placeholder="/absolute/path/to/workspace"');

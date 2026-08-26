@@ -978,11 +978,57 @@ function protocolRepairDisplayReason(payload: Record<string, unknown>): string {
 }
 
 export type ActiveModelRetryStatus = {
-  kind: "reconnecting" | "retrying";
-  label: "reconnecting" | "retrying";
+  kind: "network-error" | "response-timeout" | "rate-limited" | "service-error" | "retrying";
+  label: string;
   progress?: string;
   detail: string;
 };
+
+type ModelSystemRetryDisplay = Pick<ActiveModelRetryStatus, "kind" | "label"> & {
+  summary: string;
+};
+
+function modelSystemRetryDisplay(error: string): ModelSystemRetryDisplay {
+  const normalized = error.toLowerCase();
+  if (normalized.startsWith("model_timeout") || normalized.includes("operation timed out") || normalized.includes("curl: (28)")) {
+    return {
+      kind: "response-timeout",
+      label: "响应超时",
+      summary: "模型服务在超时期限内没有返回新的响应数据，系统正在自动重试。",
+    };
+  }
+  if (normalized.startsWith("model_http_429")) {
+    return {
+      kind: "rate-limited",
+      label: "服务限流",
+      summary: "模型接入点返回限流错误，可能与请求频率、并发限制或额度有关；系统正在自动重试。",
+    };
+  }
+  if (/^model_http_(408|409|425|5\d\d)/.test(normalized)) {
+    return {
+      kind: "service-error",
+      label: "上游异常",
+      summary: "模型接入点或其上游服务返回可重试错误，系统正在自动重试。",
+    };
+  }
+  if (normalized.startsWith("model_network_error")
+    || normalized.startsWith("curl_failed")
+    || normalized.includes("curl:")
+    || normalized.includes("http2 framing")
+    || normalized.includes("connection reset")
+    || normalized.includes("could not resolve host")) {
+    return {
+      kind: "network-error",
+      label: "网络异常",
+      summary: "连接模型服务时发生网络异常，系统正在自动重连。",
+    };
+  }
+  return {
+    kind: "service-error",
+    label: "模型服务异常",
+    summary: "模型请求发生可重试错误，系统正在自动重试。",
+  };
+}
 
 function retryProgress(payload: Record<string, unknown>): string | undefined {
   const attempt = typeof payload.attempt === "number" ? payload.attempt : undefined;
@@ -1006,14 +1052,15 @@ export function activeModelRetryStatus(turn: WebTurn): ActiveModelRetryStatus | 
 
       const progress = retryProgress(event.payload);
       const error = typeof event.payload.error === "string" ? event.payload.error.trim() : "";
+      const display = modelSystemRetryDisplay(error);
       const delayMs = typeof event.payload.delay_ms === "number" ? event.payload.delay_ms : undefined;
       const detail = [
-        "模型服务连接暂时失败，系统正在自动重连。",
-        progress ? `重连进度：${progress}` : "",
+        display.summary,
+        progress ? `重试进度：${progress}` : "",
         delayMs !== undefined ? `下次尝试：约 ${Math.ceil(delayMs / 1000)} 秒后` : "",
         error ? `错误详情：${error}` : "",
       ].filter(Boolean).join("\n\n");
-      status = { kind: "reconnecting", label: "reconnecting", progress, detail };
+      status = { kind: display.kind, label: display.label, progress, detail };
       continue;
     }
 
