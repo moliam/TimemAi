@@ -2321,29 +2321,8 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
   const welcomeTitle = activeSession ? "Ready when you are." : "Create a session to start.";
   const welcomeText = activeSession ? "Ask Timem to investigate, write, or work with you." : "Use New session to choose a workspace and runtime profile.";
   const [userMessageNavigation, setUserMessageNavigation] = useState({ previous: false, next: false, bottom: false });
-  const [userMessageNavigationVisible, setUserMessageNavigationVisible] = useState(false);
   const userMessageNavigationOffset = 18;
   const userMessageNavigationAnimationRef = useRef<number | null>(null);
-  const userMessageNavigationHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const cancelUserMessageNavigationHide = useCallback(() => {
-    if (userMessageNavigationHideTimerRef.current === null) return;
-    clearTimeout(userMessageNavigationHideTimerRef.current);
-    userMessageNavigationHideTimerRef.current = null;
-  }, []);
-
-  const scheduleUserMessageNavigationHide = useCallback(() => {
-    cancelUserMessageNavigationHide();
-    userMessageNavigationHideTimerRef.current = setTimeout(() => {
-      userMessageNavigationHideTimerRef.current = null;
-      setUserMessageNavigationVisible(false);
-    }, 6000);
-  }, [cancelUserMessageNavigationHide]);
-
-  const revealUserMessageNavigation = useCallback(() => {
-    setUserMessageNavigationVisible(true);
-    scheduleUserMessageNavigationHide();
-  }, [scheduleUserMessageNavigationHide]);
 
   const userMessageAnchors = useCallback(() => {
     const viewport = viewportRef.current;
@@ -2423,13 +2402,7 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
 
   useEffect(() => () => {
     if (userMessageNavigationAnimationRef.current !== null) cancelAnimationFrame(userMessageNavigationAnimationRef.current);
-    cancelUserMessageNavigationHide();
-  }, [cancelUserMessageNavigationHide]);
-
-  useEffect(() => {
-    setUserMessageNavigationVisible(false);
-    cancelUserMessageNavigationHide();
-  }, [activeSessionId, cancelUserMessageNavigationHide]);
+  }, []);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -2897,10 +2870,6 @@ const toggleQueuedMessages = () => {
       ref={viewportRef}
       className="chat-scroll aui-thread-viewport"
       autoScroll={false} scrollToBottomOnInitialize={false} scrollToBottomOnRunStart={false} scrollToBottomOnThreadSwitch={false}
-      onWheelCapture={revealUserMessageNavigation}
-      onTouchMove={revealUserMessageNavigation}
-      onPointerDown={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); if (event.clientX >= bounds.right - 18) revealUserMessageNavigation(); }}
-      onKeyDown={(event) => { if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) revealUserMessageNavigation(); }}
       onScroll={(event) => {
         followThreadLatest.current = isNearScrollBottom({
           scrollTop: event.currentTarget.scrollTop,
@@ -3000,10 +2969,9 @@ const toggleQueuedMessages = () => {
         </form>
       </ThreadPrimitive.ViewportFooter>
     </ThreadPrimitive.Viewport>
-    <nav className={`user-message-navigation ${userMessageNavigationVisible ? "visible" : ""}`} aria-label="用户消息导航" aria-hidden={!userMessageNavigationVisible} onMouseEnter={() => { cancelUserMessageNavigationHide(); setUserMessageNavigationVisible(true); }} onMouseLeave={(event) => { if (!event.currentTarget.contains(document.activeElement)) scheduleUserMessageNavigationHide(); }} onFocusCapture={() => { cancelUserMessageNavigationHide(); setUserMessageNavigationVisible(true); }} onBlurCapture={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) scheduleUserMessageNavigationHide(); }}>
-
-      <button type="button" tabIndex={userMessageNavigationVisible ? 0 : -1} title="上一条用户消息" aria-label="上一条用户消息" disabled={!userMessageNavigation.previous} onClick={() => { revealUserMessageNavigation(); navigateUserMessage("previous"); }}><span className="user-message-navigation-triangle up" aria-hidden="true"/></button>
-      <button type="button" tabIndex={userMessageNavigationVisible ? 0 : -1} title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} aria-label={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} disabled={!userMessageNavigation.next && !userMessageNavigation.bottom} onClick={() => { revealUserMessageNavigation(); if (userMessageNavigation.next) navigateUserMessage("next"); else navigateToThreadBottom(); }}><span className="user-message-navigation-triangle down" aria-hidden="true"/></button>
+    <nav className="user-message-navigation" aria-label="用户消息导航">
+      <button type="button" title="上一条用户消息" aria-label="上一条用户消息" disabled={!userMessageNavigation.previous} onClick={() => navigateUserMessage("previous")}><span className="user-message-navigation-triangle up" aria-hidden="true"/></button>
+      <button type="button" title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} aria-label={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} disabled={!userMessageNavigation.next && !userMessageNavigation.bottom} onClick={() => { if (userMessageNavigation.next) navigateUserMessage("next"); else navigateToThreadBottom(); }}><span className="user-message-navigation-triangle down" aria-hidden="true"/></button>
     </nav>
   </ThreadPrimitive.Root>;
 }
