@@ -200,13 +200,15 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('/* Compact Session rows: hidden endpoint labels never reserve name width. */');
     expect(styles).toContain('.session-row { min-height: 32px; border-radius: 4px; }');
     expect(styles).toContain('.session-row::after {');
-    expect(styles).toContain('.session-row .session {\n  min-height: 32px;\n  padding: 2px 2px 2px 10px;');
+    expect(styles).toContain('.session-row .session {\n  min-height: 32px;\n  padding: 2px 2px 2px 34px;');
     expect(styles).toContain('.session-drag,\n.session-expand {\n  position: absolute;');
     expect(styles).toContain('opacity: 0;\n  pointer-events: none;');
     expect(styles).toContain('.session-row:hover > :is(.session-drag, .session-expand),');
     expect(styles).toContain('.session-row > :is(.session-drag, .session-expand):focus-visible {');
     expect(styles).toContain('.session-row:hover .session,\n.session-row:focus-within .session { padding-left: 56px; }');
     expect(styles).toContain('.session-row:is(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand) { display: none; }');
+    expect(styles).toContain('.session-row:is(.delete-selecting, .controls-suppressed) .session { padding-left: 34px; }');
+    expect(styles).toContain('.session-overlay .session-name { min-width: 0; font-size: 12px; font-weight: 400; }');
     expect(source).toContain('renamingSessionId === session.session_id || runtimeLocked || isDragging ? "controls-suppressed" : ""');
     expect(source).toContain('session.workers.length === 0 ? "No workers in this session"');
     expect(source).toContain('session.workers.length > 0 && expandedSessionIds.has(session.session_id)');
@@ -1590,6 +1592,10 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
   position: absolute;`);
     expect(styles).toContain(`visibility: hidden;
   opacity: 0;`);
+    expect(styles).toContain(`.session-group:hover .session-group-actions,
+.session-group-heading:focus-within .session-group-actions,
+.session-group-actions:hover,
+.session-group-actions:focus-within {`);
     expect(styles).not.toContain('.session-group-heading:hover .session-group-toggle,');
   });
 
@@ -2331,7 +2337,7 @@ it("uses an explicit session-created event and session-scoped inline decisions",
     expect(styles).toContain(".header-context > span:first-child { display: none; }");
     expect(styles).toContain(".composer-buttons { flex: none; width: auto; flex-wrap: nowrap; }");
     expect(styles).toContain(".stop-button { width: 34px; height: 32px;");
-    expect(styles).toContain(".session-name { font-size: 12px; font-weight: 600; line-height: 1.3; }");
+    expect(styles).toContain(".session-name { font-size: 12px; font-weight: 400; line-height: 1.3; }");
     expect(styles).toContain(".session-profile { font-size: 11px; }");
   });
 
