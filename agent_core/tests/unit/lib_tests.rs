@@ -1470,3 +1470,55 @@ fn workspace_instance_lock_is_exclusive_per_mem_and_reopens_after_release() {
     let _ = fs::remove_dir_all(first_root);
     let _ = fs::remove_dir_all(second_root);
 }
+
+#[test]
+fn prompt_marks_logical_turns_independently_from_deltas() {
+    let mut core = test_core("explicit_turn_boundaries");
+
+    let first = match core.begin_turn("first question", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let first_marker = first
+        .rfind("[BEGIN TURN turn_id: action_turn_")
+        .expect("first turn marker");
+    let first_question = first.rfind("first question").expect("first question");
+    assert!(first_marker < first_question, "{first}");
+
+    let supplemented = core
+        .append_user_supplement("same-turn supplement")
+        .expect("supplement step");
+    let supplemented = match supplemented {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        supplemented.matches("[BEGIN TURN turn_id:").count(),
+        1,
+        "a supplement must not open another turn: {supplemented}"
+    );
+    assert!(supplemented.contains("same-turn supplement"));
+
+    core.defer_next_turn_slices(vec![(
+        "llm_response".to_string(),
+        "deferred previous answer".to_string(),
+    )]);
+    let second = match core.begin_turn("second question", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert_eq!(
+        second.matches("[BEGIN TURN turn_id:").count(),
+        2,
+        "{second}"
+    );
+    let deferred = second
+        .rfind("deferred previous answer")
+        .expect("deferred previous answer");
+    let second_marker = second
+        .rfind("[BEGIN TURN turn_id: action_turn_")
+        .expect("second turn marker");
+    let second_question = second.rfind("second question").expect("second question");
+    assert!(deferred < second_marker, "{second}");
+    assert!(second_marker < second_question, "{second}");
+}

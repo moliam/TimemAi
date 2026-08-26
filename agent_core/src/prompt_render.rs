@@ -53,6 +53,7 @@ pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VisiblePromptRole {
     User,
+    UserSupplement,
     You,
     Runtime,
 }
@@ -60,7 +61,7 @@ enum VisiblePromptRole {
 impl VisiblePromptRole {
     fn label(self, spec: &PromptBoundarySpec) -> &str {
         match self {
-            VisiblePromptRole::User => spec.user_role,
+            VisiblePromptRole::User | VisiblePromptRole::UserSupplement => spec.user_role,
             VisiblePromptRole::You => spec.assistant_role,
             VisiblePromptRole::Runtime => spec.runtime_role,
         }
@@ -69,11 +70,24 @@ impl VisiblePromptRole {
     fn assistant_id(self, assistant_heading: &str) -> Option<&str> {
         (self == VisiblePromptRole::You).then_some(assistant_heading)
     }
+
+    fn render_open(self, spec: &PromptBoundarySpec, assistant_heading: &str) -> String {
+        if self == VisiblePromptRole::UserSupplement {
+            if spec.uses_xml_role_elements() {
+                format!("<{} kind=\"supplement\">", spec.user_role)
+            } else {
+                format!("## {} (supplement)", spec.user_role)
+            }
+        } else {
+            spec.render_role_open(self.label(spec), self.assistant_id(assistant_heading))
+        }
+    }
 }
 
 fn visible_role(prompt_type: &str) -> VisiblePromptRole {
     match prompt_type {
-        "user_question" | "user_supplement" => VisiblePromptRole::User,
+        "user_question" => VisiblePromptRole::User,
+        "user_supplement" => VisiblePromptRole::UserSupplement,
         "llm_response" | "llm_response_raw_xml" | "llm_free_talk" => VisiblePromptRole::You,
         "result_of_llm_action" | "response_repair" | "context_compacted" => {
             VisiblePromptRole::Runtime
@@ -541,11 +555,14 @@ fn render_prompt_context_structure(
     boundaries: crate::response_protocol::PromptBoundarySpec,
 ) -> &'static str {
     if boundaries.uses_xml_role_elements() {
-        "Each `<prompt_delta>` is an outer dynamic container that may wrap `<USER>`, \
-`<ASSISTANT>`, and `<RUNTIME>` entries in chronological order. Static system \
-content is separate in `<Timem System Prompt>`."
+        "Each `<prompt_delta>` is an outer dynamic transport container that may wrap `<USER>`, \
+`<ASSISTANT>`, and `<RUNTIME>` entries in chronological order. A runtime entry \
+`[BEGIN TURN turn_id: <id>]` opens a logical user turn; all following entries, even \
+across prompt deltas, belong to that turn until the next BEGIN TURN marker. Initial \
+user input uses `<USER>` and later input in the same turn uses \
+`<USER kind=\"supplement\">`. Static system content is separate in `<Timem System Prompt>`."
     } else {
-        "A dynamic delta starts with `[BEGIN DELTA delta_id: <id>, time_ms: <time>]` and extends through every following provider-native message until the next BEGIN DELTA marker or the end of the current model input. USER, ASSISTANT, RUNTIME, and native tool-call/result messages inherit the currently open delta in chronological order. There is no END DELTA marker. Static system content is enclosed separately by the system-prompt boundaries."
+        "A dynamic delta starts with `[BEGIN DELTA delta_id: <id>, time_ms: <time>]` and extends through every following provider-native message until the next BEGIN DELTA marker or the end of the current model input. Deltas are transport batches, not user turns. A RUNTIME entry `[BEGIN TURN turn_id: <id>]` opens a logical user turn; all following USER, ASSISTANT, RUNTIME, and native tool-call/result messages, even across deltas, belong to that turn until the next BEGIN TURN marker. Initial user input uses `## USER`; later input in the same turn uses `## USER (supplement)`. There is no END DELTA or END TURN marker. Static system content is enclosed separately by the system-prompt boundaries."
     }
 }
 
@@ -577,6 +594,18 @@ fn render_prompt_delta_example(
     ];
 
     example.push_str("\nUse the delta `id` for context maintenance when needed.\n");
+    example.push('\n');
+    example.push_str(
+        &boundaries.render_role_open(VisiblePromptRole::Runtime.label(&boundaries), None),
+    );
+    example.push_str("\n[BEGIN TURN turn_id: turn_1]");
+    if let Some(close) =
+        boundaries.render_role_close(VisiblePromptRole::Runtime.label(&boundaries), None)
+    {
+        example.push('\n');
+        example.push_str(&close);
+    }
+    example.push('\n');
     for (role, body) in roles {
         example.push('\n');
         example.push_str(&boundaries.render_role_open(
@@ -755,10 +784,7 @@ pub(crate) fn render_prompt_with_rendered_static_for_mode(
                     }
                 }
                 out.push('\n');
-                out.push_str(&boundaries.render_role_open(
-                    role.label(boundaries),
-                    role.assistant_id(assistant_heading),
-                ));
+                out.push_str(&role.render_open(boundaries, assistant_heading));
                 out.push('\n');
                 last_role = Some(role);
                 last_was_action_result = false;

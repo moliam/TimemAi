@@ -7340,8 +7340,11 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
     assert!(xml_prompt.contains("## RESPONSE EXAMPLES"));
     assert!(xml_prompt.contains(r#"<prompt_delta id="pd_1" time_ms="123">"#));
     assert!(xml_prompt.contains("</prompt_delta>"));
-    assert!(xml_prompt
-        .contains("Each `<prompt_delta>` is an outer dynamic container that may wrap `<USER>`"));
+    assert!(xml_prompt.contains(
+        "Each `<prompt_delta>` is an outer dynamic transport container that may wrap `<USER>"
+    ));
+    assert!(xml_prompt.contains("[BEGIN TURN turn_id: <id>]"));
+    assert!(xml_prompt.contains(r#"<USER kind="supplement">"#));
     assert!(!xml_prompt.contains("[BEGIN DELTA] and [END DELTA]"));
     let example_start = xml_prompt
         .find(r#"<prompt_delta id="pd_1" time_ms="123">"#)
@@ -7358,10 +7361,13 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
         .find("<ASSISTANT>")
         .expect("ASSISTANT entry should be in delta");
     assert!(!example.contains("<ASSISTANT name="));
-    let runtime = example
-        .find("<RUNTIME>")
-        .expect("RUNTIME entry should be in delta");
-    assert!(user < assistant && assistant < runtime);
+    let turn_runtime = example
+        .find("<RUNTIME>\n[BEGIN TURN turn_id: turn_1]")
+        .expect("turn boundary runtime entry should be in delta");
+    let feedback_runtime = example
+        .rfind("<RUNTIME>")
+        .expect("feedback RUNTIME entry should be in delta");
+    assert!(turn_runtime < user && user < assistant && assistant < feedback_runtime);
     assert!(!xml_prompt.contains("[BEGIN DELTA]"));
     assert!(!xml_prompt.contains("[END DELTA]"));
     assert!(!xml_prompt.contains("delta_id: pd_1"));

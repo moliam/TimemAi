@@ -2498,6 +2498,9 @@ impl AgentCore {
         self.last_repair_issue = None;
         self.pending_approval = None;
         self.last_notifications.clear();
+        // A final assistant replay may already be pending from the previous turn.
+        // Keep it before the marker below; both may share a transport delta because
+        // BEGIN TURN, rather than delta batching, defines logical ownership.
         let action_turn_id = unique_id("action_turn");
         self.current_action_turn_id = Some(action_turn_id.clone());
         self.current_action_user_question = user_input.trim().to_string();
@@ -2512,11 +2515,13 @@ impl AgentCore {
             .map(|component| estimate_prompt_tokens(&component.content))
             .sum::<u32>();
         let text = user_input.trim().to_string();
+        self.submit_prompt_component(
+            PromptComponentRole::system(),
+            "turn_boundary",
+            format!("[BEGIN TURN turn_id: {action_turn_id}]"),
+            "runtime",
+        );
         if self.pending_user_interruption_note && !text.is_empty() {
-            // Pending components belong to the interrupted work. Commit them
-            // first so the next prompt has an unambiguous chronology:
-            // old work -> interruption note -> new user input -> new runtime context.
-            self.flush_pending_prompt_components();
             self.pending_user_interruption_note = false;
             self.submit_prompt_component(
                 PromptComponentRole::system(),

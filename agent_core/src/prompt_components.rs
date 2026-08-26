@@ -37,6 +37,7 @@ impl PromptComponentRole {
                 "response_repair" => "response_repair".to_string(),
                 "context_compacted" => "context_compacted".to_string(),
                 "runtime_note"
+                | "turn_boundary"
                 | "user_interrupted_work"
                 | "turn_progress_reminder"
                 | "turn_time_reminder"
