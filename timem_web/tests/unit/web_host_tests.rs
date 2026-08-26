@@ -5285,6 +5285,47 @@ fn snapshot_reports_the_active_mem_space_and_paths() {
 }
 
 #[test]
+fn opening_mem_does_not_run_temporary_retention_on_the_startup_path() {
+    let state = routing_test_state();
+    let (data_dir, space, store) = {
+        let mem = state.mem.lock().unwrap();
+        (
+            state.template.data_dir.clone(),
+            mem.space.clone(),
+            mem.session_store.clone(),
+        )
+    };
+    let session = state.sessions.lock().unwrap()["session_a"].clone();
+    store
+        .upsert_session(&stored_session_from_web_session_with_store(
+            &store, &session,
+        ))
+        .unwrap();
+    let expired = ChatHistoryRecord::Event {
+        role: ChatHistoryRole::System,
+        turn_id: "startup-retention-regression".to_string(),
+        created_at_ms: now_ms_i64() - 6 * MILLIS_PER_DAY,
+        kind: ChatHistoryEventKind::Action,
+        content: "must remain until the background pass".to_string(),
+        extra: BTreeMap::new(),
+    };
+    store.append_history_record("session_a", &expired).unwrap();
+
+    WebMemState::new(data_dir, space).unwrap();
+
+    assert!(
+        read_all_history_records(&store.history_path_for_session("session_a"))
+            .unwrap()
+            .iter()
+            .any(|record| matches!(
+                record,
+                ChatHistoryRecord::Event { content, .. }
+                    if content == "must remain until the background pass"
+            ))
+    );
+}
+
+#[test]
 fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_data() {
     let state = routing_test_state();
     let (layout, store) = {
@@ -5855,6 +5896,7 @@ fn routing_test_state() -> AppState {
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
+        temporary_retention_wakeup: Arc::new(Notify::new()),
         debug: None,
     }
 }
