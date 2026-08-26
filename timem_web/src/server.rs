@@ -48,7 +48,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ffi::OsString,
-    io::{Read, Write},
+    io::{IsTerminal, Read, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     process::Command,
@@ -1654,38 +1654,34 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         launch_parent,
     )?;
     if launch.public_access {
-        if let Some(public_url) = public_url.as_deref() {
-            println!("Timem Web is ready at {public_url}");
-        } else {
-            println!("Timem Web is ready at {local_url}");
+        if public_url.is_none() {
             println!(
                 "Could not detect a reachable server address. Set TIMEM_PUBLIC_HOST or pass --public-host <host> to get a remote browser URL."
             );
         }
         println!(
-            "Public mode is enabled. Browser, API, upload, and WebSocket access require the token above."
+            "Public mode is enabled. Browser, API, upload, and WebSocket access require the token in the URL."
         );
         println!("Local access: {local_url}");
-    } else {
-        println!("Timem Web is ready at {local_url}");
     }
     let _ = schedule_selected_session_mcp_refreshes(&state);
     if launch.open_browser && !launch.public_access {
         if should_auto_open_browser() {
             if let Err(error) = open_browser(&local_url) {
                 eprintln!("Could not open the browser automatically: {error}");
-                eprintln!("Open this URL manually: {local_url}");
+                eprintln!("Open the final URL below manually.");
             }
         } else {
-            println!(
-                "[INFO] No local graphical session detected; browser auto-open skipped. Open: {local_url}"
-            );
+            println!("[INFO] No local graphical session detected; browser auto-open skipped.");
         }
     }
     println!(
-        "The server is bound to {}. Stop with {}.",
+        "The server is bound to {}. Stop with Ctrl+C. Timem Web is ready at",
         web_bind_host(launch.public_access),
-        web_shutdown_signal_names().join("/")
+    );
+    println!(
+        "{}",
+        highlighted_browser_url(&browser_url, stdout_supports_color())
     );
     let shutdown_reason = Arc::new(Mutex::new(None));
     let serve_result = axum::serve(listener, app)
@@ -1731,6 +1727,7 @@ async fn shutdown_signal(
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(reason);
 }
 
+#[cfg(test)]
 fn web_shutdown_signal_names() -> &'static [&'static str] {
     crate::os::shutdown_signal_names()
 }
@@ -9884,6 +9881,23 @@ fn nonempty_text(text: String, label: &str) -> Result<String, String> {
         Err(format!("empty_{label}"))
     } else {
         Ok(text)
+    }
+}
+
+const ANSI_BOLD_BRIGHT_CYAN: &str = "\x1b[1;96m";
+const ANSI_RESET: &str = "\x1b[0m";
+
+fn stdout_supports_color() -> bool {
+    std::io::stdout().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none()
+        && std::env::var_os("TERM").as_deref() != Some(std::ffi::OsStr::new("dumb"))
+}
+
+fn highlighted_browser_url(browser_url: &str, use_color: bool) -> String {
+    if use_color {
+        format!("{ANSI_BOLD_BRIGHT_CYAN}{browser_url}{ANSI_RESET}")
+    } else {
+        browser_url.to_string()
     }
 }
 

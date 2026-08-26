@@ -10977,3 +10977,13 @@ async fn explicit_port_remains_higher_priority_than_default_mem_preference() {
         .unwrap();
     assert_eq!(selected.local_addr().unwrap().port(), explicit_port);
 }
+
+#[test]
+fn browser_url_highlight_is_ansi_only_when_color_is_enabled() {
+    let url = "http://127.0.0.1:13764/?token=test-token";
+    assert_eq!(highlighted_browser_url(url, false), url);
+    assert_eq!(
+        highlighted_browser_url(url, true),
+        format!("{ANSI_BOLD_BRIGHT_CYAN}{url}{ANSI_RESET}")
+    );
+}
