@@ -15,6 +15,8 @@ const CONTEXT_COMPACT_MANIFEST: &str =
 const READFILE_MANIFEST: &str = include_str!("../../resources/capabilities/tools/readfile.yaml");
 const RUN_BASH_MANIFEST: &str = include_str!("../../resources/capabilities/tools/run_bash.yaml");
 const SELF_TOOL_MANIFEST: &str = include_str!("../../resources/capabilities/tools/self_tool.yaml");
+const SUB_ANSWER_MANIFEST: &str =
+    include_str!("../../resources/capabilities/tools/sub_answer.yaml");
 const TOOLGEN_MANIFEST: &str = include_str!("../../resources/capabilities/tools/toolgen.yaml");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,6 +243,7 @@ impl CapabilityRegistry {
                 READFILE_MANIFEST,
                 RUN_BASH_MANIFEST,
                 SELF_TOOL_MANIFEST,
+                SUB_ANSWER_MANIFEST,
                 TOOLGEN_MANIFEST,
             ],
             &[],

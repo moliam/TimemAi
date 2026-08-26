@@ -72,6 +72,8 @@ pub mod session_worker;
 pub mod shell_exec;
 pub mod status_summary;
 pub mod status_view;
+#[path = "../../resources/capabilities/tools/sub_answer.rs"]
+pub mod sub_answer;
 pub mod tool_jobs;
 #[path = "../../resources/capabilities/tools/registry.rs"]
 pub(crate) mod tool_registry;
@@ -127,8 +129,8 @@ pub use host::{
     TurnStopSummary, TurnUi, UserSupplement, CORE_TOPIC_ACTION, CORE_TOPIC_CONTEXT_COMPACT,
     CORE_TOPIC_LIFECYCLE, CORE_TOPIC_LONG_RUNNING_COMMAND_REQUEST, CORE_TOPIC_MODEL_REPAIR,
     CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
-    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_TOOLGEN,
-    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_SUB_ANSWER,
+    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
     DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
 };
 pub use interaction::{
@@ -1377,6 +1379,8 @@ pub struct AgentCore {
     resolved_tool_call_mode: ToolCallMode,
     native_parallel_tool_calls: bool,
     native_exchanges: Vec<NativeExchange>,
+    sub_answer_enabled: bool,
+    sub_answer_count: u64,
     pending_native_exchange: Option<(String, String, Vec<NativeToolCall>, Vec<String>)>,
 }
 impl AgentCore {
@@ -1459,6 +1463,8 @@ impl AgentCore {
             resolved_tool_call_mode: ToolCallMode::Inline,
             native_parallel_tool_calls: false,
             native_exchanges: Vec::new(),
+            sub_answer_enabled: true,
+            sub_answer_count: 0,
             pending_native_exchange: None,
         }
     }
@@ -2346,6 +2352,7 @@ impl AgentCore {
         self.current_session_id = None;
         self.current_action_user_question.clear();
         self.last_notifications.clear();
+        self.sub_answer_count = 0;
         self.loaded_work_instruction_fingerprints.clear();
     }
     pub fn resolve_stale_context_with_audit(
@@ -2489,6 +2496,18 @@ impl AgentCore {
         self.pending_user_interruption_note = true;
     }
 
+    pub fn set_sub_answer_enabled(&mut self, enabled: bool) {
+        self.sub_answer_enabled = enabled;
+    }
+
+    pub(crate) fn sub_answer_enabled(&self) -> bool {
+        self.sub_answer_enabled
+    }
+    pub(crate) fn record_sub_answer(&mut self) -> u64 {
+        self.sub_answer_count = self.sub_answer_count.saturating_add(1);
+        self.sub_answer_count
+    }
+
     pub fn begin_turn(&mut self, user_input: &str, supporting_context: Option<&str>) -> CoreStep {
         self.current_round = 0;
         self.round_budget = self.configured_round_budget;
@@ -2498,6 +2517,7 @@ impl AgentCore {
         self.last_repair_issue = None;
         self.pending_approval = None;
         self.last_notifications.clear();
+        self.sub_answer_count = 0;
         // A final assistant replay may already be pending from the previous turn.
         // Keep it before the marker below; both may share a transport delta because
         // BEGIN TURN, rather than delta batching, defines logical ownership.
@@ -4658,6 +4678,32 @@ Runtime tool_call ids:",
     ) -> Result<Vec<String>, (Vec<String>, PendingApproval)> {
         let mut result_lines = Vec::new();
         for group in groups {
+            if group.order == ActionGroupOrder::Parallel
+                && group
+                    .actions
+                    .iter()
+                    .any(|action| action.action == "sub_answer")
+            {
+                result_lines.extend(group.actions.into_iter().map(|action| {
+                    if action.action == "sub_answer" {
+                        self.format_action_outcome(
+                            &action,
+                            &ActionOutcome::failed(
+                                "Action result: sub_answer\nerror: parallel_use_not_allowed",
+                            ),
+                        )
+                    } else {
+                        self.format_action_outcome(
+                            &action,
+                            &ActionOutcome::failed(format!(
+                                "Action result: {}\nerror: parallel_group_rejected",
+                                action.action
+                            )),
+                        )
+                    }
+                }));
+                continue;
+            }
             if group.order == ActionGroupOrder::Parallel && group.actions.len() > 1 {
                 match self.execute_parallel_action_group(group.actions, runtime) {
                     Ok(group_results) => result_lines.extend(group_results),
