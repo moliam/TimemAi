@@ -126,6 +126,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("Ask Timem to investigate, write, or work with you.");
     expect(source).not.toContain("work with your local environment");
     expect(source).not.toContain("<small>local</small>");
+    expect(styles).toContain(".brand > span { font-size: 34px; font-weight: 900; line-height: 41px; letter-spacing: .015em; }");
   });
 
   it("uses assistant-ui thread primitives for the primary conversation surface", () => {
