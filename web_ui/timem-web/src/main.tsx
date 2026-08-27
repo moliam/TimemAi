@@ -1239,11 +1239,20 @@ function TimemApp() {
     }
     if (event.type !== "core_topic") return;
     const topic = event.event;
-    setSessions((current) => current.map((session) => applyCoreTopicToSession(
-      appendTurnEvent(session, event.turn_id, { event_id: event.turn_event_id ?? clientId(), source: "core_topic", payload: topic as unknown as Record<string, unknown>, created_at_ms: Date.now() }),
-      topic,
-      (text) => makeMessage("assistant", text),
-    )));
+    setSessions((current) => {
+      const sessionIndex = current.findIndex((session) => session.session_id === topic.session_id);
+      if (sessionIndex < 0) return current;
+      const session = current[sessionIndex];
+      const nextSession = applyCoreTopicToSession(
+        appendTurnEvent(session, event.turn_id, { event_id: event.turn_event_id ?? clientId(), source: "core_topic", payload: topic as unknown as Record<string, unknown>, created_at_ms: Date.now() }),
+        topic,
+        (text) => makeMessage("assistant", text),
+      );
+      if (nextSession === session) return current;
+      const next = [...current];
+      next[sessionIndex] = nextSession;
+      return next;
+    });
     const pendingDecision = requestDecision(topic, event.turn_id);
     if (pendingDecision) setDecisions((current) => enqueueDecision(current, pendingDecision));
     if (topic.topic.name === "core.lifecycle") {
@@ -3577,6 +3586,27 @@ type TurnInteractionProps = {
   onRequestMessageDelete: (candidate: ChatMessageDeleteCandidate) => void;
 };
 
+const WorkingElapsed = memo(function WorkingElapsed({
+  createdAtMs,
+}: {
+  createdAtMs: number;
+}) {
+  const [elapsedMs, setElapsedMs] = useState(() =>
+    Math.max(0, Date.now() - createdAtMs),
+  );
+  useEffect(() => {
+    const updateElapsed = () => setElapsedMs(Math.max(0, Date.now() - createdAtMs));
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 1_000);
+    return () => window.clearInterval(timer);
+  }, [createdAtMs]);
+  return (
+    <span className="working-elapsed" aria-hidden="true">
+      {formatDuration(elapsedMs)}
+    </span>
+  );
+});
+
 const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked, pendingDecisionKeys, toolGenPending, toolGenBlocked, favorite, favoritePending, onToggleFavorite, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: TurnInteractionProps) {
   const workScrollRef = useRef<HTMLDivElement | null>(null);
  const workContentRef = useRef<HTMLDivElement | null>(null);
@@ -3588,7 +3618,6 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
   );
   const previousTurnState = useRef(turn.state);
   const [pendingUpdates, setPendingUpdates] = useState(0);
-  const [workingElapsedMs, setWorkingElapsedMs] = useState(() => Math.max(0, Date.now() - turn.created_at_ms));
   const lifecycleEvents = useMemo(() => coalesceActionLifecycle(turn.events), [turn.events]);
  const lifecycleItems = useMemo(() => lifecycleEvents.map((event) => ({
  type: "event" as const,
@@ -3649,15 +3678,6 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
   const canCollapseCompletedWork = turn.state !== "working" && (!!turn.final_answer || interruptedByUser);
   const canToggleWorkStream = turn.state === "working" || canCollapseCompletedWork;
   const workStreamVisible = !canToggleWorkStream || showWorkStream;
-  const workingElapsed = turn.state === "working" ? formatDuration(workingElapsedMs) : undefined;
-
-  useEffect(() => {
-    if (turn.state !== "working") return;
-    const updateElapsed = () => setWorkingElapsedMs(Math.max(0, Date.now() - turn.created_at_ms));
-    updateElapsed();
-    const timer = window.setInterval(updateElapsed, 1_000);
-    return () => window.clearInterval(timer);
-  }, [turn.created_at_ms, turn.state]);
   const canDeleteConversationContent = turn.state !== "working" && !sessionInteractionLocked;
 
   useEffect(() => {
@@ -3684,13 +3704,21 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
  const scroll = workScrollRef.current;
  const content = workContentRef.current;
  if (!scroll || !content || typeof ResizeObserver === "undefined") return;
+ let scrollFrame: number | undefined;
  const observer = new ResizeObserver(() => {
+ if (!followLatest.current || scrollFrame !== undefined) return;
+ scrollFrame = window.requestAnimationFrame(() => {
+ scrollFrame = undefined;
  if (!followLatest.current) return;
  scroll.scrollTop = scroll.scrollHeight;
- setPendingUpdates(0);
+ setPendingUpdates((count) => count === 0 ? count : 0);
+ });
  });
  observer.observe(content);
- return () => observer.disconnect();
+ return () => {
+ observer.disconnect();
+ if (scrollFrame !== undefined) window.cancelAnimationFrame(scrollFrame);
+ };
  }, [workStreamVisible]);
 
 
@@ -3720,7 +3748,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
       </div>)}</div>
     </section>}
     {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state} ${workStreamVisible ? "" : "collapsed-work"}`}>
-      {canToggleWorkStream && <div className="turn-assistant-heading"><button type="button" className={`working-chip work-title-chip work-collapse-toggle${turn.state === "working" ? " active-work-title" : " completed-work-title"}${interruptedByUser ? " interrupted-work-title" : ""}${isToolGenTurn ? ` toolgen-working${turn.state === "working" ? "" : " toolgen-completed-title"}` : ""}`} title={showWorkStream ? "Hide work details" : "Show work details"} aria-label={showWorkStream ? "Hide work details" : "Show work details"} aria-expanded={showWorkStream} onClick={() => setShowWorkStream((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>{isToolGenTurn && <Wrench size={11}/>} {turn.state === "working" ? (isToolGenTurn ? "Generating tools…" : <span className="working-label">working</span>) : (isToolGenTurn ? "ToolGen" : "Thought/Action")}{workingElapsed && <span className="working-elapsed" aria-hidden="true">{workingElapsed}</span>}{interruptedByUser && <span className="work-title-status">(Interrupted)</span>}</button>{modelRetryStatus && <details className={`model-retry-status ${modelRetryStatus.kind}`}><summary title={`展开 ${modelRetryStatus.label} 详情`} aria-label={`展开 ${modelRetryStatus.label} 详情`}><ChevronRight size={12} aria-hidden="true"/><span>{modelRetryStatus.label}</span>{modelRetryStatus.progress && <small>{modelRetryStatus.progress}</small>}</summary><div className="model-retry-detail"><MarkdownContent text={modelRetryStatus.detail}/></div></details>}</div>}
+      {canToggleWorkStream && <div className="turn-assistant-heading"><button type="button" className={`working-chip work-title-chip work-collapse-toggle${turn.state === "working" ? " active-work-title" : " completed-work-title"}${interruptedByUser ? " interrupted-work-title" : ""}${isToolGenTurn ? ` toolgen-working${turn.state === "working" ? "" : " toolgen-completed-title"}` : ""}`} title={showWorkStream ? "Hide work details" : "Show work details"} aria-label={showWorkStream ? "Hide work details" : "Show work details"} aria-expanded={showWorkStream} onClick={() => setShowWorkStream((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>{isToolGenTurn && <Wrench size={11}/>} {turn.state === "working" ? (isToolGenTurn ? "Generating tools…" : <span className="working-label">working</span>) : (isToolGenTurn ? "ToolGen" : "Thought/Action")}{turn.state === "working" && <WorkingElapsed createdAtMs={turn.created_at_ms}/>}{interruptedByUser && <span className="work-title-status">(Interrupted)</span>}</button>{modelRetryStatus && <details className={`model-retry-status ${modelRetryStatus.kind}`}><summary title={`展开 ${modelRetryStatus.label} 详情`} aria-label={`展开 ${modelRetryStatus.label} 详情`}><ChevronRight size={12} aria-hidden="true"/><span>{modelRetryStatus.label}</span>{modelRetryStatus.progress && <small>{modelRetryStatus.progress}</small>}</summary><div className="model-retry-detail"><MarkdownContent text={modelRetryStatus.detail}/></div></details>}</div>}
       {workStreamVisible && <div className="turn-work-panel">
         <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleItems.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
           followLatest.current = isNearScrollBottom({ scrollTop: event.currentTarget.scrollTop, scrollHeight: event.currentTarget.scrollHeight, clientHeight: event.currentTarget.clientHeight }, 36);

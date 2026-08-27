@@ -914,12 +914,11 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".turn-assistant-frame.working .working-chip.active-work-title { min-width: 0; color: #8fc9f1; font-size: 11px; font-weight: 700; letter-spacing: 0; }");
     expect(source).toContain('<span className="working-label">working</span>');
     expect(styles).toContain(".turn-assistant-frame.working .working-label {");
-    expect(styles).toContain("background-size: 320% 100%;");
-    expect(styles).toContain("animation: working-label-sweep 2.8s linear infinite;");
-    expect(styles).toContain("@keyframes working-label-sweep");
-    expect(styles).toContain("from { background-position: 100% 50%; }");
-    expect(styles).toContain("to { background-position: -100% 50%; }");
-    expect(styles).toContain("will-change: background-position;");
+    expect(styles).toContain("color: #8fc9f1;");
+    expect(styles).not.toContain("background-size: 320% 100%;");
+    expect(styles).not.toContain("animation: working-label-sweep");
+    expect(styles).not.toContain("@keyframes working-label-sweep");
+    expect(styles).not.toContain("will-change: background-position;");
     expect(styles).not.toContain("70%, 100% { background-position: -100% 50%; }");
     expect(styles).toContain(':root[data-theme="light"] .turn-assistant-frame.working .working-label {');
     expect(styles).toContain("@media (prefers-reduced-motion: reduce) {");
@@ -965,11 +964,21 @@ expect(styles).toContain(".worker-role-item.delete-selected");
 expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-selected');
   });
 
+  it("updates only the core topic target session for high-frequency events", () => {
+    expect(source).toContain("const sessionIndex = current.findIndex((session) => session.session_id === topic.session_id);");
+    expect(source).toContain("if (sessionIndex < 0) return current;");
+    expect(source).toContain("next[sessionIndex] = nextSession;");
+    expect(source).not.toContain("current.map((session) => applyCoreTopicToSession(");
+  });
+
   it("shows a live elapsed duration only while the turn is working", () => {
-    expect(source).toContain("const [workingElapsedMs, setWorkingElapsedMs] = useState(() => Math.max(0, Date.now() - turn.created_at_ms));");
-    expect(source).toContain('if (turn.state !== "working") return;');
+    expect(source).toContain("const WorkingElapsed = memo(function WorkingElapsed");
+    expect(source).toContain("const [elapsedMs, setElapsedMs] = useState(() =>");
+    expect(source).toContain("Math.max(0, Date.now() - createdAtMs)");
     expect(source).toContain("const timer = window.setInterval(updateElapsed, 1_000);");
     expect(source).toContain("return () => window.clearInterval(timer);");
+    expect(source).toContain('{turn.state === "working" && <WorkingElapsed createdAtMs={turn.created_at_ms}/>}');
+    expect(source).not.toContain("const [workingElapsedMs, setWorkingElapsedMs]");
     expect(source).toContain('className="working-elapsed" aria-hidden="true"');
     expect(styles).toContain(".working-elapsed { min-width: 3.5ch;");
     expect(styles).toContain("font-variant-numeric: tabular-nums;");
@@ -1393,7 +1402,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
   it("renders live task usage and session context without replacing final telemetry", () => {
     expect(source).toContain("<HeaderContextUsage session={activeSession}");
     expect(source).toContain("<LiveTurnUsage turn={turn}");
-    expect(source).toContain('aria-label="Current task token usage"'); expect(styles).toContain("animation: live-turn-usage-breathe 2.8s ease-in-out infinite;"); expect(styles).toContain("@keyframes live-turn-usage-breathe { 50% { opacity: .48; } }"); expect(styles).toContain(".live-turn-usage, .pulse, .connection.offline");
+    expect(source).toContain('aria-label="Current task token usage"'); expect(styles).not.toContain("animation: live-turn-usage-breathe"); expect(styles).not.toContain("@keyframes live-turn-usage-breathe"); expect(styles).toContain(".live-turn-usage, .pulse, .connection.offline");
     expect(source).toContain('const level = ratio >= 90 ? "critical" : ratio >= 75 ? "warning" : "normal";');
     expect(source).toContain('className={`header-context ${level}`}');
     expect(source).toContain('const ratio = limit ? Math.min(100, Math.ceil((usage?.prompt_tokens ?? 0) * 100 / limit)) : 0;');
@@ -2453,7 +2462,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain('.work-collapse-toggle[aria-expanded="true"] .work-collapse-arrow { transform: rotate(90deg); }');
     expect(styles).toContain(".turn-assistant-frame.collapsed-work");
     expect(styles).toContain("overflow-y: auto;");
-    expect(source).toContain("followLatest.current = isNearScrollBottom({"); expect(source).toContain("const observer = new ResizeObserver(() => {"); expect(source).toContain("if (!followLatest.current) return;"); expect(source).toContain("observer.observe(content);"); expect(source).toContain("return () => observer.disconnect();");
+    expect(source).toContain("followLatest.current = isNearScrollBottom({"); expect(source).toContain("const observer = new ResizeObserver(() => {"); expect(source).toContain("if (!followLatest.current || scrollFrame !== undefined) return;"); expect(source).toContain("scrollFrame = window.requestAnimationFrame(() => {"); expect(source).toContain("if (scrollFrame !== undefined) window.cancelAnimationFrame(scrollFrame);"); expect(source).toContain("observer.observe(content);");
     expect(source).toContain('className="turn-new-updates"');
   });
 
