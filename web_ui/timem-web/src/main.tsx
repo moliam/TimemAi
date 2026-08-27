@@ -26,6 +26,7 @@ import { enablesSemanticDelivery, shouldReduceTopLevelWireEvent } from "./wire_d
 import { clipboardImageFiles } from "./clipboard_images";
 import { humanizeToolStatus, isToolActivityRunning, TOOL_STATUS_RUNNING } from "./tool_status";
 import { MarkdownContent } from "./markdown_render";
+import { BrowserPerformanceTrace } from "./performance_trace";
 import { useTimedClipboardCopy } from "./clipboard_copy";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
@@ -252,6 +253,7 @@ function TimemApp() {
   const [renameDraft, setRenameDraft] = useState("");
   const [server, setServer] = useState<Snapshot["server"] | null>(null);
   const socket = useRef<WebSocket | null>(null);
+  const performanceTraceRef = useRef(new BrowserPerformanceTrace());
   const sessionsRef = useRef<Session[]>([]);
   const previousSessionStatesRef = useRef<Map<string, string> | null>(null);
   const activeSessionIdRef = useRef("");
@@ -513,8 +515,9 @@ function TimemApp() {
       wireCommand = { ...command, command_id: commandId };
     }
     if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady) return reliable;
+    const tracedCommand = performanceTraceRef.current.instrumentCommand(wireCommand);
     try {
-      socket.current.send(JSON.stringify(wireCommand));
+      socket.current.send(JSON.stringify(tracedCommand));
       return true;
     } catch {
       return reliable;
@@ -725,6 +728,7 @@ function TimemApp() {
     setUnreadCompletedSessionIds(new Set());
     toolCountBySessionRef.current = new Map(snapshot.sessions.map((session) => [session.session_id, session.tools.length]));
     setServer(snapshot.server);
+    performanceTraceRef.current.setEnabled(snapshot.server.performance_trace);
     if (!snapshot.server.debug_mode) setExpandedSessionIds(new Set());
     const authoritativeRoleLibrary = snapshot.role_library ?? { roles: snapshot.sessions[0]?.roles ?? [], groups: [] };
     authoritativeRoleLibraryRef.current = authoritativeRoleLibrary;
@@ -1058,6 +1062,7 @@ function TimemApp() {
       return;
     }
     if (event.type === "turn_updated") {
+      performanceTraceRef.current.observeTurnUpdated(event.session_id, event.turn);
       const consumedAttachmentIds = new Set(event.turn.user_entries.flatMap((entry) => entry.attachments ?? []).map((attachment) => attachment.id));
       setSessions((current) => current.map((session) => session.session_id === event.session_id
         ? { ...upsertTurn(session, event.turn), attachments: session.attachments.filter((attachment) => !consumedAttachmentIds.has(attachment.id)) }
@@ -1274,6 +1279,7 @@ function TimemApp() {
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
+    if (activeSessionId) performanceTraceRef.current.observeSessionPainted(activeSessionId);
   }, [activeSessionId]);
 
   useEffect(() => {
@@ -1689,7 +1695,7 @@ function TimemApp() {
                     <div ref={setNodeRef} style={style} className={`session-row ${server?.debug_mode && session.workers.length > 0 ? "has-workers" : ""} ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""} ${unreadCompletedSessionIds.has(session.session_id) ? "has-unread-completion" : ""} ${renamingSession ? "renaming-session" : ""} ${renamingSessionId === session.session_id || runtimeLocked || isDragging ? "controls-suppressed" : ""} ${sessionDeleteMode ? "delete-selecting" : ""} ${selectedDeleteSessionId === session.session_id ? "delete-selected" : ""} ${isDragging ? "dragging" : ""}`} aria-busy={renamingSession || deletingSession || undefined}>
                       <button type="button" className="session-drag" disabled={runtimeLocked || sessionDeleteMode || renamingSessionId === session.session_id} title={`拖动 ${session.display_name} 到其他分组`} aria-label={`拖动 ${session.display_name} 到其他分组`} {...attributes} {...listeners}><GripVertical size={13}/></button>
                       {server?.debug_mode && <button type="button" className={`session-expand ${session.workers.length > 0 ? "available" : ""} ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.workers.length === 0 ? "No workers in this session" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}` : session.workers.length === 0 ? `No workers for ${session.display_name}` : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={session.workers.length > 0 && expandedSessionIds.has(session.session_id)} disabled={runtimeLocked || sessionDeleteMode || renamingSessionId === session.session_id || session.workers.length === 0} onClick={() => setExpandedSessionIds((current) => { const next = new Set(current); if (next.has(session.session_id)) next.delete(session.session_id); else next.add(session.session_id); return next; })}><ChevronRight size={13}/></button>}
-                      {renamingSessionId === session.session_id ? <input className="session-rename-input" autoFocus value={renameDraft} aria-label={`Rename ${session.display_name}`} disabled={runtimeLocked} onChange={(event) => setRenameDraft(event.target.value)} onBlur={() => finishRename(session.session_id)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); } if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); } }}/>: <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.display_name} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { if (sessionDeleteMode) { setSelectedDeleteSessionId((current) => current === session.session_id ? "" : session.session_id); return; } setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
+                      {renamingSessionId === session.session_id ? <input className="session-rename-input" autoFocus value={renameDraft} aria-label={`Rename ${session.display_name}`} disabled={runtimeLocked} onChange={(event) => setRenameDraft(event.target.value)} onBlur={() => finishRename(session.session_id)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); } if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); } }}/>: <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.display_name} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { if (sessionDeleteMode) { setSelectedDeleteSessionId((current) => current === session.session_id ? "" : session.session_id); return; } performanceTraceRef.current.beginSessionSelection(session.session_id); if (session.session_id === activeSessionIdRef.current) performanceTraceRef.current.observeSessionPainted(session.session_id); setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
                         {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : unreadCompletedSessionIds.has(session.session_id) ? <span className="session-unread-dot" aria-label="Session has new completed work"/> : null}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && !sessionDeleteMode && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span></span><span className={`session-endpoint-reveal ${renamingSession ? "pending" : ""}`} title={renamingSession ? "Saving name" : sessionEndpointName}>{renamingSession ? <span className="session-pending">Saving name...</span> : <span>{sessionEndpointName}</span>}</span><span className="sr-only">Session state: {session.state}</span>
                       </button>}
                       {sessionDeleteMode && <button type="button" className={`session-delete-select ${selectedDeleteSessionId === session.session_id ? "selected" : ""}`} title={`选择删除 ${session.display_name}`} aria-label={`选择删除 ${session.display_name}`} aria-pressed={selectedDeleteSessionId === session.session_id} disabled={runtimeLocked || deletingSession} onClick={() => setSelectedDeleteSessionId((current) => current === session.session_id ? "" : session.session_id)}>{deletingSession ? <LoaderCircle size={14}/> : selectedDeleteSessionId === session.session_id ? <Check size={14}/> : null}</button>}
