@@ -3398,6 +3398,7 @@ fn browser_responses_disable_referrer_leaks_and_remote_active_content() {
         .to_str()
         .unwrap();
     assert!(policy.contains("img-src 'self' data:"));
+    assert!(policy.contains("font-src 'self' data:"));
     assert!(policy.contains("script-src 'self'"));
     assert!(!policy.contains("script-src 'self' 'unsafe-inline'"));
     assert!(policy.contains("form-action 'none'"));
