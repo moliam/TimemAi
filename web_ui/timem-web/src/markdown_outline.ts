@@ -218,6 +218,38 @@ export function markdownOutlineTargetScrollTop(
   return Math.max(0, currentScrollTop + targetViewportTop - viewportTop - Math.max(0, offset));
 }
 
+export type MarkdownFloatingNavigationOverlap = "none" | "partial" | "full";
+
+export function markdownFloatingNavigationLayout(
+  contentLeft: number,
+  navigationWidth: number,
+  bodyGap: number,
+  viewportWidth: number,
+  edgeInset: number,
+  outlineLeft?: number,
+  outlineRight?: number,
+) {
+  const finite = [contentLeft, navigationWidth, bodyGap, viewportWidth, edgeInset].every(Number.isFinite);
+  if (!finite) return { left: 0, overlap: "none" as MarkdownFloatingNavigationOverlap };
+  const width = Math.max(0, navigationWidth);
+  const inset = Math.max(0, edgeInset);
+  const maximumVisibleLeft = Math.max(inset, viewportWidth - width - inset);
+  // Stay as close to the reading column as possible while preserving a body gap.
+  // When an expanded outline consumes that space, this naturally degrades from
+  // no overlap to partial overlap and only then to full overlap.
+  const left = Math.min(maximumVisibleLeft, Math.max(inset, contentLeft - Math.max(0, bodyGap) - width));
+  if (!Number.isFinite(outlineLeft) || !Number.isFinite(outlineRight) || outlineRight! <= outlineLeft!) {
+    return { left, overlap: "none" as MarkdownFloatingNavigationOverlap };
+  }
+  const intersection = Math.max(0, Math.min(left + width, outlineRight!) - Math.max(left, outlineLeft!));
+  const overlap: MarkdownFloatingNavigationOverlap = intersection <= 0
+    ? "none"
+    : intersection >= width - .5
+      ? "full"
+      : "partial";
+  return { left, overlap };
+}
+
 export function markdownOutlineAnimationPosition(
   start: number,
   target: number,

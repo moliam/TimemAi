@@ -2,7 +2,7 @@ import { AssistantRuntimeProvider, ThreadMessageLike, ThreadPrimitive, useExtern
 import { closestCenter, DndContext, DragEndEvent, DragOverlay, DragOverEvent, KeyboardSensor, PointerSensor, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ArrowDown, ArrowLeftRight, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CircleStop, Clock3, Copy, CornerUpLeft, Cpu, Database, Eye, EyeOff, Folder, FolderOpen, FolderPlus, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Settings, Sparkles, Star, Terminal, TriangleAlert, Trash2, Wrench, X } from "lucide-react";
+import { ArrowDown, ArrowLeftRight, BriefcaseBusiness, Bookmark, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CircleStop, Clock3, Copy, CornerUpLeft, Cpu, Database, Eye, EyeOff, Folder, FolderOpen, FolderPlus, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Settings, Sparkles, Star, Terminal, TriangleAlert, Trash2, Wrench, X } from "lucide-react";
 import { CSSProperties, Dispatch, memo, MutableRefObject, ReactNode, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useId } from "react";
 import { createPortal } from "react-dom";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
@@ -11,7 +11,7 @@ import { Activity, ChatFavorite, ChatLibraryCapacity, ChatMessage, ChatSearchHit
 import { applyWorkerRoleMutation, isOptimisticWorkerRoleMutation, replayWorkerRoleMutations, WorkerRoleMutation } from "./worker_roles_ui";
 import { adjacentUserMessageIndex, canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, UserMessageNavigationDirection, wheelDeltaPixels } from "./scroll";
 import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, manualToolGenCommand, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, sessionWorkerTreeRows, setSessionDraft, tailPath, toolActivityDisplayName, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn } from "./view_model";
-import { extractMarkdownOutline, finalAnswerNeedsOutline, markdownHeadingId, markdownOutlineActiveId, markdownOutlineAnimationPosition, markdownOutlineFitsBesideContent, MARKDOWN_OUTLINE_START_ID, markdownOutlineTargetScrollTop, MarkdownOutlineItem } from "./markdown_outline";
+import { extractMarkdownOutline, finalAnswerNeedsOutline, markdownHeadingId, markdownFloatingNavigationLayout, markdownOutlineActiveId, markdownOutlineAnimationPosition, MARKDOWN_OUTLINE_START_ID, markdownOutlineTargetScrollTop, MarkdownOutlineItem } from "./markdown_outline";
 import { createMcpTransportDrafts, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
 import { commandSessionId, isModelSubmissionCommand, modelDisplayName, modelServiceIssue, NO_MODEL_ENDPOINTS_ISSUE, UNCONFIGURED_MODEL_LABEL } from "./model_service_ui";
@@ -2874,13 +2874,86 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
   const welcomeTitle = activeSession ? "Ready when you are." : "Create a session to start.";
   const welcomeText = activeSession ? "Ask Timem to investigate, write, or work with you." : "Use New session to choose a workspace and runtime profile.";
   const [userMessageNavigation, setUserMessageNavigation] = useState({ previous: false, next: false, bottom: false });
+  const [userMessageNavigationLayout, setUserMessageNavigationLayout] = useState<{ left?: number; overlap: "none" | "partial" | "full" }>({ overlap: "none" });
+  const [userMessageNavigationHoverLocked, setUserMessageNavigationHoverLocked] = useState(false);
+  const userMessageNavigationRef = useRef<HTMLElement | null>(null);
+  const userMessageNavigationHoverLockedRef = useRef(false);
+  const pendingUserMessageNavigationLayoutRef = useRef<{ left?: number; overlap: "none" | "partial" | "full" } | null>(null);
   const userMessageNavigationOffset = 18;
+  const userMessageNavigationBodyGap = 16;
+  const userMessageNavigationEdgeInset = 10;
   const userMessageNavigationAnimationRef = useRef<number | null>(null);
 
   const userMessageAnchors = useCallback(() => {
     const viewport = viewportRef.current;
     return viewport ? Array.from(viewport.querySelectorAll<HTMLElement>("[data-user-message-anchor]")) : [];
   }, []);
+
+  const applyUserMessageNavigationLayout = useCallback((next: { left?: number; overlap: "none" | "partial" | "full" }) => {
+    if (userMessageNavigationHoverLockedRef.current) {
+      pendingUserMessageNavigationLayoutRef.current = next;
+      return;
+    }
+    setUserMessageNavigationLayout((current) => current.left === next.left && current.overlap === next.overlap ? current : next);
+  }, []);
+
+  const updateUserMessageNavigationLayout = useCallback(() => {
+    const viewport = viewportRef.current;
+    const navigation = userMessageNavigationRef.current;
+    if (!viewport || !navigation) return;
+    const viewportRect = viewport.getBoundingClientRect();
+    const navigationRect = navigation.getBoundingClientRect();
+    const navigationCenter = navigationRect.top + navigationRect.height / 2;
+    const expandedOutlines = Array.from(viewport.querySelectorAll<HTMLElement>(".final-answer-outline.expanded"));
+    const activeOutline = expandedOutlines.find((candidate) => {
+      const rect = candidate.getBoundingClientRect();
+      return rect.top <= navigationCenter && rect.bottom >= navigationCenter;
+    });
+    if (!activeOutline) {
+      applyUserMessageNavigationLayout({ overlap: "none" });
+      return;
+    }
+    const readingId = activeOutline.dataset.finalAnswerReadingId;
+    const reading = readingId ? document.getElementById(readingId) : null;
+    const card = activeOutline.querySelector<HTMLElement>(".final-answer-outline-card");
+    if (!reading || !card) return;
+    const readingRect = reading.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    const next = markdownFloatingNavigationLayout(
+      readingRect.left - viewportRect.left,
+      navigationRect.width,
+      userMessageNavigationBodyGap,
+      viewportRect.width,
+      userMessageNavigationEdgeInset,
+      cardRect.left - viewportRect.left,
+      cardRect.right - viewportRect.left,
+    );
+    applyUserMessageNavigationLayout(next);
+  }, [applyUserMessageNavigationLayout, userMessageNavigationBodyGap, userMessageNavigationEdgeInset]);
+
+  const lockUserMessageNavigationLayout = useCallback(() => {
+    const viewport = viewportRef.current;
+    const navigation = userMessageNavigationRef.current;
+    if (!viewport || !navigation || userMessageNavigationHoverLockedRef.current) return;
+    userMessageNavigationHoverLockedRef.current = true;
+    setUserMessageNavigationHoverLocked(true);
+    const viewportRect = viewport.getBoundingClientRect();
+    const navigationRect = navigation.getBoundingClientRect();
+    setUserMessageNavigationLayout((current) => {
+      pendingUserMessageNavigationLayoutRef.current = current;
+      return { ...current, left: navigationRect.left - viewportRect.left };
+    });
+  }, []);
+
+  const unlockUserMessageNavigationLayout = useCallback(() => {
+    if (!userMessageNavigationHoverLockedRef.current) return;
+    userMessageNavigationHoverLockedRef.current = false;
+    setUserMessageNavigationHoverLocked(false);
+    const pending = pendingUserMessageNavigationLayoutRef.current;
+    pendingUserMessageNavigationLayoutRef.current = null;
+    if (pending) setUserMessageNavigationLayout(pending);
+    window.requestAnimationFrame(updateUserMessageNavigationLayout);
+  }, [updateUserMessageNavigationLayout]);
 
   const updateUserMessageNavigation = useCallback(() => {
     const viewport = viewportRef.current;
@@ -2982,6 +3055,22 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
     };
     userMessageNavigationAnimationRef.current = requestAnimationFrame(animate);
   }, [updateUserMessageNavigation]);
+
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const update = () => window.requestAnimationFrame(updateUserMessageNavigationLayout);
+    updateUserMessageNavigationLayout();
+    window.addEventListener("resize", update);
+    window.addEventListener("markdown-outline-layout-change", update);
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(update);
+    observer?.observe(viewport);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("markdown-outline-layout-change", update);
+      observer?.disconnect();
+    };
+  }, [activeSessionId, updateUserMessageNavigationLayout]);
 
   useEffect(() => () => {
     if (userMessageNavigationAnimationRef.current !== null) cancelAnimationFrame(userMessageNavigationAnimationRef.current);
@@ -3466,6 +3555,7 @@ const toggleQueuedMessages = () => {
           followLatest: followThreadLatest.current,
         });
         updateUserMessageNavigation();
+        updateUserMessageNavigationLayout();
       }}
     >
       {(activeSession?.turns.length ?? 0) === 0 &&
@@ -3557,7 +3647,7 @@ const toggleQueuedMessages = () => {
         </form>
       </ThreadPrimitive.ViewportFooter>
     </ThreadPrimitive.Viewport>
-    <nav className="user-message-navigation" aria-label="用户消息导航">
+    <nav ref={userMessageNavigationRef} className={`user-message-navigation outline-overlap-${userMessageNavigationLayout.overlap}${userMessageNavigationHoverLocked ? " hover-locked" : ""}`} style={userMessageNavigationLayout.left === undefined ? undefined : { left: `${userMessageNavigationLayout.left}px` }} aria-label="用户消息导航" onPointerEnter={lockUserMessageNavigationLayout} onPointerLeave={unlockUserMessageNavigationLayout}>
       <button type="button" title="上一条用户消息" aria-label="上一条用户消息" disabled={!userMessageNavigation.previous} onClick={() => navigateUserMessage("previous")}><ChevronUp size={17} aria-hidden="true"/></button>
       <button type="button" title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} aria-label={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} disabled={!userMessageNavigation.next && !userMessageNavigation.bottom} onClick={() => { if (userMessageNavigation.next) navigateUserMessage("next"); else navigateToThreadBottom(); }}><ChevronDown size={17} aria-hidden="true"/></button>
       {activeSession?.state === "working" && <button type="button" className={`thread-working-away${threadAwayFromBottom ? " away-from-bottom" : " at-live-edge"}`} title={threadAwayFromBottom ? "工作仍在继续，跳转到最新内容" : "工作仍在继续，当前已是最新内容"} aria-label={threadAwayFromBottom ? "工作仍在继续，跳转到最新内容" : "工作仍在继续，当前已是最新内容"} onClick={navigateWorkingToThreadBottom}><LoaderCircle size={15} strokeWidth={1.8} aria-hidden="true"/><span className="sr-only" role="status" aria-live="polite">Working</span></button>}
@@ -3862,9 +3952,7 @@ function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked,
 const FINAL_ANSWER_OUTLINE_MIN_SECTIONS = 2;
 const FINAL_ANSWER_OUTLINE_SCROLL_OFFSET = 24;
 const FINAL_ANSWER_OUTLINE_SCROLL_DURATION_MS = 180;
-const FINAL_ANSWER_OUTLINE_WIDTH = 184;
-const FINAL_ANSWER_OUTLINE_GAP = 78;
-const FINAL_ANSWER_OUTLINE_EDGE_GUARD = 16;
+const FINAL_ANSWER_OUTLINE_EDGE_GUARD = 12;
 
 function FinalAnswerContent({ text }: { text: string }) {
   const outline = useMemo(() => {
@@ -3872,12 +3960,16 @@ function FinalAnswerContent({ text }: { text: string }) {
     catch { return []; }
   }, [text]);
   const reactId = useId();
-  const headingPrefix = `final-heading-${reactId.replaceAll(":", "")}`;
+  const stableId = reactId.replaceAll(":", "");
+  const headingPrefix = `final-heading-${stableId}`;
+  const readingId = `final-answer-reading-${stableId}`;
   const rootRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const outlineNavigationAnimationRef = useRef<number | null>(null);
   const [showOutline, setShowOutline] = useState(false);
-  const [outlinePlacement, setOutlinePlacement] = useState<"rail" | "compact">("rail");
+  const [outlineHost, setOutlineHost] = useState<HTMLElement | null>(null);
+  const [outlineGeometry, setOutlineGeometry] = useState({ top: 0, height: 0 });
+  const [outlinePlacement, setOutlinePlacement] = useState<"docked" | "overlay">("docked");
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [activeId, setActiveId] = useState(MARKDOWN_OUTLINE_START_ID);
 
@@ -3887,27 +3979,53 @@ function FinalAnswerContent({ text }: { text: string }) {
     const root = rootRef.current;
     const content = contentRef.current;
     const viewport = root?.closest<HTMLElement>(".chat-scroll");
-    if (!root || !content || !viewport || outline.length < FINAL_ANSWER_OUTLINE_MIN_SECTIONS) {
+    const chatShell = viewport?.closest<HTMLElement>(".chat-shell");
+    if (!root || !content || !viewport || !chatShell || outline.length < FINAL_ANSWER_OUTLINE_MIN_SECTIONS) {
       setShowOutline(false);
       return;
     }
+    let updateFrame: number | null = null;
     const update = () => {
-      const availableLeftSpace = content.getBoundingClientRect().left - viewport.getBoundingClientRect().left;
-      const outlineFitsBesideContent = markdownOutlineFitsBesideContent(availableLeftSpace, FINAL_ANSWER_OUTLINE_WIDTH, FINAL_ANSWER_OUTLINE_GAP, FINAL_ANSWER_OUTLINE_EDGE_GUARD);
-      setOutlinePlacement(outlineFitsBesideContent ? "rail" : "compact");
+      updateFrame = null;
+      const contentRect = content.getBoundingClientRect();
+      const viewportRect = viewport.getBoundingClientRect();
+      const bodyInset = Math.max(0, contentRect.left - viewportRect.left);
+      const configuredWidth = Number.parseFloat(getComputedStyle(root).getPropertyValue("--final-outline-width"));
+      const outlineWidth = Number.isFinite(configuredWidth) && configuredWidth > 0 ? configuredWidth : 0;
+      const nextTop = contentRect.top - viewportRect.top + viewport.scrollTop;
+      const nextHeight = contentRect.height;
+      setOutlineHost((current) => current === viewport ? current : viewport);
+      setOutlineGeometry((current) => current.top === nextTop && current.height === nextHeight
+        ? current
+        : { top: nextTop, height: nextHeight });
+      setOutlinePlacement(bodyInset >= outlineWidth + FINAL_ANSWER_OUTLINE_EDGE_GUARD ? "docked" : "overlay");
       setShowOutline(finalAnswerNeedsOutline(content.offsetHeight, viewport.clientHeight, outline.length));
     };
+    const scheduleUpdate = () => {
+      if (updateFrame !== null) return;
+      updateFrame = window.requestAnimationFrame(update);
+    };
     update();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(update);
-    observer.observe(content);
-    observer.observe(viewport);
-    return () => observer.disconnect();
+    window.addEventListener("resize", scheduleUpdate);
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(scheduleUpdate);
+    observer?.observe(root);
+    observer?.observe(content);
+    observer?.observe(viewport);
+    observer?.observe(chatShell);
+    return () => {
+      window.removeEventListener("resize", scheduleUpdate);
+      observer?.disconnect();
+      if (updateFrame !== null) cancelAnimationFrame(updateFrame);
+    };
   }, [outline, text]);
 
   useEffect(() => {
-    setOutlineCollapsed(outlinePlacement === "compact");
+    setOutlineCollapsed(outlinePlacement === "overlay");
   }, [outlinePlacement]);
+
+  useLayoutEffect(() => {
+    window.dispatchEvent(new Event("markdown-outline-layout-change"));
+  }, [outlineCollapsed, outlinePlacement, showOutline]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -3971,14 +4089,18 @@ function FinalAnswerContent({ text }: { text: string }) {
     animateOutlineNavigation(viewport, targetTop, item.id);
   };
 
-  return <div ref={(node) => { rootRef.current = node; contentRef.current = node; }} className={`message-content final-answer-reading${showOutline ? " has-outline" : ""}`}>
-    {showOutline && <aside className={`final-answer-outline ${outlinePlacement}${outlineCollapsed ? " collapsed" : " expanded"}`} aria-label="Final answer table of contents">
+  const outlineElement = showOutline && outlineHost ? createPortal(<aside
+    className={`final-answer-outline ${outlinePlacement}${outlineCollapsed ? " collapsed" : " expanded"}`}
+    data-final-answer-reading-id={readingId}
+    style={{ top: `${outlineGeometry.top}px`, height: `${outlineGeometry.height}px` }}
+    aria-label="Final answer table of contents"
+  >
       <div className="final-answer-outline-anchor">
-        <button type="button" className="final-answer-outline-toggle" aria-expanded={!outlineCollapsed} aria-label={outlineCollapsed ? "Show table of contents" : "Hide table of contents"} title={outlineCollapsed ? "Show table of contents" : "Hide table of contents"} onClick={() => setOutlineCollapsed((current) => !current)}>
-          <span>Contents</span>{outlineCollapsed ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}
-        </button>
+        {outlineCollapsed && <button type="button" className="final-answer-outline-toggle" aria-expanded={false} aria-label="Show table of contents" title="Show table of contents" onClick={() => setOutlineCollapsed(false)}>
+          <Bookmark size={15} strokeWidth={1.8} aria-hidden="true"/><ChevronRight className="final-answer-outline-toggle-arrow" size={10} strokeWidth={2.2} aria-hidden="true"/>
+        </button>}
         {!outlineCollapsed && <div className="final-answer-outline-card">
-          <header><span>Contents</span></header>
+          <header><button type="button" className="final-answer-outline-close" aria-label="Hide table of contents" title="Hide table of contents" onClick={() => setOutlineCollapsed(true)}><ChevronLeft size={13} aria-hidden="true"/></button><span><Bookmark size={12} aria-hidden="true"/>Contents</span></header>
           <nav><button
             type="button"
             className={`final-answer-outline-start${activeId === MARKDOWN_OUTLINE_START_ID ? " active" : ""}`}
@@ -3995,7 +4117,10 @@ function FinalAnswerContent({ text }: { text: string }) {
           >{item.title}</button>)}</nav>
         </div>}
       </div>
-    </aside>}
+    </aside>, outlineHost) : null;
+
+  return <div id={readingId} ref={(node) => { rootRef.current = node; contentRef.current = node; }} className={`message-content final-answer-reading${showOutline ? " has-outline" : ""}`}>
+    {outlineElement}
     <MarkdownContent text={text} headingIdPrefix={outline.length >= FINAL_ANSWER_OUTLINE_MIN_SECTIONS ? headingPrefix : undefined}/>
   </div>;
 }

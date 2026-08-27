@@ -137,29 +137,39 @@ describe("assistant-ui thread integration", () => {
   });
 
   it("keeps the Markdown outline anchor separate from navigation-item decoration", () => {
-    expect(source).toContain('className="final-answer-outline-toggle" aria-expanded={!outlineCollapsed}');
-    expect(source).toContain('aria-label={outlineCollapsed ? "Show table of contents" : "Hide table of contents"}');
-    expect(source).toContain('onClick={() => setOutlineCollapsed((current) => !current)}');
-    expect(styles).toContain('.final-answer-outline-toggle { display: inline-flex; align-items: center; justify-content: center;');
-    expect(styles).toContain('width: 82px; height: 34px;');
-    expect(styles).toContain('.final-answer-outline-toggle span { font-size: 8px; font-weight: 720; line-height: 1;');
-    expect(styles).toContain('white-space: nowrap;');
+    expect(source).toContain('className="final-answer-outline-toggle" aria-expanded={false}');
+    expect(source).toContain('aria-label="Show table of contents"');
+    expect(source).toContain('onClick={() => setOutlineCollapsed(false)}');
+    expect(source).toContain('<Bookmark size={15} strokeWidth={1.8} aria-hidden="true"/><ChevronRight className="final-answer-outline-toggle-arrow"');
+    expect(source).not.toContain('<Bookmark size={15} strokeWidth={1.8} aria-hidden="true"/><span>Contents</span>');
+    expect(styles).toContain('.final-answer-outline-toggle { position: relative; display: inline-flex; flex: none; width: 30px; height: 48px; align-items: center; justify-content: center;');
+    expect(styles).toContain('.final-answer-outline-toggle-arrow { position: absolute; right: 3px; bottom: 4px;');
+    expect(styles).not.toContain('.final-answer-outline-toggle span {');
     expect(styles).toContain('.final-answer-outline-card nav > button { position: relative;');
     expect(styles).toContain('.final-answer-outline-card nav > button::before { position: absolute;');
     expect(styles).not.toContain('.final-answer-outline-card button::before { position: absolute;');
   });
 
-  it("keeps resizable sidebar branding contained and removes the desktop right-rail seam", () => {
+  it("keeps resizable sidebar branding contained and mirrors borderless shadows around chat", () => {
     expect(styles).toContain('.sidebar { container-type: inline-size; }');
     expect(styles).toContain('font-size: clamp(20px, 12cqw, 28px);');
     expect(styles).toContain('letter-spacing: clamp(.06em, .5cqw, .12em);');
     expect(styles).toContain('white-space: nowrap;');
-    expect(styles).toMatch(/@media \(min-width: 1051px\) \{[\s\S]*?\.chat-shell \{[\s\S]*?border-right: 0;[\s\S]*?box-shadow: none;[\s\S]*?\.worker-role-panel,[\s\S]*?\.toolrepo-side-panel \{[\s\S]*?width: 100%;[\s\S]*?margin-left: 0;[\s\S]*?border-left: 0;/);
-    expect(styles).toContain('.worker-role-panel { box-shadow: -3px 0 0 var(--management-panel); }');
+    expect(styles).toMatch(/@media \(min-width: 1051px\) \{[\s\S]*?\.chat-shell \{[\s\S]*?z-index: 0;[\s\S]*?border-right: 0;[\s\S]*?box-shadow: none;[\s\S]*?\.sidebar,[\s\S]*?\.worker-role-panel \{ z-index: 1; \}[\s\S]*?\.sidebar \{[\s\S]*?border-right: 0;[\s\S]*?box-shadow: 18px 0 30px -24px #000000b8;[\s\S]*?\.worker-role-panel,[\s\S]*?\.toolrepo-side-panel \{[\s\S]*?width: 100%;[\s\S]*?margin-left: 0;[\s\S]*?border-left: 0;/);
+    expect(styles).toContain('.worker-role-panel { box-shadow: -18px 0 30px -24px #000000b8; }');
+    expect(styles).toContain(':root[data-theme="light"] .sidebar { box-shadow: 18px 0 30px -24px #29443b52; }');
+    expect(styles).toContain(':root[data-theme="light"] .worker-role-panel { box-shadow: -18px 0 30px -24px #29443b52; }');
+    expect(styles).not.toContain('.worker-role-panel { box-shadow: -3px 0 0 var(--management-panel); }');
+    expect(styles).not.toContain('box-shadow: inset -1px 0 #303b3875;');
+    expect(styles).not.toContain('box-shadow: inset 1px 0 #303b3875;');
     expect(styles).toContain('.toolrepo-side-panel { box-shadow: -3px 0 0 #10171f; }');
     expect(styles).toContain(':root[data-theme="light"] .toolrepo-side-panel { box-shadow: -3px 0 0 #f8fafb; }');
     expect(styles).toContain('.worker-role-panel > .sidebar-resize-handle:hover:not(:disabled),');
     expect(styles).toContain('.toolrepo-side-panel > .sidebar-resize-handle:focus-visible { appearance: none; border: 0; border-radius: 0; outline: 0; background: transparent; box-shadow: none; }');
+    expect(styles).toContain('.worker-role-panel button:not(.sidebar-resize-handle),');
+    expect(styles).toContain(':root[data-theme="light"] .worker-role-panel button:not(.sidebar-resize-handle),');
+    expect(styles).not.toContain('.worker-role-panel button,\n.mcp-panel-header-actions');
+    expect(styles).not.toContain(':root[data-theme="light"] .worker-role-panel button,');
     expect(styles).toContain('.sidebar-resize-handle { position: absolute; z-index: 7; top: 0; bottom: 0; width: 10px; appearance: none; border: 0; border-radius: 0; padding: 0; outline: 0; background: transparent; box-shadow: none;');
     expect(styles).not.toContain('width: calc(100% + 1px);');
     expect(styles).not.toContain('margin-left: -1px;');
@@ -291,7 +301,8 @@ describe("assistant-ui thread integration", () => {
   it("keeps previous-message and thread-bottom navigation beside the thread", () => {
     expect(source).toContain('className="turn-user-frame" data-user-message-anchor');
     expect(source).not.toMatch(/className=\{`turn-user-entry \.\{entry\.kind\}`\} data-user-message-anchor/);
-    expect(source).toContain('className="user-message-navigation" aria-label="用户消息导航"');
+    expect(source).toContain('className={`user-message-navigation outline-overlap-${userMessageNavigationLayout.overlap}${userMessageNavigationHoverLocked ? " hover-locked" : ""}`}');
+    expect(source).toContain('onPointerEnter={lockUserMessageNavigationLayout} onPointerLeave={unlockUserMessageNavigationLayout}');
     expect(source).toContain('title="上一条用户消息" aria-label="上一条用户消息"');
     expect(source).toContain('title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"}');
     expect(source).toContain('disabled={!userMessageNavigation.previous}');
@@ -313,7 +324,13 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('<ChevronUp size={17} aria-hidden="true"/>');
     expect(source).toContain('<ChevronDown size={17} aria-hidden="true"/>');
     expect(source).not.toContain('user-message-navigation-triangle');
-    expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 38px); left: max(10px, calc((100% - 900px) / 2)); display: grid; gap: 7px;');
+    expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 6; top: calc(50% + 38px); left: max(10px, calc((100% - 876px) / 2)); display: grid; gap: 7px;');
+    expect(source).toContain('markdownFloatingNavigationLayout(');
+    expect(source).toContain('outline-overlap-${userMessageNavigationLayout.overlap}');
+    expect(source).toContain('pendingUserMessageNavigationLayoutRef.current = next;');
+    expect(source).toContain('window.requestAnimationFrame(updateUserMessageNavigationLayout);');
+    expect(styles).toContain('.user-message-navigation.hover-locked { transition: none; }');
+    expect(source.indexOf('className={`thread-working-away')).toBeGreaterThan(source.indexOf('onPointerEnter={lockUserMessageNavigationLayout}'));
     expect(styles).toContain('.user-message-navigation button { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 9px; background: #242424d9;');
     expect(styles).toContain('.user-message-navigation button:disabled { opacity: .24; cursor: default; box-shadow: none; }');
     expect(styles).toContain(':root[data-theme="light"] .user-message-navigation button { background: #f7f9f9ed; color: #667d76;');
@@ -1121,21 +1138,28 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('<FinalAnswerDelivery text={turn.final_answer}');
     expect(source).toContain('<FinalAnswerContent text={text}/>');
     expect(source).toContain('<FinalAnswerContent text={turn.final_answer}/>');
-    expect(source).toContain('const availableLeftSpace = content.getBoundingClientRect().left - viewport.getBoundingClientRect().left;');
-    expect(source).toContain('markdownOutlineFitsBesideContent(availableLeftSpace, FINAL_ANSWER_OUTLINE_WIDTH, FINAL_ANSWER_OUTLINE_GAP, FINAL_ANSWER_OUTLINE_EDGE_GUARD)');
-    expect(source).toContain('setOutlinePlacement(outlineFitsBesideContent ? "rail" : "compact")');
+    expect(source).toContain('const chatShell = viewport?.closest<HTMLElement>(".chat-shell");');
+    expect(source).toContain('const bodyInset = Math.max(0, contentRect.left - viewportRect.left);');
+    expect(source).toContain('const nextTop = contentRect.top - viewportRect.top + viewport.scrollTop;');
+    expect(source).toContain('setOutlineHost((current) => current === viewport ? current : viewport);');
+    expect(source).toContain('getComputedStyle(root).getPropertyValue("--final-outline-width")');
+    expect(source).toContain('setOutlinePlacement(bodyInset >= outlineWidth + FINAL_ANSWER_OUTLINE_EDGE_GUARD ? "docked" : "overlay")');
     expect(source).toContain('setShowOutline(finalAnswerNeedsOutline(content.offsetHeight, viewport.clientHeight, outline.length))');
     expect(source).toContain('try { return extractMarkdownOutline(text); }');
     expect(source).toContain('catch { return []; }');
     expect(source).toContain('headingIdPrefix={outline.length >= FINAL_ANSWER_OUTLINE_MIN_SECTIONS ? headingPrefix : undefined}');
     expect(source).toContain('aria-label="Final answer table of contents"');
-    expect(source).toContain('const [outlinePlacement, setOutlinePlacement] = useState<"rail" | "compact">("rail");');
+    expect(source).toContain('const [outlinePlacement, setOutlinePlacement] = useState<"docked" | "overlay">("docked");');
+    expect(source).not.toContain('const [outlineBoundaryOffset, setOutlineBoundaryOffset] = useState(0);');
+    expect(source).toContain('const [outlineGeometry, setOutlineGeometry] = useState({ top: 0, height: 0 });');
     expect(source).toContain('const [outlineCollapsed, setOutlineCollapsed] = useState(false);');
-    expect(source).toContain('setOutlineCollapsed(outlinePlacement === "compact")');
+    expect(source).toContain('setOutlineCollapsed(outlinePlacement === "overlay")');
     expect(source).toContain('className="final-answer-outline-anchor"');
-    expect(source).toContain('className="final-answer-outline-toggle" aria-expanded={!outlineCollapsed}');
-    expect(source).toContain('aria-label={outlineCollapsed ? "Show table of contents" : "Hide table of contents"}');
-    expect(source).toContain('onClick={() => setOutlineCollapsed((current) => !current)}');
+    expect(source).toContain('className="final-answer-outline-toggle" aria-expanded={false}');
+    expect(source).toContain('aria-label="Show table of contents"');
+    expect(source).toContain('onClick={() => setOutlineCollapsed(false)}');
+    expect(source).toContain('className="final-answer-outline-close" aria-label="Hide table of contents"');
+    expect(source).toContain('onClick={() => setOutlineCollapsed(true)}');
     expect(source).toContain('const FINAL_ANSWER_OUTLINE_SCROLL_DURATION_MS = 180;');
     expect(source).toContain('markdownOutlineAnimationPosition(startTop, targetTop, elapsedMs, FINAL_ANSWER_OUTLINE_SCROLL_DURATION_MS)');
     expect(source).toContain('outlineNavigationAnimationRef.current = requestAnimationFrame(animate);');
@@ -1156,23 +1180,42 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).not.toContain('height: min(calc(64vh - 42px), 498px)');
     expect(styles).toContain('.final-answer-outline { position: absolute;');
     expect(styles).toContain('.final-answer-outline-anchor { position: sticky; top: 50%;');
-    expect(styles).toContain('.final-answer-outline-toggle { display: inline-flex; align-items: center; justify-content: center;');
-    expect(styles).toContain('.final-answer-outline-card { position: relative; width: 184px; min-height: 0; max-height: min(calc(64vh - 42px), 498px, calc(100vh - 66px)); display: flex; flex-direction: column; margin-top: 8px;');
-    expect(styles).toContain('transform-origin: top center; animation: final-outline-open');
-    expect(styles).toContain('@keyframes final-outline-open { from { opacity: 0; transform: translateY(-8px) scale(.98); } }');
-    expect(styles).toContain('.final-answer-outline { position: absolute; z-index: 5; top: 0; bottom: 0; width: 184px;');
-    expect(styles).toContain('.final-answer-outline.rail { right: calc(100% + 78px); }');
-    expect(styles).toContain('.final-answer-outline.compact { right: 0; }');
-    expect(styles).toContain('.final-answer-outline.compact .final-answer-outline-toggle { width: 34px; padding: 0; }');
-    expect(styles).toContain('.final-answer-outline-anchor { position: sticky; top: 50%; width: 184px; min-height: 34px; max-height: calc(100vh - 24px); display: flex; flex-direction: column; align-items: center; transform: translateY(-50%);');
-    expect(styles).toContain('.final-answer-outline-card { position: relative; width: 184px; min-height: 0; max-height: min(calc(64vh - 42px), 498px, calc(100vh - 66px)); display: flex; flex-direction: column; margin-top: 8px;');
-    expect(styles).not.toContain('.final-answer-outline.collapsed { width:');
+    expect(styles).toContain('.final-answer-outline-toggle { position: relative; display: inline-flex; flex: none; width: 30px; height: 48px; align-items: center; justify-content: center;');
+    expect(styles).toContain('.final-answer-outline-card { position: relative; width: 208px; min-height: 0; max-height: min(64vh, 498px, calc(100vh - 24px)); display: flex; flex-direction: column; overflow: hidden;');
+    expect(styles).toContain('transform-origin: left center; animation: final-outline-open');
+    expect(styles).toContain('@keyframes final-outline-open { from { opacity: 0; transform: translateX(-12px) scale(.985); } }');
+    expect(styles).toContain('.final-answer-reading { --final-outline-width: 220px; position: relative; min-width: 0; }');
+    expect(styles).toContain('.final-answer-outline { position: absolute; z-index: 5; left: 0; width: var(--final-outline-width);');
+    expect(styles).not.toContain('.final-answer-outline::before {');
+    expect(styles).toContain('.final-answer-outline-toggle { position: relative; display: inline-flex; flex: none; width: 30px; height: 48px;');
+    expect(styles).not.toContain('.final-answer-outline-toggle span {');
+    expect(styles).toContain('.final-answer-outline-anchor { position: sticky; top: 50%; width: max-content; min-height: 86px; max-height: calc(100vh - 24px); display: flex; align-items: flex-start; transform: translateY(-50%);');
+    expect(styles).toContain('.final-answer-outline.collapsed { width: 32px; }');
+    expect(styles).toContain('border-radius: 0 9px 9px 0;');
+    expect(styles).not.toContain('inset 2px 0 #7bb7a547');
+    expect(styles).not.toContain('inset 1px 0 #ffffff0a');
     expect(styles).not.toContain('.final-answer-outline.expanded { width:');
-    expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 38px); left: max(10px, calc((100% - 900px) / 2));');
+    expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 6; top: calc(50% + 38px); left: max(10px, calc((100% - 876px) / 2));');
     expect(styles).not.toContain('.final-answer-outline-anchor { position: sticky; top: calc(50% + 38px);');
-    expect(source).toContain('<span>Contents</span>{outlineCollapsed ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}');
+    expect(source).toContain('{outlineCollapsed && <button type="button" className="final-answer-outline-toggle"');
+    expect(source).toContain('<header><button type="button" className="final-answer-outline-close"');
+    expect(source).toContain('<ChevronLeft size={13} aria-hidden="true"/></button><span><Bookmark size={12} aria-hidden="true"/>Contents</span></header>');
+    expect(styles).toContain('.final-answer-outline-card header { flex: 0 0 auto; min-height: 22px; display: flex; align-items: center; justify-content: flex-start; gap: 3px; margin: 0 2px 9px 0; }');
+    expect(styles).toContain('.final-answer-outline.overlay.expanded .final-answer-outline-card { background: linear-gradient(90deg,');
+    expect(styles).toContain('mask-image: linear-gradient(90deg, #000 0%, #000 70%, #000c 84%, transparent 100%);');
+    expect(styles).toContain('font-size: 12px; font-weight: 530; line-height: 1.42;');
+    expect(styles).toContain('.final-answer-outline-card nav > button.level-3 { padding-left: 25px; color: #747e79; font-size: 11px; }');
+    expect(styles).toContain('.final-answer-outline-card nav > button { position: relative; flex: 0 0 auto; min-width: 0; overflow: hidden; border: 0; border-radius: 7px; padding: 6px 7px 6px 11px;');
+    expect(styles).not.toContain('.final-answer-outline-card::after {');
+    expect(source).not.toContain('sidebar-layout-change');
+    expect(source).toContain('observer?.observe(chatShell);');
+    expect(source).toContain('data-final-answer-reading-id={readingId}');
+    expect(source).toContain('style={{ top: `${outlineGeometry.top}px`, height: `${outlineGeometry.height}px` }}');
+    expect(source).toContain('</aside>, outlineHost) : null;');
+    expect(styles).toContain('.chat-scroll { position: relative; overflow-x: hidden; }');
+    expect(source).not.toContain('--final-outline-boundary-offset');
     expect(styles).not.toContain('.final-answer-outline { display: none; }');
-    expect(styles).toContain('@media (max-width: 720px) { .final-answer-outline.compact { right: -4px; }');
+    expect(styles).toContain('@media (max-width: 720px) { .final-answer-outline-card');
     expect(source).toContain('{hasInterim && <div className="turn-answer-tabs" role="tablist" aria-label="Turn answers">');
     expect(source).toContain('const showFinalTab = hasFinal || hasInterim;');
     expect(source).toContain('{showFinalTab && <button type="button" role="tab"');
@@ -1738,7 +1781,11 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain("/* Border-light management surfaces: reserve visible borders for form controls and stateful toggles. */");
     expect(styles).toContain(`.sidebar {
   border-right-color: transparent;
-  box-shadow: inset -1px 0 #303b3875;
+  box-shadow: none;
+}`);
+    expect(styles).toContain(`.worker-role-panel {
+  border-left-color: transparent;
+  box-shadow: none;
 }`);
     expect(styles).toContain(`.worker-role-group,
 .worker-role-item,
@@ -2544,7 +2591,7 @@ it("uses an explicit session-created event and session-scoped inline decisions",
   });
 
   it("keeps compact mobile controls and long content inside the viewport", () => {
-    expect(styles).toContain(".chat-scroll { overflow-x: hidden; }");
+    expect(styles).toContain(".chat-scroll { position: relative; overflow-x: hidden; }");
     expect(styles).toContain(".turn-work-scroll { overflow-x: hidden; }");
     expect(styles).toContain("overscroll-behavior-y: auto;");
     expect(styles).toContain(".markdown-body .table-scroll { max-width: 100%; overflow-x: auto;");
