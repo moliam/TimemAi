@@ -53,7 +53,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, RwLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -77,6 +77,8 @@ const TEMPORARY_RETENTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SESSION_HISTORY_PAGE_LIMIT: usize = 200;
 const DEFAULT_MEM_TEMPORARY_RETENTION_DAYS: u16 = 5;
 const MILLIS_PER_DAY: i64 = 24 * 60 * 60 * 1_000;
+const MAX_MEM_TEMPORARY_SCAN_ENTRIES: usize = 20_000;
+const MAX_MEM_TEMPORARY_SCAN_DEPTH: usize = 32;
 const MAX_SESSION_MESSAGES: usize = 2_000;
 const MAX_SESSION_TURNS: usize = 200;
 const MAX_TURN_USER_ENTRIES: usize = 200;
@@ -109,6 +111,7 @@ struct AppState {
     command_global_barrier: Arc<RwLock<()>>,
     mem_epoch: Arc<RwLock<u64>>,
     temporary_retention_wakeup: Arc<Notify>,
+    mem_temporary_task_running: Arc<AtomicBool>,
     debug: Option<Arc<DebugStore>>,
 }
 
@@ -527,6 +530,279 @@ struct TemporaryRetentionResult {
     history_events: usize,
     shell_jobs: usize,
     api_audit_events: usize,
+}
+
+fn temporary_file_name(name: &str) -> bool {
+    name.ends_with(".tmp") || name.contains(".tmp-") || name.starts_with("tmp-")
+}
+
+fn modified_at_ms(metadata: &std::fs::Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+}
+
+fn collect_named_temporary_files(root: &Path) -> Result<Vec<MemTemporaryItem>, String> {
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        depth: usize,
+        visited: &mut usize,
+        out: &mut Vec<MemTemporaryItem>,
+    ) -> Result<(), String> {
+        if depth > MAX_MEM_TEMPORARY_SCAN_DEPTH || *visited >= MAX_MEM_TEMPORARY_SCAN_ENTRIES {
+            return Ok(());
+        }
+        for entry in
+            std::fs::read_dir(dir).map_err(|_| "mem_temporary_items_read_failed".to_string())?
+        {
+            if *visited >= MAX_MEM_TEMPORARY_SCAN_ENTRIES {
+                break;
+            }
+            *visited = visited.saturating_add(1);
+            let entry = entry.map_err(|_| "mem_temporary_items_read_failed".to_string())?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|_| "mem_temporary_items_metadata_failed".to_string())?;
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                if path.file_name().and_then(|name| name.to_str()) != Some("shell_jobs") {
+                    visit(root, &path, depth.saturating_add(1), visited, out)?;
+                }
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !temporary_file_name(name) {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| "mem_temporary_item_path_invalid".to_string())?;
+            let relative = relative
+                .to_str()
+                .ok_or_else(|| "mem_temporary_item_path_invalid".to_string())?
+                .replace('\\', "/");
+            out.push(MemTemporaryItem {
+                id: format!("file:{relative}"),
+                path: relative,
+                kind: "temporary_file".to_string(),
+                bytes: metadata.len(),
+                modified_at_ms: modified_at_ms(&metadata),
+            });
+        }
+        Ok(())
+    }
+    let mut items = Vec::new();
+    let mut visited = 0usize;
+    if root.exists() {
+        visit(root, root, 0, &mut visited, &mut items)?;
+    }
+    Ok(items)
+}
+
+fn list_mem_temporary_items_at(memory_dir: &Path) -> Result<Vec<MemTemporaryItem>, String> {
+    let mut items = collect_named_temporary_files(memory_dir)?;
+    let shell_store = FileShellJobStore::new(memory_dir);
+    for item in shell_store
+        .finished_temporary_items()
+        .map_err(|_| "mem_temporary_shell_jobs_read_failed".to_string())?
+    {
+        items.push(MemTemporaryItem {
+            id: format!("shell_job:{}", item.id),
+            path: format!("shell_jobs/{}", item.id),
+            kind: "shell_job".to_string(),
+            bytes: item.bytes,
+            modified_at_ms: item.created_at_ms,
+        });
+    }
+    items.sort_by(|left, right| {
+        right
+            .bytes
+            .cmp(&left.bytes)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    items.truncate(100);
+    Ok(items)
+}
+
+fn safe_temporary_relative_path(value: &str) -> Result<PathBuf, String> {
+    let path = Path::new(value);
+    if path.as_os_str().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err("mem_temporary_item_path_invalid".to_string());
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "mem_temporary_item_path_invalid".to_string())?;
+    if !temporary_file_name(name) {
+        return Err("mem_temporary_item_not_deletable".to_string());
+    }
+    Ok(path.to_path_buf())
+}
+
+fn delete_mem_temporary_items_at(memory_dir: &Path, ids: &[String]) -> Result<usize, String> {
+    if ids.is_empty() || ids.len() > 100 {
+        return Err("mem_temporary_item_selection_invalid".to_string());
+    }
+    let selected = ids.iter().collect::<BTreeSet<_>>();
+    if selected.len() != ids.len() {
+        return Err("mem_temporary_item_selection_invalid".to_string());
+    }
+    let current = list_mem_temporary_items_at(memory_dir)?;
+    let available = current
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if ids.iter().any(|id| !available.contains(id.as_str())) {
+        return Err("mem_temporary_item_not_found".to_string());
+    }
+    let canonical_root = std::fs::canonicalize(memory_dir)
+        .map_err(|_| "mem_temporary_item_path_invalid".to_string())?;
+    let mut shell_ids = Vec::new();
+    let mut file_paths = Vec::new();
+    for id in ids {
+        if let Some(shell_id) = id.strip_prefix("shell_job:") {
+            if shell_id.is_empty() {
+                return Err("mem_temporary_item_id_invalid".to_string());
+            }
+            shell_ids.push(shell_id.to_string());
+        } else if let Some(relative) = id.strip_prefix("file:") {
+            let relative = safe_temporary_relative_path(relative)?;
+            let path = memory_dir.join(relative);
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    "mem_temporary_item_not_found".to_string()
+                } else {
+                    "mem_temporary_item_metadata_failed".to_string()
+                }
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err("mem_temporary_item_not_deletable".to_string());
+            }
+            let canonical = std::fs::canonicalize(&path)
+                .map_err(|_| "mem_temporary_item_path_invalid".to_string())?;
+            if !canonical.starts_with(&canonical_root) {
+                return Err("mem_temporary_item_path_invalid".to_string());
+            }
+            file_paths.push(path);
+        } else {
+            return Err("mem_temporary_item_id_invalid".to_string());
+        }
+    }
+    let mut deleted = FileShellJobStore::new(memory_dir)
+        .delete_finished_temporary_items(&shell_ids)
+        .map_err(|_| "mem_temporary_shell_jobs_delete_failed".to_string())?;
+    for path in file_paths {
+        std::fs::remove_file(path).map_err(|_| "mem_temporary_item_delete_failed".to_string())?;
+        deleted = deleted.saturating_add(1);
+    }
+    Ok(deleted)
+}
+
+fn schedule_mem_temporary_task(
+    state: &AppState,
+    delete_ids: Option<Vec<String>>,
+) -> Result<(), String> {
+    if state
+        .mem_temporary_task_running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return if delete_ids.is_none() {
+            Ok(())
+        } else {
+            Err("mem_temporary_task_busy".to_string())
+        };
+    }
+    let (memory_dir, accepted_epoch) = match state.mem.lock() {
+        Ok(mem) => (
+            mem.layout.memory_dir(),
+            state
+                .mem_epoch
+                .read()
+                .map(|epoch| *epoch)
+                .unwrap_or_default(),
+        ),
+        Err(_) => {
+            state
+                .mem_temporary_task_running
+                .store(false, Ordering::Release);
+            return Err("mem_state_poisoned".to_string());
+        }
+    };
+    let running = Arc::clone(&state.mem_temporary_task_running);
+    let running_on_error = Arc::clone(&running);
+    let state = state.clone();
+    std::thread::Builder::new()
+        .name(
+            if delete_ids.is_some() {
+                "timem-web-mem-temp-delete"
+            } else {
+                "timem-web-mem-temp-list"
+            }
+            .to_string(),
+        )
+        .spawn(move || {
+            let result = if let Some(ids) = delete_ids {
+                let _global_guard = state
+                    .command_global_barrier
+                    .write()
+                    .map_err(|_| "command_global_barrier_poisoned".to_string());
+                match _global_guard {
+                    Ok(_guard) => {
+                        let epoch_matches = state
+                            .mem_epoch
+                            .read()
+                            .ok()
+                            .is_some_and(|epoch| *epoch == accepted_epoch);
+                        if !epoch_matches {
+                            Err("command_mem_epoch_stale".to_string())
+                        } else {
+                            delete_mem_temporary_items_at(&memory_dir, &ids)
+                                .and_then(|_| list_mem_temporary_items_at(&memory_dir))
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                list_mem_temporary_items_at(&memory_dir)
+            };
+            let epoch_current = state
+                .mem_epoch
+                .read()
+                .ok()
+                .is_some_and(|epoch| *epoch == accepted_epoch);
+            if epoch_current {
+                let (items, error) = match result {
+                    Ok(items) => (items, None),
+                    Err(error) => (Vec::new(), Some(error)),
+                };
+                let _ = state
+                    .events
+                    .send(WireEvent::MemTemporaryItems { items, error });
+            }
+            running.store(false, Ordering::Release);
+        })
+        .map_err(|error| {
+            running_on_error.store(false, Ordering::Release);
+            format!("mem_temporary_task_spawn_failed:{error}")
+        })?;
+    Ok(())
 }
 
 fn apply_temporary_retention(
@@ -972,6 +1248,15 @@ struct WebChatMessage {
     completion: Option<Value>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct MemTemporaryItem {
+    id: String,
+    path: String,
+    kind: String,
+    bytes: u64,
+    modified_at_ms: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WireEvent {
@@ -1076,6 +1361,11 @@ enum WireEvent {
     },
     MemSettingsUpdated {
         temporary_retention_days: Option<u16>,
+    },
+    MemTemporaryItems {
+        items: Vec<MemTemporaryItem>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     FileUploaded {
         session_id: String,
@@ -1442,6 +1732,10 @@ enum ClientCommand {
     MemTemporaryRetentionUpdate {
         days: Option<u16>,
     },
+    MemTemporaryItemsList,
+    MemTemporaryItemsDelete {
+        ids: Vec<String>,
+    },
 }
 
 impl ClientCommand {
@@ -1452,10 +1746,12 @@ impl ClientCommand {
             | Self::ToolRepoDetail { .. }
             | Self::SessionApiKeyReveal { .. }
             | Self::McpServerSecretsReveal { .. }
-            | Self::ModelEndpointSecretReveal { .. } => None,
+            | Self::ModelEndpointSecretReveal { .. }
+            | Self::MemTemporaryItemsList => None,
             Self::RuntimeUpdate { .. }
             | Self::MemSwitch { .. }
             | Self::MemTemporaryRetentionUpdate { .. }
+            | Self::MemTemporaryItemsDelete { .. }
             | Self::McpServerDelete { .. }
             | Self::ModelEndpointUpsert { .. }
             | Self::ModelEndpointDelete { .. }
@@ -1498,6 +1794,7 @@ impl ClientCommand {
             Self::RuntimeUpdate { .. }
                 | Self::MemSwitch { .. }
                 | Self::MemTemporaryRetentionUpdate { .. }
+                | Self::MemTemporaryItemsDelete { .. }
                 | Self::McpServerDelete { .. }
                 | Self::ModelEndpointUpsert { .. }
                 | Self::ModelEndpointDelete { .. }
@@ -1576,7 +1873,7 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
     let template = WorkerTemplate::from_environment(&launch)?;
     let prefer_default_mem_port = uses_system_default_mem(&template.initial_space);
     println!("Starting Timem Web and restoring the selected workspace...");
-    let token = generate_token()?;
+    let token = launch.public_access.then(generate_token).transpose()?;
     let manager = Arc::new(Mutex::new(CoreSessionWorkerManager::new()));
     let sessions = Arc::new(Mutex::new(BTreeMap::new()));
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
@@ -1612,7 +1909,7 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         None
     };
     let state = AppState {
-        token: token.clone(),
+        token: token.clone().unwrap_or_default(),
         public_access: launch.public_access,
         manager,
         template: Arc::new(template),
@@ -1625,6 +1922,7 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
         temporary_retention_wakeup: Arc::new(Notify::new()),
+        mem_temporary_task_running: Arc::new(AtomicBool::new(false)),
         debug,
     };
     let cleanup_guard = WebRuntimeCleanupGuard::new(&state);
@@ -1661,16 +1959,15 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         }),
     );
     let app = build_router(state.clone(), port);
-    let local_url = format!("http://127.0.0.1:{port}/?token={token}");
-    let public_url = launch
-        .public_access
-        .then(|| public_access_url(launch.public_host.as_deref(), port, &token))
-        .flatten();
+    let local_url = format!("http://127.0.0.1:{port}/");
+    let public_url = token
+        .as_deref()
+        .and_then(|token| public_access_url(launch.public_host.as_deref(), port, token));
     let browser_url = public_url.as_deref().unwrap_or(&local_url).to_string();
     publish_running_instance_info(
         &state,
         port,
-        &token,
+        token.as_deref(),
         &browser_url,
         launch.public_access,
         launch_parent,
@@ -1925,7 +2222,8 @@ async fn static_asset(
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    let token_from_query = query.token.as_deref() == Some(state.token.as_str());
+    let token_from_query =
+        state.public_access && query.token.as_deref() == Some(state.token.as_str());
     if !authorized_token_or_cookie(&state, query.token.as_deref(), &headers) {
         return (
             StatusCode::UNAUTHORIZED,
@@ -2033,6 +2331,9 @@ fn authorized(state: &AppState, auth: &AuthQuery, headers: &HeaderMap) -> bool {
 }
 
 fn authorized_token_or_cookie(state: &AppState, token: Option<&str>, headers: &HeaderMap) -> bool {
+    if !state.public_access {
+        return true;
+    }
     match token {
         Some(token) => token == state.token,
         None => authorized_by_cookie(state, headers),
@@ -2219,7 +2520,7 @@ fn command_dedup_path(mem: &WebMemState) -> PathBuf {
 fn publish_running_instance_info(
     state: &AppState,
     port: u16,
-    token: &str,
+    token: Option<&str>,
     browser_url: &str,
     public_access: bool,
     launch_parent: crate::os::LaunchParent,
@@ -2232,7 +2533,7 @@ fn publish_running_instance_info(
         pid: std::process::id(),
         launch_parent_pid: launch_parent.pid_u32(),
         port: Some(port),
-        token: Some(token.to_string()),
+        token: token.map(str::to_string),
         browser_url: Some(browser_url.to_string()),
         public_access,
         started_at_ms: now_ms(),
@@ -2294,14 +2595,22 @@ async fn existing_web_instance_is_healthy(
     info: &JournalInstanceInfo,
     health_timeout: Duration,
 ) -> bool {
-    let (Some(port), Some(token)) = (info.port, info.token.as_deref()) else {
+    let Some(port) = info.port else {
         return false;
+    };
+    let health_path = if info.public_access {
+        let Some(token) = info.token.as_deref() else {
+            return false;
+        };
+        format!("/api/health?token={token}")
+    } else {
+        "/api/health".to_string()
     };
 
     timeout(health_timeout, async {
         let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await?;
         let request = format!(
-            "GET /api/health?token={token} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+            "GET {health_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
         );
         stream.write_all(request.as_bytes()).await?;
         let mut response = Vec::new();
@@ -4143,6 +4452,18 @@ fn handle_command_with_id(
                 values: mcp_server_secret_values(state, &server_id)?,
                 server_id,
             }));
+        }
+        ClientCommand::MemTemporaryItemsList => {
+            schedule_mem_temporary_task(state, None)?;
+        }
+        ClientCommand::MemTemporaryItemsDelete { ids } => {
+            if ids.is_empty()
+                || ids.len() > 100
+                || ids.iter().collect::<BTreeSet<_>>().len() != ids.len()
+            {
+                return Err("mem_temporary_item_selection_invalid".to_string());
+            }
+            schedule_mem_temporary_task(state, Some(ids))?;
         }
         ClientCommand::MemTemporaryRetentionUpdate { days } => {
             validate_mem_temporary_retention_days(days)?;
