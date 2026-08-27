@@ -1553,7 +1553,7 @@ function TimemApp() {
                       return <div className={`worker-row ${depth > 0 ? "child-worker" : "root-worker"} ${isLast ? "last-child" : ""}`} role="treeitem" aria-level={depth + 1} key={worker.worker_id} title={`${workerName} · level ${depth + 1} · ${worker.worker_id} · ${worker.context_id}`} style={{ "--worker-depth": depth } as CSSProperties}><span className="worker-relation" aria-hidden="true"><span/></span>{worker.state === "working" ? <LoaderCircle className="worker-working-icon" size={12} aria-label={`${workerName} working`}/> : <span className="worker-idle-spacer" aria-hidden="true"/>}<span className="worker-name" title={workerName}>{workerName}</span></div>;
                     })}</div>}
                   </>}</SortableSession>;
-                })}{bucketSessions.length === 0 && <div className="session-group-drop-hint">拖动 Session 到这里</div>}</div>}
+                })}{bucketSessions.length === 0 && <div className="session-group-drop-hint">拖动Session以归组</div>}</div>}
               </SessionDropGroup>;
             })}
           </nav>
@@ -3370,7 +3370,8 @@ function areTurnInteractionPropsEqual(previous: TurnInteractionProps, next: Turn
 function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, onToolGen, onDelete }: { turn: WebTurn; toolGenPending: boolean; toolGenBlocked: boolean; onToolGen?: () => void; onDelete?: () => void }) {
   const hasFinal = !!turn.final_answer;
   const hasInterim = turn.sub_answers.length > 0;
-  const availableKeys = [...(hasFinal ? ["final"] : []), ...(hasInterim ? ["interim"] : [])];
+  const showFinalTab = hasFinal || hasInterim;
+  const availableKeys = [...(showFinalTab ? ["final"] : []), ...(hasInterim ? ["interim"] : [])];
   const newestKey = hasFinal ? "final" : "interim";
   const [selectedKey, setSelectedKey] = useState(newestKey);
   const previousFinal = useRef<string | null | undefined>(turn.final_answer);
@@ -3400,13 +3401,15 @@ function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, onToolGen, o
   }
   return <section className="turn-answer-delivery" onPointerDown={markInteracting} onFocus={markInteracting} onCopy={markInteracting}>
     {hasInterim && <div className="turn-answer-tabs" role="tablist" aria-label="Turn answers">
-      {hasFinal && <button type="button" role="tab" aria-selected={selected === "final"} className={selected === "final" ? "selected" : ""} onClick={() => selectPanel("final")}>Final Answer</button>}
+      {showFinalTab && <button type="button" role="tab" aria-selected={selected === "final"} className={selected === "final" ? "selected" : ""} onClick={() => selectPanel("final")}>Final Answer</button>}
       {hasInterim && <button type="button" role="tab" aria-selected={selected === "interim"} className={selected === "interim" ? "selected" : ""} onClick={() => selectPanel("interim")}>Interim</button>}
     </div>}
     <div className="turn-answer-panel" role="tabpanel">
-      {hasFinal && turn.final_answer && <div className={`turn-answer-view ${selected === "final" ? "selected" : "inactive"}`} aria-hidden={selected !== "final"}>
-        <FinalAnswerContent text={turn.final_answer}/>
-        {turn.completion ? <CompletionCard completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen}/> : null}
+      {showFinalTab && <div className={`turn-answer-view ${selected === "final" ? "selected" : "inactive"}`} aria-hidden={selected !== "final"}>
+        {hasFinal && turn.final_answer ? <>
+          <FinalAnswerContent text={turn.final_answer}/>
+          {turn.completion ? <CompletionCard completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen}/> : null}
+        </> : <div className="turn-final-placeholder" role="status" aria-live="polite">{turn.state === "working" ? "Still working ..." : "No final answer was produced."}</div>}
       </div>}
       {hasInterim && <div className={`turn-answer-view ${selected === "interim" ? "selected" : "inactive"}`} aria-hidden={selected !== "interim"}>
         <div className="turn-interim-list">{turn.sub_answers.map((item, index) => <section className="turn-interim-item" key={item.sub_answer_id}>

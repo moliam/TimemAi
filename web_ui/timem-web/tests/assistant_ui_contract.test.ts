@@ -226,7 +226,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('type="submit" disabled={!sessionGroupEditor.name.trim()}');
     expect(source).toContain('sessionGroups.map((group) => ({ id: group.id, group, sessions:');
     expect(source).toContain('{ id: "__ungrouped", group: undefined, sessions: ungroupedSessions }');
-    expect(source).toContain('bucketSessions.length === 0 && <div className="session-group-drop-hint">拖动 Session 到这里</div>');
+    expect(source).toContain('bucketSessions.length === 0 && <div className="session-group-drop-hint">拖动Session以归组</div>');
+    expect(styles).toContain('.session-group-drop-hint { min-height: 28px; display: grid; place-items: center; box-sizing: border-box; margin: 1px 6px 3px;');
   });
 
   it("supports dragging sessions between session groups like roles", () => {
@@ -1123,10 +1124,12 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('onClick={navigateToStart}');
     expect(styles).toContain('.final-answer-outline-card nav > button.final-answer-outline-start { display: flex; align-items: center;');
     expect(styles).toContain('.final-answer-outline-card nav > button.final-answer-outline-start::before { display: none; }');
+    expect(styles).toContain('.final-answer-outline-card nav { min-height: 0; display: grid; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 7px; scroll-padding-block: 7px;');
+    expect(styles).not.toContain('max-height: min(56vh, 472px)');
     expect(styles).toContain('.final-answer-outline { position: absolute;');
     expect(styles).toContain('.final-answer-outline-anchor { position: sticky; top: 50%;');
     expect(styles).toContain('.final-answer-outline-toggle { display: inline-flex; align-items: center; justify-content: center;');
-    expect(styles).toContain('.final-answer-outline-card { position: relative; width: 184px; max-height: min(calc(64vh - 42px), 498px); margin-top: 8px;');
+    expect(styles).toContain('.final-answer-outline-card { position: relative; width: 184px; max-height: min(calc(64vh - 42px), 498px); display: grid; grid-template-rows: auto minmax(0, 1fr); margin-top: 8px;');
     expect(styles).toContain('transform-origin: top center; animation: final-outline-open');
     expect(styles).toContain('@keyframes final-outline-open { from { opacity: 0; transform: translateY(-8px) scale(.98); } }');
     expect(styles).toContain('.final-answer-outline { position: absolute; z-index: 5; top: 0; bottom: 0; width: 184px;');
@@ -1134,7 +1137,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain('.final-answer-outline.compact { right: 0; }');
     expect(styles).toContain('.final-answer-outline.compact .final-answer-outline-toggle { width: 34px; padding: 0; }');
     expect(styles).toContain('.final-answer-outline-anchor { position: sticky; top: 50%; width: 184px; min-height: 34px; display: flex; flex-direction: column; align-items: center; transform: translateY(-50%);');
-    expect(styles).toContain('.final-answer-outline-card { position: relative; width: 184px; max-height: min(calc(64vh - 42px), 498px); margin-top: 8px;');
+    expect(styles).toContain('.final-answer-outline-card { position: relative; width: 184px; max-height: min(calc(64vh - 42px), 498px); display: grid; grid-template-rows: auto minmax(0, 1fr); margin-top: 8px;');
     expect(styles).not.toContain('.final-answer-outline.collapsed { width:');
     expect(styles).not.toContain('.final-answer-outline.expanded { width:');
     expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 38px); left: max(10px, calc((100% - 900px) / 2));');
@@ -1143,7 +1146,13 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).not.toContain('.final-answer-outline { display: none; }');
     expect(styles).toContain('@media (max-width: 720px) { .final-answer-outline.compact { right: -4px; }');
     expect(source).toContain('{hasInterim && <div className="turn-answer-tabs" role="tablist" aria-label="Turn answers">');
+    expect(source).toContain('const showFinalTab = hasFinal || hasInterim;');
+    expect(source).toContain('{showFinalTab && <button type="button" role="tab"');
+    expect(source).toContain('>Final Answer</button>');
     expect(source).toContain('>Interim</button>');
+    expect(source).toContain('className="turn-final-placeholder" role="status" aria-live="polite"');
+    expect(source).toContain('turn.state === "working" ? "Still working ..." : "No final answer was produced."');
+    expect(styles).toContain('.turn-final-placeholder { padding: 3px 0 15px; color: #7d8b93; font-size: 13px; font-style: italic; }');
     expect(source).toContain('className="turn-interim-list"');
     expect(source).toContain('className="turn-interim-item"');
     expect(source).toContain('className={`turn-answer-view ${selected === "final" ? "selected" : "inactive"}`}');
