@@ -4,6 +4,10 @@
 
 ### Fixed
 
+- Speed up Web Memory settings temporary-data discovery by filtering directory
+  entries before reading file metadata, retaining only the largest 100
+  candidates during traversal, and reusing the result when reopening the same
+  MEM instead of automatically rescanning it each time.
 - Fixed Web Markdown math normalization so multiline `\[...\]` and custom
   display formulas remain isolated block-math nodes instead of swallowing the
   following Markdown, and number-leading inline formulas such as `\(2P\)`

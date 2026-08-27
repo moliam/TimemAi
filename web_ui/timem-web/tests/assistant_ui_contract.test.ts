@@ -1496,6 +1496,9 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('className="memory-switch-impact"');
     expect(source).not.toContain('className="settings-memory-switch"');
     expect(source).toContain('className="settings-temporary-list" role="list" aria-label="Largest temporary files"');
+    expect(source).toContain('const memTemporaryItemsLoadedForRef = useRef("");');
+    expect(source).toContain('if (memTemporaryItemsLoadedForRef.current === memPath) return;');
+    expect(source).toContain('memTemporaryItemsLoadedForRef.current = memPath;');
     expect(source).toContain('sendCommand({ type: "mem_temporary_items_list" })');
     expect(source).toContain('sendCommand({ type: "mem_temporary_items_delete", ids })');
     expect(source).toContain('sendCommand({ type: "mem_temporary_retention_update", days })');
