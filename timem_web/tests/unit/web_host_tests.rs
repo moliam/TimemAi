@@ -8059,6 +8059,7 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
                 arguments: json!({"type": "cwd"}),
                 raw_arguments: r#"{"type":"cwd"}"#.to_string(),
             }],
+            truncated: true,
             runtime_phase: None,
         },
     );
@@ -8155,6 +8156,23 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
     assert!(statistics.contains("badge-native"), "{statistics}");
     assert!(statistics.contains("Action on-CPU time"), "{statistics}");
     assert!(statistics.contains("LLM API latency"), "{statistics}");
+    assert!(statistics.contains("Finish reason: length"), "{statistics}");
+    assert!(
+        statistics.contains("<span>Count</span><strong>1</strong>"),
+        "{statistics}"
+    );
+    assert!(
+        statistics.contains("<span>Min bytes</span><strong>29</strong>"),
+        "{statistics}"
+    );
+    assert!(
+        statistics.contains("<span>Avg bytes</span><strong>29.0</strong>"),
+        "{statistics}"
+    );
+    assert!(
+        statistics.contains("<span>Max bytes</span><strong>29</strong>"),
+        "{statistics}"
+    );
     assert!(statistics.contains("100.0%"), "{statistics}");
     assert!(statistics.contains("claude-inline"), "{statistics}");
     assert!(statistics.contains("badge-inline"), "{statistics}");
@@ -8368,6 +8386,7 @@ fn live_model_usage_is_retained_in_the_active_turn_and_correct_session() {
             round: 2,
             content: String::new(),
             tool_calls: Vec::new(),
+            truncated: false,
             runtime_phase: None,
             usage: UsageStats {
                 prompt_tokens: 8_200,
@@ -8384,6 +8403,7 @@ fn live_model_usage_is_retained_in_the_active_turn_and_correct_session() {
             round: 3,
             content: String::new(),
             tool_calls: Vec::new(),
+            truncated: false,
             runtime_phase: Some("toolgen".to_string()),
             usage: UsageStats {
                 prompt_tokens: 3_100,
