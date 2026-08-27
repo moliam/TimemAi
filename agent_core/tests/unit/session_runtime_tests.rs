@@ -1,8 +1,8 @@
 use super::*;
 use crate::{
     ApprovalRequest, BashApprovalMode, CapabilityRegistry, CoreActionKind, CoreProfile,
-    CoreTopicEvent, HostDecision, NoopTurnUi, TurnStopDetail, TurnStopReason,
-    CORE_TOPIC_CONTEXT_COMPACT, CORE_TOPIC_OUTPUT_EXPAND_REQUEST,
+    CoreTopicEvent, HostDecision, NoopTurnUi, OutputExpansionRequest, TurnStopDetail,
+    TurnStopReason, CORE_TOPIC_CONTEXT_COMPACT,
 };
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -346,7 +346,6 @@ impl TurnUi for SupplementDuringModelUi {
 struct SupplementAndExpansionUi {
     injected: bool,
     pending: Vec<String>,
-    expansion_requests: u32,
 }
 
 #[derive(Default)]
@@ -402,20 +401,6 @@ impl TurnUi for SupplementAndExpansionUi {
 
     fn drain_user_supplements(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending)
-    }
-
-    fn can_request_output_expansion(&mut self) -> bool {
-        true
-    }
-
-    fn request_host_decision(&mut self, request: HostDecisionRequest) -> HostDecision {
-        match request {
-            HostDecisionRequest::OutputExpansion(_) => {
-                self.expansion_requests += 1;
-                HostDecision::Accept
-            }
-            other => other.safe_default().into(),
-        }
     }
 }
 
@@ -2794,14 +2779,14 @@ fn session_turn_user_supplement_waits_for_truncated_output_retry_then_continues(
             .map(|usage| usage.prompt_tokens),
         Some(1_200)
     );
-    assert_eq!(ui.expansion_requests, 1);
     assert_eq!(model.inner.prompts.len(), 2);
     assert!(!model.inner.prompts[0].contains("user_supplement"));
     assert!(model.inner.prompts[1].contains("## USER"));
     assert!(model.inner.prompts[1].contains("不要展开旧输出"));
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "user_supplement"), 1);
-    assert_eq!(audit_event_count(&events, "max_llm_output_increased"), 1);
+    assert_eq!(audit_event_count(&events, "model_repair_request"), 1);
+    assert_eq!(audit_event_count(&events, "max_llm_output_increased"), 0);
 }
 
 #[test]
@@ -3913,59 +3898,49 @@ fn session_turn_forced_shrink_runs_to_final_without_repeated_shrink() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-struct ExpandOutputUi {
-    expansion_requests: u32,
-    last_request: Option<OutputExpansionRequest>,
-    request_topics: u32,
-    last_topic_name: Option<String>,
-    last_topic_blocking: bool,
+#[derive(Default)]
+struct ObserveTruncatedRepairUi {
+    output_expansion_requests: u32,
+    repair_topics: u32,
 }
 
-impl TurnUi for ExpandOutputUi {
+impl TurnUi for ObserveTruncatedRepairUi {
     fn can_request_output_expansion(&mut self) -> bool {
         true
     }
 
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
         for event in events {
-            if event.is_blocking_request() {
-                self.request_topics += 1;
-                self.last_topic_name = Some(event.topic.name.clone());
-                self.last_topic_blocking = true;
+            if event
+                .as_model_repair()
+                .is_some_and(|repair| repair.issue == "truncated_model_output")
+            {
+                self.repair_topics += 1;
             }
         }
     }
 
     fn request_host_decision(&mut self, request: HostDecisionRequest) -> HostDecision {
-        match request {
-            HostDecisionRequest::OutputExpansion(request) => {
-                self.expansion_requests += 1;
-                self.last_request = Some(request);
-                HostDecision::Accept
-            }
-            other => other.safe_default().into(),
+        if matches!(request, HostDecisionRequest::OutputExpansion(_)) {
+            self.output_expansion_requests += 1;
         }
+        request.safe_default().into()
     }
 }
 
 #[test]
-fn session_turn_truncated_output_expands_limit_and_retries_same_turn() {
-    let dir = tmp_dir("truncated_expansion_e2e");
+fn session_turn_truncated_output_replays_partial_response_and_requests_small_iteration() {
+    let dir = tmp_dir("truncated_small_iteration_e2e");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     config.max_llm_output_tokens = 8192;
-    let mut ui = ExpandOutputUi {
-        expansion_requests: 0,
-        last_request: None,
-        request_topics: 0,
-        last_topic_name: None,
-        last_topic_blocking: false,
-    };
+    let mut ui = ObserveTruncatedRepairUi::default();
+    let partial = "[TRUNCATED NATIVE TOOL CALL OUTPUT]\ntool_call[0] name=run_bash\narguments_fragment={\"cmd\":\"very long partial";
     let mut model = ReplayModel::new([
-        Ok(llm(r#"{"free_talk":"partial""#, 5_000, true)),
+        Ok(llm(partial, 5_000, true)),
         Ok(llm(
-            r#"{"status":"ALL_FINISHED","final_answer":"扩容后完成。"}"#,
+            r#"{"status":"ALL_FINISHED","final_answer":"已改为小块迭代并完成。"}"#,
             5_100,
             false,
         )),
@@ -3987,145 +3962,18 @@ fn session_turn_truncated_output_expands_limit_and_retries_same_turn() {
         &mut model,
     );
 
-    assert_eq!(outcome.text, "扩容后完成。");
+    assert_eq!(outcome.text, "已改为小块迭代并完成。");
     assert_eq!(outcome.stop_reason, None);
-    assert_eq!(ui.expansion_requests, 1);
-    assert_eq!(ui.request_topics, 1);
-    assert_eq!(
-        ui.last_topic_name.as_deref(),
-        Some(CORE_TOPIC_OUTPUT_EXPAND_REQUEST)
-    );
-    assert!(ui.last_topic_blocking);
-    assert_eq!(
-        ui.last_request,
-        Some(OutputExpansionRequest {
-            current_tokens: 8192,
-            increment_tokens: 10_000,
-            retry_same_turn: true,
-        })
-    );
+    assert_eq!(ui.output_expansion_requests, 0);
+    assert_eq!(ui.repair_topics, 1);
     assert_eq!(model.prompts.len(), 2);
-    assert_eq!(config.max_llm_output_tokens, 18_192);
-    let events = read_audit_events(&audit);
-    assert_eq!(audit_event_count(&events, "max_llm_output_increased"), 1);
-    assert_eq!(audit_event_count(&events, "turn_final"), 1);
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-#[test]
-fn session_turn_noop_ui_uses_default_output_expansion() {
-    let dir = tmp_dir("truncated_noop_expansion_e2e");
-    let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
-    let mut config = test_config();
-    config.max_llm_output_tokens = 8192;
-    let mut ui = NoopTurnUi;
-    let mut model = ReplayModel::new([
-        Ok(llm(r#"{"free_talk":"partial""#, 5_000, true)),
-        Ok(llm(
-            r#"{"status":"ALL_FINISHED","final_answer":"默认扩容后完成。"}"#,
-            5_100,
-            false,
-        )),
-    ]);
-
-    let outcome = run_session_turn_with_model_client(
-        &mut core,
-        &mut config,
-        TurnInput {
-            input: "生成长报告",
-            session: "test_session",
-            audit_file: &audit,
-            runtime: "timem_native_shell",
-            run_bash_target: "user_local_machine",
-            additional_context: None,
-        },
-        &mut ui,
-        None,
-        &mut model,
-    );
-
-    assert_eq!(outcome.text, "默认扩容后完成。");
-    assert_eq!(outcome.stop_reason, None);
-    assert_eq!(model.prompts.len(), 2);
-    assert_eq!(config.max_llm_output_tokens, 18_192);
-    let events = read_audit_events(&audit);
-    assert_eq!(audit_event_count(&events, "max_llm_output_increased"), 1);
-    assert_eq!(audit_event_count(&events, "turn_final"), 1);
-    let _ = std::fs::remove_dir_all(dir);
-}
-
-struct DeclineExpandOutputUi {
-    expansion_requests: u32,
-}
-
-impl TurnUi for DeclineExpandOutputUi {
-    fn can_request_output_expansion(&mut self) -> bool {
-        true
-    }
-
-    fn request_host_decision(&mut self, request: HostDecisionRequest) -> HostDecision {
-        match request {
-            HostDecisionRequest::OutputExpansion(_) => {
-                self.expansion_requests += 1;
-                HostDecision::Decline
-            }
-            other => other.safe_default().into(),
-        }
-    }
-}
-
-#[test]
-fn session_turn_truncated_output_stop_sets_structured_stop_reason() {
-    let dir = tmp_dir("truncated_stop_e2e");
-    let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
-    let mut config = test_config();
-    config.max_llm_output_tokens = 8192;
-    let mut ui = DeclineExpandOutputUi {
-        expansion_requests: 0,
-    };
-    let mut model = ReplayModel::new([Ok(llm(
-        r#"{"status":"ALL_FINISHED","final_answer":"partial"#,
-        5_000,
-        true,
-    ))]);
-
-    let outcome = run_session_turn_with_model_client(
-        &mut core,
-        &mut config,
-        TurnInput {
-            input: "生成长报告但不扩容",
-            session: "test_session",
-            audit_file: &audit,
-            runtime: "timem_native_shell",
-            run_bash_target: "user_local_machine",
-            additional_context: None,
-        },
-        &mut ui,
-        None,
-        &mut model,
-    );
-
-    assert!(outcome.text.is_empty());
-    assert_eq!(
-        outcome.repair_issue.as_deref(),
-        Some("truncated_output_stopped_by_user")
-    );
-    assert_eq!(
-        outcome.stop_reason,
-        Some(TurnStopReason::OutputLimitStoppedByUser)
-    );
-    assert_eq!(
-        outcome.stop_summary.as_ref().map(|summary| &summary.detail),
-        Some(&TurnStopDetail::OutputLimit {
-            current_tokens: 8192
-        })
-    );
-    assert_eq!(ui.expansion_requests, 1);
-    assert_eq!(model.prompts.len(), 1);
+    assert!(model.prompts[1].contains(partial));
+    assert!(model.prompts[1].contains("上一次已收到的截断回复"));
+    assert!(model.prompts[1].contains("本次只生成一个较小、完整的步骤或工具调用"));
+    assert!(model.prompts[1].contains("拿到结果后再继续下一小块"));
     assert_eq!(config.max_llm_output_tokens, 8192);
     let events = read_audit_events(&audit);
+    assert_eq!(audit_event_count(&events, "model_repair_request"), 1);
     assert_eq!(audit_event_count(&events, "max_llm_output_increased"), 0);
     assert_eq!(audit_event_count(&events, "turn_final"), 1);
     let _ = std::fs::remove_dir_all(dir);
@@ -4984,6 +4832,172 @@ fn noop_turn_ui_uses_core_default_host_decisions() {
     assert!(ui.request_round_limit_continue(RoundLimitDecisionRequest::new(20)));
     assert!(ui.can_request_output_expansion());
     assert!(ui.request_expand_output_tokens(OutputExpansionRequest::new(10_000)));
+}
+
+struct TruncatedNativeRecoveryModel {
+    business_calls: usize,
+    saw_repair_context: bool,
+    saw_tool_result: bool,
+}
+
+impl ModelClient for TruncatedNativeRecoveryModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_inline_model_call".to_string())
+    }
+
+    fn call_model_interaction(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        if request
+            .tools
+            .iter()
+            .any(|tool| tool.name == "timem_capability_probe")
+        {
+            return Ok(LlmResponse {
+                tool_calls: vec![crate::NativeToolCall {
+                    id: "probe_0".to_string(),
+                    name: "timem_capability_probe".to_string(),
+                    arguments: serde_json::json!({"slot": 1}),
+                    raw_arguments: "{\"slot\":1}".to_string(),
+                }],
+                content: String::new(),
+                model_name: config.model.clone(),
+                usage: usage(10, 2),
+                truncated: false,
+            });
+        }
+
+        self.business_calls += 1;
+        match self.business_calls {
+            1 => {
+                let chunk = serde_json::json!({"choices":[{
+                    "delta":{"tool_calls":[{
+                        "index":0,
+                        "id":"call_too_large",
+                        "function":{
+                            "name":"run_bash",
+                            "arguments":"{\"cmd\":\"printf a very long generated report that ends mid-string"
+                        }
+                    }]},
+                    "finish_reason":"length"
+                }],"usage":{"prompt_tokens":100,"completion_tokens":5206,"total_tokens":5306}});
+                let body = format!("data: {chunk}\n\ndata: [DONE]\n");
+                crate::interpret_model_http_response(config, 200, &body, "").result
+            }
+            2 => {
+                self.saw_repair_context = request
+                    .rendered_prompt
+                    .contains("[TRUNCATED NATIVE TOOL CALL OUTPUT]")
+                    && request
+                        .rendered_prompt
+                        .contains("tool_call[0] name=run_bash")
+                    && request.rendered_prompt.contains(
+                        "arguments_fragment={\"cmd\":\"printf a very long generated report",
+                    )
+                    && request
+                        .rendered_prompt
+                        .contains("本次只生成一个较小、完整的步骤或工具调用")
+                    && request.rendered_prompt.contains("拿到结果后再继续下一小块");
+                if !self.saw_repair_context {
+                    return Err("missing_truncated_small_iteration_guidance".to_string());
+                }
+                Ok(LlmResponse {
+                    tool_calls: vec![crate::NativeToolCall {
+                        id: "call_small_step".to_string(),
+                        name: "run_bash".to_string(),
+                        arguments: serde_json::json!({"cmd": "printf 'recovered_value=42\\n'"}),
+                        raw_arguments: "{\"cmd\":\"printf 'recovered_value=42\\\\n'\"}".to_string(),
+                    }],
+                    content: "先执行一个小步骤。".to_string(),
+                    model_name: config.model.clone(),
+                    usage: usage(120, 20),
+                    truncated: false,
+                })
+            }
+            3 => {
+                self.saw_tool_result = request.native_exchanges.iter().any(|exchange| {
+                    exchange
+                        .calls
+                        .iter()
+                        .any(|call| call.id == "call_small_step")
+                        && exchange
+                            .results
+                            .iter()
+                            .any(|result| result.content.contains("recovered_value=42"))
+                });
+                if !self.saw_tool_result {
+                    return Err("missing_small_step_tool_result".to_string());
+                }
+                Ok(LlmResponse {
+                    tool_calls: Vec::new(),
+                    content: "恢复成功，分块执行得到正确结果：42。".to_string(),
+                    model_name: config.model.clone(),
+                    usage: usage(140, 12),
+                    truncated: false,
+                })
+            }
+            _ => Err("unexpected_extra_business_model_call".to_string()),
+        }
+    }
+}
+
+#[test]
+fn truncated_native_sse_recovery_guides_small_tool_iteration_to_correct_answer() {
+    let dir = tmp_dir("truncated_native_guided_recovery");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new(
+        include_str!("../../../resources/system_prompt/system_prompt.md"),
+        test_profile(),
+        &dir,
+    );
+    let mut config = test_config();
+    config.model = format!("truncated-native-recovery-{}", epoch_millis());
+    config.interaction.tool_call_mode = crate::ToolCallMode::Auto;
+    config.interaction.parallel_tool_calls = crate::ParallelToolCalls::Disabled;
+    let mut model = TruncatedNativeRecoveryModel {
+        business_calls: 0,
+        saw_repair_context: false,
+        saw_tool_result: false,
+    };
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "生成内容；如果太长，请拆成小块并给出计算结果",
+            session: "native_recovery_session",
+            audit_file: &audit,
+            runtime: "test",
+            run_bash_target: "test_machine",
+            additional_context: None,
+        },
+        &mut NoopTurnUi,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "恢复成功，分块执行得到正确结果：42。");
+    assert_eq!(outcome.stop_reason, None);
+    assert_eq!(model.business_calls, 3);
+    assert!(model.saw_repair_context);
+    assert!(model.saw_tool_result);
+    assert_eq!(outcome.stats.repair_calls, 1);
+    assert_eq!(config.max_llm_output_tokens, 10_000);
+    let events = read_audit_events(&audit);
+    assert_eq!(audit_event_count(&events, "model_repair_request"), 1);
+    assert_eq!(audit_event_count(&events, "max_llm_output_increased"), 0);
+    assert_eq!(audit_event_count(&events, "turn_final"), 1);
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 struct NativeRoundTripModel {

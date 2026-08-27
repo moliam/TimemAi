@@ -967,6 +967,60 @@ fn anthropic_native_cache_breakpoint_ends_at_static_builtin_tool_prefix() {
 }
 
 #[test]
+fn truncated_openai_compatible_tool_arguments_become_repairable_model_output() {
+    let response = parse_model_response(
+        &config(ApiProtocol::OpenAiCompatible),
+        &json!({
+            "choices": [{
+                "message": {"content": null, "tool_calls": [{
+                    "id": "call_partial",
+                    "type": "function",
+                    "function": {
+                        "name": "run_bash",
+                        "arguments": "{\"cmd\":\"python3 - <<'PY'\\nprint(\"partial"
+                    }
+                }]},
+                "finish_reason": "length"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5206, "total_tokens": 5216}
+        }),
+    )
+    .unwrap();
+
+    assert!(response.truncated);
+    assert!(response.tool_calls.is_empty());
+    assert!(response
+        .content
+        .contains("[TRUNCATED NATIVE TOOL CALL OUTPUT]"));
+    assert!(response
+        .content
+        .contains("invalid_tool_call[0].arguments_json"));
+    assert!(response.content.contains("tool_call[0] name=run_bash"));
+    assert!(response.content.contains("arguments_fragment={\"cmd\""));
+}
+
+#[test]
+fn nontruncated_openai_compatible_invalid_tool_arguments_remain_an_error() {
+    let error = parse_model_response(
+        &config(ApiProtocol::OpenAiCompatible),
+        &json!({
+            "choices": [{
+                "message": {"content": null, "tool_calls": [{
+                    "id": "call_invalid",
+                    "type": "function",
+                    "function": {"name": "run_bash", "arguments": "{\"cmd\":\"partial"}
+                }]},
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {}
+        }),
+    )
+    .unwrap_err();
+
+    assert!(error.starts_with("invalid_tool_call[0].arguments_json:"));
+}
+
+#[test]
 fn openai_compatible_tool_calls_do_not_depend_on_finish_reason() {
     let response = parse_model_response(
         &config(ApiProtocol::OpenAiCompatible),
@@ -985,6 +1039,31 @@ fn openai_compatible_tool_calls_do_not_depend_on_finish_reason() {
     .unwrap();
     assert_eq!(response.tool_calls.len(), 1);
     assert_eq!(response.tool_calls[0].arguments["language"], "Rust");
+}
+
+#[test]
+fn openai_compatible_sse_length_with_partial_tool_arguments_is_repairable() {
+    let chunk = json!({"choices":[{
+        "delta":{"tool_calls":[{
+            "index":0,
+            "id":"call_partial",
+            "function":{"name":"run_bash","arguments":"{\"cmd\":\"very long partial"}
+        }]},
+        "finish_reason":"length"
+    }],"usage":{"prompt_tokens":10,"completion_tokens":5206,"total_tokens":5216}});
+    let body = format!("data: {chunk}\n\ndata: [DONE]\n");
+    let response =
+        interpret_model_http_response(&config(ApiProtocol::OpenAiCompatible), 200, &body, "")
+            .result
+            .unwrap();
+
+    assert!(response.truncated);
+    assert!(response.tool_calls.is_empty());
+    assert!(response
+        .content
+        .contains("[TRUNCATED NATIVE TOOL CALL OUTPUT]"));
+    assert!(response.content.contains("tool_call[0] name=run_bash"));
+    assert!(response.content.contains("very long partial"));
 }
 
 #[test]

@@ -622,7 +622,7 @@ sequenceDiagram
         C->>P: next model request
     else approval or round decision is needed
         C-->>UI: request topic
-        UI-->>C: TopicReply approval / continue / expand output
+        UI-->>C: TopicReply approval / continue
     else response is final
         C-->>UI: TurnOutcome
         UI-->>U: render answer and status
@@ -631,15 +631,18 @@ sequenceDiagram
 
 Each turn can use multiple model/action rounds. The model must return exactly
 one response envelope. If it emits malformed JSON or an invalid action shape,
-the core sends one protocol repair request. If the repaired response is still
+the core sends a bounded protocol repair request. A provider `length`/`max_tokens`
+stop is handled as truncated model output: the received response and any partial
+native-tool arguments are replayed to the model with instructions to regenerate
+one smaller complete step, then continue in later rounds. If repairs remain
 invalid, raw model text is blocked from the user and a safe fallback is shown.
 
 The UI adapter must not own the agent loop, model transport, or tool
 execution. Its responsibilities are limited to:
 
 - Present turn progress events such as model request/response and observations.
-- Provide user decisions for approvals, round-limit continuation, stale context,
-  and output-token expansion when the UI is interactive.
+- Provide user decisions for approvals, round-limit continuation, and stale context
+  when the UI is interactive.
 - Provide cancellation state.
 - Render `TurnOutcome`.
 

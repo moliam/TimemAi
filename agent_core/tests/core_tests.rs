@@ -3650,6 +3650,9 @@ fn truncated_response_requests_output_limit_repair_in_noninteractive_path() {
     assert!(prompt.contains("response is not protocol compliant"));
     assert!(prompt.contains("truncated_model_output"));
     assert!(prompt.contains("max output token"));
+    assert!(prompt.contains("上一次已收到的截断回复"));
+    assert!(prompt.contains("本次只生成一个较小、完整的步骤或工具调用"));
+    assert!(prompt.contains("拿到结果后再继续下一小块"));
     assert!(prompt.contains("Return exactly one valid JSON object"));
     assert!(prompt.contains(r#"{"#));
 }

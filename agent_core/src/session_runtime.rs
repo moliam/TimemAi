@@ -3,10 +3,9 @@ use crate::{
     model_retry_audit_event, model_retry_decision, normalize_user_supplements_with_context,
     ActionRuntime, AgentCore, CoreStep, CoreTopicEvent, HostDecisionRequest, HttpModelClient,
     LlmResponse, LongRunningCommandDecision, LongRunningCommandStatus, ModelCallOutcome,
-    ModelInteractionRequest, ModelServiceConfig, ModelSystemRetryPolicy, OutputExpansionRequest,
-    OutputExpansionResolution, PromptComponentRole, RoundLimitDecisionRequest,
-    RoundLimitResolution, RuntimeProfiler, StoppedTurn, TurnInput, TurnOutcome, TurnStopReason,
-    TurnStopSummary, TurnUi, UsageStats, UserSupplement,
+    ModelInteractionRequest, ModelServiceConfig, ModelSystemRetryPolicy, PromptComponentRole,
+    RoundLimitDecisionRequest, RoundLimitResolution, RuntimeProfiler, StoppedTurn, TurnInput,
+    TurnOutcome, TurnStopReason, TurnStopSummary, TurnUi, UsageStats, UserSupplement,
 };
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -385,52 +384,6 @@ fn run_session_turn_with_model_client_and_reminder_override(
                         );
                         if ui.take_cancel_request() {
                             break cancelled_turn_parts();
-                        }
-                        if response.response.truncated && ui.can_request_output_expansion() {
-                            let expansion =
-                                OutputExpansionRequest::new(config.max_llm_output_tokens);
-                            ui.pause_for_user_decision();
-                            let user_wait_start = Instant::now();
-                            let should_expand = ui
-                                .request_host_decision_topic(
-                                    request.session,
-                                    HostDecisionRequest::OutputExpansion(expansion),
-                                )
-                                .as_bool();
-                            user_wait_this_turn =
-                                user_wait_this_turn.saturating_add(user_wait_start.elapsed());
-                            let truncated_usage = response.response.usage.clone();
-                            match core.resolve_output_expansion_with_audit(
-                                config,
-                                expansion,
-                                should_expand,
-                                response.response.usage,
-                                request.audit_file,
-                                request.session,
-                                &turn_id,
-                            ) {
-                                OutputExpansionResolution::RetryWithExpandedLimit { .. } => {
-                                    core.record_unapplied_model_response_usage(&truncated_usage);
-                                    let supplements = normalize_user_supplements_with_context(
-                                        ui.drain_user_supplements_with_context(),
-                                    );
-                                    if let Some(next_step) = core
-                                        .append_user_supplements_with_context_and_audit(
-                                            supplements,
-                                            request.audit_file,
-                                            request.session,
-                                            &turn_id,
-                                        )
-                                    {
-                                        step = next_step;
-                                    }
-                                    ui.resume_after_user_decision();
-                                    continue;
-                                }
-                                OutputExpansionResolution::Stop(stop) => {
-                                    break turn_stop_parts(stop);
-                                }
-                            }
                         }
                         latest_usage = Some(response.response.usage.clone());
                         if !core.should_suppress_model_response(&response.response) {
