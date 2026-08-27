@@ -27,12 +27,16 @@ import { clipboardImageFiles } from "./clipboard_images";
 import { humanizeToolStatus, isToolActivityRunning, TOOL_STATUS_RUNNING } from "./tool_status";
 import { MarkdownContent } from "./markdown_render";
 import { BrowserPerformanceTrace } from "./performance_trace";
+import { createFrameTask, FrameTask } from "./frame_task";
+import { reconcileSessionTimelineCache } from "./session_timeline_cache";
+import { requestTimelineNavigationWork } from "./timeline_navigation_work";
 import { useTimedClipboardCopy } from "./clipboard_copy";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 import "katex/dist/katex.min.css";
 
 const STORED_HISTORY_PAGE_SIZE = 200;
+const MAX_MOUNTED_SESSION_TIMELINES = 2;
 const TOKEN_STORAGE_KEY = "timem-web-access-token";
 const EMPTY_CHAT_MESSAGES: ChatMessage[] = [];
 const SESSION_API_KEY_SAVE_TIMEOUT_MS = 20_000;
@@ -2649,6 +2653,66 @@ const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, restar
   });
 });
 
+type SessionTimelinePaneProps = {
+  session: Session;
+  active: boolean;
+  decisionsByTurn: ReadonlyMap<string, Decision[]>;
+  sessionInteractionLocked: boolean;
+  pendingDecisionKeys: Set<string>;
+  pendingToolGenTurnIds: Set<string>;
+  toolGenSessionBusy: boolean;
+  favoriteBySource: ReadonlyMap<string, ChatFavorite>;
+  pendingFavoriteSourceKeys: ReadonlySet<string>;
+  onToggleFavorite: (sessionId: string, turnId: string, favoriteId?: string) => boolean;
+  onDecisionReply: (decision: Decision, reply: "accept" | "decline" | "always_allow") => void;
+  onRequestToolGen?: (turnId: string) => void;
+  onRequestMessageDelete: (candidate: ChatMessageDeleteCandidate) => void;
+};
+
+const SessionTimelinePane = memo(function SessionTimelinePane({
+  session, active, decisionsByTurn, sessionInteractionLocked, pendingDecisionKeys,
+  pendingToolGenTurnIds, toolGenSessionBusy, favoriteBySource, pendingFavoriteSourceKeys,
+  onToggleFavorite, onDecisionReply, onRequestToolGen, onRequestMessageDelete,
+}: SessionTimelinePaneProps) {
+  const renderedSessionRef = useRef(session);
+  // Inactive cached timelines keep their last visible snapshot. Background
+  // events must not repeatedly rebuild hidden Markdown on the active UI path;
+  // the pane catches up synchronously when it becomes active again.
+  if (active) renderedSessionRef.current = session;
+  const renderedSession = renderedSessionRef.current;
+  const restartMarkers = useMemo(
+    () => visibleRuntimeRestartMarkers(
+      renderedSession.turns,
+      renderedSession.messages.filter((message) => message.role === "system" && message.kind === "runtime_restart"),
+    ),
+    [renderedSession.messages, renderedSession.turns],
+  );
+  return <section
+    className="session-timeline-pane"
+    data-session-timeline-id={renderedSession.session_id}
+    data-session-timeline-active={active ? "true" : "false"}
+    hidden={!active}
+    aria-hidden={!active || undefined}
+  >
+    <VisibleTurnList
+      sessionId={renderedSession.session_id}
+      turns={renderedSession.turns}
+      restartMarkers={restartMarkers}
+      decisionsByTurn={decisionsByTurn}
+      sessionInteractionLocked={sessionInteractionLocked}
+      pendingDecisionKeys={pendingDecisionKeys}
+      pendingToolGenTurnIds={pendingToolGenTurnIds}
+      toolGenSessionBusy={toolGenSessionBusy}
+      favoriteBySource={favoriteBySource}
+      pendingFavoriteSourceKeys={pendingFavoriteSourceKeys}
+      onToggleFavorite={onToggleFavorite}
+      onDecisionReply={onDecisionReply}
+      onRequestToolGen={onRequestToolGen}
+      onRequestMessageDelete={onRequestMessageDelete}
+    />
+  </section>;
+});
+
 function RuntimeRestartDivider({ marker }: { marker: ChatMessage }) {
   const restartedAt = new Date(marker.created_at_ms);
   const timeLabel = Number.isNaN(restartedAt.getTime())
@@ -2808,13 +2872,6 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
  return true;
  }, [reliableStorageScope]);
   const turns = activeSession?.turns ?? [];
-  const restartMarkers = useMemo(
-    () => visibleRuntimeRestartMarkers(
-      turns,
-      (activeSession?.messages ?? []).filter((message) => message.role === "system" && message.kind === "runtime_restart"),
-    ),
-    [activeSession?.messages, turns],
-  );
   const activeSessionId = activeSession?.session_id;
   const queuedMessagesPause = activeSessionId ? queuedMessagesPauseBySession[activeSessionId] ?? null : null;
   const draft = draftForSession(draftsBySession, activeSessionId);
@@ -2871,10 +2928,36 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
   const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${latestTurn?.events.length ?? 0}:${latestTurn?.user_entries.length ?? 0}:${latestTurn?.final_answer?.length ?? 0}:${latestTurn?.completion ? 1 : 0}`;
   const liveSessionKey = sessionIds.join("\u0000");
   const liveSessionIds = useMemo(() => new Set(sessionIds), [liveSessionKey]);
+  const [recentTimelineSessionIds, setRecentTimelineSessionIds] = useState<string[]>([]);
+  const mountedTimelineSessionIds = useMemo(
+    () => reconcileSessionTimelineCache(
+      recentTimelineSessionIds,
+      activeSessionId,
+      sessionIds,
+      MAX_MOUNTED_SESSION_TIMELINES,
+    ),
+    [activeSessionId, liveSessionKey, recentTimelineSessionIds],
+  );
+  const mountedTimelineSessionIdSet = useMemo(
+    () => new Set(mountedTimelineSessionIds),
+    [mountedTimelineSessionIds],
+  );
+  // LRU order controls eviction only. Keep the host Session order stable so a
+  // warm A/B switch toggles visibility instead of moving two large DOM trees.
+  const mountedTimelineSessions = sessions.filter((session) => mountedTimelineSessionIdSet.has(session.session_id));
+  useEffect(() => {
+    setRecentTimelineSessionIds((current) => {
+      const next = reconcileSessionTimelineCache(current, activeSessionId, sessionIds, MAX_MOUNTED_SESSION_TIMELINES);
+      return current.length === next.length && current.every((sessionId, index) => sessionId === next[index])
+        ? current
+        : next;
+    });
+  }, [activeSessionId, liveSessionKey]);
   const welcomeTitle = activeSession ? "Ready when you are." : "Create a session to start.";
   const welcomeText = activeSession ? "Ask Timem to investigate, write, or work with you." : "Use New session to choose a workspace and runtime profile.";
   const [userMessageNavigation, setUserMessageNavigation] = useState({ previous: false, next: false, bottom: false });
   const [userMessageNavigationLayout, setUserMessageNavigationLayout] = useState<{ left?: number; overlap: "none" | "partial" | "full" }>({ overlap: "none" });
+
   const [userMessageNavigationHoverLocked, setUserMessageNavigationHoverLocked] = useState(false);
   const userMessageNavigationRef = useRef<HTMLElement | null>(null);
   const userMessageNavigationHoverLockedRef = useRef(false);
@@ -2883,11 +2966,16 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
   const userMessageNavigationBodyGap = 16;
   const userMessageNavigationEdgeInset = 10;
   const userMessageNavigationAnimationRef = useRef<number | null>(null);
+  const userMessageAnchorOffsetsRef = useRef<number[]>([]);
+  const userMessageNavigationTaskRef = useRef<FrameTask | null>(null);
+  const userMessageGeometryTaskRef = useRef<FrameTask | null>(null);
+  const userMessageNavigationLayoutTaskRef = useRef<FrameTask | null>(null);
 
   const userMessageAnchors = useCallback(() => {
     const viewport = viewportRef.current;
-    return viewport ? Array.from(viewport.querySelectorAll<HTMLElement>("[data-user-message-anchor]")) : [];
+    return viewport ? Array.from(viewport.querySelectorAll<HTMLElement>('[data-session-timeline-active="true"] [data-user-message-anchor]')) : [];
   }, []);
+
 
   const applyUserMessageNavigationLayout = useCallback((next: { left?: number; overlap: "none" | "partial" | "full" }) => {
     if (userMessageNavigationHoverLockedRef.current) {
@@ -2904,12 +2992,13 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
     const viewportRect = viewport.getBoundingClientRect();
     const navigationRect = navigation.getBoundingClientRect();
     const navigationCenter = navigationRect.top + navigationRect.height / 2;
-    const expandedOutlines = Array.from(viewport.querySelectorAll<HTMLElement>(".final-answer-outline.expanded"));
+    const expandedOutlines = Array.from(viewport.querySelectorAll<HTMLElement>('[data-session-timeline-active="true"] .final-answer-outline.expanded'));
     const activeOutline = expandedOutlines.find((candidate) => {
       const rect = candidate.getBoundingClientRect();
       return rect.top <= navigationCenter && rect.bottom >= navigationCenter;
     });
     if (!activeOutline) {
+
       applyUserMessageNavigationLayout({ overlap: "none" });
       return;
     }
@@ -2928,6 +3017,7 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
       cardRect.left - viewportRect.left,
       cardRect.right - viewportRect.left,
     );
+
     applyUserMessageNavigationLayout(next);
   }, [applyUserMessageNavigationLayout, userMessageNavigationBodyGap, userMessageNavigationEdgeInset]);
 
@@ -2961,12 +3051,11 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
       setUserMessageNavigation((current) => current.previous || current.next || current.bottom ? { previous: false, next: false, bottom: false } : current);
       return;
     }
-    const viewportTop = viewport.getBoundingClientRect().top;
-    const navigationTop = viewportTop + userMessageNavigationOffset;
-    const anchorTops = userMessageAnchors().map((anchor) => anchor.getBoundingClientRect().top);
-    const nextUserMessageAvailable = adjacentUserMessageIndex(anchorTops, navigationTop, "next") >= 0;
+    const navigationTop = viewport.scrollTop + userMessageNavigationOffset;
+    const anchorOffsets = userMessageAnchorOffsetsRef.current;
+    const nextUserMessageAvailable = adjacentUserMessageIndex(anchorOffsets, navigationTop, "next") >= 0;
     const next = {
-      previous: adjacentUserMessageIndex(anchorTops, navigationTop, "previous") >= 0,
+      previous: adjacentUserMessageIndex(anchorOffsets, navigationTop, "previous") >= 0,
       next: nextUserMessageAvailable,
       bottom: !nextUserMessageAvailable && !isNearScrollBottom({
         scrollTop: viewport.scrollTop,
@@ -2975,19 +3064,34 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
       }),
     };
     setUserMessageNavigation((current) => current.previous === next.previous && current.next === next.next && current.bottom === next.bottom ? current : next);
-  }, [userMessageAnchors, userMessageNavigationOffset]);
+  }, [userMessageNavigationOffset]);
+
+  const refreshUserMessageGeometry = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) {
+      userMessageAnchorOffsetsRef.current = [];
+      updateUserMessageNavigation();
+      return;
+    }
+    const viewportTop = viewport.getBoundingClientRect().top;
+    const scrollTop = viewport.scrollTop;
+    userMessageAnchorOffsetsRef.current = userMessageAnchors().map(
+      (anchor) => scrollTop + anchor.getBoundingClientRect().top - viewportTop,
+    );
+    updateUserMessageNavigation();
+  }, [updateUserMessageNavigation, userMessageAnchors]);
 
   const navigateUserMessage = useCallback((direction: UserMessageNavigationDirection) => {
     const viewport = viewportRef.current;
     if (!viewport) return;
     const anchors = userMessageAnchors();
-    const viewportTop = viewport.getBoundingClientRect().top;
-    const navigationTop = viewportTop + userMessageNavigationOffset;
-    const index = adjacentUserMessageIndex(anchors.map((anchor) => anchor.getBoundingClientRect().top), navigationTop, direction);
-    const target = anchors[index];
-    if (!target) return;
+    if (userMessageAnchorOffsetsRef.current.length !== anchors.length) refreshUserMessageGeometry();
+    const anchorOffsets = userMessageAnchorOffsetsRef.current;
+    const navigationTop = viewport.scrollTop + userMessageNavigationOffset;
+    const index = adjacentUserMessageIndex(anchorOffsets, navigationTop, direction);
+    if (!anchors[index]) return;
     followThreadLatest.current = false;
-    const targetTop = viewport.scrollTop + target.getBoundingClientRect().top - viewportTop - userMessageNavigationOffset;
+    const targetTop = anchorOffsets[index] - userMessageNavigationOffset;
     if (userMessageNavigationAnimationRef.current !== null) cancelAnimationFrame(userMessageNavigationAnimationRef.current);
     if (prefersReducedMotion()) {
       viewport.scrollTop = targetTop;
@@ -3010,7 +3114,7 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
       }
     };
     userMessageNavigationAnimationRef.current = requestAnimationFrame(animate);
-  }, [updateUserMessageNavigation, userMessageAnchors, userMessageNavigationOffset]);
+  }, [refreshUserMessageGeometry, updateUserMessageNavigation, userMessageAnchors, userMessageNavigationOffset]);
 
   const navigateToThreadBottom = useCallback(() => {
     const viewport = viewportRef.current;
@@ -3057,10 +3161,55 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
   }, [updateUserMessageNavigation]);
 
   useLayoutEffect(() => {
+    const navigationTask = createFrameTask({ run: updateUserMessageNavigation });
+    const geometryTask = createFrameTask({ run: refreshUserMessageGeometry });
+    const layoutTask = createFrameTask({ run: updateUserMessageNavigationLayout });
+    userMessageNavigationTaskRef.current = navigationTask;
+    userMessageGeometryTaskRef.current = geometryTask;
+    userMessageNavigationLayoutTaskRef.current = layoutTask;
+    return () => {
+      navigationTask.dispose();
+      geometryTask.dispose();
+      layoutTask.dispose();
+      if (userMessageNavigationTaskRef.current === navigationTask) userMessageNavigationTaskRef.current = null;
+      if (userMessageGeometryTaskRef.current === geometryTask) userMessageGeometryTaskRef.current = null;
+      if (userMessageNavigationLayoutTaskRef.current === layoutTask) userMessageNavigationLayoutTaskRef.current = null;
+    };
+  }, [refreshUserMessageGeometry, updateUserMessageNavigation, updateUserMessageNavigationLayout]);
+
+  useLayoutEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    const update = () => window.requestAnimationFrame(updateUserMessageNavigationLayout);
-    updateUserMessageNavigationLayout();
+    let outlineIntersectionObserver: IntersectionObserver | undefined;
+    const work = () => ({
+      navigation: userMessageNavigationTaskRef.current,
+      geometry: userMessageGeometryTaskRef.current,
+      layout: userMessageNavigationLayoutTaskRef.current,
+    });
+    const observeOutlineCrossings = () => {
+      outlineIntersectionObserver?.disconnect();
+      outlineIntersectionObserver = undefined;
+      const navigation = userMessageNavigationRef.current;
+      if (typeof IntersectionObserver === "undefined" || !navigation) return;
+      const viewportRect = viewport.getBoundingClientRect();
+      const navigationRect = navigation.getBoundingClientRect();
+      const center = Math.max(1, Math.min(viewport.clientHeight - 1, navigationRect.top + navigationRect.height / 2 - viewportRect.top));
+      outlineIntersectionObserver = new IntersectionObserver(
+        () => requestTimelineNavigationWork("layout", work()),
+        {
+          root: viewport,
+          rootMargin: `${-Math.max(0, center - 1)}px 0px ${-Math.max(0, viewport.clientHeight - center - 1)}px 0px`,
+          threshold: 0,
+        },
+      );
+      viewport.querySelectorAll<HTMLElement>('[data-session-timeline-active="true"] .final-answer-outline.expanded')
+        .forEach((outline) => outlineIntersectionObserver?.observe(outline));
+    };
+    const update = () => {
+      requestTimelineNavigationWork("layout", work());
+      observeOutlineCrossings();
+    };
+    update();
     window.addEventListener("resize", update);
     window.addEventListener("markdown-outline-layout-change", update);
     const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(update);
@@ -3069,8 +3218,9 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
       window.removeEventListener("resize", update);
       window.removeEventListener("markdown-outline-layout-change", update);
       observer?.disconnect();
+      outlineIntersectionObserver?.disconnect();
     };
-  }, [activeSessionId, updateUserMessageNavigationLayout]);
+  }, [activeSessionId]);
 
   useEffect(() => () => {
     if (userMessageNavigationAnimationRef.current !== null) cancelAnimationFrame(userMessageNavigationAnimationRef.current);
@@ -3079,13 +3229,20 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    updateUserMessageNavigation();
-    const mutationObserver = new MutationObserver(updateUserMessageNavigation);
+    const update = () => requestTimelineNavigationWork("content", {
+      navigation: userMessageNavigationTaskRef.current,
+      geometry: userMessageGeometryTaskRef.current,
+      layout: userMessageNavigationLayoutTaskRef.current,
+    });
+    update();
+    const mutationObserver = new MutationObserver(update);
     mutationObserver.observe(viewport, { childList: true, subtree: true });
-    const resizeObserver = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(updateUserMessageNavigation);
+    const resizeObserver = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(update);
     resizeObserver?.observe(viewport);
+    const activePane = viewport.querySelector<HTMLElement>('[data-session-timeline-active="true"]');
+    if (activePane) resizeObserver?.observe(activePane);
     return () => { mutationObserver.disconnect(); resizeObserver?.disconnect(); };
-  }, [activeSessionId, updateUserMessageNavigation]);
+  }, [activeSessionId]);
 
   useEffect(() => {
     const textarea = composerTextareaRef.current;
@@ -3101,6 +3258,10 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
     textarea.addEventListener("wheel", prioritizeComposerScroll, { passive: false });
     return () => textarea.removeEventListener("wheel", prioritizeComposerScroll);
   }, []);
+
+  useLayoutEffect(() => {
+    window.dispatchEvent(new Event("session-timeline-activation-change"));
+  }, [activeSessionId]);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -3554,18 +3715,24 @@ const toggleQueuedMessages = () => {
           scrollTop: event.currentTarget.scrollTop,
           followLatest: followThreadLatest.current,
         });
-        updateUserMessageNavigation();
-        updateUserMessageNavigationLayout();
+        // Ordinary vertical scrolling only updates state from cached anchor offsets.
+        // Geometry and floating-navigation layout are refreshed by structural,
+        // sizing, outline-layout, and Session-activation invalidations instead.
+        requestTimelineNavigationWork("scroll", {
+          navigation: userMessageNavigationTaskRef.current,
+          geometry: userMessageGeometryTaskRef.current,
+          layout: userMessageNavigationLayoutTaskRef.current,
+        });
       }}
     >
       {(activeSession?.turns.length ?? 0) === 0 &&
         <div className="welcome"><Sparkles size={24}/><h2>{welcomeTitle}</h2><p>{welcomeText}</p></div>
       }
       {canLoadStoredHistory && <button type="button" className={`load-history ${loadingHistory ? "loading" : ""}`} title={historyButtonLabel} aria-label={historyButtonLabel} aria-live="polite" aria-busy={loadingHistory || undefined} disabled={loadingHistory || sessionInteractionLocked} onClick={loadEarlierTurns}>{loadingHistory && <LoaderCircle size={13} aria-hidden="true"/>}<span>{historyButtonLabel}</span></button>}
-      <VisibleTurnList
-        sessionId={activeSession?.session_id ?? ""}
-        turns={turns}
-        restartMarkers={restartMarkers}
+      {mountedTimelineSessions.map((session) => <SessionTimelinePane
+        key={session.session_id}
+        session={session}
+        active={session.session_id === activeSessionId}
         decisionsByTurn={decisionsByTurn}
         sessionInteractionLocked={sessionInteractionLocked}
         pendingDecisionKeys={pendingDecisionKeys}
@@ -3577,7 +3744,7 @@ const toggleQueuedMessages = () => {
         onDecisionReply={onDecisionReply}
         onRequestToolGen={onRequestToolGen}
         onRequestMessageDelete={onRequestMessageDelete}
-      />
+      />)}
       <ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">
         {!!activeSession && displayQueuedMessages.length > 0 && <section className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`} aria-label={`${displayQueuedMessages.length} queued message${displayQueuedMessages.length === 1 ? "" : "s"}`} aria-live="polite"><header><span>待发送</span>{queuePanelCollapsed ? <div className={`queued-message-summary ${firstQueuedMessage?.deliveryError ? "delivery-error" : ""}`} title={firstQueuedMessage?.deliveryError || firstQueuedMessage?.text}><p>{firstQueuedMessage?.text}</p>{firstQueuedMessage && firstQueuedMessage.attachmentIds.length > 0 && <small className="queued-message-summary-attachments"><Paperclip size={10}/>{firstQueuedMessage.attachmentIds.length}</small>}<small className="queued-message-summary-count">{displayQueuedMessages.length} 条</small></div> : <small title={queuedMessagesPause?.reason}>{queuedMessagesPause ? `自动发送已停止${queuedMessagesPause.reason ? `：${queuedMessagesPause.reason}` : ""}` : "上一条正常完成后自动发送"}</small>}<div className="queued-message-header-actions"><label className="queued-auto-send-control"><span>自动发送</span><button type="button" role="switch" className="queued-auto-send-switch" aria-checked={!queuedMessagesPause} aria-label={queuedMessagesPause ? "开启自动发送" : "停止自动发送"} title={queuedMessagesPause ? "开启自动发送" : "停止自动发送"} onClick={() => { if (!activeSessionId) return; if (queuedMessagesPause) resumeQueuedMessages(activeSessionId); else pauseQueuedMessages(activeSessionId, "用户关闭了自动发送", "user"); }}><span className="queued-auto-send-thumb"/></button></label>{!queuePanelCollapsed && hiddenQueuedMessageCount > 0 && <button type="button" className="queued-message-toggle" aria-expanded={queueExpanded} title={queueExpanded ? "收起待发送消息" : `向上展开全部 ${displayQueuedMessages.length} 条待发送消息`} onClick={toggleQueuedMessages}>{queueExpanded ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}<span>{queueExpanded ? "收起" : `展开 ${hiddenQueuedMessageCount} 条`}</span></button>}<button type="button" className="queued-message-panel-toggle" aria-expanded={!queuePanelCollapsed} aria-controls={`queued-message-items-${activeSession.session_id}`} title={queuePanelCollapsed ? "展开待发送队列" : "折叠待发送队列为一行"} onClick={toggleQueuedMessagePanel}>{queuePanelCollapsed ? <ChevronDown size={14}/> : <ChevronUp size={14}/>}<span>{queuePanelCollapsed ? "展开" : "折叠"}</span></button></div></header>{!queuePanelCollapsed && <DndContext
           sensors={queueDragSensors}
@@ -3647,6 +3814,7 @@ const toggleQueuedMessages = () => {
         </form>
       </ThreadPrimitive.ViewportFooter>
     </ThreadPrimitive.Viewport>
+
     <nav ref={userMessageNavigationRef} className={`user-message-navigation outline-overlap-${userMessageNavigationLayout.overlap}${userMessageNavigationHoverLocked ? " hover-locked" : ""}`} style={userMessageNavigationLayout.left === undefined ? undefined : { left: `${userMessageNavigationLayout.left}px` }} aria-label="用户消息导航" onPointerEnter={lockUserMessageNavigationLayout} onPointerLeave={unlockUserMessageNavigationLayout}>
       <button type="button" title="上一条用户消息" aria-label="上一条用户消息" disabled={!userMessageNavigation.previous} onClick={() => navigateUserMessage("previous")}><ChevronUp size={17} aria-hidden="true"/></button>
       <button type="button" title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} aria-label={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} disabled={!userMessageNavigation.next && !userMessageNavigation.bottom} onClick={() => { if (userMessageNavigation.next) navigateUserMessage("next"); else navigateToThreadBottom(); }}><ChevronDown size={17} aria-hidden="true"/></button>
@@ -3952,6 +4120,7 @@ function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked,
 const FINAL_ANSWER_OUTLINE_MIN_SECTIONS = 2;
 const FINAL_ANSWER_OUTLINE_SCROLL_OFFSET = 24;
 const FINAL_ANSWER_OUTLINE_SCROLL_DURATION_MS = 180;
+
 const FINAL_ANSWER_OUTLINE_EDGE_GUARD = 12;
 
 function FinalAnswerContent({ text }: { text: string }) {
@@ -3966,7 +4135,11 @@ function FinalAnswerContent({ text }: { text: string }) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const outlineNavigationAnimationRef = useRef<number | null>(null);
+  const outlineHeadingOffsetsRef = useRef(new Map<string, number>());
+  const outlineActiveTaskRef = useRef<FrameTask | null>(null);
+  const outlineGeometryTaskRef = useRef<FrameTask | null>(null);
   const [showOutline, setShowOutline] = useState(false);
+
   const [outlineHost, setOutlineHost] = useState<HTMLElement | null>(null);
   const [outlineGeometry, setOutlineGeometry] = useState({ top: 0, height: 0 });
   const [outlinePlacement, setOutlinePlacement] = useState<"docked" | "overlay">("docked");
@@ -3986,6 +4159,7 @@ function FinalAnswerContent({ text }: { text: string }) {
     }
     let updateFrame: number | null = null;
     const update = () => {
+
       updateFrame = null;
       const contentRect = content.getBoundingClientRect();
       const viewportRect = viewport.getBoundingClientRect();
@@ -4027,24 +4201,92 @@ function FinalAnswerContent({ text }: { text: string }) {
     window.dispatchEvent(new Event("markdown-outline-layout-change"));
   }, [outlineCollapsed, outlinePlacement, showOutline]);
 
-  useEffect(() => {
+  const updateOutlineActive = useCallback(() => {
     const root = rootRef.current;
     const viewport = root?.closest<HTMLElement>(".chat-scroll");
-    if (!root || !viewport || !showOutline) return;
-    const updateActive = () => {
-      const threshold = viewport.getBoundingClientRect().top + FINAL_ANSWER_OUTLINE_SCROLL_OFFSET;
-      const headingTops = new Map<string, number>();
-      for (const item of outline) {
-        const heading = document.getElementById(`${headingPrefix}-${item.id}`);
-        if (heading && root.contains(heading)) headingTops.set(item.id, heading.getBoundingClientRect().top);
-      }
-      const next = markdownOutlineActiveId(outline, headingTops, threshold);
-      setActiveId((current) => current === next ? current : next);
+    const pane = root?.closest<HTMLElement>("[data-session-timeline-active]");
+    if (!root || !viewport || pane?.dataset.sessionTimelineActive !== "true") return;
+    const threshold = viewport.scrollTop + FINAL_ANSWER_OUTLINE_SCROLL_OFFSET;
+    const next = markdownOutlineActiveId(outline, outlineHeadingOffsetsRef.current, threshold);
+    setActiveId((current) => current === next ? current : next);
+  }, [outline]);
+
+  const refreshOutlineGeometry = useCallback(() => {
+    const root = rootRef.current;
+    const viewport = root?.closest<HTMLElement>(".chat-scroll");
+    const pane = root?.closest<HTMLElement>("[data-session-timeline-active]");
+    if (!root || !viewport || pane?.dataset.sessionTimelineActive !== "true") return;
+    const viewportTop = viewport.getBoundingClientRect().top;
+    const scrollTop = viewport.scrollTop;
+    const offsets = new Map<string, number>();
+    for (const item of outline) {
+      const heading = document.getElementById(`${headingPrefix}-${item.id}`);
+      if (heading && root.contains(heading)) offsets.set(item.id, scrollTop + heading.getBoundingClientRect().top - viewportTop);
+    }
+    outlineHeadingOffsetsRef.current = offsets;
+    updateOutlineActive();
+  }, [headingPrefix, outline, updateOutlineActive]);
+
+  useLayoutEffect(() => {
+    const activeTask = createFrameTask({ run: updateOutlineActive });
+    const geometryTask = createFrameTask({ run: refreshOutlineGeometry });
+    outlineActiveTaskRef.current = activeTask;
+    outlineGeometryTaskRef.current = geometryTask;
+    return () => {
+      activeTask.dispose();
+      geometryTask.dispose();
+      if (outlineActiveTaskRef.current === activeTask) outlineActiveTaskRef.current = null;
+      if (outlineGeometryTaskRef.current === geometryTask) outlineGeometryTaskRef.current = null;
     };
-    updateActive();
-    viewport.addEventListener("scroll", updateActive, { passive: true });
-    return () => viewport.removeEventListener("scroll", updateActive);
-  }, [headingPrefix, outline, showOutline]);
+  }, [refreshOutlineGeometry, updateOutlineActive]);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    const content = contentRef.current;
+    const viewport = root?.closest<HTMLElement>(".chat-scroll");
+    if (!root || !content || !viewport || !showOutline) return;
+    const refresh = () => outlineGeometryTaskRef.current?.request();
+    const updateActive = () => outlineActiveTaskRef.current?.request();
+    let listeningForScroll = false;
+    const setScrollListening = (enabled: boolean) => {
+      const active = enabled && root.closest<HTMLElement>("[data-session-timeline-active]")?.dataset.sessionTimelineActive === "true";
+      if (active === listeningForScroll) return;
+      listeningForScroll = active;
+      if (active) {
+        refresh();
+        viewport.addEventListener("scroll", updateActive, { passive: true });
+      } else {
+        viewport.removeEventListener("scroll", updateActive);
+      }
+    };
+    const syncActivePane = () => setScrollListening(
+      root.closest<HTMLElement>("[data-session-timeline-active]")?.dataset.sessionTimelineActive === "true",
+    );
+    refresh();
+    window.addEventListener("session-timeline-activation-change", syncActivePane);
+    let visibilityObserver: IntersectionObserver | undefined;
+    if (typeof IntersectionObserver === "undefined") {
+      syncActivePane();
+    } else {
+      visibilityObserver = new IntersectionObserver(
+        (entries) => setScrollListening(entries.some((entry) => entry.isIntersecting)),
+        { root: viewport, rootMargin: "100% 0px", threshold: 0 },
+      );
+      visibilityObserver.observe(root);
+    }
+    const resizeObserver = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(refresh);
+    resizeObserver?.observe(content);
+    resizeObserver?.observe(viewport);
+    const mutationObserver = new MutationObserver(refresh);
+    mutationObserver.observe(content, { childList: true, subtree: true });
+    return () => {
+      setScrollListening(false);
+      window.removeEventListener("session-timeline-activation-change", syncActivePane);
+      visibilityObserver?.disconnect();
+      resizeObserver?.disconnect();
+      mutationObserver.disconnect();
+    };
+  }, [showOutline, text]);
 
   useEffect(() => () => {
     if (outlineNavigationAnimationRef.current !== null) cancelAnimationFrame(outlineNavigationAnimationRef.current);
@@ -4089,6 +4331,7 @@ function FinalAnswerContent({ text }: { text: string }) {
     animateOutlineNavigation(viewport, targetTop, item.id);
   };
 
+
   const outlineElement = showOutline && outlineHost ? createPortal(<aside
     className={`final-answer-outline ${outlinePlacement}${outlineCollapsed ? " collapsed" : " expanded"}`}
     data-final-answer-reading-id={readingId}
@@ -4100,6 +4343,7 @@ function FinalAnswerContent({ text }: { text: string }) {
           <Bookmark size={15} strokeWidth={1.8} aria-hidden="true"/><ChevronRight className="final-answer-outline-toggle-arrow" size={10} strokeWidth={2.2} aria-hidden="true"/>
         </button>}
         {!outlineCollapsed && <div className="final-answer-outline-card">
+
           <header><button type="button" className="final-answer-outline-close" aria-label="Hide table of contents" title="Hide table of contents" onClick={() => setOutlineCollapsed(true)}><ChevronLeft size={13} aria-hidden="true"/></button><span><Bookmark size={12} aria-hidden="true"/>Contents</span></header>
           <nav><button
             type="button"

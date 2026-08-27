@@ -100,7 +100,11 @@ segments; they do not claim causality from sequence alone.
   `closed_turn_settle_finish.elapsed_ms` predicts a completion-race recovery path,
   not ordinary active-turn supplement handling.
 - A large Session selected-to-painted duration predicts Session projection/render
-  work only; it says nothing about command execution.
+  work only; it says nothing about command execution. Compare a cold first open
+  with repeated A/B/A switching: after both timelines have been visited, a large
+  remaining duration disproves remounting as the sole cause and points to reveal
+  layout, scroll restoration, or synchronous geometry work. A substantially
+  faster warm return is the expected signature of the two-pane timeline cache.
 
 Absence of a later stage is also evidence to classify: check authorization or
 connection failure for missing browser records, command rejection for missing
@@ -127,7 +131,12 @@ Run only the Web browser hot-path experiments:
 TIMEM_PERF_GUARD=1 pnpm --dir web_ui/timem-web exec vitest run tests/performance_guard.test.ts
 ```
 
-The Web experiments print elapsed time for 20,000 action lifecycle events and a
-50,000-event frame queue burst. Their thresholds are intentionally broad CI
-regression alarms, not product latency targets. Compare multiple runs on the same
-machine/build, and use the JSONL trace plus a browser profile for root-cause work.
+The Web experiments print elapsed time for 20,000 action lifecycle events, a
+50,000-event frame queue burst, and 50,000 combined scroll-invalidation/warm-A/B
+cache cycles. The last guard also asserts that scroll invalidation requests no
+geometry or floating-layout work while both warm Session panes remain cached.
+These thresholds are intentionally broad CI regression alarms, not product
+latency targets and not proof of browser rendering smoothness. Compare repeated
+runs on the same machine/build. Use command-correlated JSONL stages and a browser
+Performance profile to isolate render, reveal-layout, scroll-listener, or
+synchronous-geometry work; timestamp order alone does not establish causality.

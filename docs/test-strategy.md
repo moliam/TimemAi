@@ -115,8 +115,9 @@ checks. If a dimension is not applicable, record that residual decision in
   `docs/web_reliability_test_matrix.md`.
 - Performance guard: `scripts/performance_guard.sh` runs bounded hot-path
   checks for large prompt rendering, topic fan-out, observation panel
-  rendering with long rows, Web action-lifecycle coalescing, and browser event
-  burst draining. Thresholds are intentionally broad enough for CI
+  rendering with long rows, Web action-lifecycle coalescing, browser event
+  burst draining, and the joint long-scroll/warm-Session-cache invalidation
+  contract. Thresholds are intentionally broad enough for CI
   stability, but tight enough to catch accidental full static-prompt
   re-expansion, quadratic row trimming, or topic fan-out regressions.
 - Repeated edge regression: high-risk state machines run multiple times in CI

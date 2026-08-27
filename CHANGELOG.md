@@ -6,10 +6,34 @@
 
 - Add Web performance tracing under the existing `--debug` switch in the shared PID diagnostic directory with command-correlated browser/server stages, fixed 20 MiB in-place wrapping, browser hot-path microbenchmarks, and a reproducible diagnosis guide.
 
+### Changed
+
+- Reworked Web Session switching around a two-entry LRU of presentation-only
+  timeline panes. Warm A/B switching now reuses parsed Markdown and mounted Turn
+  DOM without duplicating composer or queue side effects; inactive panes freeze
+  their last visible snapshot, completed Turns retain stable layout containment,
+  and navigation geometry work is coalesced to one pass per animation frame.
+
+- Replaced the durable Web semantic-event replay journal with an in-memory,
+  linearized delivery stream. Connected event publication no longer performs
+  journal reads, rewrites, or fsyncs; reconnects, sequence gaps, and lag recover
+  from a full authoritative snapshot. Browser command durability, deduplication,
+  Core delivery state, restart recovery, per-MEM process ownership, and
+  multi-tab convergence remain intact.
+
 ### Fixed
 
-- Replace the doubled chat/sidebar dividers with symmetric borderless depth cues: the Session sidebar and Roles panel now cast matching mirrored shadows into the chat area, with no border or inset one-pixel seam. The Roles resize handle is excluded from generic panel-button styling so its idle state cannot add a second full-height inset line that disappears only on hover.
-- Refine the Web long-answer Markdown outline: its collapsed control is now a compact bookmark-only tab anchored to and extending from the chat/sidebar divider, its disclosure arrow and drawer styling are more precise, and the user-message bubble navigation dynamically preserves distance from the reading column while degrading through no, partial, and full outline overlap only as horizontal space becomes constrained. The entire bubble group, including its working indicator, now freezes its horizontal position while hovered so repeated previous/next clicks keep the pointer target stable, then applies the latest outline-aware position after the pointer leaves. The expanded drawer places its collapse arrow at the opaque left edge beside the title, keeping the control visible outside the right-side fade. The outline is now portaled directly into the chat scroll container, whose zero-position is the Session/chat divider, so both collapsed and expanded states follow sidebar resizing through browser layout itself rather than a content-relative negative offset or sidebar drag coupling. With no outline expanded, the floating user-message navigation now sits 12px closer to the reading column while retaining the existing outline-aware safety gap when the drawer is open.
+- Keep long-chat scrolling stable without giving up warm Session switching.
+  Variable-height Turn cards no longer use intrinsic-height `content-visibility`;
+  ordinary chat scroll frames derive user-message and Markdown-outline state
+  from cached offsets instead of scanning DOM geometry; outline collision
+  updates use visibility/intersection invalidation; hidden or distant cached
+  answers do not retain active scroll listeners. Content, size, outline, and
+  Session-activation changes still trigger bounded geometry refreshes so scroll
+  position restoration, message navigation, current-section tracking, and
+  outline avoidance remain accurate.
+
+- Refine the Web long-answer Markdown outline: its collapsed control is now a compact bookmark-only tab placed clear of the left sidebar, its disclosure arrow and drawer styling are more precise, and the user-message bubble navigation dynamically preserves distance from the reading column while degrading through no, partial, and full outline overlap only as horizontal space becomes constrained.
 - Keep large Web chat-search result sets in a bounded scroll area and prevent result rows from shrinking into unreadable stripes.
 - Recover provider `length`/`max_tokens` responses whose native tool arguments end mid-JSON: retain the received response and argument fragment in the repair context, then request one smaller complete step and continue iteratively instead of surfacing `invalid_tool_call ... EOF` or expanding the output limit first.
 - Keep Web Session Worker disclosure behind the host `--debug` option so normal launches do not expose an unfinished capability; debug launches retain the attached Worker hierarchy panel. Session names start at the left edge, and hover/focus controls remain on the right.
@@ -52,13 +76,6 @@
   users can assign specialized ways of working across Sessions and tasks.
 
 ### Changed
-
-- Replaced the durable Web semantic-event replay journal with an in-memory,
-  linearized delivery stream. Connected event publication no longer performs
-  journal reads, rewrites, or fsyncs; reconnects, sequence gaps, and lag recover
-  from a full authoritative snapshot. Browser command durability, deduplication,
-  Core delivery state, restart recovery, per-MEM process ownership, and
-  multi-tab convergence remain intact.
 
 - Refined the Web composer and Session navigation: Session names are smaller,
   cwd is shown only below the composer text area, and a subtle divider separates
