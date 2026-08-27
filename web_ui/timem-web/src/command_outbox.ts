@@ -21,6 +21,7 @@ const BEST_EFFORT_COMMANDS = new Set<ClientCommand["type"]>([
   "tool_repo_open_terminal",
   "mcp_server_secrets_reveal",
   "model_endpoint_secret_reveal",
+  "mem_temporary_items_list",
 ]);
 
 const CLIENT_COMMAND_TYPES = new Set<ClientCommand["type"]>([
@@ -29,7 +30,7 @@ const CLIENT_COMMAND_TYPES = new Set<ClientCommand["type"]>([
   "turn_submit", "turn_supplement", "turn_cancel", "attachment_remove", "history_page", "tool_repo_search", "tool_repo_detail",
   "tool_repo_rename", "tool_repo_open_terminal", "runtime_update", "session_runtime_update", "mcp_server_upsert",
   "mcp_server_delete", "mcp_session_toggle", "mcp_server_reconnect", "mcp_server_secrets_reveal",
-  "model_endpoint_upsert", "model_endpoint_delete", "model_endpoint_apply", "model_endpoint_secret_reveal", "mem_switch", "mem_temporary_retention_update", "topic_reply",
+  "model_endpoint_upsert", "model_endpoint_delete", "model_endpoint_apply", "model_endpoint_secret_reveal", "mem_switch", "mem_temporary_retention_update", "mem_temporary_items_list", "mem_temporary_items_delete", "topic_reply",
 ]);
 
 export function reliableStorageScope(origin: string, memSpaceDir: string) {

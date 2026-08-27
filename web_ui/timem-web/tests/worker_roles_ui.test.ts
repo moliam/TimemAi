@@ -64,12 +64,18 @@ describe("optimistic worker role UI", () => {
 
     expect(source).toContain('aria-label="展开编辑 Role 描述"');
     expect(source).toContain('aria-label="展开编辑用户信息"');
-    expect(source).toContain('完成编辑不会自动保存或发送');
-    expect(source).toContain('onCancel={() => { setDescription(descriptionBeforeExpand);');
-    expect(source).toContain('setSessionDraft(current, activeSessionId, composerDraftBeforeExpand)');
+    expect(source).toContain('输入内容会在完成编辑时一次性同步；不会自动保存或发送');
+    expect(source).toContain('const [draft, setDraft] = useState(value);');
+    expect(source).toContain('const finish = () => { onCommit(draft); onClose(); };');
+    expect(source).toContain('spellCheck={false} placeholder={placeholder} onChange={(event) => setDraft(event.target.value)}');
+    expect(source).toContain('onCommit={(value) => setDraftsBySession((current) => setSessionDraft(current, activeSessionId, value))}');
+    expect(source).not.toContain('composerDraftBeforeExpand');
+    expect(source).not.toContain('descriptionBeforeExpand');
     expect(styles).toContain('.worker-role-description-field textarea { padding-right: 40px; resize: none; }');
     expect(styles).toContain('.composer-text-field textarea { display: block; padding-right: 35px; resize: none; }');
     expect(styles).toContain('.expanded-text-editor > textarea');
+    expect(styles).toContain('.expanded-text-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: clamp(14px, 3vw, 34px); contain: layout style; background: #050708f2; }');
+    expect(styles).not.toContain('.expanded-text-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: clamp(14px, 3vw, 34px); background: #050708b8; backdrop-filter: blur(5px); }');
   });
 
 });

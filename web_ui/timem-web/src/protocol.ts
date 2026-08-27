@@ -183,6 +183,7 @@ export type Activity = {
   code_language?: string;
   tool_name?: string;
   tool_status?: string;
+  tool_mode?: string;
   elapsed_ms?: number;
   kind?: "context_compact" | "toolgen" | "free_talk" | "user_supplement";
   toolgen_phase?: string;
@@ -214,6 +215,14 @@ export type ModelEndpoint = {
   stream: boolean;
   api_key_configured: boolean;
   http_headers: Record<string, string>;
+};
+
+export type MemTemporaryItem = {
+  id: string;
+  path: string;
+  kind: "shell_job" | "temporary_file" | string;
+  bytes: number;
+  modified_at_ms: number;
 };
 
 export type Snapshot = {
@@ -265,6 +274,7 @@ export type WireEvent =
   | { type: "runtime_notice"; session_id: string; level: "notice" | "warning" | "error" | string; title: string; message: string }
   | { type: "host_config_updated"; key: string; value: string; session_env_defaults: Record<string, string> }
   | { type: "mem_settings_updated"; temporary_retention_days: 1 | 5 | 10 | null }
+  | { type: "mem_temporary_items"; items: MemTemporaryItem[]; error?: string }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
   | { type: "attachment_removed"; session_id: string; attachment_id: string }
   | { type: "history_page"; session_id: string; records: ChatHistoryRecord[]; before_cursor?: string | null; has_more: boolean }
@@ -318,6 +328,8 @@ export type ClientCommand =
   | { type: "mcp_server_secrets_reveal"; server_id: string }
   | { type: "mem_switch"; path: string }
   | { type: "mem_temporary_retention_update"; days: 1 | 5 | 10 | null }
+  | { type: "mem_temporary_items_list" }
+  | { type: "mem_temporary_items_delete"; ids: string[] }
   | {
       type: "topic_reply";
       session_id: string;

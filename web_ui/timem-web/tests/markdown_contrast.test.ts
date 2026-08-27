@@ -73,9 +73,10 @@ describe("formatted Markdown contrast", () => {
     expect(styles).toContain(".code-block .hljs-keyword");
   });
 
-  it("overrides the legacy light transcript color for plain text fences", () => {
+  it("keeps plain light-theme fences readable without flattening highlighted token colors", () => {
     expect(styles).toContain(':root[data-theme="light"] .message-content .code-block pre code');
     expect(styles).toContain(':root[data-theme="light"] .turn-final-delivery > .message-content .code-block pre code');
     expect(styles).toContain('-webkit-text-fill-color: var(--markdown-code-fg);');
+    expect(styles).toContain('.code-block .hljs span {\n  -webkit-text-fill-color: currentColor;\n}');
   });
 });

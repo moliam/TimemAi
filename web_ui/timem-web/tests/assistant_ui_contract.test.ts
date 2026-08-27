@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+const markdownSource = readFileSync(new URL("../src/markdown_render.tsx", import.meta.url), "utf8");
+const clipboardSource = readFileSync(new URL("../src/clipboard_copy.ts", import.meta.url), "utf8");
 const appearanceSource = readFileSync(new URL("../src/appearance.ts", import.meta.url), "utf8");
 const preloadSource = readFileSync(new URL("../src/preload.ts", import.meta.url), "utf8");
 const viewModelSource = readFileSync(new URL("../src/view_model.ts", import.meta.url), "utf8");
@@ -127,10 +129,40 @@ describe("assistant-ui thread integration", () => {
     expect(source).not.toContain("work with your local environment");
     expect(source).not.toContain("<small>local</small>");
     expect(styles).toContain('.brand { display: grid; grid-template-columns: 41px minmax(0, 1fr); align-items: center; column-gap: 9px;');
+    expect(styles).not.toContain('.brand { grid-template-columns: 41px minmax(0, 1fr) 26px; }');
     expect(styles).toContain('.brand > span { width: 100%; height: 41px; display: inline-flex; align-items: center; justify-content: center; padding-top: 2px;');
     expect(styles).toContain('font-size: 28px; font-weight: 800; line-height: 1; letter-spacing: .12em; text-align: center; text-shadow: 0 1px 0 #000, 0 3px 6px #000b, 0 0 12px #68b8a740; }');
     expect(styles).toContain('.brand { grid-template-columns: 41px minmax(0, 1fr) 30px; }');
     expect(styles).toContain(':root[data-theme="light"] .brand > span { text-shadow: 0 1px 0 #fff, 0 3px 6px #31564b45; }');
+  });
+
+  it("keeps the Markdown outline anchor separate from navigation-item decoration", () => {
+    expect(source).toContain('className="final-answer-outline-toggle" aria-expanded={!outlineCollapsed}');
+    expect(source).toContain('aria-label={outlineCollapsed ? "Show table of contents" : "Hide table of contents"}');
+    expect(source).toContain('onClick={() => setOutlineCollapsed((current) => !current)}');
+    expect(styles).toContain('.final-answer-outline-toggle { display: inline-flex; align-items: center; justify-content: center;');
+    expect(styles).toContain('width: 82px; height: 34px;');
+    expect(styles).toContain('.final-answer-outline-toggle span { font-size: 8px; font-weight: 720; line-height: 1;');
+    expect(styles).toContain('white-space: nowrap;');
+    expect(styles).toContain('.final-answer-outline-card nav > button { position: relative;');
+    expect(styles).toContain('.final-answer-outline-card nav > button::before { position: absolute;');
+    expect(styles).not.toContain('.final-answer-outline-card button::before { position: absolute;');
+  });
+
+  it("keeps resizable sidebar branding contained and removes the desktop right-rail seam", () => {
+    expect(styles).toContain('.sidebar { container-type: inline-size; }');
+    expect(styles).toContain('font-size: clamp(20px, 12cqw, 28px);');
+    expect(styles).toContain('letter-spacing: clamp(.06em, .5cqw, .12em);');
+    expect(styles).toContain('white-space: nowrap;');
+    expect(styles).toMatch(/@media \(min-width: 1051px\) \{[\s\S]*?\.chat-shell \{[\s\S]*?border-right: 0;[\s\S]*?box-shadow: none;[\s\S]*?\.worker-role-panel,[\s\S]*?\.toolrepo-side-panel \{[\s\S]*?width: 100%;[\s\S]*?margin-left: 0;[\s\S]*?border-left: 0;/);
+    expect(styles).toContain('.worker-role-panel { box-shadow: -3px 0 0 var(--management-panel); }');
+    expect(styles).toContain('.toolrepo-side-panel { box-shadow: -3px 0 0 #10171f; }');
+    expect(styles).toContain(':root[data-theme="light"] .toolrepo-side-panel { box-shadow: -3px 0 0 #f8fafb; }');
+    expect(styles).toContain('.worker-role-panel > .sidebar-resize-handle:hover:not(:disabled),');
+    expect(styles).toContain('.toolrepo-side-panel > .sidebar-resize-handle:focus-visible { appearance: none; border: 0; border-radius: 0; outline: 0; background: transparent; box-shadow: none; }');
+    expect(styles).toContain('.sidebar-resize-handle { position: absolute; z-index: 7; top: 0; bottom: 0; width: 10px; appearance: none; border: 0; border-radius: 0; padding: 0; outline: 0; background: transparent; box-shadow: none;');
+    expect(styles).not.toContain('width: calc(100% + 1px);');
+    expect(styles).not.toContain('margin-left: -1px;');
   });
 
   it("uses assistant-ui thread primitives for the primary conversation surface", () => {
@@ -162,7 +194,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("sessionScrollPositionsRef");
     expect(source).toContain('viewport.style.scrollBehavior = "auto";');
     expect(source).toContain("restoreSessionScrollTop(position, viewport.scrollHeight)");
-    expect(source).toContain("followThreadLatest.current = isNearScrollBottom");
+    expect(source).toContain("const nearBottom = isNearScrollBottom");
+    expect(source).toContain("followThreadLatest.current = nearBottom;");
     expect(source).toContain("viewport.scrollTop = viewport.scrollHeight");
     expect(source).toContain("[activeSessionId, latestTurn?.turn_id]");
   });
@@ -208,17 +241,22 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('.session-row .session {\n  min-height: 32px;\n  padding: 2px 2px 2px 34px;');
     expect(styles).toContain('.session-drag,\n.session-expand {\n  position: absolute;');
     expect(styles).toContain('opacity: 0;\n  pointer-events: none;');
-    expect(styles).toContain('.session-row:hover > :is(.session-drag, .session-expand),');
-    expect(styles).toContain('.session-row > :is(.session-drag, .session-expand):focus-visible {');
-    expect(styles).toContain('.session-row:hover .session,\n.session-row:focus-within .session { padding-left: 56px; }');
+    expect(styles).toContain('.session-row:hover > :is(.session-drag, .session-expand.available),');
+    expect(styles).toContain('.session-row > :is(.session-drag, .session-expand.available):focus-visible {');
+    expect(styles).toContain('.session-row:hover .session,\n.session-row:focus-within .session { padding-left: 34px; }');
     expect(styles).toContain('.session-row:is(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand) { display: none; }');
     expect(styles).toContain('.session-row:is(.delete-selecting, .controls-suppressed) .session { padding-left: 34px; }');
     expect(styles).toContain('.session-overlay .session-name { min-width: 0; font-size: 12px; font-weight: 400; }');
     expect(source).toContain('renamingSessionId === session.session_id || runtimeLocked || isDragging ? "controls-suppressed" : ""');
     expect(source).toContain('session.workers.length === 0 ? "No workers in this session"');
+    expect(source).toContain('session-expand ${session.workers.length > 0 ? "available" : ""}');
     expect(source).toContain('session.workers.length > 0 && expandedSessionIds.has(session.session_id)');
+    expect(styles).toContain('.session-group-list { padding-left: 19px; }');
+    expect(styles).toContain('.session-expand {\n  left: -19px;');
+    expect(styles).toContain('.worker-name {\n  min-width: 0;\n  overflow: hidden;\n  text-overflow: ellipsis;');
+    expect(source).toContain('className={`worker-row ${depth > 0 ? "child-worker" : "root-worker"}');
     expect(styles).toContain('@media (hover: none), (pointer: coarse) {');
-    expect(styles).toContain('.session-row:not(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand)');
+    expect(styles).toContain('.session-row:not(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand.available)');
     expect(styles).toContain('.session-identity { flex: 1; min-width: 0; }');
     expect(styles).toContain('.session-endpoint-reveal {\n  position: absolute;');
     expect(styles).toContain('transform: translate(3px, -50%);');
@@ -249,11 +287,11 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('<ChevronUp size={17} aria-hidden="true"/>');
     expect(source).toContain('<ChevronDown size={17} aria-hidden="true"/>');
     expect(source).not.toContain('user-message-navigation-triangle');
-    expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 42px); right: max(10px, calc((100% - 900px) / 2)); display: grid; gap: 7px;');
-    expect(styles).toContain('.user-message-navigation button { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 7px; background: #1f303e;');
+    expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 38px); left: max(10px, calc((100% - 900px) / 2)); display: grid; gap: 7px;');
+    expect(styles).toContain('.user-message-navigation button { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 9px; background: #242424d9;');
     expect(styles).toContain('.user-message-navigation button:disabled { opacity: .24; cursor: default; box-shadow: none; }');
-    expect(styles).toContain(':root[data-theme="light"] .user-message-navigation button { background: #c9e3f7; color: #286792;');
-    expect(styles).toContain('@media (max-width: 720px) { .user-message-navigation { right: 6px; }');
+    expect(styles).toContain(':root[data-theme="light"] .user-message-navigation button { background: #f7f9f9ed; color: #667d76;');
+    expect(styles).toContain('@media (max-width: 720px) { .user-message-navigation { left: 6px; }');
   });
 
   it("prioritizes a focused multiline composer before scrolling the chat viewport", () => {
@@ -386,7 +424,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const closeMobileSidebar = useCallback((restoreFocus = true) => {");
     expect(source).toContain("if (restoreFocus) mobileSessionButtonRef.current?.focus({ preventScroll: true });");
     expect(source).toContain("mobileSidebarRef.current?.focus({ preventScroll: true });");
-    expect(source).toContain('id="session-navigation" ref={mobileSidebarRef} className={`sidebar ${showMobileSessions ? "mobile-open" : ""}`} aria-label="Session navigation" tabIndex={-1}');
+    expect(source).toContain('id="session-navigation" ref={mobileSidebarRef} className={`sidebar ${leftSidebarCollapsed ? "collapsed" : ""} ${showMobileSessions ? "mobile-open" : ""}`} aria-label="Session navigation" tabIndex={-1}');
     expect(source).toContain('ref={mobileSessionButtonRef} title={mobileSessionsLabel} aria-label={mobileSessionsLabel}');
     expect(source).toContain('<button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => closeMobileSidebar()}');
     expect(source).toContain('aria-label="Close sessions" onClick={() => closeMobileSidebar()}');
@@ -401,6 +439,52 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".icon-button.mobile-session-button { display: grid;");
   });
 
+  it("supports persistent, resizable desktop sidebars and a refined collapsed session rail", () => {
+    expect(source).toContain('const SIDEBAR_LAYOUT_STORAGE_KEY = "timem.sidebar-layout.v1";');
+    expect(source).toContain('const [sidebarLayout, setSidebarLayout] = useState<SidebarLayout>(loadSidebarLayout);');
+    expect(source).toContain('saveSidebarLayout(sidebarLayout);');
+    expect(source).toContain('const startSidebarResize = useCallback((side: "left" | "right"');
+    expect(source).toContain('window.matchMedia("(max-width: 1050px)").matches');
+    expect(source).toContain('className="sidebar-resize-handle left"');
+    expect(source).toContain('className="sidebar-resize-handle right"');
+    expect(source).toContain('className="collapsed-brand brand-logo-toggle brand-logo-restore"');
+    expect(source).toContain('className="brand-logo-toggle" title="Hide session navigation" aria-label="Hide session navigation"');
+    expect(source).toContain('className="brand-scale-corner top-right"');
+    expect(source).toContain('className="brand-scale-corner bottom-left"');
+    expect(source).toContain('className="brand-scale-corner top-left"');
+    expect(source).toContain('className="brand-scale-corner bottom-right"');
+    expect(source).not.toContain('className="desktop-sidebar-toggle" title="Hide session navigation"');
+    expect(source).not.toContain('<span>TM</span>');
+    expect(source).toContain('className="sidebar-settings-button"');
+    expect(source).toContain('className="desktop-sidebar-toggle worker-role-collapse"');
+    expect(styles).toContain('.worker-role-panel .worker-role-collapse { border: 0; background: transparent; color: #718b83; box-shadow: none; }');
+    expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-role-collapse { border: 0; background: transparent; color: #698078; box-shadow: none; }');
+    expect(source).toContain('const leftSidebarCollapsed = sidebarLayout.leftCollapsed && !showMobileSessions;');
+    expect(source).toContain('const rightSidebarCollapsed = sidebarLayout.rightCollapsed && !showRoles;');
+    expect(source).toContain('className="header-session-cluster"');
+    expect(source).toContain('{activeSession?.display_name ?? "No session"}');
+    expect(styles).toContain('.chat-header { position: relative; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 7px; }');
+    expect(styles).toContain('.header-session-cluster { width: fit-content; max-width: 152px; min-width: 0; display: grid; grid-column: 1; grid-row: 1;');
+    expect(styles).toContain('.header-session-cluster > strong { width: auto; max-width: 152px; overflow: hidden;');
+    expect(styles).toContain('.header-session-cluster .header-model-guide-anchor { width: fit-content; max-width: 152px; min-width: 0; }');
+    expect(styles).toContain('.header-session-cluster .header-model { width: auto; max-width: 152px; min-height: 23px;');
+    expect(styles).not.toContain('.app-shell.left-sidebar-collapsed .chat-header {');
+    expect(styles).not.toContain('.app-shell.left-sidebar-collapsed .header-session-cluster .header-model');
+    expect(source).toContain('<div className="header-session-cluster"><strong title={activeSession?.display_name ?? "No session"}>{activeSession?.display_name ?? "No session"}</strong><div className="header-model-guide-anchor">');
+    expect(styles).toContain('grid-template-columns: var(--left-sidebar-width, 220px) minmax(0, 1fr) var(--right-sidebar-width, 286px);');
+    expect(styles).toContain('.app-shell.left-sidebar-collapsed.right-sidebar-collapsed { grid-template-columns: 58px minmax(0, 1fr) 44px; }');
+    expect(styles).toContain('.sidebar.collapsed > :not(.collapsed-brand, .sidebar-footer) { display: none; }');
+    expect(styles).toContain('.collapsed-brand { display: grid; place-items: center; width: 42px; height: 42px;');
+    expect(styles).toContain('.brand-logo-toggle { position: relative; width: 41px; height: 41px; display: grid; place-items: center;');
+    expect(styles).toContain('.brand-scale-corner.top-right { top: -2px; right: -2px; border-top: 1px solid #83b9af; border-right: 1px solid #83b9af; }');
+    expect(styles).toContain('.brand-scale-corner.bottom-left { bottom: -2px; left: -2px; border-bottom: 1px solid #83b9af; border-left: 1px solid #83b9af; }');
+    expect(styles).toContain('.brand-logo-restore:hover .brand-scale-corner.top-left { transform: translate(-2px, -2px); }');
+    expect(styles).toContain('.brand-logo-restore:hover .brand-scale-corner.bottom-right { transform: translate(2px, 2px); }');
+    expect(styles).toContain('.brand-logo-toggle { pointer-events: none; }');
+    expect(styles).toContain('.brand-scale-corner { display: none; }');
+    expect(styles).toContain('.header-session-cluster { width: fit-content; max-width: 152px; min-width: 0; display: grid; grid-column: 1; grid-row: 1; justify-items: start;');
+  });
+
   it("keeps ToolRepo as a dedicated panel without the diagnostic Activity feed", () => {
     expect(source).toContain("const [showToolRepo, setShowToolRepo] = useState(false);");
     expect(source).toContain("const toolRepoButtonRef = useRef<HTMLButtonElement | null>(null);");
@@ -411,9 +495,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('const activeToolCount = activeSession?.tools.length ?? 0;');
     expect(source).toContain('const toolRepoLabel = showToolRepo ? "Close ToolRepo" : `Open ToolRepo · ${activeToolCount} reusable tools`;');
     expect(source).toContain('aria-expanded={showToolRepo} aria-controls="toolrepo-panel"');
-    expect(source).toContain('ref={toolRepoButtonRef} title={toolRepoLabel} aria-label={toolRepoLabel}');
+    expect(source).toContain('{toolGenEnabled && <button type="button" ref={toolRepoButtonRef} title={toolRepoLabel} aria-label={toolRepoLabel}');
     expect(source).toContain('<Wrench size={17}/><span className="toolrepo-header-count" aria-hidden="true">{activeToolCount}</span>');
-    expect(source).toContain('<button type="button" className="side-panel-backdrop" aria-label="Close ToolRepo" onClick={closeToolRepoPanel}');
+    expect(source).toContain('{toolGenEnabled && showToolRepo && <button type="button" className="side-panel-backdrop" aria-label="Close ToolRepo" onClick={closeToolRepoPanel}');
     expect(source).toContain('function ToolRepoPanel');
     expect(source).toContain('id="toolrepo-panel" ref={panelRef} className="toolrepo-side-panel session-side-panel" aria-label="ToolRepo" tabIndex={-1}');
     expect(source).toContain('<strong>ToolRepo</strong>');
@@ -468,18 +552,41 @@ describe("assistant-ui thread integration", () => {
 
   it("opens ToolRepo from the header and keeps the composer focused on message actions", () => {
     expect(source).toContain('const [showToolRepo, setShowToolRepo] = useState(false);');
-    expect(source).toContain('aria-label={toolRepoLabel}');
+    expect(source).toContain('{toolGenEnabled && <button type="button" ref={toolRepoButtonRef} title={toolRepoLabel} aria-label={toolRepoLabel}');
     expect(source).toContain('className={`icon-button toolrepo-header-button ${showToolRepo ? "selected" : ""} ${toolCountPulseSessionId === activeSession?.session_id ? "count-pulse" : ""}`}');
     expect(source).not.toContain('className={`toolrepo-toggle');
     expect(source).not.toContain('onOpenToolRepo: () => void;');
     expect(source).not.toContain('type: "toolgen_set"');
-    expect(source).not.toContain('aria-pressed={toolgenEnabled}');
     expect(source).toContain('event.type === "tool_repo_updated"');
     expect(source).toContain('event.session_id !== activeSessionIdRef.current');
     expect(source).toContain('event.query !== toolSearchQueryRef.current');
     expect(styles).toContain(".toolrepo-header-button");
     expect(styles).toContain(".toolrepo-header-count");
     expect(styles).toContain("@keyframes tool-count-pulse");
+  });
+
+  it("keeps ToolGen behind a disabled-by-default Beta setting", () => {
+    expect(source).toContain('import { loadToolGenEnabled, saveToolGenEnabled } from "./beta_features";');
+    expect(source).toContain('const [toolGenEnabled, setToolGenEnabled] = useState(loadToolGenEnabled);');
+    expect(source).toContain('saveToolGenEnabled(toolGenEnabled);');
+    expect(source).toContain('type SettingsSection = "appearance" | "endpoints" | "memory" | "toolgen";');
+    expect(source).toContain('<strong>ToolGen <em>Beta</em></strong>');
+    expect(source).toContain('onClick={() => selectSettingsSection("toolgen")}');
+    expect(source).toContain('role="switch" className="settings-feature-switch" aria-checked={toolGenEnabled}');
+    expect(source).toContain('onToolGenEnabledChange(!toolGenEnabled)');
+    expect(source).toContain('Disabled by default');
+    expect(source).toContain('onRequestToolGen={toolGenEnabled ? (turnId) => {');
+    expect(source).toContain('if (!toolGenEnabled || !activeSession');
+    expect(source).toContain('{toolGenEnabled && toolgenDialog && <ToolGenDialog');
+    expect(source).toContain('if (!toolGenEnabled) return;');
+    expect(source).toContain('if (!toolGenEnabled) {');
+    expect(source).toContain('setShowToolRepo(false);');
+    expect(source).toContain('{toolGenEnabled && <button type="button" ref={toolRepoButtonRef}');
+    expect(source).toContain('{toolGenEnabled && showToolRepo && <ToolRepoPanel');
+    expect(styles).toContain('.settings-feature-switch[aria-checked="true"]');
+    expect(styles).toContain('.settings-feature-switch[aria-checked="true"] .settings-feature-switch-thumb');
+    expect(styles).toContain('.toolgen-beta-note');
+    expect(styles).toContain(':root[data-theme="light"] .toolgen-beta-card');
   });
 
   it("starts ToolGen manually from an exact completed turn with optional guidance", () => {
@@ -506,7 +613,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('toolGenPending={pendingToolGenTurnIds.has(turn.turn_id)}');
     expect(source).toContain('toolGenBlocked={toolGenSessionBusy && !pendingToolGenTurnIds.has(turn.turn_id)}');
     expect(source).toContain('function CompletionCard({ completion, toolGenPending = false, toolGenBlocked = false, onToolGen, answerActions }');
-    expect(source).toContain('onToolGen={isToolGenTurn ? undefined : () => onRequestToolGen(turn.turn_id)}');
+    expect(source).toContain('onToolGen={isToolGenTurn || !onRequestToolGen ? undefined : () => onRequestToolGen(turn.turn_id)}');
     expect(source).toContain('const toolGenLabel = toolGenPending ? "Starting ToolGen" : toolGenBlocked ? "ToolGen busy" : "ToolGen";');
     expect(source).toContain('const toolGenTitle = toolGenPending ? "ToolGen is starting for this task..." : toolGenBlocked ? "Another ToolGen task is already running in this session" : "Extract reusable tool from this task";');
     expect(source).toContain('className={`completion-toolgen ${toolGenPending ? "sending" : ""}`}');
@@ -542,82 +649,22 @@ describe("assistant-ui thread integration", () => {
   it("lets modal backdrops dismiss dialogs without closing while editing inside them", () => {
     expect(source).toContain('className="modal-backdrop" role="presentation" aria-label="Dismiss create session" onClick={closeIfIdle}');
     expect(source).toContain('className="modal-backdrop" role="presentation" aria-label="Dismiss ToolGen dialog" onClick={closeIfIdle}');
-    expect(source).toContain('className="modal-backdrop" role="presentation" aria-label="Dismiss mem switch" onClick={closeIfIdle}');
+    expect(source).toContain('className="settings-center-backdrop" role="presentation" aria-label="Dismiss settings" onClick={closeIfIdle}');
     expect(source).toContain('onClick={(event) => event.stopPropagation()}');
     expect(source).toContain('const closeIfIdle = () => { if (!creating) onClose(); };');
     expect(source).toContain('const closeIfIdle = () => { if (!pending) onClose(); };');
-    expect(source).toContain("const newSessionButtonRef = useRef<HTMLButtonElement | null>(null);");
     expect(source).toContain("const FOCUSABLE_DIALOG_SELECTOR =");
-    expect(source).toContain("textarea:not([disabled]), summary, [tabindex]");
     expect(source).toContain("function useDialogFocusTrap()");
-    expect(source).toContain("activeElement.closest<HTMLElement>");
     expect(source).toContain('document.addEventListener("keydown", containFocus, true);');
     expect(source).toContain("useDialogFocusTrap();");
-    expect(source).toContain("const closeNewSessionDialog = useCallback((restoreFocus = true) => {");
-    expect(source).toContain('window.getComputedStyle(newSessionButton).visibility !== "hidden"');
-    expect(source).toContain('newSessionButton.focus({ preventScroll: true });');
-    expect(source).toContain('mobileSessionButtonRef.current?.focus({ preventScroll: true });');
-    expect(source).toContain('const descriptionId = "new-session-dialog-description";');
-    expect(source).toContain('const statusId = "new-session-dialog-status";');
-    expect(source).toContain('const describedBy = creating ? `${descriptionId} ${statusId}` : descriptionId;');
-    expect(source).toContain('aria-label="Create session" aria-describedby={describedBy}');
-    expect(source).toContain('<p id={descriptionId}>Select a known workspace or enter an existing absolute directory for this session.</p>');
-    expect(source).toContain('{creating && <p id={statusId} className="mem-validation" role="status" aria-live="polite">Creating session…</p>}');
-    expect(source).toContain('onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}');
-    expect(source).toContain('onClose={() => { if (!creatingSessionRef.current) closeNewSessionDialog(); }}');
-    expect(source).toContain('onClose={() => { if (!pendingToolgenRequests.has(toolgenRequestKey(toolgenDialog.sessionId, toolgenDialog.turnId))) setToolgenDialog(null); }}');
-    expect(source).toContain('onClose={() => { if (!pendingMemSwitch) closeMemSwitchDialog(); }}');
-    expect(source).toContain('closeMemSwitchDialog();');
-    expect(source).toContain("const validationText = pending");
-    expect(source).toContain("Enter an absolute mem directory path on the Timem host.");
-    expect(source).toContain("This is the current mem directory.");
-    expect(source).toContain('const descriptionId = "mem-switch-dialog-description";');
-    expect(source).toContain('const statusId = "mem-switch-dialog-status";');
-    expect(source).toContain('const describedBy = validationText ? `${descriptionId} ${statusId}` : descriptionId;');
-    expect(source).toContain('aria-label="Switch memory directory" aria-describedby={describedBy}');
-    expect(source).toContain('<p id={descriptionId}>Switching mem stops current workers');
-    expect(source).toContain('id={statusId} className="mem-validation" role="status" aria-live="polite"');
-    expect(source).toContain('title={validationText || "Switch mem"}');
-    expect(source).toContain('aria-label={validationText || "Switch mem"}');
-    expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing && !pending && !invalid) { event.preventDefault(); onSwitch(cleaned); }');
-    expect(source).toContain('className="modal-titlebar"');
-    expect(source).toContain('aria-label="Close create session" disabled={creating} onClick={closeIfIdle}');
-    expect(source).toContain('aria-label="Close ToolGen dialog" disabled={pending} onClick={closeIfIdle}');
-    expect(source).toContain('<p id={descriptionId}>Timem will preserve reusable work');
-    expect(source).toContain('id={statusId} className="toolgen-dialog-status" role="status" aria-live="polite"');
-    expect(source).toContain("Starting ToolGen and opening a generating-tools task…");
-    expect(source).toContain('aria-label="Close mem switch" disabled={pending} onClick={closeIfIdle}');
-    expect(source).toContain('className={`primary ${creating ? "sending" : ""}`}');
-    expect(source).toContain("const createDecision = sessionCreateDecision(displayName, workspaceDir, env, creating, memSwitching);");
-    expect(source).toContain('closeNewSessionDialog();');
-    expect(source).toContain('memSwitching={runtimeLocked}');
-    expect(source).toContain("const submit = () => { if (createDecision.kind === \"send\") onCreate(createDecision.command); };");
-    expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing)');
-    expect(source).toContain('{creating ? <LoaderCircle size={16}/> : <Plus size={16}/>} {creating ? "Creating…" : "Create session"}');
-    expect(source).toContain("const submit = () => { if (!pending) onSubmit(instruction.trim()); };");
-    expect(source).toContain('if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !event.nativeEvent.isComposing)');
-    expect(source).toContain("Cmd/Ctrl+Enter to generate; Escape closes before it starts.");
-    expect(source).toContain('className={`primary ${pending ? "sending" : ""}`} disabled={pending} onClick={submit}');
-    expect(source).toContain('{pending ? <LoaderCircle size={16}/> : <Wrench size={15}/>} {pending ? "Starting…" : "Generate tool"}');
-    expect(source).toContain('className={`primary ${pending ? "sending" : ""}`} disabled={pending || invalid || cleaned === current}');
-    expect(source).toContain('{pending && <LoaderCircle size={16}/>} {pending ? "Switching…" : "Switch mem"}');
-    expect(styles).toContain(".decision-modal { width: min(520px, 100%); max-height: calc(100vh - 40px); display: flex; flex-direction: column; overflow: hidden;");
-    expect(styles).toContain(".modal-titlebar { flex: none; min-width: 0; display: flex;");
-    expect(styles).toContain(".modal-titlebar .icon-button { flex: none;");
-    expect(styles).toContain(".decision-actions { flex: none; display: flex; flex-wrap: wrap;");
-    expect(styles).toContain(".decision-actions button { min-width: 96px;");
-    expect(styles).toContain(".decision-actions .primary { display: inline-flex; align-items: center; justify-content: center;");
-    expect(styles).toContain(".decision-actions .primary.sending svg");
-    expect(styles).toContain(".decision-actions button { flex: 1 1 130px; }");
-    expect(styles).toContain(".session-modal-scroll { flex: 1; min-height: 0; overflow-y: auto;");
-    expect(styles).toContain('.session-runtime-overrides summary::after { content: "Show";');
-    expect(styles).toContain('.session-runtime-overrides[open] summary::after { content: "Hide";');
-    expect(styles).toContain(".toolgen-dialog label { min-height: 0;");
-    expect(styles).toContain(".toolgen-dialog textarea { min-height: 112px; max-height: min(260px, 38vh);");
-    expect(styles).toContain(".toolgen-dialog-status");
-    expect(styles).toContain(".toolgen-dialog-hint");
-    expect(styles).toContain(".mem-validation");
-    expect(styles).toContain(':root[data-theme="light"] .mem-validation');
+    expect(source).toContain('role="dialog" aria-modal="true" aria-labelledby="settings-center-title"');
+    expect(source).toContain('disabled={busy} onClick={closeIfIdle}');
+    expect(source).toContain('if (event.key === "Escape" && !pendingMemSwitch && !pendingMemRetention) closeAppearancePanel();');
+    expect(source).toContain('const busy = retentionPending || switchPending || temporaryItemsDeleting;');
+    expect(source).toContain('if (event.key === "Enter" && !event.nativeEvent.isComposing && !switchPending && cleanedPath && !pathUnchanged)');
+    expect(source).toContain('role="status" aria-live="polite">{switchPending ? "Switching MEM and loading its sessions…"');
+    expect(styles).toContain('.settings-center-backdrop { position: fixed; z-index: 45;');
+    expect(styles).toContain('.settings-center { width: min(880px, 100%);');
   });
 
   it("renders ToolRepo browsing, search, rename and terminal-open controls", () => {
@@ -791,8 +838,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("const detail = activity.detail?.trim();"); expect(source).toContain("const code = activity.code?.trim();"); expect(source).toContain("const hasExpandableDetail = !!detail || !!code;");
     expect(source).toContain("const running = isToolActivityRunning(status);");
     expect(source).toContain("const [open, setOpen] = useState(false);");
-    expect(source).toContain('if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""} ${running ? "running" : "settled"}`} aria-busy={running || undefined}>');
-    expect(source).toContain("const toolName = toolDisplayName(activity.tool_name || activity.title);");
+    expect(source).toContain('if (!hasExpandableDetail) return <div className={`tool-activity tool-activity-static ${bashActivity ? "bash-activity" : ""}${pollingActivity ? " poll-activity" : ""} ${running ? "running" : "settled"}`} aria-busy={running || undefined}>');
+    expect(source).toContain("const toolName = toolActivityDisplayName(activity.tool_name || activity.title, activity.tool_mode);");
     expect(source).toContain('const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;');
     expect(source).toContain("const summaryContent = <>");
     expect(source).toContain('className="tool-activity-command" title={invocationPreview}');
@@ -806,7 +853,7 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".tool-activity-body .turn-work-detail { padding: 2px 0 3px; }"); expect(styles).toContain(".tool-activity-body .code-block { margin: 0;"); expect(source).toContain('{detail && <div className="turn-work-detail"><MarkdownContent text={detail}/></div>}'); expect(source).toContain('<MarkdownContent text={fencedCode(activity.code_language ?? "text", code)} />');
     expect(styles).toContain(".tool-activity summary:focus-visible { background: #1f1f1f; box-shadow: inset 2px 0 0 #4d8fd7; }");
     expect(styles).toContain(':root[data-theme="light"] .tool-activity summary:focus-visible { background: #edf4f7; box-shadow: inset 2px 0 0 #2c7bbf; }');
-    expect(source).toContain("toolDisplayName(activity.tool_name || activity.title)");
+    expect(source).toContain("toolActivityDisplayName(activity.tool_name || activity.title, activity.tool_mode)");
     expect(source).toContain('from "./tool_status"');
     expect(toolStatusSource).toContain('if (status === TOOL_STATUS_BACKGROUND_RUNNING) return "background running";');
     expect(toolStatusSource).toContain('if (status === "timeout") return "timed out";');
@@ -962,6 +1009,16 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain("inboundEvents.enqueue(event, isLiveTurnProgressEvent(event));");
   });
 
+  it("renders polling Bash with a clock, Poll label, live clock timer, and second-line command", () => {
+    expect(source).toContain('const pollingActivity = bashActivity && activity.tool_mode === "poll";');
+    expect(source).toContain('pollingActivity ? <Clock3 size={13}/> : ">_"');
+    expect(source).toContain('toolActivityDisplayName(activity.tool_name || activity.title, activity.tool_mode)');
+    expect(source).toContain('pollingActivity ? formatClockDuration(displayedElapsedMs) : formatDuration(displayedElapsedMs)');
+    expect(source).toContain('window.setInterval(updateElapsed, 1_000)');
+    expect(styles).toContain('.tool-activity.poll-activity .tool-activity-command { grid-column: 2 / -1; grid-row: 2;');
+    expect(viewModelSource).toContain('if (name === "run_bash" && mode === "poll") return "Poll";');
+  });
+
   it("uses dnd-kit sortable motion for queued-message reordering", () => {
     expect(source).toContain('from "@dnd-kit/core"');
     expect(source).toContain('from "@dnd-kit/sortable"');
@@ -996,8 +1053,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
   });
 
   it("uses the Markdown highlighter for final answers and Bash activity commands", () => {
-    expect(source).toContain('import rehypeHighlight from "rehype-highlight";');
-    expect(source).toContain("rehypePlugins={[rehypeHighlight]}");
+    expect(markdownSource).toContain('import rehypeHighlight from "rehype-highlight";');
+    expect(markdownSource).toContain("rehypePlugins={[rehypeHighlight, rehypeKatex]}");
     expect(source).toContain("fencedCode(activity.code_language ?? \"text\", activity.code)");
     expect(viteConfig).toContain('highlighting: ["highlight.js", "rehype-highlight"]');
   });
@@ -1021,10 +1078,45 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('<FinalAnswerDelivery text={turn.final_answer}');
     expect(source).toContain('<FinalAnswerContent text={text}/>');
     expect(source).toContain('<FinalAnswerContent text={turn.final_answer}/>');
-    expect(source).toContain('finalAnswerNeedsOutline(content.offsetHeight, viewport.clientHeight, outline.length)');
+    expect(source).toContain('const availableLeftSpace = content.getBoundingClientRect().left - viewport.getBoundingClientRect().left;');
+    expect(source).toContain('markdownOutlineFitsBesideContent(availableLeftSpace, FINAL_ANSWER_OUTLINE_WIDTH, FINAL_ANSWER_OUTLINE_GAP, FINAL_ANSWER_OUTLINE_EDGE_GUARD)');
+    expect(source).toContain('outlineFitsBesideContent && finalAnswerNeedsOutline(content.offsetHeight, viewport.clientHeight, outline.length)');
+    expect(source).toContain('try { return extractMarkdownOutline(text); }');
+    expect(source).toContain('catch { return []; }');
+    expect(source).toContain('headingIdPrefix={outline.length >= FINAL_ANSWER_OUTLINE_MIN_SECTIONS ? headingPrefix : undefined}');
     expect(source).toContain('aria-label="Final answer table of contents"');
-    expect(source).toContain('viewport.scrollTo({ top: targetTop, behavior: prefersReducedMotion() ? "auto" : "smooth" });');
+    expect(source).toContain('const [outlineCollapsed, setOutlineCollapsed] = useState(false);');
+    expect(source).toContain('className="final-answer-outline-anchor"');
+    expect(source).toContain('className="final-answer-outline-toggle" aria-expanded={!outlineCollapsed}');
+    expect(source).toContain('aria-label={outlineCollapsed ? "Show table of contents" : "Hide table of contents"}');
+    expect(source).toContain('onClick={() => setOutlineCollapsed((current) => !current)}');
+    expect(source).toContain('const FINAL_ANSWER_OUTLINE_SCROLL_DURATION_MS = 180;');
+    expect(source).toContain('markdownOutlineAnimationPosition(startTop, targetTop, elapsedMs, FINAL_ANSWER_OUTLINE_SCROLL_DURATION_MS)');
+    expect(source).toContain('outlineNavigationAnimationRef.current = requestAnimationFrame(animate);');
+    expect(source).toContain('if (elapsedMs < FINAL_ANSWER_OUTLINE_SCROLL_DURATION_MS)');
+    expect(source).toContain('MARKDOWN_OUTLINE_START_ID');
+    expect(source).toContain('markdownOutlineActiveId(outline, headingTops, threshold)');
+    expect(source).toContain('const navigateToStart = () => {');
+    expect(source).toContain('markdownOutlineTargetScrollTop(viewport.scrollTop, root.getBoundingClientRect().top, viewportTop, FINAL_ANSWER_OUTLINE_SCROLL_OFFSET)');
+    expect(source).toContain('className={`final-answer-outline-start${activeId === MARKDOWN_OUTLINE_START_ID ? " active" : ""}`}');
+    expect(source).toContain('title="Go to the start of this answer"');
+    expect(source).toContain('onClick={navigateToStart}');
+    expect(styles).toContain('.final-answer-outline-card nav > button.final-answer-outline-start { display: flex; align-items: center;');
+    expect(styles).toContain('.final-answer-outline-card nav > button.final-answer-outline-start::before { display: none; }');
     expect(styles).toContain('.final-answer-outline { position: absolute;');
+    expect(styles).toContain('.final-answer-outline-anchor { position: sticky; top: 50%;');
+    expect(styles).toContain('.final-answer-outline-toggle { display: inline-flex; align-items: center; justify-content: center;');
+    expect(styles).toContain('.final-answer-outline-card { position: relative; width: 184px; max-height: min(calc(64vh - 42px), 498px); margin-top: 8px;');
+    expect(styles).toContain('transform-origin: top center; animation: final-outline-open');
+    expect(styles).toContain('@keyframes final-outline-open { from { opacity: 0; transform: translateY(-8px) scale(.98); } }');
+    expect(styles).toContain('.final-answer-outline { position: absolute; z-index: 5; top: 0; bottom: 0; right: calc(100% + 78px); width: 184px;');
+    expect(styles).toContain('.final-answer-outline-anchor { position: sticky; top: 50%; width: 184px; min-height: 34px; display: flex; flex-direction: column; align-items: center; transform: translateY(-50%);');
+    expect(styles).toContain('.final-answer-outline-card { position: relative; width: 184px; max-height: min(calc(64vh - 42px), 498px); margin-top: 8px;');
+    expect(styles).not.toContain('.final-answer-outline.collapsed { width:');
+    expect(styles).not.toContain('.final-answer-outline.expanded { width:');
+    expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 38px); left: max(10px, calc((100% - 900px) / 2));');
+    expect(styles).not.toContain('.final-answer-outline-anchor { position: sticky; top: calc(50% + 38px);');
+    expect(source).toContain('<span>Contents</span>{outlineCollapsed ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}');
     expect(styles).toContain('@media (max-width: 1280px) { .final-answer-outline { display: none; } }');
     expect(source).toContain('{hasInterim && <div className="turn-answer-tabs" role="tablist" aria-label="Turn answers">');
     expect(source).toContain('>Interim</button>');
@@ -1044,25 +1136,25 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(text, {');
     expect(source).toContain('copied: "Answer copied"');
     expect(source).toContain('failed: "Copy answer failed"');
-    expect(source).toContain('const copyClass = copyState === "copied" ? "copy-success" : copyState === "failed" ? "copy-failed" : "";');
+    expect(clipboardSource).toContain('const copyClass = copyState === "copied" ? "copy-success" : copyState === "failed" ? "copy-failed" : "";');
     expect(source).toContain('className={`final-copy ${copyClass}`}');
-    expect(source).toContain('aria-label={copyLabel}');
+    expect(markdownSource).toContain('aria-label={copyLabel}');
     expect(source).toContain('title={copyLabel}');
     expect(source).toContain('aria-label={copyLabel} onClick={() => void copy()}>{copyState === "copied"');
     expect(source).not.toContain('<span aria-live="polite">{copyLabel}</span>');
     expect(source).toContain('answerActions={answerActions}');
     expect(source).toContain('{answerActions}');
     expect(source).toContain('className="chat-message-delete assistant-message-delete"');
-    expect(source).toContain('<figcaption><span title={language}>{language}</span>');
-    expect(source).toContain("navigator.clipboard.writeText(text)");
-    expect(source).toContain("async function copyTextToClipboard(text: string)");
-    expect(source).toContain('document.createElement("textarea")');
-    expect(source).toContain('textarea.setAttribute("readonly", "true")');
-    expect(source).toContain('document.execCommand("copy")');
-    expect(source).toContain("document.body.removeChild(textarea)");
-    expect(source).toContain("window.getSelection()?.removeAllRanges()");
-    expect(source).toContain("window.clearTimeout(resetTimerRef.current)");
-    expect(source).toContain('setCopyState("idle");\n  }, [text]);');
+    expect(markdownSource).toContain('<figcaption><span title={language}>{language}</span>');
+    expect(clipboardSource).toContain("navigator.clipboard.writeText(text)");
+    expect(clipboardSource).toContain("async function copyTextToClipboard(text: string)");
+    expect(clipboardSource).toContain('document.createElement("textarea")');
+    expect(clipboardSource).toContain('textarea.setAttribute("readonly", "true")');
+    expect(clipboardSource).toContain('document.execCommand("copy")');
+    expect(clipboardSource).toContain("document.body.removeChild(textarea)");
+    expect(clipboardSource).toContain("window.getSelection()?.removeAllRanges()");
+    expect(clipboardSource).toContain("window.clearTimeout(resetTimerRef.current)");
+    expect(clipboardSource).toContain('setCopyState("idle");\n  }, [text]);');
     expect(source).toContain("<CompletionCard completion={completion}");
     expect(styles).toContain(".completion-card");
     expect(styles).toContain(".final-answer-actions");
@@ -1333,11 +1425,15 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain("session-expand");
     expect(source).toContain("worker-list");
     expect(source).toContain('aria-label={`Workers for ${session.display_name}: ${session.workers.length} worker${session.workers.length === 1 ? "" : "s"}`}');
-    expect(source).toContain('className={`worker-state-dot ${worker.state}`} aria-hidden="true"');
+    expect(source).toContain("sessionWorkerTreeRows(session.workers)");
+    expect(source).toContain('role="treeitem" aria-level={depth + 1}');
+    expect(source).toContain('className="worker-tree-rail"');
+    expect(source).toContain('className="worker-working-icon"');
     expect(source).toContain("worker.display_name || `ID${worker.ordinal}`");
     expect(styles).toContain(".worker-row");
-    expect(styles).toContain(".worker-state-dot.working");
-    expect(styles).toContain(".worker-name { overflow: hidden; color: #aaa; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }");
+    expect(styles).toContain(".worker-tree-rail::before");
+    expect(styles).toContain(".worker-working-icon {");
+    expect(styles).not.toContain(".worker-state-dot.working");
   });
 
   it("keeps cwd in the composer footer instead of repeating it in session navigation", () => {
@@ -1350,7 +1446,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('className={`session-endpoint-reveal ${renamingSession ? "pending" : ""}`} title={renamingSession ? "Saving name" : sessionEndpointName}');
     expect(source).not.toContain('className="session-detail session-profile"');
     expect(source).toContain('className="session-working-icon" size={15} aria-label="Session working"');
-    expect(source).toContain('session.state === "working" && <LoaderCircle className="session-working-icon"');
+    expect(source).toContain('session.state === "working" ? <LoaderCircle className="session-working-icon"');
+    expect(source).toContain('className="session-unread-dot" aria-label="Session has new completed work"');
     expect(source).not.toContain('className={`session-dot ${session.state}`}');
     expect(styles).not.toContain('.session-dot {');
     expect(source).not.toContain('className="session-state">busy</span>');
@@ -1372,85 +1469,60 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain('font-family: "SFMono-Regular", Consolas, monospace;');
   });
 
-  it("opens MEM settings from the card and uses a dedicated switch button", () => {
-    expect(source).toContain('const [showMemSettings, setShowMemSettings] = useState(false);');
-    expect(source).toContain('className="mem-card-row"');
-    expect(source).toContain('ref={memSettingsButtonRef} className="mem-card"');
-    expect(source).toContain('ref={memSwitchButtonRef} className="mem-switch-action"');
-    expect(source).toContain('<ArrowLeftRight size={15} aria-hidden="true"/>');
-    expect(source).toContain('function MemSettingsDialog({ memPath, current, pending, onClose, onSave }');
-    expect(source).toContain('<MemSettingsDialog memPath={server?.mem?.space_dir ?? ""}');
-    expect(source).toContain('<p className="mem-settings-current"><strong>Current MEM:</strong> <span>{memPath || "…"}</span></p>');
-    expect(source).toContain('<label>选择保留天数<select');
-    expect(source).not.toContain('Rollingly retain recent temporary data in this MEM');
-    expect(source).not.toContain('action/action-result/context-compact/repair events');
-    expect(source).not.toContain('aria-describedby="mem-settings-description"');
-    expect(source).toContain('<option value="1">最近 1 天</option>');
-    expect(source).toContain('<option value="5">最近 5 天</option>');
-    expect(source).toContain('<option value="10">最近 10 天</option>');
-    expect(source).toContain('<option value="unlimited">不限</option>');
+  it("keeps one sidebar Settings entry and manages Memory inside the settings center", () => {
+    expect(source).toContain('const [settingsSection, setSettingsSection] = useState<SettingsSection>("appearance");');
+    expect(source).not.toContain('const [showMemSettings, setShowMemSettings]');
+    expect(source).not.toContain('const [showMemSwitch, setShowMemSwitch]');
+    expect(source).toContain('ref={settingsButtonRef} className="sidebar-settings-button"');
+    expect(source).toContain('<Settings size={17} aria-hidden="true"/>');
+    expect(source).toContain('{!leftSidebarCollapsed && <span>Settings</span>}');
+    expect(source).toContain('aria-controls="settings-center"');
+    expect(source).toContain('onClick={() => { setSettingsSection("appearance"); setShowAppearance(true); }}');
+    expect(source).not.toContain('className="mem-card-row"');
+    expect(source).not.toContain('className="mem-card"');
+    expect(source).not.toContain('className="mem-switch-action settings-action"');
+    expect(source).toContain('function SettingsCenter(');
+    expect(source).toContain('className="settings-center-layout"');
+    expect(source).toContain('className="settings-center-nav" aria-label="Settings categories"');
+    expect(source).toContain('<strong>Appearance</strong><small>Theme, fonts, and text size</small>');
+    expect(source).toContain('<strong>Model endpoints</strong><small>Add, edit, and delete endpoints</small>');
+    expect(source).toContain('<strong>Memory</strong><small>Retention, temporary data, workspace</small>');
+    expect(source).toContain('function EndpointSettingsPane(');
+    expect(source).toContain('className="memory-identity-card" aria-label="Current MEM"');
+    expect(source).toContain('className="memory-switch-entry"');
+    expect(source).toContain('memoryPage === "switch"');
+    expect(source).toContain('className="settings-back-link"');
+    expect(source).toContain('className="memory-switch-route" aria-label="Memory switch route"');
+    expect(source).toContain('className="memory-switch-impact"');
+    expect(source).not.toContain('className="settings-memory-switch"');
+    expect(source).toContain('className="settings-temporary-list" role="list" aria-label="Largest temporary files"');
+    expect(source).toContain('sendCommand({ type: "mem_temporary_items_list" })');
+    expect(source).toContain('sendCommand({ type: "mem_temporary_items_delete", ids })');
     expect(source).toContain('sendCommand({ type: "mem_temporary_retention_update", days })');
-    expect(styles).toContain('.mem-card-row { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 34px;');
-    expect(styles).toContain('.mem-switch-action');
-    expect(styles).toContain(`.mem-card-row .mem-card,\n.mem-switch-action { border: 0; background: #202020; color: #bcbcbc; box-shadow: inset 0 0 0 1px #303030`);
-    expect(styles).toContain(`:root[data-theme="light"] .mem-card-row .mem-card,\n:root[data-theme="light"] .mem-switch-action { border: 0; background: #f3f3f3; color: #333; box-shadow: inset 0 0 0 1px #dedede`);
-    expect(styles).toContain('.mem-settings-modal');
-    expect(styles).toContain('.mem-settings-current');
-    expect(styles).toContain('.mem-settings-current span { min-width: 0; overflow-wrap: anywhere; color: #e8efec; font-family: var(--ui-font); font-size: 13px; font-weight: 500;');
-    expect(styles).not.toContain('.mem-settings-current span { min-width: 0; overflow-wrap: anywhere; color: #e8efec; font-family: "SFMono-Regular"');
+    expect(source).toContain('sendCommand({ type: "mem_switch", path })');
+    expect(styles).toContain('.sidebar-settings-button {');
+    expect(styles).toContain('.sidebar.collapsed .sidebar-settings-button {');
+    expect(styles).toContain('.settings-center-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px minmax(0, 1fr); }');
   });
 
-  it("announces runtime connection state and explains mem switch availability", () => {
+  it("announces runtime connection state and explains settings availability", () => {
     expect(source).toContain('const [runtimeEverConnected, setRuntimeEverConnected] = useState(false);');
     expect(source).toContain('const [reconnectAttempt, setReconnectAttempt] = useState(0);');
-    expect(source).toContain('setRuntimeEverConnected(true)');
     expect(source).toContain("const connectionLabel = runtimeConnectionLabel(connected, snapshotReady, runtimeEverConnected, reconnectAttempt);");
     expect(viewModelSource).toContain("export function runtimeConnectionLabel");
-    expect(source).toContain('const memSwitchTitle = !runtimeReady ? "Wait for the runtime snapshot before switching mem" : pendingMemSwitch ? "Mem switch is in progress" : "Switch mem directory";');
-    expect(source).toContain('setSnapshotReady(false)');
-    expect(source).toContain('setSnapshotReady(true)');
-    expect(source).toContain("const memSwitchButtonRef = useRef<HTMLButtonElement | null>(null);");
-    expect(source).toContain("const closeMemSwitchDialog = useCallback((restoreFocus = true) => {");
-    expect(source).toContain("if (restoreFocus) memSwitchButtonRef.current?.focus({ preventScroll: true });");
-    expect(source).toContain('className="connection-row" role="status" aria-live="polite" title={connectionLabel}');
-    expect(source).toContain('className="connection-label">{connectionLabel}</span>');
+    expect(source).toContain('const settingsTitle = !runtimeReady ? "Wait for the runtime snapshot before opening settings" : pendingMemSwitch ? "Memory switch is in progress" : "Open settings";');
+    expect(source).toContain("const settingsButtonRef = useRef<HTMLButtonElement | null>(null);");
+    expect(source).toContain("if (restoreFocus) settingsButtonRef.current?.focus({ preventScroll: true });");
+    expect(source).toContain('className="settings-runtime-status" role="status" aria-live="polite" title={connectionLabel}');
     expect(source).toContain("const runtimeDisconnected = runtimeEverConnected && !connected;");
-    expect(source).toContain("const runtimeUnavailable = runtimeDisconnected && reconnectAttempt >= 3;");
-    expect(source).toContain('const runtimeDisconnectedTitle = runtimeUnavailable ? "Runtime unavailable" : "Connection lost";');
-    expect(source).toContain('const [runtimeUnavailableDialogDismissed, setRuntimeUnavailableDialogDismissed] = useState(false);');
-    expect(source).toContain('const showRuntimeUnavailableDialog = runtimeUnavailable && !runtimeUnavailableDialogDismissed;');
-    expect(source).toContain('if (!runtimeUnavailable) setRuntimeUnavailableDialogDismissed(false);');
     expect(source).toContain('showRuntimeUnavailableDialog && <RuntimeUnavailableDialog detail={runtimeDisconnectedDetail} onClose={() => setRuntimeUnavailableDialogDismissed(true)}/>');
-    expect(source).toContain('className="modal-backdrop runtime-unavailable-backdrop" role="presentation"');
-    expect(source).toContain('className="decision-modal runtime-unavailable-dialog" role="dialog" aria-modal="true"');
-    expect(source).toContain('autoFocus title="Close runtime unavailable alert" aria-label="Close runtime unavailable alert"');
-    expect(source).toContain('After you close this dialog, the warning banner will remain visible.');
-    expect(styles).toContain('.runtime-unavailable-backdrop { z-index: 60;');
-    expect(styles).toContain('.runtime-unavailable-dialog');
     expect(source).toContain("sessionInteractionLockReasonForState(pendingMemSwitch, connected, runtimeEverConnected, reconnectAttempt)");
-    expect(viewModelSource).toContain('return reconnectAttempt >= 3 ? "Runtime unavailable. Restart timem-web." : "Connection lost. Reconnecting…";');
-    expect(source).toContain("sessionInteractionLockReason={sessionInteractionLockReason}");
     expect(source).toContain('className="runtime-disconnect-banner" role="alert"');
-    expect(source).toContain("<strong>{runtimeDisconnectedTitle}</strong>");
-    expect(source).toContain("<span>{runtimeDisconnectedDetail}</span>");
+    expect(source).toContain('ref={settingsButtonRef} className="sidebar-settings-button"');
+    expect(source).toContain('<code title={memPath}>{memPath || "…"}</code>');
+    expect(source).toContain('setPendingMemSwitch(false);');
     expect(styles).toContain(".runtime-disconnect-banner");
-    expect(styles).toContain(":root[data-theme=\"light\"] .runtime-disconnect-banner");
-    expect(source).toContain('ref={memSettingsButtonRef} className="mem-card"');
-    expect(source).toContain('ref={memSwitchButtonRef} className="mem-switch-action"');
-    expect(source).toContain('<span className="mem-card-icon" aria-hidden="true"><Database size={15}/></span>');
-    expect(source).toContain('<span className="mem-card-copy"><strong>Memory</strong>');
-    expect(source).toContain('<small dir="rtl">{pendingMemSwitch ? "Switching…" : server?.mem?.space_dir ?? "…"}</small>');
-    expect(source).not.toContain('tailPath(server?.mem?.space_dir');
-    expect(styles).toContain(".mem-card-copy small { overflow: hidden; color: #858585; direction: rtl;");
-    expect(styles).toContain("text-align: left; text-overflow: ellipsis; unicode-bidi: plaintext; white-space: nowrap;");
-    expect(source).toContain('onClick={() => setShowMemSwitch(true)}');
-    expect(styles).toContain(".mem-card");
-    expect(styles).toContain(".mem-card-copy");
-    expect(styles).toContain(".connection-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }");
-    expect(styles).toContain(".connection.offline { background: #d77b75; box-shadow: 0 0 0 3px #d77b7522; animation: connection-retry 1.1s ease-in-out infinite; }");
     expect(styles).toContain("@keyframes connection-retry");
-    expect(styles).toContain("@media (prefers-reduced-motion: reduce) { .chat-scroll { scroll-behavior: auto; }");
-    expect(styles).toContain(".pulse, .connection.offline, .session-row.working");
   });
 
   it("uses session terminology consistently for the creation workflow", () => {
@@ -1515,7 +1587,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
   });
 
   it("coordinates endpoint, role, and session management colors across themes", () => {
-    expect(source).toContain('className="endpoint-add-action" title="新增接入点" aria-label="新增接入点"');
+    expect(source).toContain('className="primary compact" disabled={deleteMode} onClick={() => onEdit("new")}><Plus size={14}/> Add endpoint');
     expect(styles).toContain("/* Coordinated management palette: teal is constructive/selected, amber is unavailable, red is destructive. */");
     expect(styles).toContain("--management-accent: #68b8a7;");
     expect(styles).toContain("--management-panel: #171d1c;");
@@ -1627,16 +1699,21 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).not.toContain('.session-group-heading:hover .session-group-toggle,');
   });
 
-  it("uses the shared select-then-confirm delete pattern for model endpoints", () => {
+  it("keeps endpoint management in Settings and the header menu apply-only", () => {
+    expect(source).toContain('function EndpointSettingsPane(');
     expect(source).toContain('const [deleteMode, setDeleteMode] = useState(false);');
-    expect(source).toContain('const [selectedDeleteEndpointId, setSelectedDeleteEndpointId] = useState("");');
-    expect(source).toContain('className="endpoint-management-actions"');
-    expect(source).toContain('className={`endpoint-delete-manage ${deleteMode ? "confirm" : ""}`}');
-    expect(source).toContain('className={`endpoint-row ${active ? "active" : ""} ${deleteMode ? "delete-selecting" : ""} ${deleteSelected ? "delete-selected" : ""}`}');
+    expect(source).toContain('const [selectedEndpointId, setSelectedEndpointId] = useState("");');
+    expect(source).toContain('className="endpoint-settings-toolbar"');
+    expect(source).toContain('className={`danger compact ${deleteMode ? "confirm" : ""}`}');
+    expect(source).toContain('className={`endpoint-settings-row ${deleteMode ? "delete-selecting" : ""} ${selectedForDelete ? "delete-selected" : ""}`}');
     expect(source).toContain('<small className="endpoint-model-summary"><Sparkles size={10} className="session-model-icon" aria-hidden="true"/><span>{endpoint.model}');
     expect(styles).toContain('.endpoint-model-summary { min-width: 0; display: flex; align-items: center; gap: 5px; }');
     expect(styles).toContain('.endpoint-model-summary > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }');
-    expect(source).toContain('className="endpoint-actions">{active && <span className="endpoint-selected-badge" role="img" aria-label="当前选中的接入点"><Check size={13} strokeWidth={3}/></span>}<button');
+    expect(source).toContain('{active && <div className="endpoint-actions"><span className="endpoint-selected-badge" role="img" aria-label="当前选中的接入点"><Check size={13} strokeWidth={3}/></span></div>}');
+    expect(source).not.toContain('className="endpoint-add-action"');
+    expect(source).not.toContain('className="endpoint-delete-manage');
+    expect(source).toContain('function ModelEndpointPanel({ panelRef, server, session, onApply }');
+    expect(source).not.toContain('function ModelEndpointPanel({ panelRef, server, session, endpointEditor');
     expect(source).not.toContain(': active && <Check size={13}/>');
     expect(styles).toContain('/* Selected endpoint badge sits immediately before the edit action. */');
     expect(styles).toContain('.endpoint-selected-badge {\n  width: 21px;\n  height: 21px;');
@@ -1674,8 +1751,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
   opacity: .72;`);
     expect(styles).toContain('.mem-card:focus-visible,');
     expect(styles).toContain(':root[data-theme="light"] .mcp-delete-select.selected {');
-    expect(source).toContain('className={`endpoint-delete-select ${deleteSelected ? "selected" : ""}`}');
-    expect(source).toContain('<Plus size={16} strokeWidth={2.8}/>');
+    expect(source).toContain('className="endpoint-delete-select">{selectedForDelete && <Check size={13}/>}');
+    expect(source).toContain('<Plus size={14}/> Add endpoint');
     expect(source).not.toContain('title={`Delete ${endpoint.name}`}');
     expect(styles).toContain('/* Shared compact create/delete management controls for model endpoints. */');
     expect(styles).toContain('.endpoint-delete-manage.confirm { border-color: #c94f49; background: #c94f49;');
@@ -1725,11 +1802,11 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain(':root[data-theme="light"] .endpoint-api-key-actions button { background: transparent;');
     expect(source).toContain('endpointMatchesProfile');
     expect(styles).toContain('.endpoint-menu');
-    expect(source).toContain('className={`runtime-card endpoint-menu ${endpointEditor ? "editing" : ""}`}');
-    expect(source).toContain('{endpointEditor ? <ModelEndpointEditor');
+    expect(source).toContain('className="runtime-card endpoint-menu"');
+    expect(source).toContain('if (endpointEditor) return <section className="settings-pane endpoint-settings-pane editing"');
+    expect(source).toContain('setSettingsSection("endpoints");');
+    expect(source).toContain('setEndpointEditor("new");');
     expect(styles).toContain('.endpoint-menu { position: absolute; z-index: 8; top: 62px; left: 24px; width: min(520px, calc(100vw - 32px));');
-    expect(styles).toContain('.endpoint-menu.editing { padding: 16px; }');
-    expect(styles).toContain('.endpoint-menu.editing .endpoint-editor { margin-top: 0; border-top: 0; padding-top: 0; }');
     expect(styles).toContain('.endpoint-actions');
     expect(source).toContain('尚未配置模型接入点');
     expect(source).toContain('className="endpoint-guide-bubble"');
@@ -1833,11 +1910,9 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('["kind", "session_id", "context_id", "worker_id"].includes(key)');
   });
 
-  it("persists theme, font, and text-size appearance without changing core state", () => {
+  it("persists appearance preferences inside the unified settings center without changing core state", () => {
     expect(appearanceSource).toContain('APPEARANCE_STORAGE_KEY = "timem-web-appearance-v1"');
     expect(appearanceSource).toContain('root.dataset.theme = appearance.theme');
-    expect(styles).toContain(':root[data-theme="light"] { color-scheme: light; }');
-    expect(styles).toContain(':root[data-theme="dark"] { color-scheme: dark; }');
     expect(appearanceSource).toContain('root.dataset.userFont = appearance.userFont');
     expect(appearanceSource).toContain('root.dataset.userChineseFont = appearance.userChineseFont');
     expect(appearanceSource).toContain('root.dataset.userBold = String(appearance.userBold)');
@@ -1845,60 +1920,32 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(appearanceSource).toContain('root.dataset.agentChineseFont = appearance.agentChineseFont');
     expect(appearanceSource).toContain('root.dataset.agentBold = String(appearance.agentBold)');
     expect(appearanceSource).toContain('root.dataset.textSize = appearance.textSize');
-    expect(source).toContain('const appearanceLabel = showAppearance ? "Close appearance settings" : "Open appearance settings";');
-    expect(source).toContain("const appearanceButtonRef = useRef<HTMLButtonElement | null>(null);");
     expect(source).toContain("const appearancePanelRef = useRef<HTMLElement | null>(null);");
-    expect(source).toContain('title={appearanceLabel} aria-label={appearanceLabel}');
-    expect(source).toContain('ref={appearanceButtonRef}');
-    expect(source).toContain('aria-expanded={showAppearance} aria-controls="appearance-panel"');
-    expect(source).toContain("<AppearancePanel");
+    expect(source).not.toContain("const appearanceButtonRef");
+    expect(source).not.toContain('aria-controls="appearance-panel"');
+    expect(source).not.toContain("<AppearancePanel");
+    expect(source).toContain("<SettingsCenter");
     expect(source).toContain("panelRef={appearancePanelRef}");
     expect(source).toContain("appearance={appearance}");
-    expect(source).toContain("aria-pressed={appearance.theme === theme}");
+    expect(source).toContain("onAppearanceChange={setAppearance}");
+    expect(source).toContain('aria-pressed={appearance.theme === theme}');
     expect(source).toContain('value={appearance.userChineseFont} aria-label="User Chinese font"');
     expect(source).toContain('value={appearance.userFont} aria-label="User other language font"');
     expect(source).toContain('checked={appearance.userBold}');
     expect(source).toContain('value={appearance.agentChineseFont} aria-label="Agent Chinese font"');
     expect(source).toContain('value={appearance.agentFont} aria-label="Agent other language font"');
     expect(source).toContain('checked={appearance.agentBold}');
-    expect(source).toContain("aria-pressed={appearance.textSize === size}");
-    expect(source).toContain('title={`Use ${theme} theme`}');
-    expect(source).toContain('<option value="heiti">黑体</option><option value="kaiti">楷体</option><option value="songti">宋体</option>');
-    expect(source).toContain('<option value="system">System</option><option value="serif">Serif</option><option value="mono">Mono</option>');
-    expect(source).toContain('title={`Use ${size === "medium" ? "default" : size} text size`}');
-    expect(source).toContain('if (!showAppearance) return;');
-    expect(source).toContain('appearancePanelRef.current?.focus({ preventScroll: true });');
-    expect(source).toContain('const closeAppearancePanel = useCallback((restoreFocus = true) => {');
-    expect(source).toContain('if (restoreFocus) appearanceButtonRef.current?.focus({ preventScroll: true });');
-    expect(source).toContain('appearanceButtonRef.current?.contains(target)');
-    expect(source).toContain('appearancePanelRef.current?.contains(target)');
-    expect(source).toContain('closeAppearancePanel(false);');
-    expect(source).toContain('if (event.key === "Escape") closeAppearancePanel()');
-    expect(source).toContain('const descriptionId = "appearance-panel-description";');
-    expect(source).toContain('id="appearance-panel" ref={panelRef} className="appearance-panel" role="dialog" aria-modal="false" aria-label="Appearance settings" aria-describedby={descriptionId} tabIndex={-1} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); } }}');
-    expect(source).toContain('<p id={descriptionId}>Adjust theme, language fonts, and message text size for this browser.</p>');
-    expect(source).toContain('setShowRuntime(false); setShowMcp(false); setShowToolRepo(false); if (showAppearance) closeAppearancePanel(); else setShowAppearance(true);');
-    expect(styles).toContain(".appearance-panel header p");
-    expect(styles).toContain(':root[data-theme="light"]');
+    expect(source).toContain('aria-pressed={appearance.textSize === size}');
+    expect(source).toContain('role="dialog" aria-modal="true" aria-labelledby="settings-center-title"');
+    expect(source).toContain('className="settings-pane appearance-settings-pane"');
     expect(styles).toContain(':root[data-user-font="serif"]');
     expect(styles).toContain(':root[data-agent-font="serif"]');
     expect(styles).toContain(':root[data-user-chinese-font="heiti"]');
     expect(styles).toContain(':root[data-agent-chinese-font="kaiti"]');
     expect(styles).toContain(':root[data-user-bold="true"]');
     expect(styles).toContain(':root[data-agent-bold="true"]');
-    expect(styles).toContain('.appearance-font-selects { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }');
-    expect(styles).toContain('.turn-user-entry { font-family: var(--user-other-font), var(--user-chinese-font), sans-serif; font-weight: var(--user-font-weight); }');
-    expect(styles).toContain('.turn-assistant-frame, .turn-final-delivery { font-family: var(--agent-other-font), var(--agent-chinese-font), sans-serif; font-weight: var(--agent-font-weight); }');
-    expect(styles).toContain("--content-size: 13.5px;");
     expect(styles).toContain(':root[data-text-size="small"] { --content-size: 12.6px; }');
     expect(styles).toContain(':root[data-text-size="large"] { --content-size: 14.4px; }');
-    expect(html).toContain('<script type="module" src="/src/preload.ts"></script>');
-    expect(html).not.toContain("<script>\n");
-    expect(preloadSource).toContain("applyAppearance(loadAppearance())");
-    expect(appearanceSource).toContain('window.localStorage.getItem(APPEARANCE_STORAGE_KEY)');
-    expect(appearanceSource).toContain('root.dataset.theme = appearance.theme');
-    expect(appearanceSource).toContain('root.dataset.userChineseFont = appearance.userChineseFont');
-    expect(appearanceSource).toContain('root.dataset.agentChineseFont = appearance.agentChineseFont');
   });
 
   it("keeps the active session label readable in light theme after style overrides", () => {
@@ -1908,19 +1955,28 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain(':root[data-theme="light"] .session-row.active .session-profile { color: #747474; }');
   });
 
-  it("renders GFM and highlighted code with a copy affordance", () => {
-    expect(source).toContain('import remarkGfm from "remark-gfm"');
-    expect(source).toContain('remarkPlugins={[remarkGfm]}');
-    expect(source).toContain('pre: CodeBlock');
-    expect(source).toContain('className="table-scroll" role="region" tabIndex={0} aria-label="Scrollable table. Use horizontal scroll to inspect all columns."');
-    expect(source).toContain('const codeCopySubject = `${language} code`;');
-    expect(source).toContain('const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(code, {');
-    expect(source).toContain('idle: `Copy ${codeCopySubject}`');
-    expect(source).toContain('copied: `${codeCopySubject} copied`');
-    expect(source).toContain('failed: `Copy ${codeCopySubject} failed`');
-    expect(source).toContain('className={copyClass}');
-    expect(source).toContain('aria-label={copyLabel}');
+  it("renders GFM, mathematical notation, and highlighted code with a copy affordance", () => {
+    expect(markdownSource).toContain('import remarkGfm from "remark-gfm"');
+    expect(markdownSource).toContain('import remarkMath from "remark-math"');
+    expect(markdownSource).toContain('import rehypeKatex from "rehype-katex"');
+    expect(source).toContain('import "katex/dist/katex.min.css"');
+    expect(markdownSource).toContain('remarkPlugins={[remarkGfm, remarkMath]}');
+    expect(markdownSource).toContain('rehypePlugins={[rehypeHighlight, rehypeKatex]}');
+    expect(markdownSource).toContain('>{normalizeMarkdownMath(text)}</ReactMarkdown>');
+    expect(markdownSource).toContain('pre: CodeBlock');
+    expect(markdownSource).toContain('className="table-scroll" role="region" tabIndex={0} aria-label="Scrollable table. Use horizontal scroll to inspect all columns."');
+    expect(markdownSource).toContain('const codeCopySubject = `${language} code`;');
+    expect(markdownSource).toContain('const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(code, {');
+    expect(markdownSource).toContain('idle: `Copy ${codeCopySubject}`');
+    expect(markdownSource).toContain('copied: `${codeCopySubject} copied`');
+    expect(markdownSource).toContain('failed: `Copy ${codeCopySubject} failed`');
+    expect(markdownSource).toContain('className={copyClass}');
+    expect(markdownSource).toContain('aria-label={copyLabel}');
     expect(styles).toContain('.markdown-body blockquote');
+    expect(styles).toContain(".markdown-body .katex-display {\n  max-width: 100%;");
+    expect(styles).toContain("margin: 1.05em 0 1.15em;");
+    expect(styles).toContain("overflow-x: auto;\n  overflow-y: visible;");
+    expect(styles).toContain("padding: .55em 0 .7em;\n  line-height: 1.35;");
     expect(styles).toContain(".table-scroll");
     expect(styles).toContain("scrollbar-gutter: auto;");
     expect(styles).toContain("scrollbar-gutter: stable;");
@@ -2009,7 +2065,6 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain(".toolrepo-header-button.count-pulse .toolrepo-header-count, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot");
     expect(styles).toContain(".send-button.sending svg");
     expect(styles).toContain(".completion-toolgen.sending svg");
-    expect(styles).toContain(".worker-state-dot.working");
     expect(styles).toContain("animation: none;");
   });
 
@@ -2294,7 +2349,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('const headerModelLabel = endpointNameForProfile(server?.model_endpoints ?? [], activeSession?.runtime_profile) ?? UNCONFIGURED_MODEL_LABEL;');
     expect(source).not.toContain('?.name ?? modelDisplayName(activeSession)');
     expect(source).toContain('className={`header-model ${showRuntime ? "selected" : ""}`}');
-    expect(source).toContain('<span title={headerModelLabel}>{headerModelLabel}</span><ChevronDown');
+    expect(source).toContain('<Sparkles size={10} aria-hidden="true"/><span title={headerModelLabel}>{headerModelLabel}</span><ChevronDown');
     expect(source).not.toContain('<Settings size={17}/>');
     expect(styles).toContain(".chat-header { flex: none; min-width: 0;");
     expect(styles).toContain(".header-model { min-width: 0; max-width: min(42vw, 260px); flex: 0 1 auto;");
@@ -2448,7 +2503,7 @@ it("uses an explicit session-created event and session-scoped inline decisions",
     expect(styles).toContain(':root[data-theme="light"] .mcp-panel');
     expect(styles).toContain('.mcp-panel { position: fixed; inset: 58px 8px 8px;');
     expect(styles).toContain('.mcp-button > svg { transform: rotate(90deg); }');
-    expect(styles).toContain('.header-identity { min-width: 0; display: flex; align-items: center; gap: 7px; overflow: visible;');
+    expect(styles).toContain('.header-context-actions { min-width: 0; display: flex; align-items: center; gap: 5px; grid-column: 2; grid-row: 1; justify-self: start; }');
     expect(styles).toContain('.mcp-count { position: absolute; z-index: 2;');
     expect(source).toContain('const connectedMcpCount = activeMcpServers.filter((item) => item.state === "connected").length;');
     expect(source).toContain('const failedMcpCount = activeMcpServers.filter((item) => item.state !== "connected" && (item.state === "error" || !!item.error)).length;');
@@ -2498,5 +2553,50 @@ it("uses an explicit session-created event and session-scoped inline decisions",
     expect(protocolSource).toContain('type: "runtime_notice"');
     expect(styles).toContain(".runtime-disconnect-banner");
     expect(styles).not.toContain(".host-error-banner");
+  });
+});
+
+describe("session activity navigation polish", () => {
+  it("renders workers as a parent-linked tree without idle status dots", () => {
+    expect(source).toContain("sessionWorkerTreeRows(session.workers)");
+    expect(source).toContain('role="tree"');
+    expect(source).toContain('role="treeitem" aria-level={depth + 1}');
+    expect(source).toContain('className="worker-tree-rail"');
+    expect(source).toContain('className="worker-working-icon"');
+    expect(source).toContain('className="worker-idle-spacer"');
+    expect(source).not.toContain('className={`worker-state-dot ${worker.state}`}');
+    expect(styles).toContain(".worker-list::before");
+    expect(styles).toContain("grid-template-columns: 20px 14px minmax(0, 1fr) max-content;");
+    expect(styles).toContain("margin-left: 0;");
+    expect(source).toContain('"--worker-lane": `${Math.min(depth, 3) * 4}px`');
+    expect(styles).toContain(".worker-working-icon {");
+  });
+
+  it("marks an unseen background Session completion until the Session is opened", () => {
+    expect(source).toContain("previousSessionStatesRef");
+    expect(source).toContain('previous.get(session.session_id) === "working" && session.state !== "working"');
+    expect(source).toContain("session.session_id !== activeSessionIdRef.current");
+    expect(source).toContain("setUnreadCompletedSessionIds");
+    expect(source).toContain('className="session-unread-dot" aria-label="Session has new completed work"');
+    expect(source).toContain("previousSessionStatesRef.current = null;");
+    expect(styles).toContain(".session-unread-dot {");
+    expect(styles).toContain(".session-row.has-unread-completion:not(.active) .session-name");
+  });
+
+  it("places a compact circular working indicator below the message navigation", () => {
+    expect(source).toContain("const [threadAwayFromBottom, setThreadAwayFromBottom] = useState(false);");
+    expect(source).toContain("setThreadAwayFromBottom(!nearBottom);");
+    expect(source).not.toContain("workingDots");
+    expect(source).toContain('className="thread-working-away" title="工作仍在继续，跳转到最新内容"');
+    expect(source).toContain('<LoaderCircle size={15} strokeWidth={1.8} aria-hidden="true"/><span className="sr-only" role="status" aria-live="polite">Working</span>');
+    expect(source).toContain("onClick={navigateToThreadBottom}");
+    expect(source.indexOf('className="thread-working-away"')).toBeGreaterThan(source.indexOf('<nav className="user-message-navigation"'));
+    expect(styles).toContain(".thread-working-away {");
+    expect(styles).toContain("width: 30px !important;");
+    expect(styles).toContain("height: 30px !important;");
+    expect(styles).toContain("border-radius: 50% !important;");
+    expect(styles).toContain(".thread-working-away::after {");
+    expect(styles).toContain(".thread-working-away > svg { filter: drop-shadow(0 0 4px #62b4ff70); animation: spin 1.15s linear infinite; }");
+    expect(styles).toContain(':root[data-theme="light"] .thread-working-away');
   });
 });

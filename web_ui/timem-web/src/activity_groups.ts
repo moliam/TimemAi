@@ -1,5 +1,5 @@
 import { Activity } from "./protocol";
-import { toolDisplayName } from "./view_model";
+import { toolActivityDisplayName } from "./view_model";
 import { isToolActivityFailed, isToolActivityRunning } from "./tool_status";
 
 export type ToolActivityGroupStatus = "running" | "failed" | "completed";
@@ -22,7 +22,7 @@ export function summarizeToolActivities(activities: Activity[]): ToolActivitySum
 
   const counts = new Map<string, number>();
   for (const activity of tools) {
-    const name = toolDisplayName(activity.tool_name || activity.title || "Tool");
+    const name = toolActivityDisplayName(activity.tool_name || activity.title || "Tool", activity.tool_mode);
     counts.set(name, (counts.get(name) ?? 0) + 1);
   }
 
