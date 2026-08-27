@@ -1359,8 +1359,22 @@ function TimemApp() {
       role: message.role,
       content: [{ type: "text" as const, text: message.text }],
     })), [activeMessages]);
-  const [auiMessages, setAuiMessages] = useState<readonly ThreadMessageLike[]>(runtimeMessages);
-  useEffect(() => setAuiMessages(runtimeMessages), [runtimeMessages]);
+  const runtimeMessageSessionId = activeSession?.session_id ?? "";
+  const [auiMessageState, setAuiMessageState] = useState<{
+    sessionId: string;
+    messages: readonly ThreadMessageLike[];
+  }>(() => ({ sessionId: runtimeMessageSessionId, messages: runtimeMessages }));
+  const auiMessages = auiMessageState.sessionId === runtimeMessageSessionId
+    ? auiMessageState.messages
+    : runtimeMessages;
+  const setAuiMessages = useCallback((messages: readonly ThreadMessageLike[]) => {
+    setAuiMessageState({ sessionId: runtimeMessageSessionId, messages });
+  }, [runtimeMessageSessionId]);
+  useEffect(() => {
+    setAuiMessageState((current) => current.sessionId === runtimeMessageSessionId && current.messages === runtimeMessages
+      ? current
+      : { sessionId: runtimeMessageSessionId, messages: runtimeMessages });
+  }, [runtimeMessageSessionId, runtimeMessages]);
   const cancelActiveTurn = useCallback(async () => {
     if (!activeSession || activeSession.state !== "working" || pendingMemSwitch) return;
     if (cancellingSessionIds.current.has(activeSession.session_id)) return;
@@ -1406,7 +1420,11 @@ function TimemApp() {
     onCancel: cancelActiveTurn,
   });
 
-  const sessionDecisions = decisions.filter((decision) => decision.event.session_id === activeSession?.session_id);
+  const activeSessionKey = activeSession?.session_id ?? "";
+  const sessionDecisions = useMemo(
+    () => decisions.filter((decision) => decision.event.session_id === activeSessionKey),
+    [activeSessionKey, decisions],
+  );
   const runtimeDisconnected = runtimeEverConnected && !connected;
   const runtimeUnavailable = runtimeDisconnected && reconnectAttempt >= 3;
   const runtimeDisconnectedTitle = runtimeUnavailable ? "Runtime unavailable" : "Connection lost";
@@ -1441,6 +1459,30 @@ function TimemApp() {
   const failedMcpCount = activeMcpServers.filter((item) => item.state !== "connected" && (item.state === "error" || !!item.error)).length;
   const mcpLabel = `Manage MCP servers · ${connectedMcpCount} connected${failedMcpCount ? ` · ${failedMcpCount} failed` : ""}`;
   const selectedRoleIdsForSession = activeSession ? selectedRoleIds[activeSession.session_id] ?? [] : [];
+  const activePendingToolGenTurnIds = useMemo(
+    () => activeSessionKey ? pendingToolgenTurnIds(pendingToolgenRequests, activeSessionKey) : new Set<string>(),
+    [activeSessionKey, pendingToolgenRequests],
+  );
+  const activeToolGenBusy = useMemo(
+    () => !!activeSessionKey && hasPendingToolgenForSession(pendingToolgenRequests, activeSessionKey),
+    [activeSessionKey, pendingToolgenRequests],
+  );
+  const replyToDecision = useCallback((decision: Decision, decisionValue: "accept" | "decline" | "always_allow") => {
+    if (runtimeLocked) return;
+    const key = decisionKey(decision);
+    if (!addPendingKey(pendingDecisionKeysRef, setPendingDecisionKeys, key)) return;
+    const event = decision.event;
+    if (sendCommand({ type: "topic_reply", session_id: event.session_id, worker_id: event.worker_id ?? undefined, topic_name: event.topic.name, request_id: typeof event.payload.request_id === "string" ? event.payload.request_id : undefined, decision: decisionValue, payload: { summary: decision.detail } })) {
+      setDecisions((current) => current.filter((candidate) => candidate !== decision));
+    } else {
+      removePendingKey(pendingDecisionKeysRef, setPendingDecisionKeys, key);
+      reportUiError("Decision reply failed", "Reconnect to Timem Web before replying to this runtime request.", event.session_id);
+    }
+  }, [addPendingKey, removePendingKey, reportUiError, runtimeLocked, sendCommand]);
+  const requestActiveToolGen = useCallback((turnId: string) => {
+    if (!toolGenEnabled || !activeSessionKey || activeSession?.state === "working" || runtimeLocked || activeToolGenBusy) return;
+    setToolgenDialog({ sessionId: activeSessionKey, turnId });
+  }, [activeSession?.state, activeSessionKey, activeToolGenBusy, runtimeLocked, toolGenEnabled]);
   const toolRepoLabel = showToolRepo ? "Close ToolRepo" : `Open ToolRepo · ${activeToolCount} reusable tools`;
   const mobileSessionsLabel = showMobileSessions ? "Close session navigation" : "Open session navigation";
   const knownSessionGroupIds = new Set(sessionGroups.map((group) => group.id));
@@ -1681,12 +1723,9 @@ function TimemApp() {
     ) return current;
     return Object.fromEntries(Object.entries(current).filter(([key]) => key !== sessionId));
   })}
-          pendingToolGenTurnIds={activeSession ? pendingToolgenTurnIds(pendingToolgenRequests, activeSession.session_id) : new Set()}
-          toolGenSessionBusy={!!activeSession && hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)}
-          onRequestToolGen={toolGenEnabled ? (turnId) => {
-            if (!toolGenEnabled || !activeSession || activeSession.state === "working" || runtimeLocked || hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)) return;
-            setToolgenDialog({ sessionId: activeSession.session_id, turnId });
-          } : undefined}
+          pendingToolGenTurnIds={activePendingToolGenTurnIds}
+          toolGenSessionBusy={activeToolGenBusy}
+          onRequestToolGen={toolGenEnabled ? requestActiveToolGen : undefined}
           onRequestMessageDelete={setDeleteMessageCandidate}
           onCancel={cancelActiveTurn}
           onUpload={uploadFile}
@@ -1700,18 +1739,7 @@ function TimemApp() {
               pushActivity(activity);
             }
           }}
-          onDecisionReply={(decision, decisionValue) => {
-            if (runtimeLocked) return;
-            const key = decisionKey(decision);
-            if (!addPendingKey(pendingDecisionKeysRef, setPendingDecisionKeys, key)) return;
-            const event = decision.event;
-            if (sendCommand({ type: "topic_reply", session_id: event.session_id, worker_id: event.worker_id ?? undefined, topic_name: event.topic.name, request_id: typeof event.payload.request_id === "string" ? event.payload.request_id : undefined, decision: decisionValue, payload: { summary: decision.detail } })) {
-              setDecisions((current) => current.filter((candidate) => candidate !== decision));
-            } else {
-              removePendingKey(pendingDecisionKeysRef, setPendingDecisionKeys, key);
-              reportUiError("Decision reply failed", "Reconnect to Timem Web before replying to this runtime request.", event.session_id);
-            }
-          }}
+          onDecisionReply={replyToDecision}
         />
       </main>
       {!showToolRepo && showRoles && <button type="button" className="role-panel-backdrop" aria-label="Close worker roles" onClick={() => setShowRoles(false)}/>}
@@ -3059,7 +3087,7 @@ const toggleQueuedMessages = () => {
  await onCancel();
  };
 
- return <ThreadPrimitive.Root key={activeSessionId ?? "no-session"} className="aui-thread">
+ return <ThreadPrimitive.Root className="aui-thread">
     <ThreadPrimitive.Viewport
       ref={viewportRef}
       className="chat-scroll aui-thread-viewport"

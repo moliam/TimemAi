@@ -502,10 +502,15 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('.sidebar.collapsed > :not(.collapsed-brand, .sidebar-footer) { display: none; }');
     expect(styles).toContain('.collapsed-brand { display: grid; place-items: center; width: 42px; height: 42px;');
     expect(styles).toContain('.brand-logo-toggle { position: relative; width: 41px; height: 41px; display: grid; place-items: center;');
-    expect(styles).toContain('.brand-scale-corner.top-right { top: -2px; right: -2px; border-top: 1px solid #83b9af; border-right: 1px solid #83b9af; }');
-    expect(styles).toContain('.brand-scale-corner.bottom-left { bottom: -2px; left: -2px; border-bottom: 1px solid #83b9af; border-left: 1px solid #83b9af; }');
-    expect(styles).toContain('.brand-logo-restore:hover .brand-scale-corner.top-left { transform: translate(-2px, -2px); }');
-    expect(styles).toContain('.brand-logo-restore:hover .brand-scale-corner.bottom-right { transform: translate(2px, 2px); }');
+    expect(styles).toContain('.brand-scale-corner { position: absolute; width: 11px; height: 11px;');
+    expect(styles).toContain('.brand-scale-corner.top-right { top: -5px; right: -5px; border-top: 2px solid #83b9af; border-right: 2px solid #83b9af; border-top-right-radius: 7px; }');
+    expect(styles).toContain('.brand-scale-corner.bottom-left { bottom: -5px; left: -5px; border-bottom: 2px solid #83b9af; border-left: 2px solid #83b9af; border-bottom-left-radius: 7px; }');
+    expect(styles).toContain('.brand-scale-corner.top-left { top: 1px; left: 1px; border-top: 2px solid #83b9af; border-left: 2px solid #83b9af; border-top-left-radius: 7px; }');
+    expect(styles).toContain('.brand-scale-corner.bottom-right { right: 1px; bottom: 1px; border-right: 2px solid #83b9af; border-bottom: 2px solid #83b9af; border-bottom-right-radius: 7px; }');
+    expect(styles).toContain('.brand-logo-toggle:not(.brand-logo-restore):is(:hover, :focus-visible) .brand-scale-corner.top-right { transform: translate(-3px, 3px); }');
+    expect(styles).toContain('.brand-logo-toggle:not(.brand-logo-restore):is(:hover, :focus-visible) .brand-scale-corner.bottom-left { transform: translate(3px, -3px); }');
+    expect(styles).toContain('.brand-logo-restore:is(:hover, :focus-visible) .brand-scale-corner.top-left { transform: translate(-4px, -4px); }');
+    expect(styles).toContain('.brand-logo-restore:is(:hover, :focus-visible) .brand-scale-corner.bottom-right { transform: translate(4px, 4px); }');
     expect(styles).toContain('.brand-logo-toggle { pointer-events: none; }');
     expect(styles).toContain('.brand-scale-corner { display: none; }');
     expect(styles).toContain('.header-session-cluster { width: fit-content; max-width: 152px; min-width: 0; display: grid; grid-column: 1; grid-row: 1; justify-items: start;');
@@ -601,8 +606,9 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('role="switch" className="settings-feature-switch" aria-checked={toolGenEnabled}');
     expect(source).toContain('onToolGenEnabledChange(!toolGenEnabled)');
     expect(source).toContain('Disabled by default');
-    expect(source).toContain('onRequestToolGen={toolGenEnabled ? (turnId) => {');
-    expect(source).toContain('if (!toolGenEnabled || !activeSession');
+    expect(source).toContain('const requestActiveToolGen = useCallback((turnId: string) => {');
+    expect(source).toContain('if (!toolGenEnabled || !activeSessionKey');
+    expect(source).toContain('onRequestToolGen={toolGenEnabled ? requestActiveToolGen : undefined}');
     expect(source).toContain('{toolGenEnabled && toolgenDialog && <ToolGenDialog');
     expect(source).toContain('if (!toolGenEnabled) return;');
     expect(source).toContain('if (!toolGenEnabled) {');
@@ -634,8 +640,10 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("Optional: preferred interface, language, scope, or reusable workflow…");
     expect(source).toContain('Additional guidance');
     expect(source).toContain('event.key === "Enter" && !event.nativeEvent.isComposing');
-    expect(source).toContain('pendingToolGenTurnIds={activeSession ? pendingToolgenTurnIds(pendingToolgenRequests, activeSession.session_id) : new Set()}');
-    expect(source).toContain('toolGenSessionBusy={!!activeSession && hasPendingToolgenForSession(pendingToolgenRequests, activeSession.session_id)}');
+    expect(source).toContain('const activePendingToolGenTurnIds = useMemo(');
+    expect(source).toContain('const activeToolGenBusy = useMemo(');
+    expect(source).toContain('pendingToolGenTurnIds={activePendingToolGenTurnIds}');
+    expect(source).toContain('toolGenSessionBusy={activeToolGenBusy}');
     expect(source).toContain('toolGenPending={pendingToolGenTurnIds.has(turn.turn_id)}');
     expect(source).toContain('toolGenBlocked={toolGenSessionBusy && !pendingToolGenTurnIds.has(turn.turn_id)}');
     expect(source).toContain('function CompletionCard({ completion, toolGenPending = false, toolGenBlocked = false, onToolGen, answerActions }');
@@ -1363,8 +1371,20 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).not.toContain("current || snapshot.sessions[0]?.session_id");
   });
 
-  it("remounts the assistant-ui thread root when switching sessions", () => {
-    expect(source).toContain('<ThreadPrimitive.Root key={activeSessionId ?? "no-session"} className="aui-thread">');
+  it("switches assistant-ui sessions without remounting the heavy thread tree", () => {
+    expect(source).toContain('<ThreadPrimitive.Root className="aui-thread">');
+    expect(source).not.toContain('<ThreadPrimitive.Root key={activeSessionId ?? "no-session"}');
+    expect(source).toContain('const runtimeMessageSessionId = activeSession?.session_id ?? "";');
+    expect(source).toContain('auiMessageState.sessionId === runtimeMessageSessionId');
+    expect(source).toContain(': runtimeMessages;');
+    expect(source).toContain('setAuiMessageState({ sessionId: runtimeMessageSessionId, messages });');
+    expect(source).toContain('const sessionDecisions = useMemo(');
+    expect(source).toContain('const activePendingToolGenTurnIds = useMemo(');
+    expect(source).toContain('const activeToolGenBusy = useMemo(');
+    expect(source).toContain('const replyToDecision = useCallback(');
+    expect(source).toContain('const requestActiveToolGen = useCallback(');
+    expect(source).toContain('pendingToolGenTurnIds={activePendingToolGenTurnIds}');
+    expect(source).toContain('onDecisionReply={replyToDecision}');
   });
 
   it("renders live task usage and session context without replacing final telemetry", () => {
@@ -2424,7 +2444,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
 it("uses an explicit session-created event and session-scoped inline decisions", () => {
     expect(source).toContain('event.type === "session_created"');
     expect(source).toContain("enqueueDecision(current, pendingDecision)");
-    expect(source).toContain("decision.event.session_id === activeSession?.session_id");
+    expect(source).toContain("decision.event.session_id === activeSessionKey");
     expect(source).toContain("<InlineDecision");
     expect(source).not.toContain("<DecisionDialog");
     expect(styles).toContain(".inline-decision");
