@@ -4678,32 +4678,6 @@ Runtime tool_call ids:",
     ) -> Result<Vec<String>, (Vec<String>, PendingApproval)> {
         let mut result_lines = Vec::new();
         for group in groups {
-            if group.order == ActionGroupOrder::Parallel
-                && group
-                    .actions
-                    .iter()
-                    .any(|action| action.action == "sub_answer")
-            {
-                result_lines.extend(group.actions.into_iter().map(|action| {
-                    if action.action == "sub_answer" {
-                        self.format_action_outcome(
-                            &action,
-                            &ActionOutcome::failed(
-                                "Action result: sub_answer\nerror: parallel_use_not_allowed",
-                            ),
-                        )
-                    } else {
-                        self.format_action_outcome(
-                            &action,
-                            &ActionOutcome::failed(format!(
-                                "Action result: {}\nerror: parallel_group_rejected",
-                                action.action
-                            )),
-                        )
-                    }
-                }));
-                continue;
-            }
             if group.order == ActionGroupOrder::Parallel && group.actions.len() > 1 {
                 match self.execute_parallel_action_group(group.actions, runtime) {
                     Ok(group_results) => result_lines.extend(group_results),
