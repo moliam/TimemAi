@@ -79,6 +79,7 @@ const DEFAULT_MEM_TEMPORARY_RETENTION_DAYS: u16 = 5;
 const MILLIS_PER_DAY: i64 = 24 * 60 * 60 * 1_000;
 const MAX_MEM_TEMPORARY_SCAN_ENTRIES: usize = 20_000;
 const MAX_MEM_TEMPORARY_SCAN_DEPTH: usize = 32;
+const MAX_MEM_TEMPORARY_ITEMS: usize = 100;
 const MAX_SESSION_MESSAGES: usize = 2_000;
 const MAX_SESSION_TURNS: usize = 200;
 const MAX_TURN_USER_ENTRIES: usize = 200;
@@ -545,6 +546,29 @@ fn modified_at_ms(metadata: &std::fs::Metadata) -> i64 {
         .unwrap_or_default()
 }
 
+fn mem_temporary_item_precedes(left: &MemTemporaryItem, right: &MemTemporaryItem) -> bool {
+    left.bytes > right.bytes || (left.bytes == right.bytes && left.path < right.path)
+}
+
+fn retain_top_mem_temporary_item(items: &mut Vec<MemTemporaryItem>, item: MemTemporaryItem) {
+    if items.len() < MAX_MEM_TEMPORARY_ITEMS {
+        items.push(item);
+        return;
+    }
+    let Some((smallest_index, smallest)) =
+        items.iter().enumerate().min_by(|(_, left), (_, right)| {
+            left.bytes
+                .cmp(&right.bytes)
+                .then_with(|| right.path.cmp(&left.path))
+        })
+    else {
+        return;
+    };
+    if mem_temporary_item_precedes(&item, smallest) {
+        items[smallest_index] = item;
+    }
+}
+
 fn collect_named_temporary_files(root: &Path) -> Result<Vec<MemTemporaryItem>, String> {
     fn visit(
         root: &Path,
@@ -564,27 +588,34 @@ fn collect_named_temporary_files(root: &Path) -> Result<Vec<MemTemporaryItem>, S
             }
             *visited = visited.saturating_add(1);
             let entry = entry.map_err(|_| "mem_temporary_items_read_failed".to_string())?;
-            let path = entry.path();
-            let metadata = std::fs::symlink_metadata(&path)
+            let file_type = entry
+                .file_type()
                 .map_err(|_| "mem_temporary_items_metadata_failed".to_string())?;
-            if metadata.file_type().is_symlink() {
+            if file_type.is_symlink() {
                 continue;
             }
-            if metadata.is_dir() {
-                if path.file_name().and_then(|name| name.to_str()) != Some("shell_jobs") {
+            let path = entry.path();
+            if file_type.is_dir() {
+                if entry.file_name().to_str() != Some("shell_jobs") {
                     visit(root, &path, depth.saturating_add(1), visited, out)?;
                 }
                 continue;
             }
-            if !metadata.is_file() {
+            if !file_type.is_file() {
                 continue;
             }
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
                 continue;
             };
             if !temporary_file_name(name) {
                 continue;
             }
+            // Metadata is the comparatively expensive filesystem operation. Read it only
+            // after the cheap directory-entry type and filename checks identify a candidate.
+            let metadata = entry
+                .metadata()
+                .map_err(|_| "mem_temporary_items_metadata_failed".to_string())?;
             let relative = path
                 .strip_prefix(root)
                 .map_err(|_| "mem_temporary_item_path_invalid".to_string())?;
@@ -592,17 +623,20 @@ fn collect_named_temporary_files(root: &Path) -> Result<Vec<MemTemporaryItem>, S
                 .to_str()
                 .ok_or_else(|| "mem_temporary_item_path_invalid".to_string())?
                 .replace('\\', "/");
-            out.push(MemTemporaryItem {
-                id: format!("file:{relative}"),
-                path: relative,
-                kind: "temporary_file".to_string(),
-                bytes: metadata.len(),
-                modified_at_ms: modified_at_ms(&metadata),
-            });
+            retain_top_mem_temporary_item(
+                out,
+                MemTemporaryItem {
+                    id: format!("file:{relative}"),
+                    path: relative,
+                    kind: "temporary_file".to_string(),
+                    bytes: metadata.len(),
+                    modified_at_ms: modified_at_ms(&metadata),
+                },
+            );
         }
         Ok(())
     }
-    let mut items = Vec::new();
+    let mut items = Vec::with_capacity(MAX_MEM_TEMPORARY_ITEMS);
     let mut visited = 0usize;
     if root.exists() {
         visit(root, root, 0, &mut visited, &mut items)?;
@@ -617,13 +651,16 @@ fn list_mem_temporary_items_at(memory_dir: &Path) -> Result<Vec<MemTemporaryItem
         .finished_temporary_items()
         .map_err(|_| "mem_temporary_shell_jobs_read_failed".to_string())?
     {
-        items.push(MemTemporaryItem {
-            id: format!("shell_job:{}", item.id),
-            path: format!("shell_jobs/{}", item.id),
-            kind: "shell_job".to_string(),
-            bytes: item.bytes,
-            modified_at_ms: item.created_at_ms,
-        });
+        retain_top_mem_temporary_item(
+            &mut items,
+            MemTemporaryItem {
+                id: format!("shell_job:{}", item.id),
+                path: format!("shell_jobs/{}", item.id),
+                kind: "shell_job".to_string(),
+                bytes: item.bytes,
+                modified_at_ms: item.created_at_ms,
+            },
+        );
     }
     items.sort_by(|left, right| {
         right
@@ -631,7 +668,6 @@ fn list_mem_temporary_items_at(memory_dir: &Path) -> Result<Vec<MemTemporaryItem
             .cmp(&left.bytes)
             .then_with(|| left.path.cmp(&right.path))
     });
-    items.truncate(100);
     Ok(items)
 }
 

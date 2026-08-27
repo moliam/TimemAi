@@ -244,6 +244,7 @@ function TimemApp() {
   const sessionsRef = useRef<Session[]>([]);
   const previousSessionStatesRef = useRef<Map<string, string> | null>(null);
   const activeSessionIdRef = useRef("");
+  const memTemporaryItemsLoadedForRef = useRef("");
   const toolSearchQueryRef = useRef("");
   const selectedToolRef = useRef<ToolDetail | null>(null);
   const toolCountBySessionRef = useRef<Map<string, number>>(new Map());
@@ -1505,11 +1506,17 @@ function TimemApp() {
     closeMobileSidebar(false);
   };
   useEffect(() => {
-    if (!showAppearance || settingsSection !== "memory" || !runtimeReady) return;
+    const memPath = server?.mem.space_dir ?? "";
+    if (!showAppearance || settingsSection !== "memory" || !runtimeReady || !memPath) return;
+    if (memTemporaryItemsLoadedForRef.current === memPath) return;
+    memTemporaryItemsLoadedForRef.current = memPath;
     setMemTemporaryItemsLoading(true);
     setMemTemporaryItemsError("");
-    if (!sendCommand({ type: "mem_temporary_items_list" })) setMemTemporaryItemsLoading(false);
-  }, [runtimeReady, settingsSection, showAppearance]);
+    if (!sendCommand({ type: "mem_temporary_items_list" })) {
+      memTemporaryItemsLoadedForRef.current = "";
+      setMemTemporaryItemsLoading(false);
+    }
+  }, [runtimeReady, sendCommand, server?.mem.space_dir, settingsSection, showAppearance]);
   const leftSidebarCollapsed = sidebarLayout.leftCollapsed && !showMobileSessions;
   const rightSidebarCollapsed = sidebarLayout.rightCollapsed && !showRoles;
   return <AssistantRuntimeProvider runtime={runtime}>
