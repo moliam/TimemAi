@@ -40,8 +40,9 @@ it does not remove authentication. Open the complete URL, including
 `?token=...`. Use HTTPS and appropriate network access controls when exposing
 Timem Web beyond a trusted network.
 
-With the local command, Timem Web opens its authenticated page automatically.
-No environment file or model credential is required just to start the UI. In
+With the local command, Timem Web binds only to `127.0.0.1` and opens the
+page automatically without an access token. No environment file or model
+credential is required just to start the UI. In
 the page, click the current model name at the top left, then configure the API
 key, model, API protocol, and Base URL for that Session. Send a message when
 the Session is configured.
@@ -174,8 +175,8 @@ them for later starts.
 
 ![Timem Web UI](docs/assets/timem-web.png)
 
-Local mode binds to `127.0.0.1` and opens the authenticated page automatically
-when a local graphical session is available:
+Local mode binds to `127.0.0.1` and opens the page automatically without an
+access token when a local graphical session is available:
 
 ```bash
 timem-web
@@ -227,6 +228,7 @@ for the files to inspect.
 - [Web delivery reliability contract](docs/web_reliability_test_matrix.md)
 - [Capability system](docs/capability-system.md)
 - [Test strategy](docs/test-strategy.md)
+- [测试人员手册（中文）](docs/tester-handbook.zh-CN.md)
 - [Feature and test management](docs/feature-test-management.md)
 - [Release management](docs/release-management.md)
 - [Release smoke checklist](docs/manual-release-smoke.md)
