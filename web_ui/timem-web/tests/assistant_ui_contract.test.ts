@@ -213,6 +213,13 @@ describe("assistant-ui thread integration", () => {
     expect(source).not.toContain('className="session-group-chevron"');
   });
 
+  it("shows an accessible animation in the session list until the runtime snapshot is ready", () => {
+    expect(source).toContain('<nav className="session-list" aria-label="Sessions" aria-busy={!snapshotReady}>');
+    expect(source).toContain('!snapshotReady ? <div className="session-list-loading" role="status" aria-live="polite"><LoaderCircle size={18} aria-hidden="true"/><span>Loading sessions…</span></div> : sessionBuckets.map');
+    expect(styles).toContain('.session-list-loading { min-height: 116px; display: flex; align-items: center; justify-content: center;');
+    expect(styles).toContain('.session-list-loading svg { flex: none; color: #75aa9e; animation: spin 1.2s linear infinite; }');
+  });
+
   it("submits session group editors as forms and keeps empty groups visible as drop targets", () => {
     expect(source).toContain('<form className="session-group-editor" onSubmit=');
     expect(source).toContain('<form className="session-group-editor inline" onSubmit=');
@@ -234,7 +241,9 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('.session-drag {');
     expect(styles).toContain('.session-group-list .session-row > .session-drag { margin-left: 0; }');
     expect(source).toContain('className={`session-endpoint-reveal ${renamingSession ? "pending" : ""}`}');
-    expect(styles).toContain('.session-row:hover .session-endpoint-reveal, .session-row:focus-within .session-endpoint-reveal, .session-endpoint-reveal.pending');
+    expect(source).toContain('renamingSession ? <span className="session-pending">Saving name...</span> : <span>{sessionEndpointName}</span>');
+    expect(source).not.toContain('<Sparkles size={9} className="session-model-icon"');
+    expect(styles).toContain('.session-row:hover .session-endpoint-reveal, .session-row:has(:focus-visible) .session-endpoint-reveal, .session-endpoint-reveal.pending');
     expect(styles).toContain('.session-row.delete-selecting .session-endpoint-reveal { display: none; }');
     expect(styles).toContain('/* Compact Session rows: hidden endpoint labels never reserve name width. */');
     expect(styles).toContain('.session-row { min-height: 28px; border-radius: 4px; }');
@@ -243,8 +252,10 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('.session-drag,\n.session-expand {\n  position: absolute;');
     expect(styles).toContain('opacity: 0;\n  pointer-events: none;');
     expect(styles).toContain('.session-row:hover > :is(.session-drag, .session-expand.available),');
+    expect(styles).toContain('.session-row:has(:focus-visible) > :is(.session-drag, .session-expand.available),');
+    expect(styles).not.toContain('.session-row:focus-within');
     expect(styles).toContain('.session-row > :is(.session-drag, .session-expand.available):focus-visible {');
-    expect(styles).toContain('.session-row:hover .session,\n.session-row:focus-within .session { padding-left: 7px; padding-right: 58px; }');
+    expect(styles).toContain('.session-row:hover .session,\n.session-row:has(:focus-visible) .session { padding-left: 7px; padding-right: 58px; }');
     expect(styles).toContain('.session-row:is(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand) { display: none; }');
     expect(styles).toContain('.session-row:is(.delete-selecting, .controls-suppressed) .session { padding-left: 7px; padding-right: 5px; }');
     expect(styles).toContain('.session-overlay .session-name { min-width: 0; font-size: 12px; font-weight: 400; }');
@@ -261,9 +272,11 @@ describe("assistant-ui thread integration", () => {
     expect(source).not.toContain('<span className={`worker-state ${worker.state}`}>{worker.state}</span>');
     expect(styles).toContain('@media (hover: none), (pointer: coarse) {');
     expect(styles).toContain('.session-row:not(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand.available)');
-    expect(styles).toContain('.session-identity { flex: 1; min-width: 0; }');
-    expect(styles).toContain('.session-endpoint-reveal {\n  position: absolute;');
-    expect(styles).toContain('transform: translate(3px, -50%);');
+    expect(styles).toContain('.session-identity { flex: 1 1 48px; min-width: 40px; }');
+    expect(styles).toContain('.session-endpoint-reveal {\n  position: static;');
+    expect(styles).toContain('max-width: calc(100% - 48px); flex: 0 1 auto; display: none;');
+    expect(styles).toContain('display: inline-flex; opacity: 1; visibility: visible; transform: translateX(0);');
+    expect(styles).not.toContain('max-width: 34%');
   });
 
   it("keeps previous-message and thread-bottom navigation beside the thread", () => {
