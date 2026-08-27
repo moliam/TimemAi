@@ -28,16 +28,16 @@ button:disabled { cursor: not-allowed; }
 .brand > span { width: 100%; height: 41px; display: inline-flex; align-items: center; justify-content: center; padding-top: 2px; font-family: system-ui, -apple-system, "Segoe UI", Arial, sans-serif; font-size: 28px; font-weight: 800; line-height: 1; letter-spacing: .12em; text-align: center; text-shadow: 0 1px 0 #000, 0 3px 6px #000b, 0 0 12px #68b8a740; }
 .brand-logo-toggle { position: relative; width: 41px; height: 41px; display: grid; place-items: center; border: 0; border-radius: 8px; padding: 0; background: transparent; }
 .brand-logo { height: 41px; width: auto; flex-shrink: 0; border-radius: 4px; }
-.brand-scale-corner { position: absolute; width: 9px; height: 9px; opacity: .58; pointer-events: none; filter: drop-shadow(0 0 4px #6ec6b657); transition: opacity .16s ease, transform .16s ease, border-color .16s ease; }
-.brand-scale-corner.top-right { top: -2px; right: -2px; border-top: 1px solid #83b9af; border-right: 1px solid #83b9af; }
-.brand-scale-corner.bottom-left { bottom: -2px; left: -2px; border-bottom: 1px solid #83b9af; border-left: 1px solid #83b9af; }
-.brand-scale-corner.top-left { top: 1px; left: 1px; border-top: 1px solid #83b9af; border-left: 1px solid #83b9af; }
-.brand-scale-corner.bottom-right { right: 1px; bottom: 1px; border-right: 1px solid #83b9af; border-bottom: 1px solid #83b9af; }
+.brand-scale-corner { position: absolute; width: 11px; height: 11px; opacity: .58; pointer-events: none; filter: drop-shadow(0 0 4px #6ec6b657); transition: opacity .18s ease, transform .18s cubic-bezier(.2, .8, .2, 1), border-color .18s ease; }
+.brand-scale-corner.top-right { top: -5px; right: -5px; border-top: 2px solid #83b9af; border-right: 2px solid #83b9af; border-top-right-radius: 7px; }
+.brand-scale-corner.bottom-left { bottom: -5px; left: -5px; border-bottom: 2px solid #83b9af; border-left: 2px solid #83b9af; border-bottom-left-radius: 7px; }
+.brand-scale-corner.top-left { top: 1px; left: 1px; border-top: 2px solid #83b9af; border-left: 2px solid #83b9af; border-top-left-radius: 7px; }
+.brand-scale-corner.bottom-right { right: 1px; bottom: 1px; border-right: 2px solid #83b9af; border-bottom: 2px solid #83b9af; border-bottom-right-radius: 7px; }
 .brand-logo-toggle:hover .brand-scale-corner, .brand-logo-toggle:focus-visible .brand-scale-corner { opacity: .96; border-color: #a8d8cf; }
-.brand-logo-toggle:hover .brand-scale-corner.top-right { transform: translate(2px, -2px); }
-.brand-logo-toggle:hover .brand-scale-corner.bottom-left { transform: translate(-2px, 2px); }
-.brand-logo-restore:hover .brand-scale-corner.top-left { transform: translate(-2px, -2px); }
-.brand-logo-restore:hover .brand-scale-corner.bottom-right { transform: translate(2px, 2px); }
+.brand-logo-toggle:not(.brand-logo-restore):is(:hover, :focus-visible) .brand-scale-corner.top-right { transform: translate(-3px, 3px); }
+.brand-logo-toggle:not(.brand-logo-restore):is(:hover, :focus-visible) .brand-scale-corner.bottom-left { transform: translate(3px, -3px); }
+.brand-logo-restore:is(:hover, :focus-visible) .brand-scale-corner.top-left { transform: translate(-4px, -4px); }
+.brand-logo-restore:is(:hover, :focus-visible) .brand-scale-corner.bottom-right { transform: translate(4px, 4px); }
 .brand-logo-toggle:focus-visible { outline: 1px solid #6eaa9d99; outline-offset: 3px; }
 .brand svg { color: #78dbc7; }.brand small { padding: 2px 6px; background: #20333b; color: #9fddcf; border-radius: 4px; font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
 .new-session { width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid #385865; border-radius: 6px; padding: 10px; color: #ddf8f0; background: #17423e; font-weight: 650; }.new-session:hover { background: #1c514b; }
