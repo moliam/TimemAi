@@ -55,6 +55,7 @@ enum VisiblePromptRole {
     User,
     UserSupplement,
     You,
+    ContextCompactionSummary,
     Runtime,
 }
 
@@ -62,13 +63,19 @@ impl VisiblePromptRole {
     fn label(self, spec: &PromptBoundarySpec) -> &str {
         match self {
             VisiblePromptRole::User | VisiblePromptRole::UserSupplement => spec.user_role,
-            VisiblePromptRole::You => spec.assistant_role,
+            VisiblePromptRole::You | VisiblePromptRole::ContextCompactionSummary => {
+                spec.assistant_role
+            }
             VisiblePromptRole::Runtime => spec.runtime_role,
         }
     }
 
     fn assistant_id(self, assistant_heading: &str) -> Option<&str> {
-        (self == VisiblePromptRole::You).then_some(assistant_heading)
+        matches!(
+            self,
+            VisiblePromptRole::You | VisiblePromptRole::ContextCompactionSummary
+        )
+        .then_some(assistant_heading)
     }
 
     fn render_open(self, spec: &PromptBoundarySpec, assistant_heading: &str) -> String {
@@ -77,6 +84,15 @@ impl VisiblePromptRole {
                 format!("<{} kind=\"supplement\">", spec.user_role)
             } else {
                 format!("## {} (supplement)", spec.user_role)
+            }
+        } else if self == VisiblePromptRole::ContextCompactionSummary {
+            if spec.uses_xml_role_elements() {
+                format!(
+                    "<{} kind=\"context_compaction_summary\">",
+                    spec.assistant_role
+                )
+            } else {
+                format!("## {} (context compaction summary)", assistant_heading)
             }
         } else {
             spec.render_role_open(self.label(spec), self.assistant_id(assistant_heading))
@@ -89,6 +105,7 @@ fn visible_role(prompt_type: &str) -> VisiblePromptRole {
         "user_question" => VisiblePromptRole::User,
         "user_supplement" => VisiblePromptRole::UserSupplement,
         "llm_response" | "llm_response_raw_xml" | "llm_free_talk" => VisiblePromptRole::You,
+        "context_compaction_summary" => VisiblePromptRole::ContextCompactionSummary,
         "result_of_llm_action" | "response_repair" | "context_compacted" => {
             VisiblePromptRole::Runtime
         }

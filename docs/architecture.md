@@ -1258,9 +1258,12 @@ model response:
 
 Runtime validates `discard` and `offload` delta ids against currently visible
 dynamic prompt refs. If all refs exist, it writes offloaded deltas into scratch,
-hides discarded/offloaded refs, and appends the summary as a new
-`context_compact` dynamic delta. The next prompt delta records the scratch id for
-offloaded deltas. If compaction targets the active persistent MCP catalog, Core
+hides discarded/offloaded refs, and appends the summary as a new assistant
+checkpoint slice in a fresh dynamic delta. Markdown prompt rendering marks it as
+`## ASSISTANT_ID (context compaction summary)`; XML prompt rendering uses
+`<ASSISTANT kind="context_compaction_summary">`. This distinguishes replacement
+context from an ordinary assistant reply while preserving assistant-role
+semantics. The next prompt delta records the scratch id for offloaded deltas. If compaction targets the active persistent MCP catalog, Core
 appends exactly one replacement catalog delta using the currently applied tool
 definitions. It contains no endpoint, header, environment, or credential data.
 Pending Web MCP edits are excluded until the next new-turn

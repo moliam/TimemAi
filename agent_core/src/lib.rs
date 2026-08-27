@@ -341,7 +341,10 @@ fn normalize_assistant_speaker_name(name: &str) -> String {
 fn role_for_prompt_type(prompt_type: &str, assistant_speaker_name: &str) -> PromptComponentRole {
     match prompt_type {
         "user_question" | "user_supplement" => PromptComponentRole::user(),
-        "llm_response" | "llm_response_raw_xml" | "llm_free_talk" => {
+        "llm_response"
+        | "llm_response_raw_xml"
+        | "llm_free_talk"
+        | "context_compaction_summary" => {
             PromptComponentRole::assistant(assistant_speaker_name.to_string())
         }
         _ => PromptComponentRole::system(),
@@ -2840,11 +2843,13 @@ impl AgentCore {
             );
             runtime.on_core_topic_events(&events);
         }
-        if parsed.continue_work && self.resolved_tool_call_mode != ToolCallMode::Native {
-            // Preserve the actual turn chronology in the replayed prompt: the
-            // assistant requested the compact before the runtime reported its
-            // result. Prompt components with the same logical timestamp retain
-            // this insertion order through their sequence number.
+        let deferred_compact_replay = parsed.continue_work
+            && self.resolved_tool_call_mode != ToolCallMode::Native
+            && !parsed.context_compacts.is_empty();
+        if parsed.continue_work
+            && self.resolved_tool_call_mode != ToolCallMode::Native
+            && !deferred_compact_replay
+        {
             slices.extend(self.assistant_replay_slices(&raw_model_output, Some(&parsed), None));
         }
         let compact_refs_mcp_catalog = parsed.context_compacts.iter().any(|compact| {
@@ -2854,6 +2859,7 @@ impl AgentCore {
                 "mcp_capability_catalog",
             )
         });
+        let compact_result_slice_start = slices.len();
         let mut compacted_successfully = false;
         let mut successful_compact_summaries = Vec::new();
         for compact in &parsed.context_compacts {
@@ -2936,15 +2942,35 @@ impl AgentCore {
         if compacted_successfully {
             self.context_compact_required = false;
         }
-        if compacted_successfully && !native_calls.is_empty() {
-            // A native context_compact call can discard the delta that would have
-            // owned its structured exchange. Persist each successful summary as a
-            // fresh assistant slice instead: the summary is the replacement context
-            // baseline and must never depend on a discarded/offloaded delta.
-            slices.extend(
+        if compacted_successfully {
+            // A successful compact gets a dedicated assistant checkpoint in both
+            // native and protocol tool-call modes. Keep non-native user-visible
+            // progress separate so only replacement context receives the summary
+            // heading.
+            let mut assistant_slices = Vec::new();
+            if deferred_compact_replay && !parsed.thought.trim().is_empty() {
+                assistant_slices.push((
+                    "llm_free_talk".to_string(),
+                    parsed.thought.trim().to_string(),
+                ));
+            }
+            assistant_slices.extend(
                 successful_compact_summaries
                     .into_iter()
-                    .map(|summary| ("llm_response".to_string(), summary)),
+                    .map(|summary| ("context_compaction_summary".to_string(), summary)),
+            );
+            slices.splice(
+                compact_result_slice_start..compact_result_slice_start,
+                assistant_slices,
+            );
+        } else if deferred_compact_replay {
+            // Validation or offload failure must not erase the assistant request
+            // that produced the runtime error evidence.
+            let assistant_slices =
+                self.assistant_replay_slices(&raw_model_output, Some(&parsed), None);
+            slices.splice(
+                compact_result_slice_start..compact_result_slice_start,
+                assistant_slices,
             );
         }
         if compacted_successfully {
@@ -6733,7 +6759,10 @@ fn prompt_type_role_for_scratch(
 ) -> &'static str {
     match prompt_type {
         "user_question" | "user_supplement" => spec.user_role,
-        "llm_response" | "llm_response_raw_xml" | "llm_free_talk" => spec.assistant_role,
+        "llm_response"
+        | "llm_response_raw_xml"
+        | "llm_free_talk"
+        | "context_compaction_summary" => spec.assistant_role,
         "result_of_llm_action" => spec.runtime_role,
         _ => spec.runtime_role,
     }

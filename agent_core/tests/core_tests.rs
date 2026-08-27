@@ -2090,7 +2090,9 @@ fn prompt_discard_can_remove_whole_delta_by_delta_id() {
     assert!(prompt.contains("context compacted successfully."));
     assert!(!prompt.contains("Context compact summary replacing"));
     assert_eq!(prompt.matches("remove stale test delta").count(), 1);
-    let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
+    let assistant = prompt
+        .find("## TIMEM_ASSISTANT (context compaction summary)")
+        .unwrap();
     let compact_request = prompt.find("remove stale test delta").unwrap();
     let compact_result = prompt.find("context compacted successfully.").unwrap();
     let system = prompt[..compact_result].rfind("## RUNTIME").unwrap();
@@ -2141,7 +2143,9 @@ fn extracted_replay_keeps_compact_summary_once_as_assistant_before_system_result
     };
 
     assert_eq!(prompt.matches("retain extracted compact state").count(), 1);
-    let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
+    let assistant = prompt
+        .find("## TIMEM_ASSISTANT (context compaction summary)")
+        .unwrap();
     let summary = prompt.find("retain extracted compact state").unwrap();
     let compact_result = prompt.find("context compacted successfully.").unwrap();
     let system = prompt[..compact_result].rfind("## RUNTIME").unwrap();
@@ -2253,6 +2257,7 @@ fn response_context_compact_hides_refs_and_appends_summary_slice() {
     };
 
     assert!(prompt.contains("## RUNTIME"));
+    assert!(prompt.contains("## TIMEM_ASSISTANT (context compaction summary)"));
     assert!(prompt.contains("旧任务已经完成，只保留 compact 后的测试摘要"));
     assert!(prompt.contains("context compacted successfully."));
     assert!(prompt.contains("CWD: "));
@@ -4532,7 +4537,7 @@ fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
     let _ = core.begin_turn("seed context", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"context_compact":{"offload":["pd_missing"],"summary":"bad refs should not write scratch"}}"#),
+        content: scored(r#"{"free_talk":"checking compact refs","context_compact":{"offload":["pd_missing"],"summary":"bad refs should not write scratch"}}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -4544,6 +4549,12 @@ fn context_compact_offload_rejects_invalid_prompt_refs_without_writing() {
     assert!(prompt.contains("Action result: context_compact"));
     assert!(prompt.contains("error: invalid_prompt_refs"));
     assert!(prompt.contains("missing_ids: pd_missing"));
+    assert!(prompt.contains("checking compact refs"));
+    assert!(prompt.contains("bad refs should not write scratch"));
+    let assistant = prompt.find("## TIMEM_ASSISTANT").unwrap();
+    let action_result = prompt.find("Action result: context_compact").unwrap();
+    assert!(assistant < action_result);
+    assert!(!prompt.contains("## TIMEM_ASSISTANT (context compaction summary)"));
     assert!(!core.scratch_file().exists());
 }
 

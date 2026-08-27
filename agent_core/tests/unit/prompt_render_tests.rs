@@ -1356,6 +1356,77 @@ fn prompt_renderer_replaces_startup_stamp() {
 }
 
 #[test]
+fn context_compaction_summary_has_an_explicit_assistant_heading() {
+    let delta = PromptDelta {
+        delta_id: "pd_compact_summary".to_string(),
+        time_ms: 123,
+        hidden_slice_ids: Vec::new(),
+        slices: vec![PromptSlice {
+            delta_id: "pd_compact_summary".to_string(),
+            slice_id: "ps_compact_summary_s001".to_string(),
+            component_id: "component_compact_summary".to_string(),
+            prompt_type: "context_compaction_summary".to_string(),
+            time_ms: 123,
+            text: "keep active task state".to_string(),
+            slice_index: 1,
+            slice_count: 1,
+        }],
+    };
+    let rendered_static = render_static_prompt(
+        "STATIC",
+        &CapabilityRegistry::builtin(),
+        &JsonSuiteV1,
+        "TIMEM_ASSISTANT",
+        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
+    );
+    let rendered = render_prompt_with_rendered_static(
+        &rendered_static,
+        &[delta],
+        "TIMEM_ASSISTANT",
+        &JsonSuiteV1,
+    );
+
+    assert!(rendered
+        .contains("## TIMEM_ASSISTANT (context compaction summary)\n\nkeep active task state"));
+}
+
+#[test]
+fn xml_context_compaction_summary_uses_an_assistant_kind_attribute() {
+    let delta = PromptDelta {
+        delta_id: "pd_xml_compact_summary".to_string(),
+        time_ms: 123,
+        hidden_slice_ids: Vec::new(),
+        slices: vec![PromptSlice {
+            delta_id: "pd_xml_compact_summary".to_string(),
+            slice_id: "ps_xml_compact_summary_s001".to_string(),
+            component_id: "component_xml_compact_summary".to_string(),
+            prompt_type: "context_compaction_summary".to_string(),
+            time_ms: 123,
+            text: "keep active task state".to_string(),
+            slice_index: 1,
+            slice_count: 1,
+        }],
+    };
+    let rendered_static = render_static_prompt(
+        "STATIC",
+        &CapabilityRegistry::builtin(),
+        &XmlSuiteV1,
+        "TIMEM_ASSISTANT",
+        "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
+    );
+    let rendered = render_prompt_with_rendered_static(
+        &rendered_static,
+        &[delta],
+        "TIMEM_ASSISTANT",
+        &XmlSuiteV1,
+    );
+
+    assert!(rendered.contains(
+        "<ASSISTANT kind=\"context_compaction_summary\">\n\nkeep active task state\n</ASSISTANT>"
+    ));
+}
+
+#[test]
 fn prompt_serialization_is_byte_stable_and_append_only_before_trailer() {
     fn delta(id: &str, time_ms: i64, prompt_type: &str, text: &str) -> PromptDelta {
         PromptDelta {
