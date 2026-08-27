@@ -30,6 +30,16 @@ describe("tool activity grouping", () => {
     expect(summary?.activities).toHaveLength(4);
   });
 
+  it("counts polling Bash separately as Poll", () => {
+    expect(summarizeToolActivities([
+      { ...activity("run_bash", "running"), tool_mode: "poll" },
+      activity("run_bash", "completed"),
+    ])?.counts).toEqual([
+      { name: "poll", count: 1 },
+      { name: "bash", count: 1 },
+    ]);
+  });
+
   it("reports running while any tool remains active", () => {
     const summary = summarizeToolActivities([
       activity("run_bash", "completed"),

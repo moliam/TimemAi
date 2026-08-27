@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnTimelinePlacement, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
+import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionWorkerTreeRows, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnTimelinePlacement, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -1455,6 +1455,23 @@ describe("web topic view model", () => {
     expect(activity).toMatchObject({ tone: "action", title: "Bash · running", tool_name: "run_bash", detail: "", code: "git status", code_language: "bash" });
   });
 
+  it("renders polling run_bash as Poll and preserves its loop command", () => {
+    const activity = activityFromTopic(topic("core.action", {
+      action: "run_bash",
+      status: "running",
+      input: { loop_cmd: "test -f build/done" },
+      kind: { kind: "bash", command: "test -f build/done", mode: "poll", interval_ms: 1000 },
+    }));
+    expect(activity).toMatchObject({
+      tone: "action",
+      title: "Poll · running",
+      tool_name: "run_bash",
+      tool_mode: "poll",
+      code: "test -f build/done",
+      code_language: "bash",
+    });
+  });
+
   it("redacts credentials from displayed Bash commands without hiding command structure", () => {
     const raw = "curl -H 'Authorization: Bearer top-secret' -H 'X-Example-GWToken: token-123' --api-key other-secret https://example.test?token=query-secret";
     const activity = activityFromTopic(topic("core.action", { action: "run_bash", status: "running", input: { cmd: raw } }));
@@ -1497,6 +1514,20 @@ describe("web topic view model", () => {
     expect(activityFromTopic(completedTopic)).toMatchObject({
       tool_status: "completed",
       elapsed_ms: 83250,
+    });
+  });
+
+  it("keeps Poll mode and final duration after action lifecycle coalescing", () => {
+    const start = actionEvent("1000", "start", "running", { loop_cmd: "test -f build/done" }, "poll");
+    const finish = actionEvent("19000", "finish", "completed", { loop_cmd: "test -f build/done" }, "poll");
+    const [completed] = coalesceActionLifecycle([start, finish]);
+    const completedTopic = completed.payload as unknown as CoreTopicEvent;
+
+    expect(activityFromTopic(completedTopic)).toMatchObject({
+      title: "Poll · completed",
+      tool_mode: "poll",
+      code: "test -f build/done",
+      elapsed_ms: 18000,
     });
   });
 
@@ -1977,5 +2008,31 @@ describe("web topic view model", () => {
     const withoutAnswer = applyChatMessageDeleted(withoutSupplement, "turn_1", "assistant", 0);
     expect(withoutAnswer.turns[0].final_answer).toBeNull();
     expect(withoutAnswer.messages.map((message) => message.id)).toEqual(["u1"]);
+  });
+});
+
+describe("session worker tree", () => {
+  it("keeps parent and child workers in a stable visual hierarchy", () => {
+    const workers = [
+      { worker_id: "child_b", context_id: "ctx_b", display_name: "Child B", ordinal: 3, state: "ready", parent_worker_id: "root" },
+      { worker_id: "root", context_id: "ctx_root", display_name: "Primary", ordinal: 0, state: "working", parent_worker_id: null },
+      { worker_id: "child_a", context_id: "ctx_a", display_name: "Child A", ordinal: 2, state: "working", parent_worker_id: "root" },
+      { worker_id: "grandchild", context_id: "ctx_g", display_name: "Grandchild", ordinal: 4, state: "ready", parent_worker_id: "child_a" },
+    ];
+    expect(sessionWorkerTreeRows(workers).map(({ worker, depth, isLast }) => [worker.worker_id, depth, isLast])).toEqual([
+      ["root", 0, true],
+      ["child_a", 1, false],
+      ["grandchild", 2, true],
+      ["child_b", 1, true],
+    ]);
+  });
+
+  it("keeps orphaned and cyclic workers visible", () => {
+    const workers = [
+      { worker_id: "orphan", context_id: "ctx_o", display_name: "Orphan", ordinal: 0, state: "ready", parent_worker_id: "missing" },
+      { worker_id: "cycle_a", context_id: "ctx_a", display_name: "A", ordinal: 1, state: "ready", parent_worker_id: "cycle_b" },
+      { worker_id: "cycle_b", context_id: "ctx_b", display_name: "B", ordinal: 2, state: "ready", parent_worker_id: "cycle_a" },
+    ];
+    expect(sessionWorkerTreeRows(workers).map(({ worker }) => worker.worker_id)).toEqual(["orphan", "cycle_a", "cycle_b"]);
   });
 });

@@ -5,9 +5,19 @@ export type MarkdownOutlineItem = {
 };
 
 const MAX_OUTLINE_LEVEL = 3;
+export const MAX_OUTLINE_SOURCE_CHARS = 512 * 1024;
+export const MAX_OUTLINE_HEADINGS = 128;
+export const MAX_OUTLINE_LINE_CHARS = 8 * 1024;
+export const MAX_OUTLINE_HEADING_SOURCE_CHARS = 2 * 1024;
+export const MAX_OUTLINE_TITLE_CHARS = 160;
+
+function boundedTitle(value: string) {
+  if (value.length <= MAX_OUTLINE_TITLE_CHARS) return value;
+  return `${value.slice(0, MAX_OUTLINE_TITLE_CHARS - 1).trimEnd()}…`;
+}
 
 export function markdownHeadingSlug(title: string) {
-  const normalized = title
+  const normalized = boundedTitle(title)
     .toLocaleLowerCase()
     .replace(/[`*_~\[\]{}()<>]/g, "")
     .replace(/[^\p{Letter}\p{Number}]+/gu, "-")
@@ -22,44 +32,202 @@ export function markdownHeadingId(title: string, occurrences: Map<string, number
   return count === 1 ? slug : `${slug}-${count}`;
 }
 
+function appendBounded(output: string[], value: string, length: { value: number }) {
+  if (!value || length.value >= MAX_OUTLINE_TITLE_CHARS) return;
+  const remaining = MAX_OUTLINE_TITLE_CHARS - length.value;
+  const next = value.length <= remaining ? value : value.slice(0, remaining);
+  output.push(next);
+  length.value += next.length;
+}
+
+/**
+ * Extracts display text from one bounded heading source with a forward-only scan.
+ * It intentionally implements only the inline constructs needed for the outline;
+ * malformed or deeply nested Markdown is treated as plain bounded text.
+ */
 export function markdownHeadingText(source: string) {
-  return source
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/<([^>]+)>/g, "$1")
-    .replace(/(`+)(.*?)\1/g, "$2")
-    .replace(/\\([\\`*_[\]{}()#+\-.!>~])/g, "$1")
-    .replace(/[*_~]+/g, "")
-    .trim();
+  const input = source.slice(0, MAX_OUTLINE_HEADING_SOURCE_CHARS);
+  const output: string[] = [];
+  const outputLength = { value: 0 };
+  let index = 0;
+
+  while (index < input.length && outputLength.value < MAX_OUTLINE_TITLE_CHARS) {
+    const char = input[index];
+    if (char === "\\" && index + 1 < input.length) {
+      appendBounded(output, input[index + 1], outputLength);
+      index += 2;
+      continue;
+    }
+    if (char === "!" && input[index + 1] === "[") {
+      index += 1;
+      continue;
+    }
+    if (char === "[") {
+      const close = input.indexOf("]", index + 1);
+      if (close >= 0) {
+        appendBounded(output, input.slice(index + 1, close), outputLength);
+        index = close + 1;
+        if (input[index] === "(") {
+          const destinationClose = input.indexOf(")", index + 1);
+          index = destinationClose >= 0 ? destinationClose + 1 : index + 1;
+        }
+        continue;
+      }
+    }
+    if (char === "<") {
+      const close = input.indexOf(">", index + 1);
+      if (close >= 0) {
+        appendBounded(output, input.slice(index + 1, close), outputLength);
+        index = close + 1;
+        continue;
+      }
+    }
+    if (char === "`") {
+      let runEnd = index + 1;
+      while (runEnd < input.length && input[runEnd] === "`") runEnd += 1;
+      const marker = input.slice(index, runEnd);
+      const close = input.indexOf(marker, runEnd);
+      if (close >= 0) {
+        appendBounded(output, input.slice(runEnd, close), outputLength);
+        index = close + marker.length;
+        continue;
+      }
+      index = runEnd;
+      continue;
+    }
+    if (char === "*" || char === "_" || char === "~") {
+      index += 1;
+      continue;
+    }
+    appendBounded(output, char, outputLength);
+    index += 1;
+  }
+
+  const title = output.join("").trim();
+  return source.length > MAX_OUTLINE_HEADING_SOURCE_CHARS || title.length >= MAX_OUTLINE_TITLE_CHARS
+    ? boundedTitle(title)
+    : title;
+}
+
+function fenceAt(line: string) {
+  let index = 0;
+  while (index < line.length && index < 3 && line[index] === " ") index += 1;
+  const marker = line[index];
+  if (marker !== "`" && marker !== "~") return undefined;
+  let end = index;
+  while (end < line.length && line[end] === marker) end += 1;
+  const length = end - index;
+  return length >= 3 ? { marker: marker as "`" | "~", length } : undefined;
+}
+
+function headingAt(line: string) {
+  let index = 0;
+  while (index < line.length && index < 3 && line[index] === " ") index += 1;
+  const markerStart = index;
+  while (index < line.length && line[index] === "#" && index - markerStart < 6) index += 1;
+  const level = index - markerStart;
+  if (level < 1 || index >= line.length || (line[index] !== " " && line[index] !== "\t")) return undefined;
+  while (index < line.length && (line[index] === " " || line[index] === "\t")) index += 1;
+  let end = line.length;
+  while (end > index && (line[end - 1] === " " || line[end - 1] === "\t")) end -= 1;
+  let hashStart = end;
+  while (hashStart > index && line[hashStart - 1] === "#") hashStart -= 1;
+  if (hashStart < end && hashStart > index && (line[hashStart - 1] === " " || line[hashStart - 1] === "\t")) {
+    end = hashStart - 1;
+    while (end > index && (line[end - 1] === " " || line[end - 1] === "\t")) end -= 1;
+  }
+  return { level, source: line.slice(index, end) };
 }
 
 export function extractMarkdownOutline(markdown: string): MarkdownOutlineItem[] {
+  if (!markdown || markdown.length > MAX_OUTLINE_SOURCE_CHARS) return [];
   const items: MarkdownOutlineItem[] = [];
   const occurrences = new Map<string, number>();
   let fence: { marker: "`" | "~"; length: number } | undefined;
+  let offset = 0;
 
-  for (const line of markdown.split(/\r?\n/)) {
-    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
-    if (fenceMatch) {
-      const marker = fenceMatch[1][0] as "`" | "~";
-      const length = fenceMatch[1].length;
-      if (!fence) fence = { marker, length };
-      else if (fence.marker === marker && length >= fence.length) fence = undefined;
-      continue;
+  while (offset <= markdown.length) {
+    let lineEnd = markdown.indexOf("\n", offset);
+    if (lineEnd < 0) lineEnd = markdown.length;
+    const rawLength = lineEnd - offset;
+    const lineLength = rawLength > 0 && markdown[lineEnd - 1] === "\r" ? rawLength - 1 : rawLength;
+    if (lineLength <= MAX_OUTLINE_LINE_CHARS) {
+      const line = markdown.slice(offset, offset + lineLength);
+      const nextFence = fenceAt(line);
+      if (nextFence) {
+        if (!fence) fence = nextFence;
+        else if (fence.marker === nextFence.marker && nextFence.length >= fence.length) fence = undefined;
+      } else if (!fence) {
+        const heading = headingAt(line);
+        if (heading && heading.level <= MAX_OUTLINE_LEVEL) {
+          const title = markdownHeadingText(heading.source);
+          if (title) {
+            if (items.length >= MAX_OUTLINE_HEADINGS) return [];
+            items.push({ id: markdownHeadingId(title, occurrences), level: heading.level, title });
+          }
+        }
+      }
     }
-    if (fence) continue;
-
-    const match = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
-    if (!match) continue;
-    const level = match[1].length;
-    if (level > MAX_OUTLINE_LEVEL) continue;
-    const title = markdownHeadingText(match[2].replace(/\s+#+\s*$/, ""));
-    if (!title) continue;
-    items.push({ id: markdownHeadingId(title, occurrences), level, title });
+    if (lineEnd === markdown.length) break;
+    offset = lineEnd + 1;
   }
   return items;
 }
 
 export function finalAnswerNeedsOutline(answerHeight: number, viewportHeight: number, sectionCount: number) {
   return sectionCount >= 2 && viewportHeight > 0 && answerHeight > viewportHeight * 2;
+}
+
+
+export const MARKDOWN_OUTLINE_START_ID = "__start";
+
+export function markdownOutlineFitsBesideContent(
+  availableSpace: number,
+  outlineWidth: number,
+  gap: number,
+  edgeGuard: number,
+) {
+  return Number.isFinite(availableSpace)
+    && availableSpace >= Math.max(0, outlineWidth) + Math.max(0, gap) + Math.max(0, edgeGuard);
+}
+
+export function markdownOutlineActiveId(
+  items: readonly MarkdownOutlineItem[],
+  headingTops: ReadonlyMap<string, number>,
+  threshold: number,
+) {
+  let activeId = MARKDOWN_OUTLINE_START_ID;
+  if (!Number.isFinite(threshold)) return activeId;
+  for (const item of items) {
+    const top = headingTops.get(item.id);
+    if (top === undefined || !Number.isFinite(top)) continue;
+    if (top <= threshold) activeId = item.id;
+    else break;
+  }
+  return activeId;
+}
+
+export function markdownOutlineTargetScrollTop(
+  currentScrollTop: number,
+  targetViewportTop: number,
+  viewportTop: number,
+  offset: number,
+) {
+  const values = [currentScrollTop, targetViewportTop, viewportTop, offset];
+  if (!values.every(Number.isFinite)) return Math.max(0, Number.isFinite(currentScrollTop) ? currentScrollTop : 0);
+  return Math.max(0, currentScrollTop + targetViewportTop - viewportTop - Math.max(0, offset));
+}
+
+export function markdownOutlineAnimationPosition(
+  start: number,
+  target: number,
+  elapsedMs: number,
+  durationMs: number,
+) {
+  if (![start, target, elapsedMs, durationMs].every(Number.isFinite)) return Number.isFinite(target) ? target : 0;
+  if (durationMs <= 0 || elapsedMs >= durationMs) return target;
+  if (elapsedMs <= 0) return start;
+  const progress = elapsedMs / durationMs;
+  const eased = 1 - Math.pow(1 - progress, 3);
+  return start + (target - start) * eased;
 }

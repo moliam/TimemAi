@@ -1,4 +1,4 @@
-import { Activity, ChatHistoryRecord, ChatMessage, ClientCommand, clientId, CoreTopicEvent, Decision, Session, TurnCompletion, WebTurn, WebTurnEvent } from "./protocol";
+import { Activity, ChatHistoryRecord, ChatMessage, ClientCommand, clientId, CoreTopicEvent, Decision, Session, SessionWorker, TurnCompletion, WebTurn, WebTurnEvent } from "./protocol";
 import { humanizeToolStatus, TOOL_STATUS_BACKGROUND_RUNNING } from "./tool_status";
 
 export const MAX_RENDERED_MESSAGES = 1000;
@@ -250,6 +250,43 @@ export function resolveActiveSessionId(currentSessionId: string, sessions: Pick<
     return currentSessionId;
   }
   return sessions[0]?.session_id ?? "";
+}
+
+export type SessionWorkerTreeRow = {
+  worker: SessionWorker;
+  depth: number;
+  isLast: boolean;
+};
+
+export function sessionWorkerTreeRows(workers: readonly SessionWorker[]): SessionWorkerTreeRow[] {
+  const ordered = [...workers].sort((left, right) => left.ordinal - right.ordinal || left.worker_id.localeCompare(right.worker_id));
+  const byId = new Map(ordered.map((worker) => [worker.worker_id, worker]));
+  const children = new Map<string, SessionWorker[]>();
+  const roots: SessionWorker[] = [];
+  for (const worker of ordered) {
+    const parentId = worker.parent_worker_id;
+    if (!parentId || parentId === worker.worker_id || !byId.has(parentId)) {
+      roots.push(worker);
+      continue;
+    }
+    children.set(parentId, [...(children.get(parentId) ?? []), worker]);
+  }
+  const rows: SessionWorkerTreeRow[] = [];
+  const visited = new Set<string>();
+  const append = (worker: SessionWorker, depth: number, isLast: boolean) => {
+    if (visited.has(worker.worker_id)) return;
+    visited.add(worker.worker_id);
+    rows.push({ worker, depth, isLast });
+    const nested = children.get(worker.worker_id) ?? [];
+    nested.forEach((child, index) => append(child, depth + 1, index === nested.length - 1));
+  };
+  roots.forEach((worker, index) => append(worker, 0, index === roots.length - 1));
+  // A malformed parent cycle has no root. Keep every worker visible instead of
+  // dropping it from the Session tree.
+  ordered.filter((worker) => !visited.has(worker.worker_id)).forEach((worker, index, remaining) => {
+    append(worker, 0, index === remaining.length - 1);
+  });
+  return rows;
 }
 
 export function composerPrimaryAction(
@@ -1125,6 +1162,7 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       const statusText = humanizeToolStatus(status);
       const input = payload.input && typeof payload.input === "object" ? payload.input as Record<string, unknown> : undefined;
       const kind = payload.kind && typeof payload.kind === "object" ? payload.kind as Record<string, unknown> : undefined;
+      const toolMode = typeof kind?.mode === "string" ? kind.mode : typeof input?.loop_cmd === "string" ? "poll" : undefined;
       const command = action === "run_bash"
         ? [input?.cmd, input?.loop_cmd, kind?.command].find((value): value is string => typeof value === "string" && value.trim().length > 0)
         : undefined;
@@ -1133,9 +1171,10 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
         id: clientId(),
         sessionId: event.session_id,
         tone: "action",
-        title: `${toolDisplayName(action)} · ${statusText}`,
+        title: `${toolActivityDisplayName(action, toolMode)} · ${statusText}`,
         tool_name: action,
         tool_status: status,
+        tool_mode: toolMode,
         elapsed_ms: typeof payload.elapsed_ms === "number" ? payload.elapsed_ms : undefined,
         detail,
         code: command ? redactSensitiveDisplayText(command) : undefined,
@@ -1199,6 +1238,11 @@ export function hasOnlyFreeTalkActivity(activities: Activity[], decisionCount: n
   return activities.length > 0
     && activities.every((activity) => activity.tone === "thinking")
     && decisionCount === 0;
+}
+
+export function toolActivityDisplayName(name: string, mode?: string) {
+  if (name === "run_bash" && mode === "poll") return "Poll";
+  return toolDisplayName(name);
 }
 
 export function toolDisplayName(name: string) {
