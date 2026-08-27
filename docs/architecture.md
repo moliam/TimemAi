@@ -55,8 +55,9 @@ Version 1.1 also defines a durable browser/Host/Core delivery boundary:
   `accepted`, `committed`, or `rejected` acknowledgements;
 - the browser retains pending intent until authoritative commit instead of
   treating `WebSocket.send()` as delivery;
-- authoritative UI events are journaled per memory space with monotonic
-  `event_seq` values and replayed from a client cursor after reconnect;
+- authoritative UI events receive monotonic `event_seq` values at one
+  in-memory linearization point; reconnect, lag, or a sequence gap establishes
+  a fresh baseline from a full authoritative snapshot;
 - commands are FIFO within a Session while independent Sessions may work in
   parallel; Session-group mutations use their own lane, and memory-space
   changes use an epoch barrier;
@@ -65,7 +66,7 @@ Version 1.1 also defines a durable browser/Host/Core delivery boundary:
   jobs, and audit state have independent lock domains. No ordinary Session
   update rewrites a MEM-wide Session index;
 - API keys and MCP secrets remain request-scoped direct replies and never enter
-  snapshots, semantic event journals, prompts, history, or audit.
+  snapshots, semantic delivery envelopes, prompts, history, or audit.
 
 The executable contract for these invariants is
 [`web_reliability_test_matrix.md`](web_reliability_test_matrix.md).
@@ -285,8 +286,8 @@ shell-only shortcut.
 
 `timem_web/src/os/` is the Web host operating-system adapter. Unix parent-process
 capture, launcher-exit monitoring, and SIGINT/SIGTERM/SIGHUP registration stay
-there; `server.rs` consumes platform-neutral shutdown triggers. Storage-specific
-permissions and event-journal locking remain in their owning storage modules.
+there; `server.rs` consumes platform-neutral shutdown triggers. Storage-specific permissions remain in their owning storage modules; the per-MEM
+Web-instance lease and in-memory semantic delivery stay in dedicated Web host modules.
 
 `timem_web` is a local-first host adapter, not a second agent runtime. It binds
 to `127.0.0.1` by default and binds to `0.0.0.0` only after the explicit
@@ -395,9 +396,10 @@ memory. For duplicate IDs the newest `updated_at_ms` record wins deterministical
 valid Session records remain usable, and the exact original index is preserved
 as a timestamped sibling backup before the repaired index is installed. Shell
 prints the backup path and continues with a recovered or fresh Session; Web uses
-the same recovery result. Web also treats the semantic event journal, command
-dedup cache, MCP configuration, and global worker-role library as independently
-recoverable stores. Corrupt worker-role data is quarantined, valid roles are
+the same recovery result. Web also treats the command dedup cache, MCP configuration, and global
+worker-role library as independently recoverable stores. Semantic event history
+is intentionally not persisted: restart and reconnect recovery use the same
+full authoritative snapshot assembled from Session and MEM stores. Corrupt worker-role data is quarantined, valid roles are
 salvaged where possible, and the UI starts with the recovered library instead of
 being blocked by optional configuration. Permission, storage, or replacement
 failures remain hard errors because safe repair cannot be proven; those errors

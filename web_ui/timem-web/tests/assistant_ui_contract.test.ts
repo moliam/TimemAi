@@ -2364,9 +2364,10 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain("window.sessionStorage.setItem(TOKEN_STORAGE_KEY, query)");
     expect(source).toContain("window.history.replaceState");
     expect(source).toContain('if (token) query.set("token", token);');
-    expect(source).toContain('if (eventCursorRef.current > 0) query.set("last_event_seq", String(eventCursorRef.current));');
-    expect(source).toContain('saveEventCursor(window.sessionStorage');
-    expect(source).toContain('loadEventCursor(window.sessionStorage');
+    expect(source).not.toContain('query.set("last_event_seq"');
+    expect(source).not.toContain('saveEventCursor(window.sessionStorage');
+    expect(source).not.toContain('loadEventCursor(window.sessionStorage');
+    expect(source).toContain('eventCursorRef.current = Number.isSafeInteger(event.event_cursor)');
     expect(source).toContain('new WebSocket(`${scheme}://${window.location.host}/ws${queryString}`)');
     expect(source).not.toContain("Access token missing");
     expect(source).not.toContain("if (!token) {\n      setActivities");

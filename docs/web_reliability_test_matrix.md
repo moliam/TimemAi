@@ -97,24 +97,27 @@ state.
 Purely client-derived animation frames are not Core messages and may be
 coalesced.
 
-### Sequenced journal integration
+### Ordered delivery and snapshot recovery
 
-`timem_web::event_journal::EventJournal` supplies the durable cursor and replay
-primitive. The WebSocket integration must follow this order:
+`timem_web::semantic_delivery::OrderedEventDelivery` supplies the in-memory
+linearization point. The WebSocket integration follows this order:
 
 1. Subscribe to live publication.
-2. Capture the journal cursor **before** constructing the snapshot.
-3. Send `hello(snapshot, event_cursor)`.
-4. Replay journal entries with `event_seq > event_cursor`.
-5. Continue live delivery, discarding only entries whose sequence was already
-   sent. A reconnect supplies its last reduced sequence and replays after it.
+2. Capture the current delivery sequence before constructing the snapshot.
+3. Send `hello(snapshot, event_cursor)`; that cursor is the connection baseline.
+4. Discard buffered envelopes at or below the baseline and continue with the
+   strictly next sequence.
+5. On a sequence gap or broadcast lag, send a new full snapshot baseline (or
+   reconnect and receive one). There is no persisted event replay cursor.
 
-Capturing the cursor before the snapshot can duplicate an event that the
-snapshot already reflects, but cannot omit it. The UI reducer must therefore be
-idempotent by `event_seq`/stable event ID. Capturing the cursor after a snapshot
-is unsafe unless snapshot state and journal publication share one transaction.
+Capturing the baseline before the snapshot can make a buffered event redundant
+with snapshot state, but cannot omit a post-baseline event. Reducers remain
+idempotent for duplicate envelopes. Sequence allocation and broadcast occur in
+one short mutex critical section, so concurrent publishers cannot expose N+1
+before N. The common connected path performs no semantic-delivery filesystem
+I/O; uncommon reconnect, gap, and lag recovery pay for a full snapshot.
 
-Journal and broadcast these authoritative event classes:
+Use ordered envelopes for authoritative event classes:
 
 - session created, renamed, deleted, stopped, and runtime/config updates;
 - turn created/updated, user task and supplement acceptance;
@@ -122,17 +125,17 @@ Journal and broadcast these authoritative event classes:
 - attachment added/removed, ToolRepo mutation, and MCP mutation state;
 - final answer, cancellation/error, and turn completion.
 
-Keep request-scoped or sensitive replies direct and outside the journal:
+Keep request-scoped or sensitive replies direct:
 
 - command acknowledgements and validation errors;
 - API-key and MCP-secret reveal responses;
 - history/search/detail query responses and terminal-open results;
-- initial hello snapshots.
+- `hello` snapshots.
 
-Every mutation result currently returned only to the requesting socket must
-also use the authoritative publication path. A direct result may still be sent
-for latency, but it cannot be the only notification because other connected
-tabs and reconnecting clients must converge.
+Every mutation result returned to one requesting socket must also use the
+ordered authoritative publication path so other connected tabs converge. The
+publication path is downstream of authoritative persistence and cannot turn an
+already committed mutation into a rejection.
 
 ## Historical failures protected by regression tests
 
@@ -141,5 +144,5 @@ socket-disconnect command loss, uncorrelated command results, premature UI queue
 deletion, missing reconnect decisions, discarded late supplements, cross-socket
 Session reordering, history-before-Core crash windows, and memory-switch races.
 Removing the durable outbox, correlated acknowledgements, Core delivery state,
-sequenced event journal, FIFO Session lanes, or memory epoch barrier requires a
-replacement that passes the same cases.
+ordered semantic delivery, snapshot-baseline recovery, FIFO Session lanes, or
+memory epoch barrier requires a replacement that passes the same cases.

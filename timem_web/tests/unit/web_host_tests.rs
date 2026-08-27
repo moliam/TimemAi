@@ -581,11 +581,10 @@ fn chat_message_delete_rejects_an_active_turn_without_touching_raw_log() {
 fn production_semantic_envelope_has_one_sequence_and_one_nested_event() {
     let envelope = semantic_event_envelope(
         42,
-        serde_json::to_value(WireEvent::SessionRenamed {
+        WireEvent::SessionRenamed {
             session_id: "session_a".to_string(),
             display_name: "Renamed".to_string(),
-        })
-        .unwrap(),
+        },
     );
     let wire = serde_json::to_value(envelope).unwrap();
     assert_eq!(wire["type"], "semantic_event");
@@ -601,6 +600,7 @@ fn reliable_mutation_returns_only_ack_while_authoritative_result_is_enveloped() 
     let session_id = register_real_worker(&state, "ENVELOPE_ONLY_MUTATION");
     let command_id = "rename_envelope_only";
     assert!(reserve_command_dedup(&state, command_id).unwrap().is_none());
+    let mut live = state.events.subscribe();
     let completion = execute_browser_command(
         &state,
         TEST_PORT,
@@ -616,10 +616,7 @@ fn reliable_mutation_returns_only_ack_while_authoritative_result_is_enveloped() 
             },
         },
     );
-    assert!(
-        completion.event.is_none(),
-        "mutation must not be sent as raw direct event"
-    );
+    assert!(completion.event.is_none());
     assert!(matches!(
         completion.ack,
         Some(WireEvent::CommandAck {
@@ -627,20 +624,15 @@ fn reliable_mutation_returns_only_ack_while_authoritative_result_is_enveloped() 
             ..
         })
     ));
-    let journal = state.event_journal.lock().unwrap().replay_after(0).unwrap();
-    let entry = journal.last().unwrap();
-    let envelope = serde_json::to_value(semantic_event_envelope(
-        entry.event_seq,
-        entry.event.clone(),
-    ))
-    .unwrap();
+    let envelope = serde_json::to_value(live.try_recv().unwrap()).unwrap();
     assert_eq!(envelope["type"], "semantic_event");
+    assert_eq!(envelope["event_seq"], 1);
     assert_eq!(envelope["event"]["type"], "session_renamed");
     assert_eq!(envelope["event"]["session_id"], session_id);
 }
 
 #[test]
-fn lagged_live_receiver_can_recover_the_durable_tail_without_a_future_event() {
+fn lagged_live_receiver_requires_a_fresh_snapshot_baseline() {
     let state = routing_test_state();
     let mut receiver = state.events.subscribe();
     let count = EVENT_CHANNEL_CAPACITY + 17;
@@ -651,20 +643,19 @@ fn lagged_live_receiver_can_recover_the_durable_tail_without_a_future_event() {
                 session_id: "session_a".to_string(),
                 display_name: format!("rename-{ordinal}"),
             },
-        )
-        .unwrap();
+        );
     }
     assert!(matches!(
         receiver.try_recv(),
         Err(broadcast::error::TryRecvError::Lagged(_))
     ));
-
-    // No additional broadcast is required to wake recovery: observing Lagged
-    // itself is the trigger, and the journal already contains the exact tail.
-    let replay = state.event_journal.lock().unwrap().replay_after(0).unwrap();
-    assert_eq!(replay.len(), count);
-    assert_eq!(replay.first().unwrap().event_seq, 1);
-    assert_eq!(replay.last().unwrap().event_seq, count as u64);
+    assert_eq!(state.semantic_delivery.baseline(), count as u64);
+    assert!(!current_mem_state(&state)
+        .unwrap()
+        .layout
+        .memory_dir()
+        .join("web_events.ndjson")
+        .exists());
 }
 
 #[test]
@@ -1190,7 +1181,7 @@ fn all_accepted_command_cache_is_bounded_instead_of_evicting_ownership() {
 }
 
 #[test]
-fn core_acceptance_ack_is_correlated_live_control_not_semantic_journal_data() {
+fn core_acceptance_ack_is_correlated_live_control_not_semantic_delivery_data() {
     let state = routing_test_state();
     let command_id = "core_acceptance_control_ack";
     start_web_turn_with_command_id(
@@ -1201,27 +1192,14 @@ fn core_acceptance_ack_is_correlated_live_control_not_semantic_journal_data() {
     )
     .unwrap();
     assert!(reserve_command_dedup(&state, command_id).unwrap().is_none());
-    let cursor = state.event_journal.lock().unwrap().cursor();
+    let baseline = state.semantic_delivery.baseline();
     let mut live = state.events.subscribe();
-
     mark_core_command_accepted(&state, "session_a", command_id);
-
     let event = live.try_recv().unwrap();
-    assert!(matches!(
-        event,
-        WireEvent::CommandAck {
-            command_id: ref actual,
-            status: CommandAckStatus::Committed,
-            ..
-        } if actual == command_id
-    ));
-    assert!(state
-        .event_journal
-        .lock()
-        .unwrap()
-        .replay_after(cursor)
-        .unwrap()
-        .is_empty());
+    assert!(
+        matches!(event, WireEvent::CommandAck { command_id: ref actual, status: CommandAckStatus::Committed, .. } if actual == command_id)
+    );
+    assert_eq!(state.semantic_delivery.baseline(), baseline);
 }
 
 #[test]
@@ -2437,17 +2415,13 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
     assert!(public.server.public_access);
     assert!(!authorized(
         &state,
-        &AuthQuery {
-            token: None,
-            last_event_seq: None
-        },
+        &AuthQuery { token: None },
         &HeaderMap::new()
     ));
     assert!(!authorized(
         &state,
         &AuthQuery {
             token: Some("wrong".to_string()),
-            last_event_seq: None,
         },
         &HeaderMap::new()
     ));
@@ -2455,7 +2429,6 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
         &state,
         &AuthQuery {
             token: Some("te".to_string()),
-            last_event_seq: None,
         },
         &HeaderMap::new()
     ));
@@ -2463,7 +2436,6 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
         &state,
         &AuthQuery {
             token: Some("test-extra".to_string()),
-            last_event_seq: None,
         },
         &HeaderMap::new()
     ));
@@ -2471,7 +2443,6 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
         &state,
         &AuthQuery {
             token: Some("test".to_string()),
-            last_event_seq: None,
         },
         &HeaderMap::new()
     ));
@@ -2483,17 +2454,13 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
     );
     assert!(authorized(
         &state,
-        &AuthQuery {
-            token: None,
-            last_event_seq: None
-        },
+        &AuthQuery { token: None },
         &cookie_headers
     ));
     assert!(!authorized(
         &state,
         &AuthQuery {
             token: Some("te".to_string()),
-            last_event_seq: None,
         },
         &cookie_headers
     ));
@@ -2505,10 +2472,7 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
     );
     assert!(!authorized(
         &state,
-        &AuthQuery {
-            token: None,
-            last_event_seq: None
-        },
+        &AuthQuery { token: None },
         &partial_cookie_headers
     ));
 
@@ -2519,10 +2483,7 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
     );
     assert!(!authorized(
         &state,
-        &AuthQuery {
-            token: None,
-            last_event_seq: None
-        },
+        &AuthQuery { token: None },
         &similar_cookie_headers
     ));
 }
@@ -2532,10 +2493,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
     let local_state = routing_test_state();
     let local = static_asset(
         State((local_state, TEST_PORT)),
-        Query(AuthQuery {
-            token: None,
-            last_event_seq: None,
-        }),
+        Query(AuthQuery { token: None }),
         HeaderMap::new(),
         Uri::from_static("/"),
     )
@@ -2547,10 +2505,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
     state.public_access = true;
     let denied = static_asset(
         State((state.clone(), TEST_PORT)),
-        Query(AuthQuery {
-            token: None,
-            last_event_seq: None,
-        }),
+        Query(AuthQuery { token: None }),
         HeaderMap::new(),
         Uri::from_static("/"),
     )
@@ -2561,7 +2516,6 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery {
             token: Some("test".to_string()),
-            last_event_seq: None,
         }),
         HeaderMap::new(),
         Uri::from_static("/"),
@@ -2584,10 +2538,7 @@ async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie
     );
     let cookie_allowed = static_asset(
         State((state, TEST_PORT)),
-        Query(AuthQuery {
-            token: None,
-            last_event_seq: None,
-        }),
+        Query(AuthQuery { token: None }),
         headers,
         Uri::from_static("/assets/index.js"),
     )
@@ -2603,7 +2554,6 @@ async fn reuses_the_same_authenticated_url_after_closing_and_reopening_a_page() 
             State((state.clone(), TEST_PORT)),
             Query(AuthQuery {
                 token: Some("test".to_string()),
-                last_event_seq: None,
             }),
             HeaderMap::new(),
             Uri::from_static("/"),
@@ -2636,7 +2586,6 @@ async fn explicit_partial_public_static_token_does_not_fallback_to_cookie() {
         State((state, TEST_PORT)),
         Query(AuthQuery {
             token: Some("te".to_string()),
-            last_event_seq: None,
         }),
         headers,
         Uri::from_static("/"),
@@ -2687,7 +2636,6 @@ async fn api_routes_reject_cross_origin_even_with_valid_token() {
         State((state, TEST_PORT)),
         Query(AuthQuery {
             token: Some("test".to_string()),
-            last_event_seq: None,
         }),
         headers,
     )
@@ -5937,11 +5885,11 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
             )),
         "switching memory spaces inside one process is not a runtime restart"
     );
-    let journal_path = state.event_journal.lock().unwrap().path().to_path_buf();
+    let instance_path = state.web_instance.lock().unwrap().path().to_path_buf();
     assert_eq!(
-        journal_path,
-        data_dir.join("beta").join("web_events.ndjson"),
-        "switching mem must also switch the durable semantic-event journal"
+        instance_path,
+        data_dir.join("beta").join("web_instance.json"),
+        "switching mem must also switch the per-MEM Web instance lease"
     );
 }
 
@@ -5970,10 +5918,10 @@ fn mem_switch_requires_a_safe_absolute_directory_path() {
 }
 
 #[test]
-fn mem_switch_rejects_active_sessions_before_touching_mem_scoped_journals() {
+fn mem_switch_rejects_active_sessions_before_touching_mem_scoped_instance_leases() {
     let state = routing_test_state();
     let original_mem = current_mem_state(&state).unwrap().space;
-    let original_journal = state.event_journal.lock().unwrap().path().to_path_buf();
+    let original_instance_lease = state.web_instance.lock().unwrap().path().to_path_buf();
     state
         .sessions
         .lock()
@@ -5987,7 +5935,10 @@ fn mem_switch_rejects_active_sessions_before_touching_mem_scoped_journals() {
         "mem_switch_active_sessions"
     );
     assert_eq!(current_mem_state(&state).unwrap().space, original_mem);
-    assert_eq!(state.event_journal.lock().unwrap().path(), original_journal);
+    assert_eq!(
+        state.web_instance.lock().unwrap().path(),
+        original_instance_lease
+    );
 }
 
 #[test]
@@ -6159,12 +6110,13 @@ fn routing_test_state() -> AppState {
             WebMemState::new(template.data_dir.clone(), template.initial_space.clone()).unwrap(),
         )),
         template: Arc::new(template),
-        events,
+        events: events.clone(),
         sessions: Arc::new(Mutex::new(sessions)),
         command_dedup: Arc::new(Mutex::new(CommandDedupCache::default())),
-        event_journal: Arc::new(Mutex::new(
-            EventJournal::open(
-                std::env::temp_dir().join(unique_web_id("routing_test_events.ndjson")),
+        semantic_delivery: Arc::new(SemanticEventDelivery::new(events.clone())),
+        web_instance: Arc::new(Mutex::new(
+            WebInstanceLease::acquire(
+                &std::env::temp_dir().join(unique_web_id("routing_test_web_instance.json")),
             )
             .unwrap(),
         )),
@@ -6376,6 +6328,7 @@ fn drain_wire_events(receiver: &mut broadcast::Receiver<WireEvent>) -> Vec<WireE
     let mut events = Vec::new();
     loop {
         match receiver.try_recv() {
+            Ok(WireEvent::SemanticEvent { event, .. }) => events.push(*event),
             Ok(event) => events.push(event),
             Err(broadcast::error::TryRecvError::Empty)
             | Err(broadcast::error::TryRecvError::Closed) => return events,
@@ -6558,15 +6511,9 @@ fn barrier_synchronized_sessions_keep_request_action_final_and_completion_scoped
     }
     drop(sessions);
 
-    let journal = state.event_journal.lock().unwrap();
-    let replay = journal.replay_after(0).unwrap();
-    assert_eq!(
-        replay
-            .iter()
-            .map(|event| event.event_seq)
-            .collect::<Vec<_>>(),
-        (1..=replay.len() as u64).collect::<Vec<_>>(),
-        "all sessions share one monotonic delivery order without sharing payload scope"
+    assert!(
+        state.semantic_delivery.baseline() > 0,
+        "all sessions share one in-memory semantic delivery order"
     );
 }
 
@@ -10751,25 +10698,27 @@ fn workspace_lock_error_handles_unreadable_owner_metadata() {
 }
 
 #[test]
-fn friendly_journal_error_replaces_in_use_with_actionable_message() {
+fn friendly_web_instance_error_replaces_in_use_with_actionable_message() {
     let data_dir = std::path::PathBuf::from("/tmp/timem_test_data");
-    let msg = friendly_journal_error("event_journal_in_use".to_string(), &data_dir, ".test_mem");
+    let msg =
+        friendly_web_instance_error("web_instance_in_use".to_string(), &data_dir, ".test_mem");
     assert!(msg.contains("already running on this memory space"));
     assert!(msg.contains("/tmp/timem_test_data"));
     assert!(msg.contains(".test_mem"));
     assert!(msg.contains("--space"));
     assert!(msg.contains("/absolute/path/to/mem"));
-    assert!(!msg.contains("event_journal_in_use"));
-    let passthrough = friendly_journal_error("other_error".to_string(), &data_dir, ".test_mem");
+    assert!(!msg.contains("web_instance_in_use"));
+    let passthrough =
+        friendly_web_instance_error("other_error".to_string(), &data_dir, ".test_mem");
     assert_eq!(passthrough, "other_error");
 }
 
 #[test]
 fn existing_instance_is_rejected_with_pid_url_and_stop_command() {
     let path = std::env::temp_dir().join(unique_web_id("existing_instance_recovery"));
-    let mut journal = EventJournal::open(&path).unwrap();
-    journal
-        .publish_instance_info(&JournalInstanceInfo {
+    let mut lease = WebInstanceLease::acquire(&path).unwrap();
+    lease
+        .publish(&WebInstanceInfo {
             pid: 4242,
             launch_parent_pid: None,
             port: Some(18080),
@@ -10780,7 +10729,7 @@ fn existing_instance_is_rejected_with_pid_url_and_stop_command() {
         })
         .unwrap();
 
-    let info = EventJournal::read_instance_info(&path).unwrap();
+    let info = WebInstanceLease::read_info(&path).unwrap();
     let error = existing_web_instance_error(&info);
     assert!(error.contains("never reused"));
     assert!(error.contains("PID:  4242"));
@@ -10795,32 +10744,24 @@ fn existing_instance_is_rejected_with_pid_url_and_stop_command() {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let lock_path = path.with_file_name(format!(
-            "{}.lock",
-            path.file_name().unwrap().to_string_lossy()
-        ));
         assert_eq!(
-            std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777,
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
     }
 
-    drop(journal);
-    let _ = std::fs::remove_file(path.with_file_name(format!(
-        "{}.lock",
-        path.file_name().unwrap().to_string_lossy()
-    )));
+    drop(lease);
     let _ = std::fs::remove_file(path);
 }
 
 #[tokio::test]
-async fn healthy_existing_instance_is_detected_without_taking_its_journal() {
+async fn healthy_existing_instance_is_detected_without_taking_its_lease() {
     let path = std::env::temp_dir().join(unique_web_id("healthy_existing_instance"));
-    let mut owner = EventJournal::open(&path).unwrap();
+    let mut owner = WebInstanceLease::acquire(&path).unwrap();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     owner
-        .publish_instance_info(&JournalInstanceInfo {
+        .publish(&WebInstanceInfo {
             pid: 4242,
             launch_parent_pid: Some(std::process::id()),
             port: Some(port),
@@ -10845,7 +10786,7 @@ async fn healthy_existing_instance_is_detected_without_taking_its_journal() {
         socket.write_all(response.as_bytes()).await.unwrap();
     });
 
-    let outcome = open_event_journal_after_handoff(
+    let outcome = open_web_instance_after_handoff(
         &path,
         Duration::from_secs(1),
         Duration::from_millis(10),
@@ -10855,27 +10796,27 @@ async fn healthy_existing_instance_is_detected_without_taking_its_journal() {
     .unwrap();
     assert!(matches!(
         outcome,
-        EventJournalOpenOutcome::Existing(ref info) if info.pid == 4242
+        WebInstanceOpenOutcome::Existing(ref info) if info.pid == 4242
     ));
     server.await.unwrap();
     assert_eq!(
-        EventJournal::open(&path).unwrap_err(),
-        "event_journal_in_use"
+        WebInstanceLease::acquire(&path).unwrap_err(),
+        "web_instance_in_use"
     );
 
     drop(owner);
-    remove_web_journal_files(&path);
+    remove_web_instance_files(&path);
 }
 
 #[cfg(unix)]
 #[tokio::test]
 async fn healthy_host_with_dead_launcher_is_not_reused_during_shutdown_handoff() {
     let path = std::env::temp_dir().join(unique_web_id("dead_launcher_handoff"));
-    let mut owner = EventJournal::open(&path).unwrap();
+    let mut owner = WebInstanceLease::acquire(&path).unwrap();
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     owner
-        .publish_instance_info(&JournalInstanceInfo {
+        .publish(&WebInstanceInfo {
             pid: 4242,
             launch_parent_pid: Some(i32::MAX as u32),
             port: Some(port),
@@ -10898,7 +10839,7 @@ async fn healthy_host_with_dead_launcher_is_not_reused_during_shutdown_handoff()
         drop(owner);
     });
 
-    let outcome = open_event_journal_after_handoff(
+    let outcome = open_web_instance_after_handoff(
         &path,
         Duration::from_secs(1),
         Duration::from_millis(10),
@@ -10907,7 +10848,7 @@ async fn healthy_host_with_dead_launcher_is_not_reused_during_shutdown_handoff()
     .await
     .unwrap();
 
-    let EventJournalOpenOutcome::Owned(new_owner) = outcome else {
+    let WebInstanceOpenOutcome::Owned(new_owner) = outcome else {
         panic!("a Host whose launcher exited must not be reused");
     };
     release.await.unwrap();
@@ -10919,19 +10860,19 @@ async fn healthy_host_with_dead_launcher_is_not_reused_during_shutdown_handoff()
     );
 
     drop(new_owner);
-    remove_web_journal_files(&path);
+    remove_web_instance_files(&path);
 }
 
 #[tokio::test]
-async fn startup_waits_for_exiting_instance_then_takes_over_its_journal() {
-    let path = std::env::temp_dir().join(unique_web_id("journal_handoff"));
-    let owner = EventJournal::open(&path).unwrap();
+async fn startup_waits_for_exiting_instance_then_takes_over_its_lease() {
+    let path = std::env::temp_dir().join(unique_web_id("instance_handoff"));
+    let owner = WebInstanceLease::acquire(&path).unwrap();
 
     let release = tokio::spawn(async move {
         sleep(Duration::from_millis(80)).await;
         drop(owner);
     });
-    let outcome = open_event_journal_after_handoff(
+    let outcome = open_web_instance_after_handoff(
         &path,
         Duration::from_secs(1),
         Duration::from_millis(10),
@@ -10940,24 +10881,24 @@ async fn startup_waits_for_exiting_instance_then_takes_over_its_journal() {
     .await
     .unwrap();
 
-    let EventJournalOpenOutcome::Owned(new_owner) = outcome else {
+    let WebInstanceOpenOutcome::Owned(new_owner) = outcome else {
         panic!("an inaccessible exiting instance must not be reported as reusable");
     };
     release.await.unwrap();
     assert_eq!(
-        EventJournal::open(&path).unwrap_err(),
-        "event_journal_in_use"
+        WebInstanceLease::acquire(&path).unwrap_err(),
+        "web_instance_in_use"
     );
     drop(new_owner);
-    remove_web_journal_files(&path);
+    remove_web_instance_files(&path);
 }
 
 #[tokio::test]
 async fn inaccessible_instance_that_keeps_the_lock_fails_clearly() {
     let path = std::env::temp_dir().join(unique_web_id("inaccessible_instance"));
-    let owner = EventJournal::open(&path).unwrap();
+    let owner = WebInstanceLease::acquire(&path).unwrap();
 
-    let error = match open_event_journal_after_handoff(
+    let error = match open_web_instance_after_handoff(
         &path,
         Duration::from_millis(80),
         Duration::from_millis(10),
@@ -10970,17 +10911,13 @@ async fn inaccessible_instance_that_keeps_the_lock_fails_clearly() {
     };
     assert!(error.contains("still holding this workspace lock"));
     assert!(error.contains("not reachable"));
-    assert!(!error.contains("event_journal_in_use"));
+    assert!(!error.contains("web_instance_in_use"));
 
     drop(owner);
-    remove_web_journal_files(&path);
+    remove_web_instance_files(&path);
 }
 
-fn remove_web_journal_files(path: &Path) {
-    let _ = std::fs::remove_file(path.with_file_name(format!(
-        "{}.lock",
-        path.file_name().unwrap().to_string_lossy()
-    )));
+fn remove_web_instance_files(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
@@ -11540,10 +11477,7 @@ async fn performance_trace_endpoint_authenticates_validates_and_records_browser_
     state.runtime_log = RuntimeLog::with_path_and_limit(path.clone(), 4096);
     let denied = performance_trace(
         State((state.clone(), 13764)),
-        Query(AuthQuery {
-            token: None,
-            last_event_seq: None,
-        }),
+        Query(AuthQuery { token: None }),
         HeaderMap::new(),
         Json(ClientPerformanceTrace {
             stage: "browser_turn_updated".to_string(),
@@ -11562,7 +11496,6 @@ async fn performance_trace_endpoint_authenticates_validates_and_records_browser_
         State((state.clone(), 13764)),
         Query(AuthQuery {
             token: Some("test".to_string()),
-            last_event_seq: None,
         }),
         HeaderMap::new(),
         Json(ClientPerformanceTrace {
@@ -11586,7 +11519,6 @@ async fn performance_trace_endpoint_authenticates_validates_and_records_browser_
         State((state, 13764)),
         Query(AuthQuery {
             token: Some("test".to_string()),
-            last_event_seq: None,
         }),
         HeaderMap::new(),
         Json(ClientPerformanceTrace {

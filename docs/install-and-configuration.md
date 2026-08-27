@@ -197,7 +197,7 @@ By default, Timem stores MEM data in the user's home directory:
       raw_chat_history.jsonl
   session_groups.json
   worker_roles.json
-  web_events.ndjson
+  web_instance.json
   shell_history.txt
 ```
 
@@ -242,7 +242,7 @@ an extra `memory` component:
 On Unix, Timem creates the selected MEM directory with owner-only `0700`
 permissions and tightens an existing selected MEM directory to `0700` at
 startup. The parent directory is not modified. This protects Session runtime
-configuration, cached credentials, memory, audit data, event journals, and Web
+configuration, cached credentials, memory, audit data, Web instance metadata, and Web
 lifecycle diagnostics on multi-user Linux and macOS hosts.
 
 ```bash

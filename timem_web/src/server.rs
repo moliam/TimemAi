@@ -1,8 +1,9 @@
-use crate::event_journal::{EventJournal, JournalInstanceInfo};
+use crate::semantic_delivery::OrderedEventDelivery;
 use crate::session_groups::{
     load_session_groups, normalize_session_group_name, save_session_groups, SessionGroup,
     MAX_SESSION_GROUPS,
 };
+use crate::web_instance::{WebInstanceInfo, WebInstanceLease};
 use crate::worker_roles::{
     load_role_library, load_roles, normalize_group_name, normalize_role_fields,
     recover_role_library, role_library_path, roles_path_for_history, save_role_library, WorkerRole,
@@ -104,6 +105,8 @@ const INSTANCE_HEALTH_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_INSTANCE_HEALTH_RESPONSE_BYTES: u64 = 16 * 1024;
 static NEXT_WEB_ID: AtomicU64 = AtomicU64::new(1);
 
+type SemanticEventDelivery = OrderedEventDelivery<WireEvent>;
+
 #[derive(Clone)]
 struct AppState {
     token: String,
@@ -114,7 +117,8 @@ struct AppState {
     events: broadcast::Sender<WireEvent>,
     sessions: Arc<Mutex<BTreeMap<String, WebSession>>>,
     command_dedup: Arc<Mutex<CommandDedupCache>>,
-    event_journal: Arc<Mutex<EventJournal>>,
+    semantic_delivery: Arc<SemanticEventDelivery>,
+    web_instance: Arc<Mutex<WebInstanceLease>>,
     command_lanes: Arc<Mutex<HashMap<String, Arc<TicketCommandLane>>>>,
     command_global_barrier: Arc<RwLock<()>>,
     mem_epoch: Arc<RwLock<u64>>,
@@ -1311,7 +1315,7 @@ enum WireEvent {
     },
     SemanticEvent {
         event_seq: u64,
-        event: Value,
+        event: Box<WireEvent>,
     },
     SessionCreated {
         session: Box<WebSession>,
@@ -1408,6 +1412,7 @@ enum WireEvent {
     HostError {
         message: String,
     },
+    #[allow(dead_code)]
     RuntimeNotice {
         session_id: String,
         level: String,
@@ -1531,7 +1536,6 @@ struct WebRuntimeOption {
 #[derive(Debug, Deserialize)]
 struct AuthQuery {
     token: Option<String>,
-    last_event_seq: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1990,21 +1994,21 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
     let initial_mem = WebMemState::new(template.data_dir.clone(), template.initial_space.clone())?;
     let command_dedup = load_command_dedup_resilient(&command_dedup_path(&initial_mem))?;
-    let journal_path = event_journal_path(&initial_mem);
-    let event_journal = match open_event_journal_after_handoff(
-        &journal_path,
+    let instance_path = web_instance_path(&initial_mem);
+    let web_instance = match open_web_instance_after_handoff(
+        &instance_path,
         INSTANCE_HANDOFF_TIMEOUT,
         INSTANCE_HANDOFF_POLL_INTERVAL,
         INSTANCE_HEALTH_TIMEOUT,
     )
     .await
     {
-        Ok(EventJournalOpenOutcome::Owned(journal)) => journal,
-        Ok(EventJournalOpenOutcome::Existing(info)) => {
+        Ok(WebInstanceOpenOutcome::Owned(lease)) => lease,
+        Ok(WebInstanceOpenOutcome::Existing(info)) => {
             return Err(existing_web_instance_error(&info));
         }
         Err(error) => {
-            return Err(friendly_journal_error(
+            return Err(friendly_web_instance_error(
                 error,
                 &template.data_dir,
                 &template.initial_space,
@@ -2049,10 +2053,11 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         manager,
         template: Arc::new(template),
         mem,
-        events,
+        events: events.clone(),
         sessions,
         command_dedup: Arc::new(Mutex::new(command_dedup)),
-        event_journal: Arc::new(Mutex::new(event_journal)),
+        semantic_delivery: Arc::new(SemanticEventDelivery::new(events.clone())),
+        web_instance: Arc::new(Mutex::new(web_instance)),
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
@@ -2382,7 +2387,7 @@ async fn upload_file(
                 session_id: query.session_id,
                 file: attachment.clone(),
             },
-        )?;
+        );
         Ok::<_, String>(attachment)
     }
     .await;
@@ -2497,8 +2502,7 @@ async fn websocket(
     if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let last_event_seq = auth.last_event_seq;
-    ws.on_upgrade(move |socket| websocket_session(socket, state, port, last_event_seq))
+    ws.on_upgrade(move |socket| websocket_session(socket, state, port))
 }
 
 #[cfg(test)]
@@ -2701,11 +2705,11 @@ fn publish_running_instance_info(
     public_access: bool,
     launch_parent: crate::os::LaunchParent,
 ) -> Result<(), String> {
-    let mut journal = state
-        .event_journal
+    let mut lease = state
+        .web_instance
         .lock()
-        .map_err(|_| "event_journal_poisoned".to_string())?;
-    journal.publish_instance_info(&JournalInstanceInfo {
+        .map_err(|_| "web_instance_poisoned".to_string())?;
+    lease.publish(&WebInstanceInfo {
         pid: std::process::id(),
         launch_parent_pid: launch_parent.pid_u32(),
         port: Some(port),
@@ -2716,31 +2720,31 @@ fn publish_running_instance_info(
     })
 }
 
-enum EventJournalOpenOutcome {
-    Owned(EventJournal),
-    Existing(JournalInstanceInfo),
+enum WebInstanceOpenOutcome {
+    Owned(WebInstanceLease),
+    Existing(WebInstanceInfo),
 }
 
-async fn open_event_journal_after_handoff(
-    journal_path: &Path,
+async fn open_web_instance_after_handoff(
+    instance_path: &Path,
     handoff_timeout: Duration,
     poll_interval: Duration,
     health_timeout: Duration,
-) -> Result<EventJournalOpenOutcome, String> {
+) -> Result<WebInstanceOpenOutcome, String> {
     let deadline = Instant::now() + handoff_timeout;
     let mut last_info = None;
 
     loop {
-        match EventJournal::open(journal_path) {
-            Ok(journal) => return Ok(EventJournalOpenOutcome::Owned(journal)),
-            Err(error) if error == "event_journal_in_use" => {}
+        match WebInstanceLease::acquire(instance_path) {
+            Ok(lease) => return Ok(WebInstanceOpenOutcome::Owned(lease)),
+            Err(error) if error == "web_instance_in_use" => {}
             Err(error) => return Err(error),
         }
 
-        if let Some(info) = EventJournal::read_instance_info(journal_path) {
+        if let Some(info) = WebInstanceLease::read_info(instance_path) {
             let launcher_alive = existing_instance_launcher_is_alive(&info);
             if launcher_alive && existing_web_instance_is_healthy(&info, health_timeout).await {
-                return Ok(EventJournalOpenOutcome::Existing(info));
+                return Ok(WebInstanceOpenOutcome::Existing(info));
             }
             last_info = Some(info);
         }
@@ -2759,7 +2763,7 @@ async fn open_event_journal_after_handoff(
     }
 }
 
-fn existing_instance_launcher_is_alive(info: &JournalInstanceInfo) -> bool {
+fn existing_instance_launcher_is_alive(info: &WebInstanceInfo) -> bool {
     let Some(parent_pid) = info.launch_parent_pid else {
         // Backward-compatible metadata cannot distinguish launcher state.
         return true;
@@ -2768,7 +2772,7 @@ fn existing_instance_launcher_is_alive(info: &JournalInstanceInfo) -> bool {
 }
 
 async fn existing_web_instance_is_healthy(
-    info: &JournalInstanceInfo,
+    info: &WebInstanceInfo,
     health_timeout: Duration,
 ) -> bool {
     let Some(port) = info.port else {
@@ -2818,7 +2822,7 @@ fn valid_instance_health_response(response: &[u8], expected_port: u16) -> bool {
         })
 }
 
-fn existing_web_instance_error(info: &JournalInstanceInfo) -> String {
+fn existing_web_instance_error(info: &WebInstanceInfo) -> String {
     let mut message = String::from(
         "Another Timem Web instance is already running for this workspace. \
 Timem Web instances are never reused; each launch must own its own process and runtime state.",
@@ -2882,9 +2886,9 @@ pub(crate) fn friendly_workspace_instance_error(error: String, space: &str) -> S
         ));
 
         if owner.host == "timem-web" {
-            let journal_path = space_dir.join("web_events.ndjson");
+            let instance_path = space_dir.join("web_instance.json");
             if let Some(info) =
-                EventJournal::read_instance_info(&journal_path).filter(|info| info.pid == owner.pid)
+                WebInstanceLease::read_info(&instance_path).filter(|info| info.pid == owner.pid)
             {
                 if let Some(port) = info.port {
                     message.push_str(&format!(
@@ -2974,8 +2978,8 @@ Do not delete the lock file while a process still holds it. The operating system
     message
 }
 
-fn friendly_journal_error(error: String, data_dir: &std::path::Path, space: &str) -> String {
-    if error == "event_journal_in_use" {
+fn friendly_web_instance_error(error: String, data_dir: &std::path::Path, space: &str) -> String {
+    if error == "web_instance_in_use" {
         let space_dir = absolute_path(web_layout_for_space(data_dir, space).space_dir());
         format!(
             "Timem Web is already running on this memory space.\n\n  data dir: {}\n  space:    {}\n  location:  {}\n\nOptions:\n  - Use a different MEM: timem-web --space /absolute/path/to/mem\n  - Or stop the other Timem Web instance first.",
@@ -2998,7 +3002,7 @@ fn friendly_memory_space_error(error: String, data_dir: &std::path::Path, space:
             space_dir.display(),
         )
     } else {
-        friendly_journal_error(error, data_dir, space)
+        friendly_web_instance_error(error, data_dir, space)
     }
 }
 
@@ -3014,8 +3018,8 @@ fn friendly_bind_error(error: String, requested_port: Option<u16>) -> String {
     }
 }
 
-fn event_journal_path(mem: &WebMemState) -> PathBuf {
-    mem.layout.memory_dir().join("web_events.ndjson")
+fn web_instance_path(mem: &WebMemState) -> PathBuf {
+    mem.layout.memory_dir().join("web_instance.json")
 }
 
 fn current_command_dedup_path(state: &AppState) -> Result<PathBuf, String> {
@@ -3027,70 +3031,24 @@ fn session_tool_repo(state: &AppState, session_id: &str) -> Result<SessionToolRe
     Ok(SessionToolRepo::new(mem.layout.memory_dir(), session_id))
 }
 
-async fn websocket_session(
-    socket: WebSocket,
-    state: AppState,
-    port: u16,
-    last_event_seq: Option<u64>,
-) {
+async fn websocket_session(socket: WebSocket, state: AppState, port: u16) {
     let (mut sender, mut receiver) = socket.split();
-    // Subscribe before taking the snapshot. Events produced after the snapshot
-    // is captured are then buffered instead of falling into a subscribe gap.
+    // Subscribe before taking the snapshot. The sequence baseline makes every
+    // buffered event at or below it redundant with the full snapshot.
     let mut events = state.events.subscribe();
-    let (event_cursor, event_replay_floor) = state
-        .event_journal
-        .lock()
-        .map(|journal| (journal.cursor(), journal.replay_floor()))
-        .unwrap_or_default();
+    let mut last_sent_event_seq = state.semantic_delivery.baseline();
     if send_event(
         &mut sender,
         &WireEvent::Hello {
             snapshot: snapshot_for(&state, port),
-            event_cursor,
-            event_replay_floor,
+            event_cursor: last_sent_event_seq,
+            event_replay_floor: last_sent_event_seq,
         },
     )
     .await
     .is_err()
     {
         return;
-    }
-    let replay_after = last_event_seq
-        .filter(|cursor| *cursor >= event_replay_floor && *cursor <= event_cursor)
-        .unwrap_or(event_cursor);
-    let mut last_sent_event_seq = replay_after;
-    let replay = state
-        .event_journal
-        .lock()
-        .map_err(|_| "event_journal_poisoned".to_string())
-        .and_then(|journal| journal.replay_after(replay_after));
-    match replay {
-        Ok(replay) => {
-            for entry in replay {
-                let event_seq = entry.event_seq;
-                if send_event(
-                    &mut sender,
-                    &WireEvent::SemanticEvent {
-                        event_seq: entry.event_seq,
-                        event: entry.event,
-                    },
-                )
-                .await
-                .is_err()
-                {
-                    return;
-                }
-                last_sent_event_seq = event_seq;
-            }
-        }
-        Err(error) => {
-            if send_event(&mut sender, &WireEvent::HostError { message: error })
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
     }
     let (command_tx, command_rx) =
         tokio_mpsc::channel::<BrowserCommand>(BROWSER_COMMAND_QUEUE_CAPACITY);
@@ -3231,34 +3189,17 @@ async fn websocket_session(
                     }
                 },
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let replay = state
-                        .event_journal
-                        .lock()
-                        .map_err(|_| "event_journal_poisoned".to_string())
-                        .and_then(|journal| journal.replay_after(last_sent_event_seq));
-                    match replay {
-                        Ok(entries) => {
-                            let mut disconnected = false;
-                            for entry in entries {
-                                let event_seq = entry.event_seq;
-                                if send_event(
-                                    &mut sender,
-                                    &semantic_event_envelope(event_seq, entry.event),
-                                )
-                                .await
-                                .is_err()
-                                {
-                                    disconnected = true;
-                                    break;
-                                }
-                                last_sent_event_seq = event_seq;
-                            }
-                            if disconnected { break; }
-                        }
-                        Err(message) => {
-                            if send_event(&mut sender, &WireEvent::HostError { message }).await.is_err() { break; }
-                        }
-                    }
+                    // There is deliberately no replay journal. A lagging client
+                    // pays the uncommon recovery cost and establishes a fresh
+                    // snapshot baseline while connected clients keep a zero-I/O
+                    // semantic event path.
+                    last_sent_event_seq = state.semantic_delivery.baseline();
+                    let hello = WireEvent::Hello {
+                        snapshot: snapshot_for(&state, port),
+                        event_cursor: last_sent_event_seq,
+                        event_replay_floor: last_sent_event_seq,
+                    };
+                    if send_event(&mut sender, &hello).await.is_err() { break; }
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -3725,42 +3666,23 @@ async fn send_event(
     sender.send(Message::Text(text)).await.map_err(|_| ())
 }
 
-fn publish_semantic(state: &AppState, event: WireEvent) -> Result<u64, String> {
-    let value = serde_json::to_value(&event)
-        .map_err(|error| format!("semantic_event_serialize_failed:{error}"))?;
-    let entry = state
-        .event_journal
-        .lock()
-        .map_err(|_| "event_journal_poisoned".to_string())?
-        .append(value)?;
-    #[cfg(not(test))]
-    let _ = state
-        .events
-        .send(semantic_event_envelope(entry.event_seq, entry.event));
-    #[cfg(test)]
-    let _ = state.events.send(event);
-    Ok(entry.event_seq)
+fn publish_semantic(state: &AppState, event: WireEvent) -> u64 {
+    // The domain mutation is authoritative. Delivery is in-memory, ordered,
+    // and best-effort; receiver state can never reject committed business data.
+    state
+        .semantic_delivery
+        .publish_with(event, semantic_event_envelope)
 }
 
-fn semantic_event_envelope(event_seq: u64, event: Value) -> WireEvent {
-    WireEvent::SemanticEvent { event_seq, event }
-}
-
-fn publish_core_semantic(state: &AppState, session_id: &str, event: WireEvent) {
-    if let Err(error) = publish_semantic(state, event) {
-        if let Ok(mut sessions) = state.sessions.lock() {
-            if let Some(session) = sessions.get_mut(session_id) {
-                session.state = "error".to_string();
-            }
-        }
-        eprintln!("[timem_web_semantic_publish_error] session_id={session_id:?} reason={error}");
-        let _ = state.events.send(WireEvent::RuntimeNotice {
-            session_id: session_id.to_string(),
-            level: "warning".to_string(),
-            title: "Runtime persistence warning".to_string(),
-            message: format!("semantic_event_persist_failed:{error}"),
-        });
+fn semantic_event_envelope(event_seq: u64, event: WireEvent) -> WireEvent {
+    WireEvent::SemanticEvent {
+        event_seq,
+        event: Box::new(event),
     }
+}
+
+fn publish_core_semantic(state: &AppState, _session_id: &str, event: WireEvent) {
+    publish_semantic(state, event);
 }
 
 #[cfg(test)]
@@ -3797,12 +3719,12 @@ fn handle_command_with_id(
                 .cloned()
                 .ok_or_else(|| "created_session_not_found".to_string())?;
             if let Some(event) = work_instruction_notice_event(state, &session_id) {
-                publish_semantic(state, event)?;
+                publish_semantic(state, event);
             }
             let event = WireEvent::SessionCreated {
                 session: Box::new(session),
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::SessionRename {
@@ -3852,7 +3774,7 @@ fn handle_command_with_id(
                 session_id,
                 display_name,
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::SessionGroupCreate { name } => {
@@ -3869,7 +3791,7 @@ fn handle_command_with_id(
                 Ok(())
             })?;
             let event = WireEvent::SessionGroupsUpdated { groups };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::SessionGroupUpdate { group_id, name } => {
@@ -3884,7 +3806,7 @@ fn handle_command_with_id(
                 Ok(())
             })?;
             let event = WireEvent::SessionGroupsUpdated { groups };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::SessionGroupDelete { group_id } => {
@@ -3951,7 +3873,7 @@ fn handle_command_with_id(
                 }
             }
             let event = WireEvent::SessionGroupsUpdated { groups };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             for (session_id, _, _) in affected {
                 publish_semantic(
                     state,
@@ -3959,7 +3881,7 @@ fn handle_command_with_id(
                         session_id,
                         group_id: None,
                     },
-                )?;
+                );
             }
             return Ok(Some(event));
         }
@@ -3980,7 +3902,7 @@ fn handle_command_with_id(
                 Ok(())
             })?;
             let event = WireEvent::SessionGroupsUpdated { groups: updated };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::SessionGroupMove {
@@ -4023,7 +3945,7 @@ fn handle_command_with_id(
                 session_id,
                 group_id,
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::SessionApiKeyUpdate {
@@ -4037,7 +3959,7 @@ fn handle_command_with_id(
                     session_id,
                     runtime_profile,
                 },
-            )?;
+            );
         }
         ClientCommand::SessionApiKeyReveal { session_id } => {
             return Ok(Some(WireEvent::SessionApiKeyRevealed {
@@ -4075,7 +3997,7 @@ fn handle_command_with_id(
                 .remove(&session_id)
                 .ok_or_else(|| "session_not_found".to_string())?;
             let event = WireEvent::SessionDeleted { session_id };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::ChatMessageDelete {
@@ -4091,7 +4013,7 @@ fn handle_command_with_id(
                 role,
                 role_index,
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::WorkerRoleCreate {
@@ -4122,7 +4044,7 @@ fn handle_command_with_id(
                 library,
                 command_id: command_id.map(str::to_string),
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::WorkerRoleUpdate {
@@ -4147,7 +4069,7 @@ fn handle_command_with_id(
                 library,
                 command_id: command_id.map(str::to_string),
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::WorkerRoleDelete {
@@ -4169,7 +4091,7 @@ fn handle_command_with_id(
                 library,
                 command_id: command_id.map(str::to_string),
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::WorkerRoleGroupCreate { session_id, name } => {
@@ -4190,7 +4112,7 @@ fn handle_command_with_id(
                 library,
                 command_id: command_id.map(str::to_string),
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::WorkerRoleGroupUpdate {
@@ -4213,7 +4135,7 @@ fn handle_command_with_id(
                 library,
                 command_id: command_id.map(str::to_string),
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::WorkerRoleGroupDelete {
@@ -4232,7 +4154,7 @@ fn handle_command_with_id(
                 library,
                 command_id: command_id.map(str::to_string),
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::WorkerRoleLibraryReorder {
@@ -4286,7 +4208,7 @@ fn handle_command_with_id(
                 library,
                 command_id: command_id.map(str::to_string),
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::TurnSubmit {
@@ -4384,7 +4306,7 @@ fn handle_command_with_id(
                 turn,
             };
             let publish_started = std::time::Instant::now();
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             state.runtime_log.record(
                 "supplement_published",
                 json!({
@@ -4420,7 +4342,7 @@ fn handle_command_with_id(
                 session_id,
                 attachment_id,
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::ChatSearch {
@@ -4563,7 +4485,7 @@ fn handle_command_with_id(
                 }
             }
             let event = WireEvent::ToolRepoUpdated { session_id, tools };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::ToolRepoOpenTerminal {
@@ -4598,7 +4520,7 @@ fn handle_command_with_id(
                     let turn =
                         append_turn_user_entry(state, &session_id, "approval", approval_summary)?;
                     let event = WireEvent::TurnUpdated { session_id, turn };
-                    publish_semantic(state, event.clone())?;
+                    publish_semantic(state, event.clone());
                     return Ok(Some(event));
                 }
                 return Ok(None);
@@ -4626,7 +4548,7 @@ fn handle_command_with_id(
             return match append_turn_user_entry(state, &session_id, "approval", approval_summary) {
                 Ok(turn) => {
                     let event = WireEvent::TurnUpdated { session_id, turn };
-                    publish_semantic(state, event.clone())?;
+                    publish_semantic(state, event.clone());
                     Ok(Some(event))
                 }
                 Err(error) if error == "active_turn_not_found" => Ok(None),
@@ -4649,7 +4571,7 @@ fn handle_command_with_id(
                     value: report.value.clone(),
                     session_env_defaults,
                 },
-            )?;
+            );
             // Propagate config change to all active sessions
             let field = runtime_config_field_from_key(&key)?;
             propagate_runtime_config_to_sessions(state, field, &report.value);
@@ -4670,7 +4592,7 @@ fn handle_command_with_id(
                     value,
                     runtime_profile,
                 },
-            )?;
+            );
         }
         ClientCommand::ModelEndpointUpsert { endpoint } => {
             let previous_endpoint = endpoint
@@ -4684,7 +4606,7 @@ fn handle_command_with_id(
             let event = WireEvent::ModelEndpointsUpdated {
                 endpoints: model_endpoint_reports(state)?,
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             if let Some(previous_endpoint) = previous_endpoint {
                 for (session_id, runtime_profile) in
                     sync_endpoint_runtime_fields(state, &previous_endpoint, &updated_endpoint)?
@@ -4695,7 +4617,7 @@ fn handle_command_with_id(
                             session_id,
                             runtime_profile,
                         },
-                    )?;
+                    );
                 }
             }
             return Ok(Some(event));
@@ -4705,7 +4627,7 @@ fn handle_command_with_id(
             let event = WireEvent::ModelEndpointsUpdated {
                 endpoints: model_endpoint_reports(state)?,
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::ModelEndpointApply {
@@ -4719,7 +4641,7 @@ fn handle_command_with_id(
                     session_id,
                     runtime_profile,
                 },
-            )?;
+            );
         }
         ClientCommand::ModelEndpointSecretReveal { endpoint_id } => {
             let (api_key, http_headers) = model_endpoint_secrets(state, &endpoint_id)?;
@@ -4737,13 +4659,13 @@ fn handle_command_with_id(
             schedule_mcp_server_refresh(state, &server_id)?;
             persist_web_session(state, &session_id)?;
             let event = mcp_updated_event(state, Some(session_id))?;
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::McpServerDelete { server_id } => {
             delete_mcp_server(state, &server_id)?;
             let event = mcp_updated_event(state, None)?;
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::McpSessionToggle {
@@ -4757,7 +4679,7 @@ fn handle_command_with_id(
             }
             persist_web_session(state, &session_id)?;
             let event = mcp_updated_event(state, Some(session_id))?;
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::McpServerReconnect {
@@ -4773,7 +4695,7 @@ fn handle_command_with_id(
                 .disconnect(&server_id);
             schedule_mcp_server_refresh(state, &server_id)?;
             let event = mcp_updated_event(state, Some(session_id))?;
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::McpServerSecretsReveal { server_id } => {
@@ -4822,7 +4744,7 @@ fn handle_command_with_id(
             let event = WireEvent::MemSettingsUpdated {
                 temporary_retention_days: days,
             };
-            publish_semantic(state, event.clone())?;
+            publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
         ClientCommand::MemSwitch { path } => {
@@ -4830,19 +4752,16 @@ fn handle_command_with_id(
                 .mem_epoch
                 .write()
                 .map_err(|_| "mem_epoch_poisoned".to_string())?;
-            let snapshot = switch_mem_space(state, port, &path)?;
+            switch_mem_space(state, port, &path)?;
             *epoch = epoch.saturating_add(1);
             state.temporary_retention_wakeup.notify_one();
-            let (event_cursor, event_replay_floor) = state
-                .event_journal
-                .lock()
-                .map(|journal| (journal.cursor(), journal.replay_floor()))
-                .unwrap_or_default();
-            let _ = state.events.send(WireEvent::Hello {
-                snapshot,
-                event_cursor,
-                event_replay_floor,
-            });
+            state
+                .semantic_delivery
+                .broadcast_baseline_with(|event_cursor| WireEvent::Hello {
+                    snapshot: snapshot_for(state, port),
+                    event_cursor,
+                    event_replay_floor: event_cursor,
+                });
         }
     }
     Ok(None)
@@ -4872,16 +4791,23 @@ fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapsh
         let data_root = current_mem_state(state)?.layout.data_root().to_path_buf();
         WebMemState::new(data_root, path.to_string())?
     };
-    let next_command_dedup = load_command_dedup_resilient(&command_dedup_path(&next_mem))?;
-    let next_event_journal =
-        EventJournal::open(event_journal_path(&next_mem)).map_err(|error| {
-            friendly_journal_error(error, next_mem.layout.data_root(), &next_mem.space)
-        })?;
     let current_path = absolute_path(current_mem_state(state)?.layout.space_dir());
     let next_path = absolute_path(next_mem.layout.space_dir());
     if current_path == next_path {
         return Ok(snapshot_for(state, port));
     }
+    let next_command_dedup = load_command_dedup_resilient(&command_dedup_path(&next_mem))?;
+    let running_instance_info = state
+        .web_instance
+        .lock()
+        .map_err(|_| "web_instance_poisoned".to_string())?
+        .info()
+        .clone();
+    let mut next_web_instance =
+        WebInstanceLease::acquire(&web_instance_path(&next_mem)).map_err(|error| {
+            friendly_web_instance_error(error, next_mem.layout.data_root(), &next_mem.space)
+        })?;
+    next_web_instance.publish(&running_instance_info)?;
     let old_manager = {
         let mut manager = state
             .manager
@@ -4920,11 +4846,11 @@ fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapsh
         *cache = next_command_dedup;
     }
     {
-        let mut journal = state
-            .event_journal
+        let mut lease = state
+            .web_instance
             .lock()
-            .map_err(|_| "event_journal_poisoned".to_string())?;
-        *journal = next_event_journal;
+            .map_err(|_| "web_instance_poisoned".to_string())?;
+        *lease = next_web_instance;
     }
     if restore_stored_sessions(state)? == 0 {
         let _ = create_session(state, None, None, BTreeMap::new())?;
@@ -5244,9 +5170,7 @@ fn schedule_mcp_server_refresh(state: &AppState, server_id: &str) -> Result<bool
             };
             for session_id in session_ids {
                 if let Ok(event) = mcp_updated_event(&state, Some(session_id)) {
-                    if let Err(error) = publish_semantic(&state, event) {
-                        eprintln!("[timem_web_semantic_publish_error] reason={error}");
-                    }
+                    publish_semantic(&state, event);
                 }
             }
         })
@@ -6797,7 +6721,7 @@ fn submit_turn_with_selected_attachments(
                 session_id: session_id.to_string(),
                 turn: turn.clone(),
             },
-        )?;
+        );
         let attachments = turn.user_entries[0].attachments.clone();
         let event = HostDecisionRequest::WorkInstructionLoad(request).topic_event(session_id);
         let request_id = event.payload["request_id"]
@@ -6831,7 +6755,7 @@ fn submit_turn_with_selected_attachments(
                 turn_event_id: turn_ref.map(|value| value.event_id),
                 event: wire_payload,
             },
-        )?;
+        );
         let timeout_state = state.clone();
         let timeout_session = session_id.to_string();
         tokio::spawn(async move {
@@ -6869,17 +6793,13 @@ fn submit_turn_with_selected_attachments(
     )?;
     // Publish the authoritative turn before allowing Core to emit activity for
     // it. Otherwise a fast worker event can overtake the direct command reply.
-    if let Err(error) = publish_semantic(
+    publish_semantic(
         state,
         WireEvent::TurnUpdated {
             session_id: session_id.to_string(),
             turn: turn.clone(),
         },
-    ) {
-        let attachments = turn.user_entries[0].attachments.clone();
-        rollback_web_turn(state, session_id, &turn.turn_id, attachments);
-        return Err(error);
-    }
+    );
     let attachments = turn.user_entries[0].attachments.clone();
     if let Err(error) = primary_worker_handle(state, session_id)?.run_turn_with_command_id(
         text,
@@ -6920,7 +6840,7 @@ fn resolve_work_instruction_decision(
     };
     if decision.as_bool() {
         if let Some(event) = work_instruction_notice_event(state, session_id) {
-            publish_semantic(state, event)?;
+            publish_semantic(state, event);
         }
     }
     primary_worker_handle(state, session_id)?.run_turn_with_command_id(
@@ -8063,16 +7983,13 @@ fn submit_toolgen_turn(
         user_instruction.as_deref(),
         command_id,
     )?;
-    if let Err(error) = publish_semantic(
+    publish_semantic(
         state,
         WireEvent::TurnUpdated {
             session_id: session_id.to_string(),
             turn: turn.clone(),
         },
-    ) {
-        rollback_web_turn(state, session_id, &turn.turn_id, Vec::new());
-        return Err(error);
-    }
+    );
     let request = ToolGenRequest::new(user_instruction);
     if let Err(error) = primary_worker_handle(state, session_id)?
         .run_toolgen_with_command_id(request, command_id.map(str::to_string))

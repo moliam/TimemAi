@@ -107,8 +107,8 @@ checks. If a dimension is not applicable, record that residual decision in
   verifies that both complete in their own conversation.
 - Web delivery reliability: deterministic Host and frontend tests cover stable
   command IDs, accepted/committed/rejected acknowledgement reordering, lost-ack
-  replay, disconnect recovery, bounded durable browser outboxes, sequenced
-  semantic-event replay, journal compaction floors, cross-tab coordination,
+  replay, disconnect recovery, bounded durable browser outboxes, strictly ordered
+  in-memory semantic delivery, snapshot recovery after gaps or lag, cross-tab coordination,
   same-Session FIFO, global mutation exclusion, memory epoch barriers, atomic
   restored task/supplement batches, and four Sessions restoring concurrently
   without cross-talk. The normative case list is

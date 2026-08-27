@@ -51,6 +51,13 @@
 
 ### Changed
 
+- Replaced the durable Web semantic-event replay journal with an in-memory,
+  linearized delivery stream. Connected event publication no longer performs
+  journal reads, rewrites, or fsyncs; reconnects, sequence gaps, and lag recover
+  from a full authoritative snapshot. Browser command durability, deduplication,
+  Core delivery state, restart recovery, per-MEM process ownership, and
+  multi-tab convergence remain intact.
+
 - Refined the Web composer and Session navigation: Session names are smaller,
   cwd is shown only below the composer text area, and a subtle divider separates
   the text area from the cwd/actions row.
