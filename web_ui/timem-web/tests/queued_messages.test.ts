@@ -178,6 +178,52 @@ describe("queued messages", () => {
     expect(saveQueuedMessages(storage, "scope", { session_a: [{ id: "a", text: "A", createdAtMs: 1 }] })).toBe(false);
   });
 
+  it("does not rewrite unchanged durable queue records", () => {
+    const operations: string[] = [];
+    const storage = {
+      setItem: (key: string) => { operations.push(`set:${key}`); },
+      removeItem: (key: string) => { operations.push(`remove:${key}`); },
+    };
+    const previous = {
+      session_a: [
+        { id: "a", text: "A", createdAtMs: 1 },
+        { id: "b", text: "B", createdAtMs: 2 },
+      ],
+    };
+
+    expect(saveQueuedMessages(storage, "scope", previous, previous)).toBe(true);
+    expect(operations).toEqual([]);
+  });
+
+  it("writes only changed or new records before removing obsolete records", () => {
+    const operations: string[] = [];
+    const storage = {
+      setItem: (key: string) => { operations.push(`set:${key}`); },
+      removeItem: (key: string) => { operations.push(`remove:${key}`); },
+    };
+    const previous = {
+      session_a: [
+        { id: "unchanged", text: "Same", createdAtMs: 1 },
+        { id: "changed", text: "Before", createdAtMs: 2 },
+        { id: "obsolete", text: "Old", createdAtMs: 3 },
+      ],
+    };
+    const next = {
+      session_a: [
+        previous.session_a[0],
+        { ...previous.session_a[1], text: "After" },
+        { id: "new", text: "New", createdAtMs: 4 },
+      ],
+    };
+
+    expect(saveQueuedMessages(storage, "scope", next, previous)).toBe(true);
+    expect(operations).toEqual([
+      `set:${queuedMessagesStorageKey("scope", "changed")}`,
+      `set:${queuedMessagesStorageKey("scope", "new")}`,
+      `remove:${queuedMessagesStorageKey("scope", "obsolete")}`,
+    ]);
+  });
+
   it("writes the next queue before removing old records so quota failure cannot erase the durable message", () => {
     const operations: string[] = [];
     const storage = {

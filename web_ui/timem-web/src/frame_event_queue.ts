@@ -53,11 +53,11 @@ export function createFrameEventQueue<T>({
       if (flushImmediately) {
         if (scheduled !== null) cancel(scheduled);
         scheduled = null;
-        while (!disposed && queue.length > 0) {
-          flush();
-          if (scheduled !== null) cancel(scheduled);
-          scheduled = null;
-        }
+        // Make the first live update visible without waiting for the next frame,
+        // but preserve the normal batch/time budget for any accumulated burst.
+        // Synchronously draining the whole queue can monopolize the browser main
+        // thread when model and action events arrive together.
+        flush();
       } else {
         requestFlush();
       }

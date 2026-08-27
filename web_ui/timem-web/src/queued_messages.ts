@@ -174,18 +174,27 @@ export function saveQueuedMessages(
 ) {
   const mutations: Array<{ type: "set"; key: string; value: string } | { type: "remove"; key: string }> = [];
   try {
-    const nextIds = new Set(Object.values(messages).flat().map((message) => message.id));
-    for (const oldMessage of Object.values(previous).flat()) {
-      if (!nextIds.has(oldMessage.id)) mutations.push({ type: "remove", key: queuedMessagesStorageKey(scope, oldMessage.id) });
+    const previousRecords = new Map<string, string>();
+    for (const [sessionId, queue] of Object.entries(previous)) {
+      queue.forEach((message, position) => previousRecords.set(
+        message.id,
+        JSON.stringify({ sessionId, position, message } satisfies StoredQueuedMessage),
+      ));
     }
+    const nextIds = new Set<string>();
     for (const [sessionId, queue] of Object.entries(messages)) {
-      queue.forEach((message, position) => mutations.push({
-        type: "set",
-        key: queuedMessagesStorageKey(scope, message.id),
-        value: JSON.stringify({ sessionId, position, message } satisfies StoredQueuedMessage),
-      }));
+      queue.forEach((message, position) => {
+        nextIds.add(message.id);
+        const value = JSON.stringify({ sessionId, position, message } satisfies StoredQueuedMessage);
+        if (previousRecords.get(message.id) !== value) {
+          mutations.push({ type: "set", key: queuedMessagesStorageKey(scope, message.id), value });
+        }
+      });
     }
-    // Write the complete next state before removing obsolete records. A quota
+    for (const messageId of previousRecords.keys()) {
+      if (!nextIds.has(messageId)) mutations.push({ type: "remove", key: queuedMessagesStorageKey(scope, messageId) });
+    }
+    // Write changed next records before removing obsolete records. A quota
     // failure therefore preserves every previously durable queued message.
     for (const mutation of mutations) {
       if (mutation.type === "set") storage.setItem(mutation.key, mutation.value);

@@ -78,6 +78,12 @@ describe("frame event queue", () => {
     queue.enqueue(31, true);
     expect(batches).toEqual([
       Array.from({ length: 24 }, (_, index) => index + 1),
+    ]);
+    expect(frames.size()).toBe(1);
+    expect(queue.pending()).toBe(7);
+    expect(frames.runOne()).toBe(true);
+    expect(batches).toEqual([
+      Array.from({ length: 24 }, (_, index) => index + 1),
       Array.from({ length: 7 }, (_, index) => index + 25),
     ]);
     expect(frames.size()).toBe(0);
