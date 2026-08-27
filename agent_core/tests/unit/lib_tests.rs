@@ -729,6 +729,68 @@ fn completed_background_bash_emits_terminal_topic_for_original_action() {
     assert_eq!(terminal.payload["turn_id"], core.current_action_turn_id());
 }
 
+#[test]
+fn parallel_sub_answers_are_all_shown_in_declared_order() {
+    #[derive(Default)]
+    struct TopicRecorder(Vec<CoreTopicEvent>);
+
+    impl ActionRuntime for TopicRecorder {
+        fn should_cancel(&mut self) -> bool {
+            false
+        }
+
+        fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+            self.0.extend_from_slice(events);
+        }
+    }
+
+    let mut core = test_core("parallel_sub_answers");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let _ = core.begin_turn("answer three independent questions", None);
+    let actions = (1..=3)
+        .map(|index| ParsedAction {
+            action: "sub_answer".to_string(),
+            name: None,
+            call_id: format!("call_sub_{index}"),
+            raw_input: json!({
+                "task": format!("Question {index}"),
+                "answer": format!("Answer {index}"),
+            }),
+        })
+        .collect();
+    let mut runtime = TopicRecorder::default();
+
+    let results = core
+        .execute_action_groups(
+            vec![ParsedActionGroup {
+                order: ActionGroupOrder::Parallel,
+                actions,
+            }],
+            &mut runtime,
+        )
+        .expect("parallel sub answers should not require approval");
+
+    assert_eq!(results.len(), 3);
+    assert!(results
+        .iter()
+        .all(|result| result.contains("Shown to user successfully.")));
+    assert!(results
+        .iter()
+        .all(|result| !result.contains("parallel_use_not_allowed")));
+    let sub_answers = runtime
+        .0
+        .iter()
+        .filter(|event| event.topic.name == CORE_TOPIC_SUB_ANSWER)
+        .collect::<Vec<_>>();
+    assert_eq!(sub_answers.len(), 3);
+    for (index, event) in sub_answers.into_iter().enumerate() {
+        let ordinal = u64::try_from(index + 1).unwrap();
+        assert_eq!(event.payload["ordinal"], ordinal);
+        assert_eq!(event.payload["task"], format!("Question {ordinal}"));
+        assert_eq!(event.payload["answer"], format!("Answer {ordinal}"));
+    }
+}
+
 fn test_core(name: &str) -> AgentCore {
     let dir = std::env::temp_dir().join(format!(
         "timem_prompt_component_test_{}_{}",
