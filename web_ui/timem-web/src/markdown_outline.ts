@@ -175,7 +175,7 @@ export function extractMarkdownOutline(markdown: string): MarkdownOutlineItem[] 
 }
 
 export function finalAnswerNeedsOutline(answerHeight: number, viewportHeight: number, sectionCount: number) {
-  return sectionCount >= 2 && viewportHeight > 0 && answerHeight > viewportHeight * 2;
+  return sectionCount >= 2 && viewportHeight > 0 && answerHeight > viewportHeight;
 }
 
 

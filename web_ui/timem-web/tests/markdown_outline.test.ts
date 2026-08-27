@@ -25,9 +25,9 @@ describe("final answer markdown outline", () => {
     expect(markdownHeadingSlug("***")).toBe("section");
   });
 
-  it("requires at least two sections and more than two viewport pages", () => {
-    expect(finalAnswerNeedsOutline(1201, 600, 2)).toBe(true);
-    expect(finalAnswerNeedsOutline(1200, 600, 2)).toBe(false);
+  it("requires at least two sections and more than one viewport page", () => {
+    expect(finalAnswerNeedsOutline(601, 600, 2)).toBe(true);
+    expect(finalAnswerNeedsOutline(600, 600, 2)).toBe(false);
     expect(finalAnswerNeedsOutline(1800, 600, 1)).toBe(false);
     expect(finalAnswerNeedsOutline(1800, 0, 3)).toBe(false);
   });

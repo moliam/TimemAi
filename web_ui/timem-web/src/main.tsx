@@ -2564,6 +2564,36 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
     });
   }, []);
 
+  const navigateWorkingToThreadBottom = useCallback(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    if (userMessageNavigationAnimationRef.current !== null) cancelAnimationFrame(userMessageNavigationAnimationRef.current);
+    followThreadLatest.current = true;
+    const targetTop = viewport.scrollHeight;
+    if (prefersReducedMotion()) {
+      viewport.scrollTop = targetTop;
+      userMessageNavigationAnimationRef.current = null;
+      updateUserMessageNavigation();
+      return;
+    }
+    const startTop = viewport.scrollTop;
+    const distance = targetTop - startTop;
+    const startedAt = performance.now();
+    const durationMs = 90;
+    const animate = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / durationMs);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      viewport.scrollTop = startTop + distance * eased;
+      if (progress < 1) {
+        userMessageNavigationAnimationRef.current = requestAnimationFrame(animate);
+      } else {
+        userMessageNavigationAnimationRef.current = null;
+        updateUserMessageNavigation();
+      }
+    };
+    userMessageNavigationAnimationRef.current = requestAnimationFrame(animate);
+  }, [updateUserMessageNavigation]);
+
   useEffect(() => () => {
     if (userMessageNavigationAnimationRef.current !== null) cancelAnimationFrame(userMessageNavigationAnimationRef.current);
   }, []);
@@ -3138,7 +3168,7 @@ const toggleQueuedMessages = () => {
     <nav className="user-message-navigation" aria-label="用户消息导航">
       <button type="button" title="上一条用户消息" aria-label="上一条用户消息" disabled={!userMessageNavigation.previous} onClick={() => navigateUserMessage("previous")}><ChevronUp size={17} aria-hidden="true"/></button>
       <button type="button" title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} aria-label={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} disabled={!userMessageNavigation.next && !userMessageNavigation.bottom} onClick={() => { if (userMessageNavigation.next) navigateUserMessage("next"); else navigateToThreadBottom(); }}><ChevronDown size={17} aria-hidden="true"/></button>
-      {activeSession?.state === "working" && threadAwayFromBottom && <button type="button" className="thread-working-away" title="工作仍在继续，跳转到最新内容" aria-label="工作仍在继续，跳转到最新内容" onClick={navigateToThreadBottom}><LoaderCircle size={15} strokeWidth={1.8} aria-hidden="true"/><span className="sr-only" role="status" aria-live="polite">Working</span></button>}
+      {activeSession?.state === "working" && threadAwayFromBottom && <button type="button" className="thread-working-away" title="工作仍在继续，跳转到最新内容" aria-label="工作仍在继续，跳转到最新内容" onClick={navigateWorkingToThreadBottom}><LoaderCircle size={15} strokeWidth={1.8} aria-hidden="true"/><span className="sr-only" role="status" aria-live="polite">Working</span></button>}
     </nav>
   </ThreadPrimitive.Root>;
 }
@@ -3425,6 +3455,7 @@ function FinalAnswerContent({ text }: { text: string }) {
   const contentRef = useRef<HTMLDivElement | null>(null);
   const outlineNavigationAnimationRef = useRef<number | null>(null);
   const [showOutline, setShowOutline] = useState(false);
+  const [outlinePlacement, setOutlinePlacement] = useState<"rail" | "compact">("rail");
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [activeId, setActiveId] = useState(MARKDOWN_OUTLINE_START_ID);
 
@@ -3441,7 +3472,8 @@ function FinalAnswerContent({ text }: { text: string }) {
     const update = () => {
       const availableLeftSpace = content.getBoundingClientRect().left - viewport.getBoundingClientRect().left;
       const outlineFitsBesideContent = markdownOutlineFitsBesideContent(availableLeftSpace, FINAL_ANSWER_OUTLINE_WIDTH, FINAL_ANSWER_OUTLINE_GAP, FINAL_ANSWER_OUTLINE_EDGE_GUARD);
-      setShowOutline(outlineFitsBesideContent && finalAnswerNeedsOutline(content.offsetHeight, viewport.clientHeight, outline.length));
+      setOutlinePlacement(outlineFitsBesideContent ? "rail" : "compact");
+      setShowOutline(finalAnswerNeedsOutline(content.offsetHeight, viewport.clientHeight, outline.length));
     };
     update();
     if (typeof ResizeObserver === "undefined") return;
@@ -3450,6 +3482,10 @@ function FinalAnswerContent({ text }: { text: string }) {
     observer.observe(viewport);
     return () => observer.disconnect();
   }, [outline, text]);
+
+  useEffect(() => {
+    setOutlineCollapsed(outlinePlacement === "compact");
+  }, [outlinePlacement]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -3514,7 +3550,7 @@ function FinalAnswerContent({ text }: { text: string }) {
   };
 
   return <div ref={(node) => { rootRef.current = node; contentRef.current = node; }} className={`message-content final-answer-reading${showOutline ? " has-outline" : ""}`}>
-    {showOutline && <aside className={`final-answer-outline${outlineCollapsed ? " collapsed" : " expanded"}`} aria-label="Final answer table of contents">
+    {showOutline && <aside className={`final-answer-outline ${outlinePlacement}${outlineCollapsed ? " collapsed" : " expanded"}`} aria-label="Final answer table of contents">
       <div className="final-answer-outline-anchor">
         <button type="button" className="final-answer-outline-toggle" aria-expanded={!outlineCollapsed} aria-label={outlineCollapsed ? "Show table of contents" : "Hide table of contents"} title={outlineCollapsed ? "Show table of contents" : "Hide table of contents"} onClick={() => setOutlineCollapsed((current) => !current)}>
           <span>Contents</span>{outlineCollapsed ? <ChevronDown size={13}/> : <ChevronUp size={13}/>}
