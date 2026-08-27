@@ -431,7 +431,7 @@ web_ui_required_test_names=(
   "uses only the selected session's latest real model usage for context"
   "renders live task usage and session context without replacing final telemetry"
   "attaches completion telemetry only to the matching final answer"
-  "persists theme, font, and text-size appearance without changing core state"
+  "persists appearance preferences inside the unified settings center without changing core state"
   "removes the access token from the visible URL while retaining the session credential"
   "public_web_launch_keeps_token_auth_and_reports_bind_mode"
   "static_web_entry_requires_token_or_authenticated_cookie"
