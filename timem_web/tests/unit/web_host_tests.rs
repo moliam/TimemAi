@@ -43,6 +43,99 @@ fn reliable_command_wire_is_legacy_compatible_and_ack_is_correlated() {
 }
 
 #[test]
+fn chat_library_commands_have_stable_wire_and_delivery_contracts() {
+    let search: BrowserCommand = serde_json::from_value(json!({
+        "type": "chat_search",
+        "query": "release notes",
+        "session_id": "session_a",
+        "limit": 25
+    }))
+    .unwrap();
+    assert!(search.command.mutation_lane().is_none());
+    assert!(search.command.result_is_direct());
+
+    let list: BrowserCommand = serde_json::from_value(json!({ "type": "favorites_list" })).unwrap();
+    assert!(list.command.mutation_lane().is_none());
+    assert!(list.command.result_is_direct());
+
+    let create: BrowserCommand = serde_json::from_value(json!({
+        "type": "favorite_create",
+        "session_id": "session_a",
+        "turn_id": "turn_1"
+    }))
+    .unwrap();
+    assert_eq!(
+        create.command.mutation_lane().as_deref(),
+        Some("chat-library")
+    );
+    assert!(create.command.result_is_direct());
+
+    let delete: BrowserCommand = serde_json::from_value(json!({
+        "type": "favorite_delete",
+        "favorite_id": "favorite_1"
+    }))
+    .unwrap();
+    assert_eq!(
+        delete.command.mutation_lane().as_deref(),
+        Some("chat-library")
+    );
+    assert!(delete.command.result_is_direct());
+
+    let capacity_update: BrowserCommand = serde_json::from_value(json!({
+        "type": "favorite_capacity_update",
+        "max_bytes": 1073741824_u64
+    }))
+    .unwrap();
+    assert_eq!(
+        capacity_update.command.mutation_lane().as_deref(),
+        Some("chat-library")
+    );
+    assert!(capacity_update.command.result_is_direct());
+
+    let unlimited: BrowserCommand = serde_json::from_value(json!({
+        "type": "favorite_capacity_update",
+        "max_bytes": null
+    }))
+    .unwrap();
+    assert!(matches!(
+        unlimited.command,
+        ClientCommand::FavoriteCapacityUpdate { max_bytes: None }
+    ));
+
+    let search_event = serde_json::to_value(WireEvent::ChatSearchResult {
+        query: "release notes".to_string(),
+        hits: Vec::new(),
+    })
+    .unwrap();
+    assert_eq!(search_event["type"], "chat_search_result");
+    assert_eq!(search_event["query"], "release notes");
+    assert_eq!(search_event["hits"], json!([]));
+
+    let capacity = ChatLibraryCapacity {
+        used_bytes: 243_000_000,
+        limit_bytes: Some(268_435_456),
+        used_percent: Some(91),
+    };
+    let capacity_event =
+        serde_json::to_value(WireEvent::FavoriteCapacityUpdated { capacity }).unwrap();
+    assert_eq!(capacity_event["type"], "favorite_capacity_updated");
+    assert_eq!(capacity_event["capacity"]["used_percent"], 91);
+    assert_eq!(capacity_event["capacity"]["limit_bytes"], 268_435_456_u64);
+
+    let reached_event =
+        serde_json::to_value(WireEvent::FavoriteCapacityReached { capacity }).unwrap();
+    assert_eq!(reached_event["type"], "favorite_capacity_reached");
+    assert_eq!(reached_event["capacity"]["used_percent"], 91);
+
+    let deleted_event = serde_json::to_value(WireEvent::FavoriteDeleted {
+        favorite_id: "favorite_1".to_string(),
+    })
+    .unwrap();
+    assert_eq!(deleted_event["type"], "favorite_deleted");
+    assert_eq!(deleted_event["favorite_id"], "favorite_1");
+}
+
+#[test]
 fn worker_role_create_preserves_client_id_and_correlates_authoritative_event() {
     let state = routing_test_state();
     let event = handle_command_with_id(

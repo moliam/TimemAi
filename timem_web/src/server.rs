@@ -10,6 +10,9 @@ use crate::worker_roles::{
     MAX_WORKER_ROLE_GROUPS,
 };
 use crate::{debug_session::DebugStore, lifecycle_diagnostics::LifecycleDiagnostics};
+use agent_core::chat_library::{
+    ChatFavorite, ChatLibrary, ChatLibraryCapacity, ChatSearchHit, CreateFavoriteOutcome,
+};
 use agent_core::mcp::{McpRuntime, McpServerConfig, McpServerReport, McpStore, McpTool};
 use agent_core::session_store::{
     ChatCommandDeliveryState, ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole,
@@ -1333,6 +1336,28 @@ enum WireEvent {
         role: String,
         role_index: usize,
     },
+    ChatSearchResult {
+        query: String,
+        hits: Vec<ChatSearchHit>,
+    },
+    FavoritesList {
+        favorites: Vec<ChatFavorite>,
+        capacity: ChatLibraryCapacity,
+    },
+    FavoriteCreated {
+        favorite: ChatFavorite,
+        capacity: ChatLibraryCapacity,
+        nearing_limit: bool,
+    },
+    FavoriteCapacityReached {
+        capacity: ChatLibraryCapacity,
+    },
+    FavoriteCapacityUpdated {
+        capacity: ChatLibraryCapacity,
+    },
+    FavoriteDeleted {
+        favorite_id: String,
+    },
     SessionRuntimeUpdated {
         session_id: String,
         runtime_profile: WebSessionRuntimeProfile,
@@ -1624,6 +1649,22 @@ enum ClientCommand {
         role: String,
         role_index: usize,
     },
+    ChatSearch {
+        query: String,
+        session_id: Option<String>,
+        limit: Option<usize>,
+    },
+    FavoritesList,
+    FavoriteCreate {
+        session_id: String,
+        turn_id: String,
+    },
+    FavoriteDelete {
+        favorite_id: String,
+    },
+    FavoriteCapacityUpdate {
+        max_bytes: Option<u64>,
+    },
     WorkerRoleCreate {
         session_id: String,
         #[serde(default)]
@@ -1779,6 +1820,8 @@ impl ClientCommand {
     fn mutation_lane(&self) -> Option<String> {
         match self {
             Self::HistoryPage { .. }
+            | Self::ChatSearch { .. }
+            | Self::FavoritesList
             | Self::ToolRepoSearch { .. }
             | Self::ToolRepoDetail { .. }
             | Self::SessionApiKeyReveal { .. }
@@ -1799,6 +1842,9 @@ impl ClientCommand {
             | Self::WorkerRoleGroupUpdate { .. }
             | Self::WorkerRoleGroupDelete { .. }
             | Self::WorkerRoleLibraryReorder { .. } => Some("global".to_string()),
+            Self::FavoriteCreate { .. }
+            | Self::FavoriteDelete { .. }
+            | Self::FavoriteCapacityUpdate { .. } => Some("chat-library".to_string()),
             Self::SessionGroupCreate { .. }
             | Self::SessionGroupUpdate { .. }
             | Self::SessionGroupDelete { .. }
@@ -1858,6 +1904,11 @@ impl ClientCommand {
         matches!(
             self,
             Self::HistoryPage { .. }
+                | Self::ChatSearch { .. }
+                | Self::FavoritesList
+                | Self::FavoriteCreate { .. }
+                | Self::FavoriteDelete { .. }
+                | Self::FavoriteCapacityUpdate { .. }
                 | Self::ToolRepoSearch { .. }
                 | Self::ToolRepoDetail { .. }
                 | Self::SessionApiKeyReveal { .. }
@@ -4215,6 +4266,89 @@ fn handle_command_with_id(
             };
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
+        }
+        ClientCommand::ChatSearch {
+            query,
+            session_id,
+            limit,
+        } => {
+            let (memory_dir, store) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                (mem.layout.memory_dir(), mem.session_store.clone())
+            };
+            let hits = ChatLibrary::new(memory_dir).search(
+                &store,
+                &query,
+                session_id.as_deref(),
+                limit.unwrap_or(100),
+            )?;
+            return Ok(Some(WireEvent::ChatSearchResult { query, hits }));
+        }
+        ClientCommand::FavoritesList => {
+            let memory_dir = state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .layout
+                .memory_dir();
+            let library = ChatLibrary::new(memory_dir);
+            let favorites = library.list_favorites()?;
+            let capacity = library.capacity()?;
+            return Ok(Some(WireEvent::FavoritesList {
+                favorites,
+                capacity,
+            }));
+        }
+        ClientCommand::FavoriteCreate {
+            session_id,
+            turn_id,
+        } => {
+            let (memory_dir, store) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                (mem.layout.memory_dir(), mem.session_store.clone())
+            };
+            let outcome =
+                ChatLibrary::new(memory_dir).create_favorite(&store, &session_id, &turn_id)?;
+            return Ok(Some(match outcome {
+                CreateFavoriteOutcome::Created {
+                    favorite,
+                    capacity,
+                    nearing_limit,
+                } => WireEvent::FavoriteCreated {
+                    favorite: *favorite,
+                    capacity,
+                    nearing_limit,
+                },
+                CreateFavoriteOutcome::CapacityReached(capacity) => {
+                    WireEvent::FavoriteCapacityReached { capacity }
+                }
+            }));
+        }
+        ClientCommand::FavoriteDelete { favorite_id } => {
+            let memory_dir = state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .layout
+                .memory_dir();
+            ChatLibrary::new(memory_dir).delete_favorite(&favorite_id)?;
+            return Ok(Some(WireEvent::FavoriteDeleted { favorite_id }));
+        }
+        ClientCommand::FavoriteCapacityUpdate { max_bytes } => {
+            let memory_dir = state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .layout
+                .memory_dir();
+            let capacity = ChatLibrary::new(memory_dir).update_capacity_limit(max_bytes)?;
+            return Ok(Some(WireEvent::FavoriteCapacityUpdated { capacity }));
         }
         ClientCommand::HistoryPage {
             session_id,

@@ -29,6 +29,7 @@ pub mod audit;
 pub mod capability;
 #[path = "../../resources/capabilities/tools/capmgr.rs"]
 pub mod capmgr;
+pub mod chat_library;
 pub mod mcp;
 pub use capability::CapabilityHostProfile;
 use capability::CapabilityRegistry;

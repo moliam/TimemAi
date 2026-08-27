@@ -2,12 +2,12 @@ import { AssistantRuntimeProvider, ThreadMessageLike, ThreadPrimitive, useExtern
 import { closestCenter, DndContext, DragEndEvent, DragOverlay, DragOverEvent, KeyboardSensor, PointerSensor, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ArrowDown, ArrowLeftRight, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CircleStop, Clock3, Copy, CornerUpLeft, Cpu, Database, Eye, EyeOff, Folder, FolderOpen, FolderPlus, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Settings, Sparkles, Terminal, TriangleAlert, Trash2, Wrench, X } from "lucide-react";
+import { ArrowDown, ArrowLeftRight, BriefcaseBusiness, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CircleStop, Clock3, Copy, CornerUpLeft, Cpu, Database, Eye, EyeOff, Folder, FolderOpen, FolderPlus, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Settings, Sparkles, Star, Terminal, TriangleAlert, Trash2, Wrench, X } from "lucide-react";
 import { CSSProperties, Dispatch, memo, MutableRefObject, ReactNode, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useId } from "react";
 import { createPortal } from "react-dom";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { loadToolGenEnabled, saveToolGenEnabled } from "./beta_features";
-import { Activity, ChatMessage, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, MemTemporaryItem, ModelEndpoint, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole, WorkerRoleGroup, WorkerRoleLibrary, SessionGroup } from "./protocol";
+import { Activity, ChatFavorite, ChatLibraryCapacity, ChatMessage, ChatSearchHit, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, MemTemporaryItem, ModelEndpoint, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole, WorkerRoleGroup, WorkerRoleLibrary, SessionGroup } from "./protocol";
 import { applyWorkerRoleMutation, isOptimisticWorkerRoleMutation, replayWorkerRoleMutations, WorkerRoleMutation } from "./worker_roles_ui";
 import { adjacentUserMessageIndex, canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, UserMessageNavigationDirection, wheelDeltaPixels } from "./scroll";
 import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, manualToolGenCommand, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, sessionWorkerTreeRows, setSessionDraft, tailPath, toolActivityDisplayName, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn } from "./view_model";
@@ -205,6 +205,17 @@ function TimemApp() {
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [runtimeUnavailableDialogDismissed, setRuntimeUnavailableDialogDismissed] = useState(false);
   const [showToolRepo, setShowToolRepo] = useState(false);
+  const [chatLibraryMode, setChatLibraryMode] = useState<"search" | "favorites" | null>(null);
+  const [chatSearchQuery, setChatSearchQuery] = useState("");
+  const [chatSearchScope, setChatSearchScope] = useState<"all" | "session">("all");
+  const [chatSearchResults, setChatSearchResults] = useState<ChatSearchHit[]>([]);
+  const [chatSearchPending, setChatSearchPending] = useState(false);
+  const [favorites, setFavorites] = useState<ChatFavorite[]>([]);
+  const [favoritesLoading, setFavoritesLoading] = useState(false);
+  const [pendingFavoriteSourceKeys, setPendingFavoriteSourceKeys] = useState<Set<string>>(() => new Set());
+  const [favoriteCapacity, setFavoriteCapacity] = useState<ChatLibraryCapacity>({ used_bytes: 0, limit_bytes: 256 * 1024 * 1024, used_percent: 0 });
+  const [favoriteCapacityNotice, setFavoriteCapacityNotice] = useState<{ capacity: ChatLibraryCapacity; full: boolean } | null>(null);
+  const [favoriteCapacityUpdating, setFavoriteCapacityUpdating] = useState(false);
   const [showRoles, setShowRoles] = useState(false);
   const [sidebarLayout, setSidebarLayout] = useState<SidebarLayout>(loadSidebarLayout);
   const [toolSearchQuery, setToolSearchQuery] = useState("");
@@ -304,6 +315,7 @@ function TimemApp() {
   const mobileSidebarRef = useRef<HTMLElement | null>(null);
   const toolRepoButtonRef = useRef<HTMLButtonElement | null>(null);
   const toolRepoPanelRef = useRef<HTMLElement | null>(null);
+  const chatLibraryPanelRef = useRef<HTMLElement | null>(null);
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? sessions[0];
   sessionsRef.current = sessions;
@@ -322,6 +334,7 @@ function TimemApp() {
   const reportUiError = useCallback((title: string, detail: string, sessionId = activeSessionIdRef.current || "system") => {
     pushActivity({ id: clientId(), sessionId, tone: "error", title, detail, createdAt: Date.now() });
   }, [pushActivity]);
+  const closeChatLibrary = useCallback(() => setChatLibraryMode(null), []);
   const closeToolRepoPanel = useCallback(() => {
     setShowToolRepo(false);
     toolRepoButtonRef.current?.focus({ preventScroll: true });
@@ -453,6 +466,16 @@ function TimemApp() {
   }, [closeAppearancePanel, pendingMemRetention, pendingMemSwitch, showAppearance]);
 
   useEffect(() => {
+    if (!chatLibraryMode) return;
+    chatLibraryPanelRef.current?.focus({ preventScroll: true });
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") closeChatLibrary();
+    };
+    document.addEventListener("keydown", dismissOnEscape);
+    return () => document.removeEventListener("keydown", dismissOnEscape);
+  }, [chatLibraryMode, closeChatLibrary]);
+
+  useEffect(() => {
     if (!showMcp) return;
     mcpPanelRef.current?.focus({ preventScroll: true });
     const dismissOnOutsidePointer = (event: PointerEvent) => {
@@ -497,6 +520,16 @@ function TimemApp() {
       return reliable;
     }
   }, [snapshotReady]);
+
+  const toggleFavorite = useCallback((sessionId: string, turnId: string, favoriteId?: string) => {
+    const sourceKey = `legacy:${sessionId}:${turnId}:assistant:0`;
+    setPendingFavoriteSourceKeys((current) => new Set(current).add(sourceKey));
+    const sent = sendCommand(favoriteId
+      ? { type: "favorite_delete", favorite_id: favoriteId }
+      : { type: "favorite_create", session_id: sessionId, turn_id: turnId });
+    if (!sent) setPendingFavoriteSourceKeys((current) => { const next = new Set(current); next.delete(sourceKey); return next; });
+    return sent;
+  }, [sendCommand]);
 
   useEffect(() => {
     if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady) return;
@@ -796,6 +829,16 @@ function TimemApp() {
           } else if (isModelSubmissionCommand(completed?.command)) {
             const issue = modelServiceIssue(event.error || "The runtime rejected this model request.");
             reportUiError(issue.title, issue.detail, sessionId);
+          } else if (completed?.command.type === "favorite_capacity_update") {
+            setFavoriteCapacityUpdating(false);
+            reportUiError("无法调整收藏夹空间", "请稍后重试。", sessionId);
+          } else if (completed?.command.type === "favorite_create" || completed?.command.type === "favorite_delete" || completed?.command.type === "favorites_list") {
+            setFavoritesLoading(false);
+            setPendingFavoriteSourceKeys(new Set());
+            reportUiError("收藏夹暂时不可用", "请稍后重试。", sessionId);
+          } else if (completed?.command.type === "chat_search") {
+            setChatSearchPending(false);
+            reportUiError("搜索暂时不可用", "请稍后重试。", sessionId);
           } else {
             reportUiError("Command rejected", event.error || "The runtime rejected this command.", sessionId);
           }
@@ -839,8 +882,19 @@ function TimemApp() {
       clearAllPendingCommands();
       setDecisions(decisionsFromSessions(event.snapshot.sessions));
       applySnapshot(event.snapshot);
+      setFavorites([]);
+      setChatSearchResults([]);
+      setFavoriteCapacityNotice(null);
+      setFavoriteCapacityUpdating(false);
+      setFavoritesLoading(true);
       setSnapshotReady(true);
-      if (reconnectForReplay) queueMicrotask(() => socket.current?.close());
+      if (reconnectForReplay) {
+        queueMicrotask(() => socket.current?.close());
+      } else {
+        queueMicrotask(() => {
+          if (!sendCommand({ type: "favorites_list" })) setFavoritesLoading(false);
+        });
+      }
       return;
     }
     if (event.type === "session_created") {
@@ -918,6 +972,47 @@ function TimemApp() {
         }
         return changed ? next : current;
       });
+      return;
+    }
+    if (event.type === "chat_search_result") {
+      setChatSearchPending(false);
+      setChatSearchResults(event.hits);
+      return;
+    }
+    if (event.type === "favorites_list") {
+      setFavoritesLoading(false);
+      setFavorites(event.favorites);
+      setFavoriteCapacity(event.capacity);
+      return;
+    }
+    if (event.type === "favorite_created") {
+      setPendingFavoriteSourceKeys((current) => { const next = new Set(current); next.delete(event.favorite.source_key); return next; });
+      setFavoritesLoading(false);
+      setFavorites((current) => [event.favorite, ...current.filter((item) => item.id !== event.favorite.id && item.source_key !== event.favorite.source_key)]);
+      setChatSearchResults((current) => current.map((hit) => hit.source_key === event.favorite.source_key ? { ...hit, favorite_id: event.favorite.id } : hit));
+      setFavoriteCapacity(event.capacity);
+      if (event.nearing_limit) setFavoriteCapacityNotice({ capacity: event.capacity, full: false });
+      return;
+    }
+    if (event.type === "favorite_capacity_reached") {
+      setPendingFavoriteSourceKeys(new Set());
+      setFavoriteCapacity(event.capacity);
+      setFavoriteCapacityNotice({ capacity: event.capacity, full: true });
+      return;
+    }
+    if (event.type === "favorite_capacity_updated") {
+      setFavoriteCapacityUpdating(false);
+      setFavoriteCapacity(event.capacity);
+      setFavoriteCapacityNotice(null);
+      return;
+    }
+    if (event.type === "favorite_deleted") {
+      setFavorites((current) => {
+        const deleted = current.find((item) => item.id === event.favorite_id);
+        if (deleted) setPendingFavoriteSourceKeys((pending) => { const next = new Set(pending); next.delete(deleted.source_key); return next; });
+        return current.filter((item) => item.id !== event.favorite_id);
+      });
+      setChatSearchResults((current) => current.map((hit) => hit.favorite_id === event.favorite_id ? { ...hit, favorite_id: null } : hit));
       return;
     }
     if (event.type === "chat_message_deleted") {
@@ -1602,7 +1697,9 @@ function TimemApp() {
           <DragOverlay dropAnimation={prefersReducedMotion() ? null : { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" }}>{draggedSession && <div className="session-row session-overlay" aria-hidden="true"><span className="session-drag"><GripVertical size={13}/></span><span className="session-name">{draggedSession.display_name}</span></div>}</DragOverlay>
         </DndContext>
         <div className="sidebar-footer">
-          <button type="button" ref={settingsButtonRef} className="sidebar-settings-button" title={settingsTitle} aria-label={settingsTitle} aria-expanded={showAppearance} aria-controls="settings-center" disabled={!runtimeReady || pendingMemSwitch} onClick={() => { setSettingsSection("appearance"); setShowAppearance(true); }}><Settings size={17} aria-hidden="true"/>{!leftSidebarCollapsed && <span>Settings</span>}</button>
+          <button type="button" className={`sidebar-library-button ${chatLibraryMode === "search" ? "active" : ""}`} title="Search chats" aria-label="Search chats" aria-expanded={chatLibraryMode === "search"} aria-controls="chat-library-center" disabled={!runtimeReady || pendingMemSwitch} onClick={() => { setShowAppearance(false); setShowToolRepo(false); setShowRoles(false); setChatLibraryMode((current) => current === "search" ? null : "search"); }}><Search size={17} aria-hidden="true"/>{!leftSidebarCollapsed && <span>Search</span>}</button>
+          <button type="button" className={`sidebar-library-button ${chatLibraryMode === "favorites" ? "active" : ""}`} title="Favorite answers" aria-label="Favorite answers" aria-expanded={chatLibraryMode === "favorites"} aria-controls="chat-library-center" disabled={!runtimeReady || pendingMemSwitch} onClick={() => { setShowAppearance(false); setShowToolRepo(false); setShowRoles(false); const opening = chatLibraryMode !== "favorites"; setChatLibraryMode(opening ? "favorites" : null); if (opening) { setFavoritesLoading(true); if (!sendCommand({ type: "favorites_list" })) setFavoritesLoading(false); } }}><Star size={17} aria-hidden="true"/>{!leftSidebarCollapsed && <span>Favorite</span>}</button>
+          <button type="button" ref={settingsButtonRef} className={`sidebar-settings-button ${showAppearance ? "active" : ""}`} title={settingsTitle} aria-label={settingsTitle} aria-expanded={showAppearance} aria-controls="settings-center" disabled={!runtimeReady || pendingMemSwitch} onClick={() => { setChatLibraryMode(null); setSettingsSection("appearance"); setShowAppearance(true); }}><Settings size={17} aria-hidden="true"/>{!leftSidebarCollapsed && <span>Settings</span>}</button>
         </div>
       </aside>
       <main className="chat-shell">
@@ -1726,6 +1823,9 @@ function TimemApp() {
           pendingToolGenTurnIds={activePendingToolGenTurnIds}
           toolGenSessionBusy={activeToolGenBusy}
           onRequestToolGen={toolGenEnabled ? requestActiveToolGen : undefined}
+          favoriteBySource={new Map(favorites.map((favorite) => [favorite.source_key, favorite]))}
+          pendingFavoriteSourceKeys={pendingFavoriteSourceKeys}
+          onToggleFavorite={toggleFavorite}
           onRequestMessageDelete={setDeleteMessageCandidate}
           onCancel={cancelActiveTurn}
           onUpload={uploadFile}
@@ -1788,6 +1888,25 @@ function TimemApp() {
           setSessions((current) => current.map((session) => ({ ...session, roles: visibleLibrary.roles })));
           return false;
         }}
+      />}
+      {chatLibraryMode && <ChatLibraryPanel
+        panelRef={chatLibraryPanelRef}
+        mode={chatLibraryMode}
+        query={chatSearchQuery}
+        scope={chatSearchScope}
+        activeSession={activeSession}
+        results={chatSearchResults}
+        favorites={favorites}
+        searchPending={chatSearchPending}
+        favoritesLoading={favoritesLoading}
+        onModeChange={(mode) => { setChatLibraryMode(mode); if (mode === "favorites") { setFavoritesLoading(true); if (!sendCommand({ type: "favorites_list" })) setFavoritesLoading(false); } }}
+        onQueryChange={setChatSearchQuery}
+        onScopeChange={setChatSearchScope}
+        onSearch={() => { const query = chatSearchQuery.trim(); if (!query) { setChatSearchResults([]); return; } setChatSearchPending(true); if (!sendCommand({ type: "chat_search", query, session_id: chatSearchScope === "session" ? activeSession?.session_id : undefined, limit: 100 })) setChatSearchPending(false); }}
+        pendingFavoriteSourceKeys={pendingFavoriteSourceKeys}
+        onToggleFavorite={toggleFavorite}
+        onOpen={(sessionId, turnId) => { setActiveSessionId(sessionId); closeMobileSidebar(false); closeChatLibrary(); window.setTimeout(() => document.querySelector<HTMLElement>(`[data-turn-id="${globalThis.CSS.escape(turnId)}"]`)?.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "center" }), 80); }}
+        onClose={closeChatLibrary}
       />}
       {toolGenEnabled && showToolRepo && <button type="button" className="side-panel-backdrop" aria-label="Close ToolRepo" onClick={closeToolRepoPanel}/>}
       {toolGenEnabled && showToolRepo && <ToolRepoPanel
@@ -1858,6 +1977,20 @@ function TimemApp() {
           reportUiError("Delete session failed", "Reconnect to Timem Web before deleting this session.", sessionId);
         }
       }} />}
+      {favoriteCapacityNotice && <FavoriteCapacityDialog
+        notice={favoriteCapacityNotice}
+        currentCapacity={favoriteCapacity}
+        updating={favoriteCapacityUpdating}
+        onClose={() => { if (!favoriteCapacityUpdating) setFavoriteCapacityNotice(null); }}
+        onSelectLimit={(maxBytes) => {
+          if (favoriteCapacityUpdating) return;
+          setFavoriteCapacityUpdating(true);
+          if (!sendCommand({ type: "favorite_capacity_update", max_bytes: maxBytes })) {
+            setFavoriteCapacityUpdating(false);
+            reportUiError("无法调整收藏夹空间", "请检查连接后重试。", "system");
+          }
+        }}
+      />}
       {deleteMessageCandidate && <ChatMessageDeleteDialog
         candidate={deleteMessageCandidate}
         pending={pendingDeleteMessageKeys.has(chatMessageDeleteKey(deleteMessageCandidate))}
@@ -2124,6 +2257,91 @@ function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOp
   </>}</aside>;
 }
 
+function ChatLibraryPanel({ panelRef, mode, query, scope, activeSession, results, favorites, searchPending, favoritesLoading, pendingFavoriteSourceKeys, onModeChange, onQueryChange, onScopeChange, onSearch, onToggleFavorite, onOpen, onClose }: {
+  panelRef: React.RefObject<HTMLElement | null>;
+  mode: "search" | "favorites";
+  query: string;
+  scope: "all" | "session";
+  activeSession: Session | undefined;
+  results: ChatSearchHit[];
+  favorites: ChatFavorite[];
+  searchPending: boolean;
+  favoritesLoading: boolean;
+  pendingFavoriteSourceKeys: ReadonlySet<string>;
+  onModeChange: (mode: "search" | "favorites") => void;
+  onQueryChange: (query: string) => void;
+  onScopeChange: (scope: "all" | "session") => void;
+  onSearch: () => void;
+  onToggleFavorite: (sessionId: string, turnId: string, favoriteId?: string) => boolean;
+  onOpen: (sessionId: string, turnId: string) => void;
+  onClose: () => void;
+}) {
+  const items = mode === "search"
+    ? results.map((hit) => ({
+        id: hit.source_key,
+        sessionId: hit.session_id,
+        sessionName: hit.session_display_name,
+        turnId: hit.turn_id,
+        title: hit.role === "assistant" ? "Assistant answer" : "User message",
+        content: hit.content,
+        createdAt: hit.created_at_ms,
+        role: hit.role,
+        favoriteId: hit.favorite_id ?? undefined,
+      }))
+    : favorites.map((favorite) => ({
+        id: favorite.id,
+        sessionId: favorite.session_id,
+        sessionName: favorite.session_display_name,
+        turnId: favorite.turn_id,
+        title: favorite.title,
+        content: favorite.content_snapshot,
+        createdAt: favorite.source_created_at_ms,
+        role: "assistant" as const,
+        favoriteId: favorite.id,
+      }));
+  const loading = mode === "search" ? searchPending : favoritesLoading;
+  const emptyLabel = mode === "search"
+    ? query.trim() ? "No matching messages." : "Search across user messages and final answers."
+    : "Favorite final answers to keep them close.";
+  return <div className="chat-library-center-backdrop" role="presentation" onClick={onClose}>
+    <section id="chat-library-center" ref={panelRef} className="chat-library-center" role="dialog" aria-modal="true" aria-label="Chat library" tabIndex={-1} onClick={(event) => event.stopPropagation()}>
+    <header className="chat-library-header">
+      <div><span className="eyebrow">CHAT LIBRARY</span><strong>{mode === "search" ? "Search" : "Favorite"}</strong></div>
+      <button type="button" className="icon-button" title="Close chat library" aria-label="Close chat library" onClick={onClose}><X size={16}/></button>
+    </header>
+    <nav className="chat-library-tabs" aria-label="Chat library views">
+      <button type="button" className={mode === "search" ? "active" : ""} aria-current={mode === "search" ? "page" : undefined} onClick={() => onModeChange("search")}><Search size={14}/><span>Search</span></button>
+      <button type="button" className={mode === "favorites" ? "active" : ""} aria-current={mode === "favorites" ? "page" : undefined} onClick={() => onModeChange("favorites")}><Star size={14}/><span>Favorite</span><small>{favorites.length}</small></button>
+    </nav>
+    {mode === "search" && <form className="chat-library-search" onSubmit={(event) => { event.preventDefault(); onSearch(); }}>
+      <label><Search size={14}/><input autoFocus value={query} maxLength={256} placeholder="Keywords" aria-label="Search chat history" onChange={(event) => onQueryChange(event.target.value)}/>{query && <button type="button" title="Clear search" aria-label="Clear search" onClick={() => onQueryChange("")}><X size={12}/></button>}</label>
+      <div className="chat-library-scope" role="group" aria-label="Search scope">
+        <button type="button" className={scope === "all" ? "active" : ""} aria-pressed={scope === "all"} onClick={() => onScopeChange("all")}>All sessions</button>
+        <button type="button" className={scope === "session" ? "active" : ""} aria-pressed={scope === "session"} disabled={!activeSession} onClick={() => onScopeChange("session")}>Current</button>
+        <button type="submit" className="chat-library-submit" disabled={!query.trim() || searchPending}>{searchPending ? <LoaderCircle size={13}/> : <ArrowDown className="chat-library-submit-arrow" size={13}/>}<span>Search</span></button>
+      </div>
+    </form>}
+    <div className="chat-library-summary"><span>{mode === "search" ? `${items.length} result${items.length === 1 ? "" : "s"}` : `${items.length} saved`}</span>{scope === "session" && mode === "search" && activeSession && <small title={activeSession.display_name}>{activeSession.display_name}</small>}</div>
+    <div className="chat-library-list" aria-busy={loading || undefined}>
+      {loading && items.length === 0 ? <div className="chat-library-empty"><LoaderCircle size={16}/><span>Loading…</span></div> : items.length === 0 ? <div className="chat-library-empty"><span>{emptyLabel}</span></div> : items.map((item) => <article className="chat-library-item" key={item.id}>
+        <button type="button" className="chat-library-item-main" title={`Open ${item.sessionName}`} onClick={() => onOpen(item.sessionId, item.turnId)}>
+          <span className={`chat-library-role ${item.role}`}>{item.role === "assistant" ? <Sparkles size={11}/> : <CornerUpLeft size={11}/>}<b>{item.title}</b></span>
+          <p>{item.content}</p>
+          <small><span title={item.sessionName}>{item.sessionName}</span><time dateTime={new Date(item.createdAt).toISOString()}>{formatChatLibraryDate(item.createdAt)}</time></small>
+        </button>
+        {item.role === "assistant" && <button type="button" className={`chat-library-star ${item.favoriteId || pendingFavoriteSourceKeys.has(`legacy:${item.sessionId}:${item.turnId}:assistant:0`) ? "active" : ""} ${pendingFavoriteSourceKeys.has(`legacy:${item.sessionId}:${item.turnId}:assistant:0`) ? "pending" : ""}`} title={item.favoriteId ? "Remove from favorites" : "Favorite this answer"} aria-label={item.favoriteId ? "Remove from favorites" : "Favorite answer"} aria-pressed={!!item.favoriteId || pendingFavoriteSourceKeys.has(`legacy:${item.sessionId}:${item.turnId}:assistant:0`)} disabled={pendingFavoriteSourceKeys.has(`legacy:${item.sessionId}:${item.turnId}:assistant:0`)} onClick={() => onToggleFavorite(item.sessionId, item.turnId, item.favoriteId)}><Star size={14} fill={item.favoriteId || pendingFavoriteSourceKeys.has(`legacy:${item.sessionId}:${item.turnId}:assistant:0`) ? "currentColor" : "none"}/></button>}
+      </article>)}
+    </div>
+    </section>
+  </div>;
+}
+
+function formatChatLibraryDate(value: number) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString([], { month: "short", day: "numeric", year: date.getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
+}
+
 function ToolRepoPanel({ panelRef, onResizeStart, onClose, session, searchQuery, searchPending, onSearchQueryChange, tools, selectedTool, pendingToolDetailId, pendingToolRenameIds, onSelectTool, onCollapseTool, onRenameTool, onOpenTerminal }: {
   panelRef: MutableRefObject<HTMLElement | null>;
   onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
@@ -2239,7 +2457,7 @@ function ToolRepoPanel({ panelRef, onResizeStart, onClose, session, searchQuery,
 
 const EMPTY_DECISIONS: Decision[] = [];
 
-const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, restartMarkers, decisionsByTurn, sessionInteractionLocked, pendingDecisionKeys, pendingToolGenTurnIds, toolGenSessionBusy, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
+const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, restartMarkers, decisionsByTurn, sessionInteractionLocked, pendingDecisionKeys, pendingToolGenTurnIds, toolGenSessionBusy, favoriteBySource, pendingFavoriteSourceKeys, onToggleFavorite, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
   sessionId: string;
   turns: WebTurn[];
   restartMarkers: ChatMessage[];
@@ -2248,6 +2466,9 @@ const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, restar
   pendingDecisionKeys: Set<string>;
   pendingToolGenTurnIds: Set<string>;
   toolGenSessionBusy: boolean;
+  favoriteBySource: ReadonlyMap<string, ChatFavorite>;
+  pendingFavoriteSourceKeys: ReadonlySet<string>;
+  onToggleFavorite: (sessionId: string, turnId: string, favoriteId?: string) => boolean;
   onDecisionReply: (decision: Decision, reply: "accept" | "decline" | "always_allow") => void;
   onRequestToolGen?: (turnId: string) => void;
   onRequestMessageDelete: (candidate: ChatMessageDeleteCandidate) => void;
@@ -2284,6 +2505,9 @@ const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, restar
       pendingDecisionKeys={pendingDecisionKeys}
       toolGenPending={pendingToolGenTurnIds.has(turn.turn_id)}
       toolGenBlocked={toolGenSessionBusy && !pendingToolGenTurnIds.has(turn.turn_id)}
+      favorite={favoriteBySource.get(`legacy:${sessionId}:${turn.turn_id}:assistant:0`)}
+      favoritePending={pendingFavoriteSourceKeys.has(`legacy:${sessionId}:${turn.turn_id}:assistant:0`)}
+      onToggleFavorite={onToggleFavorite}
       onDecisionReply={onDecisionReply}
       onRequestToolGen={onRequestToolGen}
       onRequestMessageDelete={onRequestMessageDelete}
@@ -2341,7 +2565,7 @@ function SortableQueuedMessage({
   });
 }
 
-function TimemThread({ activeSession, sessions, completedTurnsBySession, commandAcks, onConsumeCommandAcks, reliableStorageScope, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, selectedRoleIds, onRolesConsumed, onLoadMoreHistory, onSend, onSendForSession, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
+function TimemThread({ activeSession, sessions, completedTurnsBySession, commandAcks, onConsumeCommandAcks, reliableStorageScope, sessionIds, sessionInteractionLocked, sessionInteractionLockReason, decisions, fileInput, isCancelling, pendingAttachmentRemoveIds, pendingDecisionKeys, uploadingAttachment, uploadingAttachmentFile, loadingHistory, pendingToolGenTurnIds, toolGenSessionBusy, selectedRoleIds, onRolesConsumed, onLoadMoreHistory, onSend, onSendForSession, onCancel, onUpload, onRemoveAttachment, onDecisionReply, onRequestToolGen, favoriteBySource, pendingFavoriteSourceKeys, onToggleFavorite, onRequestMessageDelete }: {
   activeSession: Session | undefined;
   sessions: Session[];
   completedTurnsBySession: Record<string, { key: string; successful: boolean }>;
@@ -2361,6 +2585,9 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
   loadingHistory: boolean;
   pendingToolGenTurnIds: Set<string>;
   toolGenSessionBusy: boolean;
+  favoriteBySource: ReadonlyMap<string, ChatFavorite>;
+  pendingFavoriteSourceKeys: ReadonlySet<string>;
+  onToggleFavorite: (sessionId: string, turnId: string, favoriteId?: string) => boolean;
   onLoadMoreHistory: (session: Session) => void;
   onSend: (text: string, commandId?: string) => boolean;
   onSendForSession: (sessionId: string, text: string, commandId?: string, attachmentIds?: readonly string[], forceSupplement?: boolean, roleIds?: readonly string[], forceNewTurn?: boolean) => boolean;
@@ -3120,6 +3347,9 @@ const toggleQueuedMessages = () => {
         pendingDecisionKeys={pendingDecisionKeys}
         pendingToolGenTurnIds={pendingToolGenTurnIds}
         toolGenSessionBusy={toolGenSessionBusy}
+        favoriteBySource={favoriteBySource}
+        pendingFavoriteSourceKeys={pendingFavoriteSourceKeys}
+        onToggleFavorite={onToggleFavorite}
         onDecisionReply={onDecisionReply}
         onRequestToolGen={onRequestToolGen}
         onRequestMessageDelete={onRequestMessageDelete}
@@ -3209,12 +3439,15 @@ type TurnInteractionProps = {
   pendingDecisionKeys: Set<string>;
   toolGenPending: boolean;
   toolGenBlocked: boolean;
+  favorite?: ChatFavorite;
+  favoritePending: boolean;
+  onToggleFavorite: (sessionId: string, turnId: string, favoriteId?: string) => boolean;
   onDecisionReply: (decision: Decision, reply: "accept" | "decline" | "always_allow") => void;
   onRequestToolGen?: (turnId: string) => void;
   onRequestMessageDelete: (candidate: ChatMessageDeleteCandidate) => void;
 };
 
-const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked, pendingDecisionKeys, toolGenPending, toolGenBlocked, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: TurnInteractionProps) {
+const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisions, sessionInteractionLocked, pendingDecisionKeys, toolGenPending, toolGenBlocked, favorite, favoritePending, onToggleFavorite, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: TurnInteractionProps) {
   const workScrollRef = useRef<HTMLDivElement | null>(null);
  const workContentRef = useRef<HTMLDivElement | null>(null);
  const followLatest = useRef(true);
@@ -3371,7 +3604,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
       </div>}
     </section>}
     {persistentToolGenItems.length > 0 && <div className="turn-persistent-toolgen" aria-label="ToolGen result">{persistentToolGenItems.map(({ key, activity }) => activity ? <ActivityView key={key} activity={activity}/> : null)}</div>}
-    {(turn.sub_answers.length > 0 || turn.final_answer) && <TurnAnswerDelivery turn={turn} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={isToolGenTurn || !onRequestToolGen ? undefined : () => onRequestToolGen(turn.turn_id)} onDelete={turn.final_answer && canDeleteConversationContent ? () => onRequestMessageDelete({ sessionId, turnId: turn.turn_id, role: "assistant", roleIndex: 0, preview: turn.final_answer ?? "" }) : undefined}/>}
+    {(turn.sub_answers.length > 0 || turn.final_answer) && <TurnAnswerDelivery turn={turn} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={isToolGenTurn || !onRequestToolGen ? undefined : () => onRequestToolGen(turn.turn_id)} favorite={favorite} favoritePending={favoritePending} onToggleFavorite={() => onToggleFavorite(sessionId, turn.turn_id, favorite?.id)} onDelete={turn.final_answer && canDeleteConversationContent ? () => onRequestMessageDelete({ sessionId, turnId: turn.turn_id, role: "assistant", roleIndex: 0, preview: turn.final_answer ?? "" }) : undefined}/>}
     {!turn.final_answer && turn.sub_answers.length === 0 && turn.completion && <section className="turn-completion-only"><CompletionCard completion={turn.completion}/></section>}
   </article>;
 }, areTurnInteractionPropsEqual);
@@ -3383,6 +3616,9 @@ function areTurnInteractionPropsEqual(previous: TurnInteractionProps, next: Turn
     || previous.sessionInteractionLocked !== next.sessionInteractionLocked
     || previous.toolGenPending !== next.toolGenPending
     || previous.toolGenBlocked !== next.toolGenBlocked
+    || previous.favorite?.id !== next.favorite?.id
+    || previous.favoritePending !== next.favoritePending
+    || previous.onToggleFavorite !== next.onToggleFavorite
     || previous.onDecisionReply !== next.onDecisionReply
     || previous.onRequestToolGen !== next.onRequestToolGen
     || previous.onRequestMessageDelete !== next.onRequestMessageDelete
@@ -3395,7 +3631,7 @@ function areTurnInteractionPropsEqual(previous: TurnInteractionProps, next: Turn
   });
 }
 
-function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, onToolGen, onDelete }: { turn: WebTurn; toolGenPending: boolean; toolGenBlocked: boolean; onToolGen?: () => void; onDelete?: () => void }) {
+function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, favorite, favoritePending, onToggleFavorite, onToolGen, onDelete }: { turn: WebTurn; toolGenPending: boolean; toolGenBlocked: boolean; favorite?: ChatFavorite; favoritePending: boolean; onToggleFavorite: () => boolean; onToolGen?: () => void; onDelete?: () => void }) {
   const hasFinal = !!turn.final_answer;
   const hasInterim = turn.sub_answers.length > 0;
   const showFinalTab = hasFinal || hasInterim;
@@ -3425,7 +3661,7 @@ function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, onToolGen, o
   const selected = availableKeys.includes(selectedKey) ? selectedKey : availableKeys[0];
   if (!selected) return null;
   if (availableKeys.length === 1 && selected === "final" && turn.final_answer) {
-    return <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen} onDelete={onDelete}/>;
+    return <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} favorite={favorite} favoritePending={favoritePending} onToggleFavorite={onToggleFavorite} onToolGen={onToolGen} onDelete={onDelete}/>;
   }
   return <section className="turn-answer-delivery" onPointerDown={markInteracting} onFocus={markInteracting} onCopy={markInteracting}>
     {hasInterim && <div className="turn-answer-tabs" role="tablist" aria-label="Turn answers">
@@ -3436,6 +3672,7 @@ function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, onToolGen, o
       {showFinalTab && <div className={`turn-answer-view ${selected === "final" ? "selected" : "inactive"}`} aria-hidden={selected !== "final"}>
         {hasFinal && turn.final_answer ? <>
           <FinalAnswerContent text={turn.final_answer}/>
+          <button type="button" className={`final-favorite standalone ${favorite || favoritePending ? "active" : ""} ${favoritePending ? "pending" : ""}`} title={favoritePending ? "Saving favorite" : favorite ? "Remove from favorites" : "Favorite this answer"} aria-label={favoritePending ? "Saving favorite" : favorite ? "Remove answer from favorites" : "Favorite answer"} aria-pressed={!!favorite || favoritePending} disabled={favoritePending} onClick={onToggleFavorite}><Star size={13} fill={favorite || favoritePending ? "currentColor" : "none"}/></button>
           {turn.completion ? <CompletionCard completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen}/> : null}
         </> : <div className="turn-final-placeholder" role="status" aria-live="polite">{turn.state === "working" ? "Still working ..." : "No final answer was produced."}</div>}
       </div>}
@@ -3449,13 +3686,14 @@ function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, onToolGen, o
   </section>;
 }
 
-function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked, onToolGen, onDelete }: { text: string; completion: WebTurn["completion"]; toolGenPending: boolean; toolGenBlocked: boolean; onToolGen?: () => void; onDelete?: () => void }) {
+function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked, favorite, favoritePending, onToggleFavorite, onToolGen, onDelete }: { text: string; completion: WebTurn["completion"]; toolGenPending: boolean; toolGenBlocked: boolean; favorite?: ChatFavorite; favoritePending: boolean; onToggleFavorite: () => boolean; onToolGen?: () => void; onDelete?: () => void }) {
   const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(text, {
     idle: "Copy answer",
     copied: "Answer copied",
     failed: "Copy answer failed",
   });
   const answerActions = <div className="final-answer-actions">
+    <button type="button" className={`final-favorite ${favorite || favoritePending ? "active" : ""} ${favoritePending ? "pending" : ""}`} title={favoritePending ? "Saving favorite" : favorite ? "Remove from favorites" : "Favorite this answer"} aria-label={favoritePending ? "Saving favorite" : favorite ? "Remove answer from favorites" : "Favorite answer"} aria-pressed={!!favorite || favoritePending} disabled={favoritePending} onClick={onToggleFavorite}><Star size={13} fill={favorite || favoritePending ? "currentColor" : "none"}/></button>
     <button type="button" className={`final-copy ${copyClass}`} title={copyLabel} aria-label={copyLabel} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={13}/> : <Copy size={13}/>}</button>
     {onDelete && <button type="button" className="chat-message-delete assistant-message-delete" title="Delete this answer from the conversation and raw chat log" aria-label="Delete assistant answer" onClick={onDelete}><Trash2 size={13}/></button>}
   </div>;
@@ -4318,6 +4556,54 @@ const SESSION_RUNTIME_FIELDS = [
   ["TIMEM_REASONING_EFFORT", "Reasoning effort", "text"],
   ["TIMEM_STREAM", "Stream response", "boolean"],
 ] as const;
+
+const FAVORITE_CAPACITY_OPTIONS = [
+  { label: "256 MB", bytes: 256 * 1024 * 1024 },
+  { label: "1 GB", bytes: 1024 * 1024 * 1024 },
+  { label: "不限", bytes: null },
+] as const;
+
+function FavoriteCapacityDialog({ notice, currentCapacity, updating, onClose, onSelectLimit }: {
+  notice: { capacity: ChatLibraryCapacity; full: boolean };
+  currentCapacity: ChatLibraryCapacity;
+  updating: boolean;
+  onClose: () => void;
+  onSelectLimit: (maxBytes: number | null) => void;
+}) {
+  const capacity = notice.capacity;
+  const percent = capacity.used_percent ?? 0;
+  const limitLabel = formatFavoriteCapacityLimit(capacity.limit_bytes);
+  const title = notice.full ? "收藏夹已满" : "收藏夹空间快满了";
+  const message = notice.full
+    ? `这条回复还没有收藏。当前收藏夹上限为 ${limitLabel}，已使用 ${percent}%。请扩大空间或删除一些收藏后再试。`
+    : `这条回复已收藏。当前收藏夹上限为 ${limitLabel}，已使用 ${percent}%。建议现在扩大空间，或删除不再需要的收藏。`;
+  return <div className="modal-backdrop favorite-capacity-backdrop" role="presentation" onClick={() => { if (!updating) onClose(); }}>
+    <section className="decision-modal favorite-capacity-dialog" role="dialog" aria-modal="true" aria-labelledby="favorite-capacity-title" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape" && !updating) { event.preventDefault(); onClose(); } }}>
+      <div className="modal-titlebar"><div><span className="eyebrow">收藏夹空间</span><h2 id="favorite-capacity-title"><Star size={19} fill="currentColor"/> {title}</h2></div><button type="button" className="icon-button" title="关闭" aria-label="关闭" disabled={updating} onClick={onClose}><X size={16}/></button></div>
+      <p>{message}</p>
+      <div className="favorite-capacity-meter" aria-label={`收藏夹已使用 ${percent}%`}><span style={{ width: `${Math.min(100, percent)}%` }}/></div>
+      <div className="favorite-capacity-usage"><strong>{percent}%</strong><span>已使用约 {formatFavoriteCapacityUsed(capacity.used_bytes)}</span></div>
+      <fieldset disabled={updating}><legend>扩大收藏夹空间</legend><div className="favorite-capacity-options">{FAVORITE_CAPACITY_OPTIONS.map((option) => {
+        const selected = (currentCapacity.limit_bytes ?? null) === option.bytes;
+        return <button type="button" className={selected ? "selected" : ""} disabled={selected || updating} key={option.label} onClick={() => onSelectLimit(option.bytes)}><span>{option.label}</span>{selected && <small>当前</small>}</button>;
+      })}</div></fieldset>
+      <div className="decision-actions"><button type="button" className="secondary" disabled={updating} onClick={onClose}>{notice.full ? "稍后处理" : "知道了"}</button>{updating && <span className="favorite-capacity-updating" role="status"><LoaderCircle size={14}/>正在调整…</span>}</div>
+    </section>
+  </div>;
+}
+
+function formatFavoriteCapacityLimit(bytes?: number | null) {
+  if (bytes == null) return "不限";
+  return bytes >= 1024 * 1024 * 1024 ? "1 GB" : "256 MB";
+}
+
+function formatFavoriteCapacityUsed(bytes: number) {
+  if (bytes <= 0) return "0 MB";
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1) return `${Math.max(0.1, Math.round(mb * 10) / 10)} MB`;
+  if (mb < 1024) return `${Math.round(mb)} MB`;
+  return `${(mb / 1024).toFixed(1)} GB`;
+}
 
 function RuntimeUnavailableDialog({ detail, onClose }: { detail: string; onClose: () => void }) {
   return <div className="modal-backdrop runtime-unavailable-backdrop" role="presentation">

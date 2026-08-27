@@ -225,6 +225,38 @@ export type MemTemporaryItem = {
   modified_at_ms: number;
 };
 
+export type ChatSearchHit = {
+  source_key: string;
+  session_id: string;
+  session_display_name: string;
+  turn_id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at_ms: number;
+  favorite_id?: string | null;
+};
+
+export type ChatLibraryCapacity = {
+  used_bytes: number;
+  limit_bytes?: number | null;
+  used_percent?: number | null;
+};
+
+export type ChatFavorite = {
+  id: string;
+  source_key: string;
+  session_id: string;
+  session_display_name: string;
+  turn_id: string;
+  content_snapshot: string;
+  title: string;
+  source_created_at_ms: number;
+  created_at_ms: number;
+  updated_at_ms: number;
+  version: number;
+  deleted?: boolean;
+};
+
 export type Snapshot = {
   server: {
     version: string;
@@ -263,6 +295,12 @@ export type WireEvent =
   | { type: "worker_roles_updated"; session_id: string; roles: WorkerRole[] }
   | { type: "worker_role_library_updated"; library: WorkerRoleLibrary; command_id?: string }
   | { type: "chat_message_deleted"; session_id: string; turn_id: string; role: "user" | "assistant"; role_index: number }
+  | { type: "chat_search_result"; query: string; hits: ChatSearchHit[] }
+  | { type: "favorites_list"; favorites: ChatFavorite[]; capacity: ChatLibraryCapacity }
+  | { type: "favorite_created"; favorite: ChatFavorite; capacity: ChatLibraryCapacity; nearing_limit: boolean }
+  | { type: "favorite_capacity_reached"; capacity: ChatLibraryCapacity }
+  | { type: "favorite_capacity_updated"; capacity: ChatLibraryCapacity }
+  | { type: "favorite_deleted"; favorite_id: string }
   | { type: "session_runtime_updated"; session_id: string; runtime_profile: NonNullable<Session["runtime_profile"]> }
   | { type: "session_runtime_config_updated"; session_id: string; key: string; value: string; runtime_profile: NonNullable<Session["runtime_profile"]> }
   | { type: "session_api_key_revealed"; session_id: string; api_key: string }
@@ -300,6 +338,11 @@ export type ClientCommand =
   | { type: "session_stop"; session_id: string }
   | { type: "session_delete"; session_id: string }
   | { type: "chat_message_delete"; session_id: string; turn_id: string; role: "user" | "assistant"; role_index: number }
+  | { type: "chat_search"; query: string; session_id?: string; limit?: number }
+  | { type: "favorites_list" }
+  | { type: "favorite_create"; session_id: string; turn_id: string }
+  | { type: "favorite_delete"; favorite_id: string }
+  | { type: "favorite_capacity_update"; max_bytes?: number | null }
   | { type: "worker_role_create"; session_id: string; role_id?: string; name: string; description: string }
   | { type: "worker_role_update"; session_id: string; role_id: string; name: string; description: string }
   | { type: "worker_role_delete"; session_id: string; role_id: string }
