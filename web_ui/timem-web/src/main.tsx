@@ -521,8 +521,8 @@ function TimemApp() {
     }
   }, [snapshotReady]);
 
-  const toggleFavorite = useCallback((sessionId: string, turnId: string, favoriteId?: string) => {
-    const sourceKey = `legacy:${sessionId}:${turnId}:assistant:0`;
+  const toggleFavorite = useCallback((sessionId: string, turnId: string, favoriteId?: string, sourceKeyOverride?: string) => {
+    const sourceKey = sourceKeyOverride ?? `legacy:${sessionId}:${turnId}:assistant:0`;
     setPendingFavoriteSourceKeys((current) => new Set(current).add(sourceKey));
     const sent = sendCommand(favoriteId
       ? { type: "favorite_delete", favorite_id: favoriteId }
@@ -2257,6 +2257,74 @@ function WorkerRolePanel({ session, library, selectedRoleIds, disabled, mobileOp
   </>}</aside>;
 }
 
+type ChatLibrarySearchItem = {
+  id: string;
+  sessionId: string;
+  sessionName: string;
+  turnId: string;
+  title: string;
+  content: string;
+  createdAt: number;
+  formattedDate: string;
+  role: "user" | "assistant";
+};
+
+type ChatLibraryFavoriteItem = {
+  id: string;
+  sourceKey: string;
+  sessionId: string;
+  sessionName: string;
+  turnId: string;
+  title: string;
+  content: string;
+  createdAt: number;
+  formattedDate: string;
+  favoriteId: string;
+  bytes: number;
+};
+
+const ChatLibrarySearchRow = memo(function ChatLibrarySearchRow({ item, onOpen }: {
+  item: ChatLibrarySearchItem;
+  onOpen: (sessionId: string, turnId: string) => void;
+}) {
+  return <article className="chat-library-search-row">
+    <button type="button" className="chat-library-search-main" title={`Open ${item.sessionName}`} onClick={() => onOpen(item.sessionId, item.turnId)}>
+      <span className={`chat-library-role ${item.role}`}>{item.role === "assistant" ? <Sparkles size={11}/> : <CornerUpLeft size={11}/>}<b>{item.title}</b></span>
+      <p>{item.content}</p>
+      <small><span title={item.sessionName}>{item.sessionName}</span><time dateTime={new Date(item.createdAt).toISOString()}>{item.formattedDate}</time></small>
+    </button>
+  </article>;
+});
+
+const ChatLibraryFavoriteRow = memo(function ChatLibraryFavoriteRow({ item, deleteMode, selected, pending, onOpen, onToggleSelection }: {
+  item: ChatLibraryFavoriteItem;
+  deleteMode: boolean;
+  selected: boolean;
+  pending: boolean;
+  onOpen: (sessionId: string, turnId: string) => void;
+  onToggleSelection: (favoriteId: string) => void;
+}) {
+  return <article className={`chat-library-favorite-row ${deleteMode ? "selecting" : ""} ${selected ? "selected" : ""} ${pending ? "pending" : ""}`}>
+    <button type="button" className="chat-library-favorite-main" disabled={pending} aria-pressed={deleteMode ? selected : undefined} title={deleteMode ? selected ? "Deselect favorite" : "Select favorite" : `Open ${item.sessionName}`} onClick={() => deleteMode ? onToggleSelection(item.id) : onOpen(item.sessionId, item.turnId)}>
+      {deleteMode && <span className="chat-library-favorite-check" aria-hidden="true">{selected && <Check size={13} strokeWidth={3}/>}</span>}
+      <span className="chat-library-favorite-copy"><strong>{item.title}</strong><p>{item.content}</p><small><span title={item.sessionName}>{item.sessionName}</span><time dateTime={new Date(item.createdAt).toISOString()}>{item.formattedDate}</time></small></span>
+      <span className="chat-library-favorite-size">{formatBytes(item.bytes)}</span>
+    </button>
+  </article>;
+});
+
+const CHAT_LIBRARY_INITIAL_ROWS = 40;
+const CHAT_LIBRARY_MORE_ROWS = 40;
+
+function utf8ByteLength(value: string) {
+  let bytes = 0;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    bytes += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+  }
+  return bytes;
+}
+
 function ChatLibraryPanel({ panelRef, mode, query, scope, activeSession, results, favorites, searchPending, favoritesLoading, pendingFavoriteSourceKeys, onModeChange, onQueryChange, onScopeChange, onSearch, onToggleFavorite, onOpen, onClose }: {
   panelRef: React.RefObject<HTMLElement | null>;
   mode: "search" | "favorites";
@@ -2272,37 +2340,94 @@ function ChatLibraryPanel({ panelRef, mode, query, scope, activeSession, results
   onQueryChange: (query: string) => void;
   onScopeChange: (scope: "all" | "session") => void;
   onSearch: () => void;
-  onToggleFavorite: (sessionId: string, turnId: string, favoriteId?: string) => boolean;
+  onToggleFavorite: (sessionId: string, turnId: string, favoriteId?: string, sourceKey?: string) => boolean;
   onOpen: (sessionId: string, turnId: string) => void;
   onClose: () => void;
 }) {
-  const items = mode === "search"
-    ? results.map((hit) => ({
-        id: hit.source_key,
-        sessionId: hit.session_id,
-        sessionName: hit.session_display_name,
-        turnId: hit.turn_id,
-        title: hit.role === "assistant" ? "Assistant answer" : "User message",
-        content: hit.content,
-        createdAt: hit.created_at_ms,
-        role: hit.role,
-        favoriteId: hit.favorite_id ?? undefined,
-      }))
-    : favorites.map((favorite) => ({
-        id: favorite.id,
-        sessionId: favorite.session_id,
-        sessionName: favorite.session_display_name,
-        turnId: favorite.turn_id,
-        title: favorite.title,
-        content: favorite.content_snapshot,
-        createdAt: favorite.source_created_at_ms,
-        role: "assistant" as const,
-        favoriteId: favorite.id,
-      }));
+  const [favoriteSort, setFavoriteSort] = useState<"time-desc" | "time-asc" | "size-desc" | "size-asc">("time-desc");
+  const [favoriteDeleteMode, setFavoriteDeleteMode] = useState(false);
+  const [selectedFavoriteIds, setSelectedFavoriteIds] = useState<Set<string>>(new Set());
+  const [visibleSearchCount, setVisibleSearchCount] = useState(CHAT_LIBRARY_INITIAL_ROWS);
+  const [visibleFavoriteCount, setVisibleFavoriteCount] = useState(CHAT_LIBRARY_INITIAL_ROWS);
+  const onOpenRef = useRef(onOpen);
+  onOpenRef.current = onOpen;
+  const openLibraryItem = useCallback((sessionId: string, turnId: string) => onOpenRef.current(sessionId, turnId), []);
+  useEffect(() => {
+    if (mode !== "favorites") {
+      setFavoriteDeleteMode(false);
+      setSelectedFavoriteIds(new Set());
+    }
+  }, [mode]);
+  useEffect(() => {
+    setVisibleSearchCount(CHAT_LIBRARY_INITIAL_ROWS);
+  }, [results, mode]);
+  useEffect(() => {
+    setVisibleFavoriteCount(CHAT_LIBRARY_INITIAL_ROWS);
+  }, [favorites, favoriteSort, mode]);
+  useEffect(() => {
+    const available = new Set(favorites.map((favorite) => favorite.id));
+    setSelectedFavoriteIds((current) => {
+      const next = new Set([...current].filter((id) => available.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [favorites]);
+
+  const searchItems = useMemo<ChatLibrarySearchItem[]>(() => results.map((hit) => ({
+    id: hit.source_key,
+    sessionId: hit.session_id,
+    sessionName: hit.session_display_name,
+    turnId: hit.turn_id,
+    title: hit.role === "assistant" ? "Assistant answer" : "User message",
+    content: hit.content,
+    createdAt: hit.created_at_ms,
+    formattedDate: formatChatLibraryDate(hit.created_at_ms),
+    role: hit.role,
+  })), [results]);
+  const visibleSearchItems = searchItems.slice(0, visibleSearchCount);
+  const favoriteItems = useMemo<ChatLibraryFavoriteItem[]>(() => favorites.map((favorite) => ({
+    id: favorite.id,
+    sourceKey: favorite.source_key,
+    sessionId: favorite.session_id,
+    sessionName: favorite.session_display_name,
+    turnId: favorite.turn_id,
+    title: favorite.title,
+    content: favorite.content_snapshot,
+    createdAt: favorite.source_created_at_ms,
+    formattedDate: formatChatLibraryDate(favorite.source_created_at_ms),
+    favoriteId: favorite.id,
+    bytes: utf8ByteLength(favorite.content_snapshot),
+  })).sort((left, right) => {
+    if (favoriteSort === "time-desc") return right.createdAt - left.createdAt;
+    if (favoriteSort === "time-asc") return left.createdAt - right.createdAt;
+    if (favoriteSort === "size-desc") return right.bytes - left.bytes || right.createdAt - left.createdAt;
+    return left.bytes - right.bytes || right.createdAt - left.createdAt;
+  }), [favorites, favoriteSort]);
+  const visibleFavoriteItems = favoriteItems.slice(0, visibleFavoriteCount);
+  const itemCount = mode === "search" ? searchItems.length : favoriteItems.length;
   const loading = mode === "search" ? searchPending : favoritesLoading;
   const emptyLabel = mode === "search"
     ? query.trim() ? "No matching messages." : "Search across user messages and final answers."
     : "Favorite final answers to keep them close.";
+  const toggleFavoriteSelection = useCallback((favoriteId: string) => setSelectedFavoriteIds((current) => {
+    const next = new Set(current);
+    if (next.has(favoriteId)) next.delete(favoriteId); else next.add(favoriteId);
+    return next;
+  }), []);
+  const cancelFavoriteDelete = () => {
+    setFavoriteDeleteMode(false);
+    setSelectedFavoriteIds(new Set());
+  };
+  const deleteSelectedFavorites = () => {
+    const selected = favoriteItems.filter((item) => selectedFavoriteIds.has(item.id));
+    if (selected.length === 0) return;
+    const confirmed = window.confirm(`Remove ${selected.length} selected favorite${selected.length === 1 ? "" : "s"}?`);
+    if (!confirmed) return;
+    let allQueued = true;
+    for (const item of selected) {
+      if (!onToggleFavorite(item.sessionId, item.turnId, item.favoriteId, item.sourceKey)) allQueued = false;
+    }
+    if (allQueued) cancelFavoriteDelete();
+  };
   return <div className="chat-library-center-backdrop" role="presentation" onClick={onClose}>
     <section id="chat-library-center" ref={panelRef} className="chat-library-center" role="dialog" aria-modal="true" aria-label="Chat library" tabIndex={-1} onClick={(event) => event.stopPropagation()}>
     <header className="chat-library-header">
@@ -2321,17 +2446,22 @@ function ChatLibraryPanel({ panelRef, mode, query, scope, activeSession, results
         <button type="submit" className="chat-library-submit" disabled={!query.trim() || searchPending}>{searchPending ? <LoaderCircle size={13}/> : <ArrowDown className="chat-library-submit-arrow" size={13}/>}<span>Search</span></button>
       </div>
     </form>}
-    <div className="chat-library-summary"><span>{mode === "search" ? `${items.length} result${items.length === 1 ? "" : "s"}` : `${items.length} saved`}</span>{scope === "session" && mode === "search" && activeSession && <small title={activeSession.display_name}>{activeSession.display_name}</small>}</div>
-    <div className="chat-library-list" aria-busy={loading || undefined}>
-      {loading && items.length === 0 ? <div className="chat-library-empty"><LoaderCircle size={16}/><span>Loading…</span></div> : items.length === 0 ? <div className="chat-library-empty"><span>{emptyLabel}</span></div> : items.map((item) => <article className="chat-library-item" key={item.id}>
-        <button type="button" className="chat-library-item-main" title={`Open ${item.sessionName}`} onClick={() => onOpen(item.sessionId, item.turnId)}>
-          <span className={`chat-library-role ${item.role}`}>{item.role === "assistant" ? <Sparkles size={11}/> : <CornerUpLeft size={11}/>}<b>{item.title}</b></span>
-          <p>{item.content}</p>
-          <small><span title={item.sessionName}>{item.sessionName}</span><time dateTime={new Date(item.createdAt).toISOString()}>{formatChatLibraryDate(item.createdAt)}</time></small>
-        </button>
-        {item.role === "assistant" && <button type="button" className={`chat-library-star ${item.favoriteId || pendingFavoriteSourceKeys.has(`legacy:${item.sessionId}:${item.turnId}:assistant:0`) ? "active" : ""} ${pendingFavoriteSourceKeys.has(`legacy:${item.sessionId}:${item.turnId}:assistant:0`) ? "pending" : ""}`} title={item.favoriteId ? "Remove from favorites" : "Favorite this answer"} aria-label={item.favoriteId ? "Remove from favorites" : "Favorite answer"} aria-pressed={!!item.favoriteId || pendingFavoriteSourceKeys.has(`legacy:${item.sessionId}:${item.turnId}:assistant:0`)} disabled={pendingFavoriteSourceKeys.has(`legacy:${item.sessionId}:${item.turnId}:assistant:0`)} onClick={() => onToggleFavorite(item.sessionId, item.turnId, item.favoriteId)}><Star size={14} fill={item.favoriteId || pendingFavoriteSourceKeys.has(`legacy:${item.sessionId}:${item.turnId}:assistant:0`) ? "currentColor" : "none"}/></button>}
-      </article>)}
+    <div className={`chat-library-summary ${mode === "favorites" ? "favorites" : ""}`}>
+      <span>{mode === "search" ? `${itemCount} result${itemCount === 1 ? "" : "s"}` : `${itemCount} saved`}</span>
+      {scope === "session" && mode === "search" && activeSession && <small title={activeSession.display_name}>{activeSession.display_name}</small>}
+      {mode === "favorites" && <div className="chat-library-favorite-tools">
+        {!favoriteDeleteMode && <label>Sort <select aria-label="Sort favorites" value={favoriteSort} onChange={(event) => setFavoriteSort(event.target.value as typeof favoriteSort)}><option value="time-desc">Newest</option><option value="time-asc">Oldest</option><option value="size-desc">Largest</option><option value="size-asc">Smallest</option></select></label>}
+        {favoriteDeleteMode && <button type="button" className="chat-library-delete-cancel" onClick={cancelFavoriteDelete}>Cancel</button>}
+        <button type="button" className={`chat-library-delete ${favoriteDeleteMode ? "confirm" : ""}`} disabled={favoriteItems.length === 0 || (favoriteDeleteMode && selectedFavoriteIds.size === 0)} onClick={() => favoriteDeleteMode ? deleteSelectedFavorites() : setFavoriteDeleteMode(true)}>{favoriteDeleteMode ? <><Trash2 size={12}/> Delete {selectedFavoriteIds.size}</> : <><Trash2 size={12}/> Delete</>}</button>
+      </div>}
     </div>
+    {mode === "search" ? <div className="chat-library-list search-results" aria-busy={loading || undefined}>
+      {loading && searchItems.length === 0 ? <div className="chat-library-empty"><LoaderCircle size={16}/><span>Loading…</span></div> : searchItems.length === 0 ? <div className="chat-library-empty"><span>{emptyLabel}</span></div> : visibleSearchItems.map((item) => <ChatLibrarySearchRow item={item} onOpen={openLibraryItem} key={item.id}/>)}
+      {visibleSearchCount < searchItems.length && <button type="button" className="chat-library-load-more" onClick={() => setVisibleSearchCount((current) => Math.min(current + CHAT_LIBRARY_MORE_ROWS, searchItems.length))}>Show {Math.min(CHAT_LIBRARY_MORE_ROWS, searchItems.length - visibleSearchCount)} more</button>}
+    </div> : <div className={`chat-library-list favorites ${favoriteDeleteMode ? "selecting" : ""}`} aria-busy={loading || undefined}>
+      {loading && favoriteItems.length === 0 ? <div className="chat-library-empty"><LoaderCircle size={16}/><span>Loading…</span></div> : favoriteItems.length === 0 ? <div className="chat-library-empty"><span>{emptyLabel}</span></div> : visibleFavoriteItems.map((item) => <ChatLibraryFavoriteRow item={item} deleteMode={favoriteDeleteMode} selected={selectedFavoriteIds.has(item.id)} pending={pendingFavoriteSourceKeys.has(item.sourceKey)} onOpen={openLibraryItem} onToggleSelection={toggleFavoriteSelection} key={item.id}/>)}
+      {visibleFavoriteCount < favoriteItems.length && <button type="button" className="chat-library-load-more" onClick={() => setVisibleFavoriteCount((current) => Math.min(current + CHAT_LIBRARY_MORE_ROWS, favoriteItems.length))}>Show {Math.min(CHAT_LIBRARY_MORE_ROWS, favoriteItems.length - visibleFavoriteCount)} more</button>}
+    </div>}
     </section>
   </div>;
 }
@@ -4170,7 +4300,7 @@ function McpEditor({ config, pending, revealPending, revealedSecrets, onReveal, 
       <StructuredKeyValueEditor label="Headers" description={`每个 Header 单独填写；Value 中可使用 ${"${NAME}"} 引用环境变量。`} rows={transport.type === "streamable_http" ? httpHeaderRows : sseHeaderRows} keyLabel="Name" keyPlaceholder="例如：Authorization" valuePlaceholder={`例如：Bearer ${"${MCP_TOKEN}"}`} addLabel="添加 Header" showValues={showSecrets || !draft.id} revealAction={revealAction} onChange={transport.type === "streamable_http" ? setHttpHeaderRows : setSseHeaderRows}/>
     </>}
     <label>Request timeout (ms)<input type="number" min={1} value={draft.request_timeout_ms} onChange={(event) => setDraft({ ...draft, request_timeout_ms: Math.max(1, Number(event.target.value) || 1) })}/></label>
-    <div className="mcp-editor-actions"><button type="button" className="secondary" disabled={pending} onClick={onCancel}>Cancel</button><button type="submit" className="primary" disabled={!valid || pending}>{pending ? <LoaderCircle size={14}/> : <Plug size={14}/>} Save and connect</button></div>
+    <div className="mcp-editor-actions"><button type="button" className="secondary" disabled={pending} onClick={onCancel}>Cancel</button><button type="submit" className={`primary ${pending ? "pending" : ""}`} disabled={!valid || pending}>{pending ? <LoaderCircle size={14}/> : <Plug size={14}/>} Save and connect</button></div>
   </form>;
 }
 
@@ -4246,17 +4376,17 @@ function SettingsCenter(props: SettingsCenterProps) {
   };
   return <div className="settings-center-backdrop" role="presentation" aria-label="Dismiss settings" onClick={closeIfIdle}>
     <section id="settings-center" ref={panelRef} className="settings-center" role="dialog" aria-modal="true" aria-labelledby="settings-center-title" tabIndex={-1} onClick={(event) => event.stopPropagation()}>
-      <header className="settings-center-header"><div><span className="eyebrow">SETTINGS</span><h2 id="settings-center-title">Settings</h2><p>Personalize Timem and manage shared runtime resources.</p><div className="settings-runtime-status" role="status" aria-live="polite" title={connectionLabel}><span className={`connection ${connected ? "online" : "offline"}`}/><span>{connectionLabel}</span></div></div><button type="button" className="icon-button" title="Close settings" aria-label="Close settings" disabled={busy} onClick={closeIfIdle}><X size={17}/></button></header>
+      <header className="settings-center-header"><div><span className="eyebrow">SETTINGS</span><h2 id="settings-center-title">Settings</h2><div className="settings-runtime-status" role="status" aria-live="polite" title={connectionLabel}><span className={`connection ${connected ? "online" : "offline"}`}/><span>{connectionLabel}</span></div></div><button type="button" className="icon-button" title="Close settings" aria-label="Close settings" disabled={busy} onClick={closeIfIdle}><X size={17}/></button></header>
       <div className="settings-center-layout">
         <nav className="settings-center-nav" aria-label="Settings categories">
-          <button type="button" className={section === "appearance" ? "active" : ""} aria-current={section === "appearance" ? "page" : undefined} disabled={switchPending} onClick={() => selectSettingsSection("appearance")}><Palette size={16}/><span><strong>Appearance</strong><small>Theme, fonts, and text size</small></span></button>
-          <button type="button" className={section === "endpoints" ? "active" : ""} aria-current={section === "endpoints" ? "page" : undefined} disabled={switchPending} onClick={() => selectSettingsSection("endpoints")}><Sparkles size={16}/><span><strong>Model endpoints</strong><small>Add, edit, and delete endpoints</small></span></button>
-          <button type="button" className={section === "memory" ? "active" : ""} aria-current={section === "memory" ? "page" : undefined} disabled={switchPending} onClick={() => selectSettingsSection("memory")}><Database size={16}/><span><strong>Memory</strong><small>Retention, temporary data, workspace</small></span></button>
-          <button type="button" className={section === "toolgen" ? "active" : ""} aria-current={section === "toolgen" ? "page" : undefined} disabled={switchPending} onClick={() => selectSettingsSection("toolgen")}><Wrench size={16}/><span><strong>ToolGen <em>Beta</em></strong><small>Generate reusable tools from completed work</small></span></button>
+          <button type="button" className={section === "appearance" ? "active" : ""} aria-current={section === "appearance" ? "page" : undefined} disabled={switchPending} onClick={() => selectSettingsSection("appearance")}><Palette size={16}/><span><strong>Appearance</strong></span></button>
+          <button type="button" className={section === "endpoints" ? "active" : ""} aria-current={section === "endpoints" ? "page" : undefined} disabled={switchPending} onClick={() => selectSettingsSection("endpoints")}><Sparkles size={16}/><span><strong>Model Endpoints</strong></span></button>
+          <button type="button" className={section === "memory" ? "active" : ""} aria-current={section === "memory" ? "page" : undefined} disabled={switchPending} onClick={() => selectSettingsSection("memory")}><Database size={16}/><span><strong>Memory</strong></span></button>
+          <button type="button" className={section === "toolgen" ? "active" : ""} aria-current={section === "toolgen" ? "page" : undefined} disabled={switchPending} onClick={() => selectSettingsSection("toolgen")}><Wrench size={16}/><span><strong>ToolGen</strong></span></button>
         </nav>
         <div className="settings-center-content">
           {section === "appearance" && <section className="settings-pane appearance-settings-pane" aria-labelledby="appearance-settings-title">
-            <div className="settings-pane-heading"><div><h3 id="appearance-settings-title">Appearance</h3><p>These reading preferences are stored in this browser.</p></div><Palette size={19} aria-hidden="true"/></div>
+            <div className="settings-pane-heading"><h3 id="appearance-settings-title">Appearance</h3><Palette size={19} aria-hidden="true"/></div>
             <fieldset><legend>Theme</legend><div className="segmented-control">{(["dark", "light"] as const).map((theme) => <button type="button" title={`Use ${theme} theme`} className={appearance.theme === theme ? "active" : ""} aria-pressed={appearance.theme === theme} key={theme} onClick={() => updateAppearance("theme", theme)}>{theme === "dark" ? "Dark" : "Light"}</button>)}</div></fieldset>
             <fieldset className="appearance-role-fonts"><legend>User</legend><div className="appearance-font-selects"><label><span>汉语字体</span><select value={appearance.userChineseFont} aria-label="User Chinese font" onChange={(event) => updateAppearance("userChineseFont", event.target.value as Appearance["userChineseFont"])}><option value="system">系统</option><option value="heiti">黑体</option><option value="kaiti">楷体</option><option value="songti">宋体</option></select></label><label><span>其他语言字体</span><select value={appearance.userFont} aria-label="User other language font" onChange={(event) => updateAppearance("userFont", event.target.value as Appearance["userFont"])}><option value="system">System</option><option value="serif">Serif</option><option value="mono">Mono</option></select></label></div><label className="appearance-bold-option"><input type="checkbox" checked={appearance.userBold} onChange={(event) => updateAppearance("userBold", event.target.checked)}/><span>粗体</span></label></fieldset>
             <fieldset className="appearance-role-fonts"><legend>Agent</legend><div className="appearance-font-selects"><label><span>汉语字体</span><select value={appearance.agentChineseFont} aria-label="Agent Chinese font" onChange={(event) => updateAppearance("agentChineseFont", event.target.value as Appearance["agentChineseFont"])}><option value="system">系统</option><option value="heiti">黑体</option><option value="kaiti">楷体</option><option value="songti">宋体</option></select></label><label><span>其他语言字体</span><select value={appearance.agentFont} aria-label="Agent other language font" onChange={(event) => updateAppearance("agentFont", event.target.value as Appearance["agentFont"])}><option value="system">System</option><option value="serif">Serif</option><option value="mono">Mono</option></select></label></div><label className="appearance-bold-option"><input type="checkbox" checked={appearance.agentBold} onChange={(event) => updateAppearance("agentBold", event.target.checked)}/><span>粗体</span></label></fieldset>
@@ -4264,12 +4394,12 @@ function SettingsCenter(props: SettingsCenterProps) {
           </section>}
           {section === "endpoints" && <EndpointSettingsPane endpoints={endpoints} endpointEditor={endpointEditor} revealedEndpointApiKeys={revealedEndpointApiKeys} revealedEndpointHeaders={revealedEndpointHeaders} onEdit={onEditEndpoint} onDelete={onDeleteEndpoint} onReveal={onRevealEndpoint} onSave={onSaveEndpoint}/>}
           {section === "toolgen" && <section className="settings-pane toolgen-settings-pane" aria-labelledby="toolgen-settings-title">
-            <div className="settings-pane-heading"><div><h3 id="toolgen-settings-title">ToolGen <span className="settings-beta-badge">Beta</span></h3><p>Control the experimental workflow that turns completed work into reusable tools.</p></div><Wrench size={19} aria-hidden="true"/></div>
+            <div className="settings-pane-heading"><h3 id="toolgen-settings-title">ToolGen</h3><Wrench size={19} aria-hidden="true"/></div>
             <section className="settings-group toolgen-beta-card"><div className="settings-group-heading"><div><strong>Enable ToolGen</strong><p>When enabled, completed answers show a ToolGen action and can start the generation workflow. This preference is stored only in this browser.</p></div><button type="button" role="switch" className="settings-feature-switch" aria-checked={toolGenEnabled} aria-label="Enable ToolGen Beta" disabled={toolGenToggleDisabled} onClick={() => onToolGenEnabledChange(!toolGenEnabled)}><span className="settings-feature-switch-thumb"/></button></div><div className="toolgen-beta-status" role="status" aria-live="polite"><span className={toolGenEnabled ? "enabled" : "disabled"}/><strong>{toolGenEnabled ? "Enabled" : "Disabled by default"}</strong><small>{toolGenToggleDisabled ? "A ToolGen task is active; wait for it to finish before changing this setting." : toolGenEnabled ? "ToolGen actions and generation UI are available." : "ToolGen actions and generation UI are hidden."}</small></div></section>
             <section className="toolgen-beta-note"><TriangleAlert size={16}/><div><strong>Beta capability</strong><p>Generated tools should be reviewed before relying on them in important workflows.</p></div></section>
           </section>}
           {section === "memory" && memoryPage === "overview" && <section className="settings-pane memory-settings-pane" aria-labelledby="memory-settings-title">
-            <div className="settings-pane-heading"><div><h3 id="memory-settings-title">Memory</h3><p>Manage the active MEM and keep its temporary footprint under control.</p></div><Database size={19} aria-hidden="true"/></div>
+            <div className="settings-pane-heading"><h3 id="memory-settings-title">Memory</h3><Database size={19} aria-hidden="true"/></div>
             <section className="memory-identity-card" aria-label="Current MEM">
               <div className="memory-identity-icon" aria-hidden="true"><Database size={20}/></div>
               <div className="memory-identity-copy"><span>Current MEM</span><strong>Active workspace</strong><code title={memPath}>{memPath || "…"}</code></div>
@@ -4317,7 +4447,7 @@ function EndpointSettingsPane({ endpoints, endpointEditor, revealedEndpointApiKe
   if (endpointEditor) return <section className="settings-pane endpoint-settings-pane editing" aria-label="Model endpoint editor"><ModelEndpointEditor endpoint={endpointEditor === "new" ? undefined : endpointEditor} revealedApiKey={endpointEditor === "new" ? "" : revealedEndpointApiKeys[endpointEditor.id]} revealedHeaders={endpointEditor === "new" ? {} : revealedEndpointHeaders[endpointEditor.id]} onClose={() => onEdit(null)} onSave={onSave}/></section>;
   const selected = endpoints.find((endpoint) => endpoint.id === selectedEndpointId);
   return <section className="settings-pane endpoint-settings-pane" aria-labelledby="endpoint-settings-title">
-    <div className="settings-pane-heading"><div><h3 id="endpoint-settings-title">Model endpoints</h3><p>Endpoints are shared by every Session in the current MEM.</p></div><Sparkles size={19} aria-hidden="true"/></div>
+    <div className="settings-pane-heading"><h3 id="endpoint-settings-title">Model Endpoints</h3><Sparkles size={19} aria-hidden="true"/></div>
     <div className="endpoint-settings-toolbar"><span>{endpoints.length} endpoint{endpoints.length === 1 ? "" : "s"}</span><div>{deleteMode && <button type="button" className="secondary compact" onClick={() => { setDeleteMode(false); setSelectedEndpointId(""); }}>Cancel</button>}<button type="button" className={`danger compact ${deleteMode ? "confirm" : ""}`} disabled={endpoints.length === 0 || (deleteMode && !selected)} onClick={() => { if (!deleteMode) { setDeleteMode(true); setSelectedEndpointId(""); } else if (selected) onDelete(selected); }}>{deleteMode ? <Check size={14}/> : <Trash2 size={14}/>} {deleteMode ? "Delete selected" : "Delete"}</button><button type="button" className="primary compact" disabled={deleteMode} onClick={() => onEdit("new")}><Plus size={14}/> Add endpoint</button></div></div>
     <div className="endpoint-settings-list">{endpoints.length === 0 ? <div className="endpoint-empty">No model endpoints yet. Add one to configure model access.</div> : endpoints.map((endpoint) => { const selectedForDelete = selectedEndpointId === endpoint.id; return <div className={`endpoint-settings-row ${deleteMode ? "delete-selecting" : ""} ${selectedForDelete ? "delete-selected" : ""}`} key={endpoint.id}><button type="button" className="endpoint-settings-select" aria-pressed={deleteMode ? selectedForDelete : undefined} onClick={() => { if (deleteMode) setSelectedEndpointId((current) => current === endpoint.id ? "" : endpoint.id); else { onEdit(endpoint); if ((endpoint.api_key_configured || Object.keys(endpoint.http_headers).length > 0) && revealedEndpointApiKeys[endpoint.id] === undefined) onReveal(endpoint.id); } }}><span><strong>{endpoint.name}</strong>{deleteMode && <span className="endpoint-delete-select">{selectedForDelete && <Check size={13}/>}</span>}</span><small>{endpoint.model} · {endpoint.api_protocol} · {endpoint.max_llm_input_tokens / 1_000}K / {endpoint.max_llm_output_tokens / 1_000}K</small><code title={endpoint.base_url}>{endpoint.base_url}</code></button>{!deleteMode && <button type="button" className="endpoint-settings-edit" title={`Edit ${endpoint.name}`} aria-label={`Edit ${endpoint.name}`} onClick={() => { onEdit(endpoint); if ((endpoint.api_key_configured || Object.keys(endpoint.http_headers).length > 0) && revealedEndpointApiKeys[endpoint.id] === undefined) onReveal(endpoint.id); }}><Pencil size={14}/></button>}</div>; })}</div>
   </section>;
