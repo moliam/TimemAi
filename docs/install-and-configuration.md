@@ -64,8 +64,9 @@ Start the installed Web host with one command:
 timem-web
 ```
 
-The authenticated local UI opens without requiring credentials at process
-startup. Click the current model name in the upper-left header and configure
+The loopback-only local UI opens without an access token or model credentials at
+process startup. Only `--public` access requires the token printed in its URL.
+Click the current model name in the upper-left header and configure
 the API key, model, API protocol, Base URL, and token limits for the selected
 Session. Configuration is Session-owned: changing one Session does not change
 another Session's endpoint or model.

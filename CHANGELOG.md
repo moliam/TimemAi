@@ -4,6 +4,21 @@
 
 ### Fixed
 
+- Fixed Web Markdown math normalization so multiline `\[...\]` and custom
+  display formulas remain isolated block-math nodes instead of swallowing the
+  following Markdown, and number-leading inline formulas such as `\(2P\)`
+  are no longer mistaken for currency. Display formulas also receive adaptive
+  vertical breathing room so multiline fractions, boxes, and aligned equations
+  render at their natural height without clipping.
+- Make local `timem-web` launches use only the loopback port without an access token; `--public` continues to require a rotating token for browser, API, upload, and WebSocket access.
+
+- Render Web polling actions as a dedicated `Poll` activity with a clock icon, live `mm:ss` elapsed time, and the polled command on a second line.
+
+- Clarify polling exit-code semantics while preserving the standard Bash result
+  structure: `status` describes the polling lifecycle and `exit_code` is the
+  last `loop_cmd` exit code; a waited task's own exit code must be read from its
+  status file, wait result, or remote API.
+
 - Let non-empty `TIMEM_*` process environment values loaded with `source env`
   override restored Shell Session configuration, while keeping command-line
   options highest priority and retaining cached values when the process
@@ -26,8 +41,11 @@
 - Refined the Web composer and Session navigation: Session names are smaller,
   cwd is shown only below the composer text area, and a subtle divider separates
   the text area from the cwd/actions row.
-- Polished the sidebar brand alignment, made expanded Session worker names use
-  normal weight, and added the shared model glyph to endpoint model summaries.
+- Polished the sidebar brand alignment, moved Session worker disclosure into
+  the left gutter on row hover, and made expanded worker names use a fixed-width
+  hierarchy rail so deep parent/child nesting no longer consumes the name area.
+  Worker labels remain normal weight, and endpoint model summaries use the
+  shared model glyph.
 - Added a centralized `agent_core::os` abstraction with initial macOS and Linux
   implementations for host/version detection, shell paths, default config
   directories, browser and terminal launch commands, and process-group

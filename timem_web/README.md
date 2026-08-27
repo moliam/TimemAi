@@ -14,8 +14,9 @@ cargo run -p timem_web
 
 - Binds only to `127.0.0.1`.
 - Chooses a port in `12345..=23456`; `--port` selects a specific port.
-- Generates a rotating 16-character hexadecimal access token per process for HTTP/WebSocket requests.
-- Opens the authenticated local page when a local graphical session is detected;
+- Local mode needs only the selected loopback port; HTTP/WebSocket requests do not require an access token.
+- `--public` generates a rotating 16-character hexadecimal access token and requires it for browser, API, upload, and WebSocket access.
+- Opens the local page when a local graphical session is detected;
   SSH/headless sessions print the URL without launching a browser.
 - Keeps model calls, prompt building, memory, tools, and response parsing in
   `agent_core`.
