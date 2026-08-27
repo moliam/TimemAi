@@ -4284,7 +4284,8 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 }
 
 /* Search is read-only: it uses the same compact horizontal result language as Favorite. */
-.chat-library-list.search-results { grid-template-columns: minmax(0, 1fr); gap: 7px; }
+.chat-library-list.search-results { display: flex; flex-direction: column; gap: 7px; overflow-y: auto; }
+.chat-library-list.search-results > * { flex: 0 0 auto; }
 .chat-library-search-row { min-width: 0; border-radius: 8px; overflow: hidden; background: #191e1c; box-shadow: 0 4px 13px #0002; transition: background-color .15s, box-shadow .15s; }
 .chat-library-search-row:hover { background: #1d2521; box-shadow: 0 7px 18px #0004; }
 .chat-library-search-main { width: 100%; min-width: 0; display: grid; gap: 6px; border: 0; padding: 12px 14px; background: transparent; color: inherit; text-align: left; }

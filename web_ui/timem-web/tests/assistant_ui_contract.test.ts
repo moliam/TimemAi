@@ -2784,7 +2784,8 @@ describe("chat library modal and favorite management", () => {
     expect(source).toContain('className="chat-library-search-row"');
     expect(source).toContain('className="chat-library-search-main"');
     expect(source).not.toContain('className={`chat-library-star');
-    expect(styles).toContain('.chat-library-list.search-results { grid-template-columns: minmax(0, 1fr);');
+    expect(styles).toContain('.chat-library-list.search-results { display: flex; flex-direction: column; gap: 7px; overflow-y: auto; }');
+    expect(styles).toContain('.chat-library-list.search-results > * { flex: 0 0 auto; }');
     expect(styles).toContain('.chat-library-search-main p { display: -webkit-box;');
     expect(styles).toContain('-webkit-line-clamp: 3;');
   });
