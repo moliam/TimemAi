@@ -232,6 +232,7 @@ export type Snapshot = {
     port: number;
     bind_host: string;
     public_access: boolean;
+    debug_mode: boolean;
     mem: {
       space: string;
       data_dir: string;

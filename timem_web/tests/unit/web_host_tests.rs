@@ -5335,6 +5335,15 @@ fn session_group_delete_persistence_failure_rolls_back_prior_metadata_writes() {
 }
 
 #[test]
+fn snapshot_reports_worker_debug_ui_only_when_debug_store_is_enabled() {
+    let mut state = routing_test_state();
+    assert!(!snapshot_for(&state, TEST_PORT).server.debug_mode);
+
+    state.debug = Some(Arc::new(DebugStore::create().unwrap()));
+    assert!(snapshot_for(&state, TEST_PORT).server.debug_mode);
+}
+
+#[test]
 fn snapshot_reports_the_active_mem_space_and_paths() {
     let state = routing_test_state();
     let snapshot = snapshot_for(&state, TEST_PORT);
