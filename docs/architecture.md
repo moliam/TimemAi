@@ -419,9 +419,26 @@ theme remain local UI state.
 
 Inbound WebSocket events are drained in ordered, frame-budgeted batches so an
 action burst yields to keyboard and scroll frames without dropping events. The
-conversation mounts only a progressive turn window, memoizes that turn subtree
-away from composer keystrokes, and applies browser `content-visibility` only to
-completed offscreen turns. The active working turn remains fully rendered.
+conversation memoizes turn rendering away from composer keystrokes and keeps an
+LRU cache of at most two Session timeline panes. Only the expensive, near-pure
+timeline is cached; the composer, queue dispatcher, upload controls, decisions,
+and other effectful controls remain single-instance and active-Session scoped.
+Inactive panes keep their last visible snapshot so background events cannot
+rebuild hidden Markdown on the current interaction path, then synchronously
+catch up when reactivated. Stable host Session order controls DOM placement while
+LRU order controls eviction, avoiding large subtree moves during A/B switching.
+Completed turns retain layout containment without intrinsic-height estimation.
+The main chat timeline deliberately avoids `content-visibility: auto`: Turn heights
+vary too widely, so substituting an estimate while scrolling changes `scrollHeight`
+and makes the scrollbar thumb and viewport position jump. Navigation invalidations
+from scroll, mutation, resize, and outline changes are coalesced to at most one
+geometry pass per animation frame.
+
+Turn-level dynamic-height virtualization remains the next scale step when cold
+opening a Session with the bounded history page still exceeds the product latency
+budget. It is intentionally separate from Session caching because it changes
+scroll anchoring, history prepend, message navigation, browser find/selection,
+and live-turn height semantics.
 
 The Web session snapshot includes the prompt context's cwd. When Core reports a
 successful prompt-context cwd change, its existing `core.action` finish topic

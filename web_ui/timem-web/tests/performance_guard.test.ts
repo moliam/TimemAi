@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { createFrameEventQueue } from "../src/frame_event_queue";
 import { coalesceActionLifecycle } from "../src/view_model";
+import { reconcileSessionTimelineCache } from "../src/session_timeline_cache";
+import { requestTimelineNavigationWork } from "../src/timeline_navigation_work";
 import type { WebTurnEvent } from "../src/protocol";
 
 const guardEnabled = process.env.TIMEM_PERF_GUARD === "1";
@@ -47,4 +49,31 @@ describe("web performance guard", () => {
     expect(queue.pending()).toBe(0);
     assertUnder("web_frame_queue_50000_events", elapsedMs, 1_500);
   });
+  it("keeps scroll invalidations measurement-free while preserving warm A/B cache reuse", () => {
+    let navigationRequests = 0;
+    let geometryRequests = 0;
+    let layoutRequests = 0;
+    let cache: string[] = [];
+    const started = performance.now();
+    for (let index = 0; index < 50_000; index += 1) {
+      requestTimelineNavigationWork("scroll", {
+        navigation: { request: () => { navigationRequests += 1; } },
+        geometry: { request: () => { geometryRequests += 1; } },
+        layout: { request: () => { layoutRequests += 1; } },
+      });
+      cache = reconcileSessionTimelineCache(
+        cache,
+        index % 2 === 0 ? "session-a" : "session-b",
+        ["session-a", "session-b"],
+        2,
+      );
+    }
+    const elapsedMs = performance.now() - started;
+    expect(navigationRequests).toBe(50_000);
+    expect(geometryRequests).toBe(0);
+    expect(layoutRequests).toBe(0);
+    expect(new Set(cache)).toEqual(new Set(["session-a", "session-b"]));
+    assertUnder("web_scroll_and_warm_switch_50000_cycles", elapsedMs, 1_500);
+  });
+
 });

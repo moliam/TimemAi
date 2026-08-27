@@ -111,8 +111,10 @@ linearization point. The WebSocket integration follows this order:
    reconnect and receive one). There is no persisted event replay cursor.
 
 Capturing the baseline before the snapshot can make a buffered event redundant
-with snapshot state, but cannot omit a post-baseline event. Reducers remain
-idempotent for duplicate envelopes. Sequence allocation and broadcast occur in
+with snapshot state, but cannot omit a post-baseline event. Ordered semantic
+envelopes retain the wire field `event_seq`; reducers classify duplicates and
+gaps from that sequence and remain idempotent for duplicate stable event IDs.
+Sequence allocation and broadcast occur in
 one short mutex critical section, so concurrent publishers cannot expose N+1
 before N. The common connected path performs no semantic-delivery filesystem
 I/O; uncommon reconnect, gap, and lag recovery pay for a full snapshot.

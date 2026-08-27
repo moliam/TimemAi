@@ -301,13 +301,14 @@ describe("assistant-ui thread integration", () => {
   it("keeps previous-message and thread-bottom navigation beside the thread", () => {
     expect(source).toContain('className="turn-user-frame" data-user-message-anchor');
     expect(source).not.toMatch(/className=\{`turn-user-entry \.\{entry\.kind\}`\} data-user-message-anchor/);
+
     expect(source).toContain('className={`user-message-navigation outline-overlap-${userMessageNavigationLayout.overlap}${userMessageNavigationHoverLocked ? " hover-locked" : ""}`}');
     expect(source).toContain('onPointerEnter={lockUserMessageNavigationLayout} onPointerLeave={unlockUserMessageNavigationLayout}');
     expect(source).toContain('title="上一条用户消息" aria-label="上一条用户消息"');
     expect(source).toContain('title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"}');
     expect(source).toContain('disabled={!userMessageNavigation.previous}');
     expect(source).toContain('disabled={!userMessageNavigation.next && !userMessageNavigation.bottom}');
-    expect(source).toContain('const nextUserMessageAvailable = adjacentUserMessageIndex(anchorTops, navigationTop, "next") >= 0;');
+    expect(source).toContain('const nextUserMessageAvailable = adjacentUserMessageIndex(anchorOffsets, navigationTop, "next") >= 0;');
     expect(source).toContain('bottom: !nextUserMessageAvailable && !isNearScrollBottom({');
     expect(source).toContain('if (userMessageNavigation.next) navigateUserMessage("next"); else navigateToThreadBottom();');
     expect(source).toContain('top: viewport.scrollHeight');
@@ -324,6 +325,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('<ChevronUp size={17} aria-hidden="true"/>');
     expect(source).toContain('<ChevronDown size={17} aria-hidden="true"/>');
     expect(source).not.toContain('user-message-navigation-triangle');
+
     expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 6; top: calc(50% + 38px); left: max(10px, calc((100% - 876px) / 2)); display: grid; gap: 7px;');
     expect(source).toContain('markdownFloatingNavigationLayout(');
     expect(source).toContain('outline-overlap-${userMessageNavigationLayout.overlap}');
@@ -1138,6 +1140,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('<FinalAnswerDelivery text={turn.final_answer}');
     expect(source).toContain('<FinalAnswerContent text={text}/>');
     expect(source).toContain('<FinalAnswerContent text={turn.final_answer}/>');
+
     expect(source).toContain('const chatShell = viewport?.closest<HTMLElement>(".chat-shell");');
     expect(source).toContain('const bodyInset = Math.max(0, contentRect.left - viewportRect.left);');
     expect(source).toContain('const nextTop = contentRect.top - viewportRect.top + viewport.scrollTop;');
@@ -1150,6 +1153,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('headingIdPrefix={outline.length >= FINAL_ANSWER_OUTLINE_MIN_SECTIONS ? headingPrefix : undefined}');
     expect(source).toContain('aria-label="Final answer table of contents"');
     expect(source).toContain('const [outlinePlacement, setOutlinePlacement] = useState<"docked" | "overlay">("docked");');
+
     expect(source).not.toContain('const [outlineBoundaryOffset, setOutlineBoundaryOffset] = useState(0);');
     expect(source).toContain('const [outlineGeometry, setOutlineGeometry] = useState({ top: 0, height: 0 });');
     expect(source).toContain('const [outlineCollapsed, setOutlineCollapsed] = useState(false);');
@@ -1165,7 +1169,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('outlineNavigationAnimationRef.current = requestAnimationFrame(animate);');
     expect(source).toContain('if (elapsedMs < FINAL_ANSWER_OUTLINE_SCROLL_DURATION_MS)');
     expect(source).toContain('MARKDOWN_OUTLINE_START_ID');
-    expect(source).toContain('markdownOutlineActiveId(outline, headingTops, threshold)');
+    expect(source).toContain('markdownOutlineActiveId(outline, outlineHeadingOffsetsRef.current, threshold)');
     expect(source).toContain('const navigateToStart = () => {');
     expect(source).toContain('markdownOutlineTargetScrollTop(viewport.scrollTop, root.getBoundingClientRect().top, viewportTop, FINAL_ANSWER_OUTLINE_SCROLL_OFFSET)');
     expect(source).toContain('className={`final-answer-outline-start${activeId === MARKDOWN_OUTLINE_START_ID ? " active" : ""}`}');
@@ -1184,6 +1188,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain('.final-answer-outline-card { position: relative; width: 208px; min-height: 0; max-height: min(64vh, 498px, calc(100vh - 24px)); display: flex; flex-direction: column; overflow: hidden;');
     expect(styles).toContain('transform-origin: left center; animation: final-outline-open');
     expect(styles).toContain('@keyframes final-outline-open { from { opacity: 0; transform: translateX(-12px) scale(.985); } }');
+
     expect(styles).toContain('.final-answer-reading { --final-outline-width: 220px; position: relative; min-width: 0; }');
     expect(styles).toContain('.final-answer-outline { position: absolute; z-index: 5; left: 0; width: var(--final-outline-width);');
     expect(styles).not.toContain('.final-answer-outline::before {');
@@ -2466,7 +2471,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
   it("groups each task into user input, bounded process, and separate final delivery", () => {
     expect(source).toContain('className="turn-user-frame"');
     expect(source).toContain('className={`turn-assistant-frame ${turn.state} ${workStreamVisible ? "" : "collapsed-work"}`}');
-    expect(source).toContain('sessionId={activeSession?.session_id ?? ""}');
+    expect(source).toContain('sessionId={renderedSession.session_id}');
     expect(source).toContain('function TurnInteraction({ sessionId, turn, decisions');
     expect(source).toContain('<ActivityView key={item.key} activity={activity}/>');
     expect(source).not.toContain("function TurnEventView(");
@@ -2581,13 +2586,64 @@ it("uses an explicit session-created event and session-scoped inline decisions",
     expect(source).toContain("if (sendCommand(command))");
   });
 
-  it("keeps long-session scrolling stable and draft typing away from turn reconciliation", () => {
+  it("keeps long-session switching and scrolling away from repeated full mounts", () => {
     expect(source).toContain("const VisibleTurnList = memo(function VisibleTurnList");
-    expect(source).toContain("const TurnInteraction = memo(function TurnInteraction");
-    expect(source).toContain("turns={turns}");
-    expect(source).not.toContain("content-visibility");
+    expect(source).toContain("const SessionTimelinePane = memo(function SessionTimelinePane");
+    expect(source).toContain("const MAX_MOUNTED_SESSION_TIMELINES = 2;");
+    expect(source).toContain("reconcileSessionTimelineCache(");
+    expect(source).toContain("mountedTimelineSessions.map((session) => <SessionTimelinePane");
+    expect(source).toContain("sessions.filter((session) => mountedTimelineSessionIdSet.has(session.session_id))");
+    expect(source).toContain("LRU order controls eviction only");
+    expect(source).toContain("const renderedSessionRef = useRef(session);");
+    expect(source).toContain("if (active) renderedSessionRef.current = session;");
+    expect(source).toContain("turns={renderedSession.turns}");
+    expect(source).toContain("the pane catches up synchronously when it becomes active again");
+    expect(source).toContain("hidden={!active}");
+    expect(source).toContain('data-session-timeline-active={active ? "true" : "false"}');
+    expect(source).toContain("<VisibleTurnList");
+    expect(source).not.toContain("mountedTimelineSessions.map((session) => <ThreadPrimitive.Root");
+    expect(styles).toContain(".session-timeline-pane[hidden] { display: none; }");
     expect(styles).toContain(".turn-interaction.completed { contain: layout style; }");
+    expect(styles).not.toContain(".turn-interaction.completed { contain: layout style; content-visibility:");
+    expect(styles).not.toContain("contain-intrinsic-size: auto 320px;");
     expect(styles).toContain("scroll-behavior: auto;");
+  });
+
+  it("keeps long-session scroll frames free of full DOM geometry scans", () => {
+    expect(source).toContain("createFrameTask({ run: updateUserMessageNavigation })");
+    expect(source).toContain("createFrameTask({ run: refreshUserMessageGeometry })");
+    expect(source).toContain("createFrameTask({ run: updateUserMessageNavigationLayout })");
+    expect(source).toContain("const mutationObserver = new MutationObserver(update);");
+    expect(source).toContain("const resizeObserver = typeof ResizeObserver === \"undefined\" ? undefined : new ResizeObserver(update);");
+    expect(source).toContain("const navigationTop = viewport.scrollTop + userMessageNavigationOffset;");
+    expect(source).toContain("const anchorOffsets = userMessageAnchorOffsetsRef.current;");
+    expect(source).toContain('requestTimelineNavigationWork("content"');
+    expect(source).toContain('requestTimelineNavigationWork("layout"');
+    expect(source).toContain('requestTimelineNavigationWork("scroll"');
+    expect(source).toContain('[data-session-timeline-active="true"] [data-user-message-anchor]');
+    expect(source).toContain('[data-session-timeline-active="true"] .final-answer-outline.expanded');
+    expect(source).toContain("new IntersectionObserver(");
+    expect(source).toContain('rootMargin: "100% 0px"');
+    expect(source).toContain('window.addEventListener("session-timeline-activation-change", syncActivePane);');
+    expect(source).toContain('window.dispatchEvent(new Event("session-timeline-activation-change"));');
+    expect(source).toContain("if (activePane) resizeObserver?.observe(activePane);");
+    const scrollHandlerStart = source.indexOf('onScroll={(event) => {', source.indexOf('className="chat-scroll aui-thread-viewport"'));
+    const scrollHandlerEnd = source.indexOf("}}", scrollHandlerStart);
+    const scrollHandler = source.slice(scrollHandlerStart, scrollHandlerEnd);
+    expect(scrollHandler).toContain('requestTimelineNavigationWork("scroll"');
+    expect(scrollHandler).not.toContain('requestTimelineNavigationWork("layout"');
+    expect(scrollHandler).not.toContain('requestTimelineNavigationWork("content"');
+    expect(scrollHandler).not.toContain("querySelectorAll");
+    expect(scrollHandler).not.toContain("getBoundingClientRect");
+    expect(source).toContain("const outlineHeadingOffsetsRef = useRef(new Map<string, number>());");
+    expect(source).toContain("const threshold = viewport.scrollTop + FINAL_ANSWER_OUTLINE_SCROLL_OFFSET;");
+    expect(source).toContain('pane?.dataset.sessionTimelineActive !== "true"');
+    const outlineScrollStart = source.indexOf('const updateActive = () => outlineActiveTaskRef.current?.request();', source.indexOf("function FinalAnswerContent"));
+    const outlineScrollEnd = source.indexOf("\n", outlineScrollStart);
+    const outlineScrollHandler = source.slice(outlineScrollStart, outlineScrollEnd);
+    expect(outlineScrollHandler).toContain("outlineActiveTaskRef.current?.request();");
+    expect(outlineScrollHandler).not.toContain("getBoundingClientRect");
+    expect(outlineScrollHandler).not.toContain("querySelectorAll");
   });
 
   it("keeps compact mobile controls and long content inside the viewport", () => {

@@ -298,7 +298,7 @@ reliability_doc_required=(
   "command_id"
   "core_accepted"
   "event_seq"
-  "Sequenced journal integration"
+  "Ordered delivery and snapshot recovery"
   "Strict exactly-once behavior cannot be promised"
   "four Sessions"
 )
