@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Reduce Web Session-list row height and vertical padding for a denser sidebar
+  while preserving status indicators, disclosure controls, and touch behavior.
 - Speed up Web Memory settings temporary-data discovery by filtering directory
   entries before reading file metadata, retaining only the largest 100
   candidates during traversal, and reusing the result when reopening the same
