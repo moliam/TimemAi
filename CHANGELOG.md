@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add Web performance tracing under the existing `--debug` switch in the shared PID diagnostic directory with command-correlated browser/server stages, fixed 20 MiB in-place wrapping, browser hot-path microbenchmarks, and a reproducible diagnosis guide.
+
 ### Fixed
 
 - Keep large Web chat-search result sets in a bounded scroll area and prevent result rows from shrinking into unreadable stripes.

@@ -12,4 +12,7 @@ cargo test --release -p agent_core performance_guard --quiet
 echo "performance_guard: timem_shell"
 cargo test --release -p timem_shell performance_guard --quiet
 
+echo "performance_guard: timem_web browser hot paths"
+pnpm --dir web_ui/timem-web exec vitest run tests/performance_guard.test.ts
+
 echo "performance_guard: ok"

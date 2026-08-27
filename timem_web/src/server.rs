@@ -9,7 +9,11 @@ use crate::worker_roles::{
     WorkerRoleGroup, WorkerRoleLibrary, MAX_ROLE_FILE_BYTES, MAX_WORKER_ROLES,
     MAX_WORKER_ROLE_GROUPS,
 };
-use crate::{debug_session::DebugStore, lifecycle_diagnostics::LifecycleDiagnostics};
+use crate::{
+    debug_session::{DebugStore, TemporaryDebugRoot},
+    lifecycle_diagnostics::LifecycleDiagnostics,
+    runtime_log::RuntimeLog,
+};
 use agent_core::chat_library::{
     ChatFavorite, ChatLibrary, ChatLibraryCapacity, ChatSearchHit, CreateFavoriteOutcome,
 };
@@ -117,6 +121,7 @@ struct AppState {
     temporary_retention_wakeup: Arc<Notify>,
     mem_temporary_task_running: Arc<AtomicBool>,
     debug: Option<Arc<DebugStore>>,
+    runtime_log: RuntimeLog,
 }
 
 #[derive(Debug, Default)]
@@ -1498,6 +1503,7 @@ struct ServerInfo {
     bind_host: String,
     public_access: bool,
     debug_mode: bool,
+    performance_trace: bool,
     mem: WebMemInfo,
     runtime_options: Vec<WebRuntimeOption>,
     session_env_defaults: BTreeMap<String, String>,
@@ -1535,6 +1541,19 @@ struct UploadQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct ClientPerformanceTrace {
+    stage: String,
+    session_id: String,
+    command_id: String,
+    #[serde(default)]
+    turn_id: Option<String>,
+    #[serde(default)]
+    elapsed_ms: Option<f64>,
+    #[serde(default)]
+    event_count: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
 struct BrowserCommand {
     #[serde(default)]
     command_id: Option<String>,
@@ -1542,6 +1561,10 @@ struct BrowserCommand {
     accepted_mem_epoch: u64,
     #[serde(skip)]
     accepted_lane: Option<AcceptedCommandLane>,
+    #[serde(skip, default = "now_ms")]
+    accepted_at_ms: u128,
+    #[serde(default)]
+    performance_sent_at_ms: Option<f64>,
     #[serde(flatten)]
     command: ClientCommand,
 }
@@ -1989,13 +2012,37 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         }
     };
     let mem = Arc::new(Mutex::new(initial_mem));
+    let diagnostic_root = if launch.debug {
+        Some(Arc::new(TemporaryDebugRoot::create()?))
+    } else {
+        None
+    };
     let debug = if launch.debug {
-        let store = Arc::new(DebugStore::create()?);
+        let store = Arc::new(DebugStore::with_root(
+            diagnostic_root
+                .as_ref()
+                .expect("debug launch creates a diagnostic root")
+                .clone(),
+        ));
         println!("Timem Web debug directory: {}", store.root().display());
         Some(store)
     } else {
         None
     };
+    let runtime_log = if launch.debug {
+        RuntimeLog::with_diagnostic_root(
+            diagnostic_root
+                .as_ref()
+                .expect("debug launch creates a diagnostic root")
+                .clone(),
+        )
+    } else {
+        RuntimeLog::default()
+    };
+    if let Some(path) = runtime_log.path() {
+        runtime_log.record("process_started", json!({}));
+        println!("Timem Web runtime log: {}", path.display());
+    }
     let state = AppState {
         token: token.clone().unwrap_or_default(),
         public_access: launch.public_access,
@@ -2012,6 +2059,7 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         temporary_retention_wakeup: Arc::new(Notify::new()),
         mem_temporary_task_running: Arc::new(AtomicBool::new(false)),
         debug,
+        runtime_log,
     };
     let cleanup_guard = WebRuntimeCleanupGuard::new(&state);
 
@@ -2224,11 +2272,51 @@ fn shutdown_web_runtime(state: &AppState) -> Result<(), String> {
     }
 }
 
+async fn performance_trace(
+    State((state, _)): State<(AppState, u16)>,
+    Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
+    Json(trace): Json<ClientPerformanceTrace>,
+) -> Response {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !state.runtime_log.enabled() {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    match state.runtime_log.record_client(
+        &trace.stage,
+        trace.session_id,
+        trace.command_id,
+        trace.turn_id,
+        trace.elapsed_ms,
+        trace.event_count,
+    ) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => StatusCode::BAD_REQUEST.into_response(),
+    }
+}
+
+fn client_command_trace_fields(command: &ClientCommand) -> (&'static str, Option<String>) {
+    match command {
+        ClientCommand::TurnSubmit { session_id, .. } => ("turn_submit", Some(session_id.clone())),
+        ClientCommand::TurnSupplement { session_id, .. } => {
+            ("turn_supplement", Some(session_id.clone()))
+        }
+        ClientCommand::TurnCancel { session_id } => ("turn_cancel", Some(session_id.clone())),
+        _ => ("other", None),
+    }
+}
+
 fn build_router(state: AppState, port: u16) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/snapshot", get(snapshot))
         .route("/api/upload", post(upload_file))
+        .route(
+            "/api/performance-trace",
+            post(performance_trace).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
         .route("/ws", get(websocket))
         .fallback(get(static_asset))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES + 64 * 1024))
@@ -3026,6 +3114,16 @@ async fn websocket_session(
                         }
                         match serde_json::from_str::<BrowserCommand>(&text) {
                             Ok(mut command) => {
+                                command.accepted_at_ms = now_ms();
+                                let (trace_kind, trace_session_id) = client_command_trace_fields(&command.command);
+                                if trace_kind != "other" {
+                                    state.runtime_log.record("server_received", json!({
+                                        "kind": trace_kind,
+                                        "session_id": trace_session_id,
+                                        "command_id": command.command_id,
+                                        "browser_sent_at_ms": command.performance_sent_at_ms,
+                                    }));
+                                }
                                 // Acceptance and mem switching share this barrier. A switch
                                 // cannot advance the epoch between stamping and queueing a
                                 // command, and the non-Send guard is dropped before any await.
@@ -3263,7 +3361,23 @@ fn execute_browser_command(
         command,
         accepted_mem_epoch,
         accepted_lane,
+        accepted_at_ms,
+        performance_sent_at_ms,
     } = browser_command;
+    let execute_started_ms = now_ms();
+    let (trace_kind, trace_session_id) = client_command_trace_fields(&command);
+    if trace_kind != "other" {
+        state.runtime_log.record(
+            "server_execute_start",
+            json!({
+                "kind": trace_kind,
+                "session_id": trace_session_id,
+                "command_id": command_id,
+                "queue_ms": execute_started_ms.saturating_sub(accepted_at_ms),
+                "browser_sent_at_ms": performance_sent_at_ms,
+            }),
+        );
+    }
     let sensitive_result = command.result_is_sensitive();
     let direct_result = command.result_is_direct();
     let waits_for_core_acceptance = command.waits_for_core_acceptance();
@@ -3323,7 +3437,20 @@ fn execute_browser_command(
             "command_mem_epoch_stale".to_string(),
         );
     }
-    match handle_command_with_id(state, port, command_id.as_deref(), command) {
+    let handled = handle_command_with_id(state, port, command_id.as_deref(), command);
+    if trace_kind != "other" {
+        state.runtime_log.record(
+            "server_execute_handled",
+            json!({
+                "kind": trace_kind,
+                "session_id": trace_session_id,
+                "command_id": command_id,
+                "execute_ms": now_ms().saturating_sub(execute_started_ms),
+                "ok": handled.is_ok(),
+            }),
+        );
+    }
+    match handled {
         Ok(event) => {
             let direct_event = direct_result.then(|| event.clone()).flatten();
             if let Some(command_id) = command_id.as_deref() {
@@ -4231,6 +4358,14 @@ fn handle_command_with_id(
                 }
             }
             let text = nonempty_text(text, "supplement")?;
+            let started = std::time::Instant::now();
+            state.runtime_log.record(
+                "supplement_handle_start",
+                json!({
+                    "session_id": session_id,
+                    "command_id": command_id,
+                }),
+            );
             let turn = append_supplement_or_submit_turn(
                 state,
                 &session_id,
@@ -4240,8 +4375,29 @@ fn handle_command_with_id(
                 &role_ids,
                 role_id.as_deref(),
             )?;
-            let event = WireEvent::TurnUpdated { session_id, turn };
+            let append_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let event_count = turn.events.len();
+            let user_entry_count = turn.user_entries.len();
+            let turn_id = turn.turn_id.clone();
+            let event = WireEvent::TurnUpdated {
+                session_id: session_id.clone(),
+                turn,
+            };
+            let publish_started = std::time::Instant::now();
             publish_semantic(state, event.clone())?;
+            state.runtime_log.record(
+                "supplement_published",
+                json!({
+                    "session_id": session_id,
+                    "command_id": command_id,
+                    "turn_id": turn_id,
+                    "append_ms": append_ms,
+                    "publish_ms": publish_started.elapsed().as_secs_f64() * 1000.0,
+                    "total_ms": started.elapsed().as_secs_f64() * 1000.0,
+                    "event_count": event_count,
+                    "user_entry_count": user_entry_count,
+                }),
+            );
             return Ok(Some(event));
         }
         ClientCommand::TurnCancel { session_id } => {
@@ -6262,8 +6418,22 @@ fn try_append_turn_supplement(
     worker_roles: Vec<WorkerRole>,
 ) -> Result<Option<WebTurn>, String> {
     if !session_has_active_turn(state, session_id)? {
+        state.runtime_log.record(
+            "supplement_no_active_turn",
+            json!({
+                "session_id": session_id,
+                "command_id": command_id,
+            }),
+        );
         return Ok(None);
     }
+    state.runtime_log.record(
+        "supplement_active_turn_observed",
+        json!({
+            "session_id": session_id,
+            "command_id": command_id,
+        }),
+    );
     let worker_handle = primary_worker_handle(state, session_id)?;
     let selected_attachments = {
         let sessions = state
@@ -6313,26 +6483,68 @@ fn try_append_turn_supplement(
         },
     )?;
     if !accepted {
+        state.runtime_log.record(
+            "supplement_core_rejected_closed_turn",
+            json!({
+                "session_id": session_id,
+                "command_id": command_id,
+            }),
+        );
         settle_closed_primary_turn(state, session_id)?;
         return Ok(None);
     }
+    state.runtime_log.record(
+        "supplement_core_accepted",
+        json!({
+            "session_id": session_id,
+            "command_id": command_id,
+        }),
+    );
     Ok(appended_turn)
 }
 
 fn settle_closed_primary_turn(state: &AppState, session_id: &str) -> Result<(), String> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    let started = std::time::Instant::now();
+    let deadline = started + Duration::from_secs(1);
+    let mut loops = 0usize;
+    let mut drained_events = 0usize;
+    state.runtime_log.record(
+        "closed_turn_settle_start",
+        json!({ "session_id": session_id }),
+    );
     while session_has_active_turn(state, session_id)? {
-        for (event_session_id, context_id, worker_id, event) in drain_worker_events(state) {
+        loops += 1;
+        let events = drain_worker_events(state);
+        drained_events += events.len();
+        for (event_session_id, context_id, worker_id, event) in events {
             handle_scoped_worker_event(state, &event_session_id, &context_id, &worker_id, event);
         }
         if !session_has_active_turn(state, session_id)? {
             break;
         }
         if std::time::Instant::now() >= deadline {
+            state.runtime_log.record(
+                "closed_turn_settle_timeout",
+                json!({
+                    "session_id": session_id,
+                    "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+                    "loops": loops,
+                    "drained_events": drained_events,
+                }),
+            );
             return Err("closed_turn_settle_timeout".to_string());
         }
         std::thread::sleep(Duration::from_millis(2));
     }
+    state.runtime_log.record(
+        "closed_turn_settle_finish",
+        json!({
+            "session_id": session_id,
+            "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+            "loops": loops,
+            "drained_events": drained_events,
+        }),
+    );
     Ok(())
 }
 
@@ -9625,6 +9837,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             bind_host: web_bind_host(state.public_access).to_string(),
             public_access: state.public_access,
             debug_mode: state.debug.is_some(),
+            performance_trace: state.runtime_log.enabled(),
             mem,
             runtime_options,
             session_env_defaults,

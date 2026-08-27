@@ -226,6 +226,7 @@ for the files to inspect.
 - [Install and configuration](docs/install-and-configuration.md)
 - [Core/UI topic protocol](docs/core-ui-topic-protocol.md)
 - [Web delivery reliability contract](docs/web_reliability_test_matrix.md)
+- [Web performance tracing](docs/web-performance-tracing.md)
 - [Capability system](docs/capability-system.md)
 - [Test strategy](docs/test-strategy.md)
 - [测试人员手册（中文）](docs/tester-handbook.zh-CN.md)

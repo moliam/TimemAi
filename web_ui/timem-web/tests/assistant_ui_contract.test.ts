@@ -1350,7 +1350,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}`');
     expect(source).toContain('disabled={runtimeLocked || sessionDeleteMode || renamingSessionId === session.session_id || session.workers.length === 0}');
     expect(source).toContain('aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined}');
-    expect(source).toContain('disabled={runtimeLocked} onClick={() => { if (sessionDeleteMode) { setSelectedDeleteSessionId((current) => current === session.session_id ? "" : session.session_id); return; } setActiveSessionId(session.session_id);');
+    expect(source).toContain('disabled={runtimeLocked} onClick={() => { if (sessionDeleteMode) { setSelectedDeleteSessionId((current) => current === session.session_id ? "" : session.session_id); return; } performanceTraceRef.current.beginSessionSelection(session.session_id);');
+    expect(source).toContain('setActiveSessionId(session.session_id); closeMobileSidebar();');
     expect(source).toContain('onDoubleClick={() => { if (!runtimeLocked && !sessionDeleteMode && renamingSessionId !== session.session_id) beginRename(session); }}');
     expect(source).toContain("sessionRenameDecision(");
     expect(styles).toContain(".session:disabled, .session-expand:disabled");

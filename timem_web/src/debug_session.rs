@@ -19,8 +19,13 @@ const STATISTICS_REFRESH_MS: u64 = 2_000;
 static NEXT_DEBUG_STORE_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug)]
-pub(crate) struct DebugStore {
+pub(crate) struct TemporaryDebugRoot {
     root: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct DebugStore {
+    root: std::sync::Arc<TemporaryDebugRoot>,
     sessions: Mutex<BTreeMap<String, SessionDebug>>,
     file_render_lock: Mutex<()>,
 }
@@ -110,7 +115,7 @@ struct SessionDebug {
     endpoints: BTreeMap<EndpointKey, EndpointDebug>,
 }
 
-impl DebugStore {
+impl TemporaryDebugRoot {
     pub(crate) fn create() -> Result<Self, String> {
         #[cfg(unix)]
         let temporary_root = PathBuf::from("/tmp");
@@ -131,20 +136,64 @@ impl DebugStore {
                 .map_err(|error| format!("debug_root_cleanup_failed:{error}"))?;
         }
         create_private_dir(&root)?;
-        Ok(Self {
+        Ok(Self { root })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.root
+    }
+
+    pub(crate) fn cleanup(&self) -> Result<(), String> {
+        match fs::remove_dir_all(&self.root) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("debug_root_remove_failed:{error}")),
+        }
+    }
+}
+
+impl Drop for TemporaryDebugRoot {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            eprintln!("[timem_debug_cleanup_error] {error}");
+        }
+    }
+}
+
+impl DebugStore {
+    #[cfg(test)]
+    pub(crate) fn create() -> Result<Self, String> {
+        Ok(Self::with_root(std::sync::Arc::new(
+            TemporaryDebugRoot::create()?,
+        )))
+    }
+
+    pub(crate) fn with_root(root: std::sync::Arc<TemporaryDebugRoot>) -> Self {
+        Self {
             root,
             sessions: Mutex::new(BTreeMap::new()),
             file_render_lock: Mutex::new(()),
-        })
+        }
+    }
+
+    #[cfg(test)]
+    fn create_in(temporary_root: &Path, reap_stale: bool) -> Result<Self, String> {
+        Ok(Self::with_root(std::sync::Arc::new(
+            TemporaryDebugRoot::create_in(temporary_root, reap_stale)?,
+        )))
     }
 
     pub(crate) fn root(&self) -> &Path {
-        &self.root
+        self.root.path()
+    }
+
+    pub(crate) fn cleanup(&self) -> Result<(), String> {
+        self.root.cleanup()
     }
 
     pub(crate) fn session_dir(&self, session_id: &str) -> Result<PathBuf, String> {
         let component = safe_session_component(session_id)?;
-        let dir = self.root.join(component);
+        let dir = self.root.path().join(component);
         create_private_dir(&dir)?;
         let mut sessions = self
             .sessions
@@ -382,14 +431,6 @@ impl DebugStore {
         })
     }
 
-    pub(crate) fn cleanup(&self) -> Result<(), String> {
-        match fs::remove_dir_all(&self.root) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!("debug_root_remove_failed:{error}")),
-        }
-    }
-
     fn update(
         &self,
         session_id: &str,
@@ -415,7 +456,7 @@ impl DebugStore {
             .file_render_lock
             .lock()
             .map_err(|_| "debug_file_render_lock_poisoned".to_string())?;
-        let dir = self.root.join(safe_session_component(session_id)?);
+        let dir = self.root.path().join(safe_session_component(session_id)?);
         let body = {
             let sessions = self
                 .sessions
@@ -434,7 +475,7 @@ impl DebugStore {
             .file_render_lock
             .lock()
             .map_err(|_| "debug_file_render_lock_poisoned".to_string())?;
-        let dir = self.root.join(safe_session_component(session_id)?);
+        let dir = self.root.path().join(safe_session_component(session_id)?);
         let (prompt_body, tool_schema_body) = {
             let sessions = self
                 .sessions
@@ -457,7 +498,7 @@ impl DebugStore {
             .file_render_lock
             .lock()
             .map_err(|_| "debug_file_render_lock_poisoned".to_string())?;
-        let dir = self.root.join(safe_session_component(session_id)?);
+        let dir = self.root.path().join(safe_session_component(session_id)?);
         let body = {
             let sessions = self
                 .sessions
@@ -1246,14 +1287,6 @@ fn safe_session_component(session_id: &str) -> Result<&str, String> {
         Ok(session_id)
     } else {
         Err("invalid_debug_session_id".to_string())
-    }
-}
-
-impl Drop for DebugStore {
-    fn drop(&mut self) {
-        if let Err(error) = self.cleanup() {
-            eprintln!("[timem_debug_cleanup_error] {error}");
-        }
     }
 }
 

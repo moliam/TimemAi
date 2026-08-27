@@ -608,6 +608,8 @@ fn reliable_mutation_returns_only_ack_while_authoritative_result_is_enveloped() 
             command_id: Some(command_id.to_string()),
             accepted_mem_epoch: 1,
             accepted_lane: None,
+            accepted_at_ms: now_ms(),
+            performance_sent_at_ms: None,
             command: ClientCommand::SessionRename {
                 session_id: session_id.clone(),
                 display_name: "Envelope only".to_string(),
@@ -1092,6 +1094,8 @@ fn queued_command_from_old_mem_epoch_is_rejected_before_domain_execution() {
             command_id: None,
             accepted_mem_epoch: 1,
             accepted_lane: None,
+            accepted_at_ms: now_ms(),
+            performance_sent_at_ms: None,
             command: ClientCommand::SessionRename {
                 session_id: "session_a".to_string(),
                 display_name: "must not run".to_string(),
@@ -1125,6 +1129,8 @@ fn terminal_persist_failure_never_reports_an_applied_effect_as_rejected() {
             command_id: Some(command_id.to_string()),
             accepted_mem_epoch: 1,
             accepted_lane: None,
+            accepted_at_ms: now_ms(),
+            performance_sent_at_ms: None,
             command: ClientCommand::SessionRename {
                 session_id: session_id.clone(),
                 display_name: "Applied despite terminal journal failure".to_string(),
@@ -1913,6 +1919,8 @@ fn lost_terminal_ack_retry_replays_result_without_a_second_handler_effect() {
             command_id: Some(command_id.to_string()),
             accepted_mem_epoch: 1,
             accepted_lane: None,
+            accepted_at_ms: now_ms(),
+            performance_sent_at_ms: None,
             command: ClientCommand::SessionRename {
                 session_id: session_id.clone(),
                 display_name: "Committed once".to_string(),
@@ -6166,6 +6174,7 @@ fn routing_test_state() -> AppState {
         temporary_retention_wakeup: Arc::new(Notify::new()),
         mem_temporary_task_running: Arc::new(AtomicBool::new(false)),
         debug: None,
+        runtime_log: RuntimeLog::default(),
     }
 }
 
@@ -11331,6 +11340,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
             command_id: None,
             accepted_mem_epoch: 1,
             accepted_lane: None,
+            accepted_at_ms: now_ms(),
+            performance_sent_at_ms: None,
             command: ClientCommand::ModelEndpointSecretReveal {
                 endpoint_id: "endpoint-one".to_string(),
             },
@@ -11519,4 +11530,75 @@ fn browser_url_highlight_is_ansi_only_when_color_is_enabled() {
         highlighted_browser_url(url, true),
         format!("{ANSI_BOLD_BRIGHT_CYAN}{url}{ANSI_RESET}")
     );
+}
+
+#[tokio::test]
+async fn performance_trace_endpoint_authenticates_validates_and_records_browser_stages() {
+    let mut state = routing_test_state();
+    state.public_access = true;
+    let path = std::env::temp_dir().join(unique_web_id("timem_web_runtime.log"));
+    state.runtime_log = RuntimeLog::with_path_and_limit(path.clone(), 4096);
+    let denied = performance_trace(
+        State((state.clone(), 13764)),
+        Query(AuthQuery {
+            token: None,
+            last_event_seq: None,
+        }),
+        HeaderMap::new(),
+        Json(ClientPerformanceTrace {
+            stage: "browser_turn_updated".to_string(),
+            session_id: "session_a".to_string(),
+            command_id: "command_1".to_string(),
+            turn_id: Some("turn_1".to_string()),
+            elapsed_ms: Some(12.5),
+            event_count: Some(7),
+        }),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    assert!(!path.exists());
+
+    let recorded = performance_trace(
+        State((state.clone(), 13764)),
+        Query(AuthQuery {
+            token: Some("test".to_string()),
+            last_event_seq: None,
+        }),
+        HeaderMap::new(),
+        Json(ClientPerformanceTrace {
+            stage: "browser_turn_updated".to_string(),
+            session_id: "session_a".to_string(),
+            command_id: "command_1".to_string(),
+            turn_id: Some("turn_1".to_string()),
+            elapsed_ms: Some(12.5),
+            event_count: Some(7),
+        }),
+    )
+    .await;
+    assert_eq!(recorded.status(), StatusCode::NO_CONTENT);
+    let value: serde_json::Value =
+        serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
+    assert_eq!(value["stage"], "browser_turn_updated");
+    assert_eq!(value["fields"]["command_id"], "command_1");
+    assert_eq!(value["fields"]["event_count"], 7);
+
+    let rejected = performance_trace(
+        State((state, 13764)),
+        Query(AuthQuery {
+            token: Some("test".to_string()),
+            last_event_seq: None,
+        }),
+        HeaderMap::new(),
+        Json(ClientPerformanceTrace {
+            stage: "server_forgery".to_string(),
+            session_id: "session_a".to_string(),
+            command_id: "command_2".to_string(),
+            turn_id: None,
+            elapsed_ms: None,
+            event_count: None,
+        }),
+    )
+    .await;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let _ = std::fs::remove_file(path);
 }
