@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractMarkdownOutline, finalAnswerNeedsOutline, markdownHeadingSlug, markdownHeadingText, markdownOutlineActiveId, markdownOutlineAnimationPosition, markdownOutlineFitsBesideContent, MARKDOWN_OUTLINE_START_ID, markdownOutlineTargetScrollTop, MAX_OUTLINE_HEADINGS, MAX_OUTLINE_HEADING_SOURCE_CHARS, MAX_OUTLINE_LINE_CHARS, MAX_OUTLINE_SOURCE_CHARS, MAX_OUTLINE_TITLE_CHARS } from "../src/markdown_outline";
+import { extractMarkdownOutline, finalAnswerNeedsOutline, markdownFloatingNavigationLayout, markdownHeadingSlug, markdownHeadingText, markdownOutlineActiveId, markdownOutlineAnimationPosition, markdownOutlineFitsBesideContent, MARKDOWN_OUTLINE_START_ID, markdownOutlineTargetScrollTop, MAX_OUTLINE_HEADINGS, MAX_OUTLINE_HEADING_SOURCE_CHARS, MAX_OUTLINE_LINE_CHARS, MAX_OUTLINE_SOURCE_CHARS, MAX_OUTLINE_TITLE_CHARS } from "../src/markdown_outline";
 
 describe("final answer markdown outline", () => {
   it("extracts level one through three ATX headings in document order", () => {
@@ -81,6 +81,18 @@ describe("final answer markdown outline", () => {
     expect(markdownOutlineFitsBesideContent(184, 184, -20, -10)).toBe(true);
     expect(markdownOutlineFitsBesideContent(Number.NaN, 184, 60, 16)).toBe(false);
     expect(markdownOutlineFitsBesideContent(Number.POSITIVE_INFINITY, 184, 60, 16)).toBe(false);
+  });
+
+  it("degrades floating navigation overlap from none to partial to full", () => {
+    expect(markdownFloatingNavigationLayout(320, 34, 16, 900, 10, 10, 208)).toEqual({ left: 270, overlap: "none" });
+    expect(markdownFloatingNavigationLayout(220, 34, 16, 900, 10, 180, 208)).toEqual({ left: 170, overlap: "partial" });
+    expect(markdownFloatingNavigationLayout(120, 34, 16, 900, 10, 10, 208)).toEqual({ left: 70, overlap: "full" });
+  });
+
+  it("preserves body distance and viewport edge guards for malformed or tight layouts", () => {
+    expect(markdownFloatingNavigationLayout(44, 34, 16, 320, 10)).toEqual({ left: 10, overlap: "none" });
+    expect(markdownFloatingNavigationLayout(800, 34, 16, 320, 10)).toEqual({ left: 276, overlap: "none" });
+    expect(markdownFloatingNavigationLayout(Number.NaN, 34, 16, 320, 10)).toEqual({ left: 0, overlap: "none" });
   });
 
   it("computes Start and heading targets in viewport coordinates and clamps above-page targets", () => {
