@@ -138,7 +138,10 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
     assert!(!rendered.contains("large_readback"));
     assert!(!rendered.contains("check_timeout_ms"));
     assert!(rendered.contains("`background`:"));
-    assert!(rendered.contains("Normal/Polling captures status plus stdout/stderr"));
+    assert!(rendered.contains("standard structured result with lifecycle"));
+    assert!(rendered.contains("`status`, `exit_code`, and stdout/stderr"));
+    assert!(rendered.contains("`exit_code` belongs"));
+    assert!(rendered.contains("not automatically to the task being waited on"));
     assert!(rendered.contains("Background returns"));
     assert!(rendered.contains("Timeout command won't be killed automatically"));
     assert!(rendered.contains("`timeout_ms` is only how long Timem waits"));

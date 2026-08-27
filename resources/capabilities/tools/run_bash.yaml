@@ -24,8 +24,13 @@ description: |
   Revert tmp changes in the user's environment in a timely manner. Prefer to
   transform long sleeps into loop_cmd or `while` loops with short sleeps that
   can return as soon as the work is done. The loop command is re-run until it
-  exits with code 0 or loop_timeout_ms is reached. For long local work that
-  should keep running across interaction rounds, use background=true. Runtime
+  exits with code 0 or loop_timeout_ms is reached. Polling keeps the standard
+  result shape: `status` describes the polling lifecycle and `exit_code` is the
+  last `loop_cmd` exit code. This is not automatically the exit code of the task
+  being waited on; obtain that value by making `loop_cmd` read the task's status
+  file, wait result, or remote API state.
+  For long local work that should keep running across interaction rounds, use
+  background=true. Runtime
   rejects explicit process-group escape such as `setsid`, `disown`, or daemon
   launchers, including in background mode.
   Background and timeout jobs return a pid; manage them with
@@ -40,8 +45,10 @@ prompt_input: |
   background false or absent. loop_timeout_ms is the total polling wait budget;
   once_timeout_ms is the per-check command timeout.
 prompt_result: |
-  Normal/Polling captures status plus stdout/stderr; Timem's shared result gate
-  bounds only the model-visible evidence according to tail_out. Background
+  Normal and polling execution use the standard structured result with lifecycle
+  `status`, `exit_code`, and stdout/stderr. In polling mode, `exit_code` belongs
+  to the last `loop_cmd`, not automatically to the task being waited on. Timem's
+  shared result gate bounds only the model-visible evidence according to tail_out. Background
   returns `pid=..., now keeps running in background`.
   NOTE: Timeout command won't be killed automatically,
   instead you will receive its pid info.

@@ -58,6 +58,13 @@ fn default_shell_job_kind() -> String {
     "background".to_string()
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ShellJobTemporaryItem {
+    pub id: String,
+    pub created_at_ms: i64,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningShellJob {
     pub pid: u32,
@@ -669,6 +676,100 @@ impl FileShellJobStore {
         (running, exited)
     }
 
+    /// Lists finished shell jobs as deletable temporary artifact bundles.
+    /// Running jobs are never returned.
+    pub fn finished_temporary_items(&self) -> std::io::Result<Vec<ShellJobTemporaryItem>> {
+        self.guard
+            .with_read(|| {
+                Ok(self
+                    .records_unlocked()
+                    .into_iter()
+                    .filter(|record| self.record_finished(record))
+                    .map(|record| ShellJobTemporaryItem {
+                        bytes: self
+                            .shell_job_artifact_paths(&record)
+                            .iter()
+                            .filter_map(|path| fs::symlink_metadata(path).ok())
+                            .filter(|metadata| metadata.file_type().is_file())
+                            .map(|metadata| metadata.len())
+                            .sum(),
+                        id: record.id,
+                        created_at_ms: record.created_at_ms,
+                    })
+                    .collect())
+            })
+            .map_err(std::io::Error::other)?
+    }
+
+    /// Deletes complete artifact bundles for selected finished shell jobs and
+    /// rewrites the index. Unknown or running job ids are rejected.
+    pub fn delete_finished_temporary_items(&self, ids: &[String]) -> std::io::Result<usize> {
+        self.guard
+            .with_write(|| self.delete_finished_temporary_items_unlocked(ids))
+            .map_err(std::io::Error::other)?
+    }
+
+    fn delete_finished_temporary_items_unlocked(&self, ids: &[String]) -> std::io::Result<usize> {
+        let selected = ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        if selected.is_empty() {
+            return Ok(0);
+        }
+        let records = self.records_unlocked();
+        if selected.iter().any(|id| {
+            !records
+                .iter()
+                .any(|record| record.id == *id && self.record_finished(record))
+        }) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "shell job is unknown or still running",
+            ));
+        }
+        let temporary = self.dir.join(format!(
+            ".jobs.jsonl.delete.tmp-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary)?;
+        let mut removed = 0usize;
+        let result = (|| -> std::io::Result<()> {
+            for record in records {
+                if selected.contains(record.id.as_str()) {
+                    self.remove_shell_job_artifacts(&record)?;
+                    removed = removed.saturating_add(1);
+                } else {
+                    writeln!(
+                        output,
+                        "{}",
+                        serde_json::to_string(&record).unwrap_or_default()
+                    )?;
+                }
+            }
+            output.sync_all()?;
+            fs::rename(&temporary, &self.index_file)
+        })();
+        if let Err(error) = result {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        Ok(removed)
+    }
+
+    fn shell_job_artifact_paths(&self, record: &ShellJobRecord) -> [PathBuf; 4] {
+        [
+            PathBuf::from(&record.output_file),
+            PathBuf::from(&record.stderr_file),
+            PathBuf::from(&record.status_file),
+            PathBuf::from(format!("{}.notified", record.status_file)),
+        ]
+    }
+
     /// Removes finished shell-job records and their output artifacts older than
     /// `cutoff_ms`. Running jobs are retained regardless of age.
     pub fn prune_finished_before(&self, cutoff_ms: i64) -> std::io::Result<usize> {
@@ -723,12 +824,7 @@ impl FileShellJobStore {
     }
 
     fn remove_shell_job_artifacts(&self, record: &ShellJobRecord) -> std::io::Result<()> {
-        let paths = [
-            PathBuf::from(&record.output_file),
-            PathBuf::from(&record.stderr_file),
-            PathBuf::from(&record.status_file),
-            PathBuf::from(format!("{}.notified", record.status_file)),
-        ];
+        let paths = self.shell_job_artifact_paths(record);
         if paths
             .iter()
             .any(|path| path.parent() != Some(self.dir.as_path()))
@@ -1909,8 +2005,9 @@ fn polling_result(
         attempts,
         elapsed.as_millis()
     );
+    out.push_str("\nExit-code semantics: exit_code is from the last loop_cmd execution; polling does not know the waited task's own exit code unless loop_cmd reads and reports it.");
     if let Some(status) = last_status {
-        out.push_str(&format!("\nLast observed exit code: {status}"));
+        out.push_str(&format!("\nLast loop_cmd exit code: {status}"));
     }
     if let Some(error) = error {
         out.push_str(&format!("\nLast execution problem: {error}"));
