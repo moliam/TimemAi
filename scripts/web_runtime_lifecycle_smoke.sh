@@ -40,7 +40,7 @@ wait_for_url() {
       sed -n '1,120p' "$log_path" >&2
       return 1
     fi
-    url="$(sed -n '/^http:\/\/.*[?&]token=/p; /^https:\/\/.*[?&]token=/p' "$log_path" | tail -n 1)"
+    url="$(sed -n '/^http:\/\/127\.0\.0\.1:[0-9][0-9]*\/$/p' "$log_path" | tail -n 1)"
     if [ -n "$url" ]; then
       printf '%s\n' "$url"
       return 0
@@ -50,14 +50,6 @@ wait_for_url() {
   echo "timem-web did not become ready in time" >&2
   sed -n '1,120p' "$log_path" >&2
   return 1
-}
-
-assert_token_shape() {
-  local token="$1"
-  if [[ ! "$token" =~ ^[[:xdigit:]]{16}$ ]]; then
-    echo "Web runtime token must be exactly 16 hexadecimal characters" >&2
-    exit 1
-  fi
 }
 
 stop_host() {
@@ -77,8 +69,6 @@ first_url="$(wait_for_url "$first_log")"
 first_authority="${first_url#http://}"
 first_authority="${first_authority%%/*}"
 first_port="${first_authority##*:}"
-first_token="${first_url##*token=}"
-assert_token_shape "$first_token"
 curl_common=(
   --fail
   --silent
@@ -90,14 +80,14 @@ curl_common=(
   --max-time 10
 )
 
-# Each request is a new client connection, matching repeated browser opens
-# after a tab has been closed. The URL token must not be consumed or revoked.
+# Local mode is loopback-only and needs only the port; no access token or
+# authentication cookie is required. Repeated browser opens remain valid.
 for attempt in 1 2 3; do
   curl "${curl_common[@]}" "$first_url" >"$test_root/page-$attempt.html"
   grep -q '<div id="root">' "$test_root/page-$attempt.html"
 done
 curl "${curl_common[@]}" \
-  "http://127.0.0.1:$first_port/api/health?token=$first_token" \
+  "http://127.0.0.1:$first_port/api/health" \
   | grep -q '"ok":true'
 
 stop_host
@@ -108,22 +98,8 @@ second_log="$test_root/second.log"
 "$binary" --no-open --port "$first_port" --space "$test_root/lifecycle-mem" >"$second_log" 2>&1 &
 host_pid=$!
 second_url="$(wait_for_url "$second_log")"
-second_token="${second_url##*token=}"
-assert_token_shape "$second_token"
-if [ "$first_token" = "$second_token" ]; then
-  echo "a restarted runtime must rotate its access token" >&2
-  exit 1
-fi
 curl "${curl_common[@]}" "$second_url" >"$test_root/restarted.html"
 grep -q '<div id="root">' "$test_root/restarted.html"
-
-old_status="$(curl --silent --show-error --connect-timeout 1 --max-time 10 \
-  --output /dev/null --write-out '%{http_code}' \
-  "http://127.0.0.1:$first_port/?token=$first_token")"
-if [ "$old_status" != "401" ]; then
-  echo "the previous runtime token remained authorized after restart: HTTP $old_status" >&2
-  exit 1
-fi
 
 stop_host
 
@@ -165,8 +141,7 @@ if [ ! -s "$host_pid_file" ]; then
 fi
 host_pid="$(cat "$host_pid_file")"
 launcher_url="$(wait_for_url "$launcher_log")"
-launcher_token="${launcher_url##*token=}"
-curl "${curl_common[@]}"   "http://127.0.0.1:$first_port/api/health?token=$launcher_token"   | grep -q '"ok":true'
+curl "${curl_common[@]}"   "http://127.0.0.1:$first_port/api/health"   | grep -q '"ok":true'
 
 kill -KILL "$launcher_pid"
 wait "$launcher_pid" >/dev/null 2>&1 || true

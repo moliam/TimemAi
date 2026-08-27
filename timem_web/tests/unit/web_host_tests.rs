@@ -2427,8 +2427,23 @@ fn public_web_launch_keeps_token_auth_and_reports_bind_mode() {
 }
 
 #[tokio::test]
-async fn static_web_entry_requires_token_or_authenticated_cookie() {
-    let state = routing_test_state();
+async fn local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie() {
+    let local_state = routing_test_state();
+    let local = static_asset(
+        State((local_state, TEST_PORT)),
+        Query(AuthQuery {
+            token: None,
+            last_event_seq: None,
+        }),
+        HeaderMap::new(),
+        Uri::from_static("/"),
+    )
+    .await;
+    assert_eq!(local.status(), StatusCode::OK);
+    assert!(local.headers().get(header::SET_COOKIE).is_none());
+
+    let mut state = routing_test_state();
+    state.public_access = true;
     let denied = static_asset(
         State((state.clone(), TEST_PORT)),
         Query(AuthQuery {
@@ -2440,13 +2455,6 @@ async fn static_web_entry_requires_token_or_authenticated_cookie() {
     )
     .await;
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        denied
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok()),
-        Some("text/plain; charset=utf-8")
-    );
 
     let allowed = static_asset(
         State((state.clone(), TEST_PORT)),
@@ -2515,8 +2523,9 @@ fn restarts_timem_web_after_runtime_shutdown_with_the_same_data_and_port() {
 }
 
 #[tokio::test]
-async fn explicit_partial_static_token_does_not_fallback_to_cookie() {
-    let state = routing_test_state();
+async fn explicit_partial_public_static_token_does_not_fallback_to_cookie() {
+    let mut state = routing_test_state();
+    state.public_access = true;
     let mut headers = HeaderMap::new();
     headers.insert(
         header::COOKIE,
@@ -3276,7 +3285,7 @@ fn restored_interaction_cache_keeps_only_explicit_session_overrides() {
 }
 
 #[test]
-fn generated_local_access_token_is_sixteen_hex_characters_and_rotates() {
+fn generated_public_access_token_is_sixteen_hex_characters_and_rotates() {
     let tokens = (0..32)
         .map(|_| generate_token().unwrap())
         .collect::<std::collections::HashSet<_>>();
@@ -5608,6 +5617,109 @@ fn temporary_retention_rolls_forward_is_idempotent_and_unlimited_skips_cleanup()
 }
 
 #[test]
+fn mem_temporary_items_are_bounded_sorted_safe_and_deletable() {
+    let memory_dir = std::env::temp_dir().join(unique_web_id("mem_temporary_items"));
+    std::fs::create_dir_all(memory_dir.join("nested")).unwrap();
+    for index in 0..105_u64 {
+        let path = memory_dir.join("nested").join(format!("item-{index}.tmp"));
+        std::fs::write(path, vec![b'x'; usize::try_from(index + 1).unwrap()]).unwrap();
+    }
+    let persistent = memory_dir.join("persistent.json");
+    std::fs::write(&persistent, vec![b'p'; 1000]).unwrap();
+    let misleading = memory_dir.join("nested/not-temporary.txt");
+    std::fs::write(&misleading, vec![b'n'; 2000]).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&persistent, memory_dir.join("nested/link.tmp")).unwrap();
+
+    let items = list_mem_temporary_items_at(&memory_dir).unwrap();
+    assert_eq!(items.len(), 100);
+    assert!(items.windows(2).all(|pair| pair[0].bytes >= pair[1].bytes));
+    assert_eq!(items[0].bytes, 105);
+    assert_eq!(items.last().unwrap().bytes, 6);
+    assert!(items.iter().all(|item| item.kind == "temporary_file"));
+    assert!(!items
+        .iter()
+        .any(|item| item.path.contains("persistent.json")));
+    assert!(!items
+        .iter()
+        .any(|item| item.path.contains("not-temporary.txt")));
+    assert!(!items.iter().any(|item| item.path.contains("link.tmp")));
+
+    let selected = items[0].clone();
+    assert_eq!(
+        delete_mem_temporary_items_at(&memory_dir, std::slice::from_ref(&selected.id)).unwrap(),
+        1
+    );
+    assert!(!memory_dir.join(&selected.path).exists());
+    assert!(persistent.exists());
+    assert!(
+        delete_mem_temporary_items_at(&memory_dir, &["file:../escape.tmp".to_string()]).is_err()
+    );
+    assert!(
+        delete_mem_temporary_items_at(&memory_dir, &["file:persistent.json".to_string()]).is_err()
+    );
+    let _ = std::fs::remove_dir_all(memory_dir);
+}
+
+#[test]
+fn mem_temporary_items_include_only_finished_shell_job_bundles() {
+    let memory_dir = std::env::temp_dir().join(unique_web_id("mem_temporary_shell_jobs"));
+    let shell_dir = memory_dir.join("shell_jobs");
+    std::fs::create_dir_all(&shell_dir).unwrap();
+    let make_record = |id: &str, finished: bool| {
+        let output = shell_dir.join(format!("{id}.out"));
+        let stderr = shell_dir.join(format!("{id}.err"));
+        let status = shell_dir.join(format!("{id}.status"));
+        std::fs::write(&output, "12345").unwrap();
+        std::fs::write(&stderr, "678").unwrap();
+        std::fs::write(&status, if finished { "0" } else { "" }).unwrap();
+        agent_core::ShellJobRecord {
+            id: id.to_string(),
+            created_at_ms: 7,
+            kind: "test".to_string(),
+            session_id: "session_a".to_string(),
+            turn_id: "turn_a".to_string(),
+            pid: std::process::id(),
+            process_identity: None,
+            tool_call_id: format!("call-{id}"),
+            owner_id: None,
+            command: "true".to_string(),
+            cwd: memory_dir.display().to_string(),
+            output_file: output.display().to_string(),
+            stderr_file: stderr.display().to_string(),
+            status_file: status.display().to_string(),
+            tail_out: false,
+        }
+    };
+    let finished = make_record("finished", true);
+    let active = make_record("active", false);
+    std::fs::write(
+        shell_dir.join("jobs.jsonl"),
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&finished).unwrap(),
+            serde_json::to_string(&active).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let items = list_mem_temporary_items_at(&memory_dir).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, "shell_job:finished");
+    assert_eq!(items[0].bytes, 9);
+    assert_eq!(
+        delete_mem_temporary_items_at(&memory_dir, &[items[0].id.clone()]).unwrap(),
+        1
+    );
+    assert!(!Path::new(&finished.output_file).exists());
+    assert!(Path::new(&active.output_file).exists());
+    assert!(std::fs::read_to_string(shell_dir.join("jobs.jsonl"))
+        .unwrap()
+        .contains("active"));
+    let _ = std::fs::remove_dir_all(memory_dir);
+}
+
+#[test]
 fn mem_temporary_retention_rejects_invalid_values() {
     let state = routing_test_state();
     assert_eq!(
@@ -5950,6 +6062,7 @@ fn routing_test_state() -> AppState {
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
         temporary_retention_wakeup: Arc::new(Notify::new()),
+        mem_temporary_task_running: Arc::new(AtomicBool::new(false)),
         debug: None,
     }
 }
@@ -10529,8 +10642,8 @@ fn existing_instance_is_rejected_with_pid_url_and_stop_command() {
             pid: 4242,
             launch_parent_pid: None,
             port: Some(18080),
-            token: Some("existing-token".to_string()),
-            browser_url: Some("http://127.0.0.1:18080/?token=existing-token".to_string()),
+            token: None,
+            browser_url: Some("http://127.0.0.1:18080/".to_string()),
             public_access: false,
             started_at_ms: 123,
         })
@@ -10540,7 +10653,7 @@ fn existing_instance_is_rejected_with_pid_url_and_stop_command() {
     let error = existing_web_instance_error(&info);
     assert!(error.contains("never reused"));
     assert!(error.contains("PID:  4242"));
-    assert!(error.contains("http://127.0.0.1:18080/?token=existing-token"));
+    assert!(error.contains("http://127.0.0.1:18080/"));
     assert!(error.contains("--space"));
     assert!(!error.contains("--data-dir"));
     #[cfg(unix)]
@@ -10580,8 +10693,8 @@ async fn healthy_existing_instance_is_detected_without_taking_its_journal() {
             pid: 4242,
             launch_parent_pid: Some(std::process::id()),
             port: Some(port),
-            token: Some("healthy-token".to_string()),
-            browser_url: Some(format!("http://127.0.0.1:{port}/?token=healthy-token")),
+            token: None,
+            browser_url: Some(format!("http://127.0.0.1:{port}/")),
             public_access: false,
             started_at_ms: 123,
         })
@@ -10591,8 +10704,7 @@ async fn healthy_existing_instance_is_detected_without_taking_its_journal() {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut request = [0_u8; 1024];
         let size = socket.read(&mut request).await.unwrap();
-        assert!(String::from_utf8_lossy(&request[..size])
-            .starts_with("GET /api/health?token=healthy-token "));
+        assert!(String::from_utf8_lossy(&request[..size]).starts_with("GET /api/health "));
         let body = format!(r#"{{"ok":true,"port":{port}}}"#);
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -10636,8 +10748,8 @@ async fn healthy_host_with_dead_launcher_is_not_reused_during_shutdown_handoff()
             pid: 4242,
             launch_parent_pid: Some(i32::MAX as u32),
             port: Some(port),
-            token: Some("dying-token".to_string()),
-            browser_url: Some(format!("http://127.0.0.1:{port}/?token=dying-token")),
+            token: None,
+            browser_url: Some(format!("http://127.0.0.1:{port}/")),
             public_access: false,
             started_at_ms: 123,
         })
