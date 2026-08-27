@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Recover provider `length`/`max_tokens` responses whose native tool arguments end mid-JSON: retain the received response and argument fragment in the repair context, then request one smaller complete step and continue iteratively instead of surfacing `invalid_tool_call ... EOF` or expanding the output limit first.
 - Reduce Web Session-list row height and vertical padding for a denser sidebar
   while preserving status indicators, disclosure controls, and touch behavior.
 - Speed up Web Memory settings temporary-data discovery by filtering directory

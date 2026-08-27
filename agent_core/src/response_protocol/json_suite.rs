@@ -333,7 +333,7 @@ pub fn protocol_repair_instruction(issue: &str) -> &'static str {
     }
     match issue {
         "truncated_model_output" => {
-            "检查到刚刚的输出被 max output token 截断，未形成完整 JSON。请返回更短的、完整的 JSON object；长报告可用 run_bash 写入文件后在 final_answer 中给出路径。Return exactly one valid JSON object. Do not use markdown fences."
+            "检查到刚刚的输出被 max output token 截断，未形成完整 JSON。上一次已收到的截断回复和原生工具参数片段已附在上下文中，请不要再次生成同样长的整段内容。把工作拆成小块：本次只生成一个较小、完整的步骤或工具调用，拿到结果后再继续下一小块；如果是长报告，可分段写入文件，最后只在 final_answer 中给出简短总结和路径。Return exactly one valid JSON object. Do not use markdown fences."
         }
         "final_answer_requires_status_finished" => {
             "检查到刚刚的输出格式有点问题：你提供了 final_answer，但缺少 status:\"ALL_FINISHED\"。如果所有用户的 open/pending 请求已经完成，请同时提供 status:\"ALL_FINISHED\" 和 final_answer；这不会关闭 Timem session。如果仍需要 runtime 继续工作，请去掉 final_answer，并提供 working_still_action。Return exactly one valid JSON object. Do not use markdown fences."

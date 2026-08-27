@@ -857,15 +857,10 @@ pub fn parse_model_response(
     config: &ModelServiceConfig,
     raw: &Value,
 ) -> Result<LlmResponse, String> {
-    let tool_calls = parse_native_tool_calls(config.api_protocol, raw)?;
-    if tool_calls.len() > config.interaction.max_tool_calls_per_response {
-        return Err(format!(
-            "too_many_tool_calls: received {}, limit {}",
-            tool_calls.len(),
-            config.interaction.max_tool_calls_per_response
-        ));
-    }
-    let (content, usage, truncated) = match config.api_protocol {
+    // Read completion metadata before validating native tool arguments. A provider can
+    // stop at its output limit in the middle of the arguments JSON; in that case the
+    // partial call is model output to repair, not a transport/parser failure.
+    let (mut content, usage, truncated) = match config.api_protocol {
         ApiProtocol::OpenAiCompatible => {
             let content = raw
                 .pointer("/choices/0/message/content")
@@ -1007,6 +1002,21 @@ pub fn parse_model_response(
             )
         }
     };
+    let tool_calls = match parse_native_tool_calls(config.api_protocol, raw) {
+        Ok(tool_calls) => tool_calls,
+        Err(error) if truncated => {
+            append_truncated_native_tool_context(&mut content, raw, config.api_protocol, &error);
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
+    if tool_calls.len() > config.interaction.max_tool_calls_per_response {
+        return Err(format!(
+            "too_many_tool_calls: received {}, limit {}",
+            tool_calls.len(),
+            config.interaction.max_tool_calls_per_response
+        ));
+    }
     Ok(LlmResponse {
         content,
         tool_calls,
@@ -1053,6 +1063,79 @@ pub fn interpret_model_http_response(
         status,
         raw_json,
         result,
+    }
+}
+
+fn append_truncated_native_tool_context(
+    content: &mut String,
+    raw: &Value,
+    api_protocol: ApiProtocol,
+    parse_error: &str,
+) {
+    let fragments = match api_protocol {
+        ApiProtocol::OpenAiCompatible => raw
+            .pointer("/choices/0/message/tool_calls")
+            .and_then(Value::as_array)
+            .map(|calls| {
+                calls
+                    .iter()
+                    .enumerate()
+                    .map(|(index, call)| {
+                        let name = call
+                            .pointer("/function/name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        let arguments = call
+                            .pointer("/function/arguments")
+                            .map(tool_argument_fragment)
+                            .unwrap_or_default();
+                        format!("tool_call[{index}] name={name}\narguments_fragment={arguments}")
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        ApiProtocol::OpenAiResponses => raw
+            .get("output")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| {
+                        item.get("type").and_then(Value::as_str) == Some("function_call")
+                    })
+                    .enumerate()
+                    .map(|(index, call)| {
+                        let name = call
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown");
+                        let arguments = call
+                            .get("arguments")
+                            .map(tool_argument_fragment)
+                            .unwrap_or_default();
+                        format!("tool_call[{index}] name={name}\narguments_fragment={arguments}")
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        ApiProtocol::Anthropic => Vec::new(),
+    };
+    if !content.is_empty() {
+        content.push_str("\n\n");
+    }
+    content.push_str("[TRUNCATED NATIVE TOOL CALL OUTPUT]\n");
+    content.push_str("parse_error: ");
+    content.push_str(parse_error);
+    for fragment in fragments {
+        content.push('\n');
+        content.push_str(&fragment);
+    }
+}
+
+fn tool_argument_fragment(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        other => other.to_string(),
     }
 }
 
