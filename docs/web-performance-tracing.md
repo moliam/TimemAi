@@ -68,7 +68,7 @@ Command stages:
 | `supplement_active_turn_observed` / `supplement_no_active_turn` | Host's active-turn branch decision. |
 | `supplement_core_accepted` / `supplement_core_rejected_closed_turn` | Core accepted the supplement or reported that the turn had closed. |
 | `closed_turn_settle_*` | Closed-turn recovery drained pending worker events, finished, or timed out. |
-| `supplement_published` | Updated turn was journaled/published; includes append, publish, total, event, and user-entry measurements. |
+| `supplement_published` | Updated turn was persisted/published; includes append, publish, total, event, and user-entry measurements. |
 | `server_execute_handled` | Command handler returned; includes execution duration and success. |
 | `browser_turn_updated` | Matching command ID reached the browser's first authoritative `turn_updated`. |
 | `browser_painted` | First animation frame after that matching update. |
@@ -86,8 +86,9 @@ segments; they do not claim causality from sequence alone.
 - Small queue time but large `supplement_published.fields.append_ms`, reproduced
   with larger active turns, predicts that supplement append/core synchronization
   is the segment to profile next.
-- Large `publish_ms` predicts journal/broadcast publication cost. Confirm by
-  comparing event-journal size/storage conditions; do not blame rendering.
+- Large `publish_ms` predicts semantic-envelope construction or in-memory broadcast cost.
+  Confirm with host CPU/lock profiling and receiver lag; this path no longer reads or writes
+  a semantic-event journal.
 - Small server-local segments but large browser `browser_turn_updated.elapsed_ms`
   leaves delivery/event-queue/state reduction as a hypothesis. Confirm it with a
   browser Performance/WebSocket profile; do not derive the gap by subtracting

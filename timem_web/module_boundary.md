@@ -34,14 +34,16 @@ It may contain:
   mutations are FIFO across sockets, independent Sessions may execute in
   parallel, and global mutations exclude Session mutations through the global
   barrier.
-- Durable semantic event publication. Authoritative mutations and Core topics
-  are appended to the active memory space's sequenced event journal before
-  broadcast. Reconnecting clients resume after `event_seq`; journal lag is
-  repaired immediately from disk. Request-scoped queries, acknowledgements,
-  validation errors, and secret reveals remain direct and outside the journal.
-  Memory-space switching changes Session state, command deduplication, and the
-  event journal under one epoch barrier so old accepted work cannot execute in
-  the new space.
+- Ordered semantic event delivery. After authoritative state is persisted,
+  mutations and Core topics enter one in-memory linearization point that assigns
+  `event_seq` and broadcasts the envelope without filesystem I/O. WebSocket
+  handlers subscribe before taking a snapshot; every `hello` establishes a new
+  snapshot baseline. A sequence gap or broadcast lag reloads a full snapshot
+  instead of replaying disk history. Request-scoped queries, acknowledgements,
+  validation errors, and secret reveals remain direct. Memory-space switching
+  changes Session state, command deduplication, and the per-MEM Web instance
+  lease under one epoch barrier so old accepted work cannot execute in the new
+  space.
 - Per-session browser upload storage and attachment metadata. Uploaded bytes
   remain host-local; the host only contributes their paths as session context.
 - Memory-space-scoped Worker Role library ownership. Roles and Role groups are

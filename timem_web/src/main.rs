@@ -1,10 +1,11 @@
 mod debug_session;
-mod event_journal;
 mod lifecycle_diagnostics;
 mod os;
 mod runtime_log;
+mod semantic_delivery;
 mod server;
 mod session_groups;
+mod web_instance;
 mod worker_roles;
 
 use std::time::{Duration, Instant};

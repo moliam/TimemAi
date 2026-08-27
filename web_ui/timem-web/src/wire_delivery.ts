@@ -1,10 +1,10 @@
 import { WireEvent } from "./protocol";
 
 /**
- * Events which are intentionally connection-local and therefore never enter
- * the durable semantic journal. Everything else (apart from the transport
- * envelopes themselves) is authoritative state and must arrive in a
- * semantic_event envelope on a cursor-capable Host.
+ * Events which are intentionally connection-local and therefore bypass the
+ * ordered semantic delivery stream. Everything else (apart from transport
+ * envelopes) is authoritative state and arrives in a semantic_event envelope
+ * on a sequence-capable Host.
  */
 const DIRECT_EVENT_TYPES: ReadonlySet<WireEvent["type"]> = new Set([
   "command_ack",
@@ -35,8 +35,8 @@ export function isDirectWireEvent(event: WireEvent): boolean {
 
 /**
  * Legacy Hosts have no cursor and deliver authoritative events directly. Once
- * a cursor-capable Host is detected, accepting a raw authoritative event would
- * apply the same mutation twice when its journal envelope arrives as well.
+ * a sequence-capable Host is detected, accepting a raw authoritative event
+ * would apply the same mutation twice when its ordered envelope arrives.
  */
 export function shouldReduceTopLevelWireEvent(event: WireEvent, semanticDelivery: boolean): boolean {
   if (!semanticDelivery) return true;

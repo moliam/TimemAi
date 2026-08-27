@@ -21,7 +21,7 @@ import { formatTokens } from "./token_format";
 import { summarizeConsecutiveToolActivities, ToolActivitySummary } from "./activity_groups";
 import { applyQueuedMessagesAck, claimQueuedMessage, clearQueuedMessagesPause, COLLAPSED_QUEUE_LIMIT, loadQueuedMessages, loadQueuedMessagesPause, QueuedMessage, queuedMessageKey, QueuedMessagesPauseSource, QueuedMessagesPauseState, queuedMessagesPauseSessionId, queuedMessagesPauseStorageKey, queuedMessagesStorageKey, releaseQueuedMessageClaim, releaseSessionQueuedMessageClaims, removeQueuedMessage, reorderQueuedMessages, reservedQueuedAttachmentIds, saveQueuedMessages, saveQueuedMessagesPause, selectQueuedDispatches, shouldDirectManualMessage, stopQueuedAutoSend, unclaimedQueuedMessages } from "./queued_messages";
 import { acceptOutboxCommand, addCommandToOutbox, commandMayPersist, commandNeedsReliableDelivery, CommandOutboxItem, commandOutboxStorageKey, finishOutboxCommand, loadCommandOutbox, reliableStorageScope, removeCommandOutboxItem, saveCommandOutboxItem } from "./command_outbox";
-import { classifyEventSequence, loadEventCursor, resolveHelloEventCursor, saveEventCursor } from "./event_cursor";
+import { classifyEventSequence } from "./event_cursor";
 import { enablesSemanticDelivery, shouldReduceTopLevelWireEvent } from "./wire_delivery";
 import { clipboardImageFiles } from "./clipboard_images";
 import { humanizeToolStatus, isToolActivityRunning, TOOL_STATUS_RUNNING } from "./tool_status";
@@ -289,7 +289,6 @@ function TimemApp() {
   const commandOutboxRef = useRef<CommandOutboxItem[]>([]);
   const commandOutboxScopeRef = useRef("");
   const eventCursorRef = useRef(0);
-  const eventCursorScopeRef = useRef("");
   const semanticDeliveryRef = useRef(false);
   const creatingSessionRef = useRef(false);
   const pendingAttachmentRemoveIdsRef = useRef<Set<string>>(new Set());
@@ -759,13 +758,12 @@ function TimemApp() {
       const sequenceState = classifyEventSequence(eventCursorRef.current, event.event_seq);
       if (sequenceState === "duplicate") return;
       if (sequenceState === "gap") {
-        reportUiError("Runtime event gap", `Expected event ${eventCursorRef.current + 1}, received ${event.event_seq}. Reconnecting to replay missing events.`);
+        reportUiError("Runtime event gap", `Expected event ${eventCursorRef.current + 1}, received ${event.event_seq}. Reconnecting to reload the authoritative state.`);
         socket.current?.close();
         return;
       }
       receiveWireEvent(event.event, true);
       eventCursorRef.current = event.event_seq;
-      saveEventCursor(window.sessionStorage, eventCursorScopeRef.current, event.event_seq);
       return;
     }
     if (event.type === "command_ack") {
@@ -864,16 +862,12 @@ function TimemApp() {
     }
     if (event.type === "hello") {
       const scope = reliableStorageScope(window.location.origin, event.snapshot.server.mem.space_dir);
-      let reconnectForReplay = false;
-      if (eventCursorScopeRef.current !== scope) {
-        const previousScope = eventCursorScopeRef.current;
-        const restoredCursor = loadEventCursor(window.sessionStorage, scope);
-        const resolved = resolveHelloEventCursor(previousScope, scope, restoredCursor, event.event_cursor, event.event_replay_floor);
-        eventCursorScopeRef.current = scope;
-        eventCursorRef.current = resolved.cursor;
-        reconnectForReplay = resolved.reconnectForReplay;
-        saveEventCursor(window.sessionStorage, scope, eventCursorRef.current);
-      }
+      // Hello always carries a complete authoritative snapshot. Its cursor is
+      // the baseline for this connection; old browser cursors are deliberately
+      // not persisted or replayed across reconnects.
+      eventCursorRef.current = Number.isSafeInteger(event.event_cursor) && (event.event_cursor ?? 0) >= 0
+        ? event.event_cursor ?? 0
+        : 0;
       if (commandOutboxScopeRef.current !== scope) {
         commandOutboxScopeRef.current = scope;
         commandOutboxRef.current = loadCommandOutbox(window.localStorage, scope);
@@ -892,13 +886,9 @@ function TimemApp() {
       setFavoriteCapacityUpdating(false);
       setFavoritesLoading(true);
       setSnapshotReady(true);
-      if (reconnectForReplay) {
-        queueMicrotask(() => socket.current?.close());
-      } else {
-        queueMicrotask(() => {
-          if (!sendCommand({ type: "favorites_list" })) setFavoritesLoading(false);
-        });
-      }
+      queueMicrotask(() => {
+        if (!sendCommand({ type: "favorites_list" })) setFavoritesLoading(false);
+      });
       return;
     }
     if (event.type === "session_created") {
@@ -1327,7 +1317,6 @@ function TimemApp() {
       const scheme = window.location.protocol === "https:" ? "wss" : "ws";
       const query = new URLSearchParams();
       if (token) query.set("token", token);
-      if (eventCursorRef.current > 0) query.set("last_event_seq", String(eventCursorRef.current));
       const queryString = query.size > 0 ? `?${query.toString()}` : "";
       const ws = new WebSocket(`${scheme}://${window.location.host}/ws${queryString}`);
       socket.current = ws;
