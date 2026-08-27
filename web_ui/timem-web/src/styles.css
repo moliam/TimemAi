@@ -1226,6 +1226,10 @@ button:disabled { cursor: not-allowed; }
 .header-model { flex: 0 1 auto; }
 .header-context { min-width: 0; }
 .session-list { min-height: 0; scrollbar-gutter: stable; }
+.session-list-loading { min-height: 116px; display: flex; align-items: center; justify-content: center; gap: 9px; padding: 24px 12px; color: #7f918e; font-size: 12px; }
+.session-list-loading svg { flex: none; color: #75aa9e; animation: spin 1.2s linear infinite; }
+:root[data-theme="light"] .session-list-loading { color: #71807c; }
+:root[data-theme="light"] .session-list-loading svg { color: #4f8d7e; }
 .session-row .session { min-width: 0; }
 .session-identity, .session-sub, .session-detail { width: 100%; }
 .session-profile { font-size: 11px; }
@@ -2121,9 +2125,9 @@ body {
 .session-drag:hover:not(:disabled) { color: #b2bcbc; }
 .session-drag:active { cursor: grabbing; }
 .session-row .session { padding-right: 2px; }
-.session-endpoint-reveal { min-width: 0; max-width: 46%; flex: none; display: inline-flex; align-items: center; gap: 4px; margin-right: 5px; overflow: hidden; border: 1px solid #40504c; border-radius: 999px; padding: 2px 6px; background: #222a28; color: #899b96; font-size: 9px; line-height: 1.2; white-space: nowrap; opacity: 0; visibility: hidden; transform: translateX(3px); transition: opacity .15s ease, visibility .15s ease, transform .15s ease; pointer-events: none; }
+.session-endpoint-reveal { min-width: 0; max-width: calc(100% - 48px); flex: 0 1 auto; display: none; align-items: center; margin-left: auto; overflow: hidden; border: 1px solid #40504c; border-radius: 999px; padding: 2px 6px; background: #222a28; color: #899b96; font-size: 9px; line-height: 1.2; white-space: nowrap; opacity: 0; visibility: hidden; transform: translateX(3px); transition: opacity .15s ease, visibility .15s ease, transform .15s ease; pointer-events: none; }
 .session-endpoint-reveal > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.session-row:hover .session-endpoint-reveal, .session-row:focus-within .session-endpoint-reveal, .session-endpoint-reveal.pending { opacity: 1; visibility: visible; transform: translateX(0); }
+.session-row:hover .session-endpoint-reveal, .session-row:has(:focus-visible) .session-endpoint-reveal, .session-endpoint-reveal.pending { display: inline-flex; opacity: 1; visibility: visible; transform: translateX(0); }
 .session-endpoint-reveal.pending { color: #8fb9d5; }
 .session-row.delete-selecting .session-endpoint-reveal { display: none; }
 .session-overlay { width: 220px; min-height: 42px; padding: 6px 34px 6px 3px; border: 1px solid #526967; background: #292f2f; color: #ededed; box-shadow: 0 12px 28px #0008; }
@@ -2825,7 +2829,7 @@ body {
 .session-drag { left: 4px; }
 .session-expand { left: 27px; }
 .session-row:hover > :is(.session-drag, .session-expand.available),
-.session-row:focus-within > :is(.session-drag, .session-expand.available),
+.session-row:has(:focus-visible) > :is(.session-drag, .session-expand.available),
 .session-row > :is(.session-drag, .session-expand.available):focus-visible {
   opacity: 1;
   pointer-events: auto;
@@ -2833,24 +2837,17 @@ body {
   transition-delay: 0s;
 }
 .session-row:hover .session,
-.session-row:focus-within .session { padding-left: 56px; }
+.session-row:has(:focus-visible) .session { padding-left: 56px; }
 .session-row:is(.delete-selecting, .controls-suppressed) .session { padding-left: 34px; }
 .session-row:is(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand) { display: none; }
 .session-row.dragging .session { transition: none; }
 .session-working-icon { width: 15px; height: 15px; flex: none; }
-.session-identity { flex: 1; min-width: 0; }
+.session-identity { flex: 1 1 48px; min-width: 40px; }
 .session-endpoint-reveal {
-  position: absolute;
-  z-index: 2;
-  top: 50%;
-  right: 5px;
-  max-width: 46%;
+  position: static;
+  z-index: auto;
   margin-right: 0;
-  transform: translate(3px, -50%);
 }
-.session-row:hover .session-endpoint-reveal,
-.session-row:focus-within .session-endpoint-reveal,
-.session-endpoint-reveal.pending { transform: translate(0, -50%); }
 :root[data-theme="light"] .session-row::after {
   background: linear-gradient(90deg, transparent, #24342e14 12%, #24342e14 88%, transparent);
 }
@@ -3590,14 +3587,12 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .session-row:not(.has-workers) .session-drag { right: 4px; }
 .session-expand:hover { color: #c4d0d8; }
 .session-row:hover .session,
-.session-row:focus-within .session { padding-left: 7px; padding-right: 58px; }
+.session-row:has(:focus-visible) .session { padding-left: 7px; padding-right: 58px; }
 .session-row:not(.has-workers):hover .session,
-.session-row:not(.has-workers):focus-within .session { padding-right: 32px; }
+.session-row:not(.has-workers):has(:focus-visible) .session { padding-right: 32px; }
 .session-row:is(.delete-selecting, .controls-suppressed) .session { padding-left: 7px; padding-right: 5px; }
 .session-row:hover .session-endpoint-reveal,
-.session-row:focus-within .session-endpoint-reveal { right: 57px; max-width: 34%; }
-.session-row:not(.has-workers):hover .session-endpoint-reveal,
-.session-row:not(.has-workers):focus-within .session-endpoint-reveal { right: 31px; }
+.session-row:has(:focus-visible) .session-endpoint-reveal { max-width: calc(100% - 48px); }
 @media (hover: none), (pointer: coarse) {
   .session-row:not(.delete-selecting, .controls-suppressed) .session { padding-left: 7px; padding-right: 58px; }
   .session-row:not(.has-workers, .delete-selecting, .controls-suppressed) .session { padding-right: 32px; }
