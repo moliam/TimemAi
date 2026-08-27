@@ -2722,12 +2722,15 @@ describe("session activity navigation polish", () => {
     expect(source).toContain("const [threadAwayFromBottom, setThreadAwayFromBottom] = useState(false);");
     expect(source).toContain("setThreadAwayFromBottom(!nearBottom);");
     expect(source).not.toContain("workingDots");
-    expect(source).toContain('className="thread-working-away" title="工作仍在继续，跳转到最新内容"');
+    expect(source).toContain('activeSession?.state === "working" && <button');
+    expect(source).not.toContain('activeSession?.state === "working" && threadAwayFromBottom && <button');
+    expect(source).toContain('className={`thread-working-away${threadAwayFromBottom ? " away-from-bottom" : " at-live-edge"}`}');
+    expect(source).toContain('title={threadAwayFromBottom ? "工作仍在继续，跳转到最新内容" : "工作仍在继续，当前已是最新内容"}');
     expect(source).toContain('<LoaderCircle size={15} strokeWidth={1.8} aria-hidden="true"/><span className="sr-only" role="status" aria-live="polite">Working</span>');
     expect(source).toContain("onClick={navigateWorkingToThreadBottom}");
     expect(source).toContain("const navigateWorkingToThreadBottom = useCallback(() => {");
     expect(source).toContain("const durationMs = 90;");
-    expect(source.indexOf('className="thread-working-away"')).toBeGreaterThan(source.indexOf('<nav className="user-message-navigation"'));
+    expect(source.indexOf('className={`thread-working-away')).toBeGreaterThan(source.indexOf('<nav className="user-message-navigation"'));
     expect(styles).toContain(".thread-working-away {");
     expect(styles).toContain("width: 30px !important;");
     expect(styles).toContain("justify-self: center;");

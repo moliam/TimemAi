@@ -3565,7 +3565,7 @@ const toggleQueuedMessages = () => {
     <nav className="user-message-navigation" aria-label="用户消息导航">
       <button type="button" title="上一条用户消息" aria-label="上一条用户消息" disabled={!userMessageNavigation.previous} onClick={() => navigateUserMessage("previous")}><ChevronUp size={17} aria-hidden="true"/></button>
       <button type="button" title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} aria-label={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} disabled={!userMessageNavigation.next && !userMessageNavigation.bottom} onClick={() => { if (userMessageNavigation.next) navigateUserMessage("next"); else navigateToThreadBottom(); }}><ChevronDown size={17} aria-hidden="true"/></button>
-      {activeSession?.state === "working" && threadAwayFromBottom && <button type="button" className="thread-working-away" title="工作仍在继续，跳转到最新内容" aria-label="工作仍在继续，跳转到最新内容" onClick={navigateWorkingToThreadBottom}><LoaderCircle size={15} strokeWidth={1.8} aria-hidden="true"/><span className="sr-only" role="status" aria-live="polite">Working</span></button>}
+      {activeSession?.state === "working" && <button type="button" className={`thread-working-away${threadAwayFromBottom ? " away-from-bottom" : " at-live-edge"}`} title={threadAwayFromBottom ? "工作仍在继续，跳转到最新内容" : "工作仍在继续，当前已是最新内容"} aria-label={threadAwayFromBottom ? "工作仍在继续，跳转到最新内容" : "工作仍在继续，当前已是最新内容"} onClick={navigateWorkingToThreadBottom}><LoaderCircle size={15} strokeWidth={1.8} aria-hidden="true"/><span className="sr-only" role="status" aria-live="polite">Working</span></button>}
     </nav>
   </ThreadPrimitive.Root>;
 }
