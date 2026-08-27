@@ -27,6 +27,9 @@ python3 scripts/web_ui_matrix_check.py
 echo "== static prompt snapshot =="
 scripts/update_static_prompt_snapshot.sh --check
 
+echo "== sensitive scan self-test =="
+scripts/sensitive_scan.sh --self-test
+
 echo "== sensitive scan: current tree =="
 scripts/sensitive_scan.sh --current
 
