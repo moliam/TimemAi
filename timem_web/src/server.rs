@@ -202,7 +202,7 @@ impl Drop for TicketCommandLaneGuard<'_> {
 enum CommandDedupState {
     Accepted,
     Committed {
-        event: Option<WireEvent>,
+        event: Option<Box<WireEvent>>,
         serialized_event: Option<Value>,
     },
     Rejected {
@@ -1306,7 +1306,7 @@ enum WireEvent {
         event: Value,
     },
     SessionCreated {
-        session: WebSession,
+        session: Box<WebSession>,
     },
     SessionRenamed {
         session_id: String,
@@ -3013,7 +3013,7 @@ async fn websocket_session(
                                                 error,
                                             }
                                         } else if let Some((command_id, state)) = cached {
-                                            BrowserCommandEnqueueOutcome::Cached { command_id, state }
+                                            BrowserCommandEnqueueOutcome::Cached { command_id, state: Box::new(state) }
                                         } else {
                                             enqueue_reserved_browser_command(&state, &command_tx, command)
                                         }
@@ -3025,7 +3025,7 @@ async fn websocket_session(
                                     }
                                     BrowserCommandEnqueueOutcome::Accepted(None) => {}
                                     BrowserCommandEnqueueOutcome::Cached { command_id, state: cached } => {
-                                        if send_cached_command_state(&mut sender, &command_id, cached).await.is_err() { break; }
+                                        if send_cached_command_state(&mut sender, &command_id, *cached).await.is_err() { break; }
                                     }
                                     BrowserCommandEnqueueOutcome::Rejected { command_id: Some(command_id), error } => {
                                         if send_event(&mut sender, &command_ack(&command_id, CommandAckStatus::Rejected, Some(error))).await.is_err() { break; }
@@ -3132,7 +3132,7 @@ enum BrowserCommandEnqueueOutcome {
     Accepted(Option<String>),
     Cached {
         command_id: String,
-        state: CommandDedupState,
+        state: Box<CommandDedupState>,
     },
     Rejected {
         command_id: Option<String>,
@@ -3300,7 +3300,7 @@ fn execute_browser_command(
                     command_id,
                     CommandDedupState::Committed {
                         serialized_event: direct_event.as_ref().and_then(durable_command_result),
-                        event: direct_event.clone(),
+                        event: direct_event.clone().map(Box::new),
                     },
                 ) {
                     Ok(()) => BrowserCommandCompletion {
@@ -3621,7 +3621,9 @@ fn handle_command_with_id(
             if let Some(event) = work_instruction_notice_event(state, &session_id) {
                 publish_semantic(state, event)?;
             }
-            let event = WireEvent::SessionCreated { session };
+            let event = WireEvent::SessionCreated {
+                session: Box::new(session),
+            };
             publish_semantic(state, event.clone())?;
             return Ok(Some(event));
         }
