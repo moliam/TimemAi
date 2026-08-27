@@ -3512,7 +3512,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .worker-state.error { color: #d58b85; }
 .worker-state.stopped { color: #8a8580; }
 
-/* Visible only when the reader left the live edge of a working Session. */
+/* Remains visible for the full lifetime of a working Session. */
 .aui-thread { position: relative; }
 .thread-working-away {
   position: relative;
