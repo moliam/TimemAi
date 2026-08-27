@@ -619,11 +619,22 @@ fn run_bash_poll_mode_times_out_when_command_stays_nonzero() {
         outcome.text
     );
     assert!(
-        outcome.text.contains("Last observed exit code: 7"),
+        outcome.text.contains("Last loop_cmd exit code: 7"),
         "{}",
         outcome.text
     );
     assert!(outcome.text.contains("waiting"), "{}", outcome.text);
+    assert!(
+        outcome.text.contains(
+            "exit_code is from the last loop_cmd execution; polling does not know the waited task's own exit code"
+        ),
+        "{}",
+        outcome.text
+    );
+    let evidence = outcome
+        .bash_result
+        .expect("timed-out polling must retain structured evidence");
+    assert_eq!(evidence.exit_code, Some(7));
 }
 
 #[test]
@@ -1924,4 +1935,90 @@ fn approval_pending_action_preserves_tail_out() {
         PendingApprovedAction::RunBash { tail_out, .. } => assert!(tail_out),
         other => panic!("unexpected pending action: {other:?}"),
     }
+}
+
+#[test]
+fn finished_shell_job_temporary_items_are_sized_and_deleted_as_complete_bundles() {
+    let dir = tmp_memory_dir("finished_temporary_items");
+    let shell_dir = dir.join("shell_jobs");
+    fs::create_dir_all(&shell_dir).unwrap();
+    let finished_output = shell_dir.join("finished.out");
+    let finished_stderr = shell_dir.join("finished.err");
+    let finished_status = shell_dir.join("finished.status");
+    let finished_notified = shell_dir.join("finished.status.notified");
+    let active_output = shell_dir.join("active.out");
+    let active_stderr = shell_dir.join("active.err");
+    let active_status = shell_dir.join("active.status");
+    for (path, contents) in [
+        (&finished_output, "12345"),
+        (&finished_stderr, "678"),
+        (&finished_status, "0"),
+        (&finished_notified, "ok"),
+        (&active_output, "active"),
+        (&active_stderr, ""),
+        (&active_status, ""),
+    ] {
+        fs::write(path, contents).unwrap();
+    }
+    let record = |id: &str, output: &Path, stderr: &Path, status: &Path| ShellJobRecord {
+        id: id.to_string(),
+        created_at_ms: 42,
+        kind: "test".to_string(),
+        session_id: "session_a".to_string(),
+        turn_id: "turn_a".to_string(),
+        pid: std::process::id(),
+        process_identity: None,
+        tool_call_id: format!("call-{id}"),
+        owner_id: None,
+        command: "true".to_string(),
+        cwd: dir.display().to_string(),
+        output_file: output.display().to_string(),
+        stderr_file: stderr.display().to_string(),
+        status_file: status.display().to_string(),
+        tail_out: false,
+    };
+    let finished = record(
+        "finished-job",
+        &finished_output,
+        &finished_stderr,
+        &finished_status,
+    );
+    let active = record("active-job", &active_output, &active_stderr, &active_status);
+    fs::write(
+        shell_dir.join("jobs.jsonl"),
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&finished).unwrap(),
+            serde_json::to_string(&active).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let store = FileShellJobStore::new(&dir);
+    let items = store.finished_temporary_items().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, "finished-job");
+    assert_eq!(items[0].bytes, 11);
+    assert!(store
+        .delete_finished_temporary_items(&["active-job".to_string()])
+        .is_err());
+    assert_eq!(
+        store
+            .delete_finished_temporary_items(&["finished-job".to_string()])
+            .unwrap(),
+        1
+    );
+    for path in [
+        &finished_output,
+        &finished_stderr,
+        &finished_status,
+        &finished_notified,
+    ] {
+        assert!(!path.exists(), "{} should be deleted", path.display());
+    }
+    assert!(active_output.exists());
+    let index = fs::read_to_string(shell_dir.join("jobs.jsonl")).unwrap();
+    assert!(!index.contains("finished-job"));
+    assert!(index.contains("active-job"));
+    let _ = fs::remove_dir_all(dir);
 }

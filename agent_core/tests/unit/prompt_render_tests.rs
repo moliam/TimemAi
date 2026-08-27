@@ -480,6 +480,31 @@ fn xml_bash_result_uses_single_dynamic_output_block_for_one_stream() {
 }
 
 #[test]
+fn xml_polling_bash_result_reuses_standard_exit_code_for_last_loop_command() {
+    let evidence = BashResultEvidence {
+        stdout: "still waiting".to_string(),
+        stderr: String::new(),
+        exit_code: Some(7),
+        signal: None,
+        pid: None,
+        timed_out: false,
+        pid_kind: None,
+        error_type: None,
+    };
+
+    let rendered = render_xml_bash_result(
+        Some("wait for remote job"),
+        ActionStatus::Timeout,
+        &evidence,
+        124,
+    );
+
+    assert!(rendered
+        .starts_with(r#"<bash_result task="wait for remote job" status="timeout" exit_code="7">"#));
+    assert!(rendered.contains("still waiting"));
+}
+
+#[test]
 fn xml_bash_result_handles_empty_and_stderr_only_streams() {
     let empty_evidence = BashResultEvidence {
         stdout: String::new(),
