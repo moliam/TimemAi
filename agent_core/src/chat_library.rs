@@ -297,7 +297,7 @@ impl ChatLibrary {
                 });
             }
         }
-        hits.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+        hits.sort_by_key(|hit| std::cmp::Reverse(hit.created_at_ms));
         hits.truncate(limit.clamp(1, MAX_RESULTS));
         Ok(hits)
     }
