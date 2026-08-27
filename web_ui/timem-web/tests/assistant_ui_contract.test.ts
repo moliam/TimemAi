@@ -257,6 +257,13 @@ describe("assistant-ui thread integration", () => {
     expect(styles).not.toContain('.session-row:focus-within');
     expect(styles).toContain('.session-row > :is(.session-drag, .session-expand.available):focus-visible {');
     expect(styles).toContain('.session-row:hover .session,\n.session-row:has(:focus-visible) .session { padding-left: 7px; padding-right: 58px; }');
+    expect(styles).toContain('.session-row:hover .session-endpoint-reveal,\n.session-row:has(:focus-visible) .session-endpoint-reveal {\n  position: absolute;');
+    expect(styles).toContain('right: 58px;\n  width: max-content;\n  max-width: min(132px, calc(100% - 72px));\n  flex: none;');
+    expect(styles).toContain('.session-row:not(.has-workers):hover .session-endpoint-reveal,');
+    expect(styles).toContain('right: 32px; max-width: min(156px, calc(100% - 46px));');
+    expect(styles).toContain('.session-row:hover .session-endpoint-reveal::before,');
+    expect(styles).toContain('background: linear-gradient(90deg, transparent, #242e2bea 78%, #242e2b 100%);');
+    expect(styles).toContain(':root[data-theme="light"] .session-row:hover .session-endpoint-reveal::before,');
     expect(styles).toContain('.session-row:is(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand) { display: none; }');
     expect(styles).toContain('.session-row:is(.delete-selecting, .controls-suppressed) .session { padding-left: 7px; padding-right: 5px; }');
     expect(styles).toContain('.session-overlay .session-name { min-width: 0; font-size: 12px; font-weight: 400; }');
@@ -275,6 +282,7 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('.session-row:not(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand.available)');
     expect(styles).toContain('.session-identity { flex: 1 1 48px; min-width: 40px; }');
     expect(styles).toContain('.session-endpoint-reveal {\n  position: static;');
+    expect(styles).toContain('font-size: 10px;\n  transform: translateY(-50%);');
     expect(styles).toContain('max-width: calc(100% - 48px); flex: 0 1 auto; display: none;');
     expect(styles).toContain('display: inline-flex; opacity: 1; visibility: visible; transform: translateX(0);');
     expect(styles).not.toContain('max-width: 34%');

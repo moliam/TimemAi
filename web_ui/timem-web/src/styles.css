@@ -3594,7 +3594,38 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .session-row:not(.has-workers):has(:focus-visible) .session { padding-right: 32px; }
 .session-row:is(.delete-selecting, .controls-suppressed) .session { padding-left: 7px; padding-right: 5px; }
 .session-row:hover .session-endpoint-reveal,
-.session-row:has(:focus-visible) .session-endpoint-reveal { max-width: calc(100% - 48px); }
+.session-row:has(:focus-visible) .session-endpoint-reveal {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  right: 58px;
+  width: max-content;
+  max-width: min(132px, calc(100% - 72px));
+  flex: none;
+  margin: 0;
+  font-size: 10px;
+  transform: translateY(-50%);
+}
+.session-row:not(.has-workers):hover .session-endpoint-reveal,
+.session-row:not(.has-workers):has(:focus-visible) .session-endpoint-reveal { right: 32px; max-width: min(156px, calc(100% - 46px)); }
+.session-row:hover .session-endpoint-reveal::before,
+.session-row:has(:focus-visible) .session-endpoint-reveal::before {
+  position: absolute;
+  z-index: -1;
+  top: -5px;
+  bottom: -5px;
+  left: -34px;
+  width: 42px;
+  background: linear-gradient(90deg, transparent, #242e2bea 78%, #242e2b 100%);
+  content: "";
+  pointer-events: none;
+}
+.session-row.active:hover .session-endpoint-reveal::before,
+.session-row.active:has(:focus-visible) .session-endpoint-reveal::before { background: linear-gradient(90deg, transparent, #243530ea 78%, #243530 100%); }
+:root[data-theme="light"] .session-row:hover .session-endpoint-reveal::before,
+:root[data-theme="light"] .session-row:has(:focus-visible) .session-endpoint-reveal::before { background: linear-gradient(90deg, transparent, #f2f6f4ea 78%, #f2f6f4 100%); }
+:root[data-theme="light"] .session-row.active:hover .session-endpoint-reveal::before,
+:root[data-theme="light"] .session-row.active:has(:focus-visible) .session-endpoint-reveal::before { background: linear-gradient(90deg, transparent, #e0efebea 78%, #e0efeb 100%); }
 @media (hover: none), (pointer: coarse) {
   .session-row:not(.delete-selecting, .controls-suppressed) .session { padding-left: 7px; padding-right: 58px; }
   .session-row:not(.has-workers, .delete-selecting, .controls-suppressed) .session { padding-right: 32px; }
