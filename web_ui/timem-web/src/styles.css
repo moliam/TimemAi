@@ -2791,7 +2791,7 @@ body {
 
 /* Compact Session rows: hidden endpoint labels never reserve name width. */
 .session-group-list { gap: 0; }
-.session-row { min-height: 32px; border-radius: 4px; }
+.session-row { min-height: 28px; border-radius: 4px; }
 .session-row::after {
   content: "";
   position: absolute;
@@ -2804,8 +2804,8 @@ body {
   pointer-events: none;
 }
 .session-row .session {
-  min-height: 32px;
-  padding: 2px 2px 2px 34px;
+  min-height: 28px;
+  padding: 1px 2px 1px 34px;
   gap: 6px;
   transition: padding-left .18s ease, color .15s ease, background-color .15s ease;
 }

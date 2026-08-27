@@ -236,9 +236,9 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('.session-row:hover .session-endpoint-reveal, .session-row:focus-within .session-endpoint-reveal, .session-endpoint-reveal.pending');
     expect(styles).toContain('.session-row.delete-selecting .session-endpoint-reveal { display: none; }');
     expect(styles).toContain('/* Compact Session rows: hidden endpoint labels never reserve name width. */');
-    expect(styles).toContain('.session-row { min-height: 32px; border-radius: 4px; }');
+    expect(styles).toContain('.session-row { min-height: 28px; border-radius: 4px; }');
     expect(styles).toContain('.session-row::after {');
-    expect(styles).toContain('.session-row .session {\n  min-height: 32px;\n  padding: 2px 2px 2px 34px;');
+    expect(styles).toContain('.session-row .session {\n  min-height: 28px;\n  padding: 1px 2px 1px 34px;');
     expect(styles).toContain('.session-drag,\n.session-expand {\n  position: absolute;');
     expect(styles).toContain('opacity: 0;\n  pointer-events: none;');
     expect(styles).toContain('.session-row:hover > :is(.session-drag, .session-expand.available),');
