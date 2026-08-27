@@ -136,7 +136,7 @@ fn blocked_read_returns_timeout_error_after_wait_limit() {
     fs::write(dir.path().join("slow.txt"), "eventual content").unwrap();
     let probe = install_test_parallel_read_probe(
         dir.path().to_path_buf(),
-        std::time::Duration::from_millis(100),
+        std::time::Duration::from_millis(250),
     );
 
     let started = std::time::Instant::now();
@@ -150,14 +150,17 @@ fn blocked_read_returns_timeout_error_after_wait_limit() {
     assert_eq!(outcome.status, crate::ActionStatus::Timeout);
     assert!(outcome.text.contains("status: error"), "{}", outcome.text);
     assert!(outcome.text.contains("error: timeout"), "{}", outcome.text);
+    // Keep a wide margin between the return deadline and the 250 ms blocked
+    // worker. Shared CI runners may deschedule this test briefly, but an
+    // implementation that waits for the worker to finish must still fail.
     assert!(
-        elapsed < std::time::Duration::from_millis(80),
+        elapsed < std::time::Duration::from_millis(150),
         "readfile timeout returned too late: {elapsed:?}"
     );
 
     // The timed-out worker is detached because a blocking filesystem read cannot
     // be safely cancelled. Let this test probe finish before resetting its globals.
-    thread::sleep(std::time::Duration::from_millis(120));
+    thread::sleep(std::time::Duration::from_millis(270));
     drop(probe);
 }
 
