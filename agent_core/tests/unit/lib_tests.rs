@@ -386,6 +386,7 @@ fn native_context_compact_persists_summary_after_discarding_all_old_deltas() {
 
     assert!(!prompt.contains("OLD NATIVE CONTEXT"));
     assert_eq!(prompt.matches(summary).count(), 1);
+    assert!(prompt.contains("## TIMEM_ASSISTANT (context compaction summary)"));
     assert!(prompt.contains("context compacted successfully."));
     assert_eq!(core.deltas.len(), 1, "summary must live in a fresh delta");
     assert_ne!(core.deltas[0].delta_id, old_delta_id);
@@ -445,6 +446,7 @@ fn native_context_compact_summary_does_not_depend_on_discarded_owning_delta() {
     assert!(prompt.contains("KEEP ME"));
     assert!(!prompt.contains("DISCARD OWNING DELTA"));
     assert_eq!(prompt.matches(summary).count(), 1);
+    assert!(prompt.contains("## TIMEM_ASSISTANT (context compaction summary)"));
     assert!(core
         .deltas
         .iter()
