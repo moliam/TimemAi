@@ -52,6 +52,8 @@ def file_exists_token(token: str) -> bool:
         ]:
             if (base / token).exists():
                 return True
+            if base.exists() and any(path.is_file() for path in base.rglob(token)):
+                return True
     return False
 
 
