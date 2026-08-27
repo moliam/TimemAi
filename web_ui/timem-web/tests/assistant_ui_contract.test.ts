@@ -481,7 +481,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('className="brand-scale-corner bottom-right"');
     expect(source).not.toContain('className="desktop-sidebar-toggle" title="Hide session navigation"');
     expect(source).not.toContain('<span>TM</span>');
-    expect(source).toContain('className="sidebar-settings-button"');
+    expect(source).toContain('className={`sidebar-settings-button ${showAppearance ? "active" : ""}`}');
     expect(source).toContain('className="desktop-sidebar-toggle worker-role-collapse"');
     expect(styles).toContain('.worker-role-panel .worker-role-collapse { border: 0; background: transparent; color: #718b83; box-shadow: none; }');
     expect(styles).toContain(':root[data-theme="light"] .worker-role-panel .worker-role-collapse { border: 0; background: transparent; color: #698078; box-shadow: none; }');
@@ -1140,20 +1140,22 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('onClick={navigateToStart}');
     expect(styles).toContain('.final-answer-outline-card nav > button.final-answer-outline-start { display: flex; align-items: center;');
     expect(styles).toContain('.final-answer-outline-card nav > button.final-answer-outline-start::before { display: none; }');
-    expect(styles).toContain('.final-answer-outline-card nav { min-height: 0; display: grid; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 7px; scroll-padding-block: 7px;');
+    expect(styles).toContain('.final-answer-outline-card nav { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow-x: hidden; overflow-y: auto;');
+    expect(styles).toContain('scrollbar-gutter: stable;');
+    expect(styles).toContain('.final-answer-outline-card nav > button { position: relative; flex: 0 0 auto;');
     expect(styles).not.toContain('max-height: min(56vh, 472px)');
     expect(styles).toContain('.final-answer-outline { position: absolute;');
     expect(styles).toContain('.final-answer-outline-anchor { position: sticky; top: 50%;');
     expect(styles).toContain('.final-answer-outline-toggle { display: inline-flex; align-items: center; justify-content: center;');
-    expect(styles).toContain('.final-answer-outline-card { position: relative; width: 184px; max-height: min(calc(64vh - 42px), 498px); display: grid; grid-template-rows: auto minmax(0, 1fr); margin-top: 8px;');
+    expect(styles).toContain('.final-answer-outline-card { position: relative; width: 184px; height: min(calc(64vh - 42px), 498px); min-height: 0; max-height: calc(100vh - 66px); display: flex; flex-direction: column; margin-top: 8px;');
     expect(styles).toContain('transform-origin: top center; animation: final-outline-open');
     expect(styles).toContain('@keyframes final-outline-open { from { opacity: 0; transform: translateY(-8px) scale(.98); } }');
     expect(styles).toContain('.final-answer-outline { position: absolute; z-index: 5; top: 0; bottom: 0; width: 184px;');
     expect(styles).toContain('.final-answer-outline.rail { right: calc(100% + 78px); }');
     expect(styles).toContain('.final-answer-outline.compact { right: 0; }');
     expect(styles).toContain('.final-answer-outline.compact .final-answer-outline-toggle { width: 34px; padding: 0; }');
-    expect(styles).toContain('.final-answer-outline-anchor { position: sticky; top: 50%; width: 184px; min-height: 34px; display: flex; flex-direction: column; align-items: center; transform: translateY(-50%);');
-    expect(styles).toContain('.final-answer-outline-card { position: relative; width: 184px; max-height: min(calc(64vh - 42px), 498px); display: grid; grid-template-rows: auto minmax(0, 1fr); margin-top: 8px;');
+    expect(styles).toContain('.final-answer-outline-anchor { position: sticky; top: 50%; width: 184px; min-height: 34px; max-height: calc(100vh - 24px); display: flex; flex-direction: column; align-items: center; transform: translateY(-50%);');
+    expect(styles).toContain('.final-answer-outline-card { position: relative; width: 184px; height: min(calc(64vh - 42px), 498px); min-height: 0; max-height: calc(100vh - 66px); display: flex; flex-direction: column; margin-top: 8px;');
     expect(styles).not.toContain('.final-answer-outline.collapsed { width:');
     expect(styles).not.toContain('.final-answer-outline.expanded { width:');
     expect(styles).toContain('.user-message-navigation { position: absolute; z-index: 4; top: calc(50% + 38px); left: max(10px, calc((100% - 900px) / 2));');
@@ -1534,15 +1536,21 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain('font-family: "SFMono-Regular", Consolas, monospace;');
   });
 
-  it("keeps one sidebar Settings entry and manages Memory inside the settings center", () => {
+  it("keeps Search, Favorite, and Settings in a stable sidebar hierarchy", () => {
+    const searchEntry = source.indexOf('{!leftSidebarCollapsed && <span>Search</span>}');
+    const favoriteEntry = source.indexOf('{!leftSidebarCollapsed && <span>Favorite</span>}');
+    const settingsEntry = source.indexOf('{!leftSidebarCollapsed && <span>Settings</span>}');
+    expect(searchEntry).toBeGreaterThan(-1);
+    expect(favoriteEntry).toBeGreaterThan(searchEntry);
+    expect(settingsEntry).toBeGreaterThan(favoriteEntry);
     expect(source).toContain('const [settingsSection, setSettingsSection] = useState<SettingsSection>("appearance");');
     expect(source).not.toContain('const [showMemSettings, setShowMemSettings]');
     expect(source).not.toContain('const [showMemSwitch, setShowMemSwitch]');
-    expect(source).toContain('ref={settingsButtonRef} className="sidebar-settings-button"');
+    expect(source).toContain('ref={settingsButtonRef} className={`sidebar-settings-button ${showAppearance ? "active" : ""}`}');
     expect(source).toContain('<Settings size={17} aria-hidden="true"/>');
     expect(source).toContain('{!leftSidebarCollapsed && <span>Settings</span>}');
     expect(source).toContain('aria-controls="settings-center"');
-    expect(source).toContain('onClick={() => { setSettingsSection("appearance"); setShowAppearance(true); }}');
+    expect(source).toContain('onClick={() => { setChatLibraryMode(null); setSettingsSection("appearance"); setShowAppearance(true); }}');
     expect(source).not.toContain('className="mem-card-row"');
     expect(source).not.toContain('className="mem-card"');
     expect(source).not.toContain('className="mem-switch-action settings-action"');
@@ -1586,7 +1594,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('showRuntimeUnavailableDialog && <RuntimeUnavailableDialog detail={runtimeDisconnectedDetail} onClose={() => setRuntimeUnavailableDialogDismissed(true)}/>');
     expect(source).toContain("sessionInteractionLockReasonForState(pendingMemSwitch, connected, runtimeEverConnected, reconnectAttempt)");
     expect(source).toContain('className="runtime-disconnect-banner" role="alert"');
-    expect(source).toContain('ref={settingsButtonRef} className="sidebar-settings-button"');
+    expect(source).toContain('ref={settingsButtonRef} className={`sidebar-settings-button ${showAppearance ? "active" : ""}`}');
     expect(source).toContain('<code title={memPath}>{memPath || "…"}</code>');
     expect(source).toContain('setPendingMemSwitch(false);');
     expect(styles).toContain(".runtime-disconnect-banner");
@@ -2670,5 +2678,52 @@ describe("session activity navigation polish", () => {
     expect(styles).toContain(".thread-working-away::after {");
     expect(styles).toContain(".thread-working-away > svg { filter: drop-shadow(0 0 4px #62b4ff70); animation: spin 1.15s linear infinite; }");
     expect(styles).toContain(':root[data-theme="light"] .thread-working-away');
+  });
+});
+
+
+describe("friendly favorites capacity handling", () => {
+  it("offers persisted capacity tiers with plain-language near-full and full states", () => {
+    expect(protocolSource).toContain('type: "favorite_capacity_update"');
+    expect(protocolSource).toContain('type: "favorite_capacity_reached"');
+    expect(source).toContain('"收藏夹空间快满了"');
+    expect(source).toContain('"收藏夹已满"');
+    expect(source).toContain("这条回复已收藏");
+    expect(source).toContain("这条回复还没有收藏");
+    expect(source).toContain('{ label: "256 MB", bytes: 256 * 1024 * 1024 }');
+    expect(source).toContain('{ label: "1 GB", bytes: 1024 * 1024 * 1024 }');
+    expect(source).toContain('{ label: "不限", bytes: null }');
+    expect(source).toContain('if (bytes <= 0) return "0 MB";');
+    expect(styles).toContain(".favorite-capacity-dialog");
+    expect(styles).toContain(':root[data-theme="light"] .favorite-capacity-dialog');
+    expect(styles).toContain(".favorite-capacity-options");
+  });
+});
+
+
+describe("chat library modal and favorite feedback", () => {
+  it("uses a settings-style full-screen modal instead of the right rail", () => {
+    expect(source).toContain('className="chat-library-center-backdrop"');
+    expect(source).toContain('id="chat-library-center"');
+    expect(source).toContain('role="dialog" aria-modal="true"');
+    expect(source).not.toContain('className="chat-library-panel session-side-panel"');
+    expect(source).not.toContain('chat-library-open');
+    expect(styles).toContain('.chat-library-center-backdrop { position: fixed; z-index: 45; inset: 0;');
+    expect(styles).toContain('.chat-library-center { width: min(960px, 100%); height: min(720px, calc(100vh - 48px));');
+    expect(styles).toContain('.sidebar-library-button.active,\n.sidebar-settings-button.active { background: #202a26; color: #c9ddd6; }');
+    expect(styles).toContain('.chat-library-tabs button.active { border-color: #405951; background: #1e2925; color: #d5e5df; }');
+    expect(styles).toContain('.settings-center-nav button.active { border-color: #3b514a; background: #1d2723; color: #d7e5e0; }');
+    expect(styles).not.toContain('.chat-library-tabs button.active { border-color: #4b7468; background: linear-gradient(135deg, #20322d, #1c2925); color: #dbf2eb; box-shadow: inset 3px 0 #63b7a7; }');
+    expect(styles).not.toContain('.settings-center-nav button.active { border-color: #3e6258; background: linear-gradient(135deg, #20322d, #1c2925); color: #dbf2eb; box-shadow: inset 3px 0 #63b7a7; }');
+    expect(styles).not.toContain('.app-shell.chat-library-open');
+  });
+
+  it("treats search and favorite results as direct responses and shows immediate solid-star feedback", () => {
+    expect(source).toContain('setPendingFavoriteSourceKeys((current) => new Set(current).add(sourceKey))');
+    expect(source).toContain('favorite || favoritePending ? "currentColor" : "none"');
+    expect(source).toContain('disabled={favoritePending}');
+    expect(styles).toContain('.final-favorite.active { color: #f1c94f;');
+    expect(styles).toContain('.chat-library-star.active { color: #f1c94f;');
+    expect(styles).toContain('@keyframes favorite-star-pulse');
   });
 });
