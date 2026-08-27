@@ -36,6 +36,14 @@ struct LlmResponseDumpEntry {
     tool_calls: Vec<agent_core::NativeToolCall>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DebugLlmResponse<'a> {
+    pub(crate) usage: &'a agent_core::UsageStats,
+    pub(crate) content: &'a str,
+    pub(crate) tool_calls: &'a [agent_core::NativeToolCall],
+    pub(crate) truncated: bool,
+}
+
 #[derive(Debug)]
 struct LlmRequestDumpEntry {
     sequence: u64,
@@ -79,6 +87,7 @@ struct EndpointDebug {
     action_cpu_ns: Vec<u64>,
     action_cpu_unavailable: u64,
     llm_latency_ms: Vec<u64>,
+    length_finish_response_bytes: Vec<u64>,
     tools_per_response: [u64; 11],
     repairs: BTreeMap<String, u64>,
     runtime_root_repair_help: u64,
@@ -217,10 +226,14 @@ impl DebugStore {
         session_id: &str,
         worker_id: &str,
         round: u32,
-        usage: &agent_core::UsageStats,
-        content: &str,
-        tool_calls: &[agent_core::NativeToolCall],
+        response: DebugLlmResponse<'_>,
     ) -> Result<(), String> {
+        let DebugLlmResponse {
+            usage,
+            content,
+            tool_calls,
+            truncated,
+        } = response;
         self.session_dir(session_id)?;
         {
             let mut sessions = self
@@ -256,9 +269,15 @@ impl DebugStore {
             endpoint.cache_created_tokens = endpoint
                 .cache_created_tokens
                 .saturating_add(u64::from(usage.cache_created_tokens));
+            if truncated {
+                endpoint
+                    .length_finish_response_bytes
+                    .push(u64::try_from(content.len()).unwrap_or(u64::MAX));
+            }
             stats.updated_at_ms = received_at_ms;
         }
-        self.render_llm_responses(session_id)
+        self.render_llm_responses(session_id)?;
+        self.render_statistics(session_id)
     }
 
     pub(crate) fn record_llm_latency(
@@ -842,6 +861,7 @@ fn render_endpoint_panel(
         &format_tokens(endpoint.cache_created_tokens),
     );
     out.push_str("</div>");
+    render_length_finish_metrics(out, &endpoint.length_finish_response_bytes);
     if let Some(profile) = endpoint.profile.as_ref() {
         out.push_str("<dl class=\"profile-grid\">");
         profile_item(out, "API protocol", &profile.api_protocol);
@@ -971,6 +991,41 @@ fn render_endpoint_panel(
         }
     });
     out.push_str("</article></div></section>");
+}
+
+fn render_length_finish_metrics(out: &mut String, response_bytes: &[u64]) {
+    let count = response_bytes.len();
+    let min = response_bytes.iter().copied().min();
+    let max = response_bytes.iter().copied().max();
+    let total = response_bytes.iter().copied().map(u128::from).sum::<u128>();
+    let average = if count == 0 {
+        None
+    } else {
+        Some(total as f64 / count as f64)
+    };
+
+    out.push_str("<article class=\"panel length-finish-panel\"><div class=\"section-head compact\"><div><p class=\"eyebrow\">OUTPUT LIMIT</p><h3>Finish reason: length</h3></div></div><div class=\"mini-kpis\">");
+    mini_kpi(out, "Count", &count.to_string());
+    mini_kpi(
+        out,
+        "Min bytes",
+        &min.map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+    );
+    mini_kpi(
+        out,
+        "Avg bytes",
+        &average
+            .map(|value| format!("{value:.1}"))
+            .unwrap_or_else(|| "n/a".to_string()),
+    );
+    mini_kpi(
+        out,
+        "Max bytes",
+        &max.map(|value| value.to_string())
+            .unwrap_or_else(|| "n/a".to_string()),
+    );
+    out.push_str("</div></article>");
 }
 
 fn fixed_histogram(values: &[u64], width: u64, last_start: u64) -> Vec<u64> {
@@ -1519,14 +1574,17 @@ mod tests {
                 session,
                 "worker_0",
                 1,
-                &agent_core::UsageStats {
-                    prompt_tokens: 10_000,
-                    cached_tokens: 6_000,
-                    cache_created_tokens: 2_000,
-                    ..agent_core::UsageStats::zero()
+                DebugLlmResponse {
+                    usage: &agent_core::UsageStats {
+                        prompt_tokens: 10_000,
+                        cached_tokens: 6_000,
+                        cache_created_tokens: 2_000,
+                        ..agent_core::UsageStats::zero()
+                    },
+                    content: "ok",
+                    tool_calls: &[],
+                    truncated: false,
                 },
-                "ok",
-                &[],
             )
             .unwrap();
         store
@@ -1594,6 +1652,159 @@ mod tests {
     }
 
     #[test]
+    fn debug_statistics_length_finish_metrics_have_explicit_empty_state() {
+        let _guard = debug_store_test_guard();
+        let store = DebugStore::create().unwrap();
+        let session = "session_length_empty";
+        let endpoint_profile = profile(
+            "no-length-model",
+            "https://gateway.example/v1",
+            agent_core::ToolCallMode::Native,
+        );
+        store
+            .record_interaction_profile(session, "worker_0", &endpoint_profile)
+            .unwrap();
+
+        let html = fs::read_to_string(store.root().join(session).join("statistics.html")).unwrap();
+        for marker in [
+            "Finish reason: length",
+            "<span>Count</span><strong>0</strong>",
+            "<span>Min bytes</span><strong>n/a</strong>",
+            "<span>Avg bytes</span><strong>n/a</strong>",
+            "<span>Max bytes</span><strong>n/a</strong>",
+        ] {
+            assert!(html.contains(marker), "missing {marker:?} in {html}");
+        }
+        store.cleanup().unwrap();
+    }
+
+    #[test]
+    fn debug_statistics_isolates_length_finish_metrics_by_endpoint() {
+        let _guard = debug_store_test_guard();
+        let store = DebugStore::create().unwrap();
+        let session = "session_length_endpoints";
+        let first_profile = profile(
+            "first-model",
+            "https://first.example/v1",
+            agent_core::ToolCallMode::Native,
+        );
+        let second_profile = profile(
+            "second-model",
+            "https://second.example/v1",
+            agent_core::ToolCallMode::Inline,
+        );
+        store
+            .record_interaction_profile(session, "worker_0", &first_profile)
+            .unwrap();
+        store
+            .record_interaction_profile(session, "worker_1", &second_profile)
+            .unwrap();
+        for (worker_id, content) in [
+            ("worker_0", "123"),
+            ("worker_0", "12345"),
+            ("worker_1", "中文"),
+        ] {
+            store
+                .record_llm_response(
+                    session,
+                    worker_id,
+                    1,
+                    DebugLlmResponse {
+                        usage: &agent_core::UsageStats::zero(),
+                        content,
+                        tool_calls: &[],
+                        truncated: true,
+                    },
+                )
+                .unwrap();
+        }
+
+        let sessions = store.sessions.lock().unwrap();
+        let stats = &sessions[session];
+        assert_eq!(
+            stats.endpoints[&EndpointKey::from_profile(&first_profile)]
+                .length_finish_response_bytes,
+            vec![3, 5]
+        );
+        assert_eq!(
+            stats.endpoints[&EndpointKey::from_profile(&second_profile)]
+                .length_finish_response_bytes,
+            vec![6]
+        );
+        drop(sessions);
+
+        let html = fs::read_to_string(store.root().join(session).join("statistics.html")).unwrap();
+        assert!(html.contains("first-model"), "{html}");
+        assert!(html.contains("second-model"), "{html}");
+        assert_eq!(
+            html.matches("<span>Count</span><strong>2</strong>").count(),
+            1
+        );
+        assert_eq!(
+            html.matches("<span>Count</span><strong>1</strong>").count(),
+            1
+        );
+        assert!(html.contains("<span>Avg bytes</span><strong>4.0</strong>"));
+        assert!(html.contains("<span>Avg bytes</span><strong>6.0</strong>"));
+        store.cleanup().unwrap();
+    }
+
+    #[test]
+    fn debug_statistics_aggregates_length_finish_response_bytes() {
+        let _guard = debug_store_test_guard();
+        let store = DebugStore::create().unwrap();
+        let session = "session_length_finish";
+        let endpoint_profile = profile(
+            "length-model",
+            "https://gateway.example/v1",
+            agent_core::ToolCallMode::Native,
+        );
+        store
+            .record_interaction_profile(session, "worker_0", &endpoint_profile)
+            .unwrap();
+
+        for (content, truncated) in [
+            ("", true),
+            ("a", true),
+            ("中文", true),
+            ("12345678", true),
+            ("ignored", false),
+        ] {
+            store
+                .record_llm_response(
+                    session,
+                    "worker_0",
+                    1,
+                    DebugLlmResponse {
+                        usage: &agent_core::UsageStats::zero(),
+                        content,
+                        tool_calls: &[],
+                        truncated,
+                    },
+                )
+                .unwrap();
+        }
+
+        {
+            let sessions = store.sessions.lock().unwrap();
+            let endpoint =
+                &sessions[session].endpoints[&EndpointKey::from_profile(&endpoint_profile)];
+            assert_eq!(endpoint.length_finish_response_bytes, vec![0, 1, 6, 8]);
+        }
+        let html = fs::read_to_string(store.root().join(session).join("statistics.html")).unwrap();
+        for marker in [
+            "Finish reason: length",
+            "<span>Count</span><strong>4</strong>",
+            "<span>Min bytes</span><strong>0</strong>",
+            "<span>Avg bytes</span><strong>3.8</strong>",
+            "<span>Max bytes</span><strong>8</strong>",
+        ] {
+            assert!(html.contains(marker), "missing {marker:?} in {html}");
+        }
+        store.cleanup().unwrap();
+    }
+
+    #[test]
     fn concurrent_debug_updates_are_atomic_and_worker_isolated() {
         let _guard = debug_store_test_guard();
         let store = std::sync::Arc::new(DebugStore::create().unwrap());
@@ -1635,9 +1846,12 @@ mod tests {
                                 session,
                                 &worker_id,
                                 round,
-                                &agent_core::UsageStats::zero(),
-                                "ok",
-                                &[],
+                                DebugLlmResponse {
+                                    usage: &agent_core::UsageStats::zero(),
+                                    content: "ok",
+                                    tool_calls: &[],
+                                    truncated: false,
+                                },
                             )
                             .unwrap();
                     }
@@ -2070,9 +2284,12 @@ mod tests {
                     "session_responses",
                     "worker_0",
                     index,
-                    &agent_core::UsageStats::zero(),
-                    &format!("response-{index}"),
-                    &tool_calls,
+                    DebugLlmResponse {
+                        usage: &agent_core::UsageStats::zero(),
+                        content: &format!("response-{index}"),
+                        tool_calls: &tool_calls,
+                        truncated: false,
+                    },
                 )
                 .unwrap();
         }

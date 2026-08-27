@@ -9120,6 +9120,7 @@ fn handle_scoped_worker_event(
             usage,
             content,
             tool_calls,
+            truncated,
             runtime_phase,
         } => {
             if let Some(debug) = state.debug.as_ref() {
@@ -9127,9 +9128,12 @@ fn handle_scoped_worker_event(
                     session_id,
                     worker_id,
                     round,
-                    &usage,
-                    &content,
-                    &tool_calls,
+                    crate::debug_session::DebugLlmResponse {
+                        usage: &usage,
+                        content: &content,
+                        tool_calls: &tool_calls,
+                        truncated,
+                    },
                 ) {
                     eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
                 }

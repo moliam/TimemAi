@@ -1146,7 +1146,10 @@ The separate tool-schema and response dumps retain request/worker correlation;
 response dumps include assistant text and structured tool calls with lossless raw
 arguments. `statistics.html` aggregates explicit response usage fields per
 endpoint and reports KVC hit rate as cached input tokens divided by prompt input
-tokens, alongside cache-read and cache-creation totals.
+tokens, alongside cache-read and cache-creation totals. It also counts responses
+normalized by Core as output-limit truncations (reported as finish reason `length`)
+and shows the minimum, average, and maximum UTF-8 byte length of their assistant
+content.
 
 Inline mode sends one response in the selected response protocol.
 `TIMEM_RESPONSE_PROTOCOL` selects `xml` (default) or `json`; native mode omits

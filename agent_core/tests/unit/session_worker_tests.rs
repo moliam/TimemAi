@@ -205,6 +205,28 @@ struct TimeoutThenFinalModel {
     calls: u32,
 }
 
+struct TruncatedEventModel {
+    truncated: bool,
+}
+
+impl ModelClient for TruncatedEventModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &std::path::Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: r#"{"status":"ALL_FINISHED","final_answer":"EVENT_FLAG"}"#.to_string(),
+            model_name: "test-model".to_string(),
+            usage: UsageStats::zero(),
+            truncated: self.truncated,
+        })
+    }
+}
+
 impl ModelClient for TimeoutThenFinalModel {
     fn call_model(
         &mut self,
@@ -318,6 +340,56 @@ impl ModelClient for SupplementReplayModel {
             },
             truncated: false,
         })
+    }
+}
+
+#[test]
+fn model_response_event_preserves_truncated_flag() {
+    for expected in [false, true] {
+        let dir = tmp_dir(if expected {
+            "truncated_event_true"
+        } else {
+            "truncated_event_false"
+        });
+        let mut core = AgentCore::new(
+            "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+            CoreProfile {
+                model: "test-model".to_string(),
+            },
+            &dir,
+        );
+        core.set_response_protocol(ResponseProtocolKind::Json);
+        let worker = CoreSessionWorker::spawn_with_model_client(
+            core,
+            test_config(),
+            test_worker_config(&dir, "truncated_event", 1),
+            TruncatedEventModel {
+                truncated: expected,
+            },
+        );
+        let handle = worker.handle();
+        worker
+            .events()
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker lifecycle");
+        handle.run_turn("check event flag", None).unwrap();
+
+        let observed = loop {
+            match worker
+                .events()
+                .recv_timeout(Duration::from_secs(3))
+                .expect("worker should emit a model response")
+            {
+                CoreSessionWorkerEvent::ModelResponse { truncated, .. } => break truncated,
+                CoreSessionWorkerEvent::TurnFinished { .. } => {
+                    panic!("turn finished before model response event")
+                }
+                _ => {}
+            }
+        };
+        assert_eq!(observed, expected);
+        worker.shutdown().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 

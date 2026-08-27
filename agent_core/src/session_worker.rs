@@ -256,6 +256,7 @@ pub enum CoreSessionWorkerEvent {
         usage: UsageStats,
         content: String,
         tool_calls: Vec<crate::NativeToolCall>,
+        truncated: bool,
         runtime_phase: Option<String>,
     },
     ModelRetry {
@@ -1966,6 +1967,7 @@ impl TurnUi for WorkerTurnUi {
             usage: response.usage.clone(),
             content: response.content.clone(),
             tool_calls: response.tool_calls.clone(),
+            truncated: response.truncated,
             runtime_phase: self.phase.clone(),
         });
     }

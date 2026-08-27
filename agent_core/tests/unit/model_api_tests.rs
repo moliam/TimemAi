@@ -809,6 +809,92 @@ fn anthropic_response_reads_cache_creation_truncation_and_missing_cache_defaults
 }
 
 #[test]
+fn output_limit_truncation_requires_protocol_specific_terminal_metadata() {
+    let cases = [
+        (
+            ApiProtocol::OpenAiCompatible,
+            json!({
+                "choices":[{"finish_reason":"length","message":{"content":"partial"}}],
+                "usage":{}
+            }),
+            true,
+        ),
+        (
+            ApiProtocol::OpenAiCompatible,
+            json!({
+                "choices":[{"finish_reason":"max_tokens","message":{"content":"partial"}}],
+                "usage":{}
+            }),
+            true,
+        ),
+        (
+            ApiProtocol::OpenAiCompatible,
+            json!({
+                "choices":[{"finish_reason":"content_filter","message":{"content":"partial"}}],
+                "usage":{}
+            }),
+            false,
+        ),
+        (
+            ApiProtocol::OpenAiResponses,
+            json!({
+                "status":"incomplete",
+                "incomplete_details":{"reason":"max_output_tokens"},
+                "output_text":"partial",
+                "usage":{}
+            }),
+            true,
+        ),
+        (
+            ApiProtocol::OpenAiResponses,
+            json!({
+                "status":"completed",
+                "incomplete_details":{"reason":"max_output_tokens"},
+                "output_text":"partial",
+                "usage":{}
+            }),
+            false,
+        ),
+        (
+            ApiProtocol::OpenAiResponses,
+            json!({
+                "status":"incomplete",
+                "incomplete_details":{"reason":"content_filter"},
+                "output_text":"partial",
+                "usage":{}
+            }),
+            false,
+        ),
+        (
+            ApiProtocol::Anthropic,
+            json!({
+                "stop_reason":"max_tokens",
+                "content":[{"type":"text","text":"partial"}],
+                "usage":{}
+            }),
+            true,
+        ),
+        (
+            ApiProtocol::Anthropic,
+            json!({
+                "stop_reason":"end_turn",
+                "content":[{"type":"text","text":"partial"}],
+                "usage":{}
+            }),
+            false,
+        ),
+    ];
+
+    for (protocol, raw, expected) in cases {
+        let response = parse_model_response(&config(protocol), &raw).unwrap();
+        assert_eq!(
+            response.truncated, expected,
+            "unexpected truncation classification for {protocol:?}: {raw}"
+        );
+    }
+}
+
+#[test]
 fn model_http_error_includes_sanitized_service_reason() {
     let openai_like = json!({
         "error": {
