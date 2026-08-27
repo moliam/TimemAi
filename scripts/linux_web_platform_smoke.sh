@@ -56,7 +56,7 @@ for _ in $(seq 1 300); do
     sed -n '1,180p' "$log_path" >&2
     exit 1
   fi
-  url="$(sed -n '/^http:\/\/.*[?&]token=/p; /^https:\/\/.*[?&]token=/p' "$log_path" | tail -n 1)"
+  url="$(sed -n '/^http:\/\/127\.0\.0\.1:[0-9][0-9]*\/$/p' "$log_path" | tail -n 1)"
   [ -n "$url" ] && break
   sleep 0.05
 done
@@ -75,14 +75,9 @@ fi
 authority="${url#http://}"
 authority="${authority%%/*}"
 port="${authority##*:}"
-token="${url##*token=}"
-if [[ ! "$token" =~ ^[[:xdigit:]]{16}$ ]]; then
-  echo "Linux Web access token has an unexpected shape" >&2
-  exit 1
-fi
 curl --fail --silent --show-error --retry 10 --retry-connrefused \
   --retry-delay 0 --connect-timeout 1 --max-time 10 \
-  "http://127.0.0.1:$port/api/health?token=$token" | grep -q '"ok":true'
+  "http://127.0.0.1:$port/api/health" | grep -q '"ok":true'
 
 if [ "$(stat -c '%a' "$mem_root")" != "700" ]; then
   echo "Linux Web MEM directory is not mode 700" >&2

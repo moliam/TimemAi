@@ -422,7 +422,7 @@ web_ui_required_test_names=(
   "renders context compaction as a compact status pill with a reduced-motion fallback"
   "keeps context compaction as a typed system activity with token metrics"
   "uses the Markdown highlighter for final answers and Bash activity commands"
-  "renders GFM and highlighted code with a copy affordance"
+  "renders GFM, mathematical notation, and highlighted code with a copy affordance"
   "groups each task into user input, bounded process, and separate final delivery"
   "uses frame styling without repeating user or session identity labels"
   "coalesces tool lifecycles and renders tools as compact subordinate rows"
