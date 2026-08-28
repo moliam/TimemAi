@@ -61,7 +61,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc, Mutex, RwLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -129,7 +129,6 @@ struct AppState {
     command_global_barrier: Arc<RwLock<()>>,
     mem_epoch: Arc<RwLock<u64>>,
     temporary_retention_wakeup: Arc<Notify>,
-    mem_temporary_task_running: Arc<AtomicBool>,
     debug: Option<Arc<DebugStore>>,
     runtime_log: RuntimeLog,
 }
@@ -739,6 +738,8 @@ fn collect_named_temporary_files(root: &Path) -> Result<Vec<MemTemporaryItem>, S
                 kind: "temporary_file".to_string(),
                 bytes: metadata.len(),
                 modified_at_ms: modified_at_ms(&metadata),
+                deletable: true,
+                delete_reason: None,
             });
         }
         Ok(())
@@ -767,6 +768,8 @@ fn append_finished_shell_job_items(
             kind: "shell_job".to_string(),
             bytes: item.bytes,
             modified_at_ms: item.created_at_ms,
+            deletable: item.deletable,
+            delete_reason: item.delete_reason,
         });
     }
     Ok(())
@@ -841,10 +844,15 @@ fn delete_mem_temporary_items_at(memory_dir: &Path, ids: &[String]) -> Result<us
     let current = all_mem_temporary_items_at(memory_dir)?;
     let available = current
         .iter()
-        .map(|item| item.id.as_str())
-        .collect::<BTreeSet<_>>();
-    if ids.iter().any(|id| !available.contains(id.as_str())) {
-        return Err("mem_temporary_item_not_found".to_string());
+        .map(|item| (item.id.as_str(), item))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for id in ids {
+        let item = available
+            .get(id.as_str())
+            .ok_or_else(|| "mem_temporary_item_not_found".to_string())?;
+        if !item.deletable {
+            return Err("mem_temporary_item_not_deletable".to_string());
+        }
     }
     let canonical_root = std::fs::canonicalize(memory_dir)
         .map_err(|_| "mem_temporary_item_path_invalid".to_string())?;
@@ -904,102 +912,13 @@ fn delete_mem_temporary_items_at(memory_dir: &Path, ids: &[String]) -> Result<us
     Ok(deleted)
 }
 
-fn schedule_mem_temporary_task(
-    state: &AppState,
-    delete_ids: Option<Vec<String>>,
-) -> Result<(), String> {
-    if state
-        .mem_temporary_task_running
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        // A request that did not start work must not be acknowledged as successful:
-        // its caller may have subscribed after the in-flight task published its result
-        // and would otherwise wait forever for an event that will never arrive.
-        return Err("mem_temporary_task_busy".to_string());
-    }
-    let (memory_dir, accepted_epoch) = match state.mem.lock() {
-        Ok(mem) => (
-            mem.layout.memory_dir(),
-            state
-                .mem_epoch
-                .read()
-                .map(|epoch| *epoch)
-                .unwrap_or_default(),
-        ),
-        Err(_) => {
-            state
-                .mem_temporary_task_running
-                .store(false, Ordering::Release);
-            return Err("mem_state_poisoned".to_string());
-        }
-    };
-    let running = Arc::clone(&state.mem_temporary_task_running);
-    let running_on_error = Arc::clone(&running);
-    let state = state.clone();
-    std::thread::Builder::new()
-        .name(
-            if delete_ids.is_some() {
-                "timem-web-mem-temp-delete"
-            } else {
-                "timem-web-mem-temp-list"
-            }
-            .to_string(),
-        )
-        .spawn(move || {
-            let result = if let Some(ids) = delete_ids {
-                let _global_guard = state
-                    .command_global_barrier
-                    .write()
-                    .map_err(|_| "command_global_barrier_poisoned".to_string());
-                match _global_guard {
-                    Ok(_guard) => {
-                        let epoch_matches = state
-                            .mem_epoch
-                            .read()
-                            .ok()
-                            .is_some_and(|epoch| *epoch == accepted_epoch);
-                        if !epoch_matches {
-                            Err("command_mem_epoch_stale".to_string())
-                        } else {
-                            delete_mem_temporary_items_at(&memory_dir, &ids)
-                                .and_then(|_| list_mem_temporary_items_at(&memory_dir))
-                        }
-                    }
-                    Err(error) => Err(error),
-                }
-            } else {
-                list_mem_temporary_items_at(&memory_dir)
-            };
-            let epoch_current = state
-                .mem_epoch
-                .read()
-                .ok()
-                .is_some_and(|epoch| *epoch == accepted_epoch);
-            if epoch_current {
-                let (items, error) = match result {
-                    Ok(items) => (items, None),
-                    Err(error) => (Vec::new(), Some(error)),
-                };
-                let _ = state
-                    .events
-                    .send(WireEvent::MemTemporaryItems { items, error });
-            }
-            running.store(false, Ordering::Release);
-        })
-        .map_err(|error| {
-            running_on_error.store(false, Ordering::Release);
-            format!("mem_temporary_task_spawn_failed:{error}")
-        })?;
-    Ok(())
-}
-
 fn oldest_temporary_items_to_evict(
     mut items: Vec<MemTemporaryItem>,
     stable_bytes: u64,
 ) -> Vec<String> {
-    items.sort_by_key(|item| (item.modified_at_ms, item.path.clone()));
     let mut used = items.iter().map(|item| item.bytes).sum::<u64>();
+    items.retain(|item| item.deletable);
+    items.sort_by_key(|item| (item.modified_at_ms, item.path.clone()));
     let mut delete = Vec::new();
     for item in items {
         if used <= stable_bytes {
@@ -1550,6 +1469,9 @@ struct MemTemporaryItem {
     kind: String,
     bytes: u64,
     modified_at_ms: i64,
+    deletable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delete_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2208,6 +2130,8 @@ impl ClientCommand {
                 | Self::SessionApiKeyReveal { .. }
                 | Self::McpServerSecretsReveal { .. }
                 | Self::ModelEndpointSecretReveal { .. }
+                | Self::MemTemporaryItemsList
+                | Self::MemTemporaryItemsDelete { .. }
         )
     }
 
@@ -2334,7 +2258,6 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
         temporary_retention_wakeup: Arc::new(Notify::new()),
-        mem_temporary_task_running: Arc::new(AtomicBool::new(false)),
         debug,
         runtime_log,
     };
@@ -5046,16 +4969,29 @@ fn handle_command_with_id(
             }));
         }
         ClientCommand::MemTemporaryItemsList => {
-            schedule_mem_temporary_task(state, None)?;
+            let memory_dir = state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .layout
+                .memory_dir();
+            return Ok(Some(WireEvent::MemTemporaryItems {
+                items: list_mem_temporary_items_at(&memory_dir)?,
+                error: None,
+            }));
         }
         ClientCommand::MemTemporaryItemsDelete { ids } => {
-            if ids.is_empty()
-                || ids.len() > 100
-                || ids.iter().collect::<BTreeSet<_>>().len() != ids.len()
-            {
-                return Err("mem_temporary_item_selection_invalid".to_string());
-            }
-            schedule_mem_temporary_task(state, Some(ids))?;
+            let memory_dir = state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .layout
+                .memory_dir();
+            delete_mem_temporary_items_at(&memory_dir, &ids)?;
+            return Ok(Some(WireEvent::MemTemporaryItems {
+                items: list_mem_temporary_items_at(&memory_dir)?,
+                error: None,
+            }));
         }
         ClientCommand::MemTemporaryRetentionUpdate { days, max_bytes } => {
             validate_mem_temporary_retention_days(days)?;

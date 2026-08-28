@@ -1547,8 +1547,7 @@ describe("assistant-ui thread integration", () => {
     );
     expect(styles).toContain(
       ".worker-role-group-editor input,\n.worker-role-editor input,\n.worker-role-editor textarea {\n  border: 0;",
-    );
-  });
+    );  });
 
   it("renders ToolRepo browsing, search, rename and terminal-open controls", () => {
     expect(source).toContain(
@@ -3581,8 +3580,37 @@ describe("assistant-ui thread integration", () => {
     );
     expect(styles).toContain(
       "/* Settings visual system: quiet solid surfaces, soft depth, and concise labels. */",
-    );
-    expect(styles).toContain(`.settings-center {
+    );    expect(source).toContain('className="settings-temporary-list" role="list" aria-label="Largest temporary files"');
+    expect(source).toContain('const memTemporaryItemsLoadedForRef = useRef("");');
+    expect(source).toContain('if (memTemporaryItemsLoadedForRef.current === memPath) return;');
+    expect(source).toContain('memTemporaryItemsLoadedForRef.current = memPath;');
+    expect(source).toContain('if (!memTemporaryItemsLoading) return;');
+    expect(source).toContain('Temporary files took too long to load. Reconnecting to try again…');
+    expect(source).toContain('socket.current?.close();');
+    expect(source).toContain("Limited tiers include a 4 MiB safe-write reserve.");
+    expect(source).toContain('sendCommand({ type: "mem_temporary_items_list" })');
+    expect(source).toContain('sendCommand({ type: "mem_temporary_items_delete", ids })');
+    expect(source).toContain('const deletableTemporaryItems = temporaryItems.filter((item) => item.deletable !== false);');
+    expect(source).toContain('Availability is shown here and verified again when deletion starts.');
+    expect(source).toContain('disabled={!temporaryDeleteMode || temporaryItemsDeleting || !deletable}');
+    expect(source).toContain('item.delete_reason || "Not currently deletable"');
+    expect(source).toContain('{deletableTemporaryItems.length} deletable');
+    expect(styles).toContain('.settings-temporary-row.unavailable');
+    expect(source).toContain('sendCommand({ type: "mem_temporary_retention_update", days, max_bytes: maxBytes })');
+    expect(source).toContain('sendCommand({ type: "mem_switch", path, stop_running: false })');
+    expect(source).toContain('sendCommand({ type: "mem_switch", path: memSwitchCandidate.path, stop_running: true })');
+    expect(source).toContain('function memSwitchRunningSessionCount(sessions: Session[])');
+    expect(source).toContain('event.error === "mem_switch_active_sessions_confirmation_required"');
+    expect(source).toContain('runningSessionCount: Math.max(1, memSwitchRunningSessionCount(sessionsRef.current))');
+    expect(source).toContain('function MemSwitchConfirmDialog(');
+    expect(source).toContain('will be marked interrupted and will not continue in the background');
+    expect(source).toContain('function shellQuoteCommandArgument(value: string)');
+    expect(source).toContain('timem-web --space {shellQuoteCommandArgument(candidate.path)}');
+    expect(source).toContain('Stop work and switch');
+    expect(styles).toContain('.sidebar-settings-button {');
+    expect(styles).toContain('.sidebar.collapsed .sidebar-settings-button {');
+    expect(styles).toContain('.settings-center-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px minmax(0, 1fr); }');
+    expect(styles).toContain('/* Settings visual system: quiet solid surfaces, soft depth, and concise labels. */');    expect(styles).toContain(`.settings-center {
   border: 0;
   background: #141817;`);
     expect(styles).toContain(`.settings-center-nav button {
@@ -5926,6 +5954,5 @@ describe("chat library modal and favorite management", () => {
     expect(styles).toContain(
       ".chat-library-center-backdrop {\n  backdrop-filter: blur(9px) saturate(.78);\n  -webkit-backdrop-filter: blur(9px) saturate(.78);",
     );
-    expect(styles).toContain("content-visibility: auto;");
-  });
+    expect(styles).toContain("content-visibility: auto;");  });
 });

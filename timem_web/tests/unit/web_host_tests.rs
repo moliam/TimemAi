@@ -6038,6 +6038,8 @@ fn temporary_capacity_evicts_only_complete_oldest_items() {
         kind: "temporary_file".to_string(),
         bytes,
         modified_at_ms,
+        deletable: true,
+        delete_reason: None,
     };
     let evicted = oldest_temporary_items_to_evict(
         vec![
@@ -6248,7 +6250,56 @@ fn mem_temporary_items_include_only_finished_shell_job_bundles() {
 }
 
 #[test]
-fn mem_temporary_items_manage_finished_jobs_from_legacy_nested_memory_layout() {
+fn mem_temporary_items_show_inconsistent_finished_jobs_but_reject_deletion() {
+    let memory_dir = std::env::temp_dir().join(unique_web_id("mem_temporary_inconsistent_job"));
+    let shell_dir = memory_dir.join("shell_jobs");
+    std::fs::create_dir_all(&shell_dir).unwrap();
+    let status = shell_dir.join("inconsistent.status");
+    let outside_output = memory_dir.join("must-remain.out");
+    std::fs::write(&status, "exit:0").unwrap();
+    std::fs::write(&outside_output, "must remain").unwrap();
+    let record = agent_core::ShellJobRecord {
+        id: "inconsistent".to_string(),
+        created_at_ms: 7,
+        kind: "test".to_string(),
+        session_id: "session_a".to_string(),
+        turn_id: "turn_a".to_string(),
+        pid: std::process::id(),
+        process_identity: None,
+        tool_call_id: "call-inconsistent".to_string(),
+        owner_id: None,
+        command: "true".to_string(),
+        cwd: memory_dir.display().to_string(),
+        output_file: outside_output.display().to_string(),
+        stderr_file: String::new(),
+        status_file: status.display().to_string(),
+        tail_out: false,
+    };
+    std::fs::write(
+        shell_dir.join("jobs.jsonl"),
+        format!("{}\n", serde_json::to_string(&record).unwrap()),
+    )
+    .unwrap();
+
+    let items = list_mem_temporary_items_at(&memory_dir).unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, "shell_job:inconsistent");
+    assert!(!items[0].deletable);
+    assert!(items[0].delete_reason.is_some());
+    assert_eq!(
+        delete_mem_temporary_items_at(&memory_dir, &[items[0].id.clone()]),
+        Err("mem_temporary_item_not_deletable".to_string())
+    );
+    assert!(outside_output.exists());
+    assert!(status.exists());
+    assert!(std::fs::read_to_string(shell_dir.join("jobs.jsonl"))
+        .unwrap()
+        .contains("inconsistent"));
+
+    let _ = std::fs::remove_dir_all(memory_dir);
+}
+
+#[test]fn mem_temporary_items_manage_finished_jobs_from_legacy_nested_memory_layout() {
     let memory_dir = std::env::temp_dir().join(unique_web_id("mem_temporary_legacy_shell_jobs"));
     let make_record = |store_memory_dir: &Path, id: &str, finished: bool, bytes: usize| {
         let shell_dir = store_memory_dir.join("shell_jobs");
@@ -6764,24 +6815,90 @@ fn routing_test_state() -> AppState {
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
         temporary_retention_wakeup: Arc::new(Notify::new()),
-        mem_temporary_task_running: Arc::new(AtomicBool::new(false)),
         debug: None,
         runtime_log: RuntimeLog::default(),
     }
 }
 
 #[test]
-fn concurrent_mem_temporary_list_request_is_rejected_instead_of_silently_dropped() {
-    let state = routing_test_state();
-    state
-        .mem_temporary_task_running
-        .store(true, std::sync::atomic::Ordering::Release);
+fn mem_temporary_commands_return_correlated_results_without_background_broadcast() {
+    assert!(ClientCommand::MemTemporaryItemsList.result_is_direct());
+    assert!(!ClientCommand::MemTemporaryItemsList.result_is_sensitive());
+    assert!(ClientCommand::MemTemporaryItemsDelete { ids: Vec::new() }.result_is_direct());
+    assert!(!ClientCommand::MemTemporaryItemsDelete { ids: Vec::new() }.result_is_sensitive());
 
-    assert_eq!(
-        schedule_mem_temporary_task(&state, None),
-        Err("mem_temporary_task_busy".to_string())
+    let state = routing_test_state();
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    std::fs::write(memory_dir.join("listed.tmp"), b"temporary payload").unwrap();
+
+    let list_command_id = "mem_temporary_list_direct";
+    assert!(reserve_command_dedup(&state, list_command_id)
+        .unwrap()
+        .is_none());
+    let list = execute_browser_command(
+        &state,
+        TEST_PORT,
+        BrowserCommand {
+            command_id: Some(list_command_id.to_string()),
+            accepted_mem_epoch: 1,
+            accepted_lane: None,
+            accepted_at_ms: now_ms(),
+            performance_sent_at_ms: None,
+            command: ClientCommand::MemTemporaryItemsList,
+        },
     );
-}
+    assert!(matches!(
+        list.ack,
+        Some(WireEvent::CommandAck {
+            status: CommandAckStatus::Committed,
+            ..
+        })
+    ));
+    let Some(WireEvent::MemTemporaryItems { items, error }) = list.event else {
+        panic!("list command must return its result directly")
+    };
+    assert!(error.is_none());
+    assert!(items.iter().any(|item| item.id == "file:listed.tmp"));
+    assert!(matches!(
+        reserve_command_dedup(&state, list_command_id).unwrap(),
+        Some(CommandDedupState::Committed {
+            serialized_event: Some(_),
+            ..
+        })
+    ));
+
+    let delete_command_id = "mem_temporary_delete_direct";
+    assert!(reserve_command_dedup(&state, delete_command_id)
+        .unwrap()
+        .is_none());
+    let delete = execute_browser_command(
+        &state,
+        TEST_PORT,
+        BrowserCommand {
+            command_id: Some(delete_command_id.to_string()),
+            accepted_mem_epoch: 1,
+            accepted_lane: None,
+            accepted_at_ms: now_ms(),
+            performance_sent_at_ms: None,
+            command: ClientCommand::MemTemporaryItemsDelete {
+                ids: vec!["file:listed.tmp".to_string()],
+            },
+        },
+    );
+    assert!(matches!(
+        delete.ack,
+        Some(WireEvent::CommandAck {
+            status: CommandAckStatus::Committed,
+            ..
+        })
+    ));
+    let Some(WireEvent::MemTemporaryItems { items, error }) = delete.event else {
+        panic!("delete command must return the refreshed list directly")
+    };
+    assert!(error.is_none());
+    assert!(!items.iter().any(|item| item.id == "file:listed.tmp"));
+    assert!(!memory_dir.join("listed.tmp").exists());}
 
 fn set_test_mem(state: &AppState, data_dir: PathBuf, space: &str) {
     *state.mem.lock().unwrap() = WebMemState::new(data_dir, space.to_string()).unwrap();
