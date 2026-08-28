@@ -3,7 +3,7 @@ use crate::{
     CoreGlobalWorkerStatus, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopicEvent,
     HostDecision, HostDecisionRequest, HttpModelClient, ModelClient, ModelServiceConfig,
     ResponseProtocolKind, RuntimeProfiler, TopicReply, TurnInput, TurnOutcome, TurnStopDetail,
-    TurnUi, UsageStats,
+    TurnStopSummary, TurnUi, UsageStats,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -1372,9 +1372,10 @@ impl CoreSessionWorker {
                         cancel_generation: command_generation,
                     } => {
                         if command_generation < cancel_generation.load(Ordering::SeqCst) {
-                            if let Some(command_id) = command_id {
-                                let _ = event_tx
-                                    .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                            if let Some(command_id) = command_id.as_ref() {
+                                let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
+                                    command_id: command_id.clone(),
+                                });
                             }
                             for supplement in initial_supplements {
                                 if let Some(command_id) = supplement.command_id {
@@ -1384,6 +1385,18 @@ impl CoreSessionWorker {
                                         });
                                 }
                             }
+                            // The Host has already recorded a pending turn before enqueueing
+                            // this command. Complete a zero-work cancellation lifecycle so the
+                            // pending turn cannot remain visually working until a UI timeout.
+                            let _ = event_tx.send(CoreSessionWorkerEvent::TurnStarted {
+                                command_id: command_id.clone(),
+                            });
+                            let outcome = TurnOutcome::stopped(
+                                "",
+                                TurnStopSummary::cancelled_by_user().into_stopped_turn(),
+                                Duration::ZERO,
+                            );
+                            let _ = event_tx.send(CoreSessionWorkerEvent::TurnFinished { outcome });
                             continue;
                         }
                         cancel_requested.store(false, Ordering::SeqCst);
@@ -1472,10 +1485,20 @@ impl CoreSessionWorker {
                         cancel_generation: command_generation,
                     } => {
                         if command_generation < cancel_generation.load(Ordering::SeqCst) {
-                            if let Some(command_id) = command_id {
-                                let _ = event_tx
-                                    .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                            if let Some(command_id) = command_id.as_ref() {
+                                let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
+                                    command_id: command_id.clone(),
+                                });
                             }
+                            let _ = event_tx.send(CoreSessionWorkerEvent::TurnStarted {
+                                command_id: command_id.clone(),
+                            });
+                            let outcome = TurnOutcome::stopped(
+                                "",
+                                TurnStopSummary::cancelled_by_user().into_stopped_turn(),
+                                Duration::ZERO,
+                            );
+                            let _ = event_tx.send(CoreSessionWorkerEvent::TurnFinished { outcome });
                             continue;
                         }
                         cancel_requested.store(false, Ordering::SeqCst);
