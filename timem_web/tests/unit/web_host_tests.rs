@@ -1521,6 +1521,91 @@ fn aggregate_session_state_preserves_interrupted_until_real_activity_changes_it(
 }
 
 #[test]
+fn interrupted_session_persists_without_an_active_or_pending_turn() {
+    let state = routing_test_state();
+    let sessions = state.sessions.lock().unwrap();
+    let mut session = sessions["session_a"].clone();
+    drop(sessions);
+    session.state = "interrupted".to_string();
+    session.active_turn_id = None;
+    session.pending_turn_id = None;
+    session.turns.push(WebTurn {
+        turn_id: "interrupted_turn".to_string(),
+        state: "interrupted".to_string(),
+        created_at_ms: 1,
+        user_entries: Vec::new(),
+        events: Vec::new(),
+        sub_answers: Vec::new(),
+        final_answer: None,
+        completion: None,
+    });
+
+    let stored = stored_session_from_web_session(&state, &session);
+    assert_eq!(stored.state, StoredSessionState::Interrupted);
+    assert_eq!(stored.last_turn_id.as_deref(), Some("interrupted_turn"));
+}
+
+#[test]
+fn stale_turn_started_without_command_id_cannot_revive_an_interrupted_session() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let worker_id = state.sessions.lock().unwrap()[session_id]
+        .primary_worker_id
+        .clone();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.state = "interrupted".to_string();
+        session.active_turn_id = None;
+        session.pending_turn_id = None;
+        session.turns.push(WebTurn {
+            turn_id: "old_interrupted_turn".to_string(),
+            state: "interrupted".to_string(),
+            created_at_ms: 1,
+            user_entries: Vec::new(),
+            events: Vec::new(),
+            sub_answers: Vec::new(),
+            final_answer: None,
+            completion: None,
+        });
+    }
+
+    assert!(activate_core_started_turn(&state, session_id, &worker_id, None).is_none());
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(sessions[session_id].state, "interrupted");
+    assert_eq!(
+        sessions[session_id].turns.last().unwrap().state,
+        "interrupted"
+    );
+}
+
+#[test]
+fn stale_started_event_is_isolated_to_its_session() {
+    let state = routing_test_state();
+    let worker_a = state.sessions.lock().unwrap()["session_a"]
+        .primary_worker_id
+        .clone();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut("session_a").unwrap().state = "interrupted".to_string();
+        sessions.get_mut("session_b").unwrap().state = "ready".to_string();
+    }
+
+    assert!(activate_core_started_turn(
+        &state,
+        "session_a",
+        &worker_a,
+        Some("stale_before_restart"),
+    )
+    .is_none());
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(sessions["session_a"].state, "interrupted");
+    assert_eq!(sessions["session_b"].state, "ready");
+    assert_eq!(sessions["session_b"].active_turn_id, None);
+    assert_eq!(sessions["session_b"].pending_turn_id, None);
+}
+
+#[test]
 fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can_start() {
     let state = routing_test_state();
     let session_id = "session_a";
@@ -1583,7 +1668,8 @@ fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can
 }
 
 #[test]
-fn restart_marks_running_session_and_latest_unfinished_turn_interrupted_without_redrive() {
+fn core_runtime_process_restart_marks_running_session_and_latest_unfinished_turn_interrupted_without_redrive(
+) {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("restart_interrupted_session"));
     std::fs::create_dir_all(&root).unwrap();
@@ -2860,14 +2946,22 @@ fn browser_commands_are_strictly_tagged_and_do_not_accept_unknown_variants() {
             .unwrap();
     assert!(matches!(
         mem_switch,
-        ClientCommand::MemSwitch { ref path } if path == "/tmp/.test_mem"
+        ClientCommand::MemSwitch { ref path, stop_running: false } if path == "/tmp/.test_mem"
+    ));
+    let confirmed_mem_switch = serde_json::from_str::<ClientCommand>(
+        r#"{"type":"mem_switch","path":"/tmp/.test_mem","stop_running":true}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        confirmed_mem_switch,
+        ClientCommand::MemSwitch { ref path, stop_running: true } if path == "/tmp/.test_mem"
     ));
     let legacy_mem_switch =
         serde_json::from_str::<ClientCommand>(r#"{"type":"mem_switch","space":".test_mem"}"#)
             .unwrap();
     assert!(matches!(
         legacy_mem_switch,
-        ClientCommand::MemSwitch { ref path } if path == ".test_mem"
+        ClientCommand::MemSwitch { ref path, stop_running: false } if path == ".test_mem"
     ));
 
     assert!(serde_json::from_str::<ClientCommand>(r#"{"type":"shell_exec"}"#).is_err());
@@ -3422,6 +3516,49 @@ fn session_create_returns_the_complete_session_to_the_requesting_browser() {
 }
 
 #[test]
+fn unnamed_sessions_use_the_next_available_untitled_number() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_untitled_sessions"));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = root.join("data");
+    state.template = Arc::new(template);
+    set_test_mem(&state, root.join("data"), "untitled_sessions_mem");
+    state.sessions.lock().unwrap().clear();
+
+    let reserved = create_session(
+        &state,
+        Some("Untitled 2".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let first = create_session(
+        &state,
+        None,
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let third = create_session(
+        &state,
+        Some("   ".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(sessions[&reserved].display_name, "Untitled 2");
+    assert_eq!(sessions[&first].display_name, "Untitled 1");
+    assert_eq!(sessions[&third].display_name, "Untitled 3");
+    drop(sessions);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn new_session_does_not_inherit_mem_enabled_mcp_servers() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_new_session_mcp"));
@@ -3620,7 +3757,7 @@ fn assistant_speaker_name_is_fixed() {
 }
 
 #[test]
-fn unnamed_web_session_uses_session_name_while_worker_keeps_core_identity() {
+fn unnamed_web_session_uses_untitled_name_while_worker_keeps_core_identity() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(format!("timem_web_default_session_name_{}", now_ms()));
     std::fs::create_dir_all(&root).unwrap();
@@ -3640,7 +3777,7 @@ fn unnamed_web_session_uses_session_name_while_worker_keeps_core_identity() {
     .unwrap();
     let sessions = state.sessions.lock().unwrap();
     let session = &sessions[&session_id];
-    assert_eq!(session.display_name, format!("Session{}", session.ordinal));
+    assert_eq!(session.display_name, "Untitled 1");
     assert_eq!(session.workers.len(), 1);
     assert_eq!(session.workers[0].display_name, "ID0");
     drop(sessions);
@@ -5334,6 +5471,70 @@ fn snapshot_reports_the_active_mem_space_and_paths() {
     assert!(snapshot.server.mem.space_dir.ends_with(".test_mem"));
     assert!(snapshot.server.mem.memory_dir.ends_with(".test_mem/memory"));
     assert_eq!(snapshot.server.mem.temporary_retention_days, Some(5));
+    assert_eq!(
+        snapshot.server.mem.temporary_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+    assert_eq!(
+        snapshot.server.mem.conversation_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+}
+
+#[test]
+fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values() {
+    let root = std::env::temp_dir().join(unique_web_id("mem_capacity_defaults"));
+    std::fs::create_dir_all(&root).unwrap();
+
+    let normal = load_web_mem_settings(&root, false).unwrap();
+    assert_eq!(normal.temporary_retention_days, Some(5));
+    assert_eq!(normal.temporary_capacity_bytes, Some(MEM_CAPACITY_128_MB));
+    assert_eq!(
+        normal.conversation_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+
+    let debug = load_web_mem_settings(&root, true).unwrap();
+    assert_eq!(debug.temporary_retention_days, Some(5));
+    assert_eq!(debug.temporary_capacity_bytes, Some(MEM_CAPACITY_512_MB));
+    assert_eq!(debug.conversation_capacity_bytes, Some(MEM_CAPACITY_128_MB));
+
+    std::fs::write(
+        web_mem_settings_path(&root),
+        br#"{"temporary_retention_days":null,"temporary_capacity_bytes":null,"conversation_capacity_bytes":536870912}"#,
+    )
+    .unwrap();
+    let saved = load_web_mem_settings(&root, true).unwrap();
+    assert_eq!(saved.temporary_retention_days, None);
+    assert_eq!(saved.temporary_capacity_bytes, None);
+    assert_eq!(saved.conversation_capacity_bytes, Some(MEM_CAPACITY_512_MB));
+
+    std::fs::write(
+        web_mem_settings_path(&root),
+        br#"{"temporary_retention_days":10}"#,
+    )
+    .unwrap();
+    let migrated_normal = load_web_mem_settings(&root, false).unwrap();
+    assert_eq!(migrated_normal.temporary_retention_days, Some(10));
+    assert_eq!(
+        migrated_normal.temporary_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+    assert_eq!(
+        migrated_normal.conversation_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+    let migrated_debug = load_web_mem_settings(&root, true).unwrap();
+    assert_eq!(
+        migrated_debug.temporary_capacity_bytes,
+        Some(MEM_CAPACITY_512_MB)
+    );
+    assert_eq!(
+        migrated_debug.conversation_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -5482,17 +5683,24 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
     let event = handle_command(
         &state,
         TEST_PORT,
-        ClientCommand::MemTemporaryRetentionUpdate { days: Some(5) },
+        ClientCommand::MemTemporaryRetentionUpdate {
+            days: Some(5),
+            max_bytes: None,
+        },
     )
     .unwrap()
     .unwrap();
     let WireEvent::MemSettingsUpdated {
         temporary_retention_days,
+        temporary_capacity_bytes,
+        conversation_capacity_bytes,
     } = event
     else {
         panic!("expected authoritative MEM settings event")
     };
     assert_eq!(temporary_retention_days, Some(5));
+    assert_eq!(temporary_capacity_bytes, None);
+    assert_eq!(conversation_capacity_bytes, Some(MEM_CAPACITY_128_MB));
 
     let retained = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
     assert!(retained.iter().any(|record| matches!(
@@ -5518,7 +5726,7 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
     assert_eq!(audit["events"].as_array().unwrap().len(), 1);
     assert_eq!(audit["events"][0]["type"], "recent");
     assert_eq!(
-        load_web_mem_settings(store.root())
+        load_web_mem_settings(store.root(), false)
             .unwrap()
             .temporary_retention_days,
         Some(5)
@@ -5527,7 +5735,10 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
     handle_command(
         &state,
         TEST_PORT,
-        ClientCommand::MemTemporaryRetentionUpdate { days: None },
+        ClientCommand::MemTemporaryRetentionUpdate {
+            days: None,
+            max_bytes: None,
+        },
     )
     .unwrap();
     assert_eq!(
@@ -5540,6 +5751,31 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
         .temporary_retention_days,
         None,
         "unlimited retention must survive reopening the same MEM"
+    );
+}
+
+#[test]
+fn temporary_capacity_evicts_only_complete_oldest_items() {
+    let item = |id: &str, bytes: u64, modified_at_ms: i64| MemTemporaryItem {
+        id: id.to_string(),
+        path: format!("{id}.tmp"),
+        kind: "temporary_file".to_string(),
+        bytes,
+        modified_at_ms,
+    };
+    let evicted = oldest_temporary_items_to_evict(
+        vec![
+            item("new", 6, 30),
+            item("old", 7, 10),
+            item("middle", 5, 20),
+        ],
+        11,
+    );
+    assert_eq!(evicted, vec!["old"]);
+    assert!(
+        oldest_temporary_items_to_evict(vec![item("only", 12, 1)], 11)
+            .iter()
+            .eq(["only"])
     );
 }
 
@@ -5578,25 +5814,25 @@ fn temporary_retention_rolls_forward_is_idempotent_and_unlimited_skips_cleanup()
     }
 
     assert_eq!(
-        apply_temporary_retention(&layout, &store, Some(5), base_now)
+        apply_temporary_retention(&layout, &store, Some(5), None, base_now)
             .unwrap()
             .history_events,
         0
     );
     assert_eq!(
-        apply_temporary_retention(&layout, &store, Some(5), base_now + 2 * day)
+        apply_temporary_retention(&layout, &store, Some(5), None, base_now + 2 * day)
             .unwrap()
             .history_events,
         1,
         "the moving cutoff must expire data on a later periodic pass"
     );
     assert_eq!(
-        apply_temporary_retention(&layout, &store, Some(5), base_now + 2 * day).unwrap(),
+        apply_temporary_retention(&layout, &store, Some(5), None, base_now + 2 * day).unwrap(),
         TemporaryRetentionResult::default(),
         "repeating a periodic pass at the same cutoff must be idempotent"
     );
     assert_eq!(
-        apply_temporary_retention(&layout, &store, None, i64::MAX).unwrap(),
+        apply_temporary_retention(&layout, &store, None, None, i64::MAX).unwrap(),
         TemporaryRetentionResult::default()
     );
     let retained = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
@@ -5716,7 +5952,10 @@ fn mem_temporary_retention_rejects_invalid_values() {
         handle_command(
             &state,
             TEST_PORT,
-            ClientCommand::MemTemporaryRetentionUpdate { days: Some(2) },
+            ClientCommand::MemTemporaryRetentionUpdate {
+                days: Some(2),
+                max_bytes: None
+            },
         )
         .unwrap_err(),
         "mem_temporary_retention_days_invalid"
@@ -5777,6 +6016,7 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
         TEST_PORT,
         ClientCommand::MemSwitch {
             path: data_dir.join("beta").display().to_string(),
+            stop_running: false,
         },
     )
     .unwrap()
@@ -5826,6 +6066,102 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
 }
 
 #[test]
+fn same_mem_switch_is_a_noop_even_when_work_is_live() {
+    let state = routing_test_state();
+    let current_path = current_mem_state(&state)
+        .unwrap()
+        .layout
+        .space_dir()
+        .display()
+        .to_string();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .active_turn_id = Some("active_turn".to_string());
+
+    let snapshot = switch_mem_space(&state, TEST_PORT, &current_path, false).unwrap();
+    assert_eq!(snapshot.server.mem.space_dir, current_path);
+    assert_eq!(
+        state.sessions.lock().unwrap()["session_a"]
+            .active_turn_id
+            .as_deref(),
+        Some("active_turn")
+    );
+}
+
+#[test]
+fn confirmed_mem_switch_stops_real_worker_persists_interruption_and_never_redrives() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("confirmed_mem_switch"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let alpha = data_dir.join("alpha");
+    let beta = data_dir.join("beta");
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = alpha.display().to_string();
+    state.template = Arc::new(template);
+    set_test_mem(&state, data_dir.clone(), &alpha.display().to_string());
+    state.sessions.lock().unwrap().clear();
+
+    let entered = Arc::new(AtomicUsize::new(0));
+    let session_id = register_cancellable_mem_switch_worker(&state, Arc::clone(&entered), &root);
+    let turn = submit_turn(&state, &session_id, "keep running".to_string()).unwrap();
+    let started = Instant::now();
+    while entered.load(Ordering::SeqCst) == 0 {
+        assert!(started.elapsed() < Duration::from_secs(3));
+        thread::sleep(Duration::from_millis(5));
+    }
+    let old_store = current_session_store(&state).unwrap();
+    assert_eq!(
+        switch_mem_space(&state, TEST_PORT, &beta.display().to_string(), false).unwrap_err(),
+        "mem_switch_active_sessions_confirmation_required"
+    );
+    assert_eq!(state.manager.lock().unwrap().worker_count(), 1);
+    assert_eq!(current_mem_state(&state).unwrap().layout.space_dir(), alpha);
+
+    switch_mem_space(&state, TEST_PORT, &beta.display().to_string(), true).unwrap();
+    assert!(state
+        .manager
+        .lock()
+        .unwrap()
+        .statuses()
+        .iter()
+        .all(|status| status.identity.session_id != session_id));
+    let stored = old_store.load_session(&session_id).unwrap().unwrap();
+    assert_eq!(stored.state, StoredSessionState::Interrupted);
+    assert_eq!(stored.last_turn_id.as_deref(), Some(turn.turn_id.as_str()));
+
+    let mut events = state.events.subscribe();
+    switch_mem_space(&state, TEST_PORT, &alpha.display().to_string(), false).unwrap();
+    let restored = state.sessions.lock().unwrap()[&session_id].clone();
+    assert_eq!(restored.state, "interrupted");
+    assert!(restored
+        .workers
+        .iter()
+        .all(|worker| worker.state == "ready"));
+    assert_eq!(
+        restored
+            .turns
+            .iter()
+            .find(|candidate| candidate.turn_id == turn.turn_id)
+            .unwrap()
+            .state,
+        "interrupted"
+    );
+    thread::sleep(Duration::from_millis(30));
+    while let Ok(event) = events.try_recv() {
+        assert!(!matches!(event, WireEvent::TurnStarted { .. }));
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn mem_switch_requires_a_safe_absolute_directory_path() {
     let state = routing_test_state();
     let too_long = format!("/tmp/{}", "a".repeat(4097));
@@ -5843,6 +6179,7 @@ fn mem_switch_requires_a_safe_absolute_directory_path() {
             TEST_PORT,
             ClientCommand::MemSwitch {
                 path: path.to_string(),
+                stop_running: false,
             },
         )
         .is_err());
@@ -5863,8 +6200,8 @@ fn mem_switch_rejects_active_sessions_before_touching_mem_scoped_instance_leases
         .active_turn_id = Some("active_turn".to_string());
 
     assert_eq!(
-        switch_mem_space(&state, TEST_PORT, ".next_mem").unwrap_err(),
-        "mem_switch_active_sessions"
+        switch_mem_space(&state, TEST_PORT, ".next_mem", false).unwrap_err(),
+        "mem_switch_active_sessions_confirmation_required"
     );
     assert_eq!(current_mem_state(&state).unwrap().space, original_mem);
     assert_eq!(
@@ -7254,6 +7591,84 @@ fn web_runtime_cleanup_guard_runs_cleanup_once_on_scope_exit() {
     assert_eq!(state.manager.lock().unwrap().worker_count(), 0);
 }
 
+struct CancellableMemSwitchModel {
+    entered: Arc<AtomicUsize>,
+}
+
+impl ModelClient for CancellableMemSwitchModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        let started = Instant::now();
+        while !should_cancel() {
+            if started.elapsed() > Duration::from_secs(5) {
+                return Err("mem_switch_test_timeout".to_string());
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        Err("cancelled_for_mem_switch".to_string())
+    }
+}
+
+fn register_cancellable_mem_switch_worker(
+    state: &AppState,
+    entered: Arc<AtomicUsize>,
+    worker_dir: &Path,
+) -> String {
+    let session_id = unique_web_id("mem_switch_session");
+    let context_id = test_context_id(&session_id);
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        worker_dir,
+    );
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            state.template.settings.lock().unwrap().config.clone(),
+            CoreSessionWorkerWorkspace::new(
+                worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some("MEM switch worker".to_string()),
+            None,
+            CancellableMemSwitchModel { entered },
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, 0, "MEM switch worker".to_string());
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id.clone();
+    session.active_context_id = context_id;
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    persist_web_session(state, &session_id).unwrap();
+    session_id
+}
+
 struct BlockingShutdownModel {
     entered: Arc<AtomicUsize>,
 }
@@ -8227,6 +8642,68 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
                 .and_then(Value::as_str)
                 == Some(CORE_TOPIC_MODEL_REPAIR)
     )));
+}
+
+#[test]
+fn browser_reconnect_snapshot_preserves_live_core_working_state() {
+    let state = routing_test_state();
+    let turn = start_web_turn(
+        &state,
+        "session_a",
+        "keep running while the browser reconnects",
+    )
+    .unwrap();
+
+    let first_snapshot = snapshot_for(&state, TEST_PORT);
+    let first = first_snapshot
+        .sessions
+        .iter()
+        .find(|session| session.session_id == "session_a")
+        .unwrap();
+    assert_eq!(first.state, "working");
+    assert_eq!(first.active_turn_id.as_deref(), Some(turn.turn_id.as_str()));
+    assert_eq!(
+        first
+            .turns
+            .iter()
+            .find(|candidate| candidate.turn_id == turn.turn_id)
+            .unwrap()
+            .state,
+        "working"
+    );
+    assert!(first.workers.iter().any(|worker| worker.state == "working"));
+
+    // A new WebSocket connection receives another snapshot from the same live
+    // Core-owned in-memory state. Snapshot construction must not run persisted
+    // restart recovery or manufacture an interrupted state.
+    let reconnect_snapshot = snapshot_for(&state, TEST_PORT);
+    let reconnected = reconnect_snapshot
+        .sessions
+        .iter()
+        .find(|session| session.session_id == "session_a")
+        .unwrap();
+    assert_eq!(reconnected.state, "working");
+    assert_eq!(
+        reconnected.active_turn_id.as_deref(),
+        Some(turn.turn_id.as_str())
+    );
+    assert_eq!(
+        reconnected
+            .turns
+            .iter()
+            .find(|candidate| candidate.turn_id == turn.turn_id)
+            .unwrap()
+            .state,
+        "working"
+    );
+    assert!(reconnected
+        .workers
+        .iter()
+        .any(|worker| worker.state == "working"));
+    assert!(reconnect_snapshot
+        .sessions
+        .iter()
+        .all(|session| session.state != "interrupted"));
 }
 
 #[test]
