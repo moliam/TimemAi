@@ -101,12 +101,18 @@ Normal/background execution is part of the capability interface:
   runtime memory directory, and return a `job_id`.
 - Background command-bound tools are checked or cancelled through
   `capmgr op=job_status|job_cancel`. Background and timed-out `run_bash` jobs
-  are tracked by pid in the session running-job set. Core emits natural-language
-  action evidence when a job starts or times out, one-time `RUNNING_JOB_UPDATE`
-  prompt components when a tracked job exits, and a `RUNNING JOB LIST` snapshot
-  after large context compaction. The model can inspect or stop those jobs with
-  ordinary `run_bash` commands such as `ps -p <pid>` or `kill <pid>`. The shell
-  UI does not manage those jobs.
+  are tracked by pid in a process-local session running-job set. Their child
+  handles, lifecycle state, and stdout/stderr are held only in memory; each
+  stream is continuously drained into a bounded 1 MiB head-or-tail buffer.
+  Core emits natural-language action evidence when a job starts or times out,
+  one-time `RUNNING_JOB_UPDATE` prompt components when a tracked job exits, and
+  a `RUNNING JOB LIST` snapshot after large context compaction. A runtime
+  restart invalidates this tracking state: historical jobs are never recovered,
+  adopted, or signalled from disk. The model can inspect or stop current jobs
+  with ordinary `run_bash` commands such as `ps -p <pid>` or `kill <pid>`. The
+  shell UI does not manage those jobs. See
+  [`run-bash-job-supervision.md`](run-bash-job-supervision.md) for the complete
+  ownership and state-machine contract.
 - External or remote status waiting should use `run_bash` polling mode, not a
   normal `sleep && check` command. When `interval_ms` is present,
   `run_bash` repeatedly runs the command until it exits with code 0, the total

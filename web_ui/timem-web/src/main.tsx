@@ -3251,7 +3251,10 @@ function TimemApp() {
     const timeoutId = window.setTimeout(() => {
       memTemporaryItemsLoadedForRef.current = "";
       setMemTemporaryItemsLoading(false);
-      setMemTemporaryItemsError("Temporary files took too long to load. Select Refresh to try again.");    }, 15_000);
+      setMemTemporaryItemsError(
+        "Temporary files took too long to load. Select Refresh to try again.",
+      );
+    }, 15_000);
     return () => window.clearTimeout(timeoutId);
   }, [memTemporaryItemsLoading]);
   useEffect(() => {
@@ -13189,8 +13192,7 @@ function SettingsCenter(props: SettingsCenterProps) {
       </section>
     </div>,
     document.body,
-  );
-}
+  );}
 
 function EndpointSettingsPane({
   endpoints,

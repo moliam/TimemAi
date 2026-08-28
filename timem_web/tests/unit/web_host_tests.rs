@@ -5849,41 +5849,6 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
         store.append_history_record("session_a", &record).unwrap();
     }
 
-    let shell_dir = layout.memory_dir().join("shell_jobs");
-    std::fs::create_dir_all(&shell_dir).unwrap();
-    let old_output = shell_dir.join("old.out");
-    let old_stderr = shell_dir.join("old.err");
-    let old_status = shell_dir.join("old.status");
-    for (path, text) in [
-        (&old_output, "expired stdout"),
-        (&old_stderr, "expired stderr"),
-        (&old_status, "exit:0"),
-    ] {
-        std::fs::write(path, text).unwrap();
-    }
-    let old_job = agent_core::ShellJobRecord {
-        id: "old-job".to_string(),
-        created_at_ms: old_ms,
-        kind: "background".to_string(),
-        session_id: "session_a".to_string(),
-        turn_id: "old-action".to_string(),
-        pid: std::process::id(),
-        process_identity: None,
-        tool_call_id: "old-call".to_string(),
-        owner_id: Some("old-owner".to_string()),
-        command: "printf expired".to_string(),
-        cwd: layout.memory_dir().display().to_string(),
-        output_file: old_output.display().to_string(),
-        stderr_file: old_stderr.display().to_string(),
-        status_file: old_status.display().to_string(),
-        tail_out: false,
-    };
-    std::fs::write(
-        shell_dir.join("jobs.jsonl"),
-        format!("{}\n", serde_json::to_string(&old_job).unwrap()),
-    )
-    .unwrap();
-
     std::fs::create_dir_all(layout.api_audit_file().parent().unwrap()).unwrap();
     std::fs::write(
         layout.api_audit_file(),
@@ -5940,13 +5905,6 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
         record,
         ChatHistoryRecord::Event { content, .. } if content == "recent temporary action result"
     )));
-    assert!(!old_output.exists());
-    assert!(!old_stderr.exists());
-    assert!(!old_status.exists());
-    assert!(std::fs::read_to_string(shell_dir.join("jobs.jsonl"))
-        .unwrap()
-        .trim()
-        .is_empty());
     let audit = agent_core::read_audit_doc(&layout.api_audit_file()).unwrap();
     assert_eq!(audit["events"].as_array().unwrap().len(), 1);
     assert_eq!(audit["events"][0]["type"], "recent");
@@ -6190,181 +6148,22 @@ fn mem_temporary_items_are_bounded_sorted_safe_and_deletable() {
     );
     let _ = std::fs::remove_dir_all(memory_dir);
 }
-
 #[test]
-fn mem_temporary_items_include_only_finished_shell_job_bundles() {
-    let memory_dir = std::env::temp_dir().join(unique_web_id("mem_temporary_shell_jobs"));
+fn mem_temporary_items_ignore_legacy_shell_job_directories() {
+    let memory_dir = std::env::temp_dir().join(unique_web_id("ignore_legacy_shell_jobs"));
     let shell_dir = memory_dir.join("shell_jobs");
+    let nested_shell_dir = memory_dir.join("memory/shell_jobs");
     std::fs::create_dir_all(&shell_dir).unwrap();
-    let make_record = |id: &str, finished: bool| {
-        let output = shell_dir.join(format!("{id}.out"));
-        let stderr = shell_dir.join(format!("{id}.err"));
-        let status = shell_dir.join(format!("{id}.status"));
-        std::fs::write(&output, "12345").unwrap();
-        std::fs::write(&stderr, "678").unwrap();
-        std::fs::write(&status, if finished { "0" } else { "" }).unwrap();
-        agent_core::ShellJobRecord {
-            id: id.to_string(),
-            created_at_ms: 7,
-            kind: "test".to_string(),
-            session_id: "session_a".to_string(),
-            turn_id: "turn_a".to_string(),
-            pid: std::process::id(),
-            process_identity: None,
-            tool_call_id: format!("call-{id}"),
-            owner_id: None,
-            command: "true".to_string(),
-            cwd: memory_dir.display().to_string(),
-            output_file: output.display().to_string(),
-            stderr_file: stderr.display().to_string(),
-            status_file: status.display().to_string(),
-            tail_out: false,
-        }
-    };
-    let finished = make_record("finished", true);
-    let active = make_record("active", false);
-    std::fs::write(
-        shell_dir.join("jobs.jsonl"),
-        format!(
-            "{}\n{}\n",
-            serde_json::to_string(&finished).unwrap(),
-            serde_json::to_string(&active).unwrap()
-        ),
-    )
-    .unwrap();
+    std::fs::create_dir_all(&nested_shell_dir).unwrap();
+    std::fs::write(shell_dir.join("old.out"), "legacy").unwrap();
+    std::fs::write(shell_dir.join("jobs.jsonl"), "legacy index").unwrap();
+    std::fs::write(nested_shell_dir.join("old.err"), "legacy").unwrap();
+    std::fs::write(memory_dir.join("visible.tmp"), "temporary").unwrap();
 
     let items = list_mem_temporary_items_at(&memory_dir).unwrap();
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0].id, "shell_job:finished");
-    assert_eq!(items[0].bytes, 9);
-    assert_eq!(
-        delete_mem_temporary_items_at(&memory_dir, &[items[0].id.clone()]).unwrap(),
-        1
-    );
-    assert!(!Path::new(&finished.output_file).exists());
-    assert!(Path::new(&active.output_file).exists());
-    assert!(std::fs::read_to_string(shell_dir.join("jobs.jsonl"))
-        .unwrap()
-        .contains("active"));
-    let _ = std::fs::remove_dir_all(memory_dir);
-}
-
-#[test]
-fn mem_temporary_items_show_inconsistent_finished_jobs_but_reject_deletion() {
-    let memory_dir = std::env::temp_dir().join(unique_web_id("mem_temporary_inconsistent_job"));
-    let shell_dir = memory_dir.join("shell_jobs");
-    std::fs::create_dir_all(&shell_dir).unwrap();
-    let status = shell_dir.join("inconsistent.status");
-    let outside_output = memory_dir.join("must-remain.out");
-    std::fs::write(&status, "exit:0").unwrap();
-    std::fs::write(&outside_output, "must remain").unwrap();
-    let record = agent_core::ShellJobRecord {
-        id: "inconsistent".to_string(),
-        created_at_ms: 7,
-        kind: "test".to_string(),
-        session_id: "session_a".to_string(),
-        turn_id: "turn_a".to_string(),
-        pid: std::process::id(),
-        process_identity: None,
-        tool_call_id: "call-inconsistent".to_string(),
-        owner_id: None,
-        command: "true".to_string(),
-        cwd: memory_dir.display().to_string(),
-        output_file: outside_output.display().to_string(),
-        stderr_file: String::new(),
-        status_file: status.display().to_string(),
-        tail_out: false,
-    };
-    std::fs::write(
-        shell_dir.join("jobs.jsonl"),
-        format!("{}\n", serde_json::to_string(&record).unwrap()),
-    )
-    .unwrap();
-
-    let items = list_mem_temporary_items_at(&memory_dir).unwrap();
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].id, "shell_job:inconsistent");
-    assert!(!items[0].deletable);
-    assert!(items[0].delete_reason.is_some());
-    assert_eq!(
-        delete_mem_temporary_items_at(&memory_dir, &[items[0].id.clone()]),
-        Err("mem_temporary_item_not_deletable".to_string())
-    );
-    assert!(outside_output.exists());
-    assert!(status.exists());
-    assert!(std::fs::read_to_string(shell_dir.join("jobs.jsonl"))
-        .unwrap()
-        .contains("inconsistent"));
-
-    let _ = std::fs::remove_dir_all(memory_dir);
-}
-
-#[test]fn mem_temporary_items_manage_finished_jobs_from_legacy_nested_memory_layout() {
-    let memory_dir = std::env::temp_dir().join(unique_web_id("mem_temporary_legacy_shell_jobs"));
-    let make_record = |store_memory_dir: &Path, id: &str, finished: bool, bytes: usize| {
-        let shell_dir = store_memory_dir.join("shell_jobs");
-        std::fs::create_dir_all(&shell_dir).unwrap();
-        let output = shell_dir.join(format!("{id}.out"));
-        let stderr = shell_dir.join(format!("{id}.err"));
-        let status = shell_dir.join(format!("{id}.status"));
-        std::fs::write(&output, vec![b'x'; bytes]).unwrap();
-        std::fs::write(&stderr, b"err").unwrap();
-        std::fs::write(&status, if finished { "0" } else { "" }).unwrap();
-        agent_core::ShellJobRecord {
-            id: id.to_string(),
-            created_at_ms: 7,
-            kind: "test".to_string(),
-            session_id: "session_a".to_string(),
-            turn_id: "turn_a".to_string(),
-            pid: std::process::id(),
-            process_identity: None,
-            tool_call_id: format!("call-{id}"),
-            owner_id: None,
-            command: "true".to_string(),
-            cwd: memory_dir.display().to_string(),
-            output_file: output.display().to_string(),
-            stderr_file: stderr.display().to_string(),
-            status_file: status.display().to_string(),
-            tail_out: false,
-        }
-    };
-    let current = make_record(&memory_dir, "current-finished", true, 5);
-    let legacy_dir = memory_dir.join("memory");
-    let legacy_finished = make_record(&legacy_dir, "legacy-finished", true, 50);
-    let legacy_active = make_record(&legacy_dir, "legacy-active", false, 500);
-    std::fs::write(
-        memory_dir.join("shell_jobs/jobs.jsonl"),
-        format!("{}\n", serde_json::to_string(&current).unwrap()),
-    )
-    .unwrap();
-    std::fs::write(
-        legacy_dir.join("shell_jobs/jobs.jsonl"),
-        format!(
-            "{}\n{}\n",
-            serde_json::to_string(&legacy_finished).unwrap(),
-            serde_json::to_string(&legacy_active).unwrap()
-        ),
-    )
-    .unwrap();
-
-    let items = list_mem_temporary_items_at(&memory_dir).unwrap();
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0].id, "legacy_shell_job:legacy-finished");
-    assert_eq!(items[0].path, "memory/shell_jobs/legacy-finished");
-    assert_eq!(items[1].id, "shell_job:current-finished");
-    assert!(!items.iter().any(|item| item.id.contains("legacy-active")));
-
-    assert_eq!(
-        delete_mem_temporary_items_at(&memory_dir, &[items[0].id.clone()]).unwrap(),
-        1
-    );
-    assert!(!Path::new(&legacy_finished.output_file).exists());
-    assert!(Path::new(&legacy_active.output_file).exists());
-    assert!(Path::new(&current.output_file).exists());
-    let legacy_index = std::fs::read_to_string(legacy_dir.join("shell_jobs/jobs.jsonl")).unwrap();
-    assert!(!legacy_index.contains("legacy-finished"));
-    assert!(legacy_index.contains("legacy-active"));
-    let _ = std::fs::remove_dir_all(memory_dir);
+    assert_eq!(items[0].id, "file:visible.tmp");
+    assert!(!items.iter().any(|item| item.path.contains("shell_jobs")));    let _ = std::fs::remove_dir_all(memory_dir);
 }
 
 #[test]
@@ -8066,30 +7865,19 @@ fn web_runtime_shutdown_stops_all_session_workers() {
         .lines()
         .find_map(|line| line.strip_prefix("job_id: "))
         .unwrap();
-    let shell_jobs = FileShellJobStore::new(&memory_dir);
-    shell_jobs.spawn_background("sleep 30", &tool_dir, "shutdown-session", "shutdown-turn");
-
     assert_eq!(state.manager.lock().unwrap().worker_count(), 2);
     shutdown_web_runtime(&state).unwrap();
     assert_eq!(state.manager.lock().unwrap().worker_count(), 0);
     assert!(tool_jobs.status(job_id, 0).contains("state: cancelled"));
-    assert!(shell_jobs
-        .running_for_session("shutdown-session")
-        .is_empty());
 }
 
 #[test]
 fn web_runtime_cleanup_guard_runs_cleanup_once_on_scope_exit() {
     let state = routing_test_state();
-    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
-    let shell_jobs = FileShellJobStore::new(&memory_dir);
-    shell_jobs.spawn_background("sleep 30", &memory_dir, "guard-session", "guard-turn");
-
     {
         let _guard = WebRuntimeCleanupGuard::new(&state);
     }
 
-    assert!(shell_jobs.running_for_session("guard-session").is_empty());
     assert_eq!(state.manager.lock().unwrap().worker_count(), 0);
 }
 
