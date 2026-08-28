@@ -62,6 +62,7 @@ pub mod redaction;
 pub mod reminder_config;
 pub mod response_protocol;
 pub mod retry_policy;
+pub mod rolling_file_store;
 pub mod runtime_context;
 mod schema_optimizer;
 #[path = "../../resources/capabilities/tools/self_tool.rs"]
@@ -86,12 +87,13 @@ pub mod toolgen;
 pub mod work_instructions;
 pub mod workspace;
 pub use audit::{
-    append_audit_event, append_repair_output_event, host_start_audit_event,
-    max_llm_output_increased_audit_event, model_input_overflow_recovery_audit_event,
-    model_repair_output_event, model_repair_request_audit_event, model_retry_audit_event,
-    prune_api_audit_before, read_audit_doc, round_limit_audit_event,
-    stale_context_choice_audit_event, turn_error_audit_event, turn_final_audit_event,
-    turn_start_audit_event, user_approval_audit_event, user_supplement_audit_event,
+    append_audit_event, append_repair_output_event, configure_audit_storage,
+    host_start_audit_event, max_llm_output_increased_audit_event,
+    model_input_overflow_recovery_audit_event, model_repair_output_event,
+    model_repair_request_audit_event, model_retry_audit_event, prune_api_audit_before,
+    read_audit_doc, round_limit_audit_event, stale_context_choice_audit_event,
+    turn_error_audit_event, turn_final_audit_event, turn_start_audit_event,
+    user_approval_audit_event, user_supplement_audit_event,
 };
 pub use config_edit::{
     apply_runtime_config_value, bash_approval_mode_from_sources, capabilities_dir_from_sources,
@@ -812,15 +814,7 @@ impl MemGuard {
                 }
             })
             .unwrap_or_else(|| Path::new("."));
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("audit");
-        let logical_file_name = file_name
-            .strip_suffix(".jsonl")
-            .map(|stem| format!("{stem}.json"))
-            .unwrap_or_else(|| file_name.to_string());
-        Self::for_space_domain(space_dir, format!("audit-{logical_file_name}"))
+        Self::for_space_domain(space_dir, "audit-storage")
     }
 
     /// Reads do not acquire a cross-process lock. Writers publish complete
@@ -1218,26 +1212,36 @@ impl FileActionAuditStore {
     }
 
     fn begin_turn(&self, turn_id: &str, started_at_ms: i64, user_question: &str) {
-        let _ = self.guard.with_write(|| {
-            let mut doc = self.read_doc_unlocked();
-            if doc.turns.iter().any(|turn| turn.turn_id == turn_id) {
-                return;
-            }
-            doc.turns.push(ActionAuditTurn {
-                turn_id: turn_id.to_string(),
-                started_at_ms,
-                user_question: user_question.to_string(),
-                interactions: Vec::new(),
-            });
-            self.write_doc_unlocked(&doc);
-        });
+        let wrote = self
+            .guard
+            .with_write(|| {
+                let mut doc = self.read_doc_unlocked();
+                if doc.turns.iter().any(|turn| turn.turn_id == turn_id) {
+                    return false;
+                }
+                doc.turns.push(ActionAuditTurn {
+                    turn_id: turn_id.to_string(),
+                    started_at_ms,
+                    user_question: user_question.to_string(),
+                    interactions: Vec::new(),
+                });
+                self.write_doc_unlocked(&doc)
+            })
+            .unwrap_or(false);
+        if wrote {
+            let api_audit = self.file.with_file_name("api_audit.json");
+            let _ = audit::enforce_audit_storage_budget(&api_audit);
+        }
     }
 
     fn record_action(&self, entry: ActionAuditEntry, turn_id: &str, user_question: &str) {
-        let _ = self.guard.with_write(|| {
-            let mut doc = self.read_doc_unlocked();
-            let turn_index =
-                if let Some(index) = doc.turns.iter().position(|turn| turn.turn_id == turn_id) {
+        let wrote = self
+            .guard
+            .with_write(|| {
+                let mut doc = self.read_doc_unlocked();
+                let turn_index = if let Some(index) =
+                    doc.turns.iter().position(|turn| turn.turn_id == turn_id)
+                {
                     index
                 } else {
                     doc.turns.push(ActionAuditTurn {
@@ -1248,23 +1252,28 @@ impl FileActionAuditStore {
                     });
                     doc.turns.len().saturating_sub(1)
                 };
-            let turn = &mut doc.turns[turn_index];
-            let interaction_index = if let Some(index) = turn
-                .interactions
-                .iter()
-                .position(|interaction| interaction.round == entry.round)
-            {
-                index
-            } else {
-                turn.interactions.push(ActionAuditInteraction {
-                    round: entry.round,
-                    actions: Vec::new(),
-                });
-                turn.interactions.len().saturating_sub(1)
-            };
-            turn.interactions[interaction_index].actions.push(entry);
-            self.write_doc_unlocked(&doc);
-        });
+                let turn = &mut doc.turns[turn_index];
+                let interaction_index = if let Some(index) = turn
+                    .interactions
+                    .iter()
+                    .position(|interaction| interaction.round == entry.round)
+                {
+                    index
+                } else {
+                    turn.interactions.push(ActionAuditInteraction {
+                        round: entry.round,
+                        actions: Vec::new(),
+                    });
+                    turn.interactions.len().saturating_sub(1)
+                };
+                turn.interactions[interaction_index].actions.push(entry);
+                self.write_doc_unlocked(&doc)
+            })
+            .unwrap_or(false);
+        if wrote {
+            let api_audit = self.file.with_file_name("api_audit.json");
+            let _ = audit::enforce_audit_storage_budget(&api_audit);
+        }
     }
 
     fn read_doc_unlocked(&self) -> ActionAuditDocument {
@@ -1274,14 +1283,14 @@ impl FileActionAuditStore {
         serde_json::from_str(&text).unwrap_or_else(|_| Self::empty_doc())
     }
 
-    fn write_doc_unlocked(&self, doc: &ActionAuditDocument) {
+    fn write_doc_unlocked(&self, doc: &ActionAuditDocument) -> bool {
         if let Some(parent) = self.file.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let Ok(text) = serde_json::to_string_pretty(doc) else {
-            return;
+        let Ok(text) = bounded_action_audit_text(doc, audit::ACTION_AUDIT_MAX_BYTES) else {
+            return false;
         };
-        let _ = atomic_write_file(&self.file, format!("{text}\n").as_bytes());
+        atomic_write_file(&self.file, format!("{text}\n").as_bytes()).is_ok()
     }
 
     fn empty_doc() -> ActionAuditDocument {
@@ -1290,6 +1299,86 @@ impl FileActionAuditStore {
             turns: Vec::new(),
         }
     }
+}
+
+fn bounded_action_audit_text(
+    doc: &ActionAuditDocument,
+    max_bytes: u64,
+) -> Result<String, serde_json::Error> {
+    let mut retained = doc.clone();
+    loop {
+        let text = serde_json::to_string_pretty(&retained)?;
+        if text.len() as u64 <= max_bytes {
+            return Ok(text);
+        }
+        if retained.turns.len() > 1 {
+            retained.turns.remove(0);
+            continue;
+        }
+        let Some(turn) = retained.turns.first_mut() else {
+            return Ok(text);
+        };
+        if remove_oldest_action_from_turn(turn) {
+            continue;
+        }
+        summarize_oversized_action_turn(turn);
+        return serde_json::to_string_pretty(&retained);
+    }
+}
+
+fn remove_oldest_action_from_turn(turn: &mut ActionAuditTurn) -> bool {
+    let action_count = turn
+        .interactions
+        .iter()
+        .map(|interaction| interaction.actions.len())
+        .sum::<usize>();
+    if action_count <= 1 {
+        return false;
+    }
+    if let Some(interaction) = turn
+        .interactions
+        .iter_mut()
+        .find(|interaction| !interaction.actions.is_empty())
+    {
+        interaction.actions.remove(0);
+    }
+    turn.interactions
+        .retain(|interaction| !interaction.actions.is_empty());
+    true
+}
+
+fn summarize_oversized_action_turn(turn: &mut ActionAuditTurn) {
+    truncate_string_with_marker(&mut turn.turn_id, 512);
+    truncate_string_with_marker(&mut turn.user_question, 4_096);
+    for interaction in &mut turn.interactions {
+        for action in &mut interaction.actions {
+            truncate_string_with_marker(&mut action.action, 512);
+            truncate_string_with_marker(&mut action.status, 512);
+            if let Some(summary) = &mut action.result_summary {
+                truncate_string_with_marker(summary, 4_096);
+            }
+            let input_bytes = serde_json::to_vec(&action.input)
+                .map(|encoded| encoded.len())
+                .unwrap_or_default();
+            if input_bytes > 1024 * 1024 {
+                action.input = json!({
+                    "payload_omitted": true,
+                    "payload_bytes": input_bytes,
+                    "payload_limit_bytes": 1024 * 1024,
+                });
+            }
+        }
+    }
+}
+
+fn truncate_string_with_marker(value: &mut String, max_chars: usize) {
+    if value.chars().count() <= max_chars {
+        return;
+    }
+    let original_chars = value.chars().count();
+    let mut truncated = value.chars().take(max_chars).collect::<String>();
+    truncated.push_str(&format!("…[truncated; original_chars={original_chars}]"));
+    *value = truncated;
 }
 
 fn space_dir_for_memory_dir(memory_dir: &Path) -> &Path {

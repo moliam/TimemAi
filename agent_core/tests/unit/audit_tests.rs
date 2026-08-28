@@ -313,3 +313,149 @@ fn api_audit_retention_uses_the_requested_rolling_cutoff_across_json_and_jsonl()
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn jsonl_tail_compaction_keeps_only_complete_latest_records() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_core_audit_tail_compaction_{}_{}",
+        std::process::id(),
+        audit_now_ms()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("api_audit.jsonl");
+    use std::fmt::Write as _;
+    let mut lines = String::new();
+    for index in 0..12 {
+        writeln!(
+            lines,
+            "{{\"index\":{index},\"payload\":\"{}\"}}",
+            "x".repeat(20)
+        )
+        .unwrap();
+    }
+    std::fs::write(&path, lines).unwrap();
+
+    compact_jsonl_tail_in_place(&path, 150).unwrap();
+
+    let retained = std::fs::read_to_string(&path).unwrap();
+    let records = retained
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(!records.is_empty());
+    assert_eq!(records.last().unwrap()["index"], 11);
+    assert!(records.first().unwrap()["index"].as_u64().unwrap() > 0);
+    assert!(std::fs::metadata(&path).unwrap().len() <= 150);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn oversized_audit_event_is_replaced_by_bounded_summary() {
+    let event = json!({
+        "type": "llm_request",
+        "session": "session_1",
+        "payload": "x".repeat(AUDIT_EVENT_MAX_BYTES + 1),
+    });
+    let bounded = bounded_audit_event(event).unwrap();
+    assert_eq!(bounded["type"], "llm_request");
+    assert_eq!(bounded["session"], "session_1");
+    assert_eq!(bounded["payload_omitted"], true);
+    assert!(bounded["payload_bytes"].as_u64().unwrap() > AUDIT_EVENT_MAX_BYTES as u64);
+    assert!(serde_json::to_vec(&bounded).unwrap().len() < 1024);
+}
+
+#[test]
+fn audit_budget_cleanup_removes_interrupted_retention_files() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_core_audit_temp_cleanup_{}_{}",
+        std::process::id(),
+        audit_now_ms()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let stale = root.join(".api_audit.jsonl.retention.tmp-1-2");
+    let unrelated = root.join("keep.txt");
+    std::fs::write(&stale, b"stale").unwrap();
+    std::fs::write(&unrelated, b"keep").unwrap();
+
+    cleanup_stale_audit_temps(&root).unwrap();
+
+    assert!(!stale.exists());
+    assert!(unrelated.exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn legacy_base_audit_document_keeps_schema_and_latest_events_when_compacted() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_core_legacy_base_audit_{}_{}",
+        std::process::id(),
+        audit_now_ms()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("api_audit.json");
+    let events = (0..20)
+        .map(|index| json!({"type":"legacy", "index":index, "payload":"x".repeat(80)}))
+        .collect::<Vec<_>>();
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&json!({"version":1, "events":events})).unwrap(),
+    )
+    .unwrap();
+
+    compact_json_array_document(&path, "events", 700).unwrap();
+
+    let doc: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(doc["version"], 1);
+    let retained = doc["events"].as_array().unwrap();
+    assert!(!retained.is_empty());
+    assert_eq!(retained.last().unwrap()["index"], 19);
+    assert!(retained.first().unwrap()["index"].as_u64().unwrap() > 0);
+    assert!(std::fs::metadata(&path).unwrap().len() <= 700);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn legacy_root_sidecar_remains_readable_and_counts_toward_workspace_budget() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_core_legacy_root_sidecar_{}_{}",
+        std::process::id(),
+        audit_now_ms()
+    ));
+    let audit_dir = root.join("audit");
+    std::fs::create_dir_all(&audit_dir).unwrap();
+    let legacy = root.join("api_audit.jsonl");
+    let current = audit_dir.join("api_audit.jsonl");
+    std::fs::write(&legacy, b"{\"type\":\"legacy\"}\n").unwrap();
+    std::fs::write(&current, b"{\"type\":\"current\"}\n").unwrap();
+
+    assert_eq!(
+        audit_storage_bytes(&audit_dir, Some(&legacy)).unwrap(),
+        std::fs::metadata(&legacy).unwrap().len() + std::fs::metadata(&current).unwrap().len()
+    );
+    let legacy_doc = read_audit_doc_single(&legacy).unwrap();
+    assert_eq!(legacy_doc["events"][0]["type"], "legacy");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn audit_capacity_uses_16_mib_slices_and_reserves_one_for_writes() {
+    use crate::rolling_file_store::RollingCapacity;
+
+    const UNIT: u64 = 16 * 1024 * 1024;
+    let normal =
+        RollingCapacity::with_slice_bytes(DEFAULT_AUDIT_DIRECTORY_MAX_BYTES, UNIT).unwrap();
+    let debug = RollingCapacity::with_slice_bytes(DEBUG_AUDIT_DIRECTORY_MAX_BYTES, UNIT).unwrap();
+
+    assert_eq!(DEFAULT_AUDIT_DIRECTORY_MAX_BYTES, 4 * UNIT);
+    assert_eq!(normal.stable_bytes, 3 * UNIT);
+    assert_eq!(normal.reserved_bytes, UNIT);
+    assert_eq!(DEBUG_AUDIT_DIRECTORY_MAX_BYTES, 32 * UNIT);
+    assert_eq!(debug.stable_bytes, 31 * UNIT);
+    assert_eq!(debug.reserved_bytes, UNIT);
+    assert_eq!(API_AUDIT_BASE_MAX_BYTES, UNIT);
+    assert_eq!(ACTION_AUDIT_MAX_BYTES, UNIT);
+    assert_eq!(REPAIR_OUTPUT_MAX_BYTES, UNIT);
+}
