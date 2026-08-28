@@ -47,6 +47,7 @@ describe("production wire delivery contract", () => {
     { type: "host_error", message: "query_failed" },
     { type: "runtime_notice", session_id: "session-a", level: "warning", title: "Runtime warning", message: "persist_failed" },
     { type: "history_page", session_id: "session-a", records: [], has_more: false },
+    { type: "mem_temporary_items", items: [{ id: "file:tmp/a.log", path: "tmp/a.log", kind: "temporary_file", bytes: 42, modified_at_ms: 1, deletable: true }] },
     { type: "chat_search_result", query: "release", hits: [] },
     { type: "favorites_list", favorites: [], capacity: { used_bytes: 0, limit_bytes: 268435456, used_percent: 0 } },
     { type: "favorite_created", favorite: {} as never, capacity: { used_bytes: 1, limit_bytes: 268435456, used_percent: 1 }, nearing_limit: false },
