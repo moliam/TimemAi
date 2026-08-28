@@ -2468,11 +2468,40 @@ fn session_worker_stop_discards_queued_turns_but_allows_new_work() {
         }
     }
 
-    std::thread::sleep(Duration::from_millis(100));
+    let mut skipped_turn_started = false;
+    let skipped_outcome = loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(2))
+            .expect("queued turn cancelled before start should complete promptly")
+        {
+            CoreSessionWorkerEvent::TurnStarted { command_id } => {
+                assert_eq!(command_id, None);
+                skipped_turn_started = true;
+            }
+            CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
+            CoreSessionWorkerEvent::Topics(_)
+            | CoreSessionWorkerEvent::ModelRequestCompleted { .. }
+            | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
+            CoreSessionWorkerEvent::ModelRequest { .. } => {
+                panic!("work queued before Stop must not reach the model")
+            }
+            other => panic!("unexpected event while completing skipped turn: {other:?}"),
+        }
+    };
+    assert!(
+        skipped_turn_started,
+        "the Host needs TurnStarted to associate the cancellation with its pending turn"
+    );
+    assert_eq!(
+        skipped_outcome.stop_reason,
+        Some(crate::TurnStopReason::CancelledByUser)
+    );
+    assert_eq!(skipped_outcome.elapsed, Duration::ZERO);
     assert_eq!(
         *calls.lock().unwrap(),
         vec!["first".to_string()],
-        "Stop must discard the already queued second turn"
+        "Stop must complete the queued turn without another model call"
     );
 
     handle
