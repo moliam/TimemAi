@@ -177,8 +177,13 @@ process runs with no TTY or graphical display.
   guidance and may inspect the malformed raw response to provide a concrete,
   protocol-native correction skeleton; the turn loop only assembles the shared
   temporary repair delta and audit record.
-- Loads capability manifests and renders the model-facing tool catalog from the
-  same JSON Schema style IDL used to validate canonical tool actions.
+- Loads capability manifests and derives protocol-specific model-facing tool
+  schemas from the same JSON Schema style IDL used to validate canonical tool
+  actions. `agent_core::tool_schema_renderer` is the provider-dialect boundary:
+  OpenAI adapters preserve the full schema, while Anthropic/Bedrock rendering
+  removes root-level composition keywords rejected by Bedrock. The capability
+  registry and executor retain the original schema and remain authoritative for
+  strict argument validation; wire compatibility never weakens execution safety.
 - Renders `prompt_0` and dynamic prompt delta blocks through
   `agent_core::prompt_render`, so prompt generation is a module boundary rather
   than ad hoc string assembly in the turn loop.
@@ -190,7 +195,8 @@ process runs with no TTY or graphical display.
   Anthropic messages, structured-output hints, endpoint joining, usage parsing,
   truncation detection, model HTTP error normalization/redaction, model service
   default protocol/base URL/model rules, model service cache-control block
-  translation, and model request/response audit event data.
+  translation, protocol-specific tool-definition assembly through
+  `agent_core::tool_schema_renderer`, and model request/response audit event data.
 - Owns model service-agnostic prompt cache planning in `agent_core::prompt_cache`.
   The algorithm splits rendered prompt into static prompt and dynamic
   delta blocks, marks stable cache boundaries, and returns shell/UI-neutral
@@ -1059,6 +1065,12 @@ Important invariants:
   descriptions, and schemas there. Inline-only MCP catalog and enable/disable
   slices remain persistent for lossless mode switching but are filtered out of
   native messages.
+- Anthropic-protocol requests render tool schemas deterministically before
+  attaching cache markers. The static built-in tool order is stable, dynamic MCP
+  tools follow that prefix, and exactly the last built-in API tool carries the
+  tool-prefix cache breakpoint. Bedrock-incompatible root `oneOf`, `allOf`, and
+  `anyOf` clauses are removed only from the model-facing copy; nested property
+  schemas and executor-side original validation remain intact.
 - Anthropic-protocol requests attach `cache_control: {"type": "ephemeral"}` to
   the static system block, the last built-in API tool, and the latest three
   dynamic prompt deltas. The
