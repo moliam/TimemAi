@@ -730,7 +730,13 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain('.settings-center-backdrop { position: fixed; z-index: 45;');
     expect(styles).toContain('.settings-center { width: min(880px, 100%);');
     expect(styles).toContain('/* Borderless surface pass: paint-cheap Settings navigation and a modal workspace veil. */');
-    expect(styles).toContain('.settings-center-backdrop {\n  backdrop-filter: blur(9px) saturate(.78);\n  -webkit-backdrop-filter: blur(9px) saturate(.78);');
+    expect(source).toContain('return createPortal(<div className="settings-center-backdrop"');
+    expect(source).toContain('workspace.setAttribute("inert", "");');
+    expect(source).toContain('workspace.setAttribute("aria-hidden", "true");');
+    expect(source).toContain('document.documentElement.classList.add("center-modal-open");');
+    expect(styles).toContain('html.center-modal-open,\nbody.center-modal-open {\n  overflow: hidden;\n  overscroll-behavior: none;');
+    expect(styles).toContain('.settings-center-backdrop,\n.chat-library-center-backdrop {\n  isolation: isolate;\n  overscroll-behavior: none;');
+    expect(styles).toContain('backdrop-filter: none;\n  -webkit-backdrop-filter: none;');
     expect(styles).toContain('.settings-center-nav button:hover:not(:disabled) {\n  background: #202824;\n  color: #f0f6f3;\n  box-shadow: none;\n  transform: none;');
     expect(styles).toContain('.decision-modal,\n.session-modal {\n  border: 0;');
     expect(styles).toContain('.endpoint-menu,\n.mcp-panel {\n  border: 0;');
@@ -1825,7 +1831,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(viewModelSource).toContain("export function runtimeConnectionLabel");
     expect(source).toContain('const settingsTitle = !runtimeReady ? "Wait for the runtime snapshot before opening settings" : pendingMemSwitch ? "Memory switch is in progress" : "Open settings";');
     expect(source).toContain("const settingsButtonRef = useRef<HTMLButtonElement | null>(null);");
-    expect(source).toContain("if (restoreFocus) settingsButtonRef.current?.focus({ preventScroll: true });");
+    expect(source).toContain("if (restoreFocus) window.requestAnimationFrame(() => settingsButtonRef.current?.focus({ preventScroll: true }));");
     expect(source).toContain('className="settings-runtime-status" role="status" aria-live="polite" title={connectionLabel}');
     expect(source).toContain("const runtimeDisconnected = runtimeEverConnected && !connected;");
     expect(source).toContain('showRuntimeUnavailableDialog && <RuntimeUnavailableDialog detail={runtimeDisconnectedDetail} onClose={() => setRuntimeUnavailableDialogDismissed(true)}/>');
@@ -3101,7 +3107,12 @@ describe("chat library modal and favorite management", () => {
     expect(source).toContain('visibleFavoriteItems.map');
     expect(source).toContain('const ChatLibrarySearchRow = memo');
     expect(source).toContain('const ChatLibraryFavoriteRow = memo');
-    expect(styles).toContain('.chat-library-center-backdrop {\n  backdrop-filter: blur(9px) saturate(.78);\n  -webkit-backdrop-filter: blur(9px) saturate(.78);');
+    expect(source).toContain('return createPortal(<div className="chat-library-center-backdrop"');
+    expect(source).toContain('const chatLibraryTriggerRef = useRef<HTMLButtonElement | null>(null);');
+    expect(source).toContain('chatLibraryTriggerRef.current = event.currentTarget;');
+    expect(source).toContain('window.requestAnimationFrame(() => chatLibraryTriggerRef.current?.focus({ preventScroll: true }));');
+    expect(source).toContain('</div>, document.body);');
+    expect(styles).toContain('.settings-center-content,\n.chat-library-list {\n  overscroll-behavior: contain;');
     expect(styles).toContain('content-visibility: auto;');
   });
 });
