@@ -2,15 +2,15 @@ import { AssistantRuntimeProvider, ThreadMessageLike, ThreadPrimitive, useExtern
 import { closestCenter, DndContext, DragEndEvent, DragOverlay, DragOverEvent, KeyboardSensor, PointerSensor, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ArrowDown, ArrowLeftRight, BriefcaseBusiness, Bookmark, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CircleStop, Clock3, Copy, CornerUpLeft, Cpu, Database, Eye, EyeOff, Folder, FolderOpen, FolderPlus, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Settings, Sparkles, Star, Terminal, TriangleAlert, Trash2, Wrench, X } from "lucide-react";
-import { CSSProperties, Dispatch, memo, MutableRefObject, ReactNode, SetStateAction, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useId } from "react";
+import { ArrowDown, ArrowDownToLine, ArrowLeftRight, BriefcaseBusiness, Bookmark, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, CircleStop, Clock3, Copy, CornerUpLeft, Cpu, Database, Eye, EyeOff, Folder, FolderOpen, FolderPlus, Gauge, GripVertical, KeyRound, LoaderCircle, Maximize2, Menu, Minimize2, Palette, Paperclip, Pencil, Plug, Plus, RefreshCw, Search, Send, Settings, Sparkles, Star, Terminal, TriangleAlert, Trash2, Wrench, X } from "lucide-react";
+import { createContext, CSSProperties, Dispatch, memo, MutableRefObject, ReactNode, SetStateAction, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useId } from "react";
 import { createPortal } from "react-dom";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { loadToolGenEnabled, saveToolGenEnabled } from "./beta_features";
 import { Activity, ChatFavorite, ChatLibraryCapacity, ChatMessage, ChatSearchHit, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, MemTemporaryItem, ModelEndpoint, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole, WorkerRoleGroup, WorkerRoleLibrary, SessionGroup } from "./protocol";
 import { applyWorkerRoleMutation, isOptimisticWorkerRoleMutation, replayWorkerRoleMutations, WorkerRoleMutation } from "./worker_roles_ui";
 import { adjacentUserMessageIndex, canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, UserMessageNavigationDirection, wheelDeltaPixels } from "./scroll";
-import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, manualToolGenCommand, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, sessionWorkerTreeRows, setSessionDraft, tailPath, toolActivityDisplayName, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn } from "./view_model";
+import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, manualToolGenCommand, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionCacheHitPercent, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, sessionWorkerTreeRows, setSessionDraft, tailPath, toolActivityDisplayName, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn } from "./view_model";
 import { extractMarkdownOutline, finalAnswerNeedsOutline, markdownHeadingId, markdownFloatingNavigationLayout, markdownOutlineActiveId, markdownOutlineAnimationPosition, markdownOutlineRailScrollTop, MARKDOWN_OUTLINE_START_ID, markdownOutlineTargetScrollTop, MarkdownOutlineItem } from "./markdown_outline";
 import { createMcpTransportDrafts, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
@@ -45,6 +45,18 @@ type PendingSessionApiKeyCommand = {
   sessionId: string;
   timeoutId: number;
 };
+type MemSwitchCandidate = {
+  path: string;
+  runningSessionCount: number;
+};
+function memSwitchRunningSessionCount(sessions: Session[]) {
+  return sessions.filter((session) => session.state === "working"
+    || !!session.active_turn_id
+    || session.workers.some((worker) => worker.state === "working")).length;
+}
+function shellQuoteCommandArgument(value: string) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
 type ChatMessageDeleteCandidate = {
   sessionId: string;
   turnId: string;
@@ -212,7 +224,7 @@ function TimemApp() {
   const [showToolRepo, setShowToolRepo] = useState(false);
   const [chatLibraryMode, setChatLibraryMode] = useState<"search" | "favorites" | null>(null);
   const [chatSearchQuery, setChatSearchQuery] = useState("");
-  const [chatSearchScope, setChatSearchScope] = useState<"all" | "session">("all");
+  const [chatSearchScope, setChatSearchScope] = useState<"all" | "session" | "favorites">("all");
   const [chatSearchResults, setChatSearchResults] = useState<ChatSearchHit[]>([]);
   const [chatSearchPending, setChatSearchPending] = useState(false);
   const [favorites, setFavorites] = useState<ChatFavorite[]>([]);
@@ -284,7 +296,9 @@ function TimemApp() {
   const [pendingUploadSessionIds, setPendingUploadSessionIds] = useState<Set<string>>(() => new Set());
   const [pendingUploadFiles, setPendingUploadFiles] = useState<Record<string, { name: string; bytes: number }>>({});
   const [pendingMemSwitch, setPendingMemSwitch] = useState(false);
+  const [memSwitchCandidate, setMemSwitchCandidate] = useState<MemSwitchCandidate | null>(null);
   const [pendingMemRetention, setPendingMemRetention] = useState(false);
+  const [pendingMemConversationCapacity, setPendingMemConversationCapacity] = useState(false);
   const [completedTurnsBySession, setCompletedTurnsBySession] = useState<Record<string, { key: string; successful: boolean }>>({});
   const [commandAcks, setCommandAcks] = useState<Record<string, Extract<WireEvent, { type: "command_ack" }>>>({});
   const consumeCommandAcks = useCallback((commandIds: ReadonlySet<string>) => {
@@ -651,6 +665,7 @@ function TimemApp() {
     setSelectedTool(null);
     setPendingToolgenRequests(new Set());
     setPendingMemSwitch(false);
+    setMemSwitchCandidate(null);
   }, []);
 
   useEffect(() => {
@@ -817,8 +832,22 @@ function TimemApp() {
           if (completed?.command.type === "mem_temporary_retention_update") {
             setPendingMemRetention(false);
           }
+          if (completed?.command.type === "mem_conversation_capacity_update") {
+            setPendingMemConversationCapacity(false);
+          }
+          const memSwitchNeedsConfirmation = completed?.command.type === "mem_switch"
+            && !completed.command.stop_running
+            && event.error === "mem_switch_active_sessions_confirmation_required";
           if (completed?.command.type === "mem_switch") {
             setPendingMemSwitch(false);
+            if (memSwitchNeedsConfirmation) {
+              setMemSwitchCandidate({
+                path: completed.command.path,
+                runningSessionCount: Math.max(1, memSwitchRunningSessionCount(sessionsRef.current)),
+              });
+            } else {
+              setMemSwitchCandidate(null);
+            }
           }
           if (completed?.command.type === "mem_temporary_items_list") {
             setMemTemporaryItemsLoading(false);
@@ -826,7 +855,10 @@ function TimemApp() {
           if (completed?.command.type === "mem_temporary_items_delete") {
             setMemTemporaryItemsDeleting(false);
           }
-          if (pendingCredential) {
+          if (memSwitchNeedsConfirmation) {
+            // The authoritative runtime found live work after the latest browser snapshot.
+            // The confirmation dialog is the actionable response; avoid a redundant error toast.
+          } else if (pendingCredential) {
             reportUiError(
               "API key update rejected",
               event.error || "The runtime rejected this Session credential. Check the value and try again.",
@@ -854,7 +886,13 @@ function TimemApp() {
     }
     if (event.type === "mem_settings_updated") {
       setPendingMemRetention(false);
-      setServer((current) => current ? { ...current, mem: { ...current.mem, temporary_retention_days: event.temporary_retention_days } } : current);
+      setPendingMemConversationCapacity(false);
+      setServer((current) => current ? { ...current, mem: {
+        ...current.mem,
+        temporary_retention_days: event.temporary_retention_days,
+        temporary_capacity_bytes: event.temporary_capacity_bytes,
+        conversation_capacity_bytes: event.conversation_capacity_bytes,
+      } } : current);
       return;
     }
     if (event.type === "mem_temporary_items") {
@@ -1546,13 +1584,17 @@ function TimemApp() {
   const newSessionLabel = runtimeLocked ? "Session controls are temporarily locked" : "New session";
   const modelEndpointsUnavailable = !!server && server.model_endpoints.length === 0;
   const headerModelLabel = endpointNameForProfile(server?.model_endpoints ?? [], activeSession?.runtime_profile) ?? UNCONFIGURED_MODEL_LABEL;
-  const openEndpointCreator = () => {
+  const openEndpointSettings = () => {
     setShowRuntime(false);
     setShowMcp(false);
     setShowToolRepo(false);
     setSettingsSection("endpoints");
-    setEndpointEditor("new");
+    setEndpointEditor(null);
     setShowAppearance(true);
+  };
+  const openEndpointCreator = () => {
+    openEndpointSettings();
+    setEndpointEditor("new");
   };
   const runtimeLabel = showRuntime ? "Close runtime information" : "Open runtime information";
   const activeToolCount = activeSession?.tools.length ?? 0;
@@ -1672,7 +1714,7 @@ function TimemApp() {
         {leftSidebarCollapsed && <button type="button" className="collapsed-brand brand-logo-toggle brand-logo-restore" title="Show session navigation" aria-label="Show session navigation" onClick={() => setSidebarLayout((current) => ({ ...current, leftCollapsed: false }))}><img src="/timem_logo.png" alt="" className="brand-logo"/><span className="brand-scale-corner top-left" aria-hidden="true"/><span className="brand-scale-corner bottom-right" aria-hidden="true"/></button>}
         {!leftSidebarCollapsed && <button type="button" className="sidebar-resize-handle left" title="Resize session navigation" aria-label="Resize session navigation" onPointerDown={(event) => startSidebarResize("left", event)}/>}
         <div className="brand"><button type="button" className="brand-logo-toggle" title="Hide session navigation" aria-label="Hide session navigation" onClick={() => setSidebarLayout((current) => ({ ...current, leftCollapsed: true }))}><img src="/timem_logo.png" alt="Timem logo" className="brand-logo"/><span className="brand-scale-corner top-right" aria-hidden="true"/><span className="brand-scale-corner bottom-left" aria-hidden="true"/></button><span>TIMEM</span><button type="button" className="mobile-sidebar-close" title="Close sessions" aria-label="Close sessions" onClick={() => closeMobileSidebar()}><X size={17}/></button></div>
-        <div className={`session-management-actions ${sessionDeleteMode ? "deleting" : ""}`}><div className="session-create-actions"><button type="button" ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked || sessionDeleteMode} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/></button><button type="button" className="new-session-group" title="New session group" aria-label="New session group" disabled={runtimeLocked || sessionDeleteMode} onClick={() => setSessionGroupEditor({ name: "" })}><FolderPlus size={16}/></button></div><div className="session-delete-actions">{sessionDeleteMode && <button type="button" className="session-delete-cancel" title="取消删除 Session" aria-label="取消删除 Session" onClick={cancelSessionDeleteMode}><X size={14} strokeWidth={3}/></button>}<button type="button" className={`session-delete-manage ${sessionDeleteMode ? "confirm" : ""}`} title={sessionDeleteMode ? selectedDeleteSessionId ? "确认删除选中的 Session" : "请选择要删除的 Session" : "选择要删除的 Session"} aria-label={sessionDeleteMode ? selectedDeleteSessionId ? "确认删除选中的 Session" : "请选择要删除的 Session" : "选择要删除的 Session"} disabled={runtimeLocked || sessions.length === 0 || (sessionDeleteMode && !selectedDeleteSessionId)} onClick={() => { if (!sessionDeleteMode) { setSessionGroupEditor(null); setRenamingSessionId(""); setRenameDraft(""); setSessionDeleteMode(true); setSelectedDeleteSessionId(""); } else confirmSelectedSessionDelete(); }}>{sessionDeleteMode ? <Check size={15} strokeWidth={3}/> : <Trash2 size={15}/>}</button></div></div>
+        <div className={`session-management-actions ${sessionDeleteMode ? "deleting" : ""}`}><div className="session-create-actions"><button type="button" className="new-session-group" title="New session group" aria-label="New session group" disabled={runtimeLocked || sessionDeleteMode} onClick={() => setSessionGroupEditor({ name: "" })}><FolderPlus size={16}/></button><button type="button" ref={newSessionButtonRef} className="new-session" title={newSessionLabel} aria-label={newSessionLabel} disabled={runtimeLocked || sessionDeleteMode} onClick={() => { setShowNewSession(true); closeMobileSidebar(false); }}><Plus size={16}/></button></div><div className="session-delete-actions">{sessionDeleteMode && <button type="button" className="session-delete-cancel" title="取消删除 Session" aria-label="取消删除 Session" onClick={cancelSessionDeleteMode}><X size={14} strokeWidth={3}/></button>}<button type="button" className={`session-delete-manage ${sessionDeleteMode ? "confirm" : ""}`} title={sessionDeleteMode ? selectedDeleteSessionId ? "确认删除选中的 Session" : "请选择要删除的 Session" : "选择要删除的 Session"} aria-label={sessionDeleteMode ? selectedDeleteSessionId ? "确认删除选中的 Session" : "请选择要删除的 Session" : "选择要删除的 Session"} disabled={runtimeLocked || sessions.length === 0 || (sessionDeleteMode && !selectedDeleteSessionId)} onClick={() => { if (!sessionDeleteMode) { setSessionGroupEditor(null); setRenamingSessionId(""); setRenameDraft(""); setSessionDeleteMode(true); setSelectedDeleteSessionId(""); } else confirmSelectedSessionDelete(); }}>{sessionDeleteMode ? <Check size={15} strokeWidth={3}/> : <Trash2 size={15}/>}</button></div></div>
         {sessionGroupEditor && !sessionGroupEditor.id && <form className="session-group-editor" onSubmit={(event) => { event.preventDefault(); saveSessionGroup(); }}><input autoFocus value={sessionGroupEditor.name} placeholder="Group name" aria-label="New session group name" onChange={(event) => setSessionGroupEditor({ name: event.target.value })} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); setSessionGroupEditor(null); } }}/><button type="submit" disabled={!sessionGroupEditor.name.trim()}><Check size={13}/></button><button type="button" onClick={() => setSessionGroupEditor(null)}><X size={13}/></button></form>}
         <DndContext sensors={sessionDragSensors} collisionDetection={closestCenter} onDragStart={(event) => setDraggedSessionId(String(event.active.id).replace(/^session:/, ""))} onDragCancel={() => setDraggedSessionId("")} onDragEnd={finishSessionDrag}>
           <nav className="session-list" aria-label="Sessions" aria-busy={!snapshotReady}>
@@ -1705,8 +1747,8 @@ function TimemApp() {
           <DragOverlay dropAnimation={prefersReducedMotion() ? null : { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" }}>{draggedSession && <div className="session-row session-overlay" aria-hidden="true"><span className="session-drag"><GripVertical size={13}/></span><span className="session-name">{draggedSession.display_name}</span></div>}</DragOverlay>
         </DndContext>
         <div className="sidebar-footer">
-          <button type="button" className={`sidebar-library-button ${chatLibraryMode === "search" ? "active" : ""}`} title="Search chats" aria-label="Search chats" aria-expanded={chatLibraryMode === "search"} aria-controls="chat-library-center" disabled={!runtimeReady || pendingMemSwitch} onClick={() => { setShowAppearance(false); setShowToolRepo(false); setShowRoles(false); setChatLibraryMode((current) => current === "search" ? null : "search"); }}><Search size={17} aria-hidden="true"/>{!leftSidebarCollapsed && <span>Search</span>}</button>
-          <button type="button" className={`sidebar-library-button ${chatLibraryMode === "favorites" ? "active" : ""}`} title="Favorite answers" aria-label="Favorite answers" aria-expanded={chatLibraryMode === "favorites"} aria-controls="chat-library-center" disabled={!runtimeReady || pendingMemSwitch} onClick={() => { setShowAppearance(false); setShowToolRepo(false); setShowRoles(false); const opening = chatLibraryMode !== "favorites"; setChatLibraryMode(opening ? "favorites" : null); if (opening) { setFavoritesLoading(true); if (!sendCommand({ type: "favorites_list" })) setFavoritesLoading(false); } }}><Star size={17} aria-hidden="true"/>{!leftSidebarCollapsed && <span>Favorite</span>}</button>
+          <button type="button" className={`sidebar-library-button ${chatLibraryMode === "search" ? "active" : ""}`} title="Search chats" aria-label="Search chats" aria-expanded={chatLibraryMode === "search"} aria-controls="chat-library-center" disabled={!runtimeReady || pendingMemSwitch} onClick={() => { setShowAppearance(false); setShowToolRepo(false); setShowRoles(false); const opening = chatLibraryMode !== "search"; setChatLibraryMode(opening ? "search" : null); if (opening) setChatSearchScope("all"); }}><Search size={17} aria-hidden="true"/>{!leftSidebarCollapsed && <span>Search</span>}</button>
+          <button type="button" className={`sidebar-library-button ${chatLibraryMode === "favorites" ? "active" : ""}`} title="Favorite answers" aria-label="Favorite answers" aria-expanded={chatLibraryMode === "favorites"} aria-controls="chat-library-center" disabled={!runtimeReady || pendingMemSwitch} onClick={() => { setShowAppearance(false); setShowToolRepo(false); setShowRoles(false); const opening = chatLibraryMode !== "favorites"; setChatLibraryMode(opening ? "favorites" : null); if (opening) { setChatSearchScope("favorites"); setFavoritesLoading(true); if (!sendCommand({ type: "favorites_list" })) setFavoritesLoading(false); } }}><Star size={17} aria-hidden="true"/>{!leftSidebarCollapsed && <span>Favorite</span>}</button>
           <button type="button" ref={settingsButtonRef} className={`sidebar-settings-button ${showAppearance ? "active" : ""}`} title={settingsTitle} aria-label={settingsTitle} aria-expanded={showAppearance} aria-controls="settings-center" disabled={!runtimeReady || pendingMemSwitch} onClick={() => { setChatLibraryMode(null); setSettingsSection("appearance"); setShowAppearance(true); }}><Settings size={17} aria-hidden="true"/>{!leftSidebarCollapsed && <span>Settings</span>}</button>
         </div>
       </aside>
@@ -1733,7 +1775,12 @@ function TimemApp() {
           connected={connected}
           connectionLabel={connectionLabel}
           retentionDays={server ? server.mem.temporary_retention_days : 5}
+          temporaryCapacityBytes={server?.mem.temporary_capacity_bytes ?? null}
+          conversationCapacityBytes={server?.mem.conversation_capacity_bytes ?? null}
+          favoriteCapacity={favoriteCapacity}
           retentionPending={pendingMemRetention}
+          conversationCapacityPending={pendingMemConversationCapacity}
+          favoriteCapacityPending={favoriteCapacityUpdating}
           switchPending={pendingMemSwitch}
           temporaryItems={memTemporaryItems}
           temporaryItemsLoading={memTemporaryItemsLoading}
@@ -1743,7 +1790,7 @@ function TimemApp() {
           endpointEditor={endpointEditor}
           revealedEndpointApiKeys={revealedEndpointApiKeys}
           revealedEndpointHeaders={revealedEndpointHeaders}
-          onClose={() => { if (!pendingMemRetention && !pendingMemSwitch && !memTemporaryItemsDeleting) closeAppearancePanel(); }}
+          onClose={() => { if (!pendingMemRetention && !pendingMemConversationCapacity && !favoriteCapacityUpdating && !pendingMemSwitch && !memTemporaryItemsDeleting) closeAppearancePanel(); }}
           onRefreshTemporaryItems={() => {
             setMemTemporaryItemsLoading(true);
             setMemTemporaryItemsError("");
@@ -1757,24 +1804,41 @@ function TimemApp() {
           onDeleteEndpoint={setDeleteEndpointCandidate}
           onRevealEndpoint={(endpointId) => sendCommand({ type: "model_endpoint_secret_reveal", endpoint_id: endpointId })}
           onSaveEndpoint={(endpoint) => sendCommand({ type: "model_endpoint_upsert", endpoint })}
-          onSaveRetention={(days) => {
+          onSaveTemporaryPolicy={(days, maxBytes) => {
             setPendingMemRetention(true);
-            if (!sendCommand({ type: "mem_temporary_retention_update", days })) {
+            if (!sendCommand({ type: "mem_temporary_retention_update", days, max_bytes: maxBytes })) {
               setPendingMemRetention(false);
-              reportUiError("Mem settings failed", "Reconnect to Timem Web before updating temporary-data retention.", "system");
+              reportUiError("Mem settings failed", "Reconnect to Timem Web before updating temporary-data policy.", "system");
             }
           }}
+          onSaveConversationCapacity={(maxBytes) => {
+            setPendingMemConversationCapacity(true);
+            if (!sendCommand({ type: "mem_conversation_capacity_update", max_bytes: maxBytes })) {
+              setPendingMemConversationCapacity(false);
+              reportUiError("Mem settings failed", "Reconnect to Timem Web before updating conversation capacity.", "system");
+            }
+          }}
+          onSaveFavoriteCapacity={(maxBytes) => {
+            setFavoriteCapacityUpdating(true);
+            if (!sendCommand({ type: "favorite_capacity_update", max_bytes: maxBytes })) setFavoriteCapacityUpdating(false);
+          }}
           onSwitchMemory={(path) => {
+            const runningSessionCount = memSwitchRunningSessionCount(sessions);
+            if (runningSessionCount > 0) {
+              setMemSwitchCandidate({ path, runningSessionCount });
+              return;
+            }
             setRenamingSessionId("");
             setRenameDraft("");
             setPendingMemSwitch(true);
-            if (!sendCommand({ type: "mem_switch", path })) {
+            if (!sendCommand({ type: "mem_switch", path, stop_running: false })) {
               setPendingMemSwitch(false);
               reportUiError("Mem switch failed", "Reconnect to Timem Web before switching the mem directory.", "system");
             }
           }}
         />}
         {showMcp && <McpPanel
+          key={activeSession?.session_id ?? "no-session"}
           panelRef={mcpPanelRef}
           servers={server?.mcp_servers ?? []}
           session={activeSession}
@@ -1794,6 +1858,7 @@ function TimemApp() {
           panelRef={runtimePanelRef}
           server={server}
           session={activeSession}
+          onEdit={openEndpointSettings}
           onApply={(endpointId) => {
             if (!activeSession || activeSession.state === "working") return;
             sendCommand({ type: "model_endpoint_apply", session_id: activeSession.session_id, endpoint_id: endpointId });
@@ -1852,6 +1917,7 @@ function TimemApp() {
       </main>
       {!showToolRepo && showRoles && <button type="button" className="role-panel-backdrop" aria-label="Close worker roles" onClick={() => setShowRoles(false)}/>}
       {!showToolRepo && <WorkerRolePanel
+        key={activeSession?.session_id ?? "no-session"}
         session={activeSession}
         library={roleLibrary}
         mobileOpen={showRoles}
@@ -1899,7 +1965,6 @@ function TimemApp() {
       />}
       {chatLibraryMode && <ChatLibraryPanel
         panelRef={chatLibraryPanelRef}
-        mode={chatLibraryMode}
         query={chatSearchQuery}
         scope={chatSearchScope}
         activeSession={activeSession}
@@ -1907,10 +1972,22 @@ function TimemApp() {
         favorites={favorites}
         searchPending={chatSearchPending}
         favoritesLoading={favoritesLoading}
-        onModeChange={(mode) => { setChatLibraryMode(mode); if (mode === "favorites") { setFavoritesLoading(true); if (!sendCommand({ type: "favorites_list" })) setFavoritesLoading(false); } }}
         onQueryChange={setChatSearchQuery}
-        onScopeChange={setChatSearchScope}
-        onSearch={() => { const query = chatSearchQuery.trim(); if (!query) { setChatSearchResults([]); return; } setChatSearchPending(true); if (!sendCommand({ type: "chat_search", query, session_id: chatSearchScope === "session" ? activeSession?.session_id : undefined, limit: 100 })) setChatSearchPending(false); }}
+        onScopeChange={(scope) => {
+          setChatSearchScope(scope);
+          setChatLibraryMode(scope === "favorites" ? "favorites" : "search");
+          if (scope === "favorites") {
+            setFavoritesLoading(true);
+            if (!sendCommand({ type: "favorites_list" })) setFavoritesLoading(false);
+          }
+        }}
+        onSearch={() => {
+          if (chatSearchScope === "favorites") return;
+          const query = chatSearchQuery.trim();
+          if (!query) { setChatSearchResults([]); return; }
+          setChatSearchPending(true);
+          if (!sendCommand({ type: "chat_search", query, session_id: chatSearchScope === "session" ? activeSession?.session_id : undefined, limit: 100 })) setChatSearchPending(false);
+        }}
         pendingFavoriteSourceKeys={pendingFavoriteSourceKeys}
         onToggleFavorite={toggleFavorite}
         onOpen={(sessionId, turnId) => { setActiveSessionId(sessionId); closeMobileSidebar(false); closeChatLibrary(); window.setTimeout(() => document.querySelector<HTMLElement>(`[data-turn-id="${globalThis.CSS.escape(turnId)}"]`)?.scrollIntoView({ behavior: prefersReducedMotion() ? "auto" : "smooth", block: "center" }), 80); }}
@@ -1918,6 +1995,7 @@ function TimemApp() {
       />}
       {toolGenEnabled && showToolRepo && <button type="button" className="side-panel-backdrop" aria-label="Close ToolRepo" onClick={closeToolRepoPanel}/>}
       {toolGenEnabled && showToolRepo && <ToolRepoPanel
+        key={activeSession?.session_id ?? "no-session"}
         panelRef={toolRepoPanelRef}
         onResizeStart={(event) => startSidebarResize("right", event)}
         onClose={closeToolRepoPanel}
@@ -1974,6 +2052,15 @@ function TimemApp() {
           reportUiError("Create session failed", "Reconnect to Timem Web before creating a new session.", "system");
         }
       }} />}
+      {memSwitchCandidate && <MemSwitchConfirmDialog candidate={memSwitchCandidate} pending={pendingMemSwitch} onClose={() => { if (!pendingMemSwitch) setMemSwitchCandidate(null); }} onConfirm={() => {
+        setRenamingSessionId("");
+        setRenameDraft("");
+        setPendingMemSwitch(true);
+        if (!sendCommand({ type: "mem_switch", path: memSwitchCandidate.path, stop_running: true })) {
+          setPendingMemSwitch(false);
+          reportUiError("Mem switch failed", "Reconnect to Timem Web before switching the mem directory.", "system");
+        }
+      }}/>}
       {deleteEndpointCandidate && <ModelEndpointDeleteDialog endpoint={deleteEndpointCandidate} onClose={() => setDeleteEndpointCandidate(null)} onConfirm={() => sendCommand({ type: "model_endpoint_delete", endpoint_id: deleteEndpointCandidate.id })}/>}
       {deleteSessionCandidate && <SessionDeleteDialog session={deleteSessionCandidate} pending={pendingDeleteSessionIds.has(deleteSessionCandidate.session_id)} onClose={() => {
         if (!pendingDeleteSessionIdsRef.current.has(deleteSessionCandidate.session_id)) setDeleteSessionCandidate(null);
@@ -1999,7 +2086,7 @@ function TimemApp() {
           }
         }}
       />}
-      {deleteMessageCandidate && <ChatMessageDeleteDialog
+      {deleteMessageCandidate && deleteMessageCandidate.sessionId === activeSessionKey && <ChatMessageDeleteDialog
         candidate={deleteMessageCandidate}
         pending={pendingDeleteMessageKeys.has(chatMessageDeleteKey(deleteMessageCandidate))}
         onClose={() => {
@@ -2021,7 +2108,7 @@ function TimemApp() {
         }}
       />}
       {showRuntimeUnavailableDialog && <RuntimeUnavailableDialog detail={runtimeDisconnectedDetail} onClose={() => setRuntimeUnavailableDialogDismissed(true)}/>}
-      {toolGenEnabled && toolgenDialog && <ToolGenDialog
+      {toolGenEnabled && toolgenDialog && toolgenDialog.sessionId === activeSessionKey && <ToolGenDialog
         key={`${toolgenDialog.sessionId}:${toolgenDialog.turnId}`}
         pending={pendingToolgenRequests.has(toolgenRequestKey(toolgenDialog.sessionId, toolgenDialog.turnId))}
         onClose={() => { if (!pendingToolgenRequests.has(toolgenRequestKey(toolgenDialog.sessionId, toolgenDialog.turnId))) setToolgenDialog(null); }}
@@ -2333,20 +2420,18 @@ function utf8ByteLength(value: string) {
   return bytes;
 }
 
-function ChatLibraryPanel({ panelRef, mode, query, scope, activeSession, results, favorites, searchPending, favoritesLoading, pendingFavoriteSourceKeys, onModeChange, onQueryChange, onScopeChange, onSearch, onToggleFavorite, onOpen, onClose }: {
+function ChatLibraryPanel({ panelRef, query, scope, activeSession, results, favorites, searchPending, favoritesLoading, pendingFavoriteSourceKeys, onQueryChange, onScopeChange, onSearch, onToggleFavorite, onOpen, onClose }: {
   panelRef: React.RefObject<HTMLElement | null>;
-  mode: "search" | "favorites";
   query: string;
-  scope: "all" | "session";
+  scope: "all" | "session" | "favorites";
   activeSession: Session | undefined;
   results: ChatSearchHit[];
   favorites: ChatFavorite[];
   searchPending: boolean;
   favoritesLoading: boolean;
   pendingFavoriteSourceKeys: ReadonlySet<string>;
-  onModeChange: (mode: "search" | "favorites") => void;
   onQueryChange: (query: string) => void;
-  onScopeChange: (scope: "all" | "session") => void;
+  onScopeChange: (scope: "all" | "session" | "favorites") => void;
   onSearch: () => void;
   onToggleFavorite: (sessionId: string, turnId: string, favoriteId?: string, sourceKey?: string) => boolean;
   onOpen: (sessionId: string, turnId: string) => void;
@@ -2361,17 +2446,17 @@ function ChatLibraryPanel({ panelRef, mode, query, scope, activeSession, results
   onOpenRef.current = onOpen;
   const openLibraryItem = useCallback((sessionId: string, turnId: string) => onOpenRef.current(sessionId, turnId), []);
   useEffect(() => {
-    if (mode !== "favorites") {
+    if (scope !== "favorites") {
       setFavoriteDeleteMode(false);
       setSelectedFavoriteIds(new Set());
     }
-  }, [mode]);
+  }, [scope]);
   useEffect(() => {
     setVisibleSearchCount(CHAT_LIBRARY_INITIAL_ROWS);
-  }, [results, mode]);
+  }, [results, scope]);
   useEffect(() => {
     setVisibleFavoriteCount(CHAT_LIBRARY_INITIAL_ROWS);
-  }, [favorites, favoriteSort, mode]);
+  }, [favorites, favoriteSort, query, scope]);
   useEffect(() => {
     const available = new Set(favorites.map((favorite) => favorite.id));
     setSelectedFavoriteIds((current) => {
@@ -2410,12 +2495,17 @@ function ChatLibraryPanel({ panelRef, mode, query, scope, activeSession, results
     if (favoriteSort === "size-desc") return right.bytes - left.bytes || right.createdAt - left.createdAt;
     return left.bytes - right.bytes || right.createdAt - left.createdAt;
   }), [favorites, favoriteSort]);
-  const visibleFavoriteItems = favoriteItems.slice(0, visibleFavoriteCount);
-  const itemCount = mode === "search" ? searchItems.length : favoriteItems.length;
-  const loading = mode === "search" ? searchPending : favoritesLoading;
-  const emptyLabel = mode === "search"
-    ? query.trim() ? "No matching messages." : "Search across user messages and final answers."
-    : "Favorite final answers to keep them close.";
+  const normalizedFavoriteQuery = query.trim().toLocaleLowerCase();
+  const filteredFavoriteItems = normalizedFavoriteQuery
+    ? favoriteItems.filter((item) => `${item.title}\n${item.content}\n${item.sessionName}`.toLocaleLowerCase().includes(normalizedFavoriteQuery))
+    : favoriteItems;
+  const visibleFavoriteItems = filteredFavoriteItems.slice(0, visibleFavoriteCount);
+  const showingFavorites = scope === "favorites";
+  const itemCount = showingFavorites ? filteredFavoriteItems.length : searchItems.length;
+  const loading = showingFavorites ? favoritesLoading : searchPending;
+  const emptyLabel = showingFavorites
+    ? normalizedFavoriteQuery ? "No matching favorites." : "Favorite final answers to keep them close."
+    : query.trim() ? "No matching messages." : "Search across user messages and final answers.";
   const toggleFavoriteSelection = useCallback((favoriteId: string) => setSelectedFavoriteIds((current) => {
     const next = new Set(current);
     if (next.has(favoriteId)) next.delete(favoriteId); else next.add(favoriteId);
@@ -2439,36 +2529,35 @@ function ChatLibraryPanel({ panelRef, mode, query, scope, activeSession, results
   return <div className="chat-library-center-backdrop" role="presentation" onClick={onClose}>
     <section id="chat-library-center" ref={panelRef} className="chat-library-center" role="dialog" aria-modal="true" aria-label="Chat library" tabIndex={-1} onClick={(event) => event.stopPropagation()}>
     <header className="chat-library-header">
-      <div><span className="eyebrow">CHAT LIBRARY</span><strong>{mode === "search" ? "Search" : "Favorite"}</strong></div>
+      <div><span className="eyebrow">CHAT LIBRARY</span><strong>Search</strong></div>
       <button type="button" className="icon-button" title="Close chat library" aria-label="Close chat library" onClick={onClose}><X size={16}/></button>
     </header>
-    <nav className="chat-library-tabs" aria-label="Chat library views">
-      <button type="button" className={mode === "search" ? "active" : ""} aria-current={mode === "search" ? "page" : undefined} onClick={() => onModeChange("search")}><Search size={14}/><span>Search</span></button>
-      <button type="button" className={mode === "favorites" ? "active" : ""} aria-current={mode === "favorites" ? "page" : undefined} onClick={() => onModeChange("favorites")}><Star size={14}/><span>Favorite</span><small>{favorites.length}</small></button>
-    </nav>
-    {mode === "search" && <form className="chat-library-search" onSubmit={(event) => { event.preventDefault(); onSearch(); }}>
-      <label><Search size={14}/><input autoFocus value={query} maxLength={256} placeholder="Keywords" aria-label="Search chat history" onChange={(event) => onQueryChange(event.target.value)}/>{query && <button type="button" title="Clear search" aria-label="Clear search" onClick={() => onQueryChange("")}><X size={12}/></button>}</label>
-      <div className="chat-library-scope" role="group" aria-label="Search scope">
-        <button type="button" className={scope === "all" ? "active" : ""} aria-pressed={scope === "all"} onClick={() => onScopeChange("all")}>All sessions</button>
-        <button type="button" className={scope === "session" ? "active" : ""} aria-pressed={scope === "session"} disabled={!activeSession} onClick={() => onScopeChange("session")}>Current</button>
-        <button type="submit" className="chat-library-submit" disabled={!query.trim() || searchPending}>{searchPending ? <LoaderCircle size={13}/> : <ArrowDown className="chat-library-submit-arrow" size={13}/>}<span>Search</span></button>
+    <form className="chat-library-search" onSubmit={(event) => { event.preventDefault(); onSearch(); }}>
+      <label><Search size={14}/><input autoFocus value={query} maxLength={256} placeholder={showingFavorites ? "Filter favorites" : "Keywords"} aria-label={showingFavorites ? "Filter favorite answers" : "Search chat history"} onChange={(event) => onQueryChange(event.target.value)}/>{query && <button type="button" title="Clear search" aria-label="Clear search" onClick={() => onQueryChange("")}><X size={12}/></button>}</label>
+      <div className="chat-library-scope">
+        <label><span>Search scope</span><select aria-label="Search scope" value={scope} onChange={(event) => onScopeChange(event.target.value as "all" | "session" | "favorites")}>
+          <option value="all">All Sessions</option>
+          <option value="session" disabled={!activeSession}>Current Session</option>
+          <option value="favorites">Favorites</option>
+        </select></label>
+        {!showingFavorites && <button type="submit" className="chat-library-submit" disabled={!query.trim() || searchPending}>{searchPending ? <LoaderCircle size={13}/> : <ArrowDown className="chat-library-submit-arrow" size={13}/>}<span>Search</span></button>}
       </div>
-    </form>}
-    <div className={`chat-library-summary ${mode === "favorites" ? "favorites" : ""}`}>
-      <span>{mode === "search" ? `${itemCount} result${itemCount === 1 ? "" : "s"}` : `${itemCount} saved`}</span>
-      {scope === "session" && mode === "search" && activeSession && <small title={activeSession.display_name}>{activeSession.display_name}</small>}
-      {mode === "favorites" && <div className="chat-library-favorite-tools">
+    </form>
+    <div className={`chat-library-summary ${showingFavorites ? "favorites" : ""}`}>
+      <span>{showingFavorites ? `${itemCount} saved` : `${itemCount} result${itemCount === 1 ? "" : "s"}`}</span>
+      {scope === "session" && activeSession && <small title={activeSession.display_name}>{activeSession.display_name}</small>}
+      {showingFavorites && <div className="chat-library-favorite-tools">
         {!favoriteDeleteMode && <label>Sort <select aria-label="Sort favorites" value={favoriteSort} onChange={(event) => setFavoriteSort(event.target.value as typeof favoriteSort)}><option value="time-desc">Newest</option><option value="time-asc">Oldest</option><option value="size-desc">Largest</option><option value="size-asc">Smallest</option></select></label>}
         {favoriteDeleteMode && <button type="button" className="chat-library-delete-cancel" onClick={cancelFavoriteDelete}>Cancel</button>}
         <button type="button" className={`chat-library-delete ${favoriteDeleteMode ? "confirm" : ""}`} disabled={favoriteItems.length === 0 || (favoriteDeleteMode && selectedFavoriteIds.size === 0)} onClick={() => favoriteDeleteMode ? deleteSelectedFavorites() : setFavoriteDeleteMode(true)}>{favoriteDeleteMode ? <><Trash2 size={12}/> Delete {selectedFavoriteIds.size}</> : <><Trash2 size={12}/> Delete</>}</button>
       </div>}
     </div>
-    {mode === "search" ? <div className="chat-library-list search-results" aria-busy={loading || undefined}>
+    {!showingFavorites ? <div className="chat-library-list search-results" aria-busy={loading || undefined}>
       {loading && searchItems.length === 0 ? <div className="chat-library-empty"><LoaderCircle size={16}/><span>Loading…</span></div> : searchItems.length === 0 ? <div className="chat-library-empty"><span>{emptyLabel}</span></div> : visibleSearchItems.map((item) => <ChatLibrarySearchRow item={item} onOpen={openLibraryItem} key={item.id}/>)}
       {visibleSearchCount < searchItems.length && <button type="button" className="chat-library-load-more" onClick={() => setVisibleSearchCount((current) => Math.min(current + CHAT_LIBRARY_MORE_ROWS, searchItems.length))}>Show {Math.min(CHAT_LIBRARY_MORE_ROWS, searchItems.length - visibleSearchCount)} more</button>}
     </div> : <div className={`chat-library-list favorites ${favoriteDeleteMode ? "selecting" : ""}`} aria-busy={loading || undefined}>
       {loading && favoriteItems.length === 0 ? <div className="chat-library-empty"><LoaderCircle size={16}/><span>Loading…</span></div> : favoriteItems.length === 0 ? <div className="chat-library-empty"><span>{emptyLabel}</span></div> : visibleFavoriteItems.map((item) => <ChatLibraryFavoriteRow item={item} deleteMode={favoriteDeleteMode} selected={selectedFavoriteIds.has(item.id)} pending={pendingFavoriteSourceKeys.has(item.sourceKey)} onOpen={openLibraryItem} onToggleSelection={toggleFavoriteSelection} key={item.id}/>)}
-      {visibleFavoriteCount < favoriteItems.length && <button type="button" className="chat-library-load-more" onClick={() => setVisibleFavoriteCount((current) => Math.min(current + CHAT_LIBRARY_MORE_ROWS, favoriteItems.length))}>Show {Math.min(CHAT_LIBRARY_MORE_ROWS, favoriteItems.length - visibleFavoriteCount)} more</button>}
+      {visibleFavoriteCount < filteredFavoriteItems.length && <button type="button" className="chat-library-load-more" onClick={() => setVisibleFavoriteCount((current) => Math.min(current + CHAT_LIBRARY_MORE_ROWS, filteredFavoriteItems.length))}>Show {Math.min(CHAT_LIBRARY_MORE_ROWS, filteredFavoriteItems.length - visibleFavoriteCount)} more</button>}
     </div>}
     </section>
   </div>;
@@ -2594,6 +2683,7 @@ function ToolRepoPanel({ panelRef, onResizeStart, onClose, session, searchQuery,
 }
 
 const EMPTY_DECISIONS: Decision[] = [];
+const SessionTimelineActiveContext = createContext(false);
 
 const VisibleTurnList = memo(function VisibleTurnList({ sessionId, turns, restartMarkers, decisionsByTurn, sessionInteractionLocked, pendingDecisionKeys, pendingToolGenTurnIds, toolGenSessionBusy, favoriteBySource, pendingFavoriteSourceKeys, onToggleFavorite, onDecisionReply, onRequestToolGen, onRequestMessageDelete }: {
   sessionId: string;
@@ -2694,22 +2784,24 @@ const SessionTimelinePane = memo(function SessionTimelinePane({
     hidden={!active}
     aria-hidden={!active || undefined}
   >
-    <VisibleTurnList
-      sessionId={renderedSession.session_id}
-      turns={renderedSession.turns}
-      restartMarkers={restartMarkers}
-      decisionsByTurn={decisionsByTurn}
-      sessionInteractionLocked={sessionInteractionLocked}
-      pendingDecisionKeys={pendingDecisionKeys}
-      pendingToolGenTurnIds={pendingToolGenTurnIds}
-      toolGenSessionBusy={toolGenSessionBusy}
-      favoriteBySource={favoriteBySource}
-      pendingFavoriteSourceKeys={pendingFavoriteSourceKeys}
-      onToggleFavorite={onToggleFavorite}
-      onDecisionReply={onDecisionReply}
-      onRequestToolGen={onRequestToolGen}
-      onRequestMessageDelete={onRequestMessageDelete}
-    />
+    <SessionTimelineActiveContext.Provider value={active}>
+      <VisibleTurnList
+        sessionId={renderedSession.session_id}
+        turns={renderedSession.turns}
+        restartMarkers={restartMarkers}
+        decisionsByTurn={decisionsByTurn}
+        sessionInteractionLocked={sessionInteractionLocked}
+        pendingDecisionKeys={pendingDecisionKeys}
+        pendingToolGenTurnIds={pendingToolGenTurnIds}
+        toolGenSessionBusy={toolGenSessionBusy}
+        favoriteBySource={favoriteBySource}
+        pendingFavoriteSourceKeys={pendingFavoriteSourceKeys}
+        onToggleFavorite={onToggleFavorite}
+        onDecisionReply={onDecisionReply}
+        onRequestToolGen={onRequestToolGen}
+        onRequestMessageDelete={onRequestMessageDelete}
+      />
+    </SessionTimelineActiveContext.Provider>
   </section>;
 });
 
@@ -2970,6 +3062,23 @@ function TimemThread({ activeSession, sessions, completedTurnsBySession, command
   const userMessageNavigationTaskRef = useRef<FrameTask | null>(null);
   const userMessageGeometryTaskRef = useRef<FrameTask | null>(null);
   const userMessageNavigationLayoutTaskRef = useRef<FrameTask | null>(null);
+
+  useLayoutEffect(() => {
+    if (userMessageNavigationAnimationRef.current !== null) {
+      cancelAnimationFrame(userMessageNavigationAnimationRef.current);
+      userMessageNavigationAnimationRef.current = null;
+    }
+    userMessageAnchorOffsetsRef.current = [];
+    userMessageNavigationHoverLockedRef.current = false;
+    pendingUserMessageNavigationLayoutRef.current = null;
+    setUserMessageNavigationHoverLocked(false);
+    setUserMessageNavigation({ previous: false, next: false, bottom: false });
+    setUserMessageNavigationLayout({ overlap: "none" });
+    setComposerExpanded(false);
+    setDraggedQueueMessageId(undefined);
+    setQueuedMessageOverId(undefined);
+    setEditingQueuedMessage(undefined);
+  }, [activeSessionId]);
 
   const userMessageAnchors = useCallback(() => {
     const viewport = viewportRef.current;
@@ -3816,9 +3925,9 @@ const toggleQueuedMessages = () => {
     </ThreadPrimitive.Viewport>
 
     <nav ref={userMessageNavigationRef} className={`user-message-navigation outline-overlap-${userMessageNavigationLayout.overlap}${userMessageNavigationHoverLocked ? " hover-locked" : ""}`} style={userMessageNavigationLayout.left === undefined ? undefined : { left: `${userMessageNavigationLayout.left}px` }} aria-label="用户消息导航" onPointerEnter={lockUserMessageNavigationLayout} onPointerLeave={unlockUserMessageNavigationLayout}>
-      <button type="button" title="上一条用户消息" aria-label="上一条用户消息" disabled={!userMessageNavigation.previous} onClick={() => navigateUserMessage("previous")}><ChevronUp size={17} aria-hidden="true"/></button>
-      <button type="button" title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} aria-label={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} disabled={!userMessageNavigation.next && !userMessageNavigation.bottom} onClick={() => { if (userMessageNavigation.next) navigateUserMessage("next"); else navigateToThreadBottom(); }}><ChevronDown size={17} aria-hidden="true"/></button>
-      {activeSession?.state === "working" && <button type="button" className={`thread-working-away${threadAwayFromBottom ? " away-from-bottom" : " at-live-edge"}`} title={threadAwayFromBottom ? "工作仍在继续，跳转到最新内容" : "工作仍在继续，当前已是最新内容"} aria-label={threadAwayFromBottom ? "工作仍在继续，跳转到最新内容" : "工作仍在继续，当前已是最新内容"} onClick={navigateWorkingToThreadBottom}><LoaderCircle size={15} strokeWidth={1.8} aria-hidden="true"/><span className="sr-only" role="status" aria-live="polite">Working</span></button>}
+      <button type="button" title="上一条用户消息" aria-label="上一条用户消息" disabled={!userMessageNavigation.previous} onClick={() => navigateUserMessage("previous")}><ChevronUp size={14} strokeWidth={2.2} aria-hidden="true"/></button>
+      <button type="button" title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} aria-label={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"} disabled={!userMessageNavigation.next && !userMessageNavigation.bottom} onClick={() => { if (userMessageNavigation.next) navigateUserMessage("next"); else navigateToThreadBottom(); }}><ChevronDown size={14} strokeWidth={2.2} aria-hidden="true"/></button>
+      {activeSession && <button type="button" className={`thread-working-away ${activeSession.state === "working" ? "is-working" : "is-idle"}${threadAwayFromBottom ? " away-from-bottom" : " at-live-edge"}`} title={activeSession.state === "working" ? (threadAwayFromBottom ? "工作仍在继续，跳转到最新内容" : "工作仍在继续，当前已是最新内容") : (threadAwayFromBottom ? "跳转到聊天最下方" : "当前已是聊天最下方")} aria-label={activeSession.state === "working" ? (threadAwayFromBottom ? "工作仍在继续，跳转到最新内容" : "工作仍在继续，当前已是最新内容") : (threadAwayFromBottom ? "跳转到聊天最下方" : "当前已是聊天最下方")} onClick={navigateWorkingToThreadBottom}><span className="thread-edge-symbol" aria-hidden="true">{activeSession.state === "working" ? <span className="thread-working-orbit"><span className="thread-working-core"/></span> : <ArrowDownToLine className="thread-idle-bottom-icon" size={17} strokeWidth={2.35}/>}</span><span className="sr-only" role="status" aria-live="polite">{activeSession.state === "working" ? "Working" : "Jump to bottom"}</span></button>}
     </nav>
   </ThreadPrimitive.Root>;
 }
@@ -3922,7 +4031,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
  () => new Map(toolActivityRuns.map((run) => [run.startIndex, run.summary])),
  [toolActivityRuns],
  );
- const hasVisibleProcess = processActivities.length > 0 || supplementItems.length > 0 || decisions.length > 0 || turn.state === "working";
+ const hasVisibleProcess = scrollItems.some((item) => item.activity !== null) || decisions.length > 0;
   const interrupted = turn.state === "interrupted"
     || turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
   const [showWorkStream, setShowWorkStream] = useState(() => turn.state === "working");
@@ -4001,16 +4110,17 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
         {!!entry.attachments?.length && <div className="turn-entry-attachments">{entry.attachments.map((attachment) => <span key={attachment.id} title={attachment.path}><Paperclip size={13}/><i aria-hidden="true">:</i><b>{attachment.name}</b><small>{formatBytes(attachment.bytes)}</small></span>)}</div>}
       </div>)}</div>
     </section>}
+    {turn.state === "working" && !hasVisibleProcess && <div className="turn-starting-status" role="status" aria-live="polite"><span className="turn-starting-mark" aria-hidden="true"/><span>working</span></div>}
     {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state} ${workStreamVisible ? "" : "collapsed-work"}`}>
       {canToggleWorkStream && <div className="turn-assistant-heading"><button type="button" className={`working-chip work-title-chip work-collapse-toggle${turn.state === "working" ? " active-work-title" : " completed-work-title"}${interrupted ? " interrupted-work-title" : ""}${isToolGenTurn ? ` toolgen-working${turn.state === "working" ? "" : " toolgen-completed-title"}` : ""}`} title={showWorkStream ? "Hide work details" : "Show work details"} aria-label={showWorkStream ? "Hide work details" : "Show work details"} aria-expanded={showWorkStream} onClick={() => setShowWorkStream((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>{isToolGenTurn && <Wrench size={11}/>} {turn.state === "working" ? (isToolGenTurn ? "Generating tools…" : <span className="working-label">working</span>) : (isToolGenTurn ? "ToolGen" : "Thought/Action")}{turn.state === "working" && <WorkingElapsed createdAtMs={turn.created_at_ms}/>}{interrupted && <span className="work-title-status">(Interrupted)</span>}</button>{modelRetryStatus && <details className={`model-retry-status ${modelRetryStatus.kind}`}><summary title={`展开 ${modelRetryStatus.label} 详情`} aria-label={`展开 ${modelRetryStatus.label} 详情`}><ChevronRight size={12} aria-hidden="true"/><span>{modelRetryStatus.label}</span>{modelRetryStatus.progress && <small>{modelRetryStatus.progress}</small>}</summary><div className="model-retry-detail"><MarkdownContent text={modelRetryStatus.detail}/></div></details>}</div>}
       {workStreamVisible && <div className="turn-work-panel">
-        <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleItems.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
+        <div className={`turn-work-scroll has-content${pendingUpdates > 0 ? " has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
           followLatest.current = isNearScrollBottom({ scrollTop: event.currentTarget.scrollTop, scrollHeight: event.currentTarget.scrollHeight, clientHeight: event.currentTarget.clientHeight }, 36);
           if (followLatest.current) setPendingUpdates(0);
         }}>
           <div className="turn-work-content" ref={workContentRef}> {scrollItems.map((item, index) => { const { activity } = item; if (activity?.tone === "action") { const summary = toolActivityRunByStartIndex.get(index); return summary ? <ToolActivityGroup key={`tool-activity-group-${item.key}`} summary={summary}/> : null; } return activity ? <ActivityView key={item.key} activity={activity}/> : null; })} {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
           {turn.state === "working" && <LiveTurnUsage turn={turn}/>}
-          {visibleItems.length === 0 && decisions.length === 0 && turn.state === "working" && <div className={`working-indicator${isToolGenTurn ? " toolgen-working" : ""}`} role="status" aria-live="polite"><span className="pulse"/>{isToolGenTurn ? "Generating tools…" : "Waiting for the first runtime update…"}</div>} </div>
+          </div>
         </div>
         {pendingUpdates > 0 && <button type="button" className="turn-new-updates" title="Scroll to latest work update" aria-live="polite" aria-label={`${pendingUpdates} new work update${pendingUpdates === 1 ? "" : "s"}; scroll to latest`} onClick={scrollWorkToLatest}><ArrowDown size={13} aria-hidden="true"/>{pendingUpdates} new update{pendingUpdates === 1 ? "" : "s"}</button>}
       </div>}
@@ -4124,8 +4234,11 @@ const FINAL_ANSWER_OUTLINE_SCROLL_DURATION_MS = 180;
 const FINAL_ANSWER_OUTLINE_RAIL_EDGE_PADDING = 12;
 
 const FINAL_ANSWER_OUTLINE_EDGE_GUARD = 12;
+const FINAL_ANSWER_OUTLINE_VIEWPORT_RATIO = 0.15;
+const FINAL_ANSWER_OUTLINE_TOGGLE_HEIGHT = 52;
 
 function FinalAnswerContent({ text }: { text: string }) {
+  const timelineActive = useContext(SessionTimelineActiveContext);
   const outline = useMemo(() => {
     try { return extractMarkdownOutline(text); }
     catch { return []; }
@@ -4144,10 +4257,20 @@ function FinalAnswerContent({ text }: { text: string }) {
   const [showOutline, setShowOutline] = useState(false);
 
   const [outlineHost, setOutlineHost] = useState<HTMLElement | null>(null);
-  const [outlineGeometry, setOutlineGeometry] = useState({ top: 0, height: 0 });
+  const [outlineGeometry, setOutlineGeometry] = useState({ top: 0, height: 0, stickyTop: 0 });
   const [outlinePlacement, setOutlinePlacement] = useState<"docked" | "overlay">("docked");
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [activeId, setActiveId] = useState(MARKDOWN_OUTLINE_START_ID);
+
+  useLayoutEffect(() => {
+    if (timelineActive) return;
+    if (outlineNavigationAnimationRef.current !== null) {
+      cancelAnimationFrame(outlineNavigationAnimationRef.current);
+      outlineNavigationAnimationRef.current = null;
+    }
+    outlineHeadingOffsetsRef.current.clear();
+    setShowOutline(false);
+  }, [timelineActive]);
 
   useEffect(() => setActiveId(MARKDOWN_OUTLINE_START_ID), [outline]);
 
@@ -4175,7 +4298,7 @@ function FinalAnswerContent({ text }: { text: string }) {
     const content = contentRef.current;
     const viewport = root?.closest<HTMLElement>(".chat-scroll");
     const chatShell = viewport?.closest<HTMLElement>(".chat-shell");
-    if (!root || !content || !viewport || !chatShell || outline.length < FINAL_ANSWER_OUTLINE_MIN_SECTIONS) {
+    if (!timelineActive || !root || !content || !viewport || !chatShell || outline.length < FINAL_ANSWER_OUTLINE_MIN_SECTIONS) {
       setShowOutline(false);
       return;
     }
@@ -4190,10 +4313,13 @@ function FinalAnswerContent({ text }: { text: string }) {
       const outlineWidth = Number.isFinite(configuredWidth) && configuredWidth > 0 ? configuredWidth : 0;
       const nextTop = contentRect.top - viewportRect.top + viewport.scrollTop;
       const nextHeight = contentRect.height;
+      const targetWindowTop = window.innerHeight * FINAL_ANSWER_OUTLINE_VIEWPORT_RATIO;
+      const targetViewportTop = targetWindowTop - viewportRect.top;
+      const nextStickyTop = Math.max(0, targetViewportTop - (outlineCollapsed ? FINAL_ANSWER_OUTLINE_TOGGLE_HEIGHT / 2 : 0));
       setOutlineHost((current) => current === viewport ? current : viewport);
-      setOutlineGeometry((current) => current.top === nextTop && current.height === nextHeight
+      setOutlineGeometry((current) => current.top === nextTop && current.height === nextHeight && current.stickyTop === nextStickyTop
         ? current
-        : { top: nextTop, height: nextHeight });
+        : { top: nextTop, height: nextHeight, stickyTop: nextStickyTop });
       setOutlinePlacement(bodyInset >= outlineWidth + FINAL_ANSWER_OUTLINE_EDGE_GUARD ? "docked" : "overlay");
       setShowOutline(finalAnswerNeedsOutline(content.offsetHeight, viewport.clientHeight, outline.length));
     };
@@ -4213,7 +4339,7 @@ function FinalAnswerContent({ text }: { text: string }) {
       observer?.disconnect();
       if (updateFrame !== null) cancelAnimationFrame(updateFrame);
     };
-  }, [outline, text]);
+  }, [outline, outlineCollapsed, text, timelineActive]);
 
   useEffect(() => {
     setOutlineCollapsed(outlinePlacement === "overlay");
@@ -4222,6 +4348,7 @@ function FinalAnswerContent({ text }: { text: string }) {
   useLayoutEffect(() => {
     window.dispatchEvent(new Event("markdown-outline-layout-change"));
   }, [outlineCollapsed, outlinePlacement, showOutline]);
+
 
   const updateOutlineActive = useCallback(() => {
     const root = rootRef.current;
@@ -4267,8 +4394,12 @@ function FinalAnswerContent({ text }: { text: string }) {
     const content = contentRef.current;
     const viewport = root?.closest<HTMLElement>(".chat-scroll");
     if (!root || !content || !viewport || !showOutline) return;
-    const refresh = () => outlineGeometryTaskRef.current?.request();
-    const updateActive = () => outlineActiveTaskRef.current?.request();
+    const refresh = () => {
+      outlineGeometryTaskRef.current?.request();
+    };
+    const updateScrollState = () => {
+      outlineActiveTaskRef.current?.request();
+    };
     let listeningForScroll = false;
     const setScrollListening = (enabled: boolean) => {
       const active = enabled && root.closest<HTMLElement>("[data-session-timeline-active]")?.dataset.sessionTimelineActive === "true";
@@ -4276,9 +4407,9 @@ function FinalAnswerContent({ text }: { text: string }) {
       listeningForScroll = active;
       if (active) {
         refresh();
-        viewport.addEventListener("scroll", updateActive, { passive: true });
+        viewport.addEventListener("scroll", updateScrollState, { passive: true });
       } else {
-        viewport.removeEventListener("scroll", updateActive);
+        viewport.removeEventListener("scroll", updateScrollState);
       }
     };
     const syncActivePane = () => setScrollListening(
@@ -4354,10 +4485,14 @@ function FinalAnswerContent({ text }: { text: string }) {
   };
 
 
-  const outlineElement = showOutline && outlineHost ? createPortal(<aside
+  const outlineElement = timelineActive && showOutline && outlineHost ? createPortal(<aside
     className={`final-answer-outline ${outlinePlacement}${outlineCollapsed ? " collapsed" : " expanded"}`}
     data-final-answer-reading-id={readingId}
-    style={{ top: `${outlineGeometry.top}px`, height: `${outlineGeometry.height}px` }}
+    style={{
+      top: `${outlineGeometry.top}px`,
+      height: `${outlineGeometry.height}px`,
+      "--final-outline-sticky-top": `${outlineGeometry.stickyTop}px`,
+    } as React.CSSProperties}
     aria-label="Final answer table of contents"
   >
       <div className="final-answer-outline-anchor">
@@ -4393,14 +4528,17 @@ function FinalAnswerContent({ text }: { text: string }) {
 
 function HeaderContextUsage({ session }: { session: Session | undefined }) {
   const usage = session ? sessionContextUsage(session) : undefined;
+  const cacheHitPercent = session ? sessionCacheHitPercent(session) : undefined;
   const limit = session?.max_llm_input_tokens || undefined;
   const ratio = limit ? Math.min(100, Math.ceil((usage?.prompt_tokens ?? 0) * 100 / limit)) : 0;
   const level = ratio >= 90 ? "critical" : ratio >= 75 ? "warning" : "normal";
+  const cacheLabel = cacheHitPercent === undefined ? "cache: —" : `cache: ${cacheHitPercent.toFixed(1)}%`;
   const contextUsageLabel = limit
-    ? `Context usage ${ratio}% · ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens`
-    : "Context usage waiting for runtime usage";
+    ? `Context usage ${ratio}% · ${formatTokens(usage?.prompt_tokens ?? 0)} / ${formatTokens(limit)} input tokens · ${cacheLabel}`
+    : `Context usage waiting for runtime usage · ${cacheLabel}`;
   return <span className={`header-context ${level}`} title={contextUsageLabel} aria-label={contextUsageLabel}>
-    <span aria-hidden="true">· ctx</span><span className="header-context-meter" aria-hidden="true"><span style={{ width: `${ratio}%` }}/></span><span>{limit ? `${ratio}%/${formatTokens(limit)}` : "—"}</span>
+    <span className="header-context-main"><span aria-hidden="true">· ctx</span><span className="header-context-meter" aria-hidden="true"><span style={{ width: `${ratio}%` }}/></span><span>{limit ? `${ratio}%/${formatTokens(limit)}` : "—"}</span></span>
+    <span className="header-cache-rate"><span aria-hidden="true">· </span>{cacheLabel}</span>
   </span>;
 }
 
@@ -4733,7 +4871,12 @@ type SettingsCenterProps = {
   connected: boolean;
   connectionLabel: string;
   retentionDays: 1 | 5 | 10 | null;
+  temporaryCapacityBytes: number | null;
+  conversationCapacityBytes: number | null;
+  favoriteCapacity: ChatLibraryCapacity;
   retentionPending: boolean;
+  conversationCapacityPending: boolean;
+  favoriteCapacityPending: boolean;
   switchPending: boolean;
   temporaryItems: MemTemporaryItem[];
   temporaryItemsLoading: boolean;
@@ -4744,7 +4887,9 @@ type SettingsCenterProps = {
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
   onClose: () => void;
-  onSaveRetention: (days: 1 | 5 | 10 | null) => void;
+  onSaveTemporaryPolicy: (days: 1 | 5 | 10 | null, maxBytes: number | null) => void;
+  onSaveConversationCapacity: (maxBytes: number | null) => void;
+  onSaveFavoriteCapacity: (maxBytes: number | null) => void;
   onSwitchMemory: (path: string) => void;
   onRefreshTemporaryItems: () => void;
   onDeleteTemporaryItems: (ids: string[]) => void;
@@ -4755,18 +4900,24 @@ type SettingsCenterProps = {
 };
 
 function SettingsCenter(props: SettingsCenterProps) {
-  const { panelRef, section, onSectionChange, appearance, onAppearanceChange, toolGenEnabled, toolGenToggleDisabled, onToolGenEnabledChange, memPath, connected, connectionLabel, retentionDays, retentionPending, switchPending, temporaryItems, temporaryItemsLoading, temporaryItemsDeleting, temporaryItemsError, endpoints, endpointEditor, revealedEndpointApiKeys, revealedEndpointHeaders, onClose, onSaveRetention, onSwitchMemory, onRefreshTemporaryItems, onDeleteTemporaryItems, onEditEndpoint, onDeleteEndpoint, onRevealEndpoint, onSaveEndpoint } = props;
+  const { panelRef, section, onSectionChange, appearance, onAppearanceChange, toolGenEnabled, toolGenToggleDisabled, onToolGenEnabledChange, memPath, connected, connectionLabel, retentionDays, temporaryCapacityBytes, conversationCapacityBytes, favoriteCapacity, retentionPending, conversationCapacityPending, favoriteCapacityPending, switchPending, temporaryItems, temporaryItemsLoading, temporaryItemsDeleting, temporaryItemsError, endpoints, endpointEditor, revealedEndpointApiKeys, revealedEndpointHeaders, onClose, onSaveTemporaryPolicy, onSaveConversationCapacity, onSaveFavoriteCapacity, onSwitchMemory, onRefreshTemporaryItems, onDeleteTemporaryItems, onEditEndpoint, onDeleteEndpoint, onRevealEndpoint, onSaveEndpoint } = props;
   const [days, setDays] = useState<1 | 5 | 10 | null>(retentionDays);
+  const [temporaryCapacity, setTemporaryCapacity] = useState<number | null>(temporaryCapacityBytes);
+  const [conversationCapacity, setConversationCapacity] = useState<number | null>(conversationCapacityBytes);
+  const [favoriteCapacityLimit, setFavoriteCapacityLimit] = useState<number | null>(favoriteCapacity.limit_bytes ?? null);
   const [path, setPath] = useState(memPath);
   const [memoryPage, setMemoryPage] = useState<"overview" | "switch">("overview");
   const [temporaryDeleteMode, setTemporaryDeleteMode] = useState(false);
   const [selectedTemporaryIds, setSelectedTemporaryIds] = useState<Set<string>>(() => new Set());
-  const busy = retentionPending || switchPending || temporaryItemsDeleting;
+  const busy = retentionPending || conversationCapacityPending || favoriteCapacityPending || switchPending || temporaryItemsDeleting;
   const cleanedPath = path.trim();
   const pathUnchanged = cleanedPath === memPath;
   const selectedTemporaryBytes = temporaryItems.filter((item) => selectedTemporaryIds.has(item.id)).reduce((total, item) => total + item.bytes, 0);
   const updateAppearance = <K extends keyof Appearance>(key: K, value: Appearance[K]) => onAppearanceChange({ ...appearance, [key]: value });
   useEffect(() => setDays(retentionDays), [retentionDays]);
+  useEffect(() => setTemporaryCapacity(temporaryCapacityBytes), [temporaryCapacityBytes]);
+  useEffect(() => setConversationCapacity(conversationCapacityBytes), [conversationCapacityBytes]);
+  useEffect(() => setFavoriteCapacityLimit(favoriteCapacity.limit_bytes ?? null), [favoriteCapacity.limit_bytes]);
   useEffect(() => {
     setPath(memPath);
     setMemoryPage("overview");
@@ -4802,8 +4953,8 @@ function SettingsCenter(props: SettingsCenterProps) {
           {section === "appearance" && <section className="settings-pane appearance-settings-pane" aria-labelledby="appearance-settings-title">
             <div className="settings-pane-heading"><h3 id="appearance-settings-title">Appearance</h3><Palette size={19} aria-hidden="true"/></div>
             <fieldset><legend>Theme</legend><div className="segmented-control">{(["dark", "light"] as const).map((theme) => <button type="button" title={`Use ${theme} theme`} className={appearance.theme === theme ? "active" : ""} aria-pressed={appearance.theme === theme} key={theme} onClick={() => updateAppearance("theme", theme)}>{theme === "dark" ? "Dark" : "Light"}</button>)}</div></fieldset>
-            <fieldset className="appearance-role-fonts"><legend>User</legend><div className="appearance-font-selects"><label><span>汉语字体</span><select value={appearance.userChineseFont} aria-label="User Chinese font" onChange={(event) => updateAppearance("userChineseFont", event.target.value as Appearance["userChineseFont"])}><option value="system">系统</option><option value="heiti">黑体</option><option value="kaiti">楷体</option><option value="songti">宋体</option></select></label><label><span>其他语言字体</span><select value={appearance.userFont} aria-label="User other language font" onChange={(event) => updateAppearance("userFont", event.target.value as Appearance["userFont"])}><option value="system">System</option><option value="serif">Serif</option><option value="mono">Mono</option></select></label></div><label className="appearance-bold-option"><input type="checkbox" checked={appearance.userBold} onChange={(event) => updateAppearance("userBold", event.target.checked)}/><span>粗体</span></label></fieldset>
-            <fieldset className="appearance-role-fonts"><legend>Agent</legend><div className="appearance-font-selects"><label><span>汉语字体</span><select value={appearance.agentChineseFont} aria-label="Agent Chinese font" onChange={(event) => updateAppearance("agentChineseFont", event.target.value as Appearance["agentChineseFont"])}><option value="system">系统</option><option value="heiti">黑体</option><option value="kaiti">楷体</option><option value="songti">宋体</option></select></label><label><span>其他语言字体</span><select value={appearance.agentFont} aria-label="Agent other language font" onChange={(event) => updateAppearance("agentFont", event.target.value as Appearance["agentFont"])}><option value="system">System</option><option value="serif">Serif</option><option value="mono">Mono</option></select></label></div><label className="appearance-bold-option"><input type="checkbox" checked={appearance.agentBold} onChange={(event) => updateAppearance("agentBold", event.target.checked)}/><span>粗体</span></label></fieldset>
+            <section className="appearance-role-fonts" aria-labelledby="appearance-user-fonts-title"><h4 id="appearance-user-fonts-title">User</h4><div className="appearance-font-selects"><label><span>汉语字体</span><select value={appearance.userChineseFont} aria-label="User Chinese font" onChange={(event) => updateAppearance("userChineseFont", event.target.value as Appearance["userChineseFont"])}><option value="system">系统</option><option value="heiti">黑体</option><option value="kaiti">楷体</option><option value="songti">宋体</option></select></label><label><span>其他语言字体</span><select value={appearance.userFont} aria-label="User other language font" onChange={(event) => updateAppearance("userFont", event.target.value as Appearance["userFont"])}><option value="system">System</option><option value="serif">Serif</option><option value="mono">Mono</option></select></label></div><label className="appearance-bold-option"><input type="checkbox" checked={appearance.userBold} onChange={(event) => updateAppearance("userBold", event.target.checked)}/><span className="appearance-checkbox" aria-hidden="true"><Check size={12} strokeWidth={3}/></span><span>粗体</span></label></section>
+            <section className="appearance-role-fonts" aria-labelledby="appearance-agent-fonts-title"><h4 id="appearance-agent-fonts-title">Agent</h4><div className="appearance-font-selects"><label><span>汉语字体</span><select value={appearance.agentChineseFont} aria-label="Agent Chinese font" onChange={(event) => updateAppearance("agentChineseFont", event.target.value as Appearance["agentChineseFont"])}><option value="system">系统</option><option value="heiti">黑体</option><option value="kaiti">楷体</option><option value="songti">宋体</option></select></label><label><span>其他语言字体</span><select value={appearance.agentFont} aria-label="Agent other language font" onChange={(event) => updateAppearance("agentFont", event.target.value as Appearance["agentFont"])}><option value="system">System</option><option value="serif">Serif</option><option value="mono">Mono</option></select></label></div><label className="appearance-bold-option"><input type="checkbox" checked={appearance.agentBold} onChange={(event) => updateAppearance("agentBold", event.target.checked)}/><span className="appearance-checkbox" aria-hidden="true"><Check size={12} strokeWidth={3}/></span><span>粗体</span></label></section>
             <fieldset><legend>Text size</legend><div className="segmented-control text-size-control">{(["small", "medium", "large"] as const).map((size) => <button type="button" title={`Use ${size === "medium" ? "default" : size} text size`} className={appearance.textSize === size ? "active" : ""} aria-pressed={appearance.textSize === size} key={size} onClick={() => updateAppearance("textSize", size)}>{size === "small" ? "Small" : size === "medium" ? "Default" : "Large"}</button>)}</div></fieldset>
           </section>}
           {section === "endpoints" && <EndpointSettingsPane endpoints={endpoints} endpointEditor={endpointEditor} revealedEndpointApiKeys={revealedEndpointApiKeys} revealedEndpointHeaders={revealedEndpointHeaders} onEdit={onEditEndpoint} onDelete={onDeleteEndpoint} onReveal={onRevealEndpoint} onSave={onSaveEndpoint}/>}
@@ -4820,7 +4971,11 @@ function SettingsCenter(props: SettingsCenterProps) {
               <button type="button" className="memory-switch-entry" disabled={busy} onClick={() => { setPath(memPath); setMemoryPage("switch"); }}><span>Switch MEM</span><ChevronRight size={15}/></button>
             </section>
             <div className="memory-overview-label"><span>Temporary data</span><small>Policies and deletable artifacts for this MEM</small></div>
-            <section className="settings-group settings-retention-card"><div className="settings-group-heading"><div><strong>Retention policy</strong><p>Choose how long temporary memory records remain available.</p></div></div><label className="settings-field"><span>Retention period</span><select value={days === null ? "unlimited" : String(days)} disabled={retentionPending || switchPending} onChange={(event) => setDays(event.target.value === "unlimited" ? null : Number(event.target.value) as 1 | 5 | 10)}><option value="1">Most recent day</option><option value="5">Most recent 5 days</option><option value="10">Most recent 10 days</option><option value="unlimited">Unlimited</option></select></label><div className="settings-group-actions"><span className="settings-status" role="status" aria-live="polite">{retentionPending ? "Saving and applying retention…" : ""}</span><button type="button" className={`primary compact ${retentionPending ? "sending" : ""}`} disabled={busy || days === retentionDays} onClick={() => onSaveRetention(days)}>{retentionPending && <LoaderCircle size={14}/>} {retentionPending ? "Saving…" : "Save retention"}</button></div></section>
+            <section className="settings-group settings-retention-card"><div className="settings-group-heading"><div><strong>Temporary-data policy</strong><p>Age and capacity are enforced together. If either limit is exceeded, Timem removes the oldest complete temporary items first.</p></div></div><div className="settings-capacity-grid"><label className="settings-field"><span>Retention period</span><select value={days === null ? "unlimited" : String(days)} disabled={retentionPending || switchPending} onChange={(event) => setDays(event.target.value === "unlimited" ? null : Number(event.target.value) as 1 | 5 | 10)}><option value="1">Most recent day</option><option value="5">Most recent 5 days</option><option value="10">Most recent 10 days</option><option value="unlimited">Unlimited</option></select></label><label className="settings-field"><span>Maximum capacity</span><select value={temporaryCapacity === null ? "unlimited" : String(temporaryCapacity)} disabled={retentionPending || switchPending} onChange={(event) => setTemporaryCapacity(event.target.value === "unlimited" ? null : Number(event.target.value))}><option value={128 * 1024 * 1024}>128 MB</option><option value={256 * 1024 * 1024}>256 MB</option><option value={512 * 1024 * 1024}>512 MB</option><option value={1024 * 1024 * 1024}>1 GB</option><option value={5 * 1024 * 1024 * 1024}>5 GB</option><option value="unlimited">Unlimited</option></select></label></div><div className="settings-group-actions"><span className="settings-status" role="status" aria-live="polite">{retentionPending ? "Saving and applying temporary-data policy…" : ""}</span><button type="button" className={`primary compact ${retentionPending ? "sending" : ""}`} disabled={busy || (days === retentionDays && temporaryCapacity === temporaryCapacityBytes)} onClick={() => onSaveTemporaryPolicy(days, temporaryCapacity)}>{retentionPending && <LoaderCircle size={14}/>} {retentionPending ? "Saving…" : "Save policy"}</button></div></section>
+            <div className="memory-overview-label"><span>Conversation data</span><small>Complete Turns are the eviction boundary</small></div>
+            <section className="settings-group settings-capacity-card"><div className="settings-group-heading"><div><strong>Conversation capacity</strong><p>When the limit is exceeded, Timem removes the oldest complete Turns. Running and queued Sessions remain protected.</p></div></div><label className="settings-field"><span>Maximum capacity</span><select value={conversationCapacity === null ? "unlimited" : String(conversationCapacity)} disabled={conversationCapacityPending || switchPending} onChange={(event) => setConversationCapacity(event.target.value === "unlimited" ? null : Number(event.target.value))}><option value={128 * 1024 * 1024}>128 MB</option><option value={512 * 1024 * 1024}>512 MB</option><option value={1024 * 1024 * 1024}>1 GB</option><option value={5 * 1024 * 1024 * 1024}>5 GB</option><option value={20 * 1024 * 1024 * 1024}>20 GB</option><option value="unlimited">Unlimited</option></select></label><div className="settings-group-actions"><span className="settings-status" role="status" aria-live="polite">{conversationCapacityPending ? "Saving and applying conversation capacity…" : ""}</span><button type="button" className={`primary compact ${conversationCapacityPending ? "sending" : ""}`} disabled={busy || conversationCapacity === conversationCapacityBytes} onClick={() => onSaveConversationCapacity(conversationCapacity)}>{conversationCapacityPending && <LoaderCircle size={14}/>} {conversationCapacityPending ? "Saving…" : "Save capacity"}</button></div></section>
+            <div className="memory-overview-label"><span>Favorites</span><small>Stored in physical 4 MiB slices</small></div>
+            <section className="settings-group settings-capacity-card"><div className="settings-group-heading"><div><strong>Favorites capacity</strong><p>New favorites roll over the oldest complete favorites when space is full; favorite content is never truncated.</p></div></div><label className="settings-field"><span>Maximum capacity</span><select value={favoriteCapacityLimit === null ? "unlimited" : String(favoriteCapacityLimit)} disabled={favoriteCapacityPending || switchPending} onChange={(event) => setFavoriteCapacityLimit(event.target.value === "unlimited" ? null : Number(event.target.value))}><option value={256 * 1024 * 1024}>256 MB</option><option value={1024 * 1024 * 1024}>1 GB</option><option value="unlimited">Unlimited</option></select><small>Currently using {formatFavoriteCapacityUsed(favoriteCapacity.used_bytes)}.</small></label><div className="settings-group-actions"><span className="settings-status" role="status" aria-live="polite">{favoriteCapacityPending ? "Saving and reorganizing favorite slices…" : ""}</span><button type="button" className={`primary compact ${favoriteCapacityPending ? "sending" : ""}`} disabled={busy || favoriteCapacityLimit === (favoriteCapacity.limit_bytes ?? null)} onClick={() => onSaveFavoriteCapacity(favoriteCapacityLimit)}>{favoriteCapacityPending && <LoaderCircle size={14}/>} {favoriteCapacityPending ? "Saving…" : "Save capacity"}</button></div></section>
             <section className="settings-group settings-temporary-files"><div className="settings-group-heading"><div><strong>Largest temporary items</strong><p>Top 100 deletable items, largest first. Persistent data and running jobs stay protected.</p></div><div className="settings-inline-actions">{temporaryDeleteMode && <button type="button" className="secondary compact" disabled={temporaryItemsDeleting} onClick={cancelTemporaryDelete}>Cancel</button>}<button type="button" className={`danger compact ${temporaryDeleteMode ? "confirm" : ""}`} disabled={temporaryItemsLoading || temporaryItemsDeleting || temporaryItems.length === 0 || (temporaryDeleteMode && selectedTemporaryIds.size === 0)} onClick={() => { if (!temporaryDeleteMode) { setTemporaryDeleteMode(true); setSelectedTemporaryIds(new Set()); } else onDeleteTemporaryItems(Array.from(selectedTemporaryIds)); }}>{temporaryItemsDeleting ? <LoaderCircle size={14}/> : <Trash2 size={14}/>} {temporaryItemsDeleting ? "Deleting…" : temporaryDeleteMode ? `Delete ${selectedTemporaryIds.size}` : "Delete"}</button><button type="button" className="secondary compact icon-only" title="Refresh temporary files" aria-label="Refresh temporary files" disabled={temporaryItemsLoading || temporaryItemsDeleting} onClick={onRefreshTemporaryItems}>{temporaryItemsLoading ? <LoaderCircle size={14}/> : <RefreshCw size={14}/>}</button></div></div>
               <div className="settings-temporary-list" role="list" aria-label="Largest temporary files">{temporaryItemsLoading && temporaryItems.length === 0 ? <div className="settings-temporary-empty"><LoaderCircle size={15}/> Loading temporary files…</div> : temporaryItemsError ? <div className="settings-temporary-empty error"><TriangleAlert size={15}/> {temporaryItemsError}</div> : temporaryItems.length === 0 ? <div className="settings-temporary-empty">No deletable temporary files.</div> : temporaryItems.map((item, index) => { const selected = selectedTemporaryIds.has(item.id); return <button type="button" role="listitem" className={`settings-temporary-row ${temporaryDeleteMode ? "selecting" : ""} ${selected ? "selected" : ""}`} disabled={!temporaryDeleteMode || temporaryItemsDeleting} aria-pressed={temporaryDeleteMode ? selected : undefined} key={item.id} onClick={() => toggleTemporaryItem(item.id)}><span className="settings-temporary-rank">{index + 1}</span><span className="settings-temporary-select" aria-hidden="true">{selected && <Check size={12}/>}</span><span className="settings-temporary-copy"><strong title={item.path}>{item.path}</strong><small>{item.kind === "shell_job" ? "Finished shell job" : "Temporary file"}</small></span><span className="settings-temporary-size">{formatBytes(item.bytes)}</span></button>; })}</div>
               <div className="settings-temporary-summary"><span>{temporaryItems.length} item{temporaryItems.length === 1 ? "" : "s"}{temporaryItems.length === 100 ? " · Top 100" : ""}</span><span>{temporaryDeleteMode && selectedTemporaryIds.size > 0 ? `${formatBytes(selectedTemporaryBytes)} selected` : "Largest first"}</span></div>
@@ -4832,7 +4987,7 @@ function SettingsCenter(props: SettingsCenterProps) {
             <div className="memory-switch-route" aria-label="Memory switch route"><div><span>Current</span><code title={memPath}>{memPath || "…"}</code></div><ChevronRight size={17} aria-hidden="true"/><div className={cleanedPath && !pathUnchanged ? "ready" : ""}><span>Next</span><code title={cleanedPath}>{cleanedPath || "Enter a destination below"}</code></div></div>
             <section className="memory-switch-form-card">
               <label className="settings-field"><span>Destination MEM directory</span><input autoFocus value={path} disabled={switchPending} spellCheck={false} placeholder="/absolute/path/to/.test_mem" onChange={(event) => setPath(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && !switchPending && cleanedPath && !pathUnchanged) { event.preventDefault(); onSwitchMemory(cleanedPath); } }}/><small>Enter an existing absolute directory on the machine running Timem Web.</small></label>
-              <div className="memory-switch-impact"><strong>What changes</strong><ul><li>Current sessions and workspace state are replaced by the destination MEM.</li><li>Model endpoints, Memory policy, and stored sessions load from that MEM.</li><li>The current MEM remains on disk and can be switched back to later.</li></ul></div>
+              <div className="memory-switch-impact"><strong>What changes</strong><ul><li>Current sessions and workspace state are replaced by the destination MEM.</li><li>Model endpoints, Memory policy, and stored sessions load from that MEM.</li><li>Any running work in the current MEM must be stopped before switching; it will be marked interrupted.</li><li>The current MEM remains on disk and can be switched back to later.</li></ul></div>
               <div className="memory-switch-actions"><span className="settings-status" role="status" aria-live="polite">{switchPending ? "Switching MEM and loading its sessions…" : !cleanedPath ? "Enter an absolute MEM directory." : pathUnchanged ? "This is already the active MEM." : "Ready to switch."}</span><div><button type="button" className="secondary compact" disabled={switchPending} onClick={() => { setPath(memPath); setMemoryPage("overview"); }}>Cancel</button><button type="button" className={`primary compact memory-switch-confirm ${switchPending ? "sending" : ""}`} disabled={switchPending || !cleanedPath || pathUnchanged} onClick={() => onSwitchMemory(cleanedPath)}>{switchPending ? <LoaderCircle size={14}/> : <ArrowLeftRight size={14}/>} {switchPending ? "Switching…" : "Switch MEM"}</button></div></div>
             </section>
           </section>}
@@ -4947,21 +5102,21 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function ModelEndpointPanel({ panelRef, server, session, onApply }: {
+function ModelEndpointPanel({ panelRef, server, session, onEdit, onApply }: {
   panelRef: MutableRefObject<HTMLElement | null>;
   server: Snapshot["server"] | null;
   session: Session | undefined;
+  onEdit: () => void;
   onApply: (endpointId: string) => void;
 }) {
   const endpoints = server?.model_endpoints ?? [];
   const selected = endpoints.find((endpoint) => endpointMatchesProfile(endpoint, session?.runtime_profile));
   return <section id="runtime-panel" ref={panelRef} className="runtime-card endpoint-menu" tabIndex={-1}>
-    <div className="endpoint-menu-heading"><div><span className="eyebrow">MODEL ENDPOINTS</span><strong>{session ? `用于 ${session.display_name}` : "选择 Session 后应用"}</strong></div></div>
+    <div className="endpoint-menu-heading"><div><span className="eyebrow">MODEL ENDPOINTS</span><strong>{session ? `用于 ${session.display_name}` : "选择 Session 后应用"}</strong></div><button type="button" className="endpoint-menu-edit" onClick={onEdit}><Pencil size={13}/><span>编辑</span></button></div>
     <div className="endpoint-list">{endpoints.length === 0 ? <div className="endpoint-empty">还没有可用接入点。请在 Settings 中添加后再选择。</div> : endpoints.map((endpoint) => {
       const active = selected?.id === endpoint.id;
       return <div className={`endpoint-row ${active ? "active" : ""}`} key={endpoint.id}>
-        <button type="button" className="endpoint-select" disabled={!session || session.state === "working"} onClick={() => onApply(endpoint.id)}><span><strong>{endpoint.name}</strong></span><small className="endpoint-model-summary"><Sparkles size={10} className="session-model-icon" aria-hidden="true"/><span>{endpoint.model} · {endpoint.api_protocol}{endpoint.stream ? " · stream" : ""} · {endpoint.max_llm_input_tokens === 1_000_000 ? "1M" : `${endpoint.max_llm_input_tokens / 1_000}K`} / {endpoint.max_llm_output_tokens / 1_000}K</span></small><small title={endpoint.base_url}>{endpoint.base_url}</small></button>
-        {active && <div className="endpoint-actions"><span className="endpoint-selected-badge" role="img" aria-label="当前选中的接入点"><Check size={13} strokeWidth={3}/></span></div>}
+        <button type="button" className="endpoint-select" aria-pressed={active} disabled={!session || session.state === "working"} onClick={() => onApply(endpoint.id)}><span className="endpoint-copy"><span className="endpoint-name-line"><strong>{endpoint.name}</strong></span><small className="endpoint-model-summary"><Sparkles size={10} className="session-model-icon" aria-hidden="true"/><span>{endpoint.model} · {endpoint.api_protocol}{endpoint.stream ? " · stream" : ""} · {endpoint.max_llm_input_tokens === 1_000_000 ? "1M" : `${endpoint.max_llm_input_tokens / 1_000}K`} / {endpoint.max_llm_output_tokens / 1_000}K</span></small><small title={endpoint.base_url}>{endpoint.base_url}</small></span><span className={`endpoint-choice-box ${active ? "selected" : ""}`} aria-hidden="true">{active && <Check size={11} strokeWidth={3}/>}</span></button>
       </div>;
     })}</div>
     {session?.state === "working" && <p className="endpoint-note">当前 Session 工作中，结束或停止任务后才能切换接入点。</p>}
@@ -5184,6 +5339,13 @@ function NewSessionDialog({ workspaces, runtimeDefaults, creating, memSwitching,
   return <div className="modal-backdrop" role="presentation" aria-label="Dismiss create session" onClick={closeIfIdle}><section className="decision-modal session-modal" role="dialog" aria-modal="true" aria-label="Create session" aria-describedby={describedBy} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">NEW SESSION</span><h2>Start a session</h2></div><button type="button" className="icon-button" title="Close create session" aria-label="Close create session" disabled={creating} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>Select a known workspace or enter an existing absolute directory for this session.</p>{creating && <p id={statusId} className="mem-validation" role="status" aria-live="polite">Creating session…</p>}<div className="session-modal-scroll"><label>Display name<input autoFocus value={displayName} placeholder="Optional name" disabled={creating} onChange={(event) => setDisplayName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); } }}/></label><label>Workspace directory<input type="text" list="new-session-workspaces" value={workspaceDir} disabled={creating} placeholder="/absolute/path/to/workspace" autoComplete="off" onChange={(event) => setWorkspaceDir(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); submit(); } }}/><datalist id="new-session-workspaces">{workspaces.map((workspace) => <option value={workspace} key={workspace}>{tailPath(workspace, 64)}</option>)}</datalist></label><p className="mem-hint">Choose a suggested workspace or type an absolute directory path that exists on the Timem host.</p><details className="session-runtime-overrides"><summary>Runtime environment</summary><div className="session-runtime-grid">{SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => <label key={key}><span>{label}<small>{key}</small></span><div className="session-runtime-control">{kind === "api_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "default"}</option><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select> : kind === "response_protocol" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "xml"}</option><option value="xml">xml</option><option value="json">json</option></select> : kind === "bash_approval" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "ask"}</option><option value="ask">ask</option><option value="approve">approve</option></select> : kind === "work_instructions" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "silent"}</option><option value="silent">silent</option><option value="ask">ask</option><option value="off">off</option></select> : kind === "boolean" ? <select value={env[key] ?? ""} disabled={creating} onChange={(event) => updateEnv(key, event.target.value)}><option value="">Inherit · {runtimeDefaults[key] ?? "false"}</option><option value="true">true</option><option value="false">false</option></select> : <input type={kind} value={env[key] ?? ""} min={kind === "number" ? 1 : undefined} disabled={creating} autoComplete={kind === "password" ? "new-password" : undefined} placeholder={kind === "password" ? "Optional session-only key" : `Inherit · ${runtimeDefaults[key] ?? "default"}`} onChange={(event) => updateEnv(key, event.target.value)}/>} {env[key] !== undefined && <button type="button" className="session-runtime-reset" title={`Reset ${label} to inherited value`} aria-label={`Reset ${label} to inherited value`} disabled={creating} onClick={() => resetEnv(key)}>Reset</button>}</div></label>)}</div></details></div><div className="decision-actions"><button type="button" className="secondary" disabled={creating} onClick={closeIfIdle}>Cancel</button><button type="button" className={`primary ${creating ? "sending" : ""}`} disabled={!canCreateSession} onClick={submit}>{creating ? <LoaderCircle size={16}/> : <Plus size={16}/>} {creating ? "Creating…" : "Create session"}</button></div></section></div>;
 }
 
+
+function MemSwitchConfirmDialog({ candidate, pending, onClose, onConfirm }: { candidate: MemSwitchCandidate; pending: boolean; onClose: () => void; onConfirm: () => void }) {
+  const closeIfIdle = () => { if (!pending) onClose(); };
+  const descriptionId = "mem-switch-confirm-description";
+  const statusId = "mem-switch-confirm-status";
+  return <div className="modal-backdrop" role="presentation" aria-label="Dismiss MEM switch confirmation" onClick={closeIfIdle}><section className="decision-modal mem-switch-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="mem-switch-confirm-title" aria-describedby={pending ? `${descriptionId} ${statusId}` : descriptionId} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">STOP AND SWITCH</span><h2 id="mem-switch-confirm-title">Stop current MEM work?</h2></div><button type="button" className="icon-button" title="Close MEM switch confirmation" aria-label="Close MEM switch confirmation" disabled={pending} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>Switching MEM will stop all work in the current MEM. {candidate.runningSessionCount} running Session{candidate.runningSessionCount === 1 ? "" : "s"} will be marked interrupted and will not continue in the background.</p><p className="mem-switch-alternative">To keep the current work running, start a separate instance for the destination MEM instead: <code>timem-web --space {shellQuoteCommandArgument(candidate.path)}</code></p><code className="mem-switch-confirm-path" title={candidate.path}>{candidate.path}</code>{pending && <p id={statusId} className="session-delete-status" role="status" aria-live="polite">Stopping current MEM workers and switching…</p>}<div className="decision-actions"><button type="button" className="secondary" disabled={pending} onClick={closeIfIdle}>Keep current MEM</button><button type="button" className={`danger ${pending ? "sending" : ""}`} disabled={pending} onClick={onConfirm}>{pending ? <LoaderCircle size={15}/> : <CircleStop size={15}/>} {pending ? "Stopping and switching…" : "Stop work and switch"}</button></div></section></div>;
+}
 
 function ModelEndpointDeleteDialog({ endpoint, onClose, onConfirm }: { endpoint: ModelEndpoint; onClose: () => void; onConfirm: () => void }) {
   return <div className="modal-backdrop endpoint-delete-backdrop" role="presentation" onClick={onClose}><section className="decision-modal session-delete-dialog" role="dialog" aria-modal="true" aria-label={`Delete ${endpoint.name}`} onClick={(event) => event.stopPropagation()}><div className="modal-titlebar"><div><span className="eyebrow">DELETE ENDPOINT</span><h2>Delete “{endpoint.name}”?</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={16}/></button></div><p>This removes the shared endpoint from every Session dropdown. Existing Session settings are not changed.</p><div className="decision-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="button" className="danger" onClick={onConfirm}><Trash2 size={15}/> Delete endpoint</button></div></section></div>;
