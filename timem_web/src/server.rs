@@ -751,19 +751,46 @@ fn collect_named_temporary_files(root: &Path) -> Result<Vec<MemTemporaryItem>, S
     Ok(items)
 }
 
-fn all_mem_temporary_items_at(memory_dir: &Path) -> Result<Vec<MemTemporaryItem>, String> {
-    let mut items = collect_named_temporary_files(memory_dir)?;
-    for item in FileShellJobStore::new(memory_dir)
+fn append_finished_shell_job_items(
+    items: &mut Vec<MemTemporaryItem>,
+    store_memory_dir: &Path,
+    id_prefix: &str,
+    path_prefix: &str,
+) -> Result<(), String> {
+    for item in FileShellJobStore::new(store_memory_dir)
         .finished_temporary_items()
         .map_err(|_| "mem_temporary_shell_jobs_read_failed".to_string())?
     {
         items.push(MemTemporaryItem {
-            id: format!("shell_job:{}", item.id),
-            path: format!("shell_jobs/{}", item.id),
+            id: format!("{id_prefix}{}", item.id),
+            path: format!("{path_prefix}{}", item.id),
             kind: "shell_job".to_string(),
             bytes: item.bytes,
             modified_at_ms: item.created_at_ms,
         });
+    }
+    Ok(())
+}
+
+fn legacy_nested_memory_dir(memory_dir: &Path) -> Option<PathBuf> {
+    let legacy = memory_dir.join("memory");
+    legacy
+        .join("shell_jobs")
+        .join("jobs.jsonl")
+        .is_file()
+        .then_some(legacy)
+}
+
+fn all_mem_temporary_items_at(memory_dir: &Path) -> Result<Vec<MemTemporaryItem>, String> {
+    let mut items = collect_named_temporary_files(memory_dir)?;
+    append_finished_shell_job_items(&mut items, memory_dir, "shell_job:", "shell_jobs/")?;
+    if let Some(legacy) = legacy_nested_memory_dir(memory_dir) {
+        append_finished_shell_job_items(
+            &mut items,
+            &legacy,
+            "legacy_shell_job:",
+            "memory/shell_jobs/",
+        )?;
     }
     Ok(items)
 }
@@ -822,9 +849,15 @@ fn delete_mem_temporary_items_at(memory_dir: &Path, ids: &[String]) -> Result<us
     let canonical_root = std::fs::canonicalize(memory_dir)
         .map_err(|_| "mem_temporary_item_path_invalid".to_string())?;
     let mut shell_ids = Vec::new();
+    let mut legacy_shell_ids = Vec::new();
     let mut file_paths = Vec::new();
     for id in ids {
-        if let Some(shell_id) = id.strip_prefix("shell_job:") {
+        if let Some(shell_id) = id.strip_prefix("legacy_shell_job:") {
+            if shell_id.is_empty() {
+                return Err("mem_temporary_item_id_invalid".to_string());
+            }
+            legacy_shell_ids.push(shell_id.to_string());
+        } else if let Some(shell_id) = id.strip_prefix("shell_job:") {
             if shell_id.is_empty() {
                 return Err("mem_temporary_item_id_invalid".to_string());
             }
@@ -855,6 +888,15 @@ fn delete_mem_temporary_items_at(memory_dir: &Path, ids: &[String]) -> Result<us
     let mut deleted = FileShellJobStore::new(memory_dir)
         .delete_finished_temporary_items(&shell_ids)
         .map_err(|_| "mem_temporary_shell_jobs_delete_failed".to_string())?;
+    if !legacy_shell_ids.is_empty() {
+        let legacy = legacy_nested_memory_dir(memory_dir)
+            .ok_or_else(|| "mem_temporary_item_id_invalid".to_string())?;
+        deleted = deleted.saturating_add(
+            FileShellJobStore::new(&legacy)
+                .delete_finished_temporary_items(&legacy_shell_ids)
+                .map_err(|_| "mem_temporary_shell_jobs_delete_failed".to_string())?,
+        );
+    }
     for path in file_paths {
         std::fs::remove_file(path).map_err(|_| "mem_temporary_item_delete_failed".to_string())?;
         deleted = deleted.saturating_add(1);
@@ -871,11 +913,10 @@ fn schedule_mem_temporary_task(
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        return if delete_ids.is_none() {
-            Ok(())
-        } else {
-            Err("mem_temporary_task_busy".to_string())
-        };
+        // A request that did not start work must not be acknowledged as successful:
+        // its caller may have subscribed after the in-flight task published its result
+        // and would otherwise wait forever for an event that will never arrive.
+        return Err("mem_temporary_task_busy".to_string());
     }
     let (memory_dir, accepted_epoch) = match state.mem.lock() {
         Ok(mem) => (
@@ -986,9 +1027,17 @@ fn apply_temporary_retention(
                 store.prune_temporary_history_events_before(&session.session_id, cutoff_ms)?,
             );
         }
-        result.shell_jobs = FileShellJobStore::new(&layout.memory_dir())
+        let memory_dir = layout.memory_dir();
+        result.shell_jobs = FileShellJobStore::new(&memory_dir)
             .prune_finished_before(cutoff_ms)
             .map_err(|_| "shell_job_retention_failed".to_string())?;
+        if let Some(legacy) = legacy_nested_memory_dir(&memory_dir) {
+            result.shell_jobs = result.shell_jobs.saturating_add(
+                FileShellJobStore::new(&legacy)
+                    .prune_finished_before(cutoff_ms)
+                    .map_err(|_| "shell_job_retention_failed".to_string())?,
+            );
+        }
         result.api_audit_events =
             agent_core::prune_api_audit_before(&layout.api_audit_file(), cutoff_ms, now_ms)
                 .map_err(|_| "api_audit_retention_failed".to_string())?;
@@ -1034,6 +1083,14 @@ fn apply_conversation_capacity(
     };
     let capacity = RollingCapacity::from_total_bytes(total_bytes)
         .map_err(|_| "mem_conversation_capacity_bytes_invalid".to_string())?;
+    apply_conversation_stable_capacity(state, store, capacity.stable_bytes)
+}
+
+fn apply_conversation_stable_capacity(
+    state: &AppState,
+    store: &SessionStore,
+    stable_bytes: u64,
+) -> Result<u64, String> {
     let active = state
         .sessions
         .lock()
@@ -1056,16 +1113,14 @@ fn apply_conversation_capacity(
         .sum::<u64>();
     let mut removed = 0u64;
     for session in sessions {
-        if used <= capacity.stable_bytes {
+        if used <= stable_bytes {
             break;
         }
         if active.contains(&session.session_id) {
             continue;
         }
-        let reclaimed = store.prune_oldest_history_turns(
-            &session.session_id,
-            used.saturating_sub(capacity.stable_bytes),
-        )?;
+        let reclaimed = store
+            .prune_oldest_history_turns(&session.session_id, used.saturating_sub(stable_bytes))?;
         used = used.saturating_sub(reclaimed);
         removed = removed.saturating_add(reclaimed);
     }
@@ -6101,9 +6156,20 @@ fn restore_stored_session(
 const RUNTIME_RESTART_HISTORY_KIND: &str = "runtime_restart";
 const RUNTIME_RESTART_HISTORY_CONTENT: &str = "Timem Web 已重新启动，以下内容来自新的运行实例";
 
+fn append_history_record_and_schedule_retention(
+    state: &AppState,
+    session_id: &str,
+    record: &ChatHistoryRecord,
+) -> Result<(), String> {
+    current_session_store(state)?.append_history_record(session_id, record)?;
+    state.temporary_retention_wakeup.notify_one();
+    Ok(())
+}
+
 fn append_runtime_restart_history_marker(state: &AppState, session_id: &str) -> Result<(), String> {
     let created_at_ms = now_ms_i64();
-    current_session_store(state)?.append_history_record(
+    append_history_record_and_schedule_retention(
+        state,
         session_id,
         &ChatHistoryRecord::Message {
             role: ChatHistoryRole::System,
@@ -8366,7 +8432,8 @@ fn start_web_toolgen_turn(
         "source_turn_id".to_string(),
         Value::String(source_turn_id.to_string()),
     );
-    current_session_store(state)?.append_history_record(
+    append_history_record_and_schedule_retention(
+        state,
         session_id,
         &ChatHistoryRecord::Event {
             role: ChatHistoryRole::System,
@@ -8680,7 +8747,8 @@ fn append_chat_history_message(
         "system" => ChatHistoryRole::System,
         _ => ChatHistoryRole::System,
     };
-    current_session_store(state)?.append_history_record(
+    append_history_record_and_schedule_retention(
+        state,
         session_id,
         &ChatHistoryRecord::Message {
             role,
@@ -8707,19 +8775,18 @@ fn append_chat_history_event(
     let mut extra = BTreeMap::new();
     extra.insert("source".to_string(), Value::String(source.to_string()));
     extra.insert("payload".to_string(), payload);
-    if let Ok(store) = current_session_store(state) {
-        let _ = store.append_history_record(
-            session_id,
-            &ChatHistoryRecord::Event {
-                role: ChatHistoryRole::System,
-                turn_id: turn_id.to_string(),
-                created_at_ms,
-                kind,
-                content,
-                extra,
-            },
-        );
-    }
+    let _ = append_history_record_and_schedule_retention(
+        state,
+        session_id,
+        &ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: turn_id.to_string(),
+            created_at_ms,
+            kind,
+            content,
+            extra,
+        },
+    );
 }
 
 fn append_worker_roles_history(
@@ -8746,7 +8813,8 @@ fn append_worker_roles_history(
         "user_entry_created_at_ms".to_string(),
         Value::from(created_at_ms),
     );
-    current_session_store(state)?.append_history_record(
+    append_history_record_and_schedule_retention(
+        state,
         session_id,
         &ChatHistoryRecord::Event {
             role: ChatHistoryRole::System,
@@ -9237,20 +9305,19 @@ fn mark_core_command_accepted(state: &AppState, session_id: &str, command_id: &s
     extra.insert("kind".to_string(), json!("command_delivery"));
     extra.insert("command_id".to_string(), json!(command_id));
     extra.insert("delivery_state".to_string(), json!("core_accepted"));
-    let persist_result = current_session_store(state).and_then(|store| {
-        store.append_history_record(
-            session_id,
-            &ChatHistoryRecord::Event {
-                role: ChatHistoryRole::System,
-                turn_id,
-                created_at_ms: now_ms_i64(),
-                kind: ChatHistoryEventKind::RuntimeNotice,
-                content: "Core accepted command.".to_string(),
-                extra,
-            },
-        )?;
-        persist_web_session(state, session_id)
-    });
+    let persist_result = append_history_record_and_schedule_retention(
+        state,
+        session_id,
+        &ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id,
+            created_at_ms: now_ms_i64(),
+            kind: ChatHistoryEventKind::RuntimeNotice,
+            content: "Core accepted command.".to_string(),
+            extra,
+        },
+    )
+    .and_then(|()| persist_web_session(state, session_id));
     if let Err(error) = persist_result {
         let _ = state.events.send(command_ack(
             command_id,
@@ -9835,19 +9902,18 @@ fn handle_scoped_worker_event(
             if let Some(turn_id) = turn_id.as_deref() {
                 let mut extra = BTreeMap::new();
                 extra.insert("completion".to_string(), completion.clone());
-                if let Ok(store) = current_session_store(state) {
-                    let _ = store.append_history_record(
-                        session_id,
-                        &ChatHistoryRecord::Event {
-                            role: ChatHistoryRole::System,
-                            turn_id: turn_id.to_string(),
-                            created_at_ms: now_ms_i64(),
-                            kind: ChatHistoryEventKind::Stats,
-                            content: "Turn completed.".to_string(),
-                            extra,
-                        },
-                    );
-                }
+                let _ = append_history_record_and_schedule_retention(
+                    state,
+                    session_id,
+                    &ChatHistoryRecord::Event {
+                        role: ChatHistoryRole::System,
+                        turn_id: turn_id.to_string(),
+                        created_at_ms: now_ms_i64(),
+                        kind: ChatHistoryEventKind::Stats,
+                        content: "Turn completed.".to_string(),
+                        extra,
+                    },
+                );
             }
             let _ = persist_web_session(state, session_id);
             publish_core_semantic(
