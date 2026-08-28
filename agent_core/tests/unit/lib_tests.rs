@@ -98,11 +98,15 @@ fn forced_compaction_preserves_native_history_and_restricts_model_request() {
     assert!(!prompt.contains("old tool work"));
     assert!(prompt.contains("mode=force_shrink_required"));
     let request_prompt = core.build_model_request_prompt(&prompt);
-    assert!(request_prompt.ends_with("Context too long, please compress first:"));
+    assert!(request_prompt
+        .ends_with("Context is too long. Your tool calls must start with context_compact:"));
     let request = core.model_interaction_request(request_prompt);
     assert_eq!(request.tool_choice, NativeToolChoice::Required);
-    assert_eq!(request.tools.len(), 1);
-    assert_eq!(request.tools[0].name, "context_compact");
+    assert!(request
+        .tools
+        .iter()
+        .any(|tool| tool.name == "context_compact"));
+    assert!(request.tools.iter().any(|tool| tool.name == "readfile"));
 }
 
 #[test]
@@ -458,6 +462,163 @@ fn native_context_compact_summary_does_not_depend_on_discarded_owning_delta() {
     let request = core.model_interaction_request(next_prompt);
     assert_eq!(request.rendered_prompt.matches(summary).count(), 1);
     assert!(request.native_exchanges.is_empty());
+}
+
+fn native_test_profile() -> InteractionProfile {
+    InteractionProfile {
+        api_protocol: "openai_compatible".to_string(),
+        model: "test".to_string(),
+        gateway: "test".to_string(),
+        requested_mode: ToolCallMode::Native,
+        resolved_mode: ToolCallMode::Native,
+        active_prompt_protocol: "json".to_string(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: CapabilityProbeSource::Explicit,
+        reason: "test".to_string(),
+        probe_latency_ms: None,
+        observed_tool_calls: 2,
+    }
+}
+
+#[test]
+fn native_context_compact_first_then_executes_later_call_with_correct_id() {
+    let mut core = test_core("native_compact_then_call");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "OLD CONTEXT TO DISCARD".to_string(),
+    )]);
+    let old_delta_id = core.deltas[0].delta_id.clone();
+    let compact_arguments = serde_json::json!({
+        "discard": [old_delta_id],
+        "summary": "KEEP ACTIVE STATE",
+    });
+    let cwd_arguments = serde_json::json!({"type": "cwd"});
+
+    let step = core.apply_model_response(LlmResponse {
+        content: "compacting before continuing".to_string(),
+        tool_calls: vec![
+            NativeToolCall {
+                id: "call_compact_first".to_string(),
+                name: "context_compact".to_string(),
+                raw_arguments: compact_arguments.to_string(),
+                arguments: compact_arguments,
+            },
+            NativeToolCall {
+                id: "call_after_compact".to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: cwd_arguments.to_string(),
+                arguments: cwd_arguments,
+            },
+        ],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("compact followed by a tool call should continue")
+    };
+
+    assert!(!prompt.contains("OLD CONTEXT TO DISCARD"));
+    assert!(prompt.contains("KEEP ACTIVE STATE"));
+    assert_eq!(core.native_exchanges.len(), 1);
+    let exchange = &core.native_exchanges[0];
+    assert_eq!(exchange.calls.len(), 1);
+    assert_eq!(exchange.calls[0].id, "call_after_compact");
+    assert_eq!(exchange.results.len(), 1);
+    assert_eq!(exchange.results[0].call_id, "call_after_compact");
+    assert_eq!(exchange.results[0].name, "self_tool");
+    assert!(exchange.results[0].content.contains("CWD:"));
+}
+
+#[test]
+fn native_context_compact_after_another_call_is_rejected() {
+    let mut core = test_core("native_compact_not_first");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "KEEP OLD STATE".to_string(),
+    )]);
+    let old_delta_id = core.deltas[0].delta_id.clone();
+    let cwd_arguments = serde_json::json!({"type": "cwd"});
+    let compact_arguments = serde_json::json!({
+        "discard": [old_delta_id],
+        "summary": "SHOULD NOT APPLY",
+    });
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![
+            NativeToolCall {
+                id: "call_before_compact".to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: cwd_arguments.to_string(),
+                arguments: cwd_arguments,
+            },
+            NativeToolCall {
+                id: "call_compact_second".to_string(),
+                name: "context_compact".to_string(),
+                raw_arguments: compact_arguments.to_string(),
+                arguments: compact_arguments,
+            },
+        ],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("non-first context_compact should request protocol repair")
+    };
+
+    assert!(prompt.contains("context_compact_must_be_first"));
+    assert!(prompt.contains("KEEP OLD STATE"));
+    assert!(!prompt.contains("SHOULD NOT APPLY"));
+    assert!(core.native_exchanges.is_empty());
+}
+
+#[test]
+fn failed_context_compact_blocks_later_native_calls() {
+    let mut core = test_core("native_compact_failure_barrier");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "ACTIVE STATE".to_string(),
+    )]);
+    let compact_arguments = serde_json::json!({
+        "discard": ["pd_missing"],
+        "summary": "INVALID COMPACT",
+    });
+    let cwd_arguments = serde_json::json!({"type": "cwd"});
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![
+            NativeToolCall {
+                id: "call_bad_compact".to_string(),
+                name: "context_compact".to_string(),
+                raw_arguments: compact_arguments.to_string(),
+                arguments: compact_arguments,
+            },
+            NativeToolCall {
+                id: "call_must_not_run".to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: cwd_arguments.to_string(),
+                arguments: cwd_arguments,
+            },
+        ],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("failed context_compact should continue without executing later calls")
+    };
+
+    assert!(prompt.contains("error: invalid_prompt_refs"));
+    assert!(!prompt.contains("Action result: self_tool"));
+    assert!(prompt.contains("ACTIVE STATE"));
+    assert!(core.native_exchanges.is_empty());
 }
 
 #[test]

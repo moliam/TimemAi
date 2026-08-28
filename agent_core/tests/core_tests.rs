@@ -2525,9 +2525,10 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("mode=force_shrink_required"));
+    assert!(prompt.contains("Your tool calls must start with context_compact"));
     assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
     assert!(prompt.contains("target_dynamic_context_ratio=10%-20%"));
-    assert!(prompt.contains("summarize all dynamic prompt deltas into about 10%-20%"));
+    assert!(prompt.contains("Summarize all dynamic prompt deltas into about 10%-20%"));
     assert!(prompt.contains("task description"));
     assert!(prompt.contains("working environment facts"));
     assert!(prompt.contains("current progress"));
@@ -4456,6 +4457,83 @@ fn scratch_delete_missing_id_is_non_destructive() {
     assert!(fs::read_to_string(core.scratch_file())
         .unwrap()
         .contains("keep this checkpoint"));
+}
+
+#[test]
+fn json_context_compact_runs_before_later_action_in_same_response() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("json_compact_then_action"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let initial_prompt = match core.begin_turn("OLD JSON CONTEXT", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected initial step: {other:?}"),
+    };
+    let old_delta_id = first_field_value(&initial_prompt, "delta_id");
+    assert!(old_delta_id.starts_with("pd_"));
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: serde_json::json!({
+            "free_talk": "compact first, then continue",
+            "context_compact": {
+                "discard": [old_delta_id],
+                "summary": "KEEP JSON ACTIVE STATE"
+            },
+            "working_still_action": {
+                "self_tool": {"type": "cwd"}
+            }
+        })
+        .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected compact plus later action to continue, got {other:?}"),
+    };
+
+    assert!(!prompt.contains("OLD JSON CONTEXT"));
+    assert!(prompt.contains("KEEP JSON ACTIVE STATE"));
+    assert!(prompt.contains("Action result: self_tool"));
+    assert!(prompt.contains("CWD:"));
+}
+
+#[test]
+fn json_failed_context_compact_blocks_later_action() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("json_compact_failure_barrier"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let _ = core.begin_turn("KEEP JSON OLD STATE", None);
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: serde_json::json!({
+            "context_compact": {
+                "discard": ["pd_missing"],
+                "summary": "INVALID JSON COMPACT"
+            },
+            "working_still_action": {
+                "self_tool": {"type": "cwd"}
+            }
+        })
+        .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected failed compact barrier to continue, got {other:?}"),
+    };
+
+    assert!(prompt.contains("error: invalid_prompt_refs"));
+    assert!(!prompt.contains("Action result: self_tool"));
+    assert!(prompt.contains("KEEP JSON OLD STATE"));
 }
 
 #[test]
@@ -7195,7 +7273,7 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
     assert!(prompt.contains("\"final_answer?\""));
     assert!(prompt.contains("\"free_talk?\""));
     assert!(prompt.contains("\"working_still_action?\""));
-    assert!(prompt.contains("context_compact is an exclusive action"));
+    assert!(prompt.contains("context_compact may be followed by other actions"));
     assert!(prompt.contains("context_compact"));
     assert!(prompt.contains("ALL_FINISHED"));
 }

@@ -1498,14 +1498,10 @@ impl AgentCore {
             return ModelInteractionRequest::inline(rendered_prompt);
         }
         let mut tools = self.capabilities.native_builtin_tool_definitions();
-        let mut static_tool_count = tools.len();
+        let static_tool_count = tools.len();
         let mut dynamic_tools = self.capabilities.native_dynamic_tool_definitions();
         self.attach_mcp_instructions_to_native_tools(&mut dynamic_tools);
         tools.extend(dynamic_tools);
-        if self.context_compact_required {
-            tools.retain(|tool| tool.name == "context_compact");
-            static_tool_count = tools.len();
-        }
         ModelInteractionRequest {
             rendered_prompt: rendered_prompt.into(),
             static_tool_count,
@@ -2728,7 +2724,7 @@ impl AgentCore {
             .max(response.usage.prompt_tokens);
         let raw_model_output = response.content.clone();
         let protocol_suite = self.response_protocol.suite();
-        let native_calls = response.tool_calls.clone();
+        let mut native_calls = response.tool_calls.clone();
         let mut parsed = if self.resolved_tool_call_mode == ToolCallMode::Native {
             self.parse_native_response(&response)
         } else {
@@ -2987,6 +2983,28 @@ impl AgentCore {
             if let Some(catalog) = self.current_mcp_catalog_text() {
                 slices.push(("mcp_capability_catalog".to_string(), catalog));
             }
+        }
+        if !parsed.context_compacts.is_empty() && !compacted_successfully {
+            // context_compact is a barrier: later actions were authored against the
+            // pre-compaction response but must not run unless the state rewrite succeeds.
+            self.submit_running_job_updates_for_session(&self.current_session_id(), runtime);
+            self.append_delta_with_action_output_budget(slices);
+            self.append_in_turn_shrink_review_if_needed();
+            if self.remaining_rounds() == 0 {
+                return CoreStep::RoundLimitReached {
+                    max_rounds: self.round_budget,
+                };
+            }
+            return CoreStep::NeedModel {
+                prompt: self.render_prompt(),
+                rounds_remaining: self.remaining_rounds(),
+            };
+        }
+        if compacted_successfully && !native_calls.is_empty() {
+            // The compact call rewrites its own context and is represented by the
+            // independently persisted summary. Keep only later native calls for
+            // provider replay and tool-result correlation.
+            native_calls.retain(|call| call.name != "context_compact");
         }
         if !parsed.continue_work {
             for candidate in &parsed.memory_candidates {
@@ -3267,39 +3285,39 @@ impl AgentCore {
         if parsed.repair_issue.is_some() {
             return;
         }
-        let total_actions = parsed
+        let compact_positions = parsed
             .action_groups
             .iter()
-            .map(|group| group.actions.len())
-            .sum::<usize>();
-        let compact_count = parsed
-            .action_groups
-            .iter()
-            .flat_map(|group| group.actions.iter())
-            .filter(|action| action.action == "context_compact")
-            .count();
-        if compact_count == 0 {
+            .enumerate()
+            .flat_map(|(group_index, group)| {
+                group
+                    .actions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, action)| action.action == "context_compact")
+                    .map(move |(action_index, _)| (group_index, action_index))
+            })
+            .collect::<Vec<_>>();
+        if compact_positions.is_empty() {
             return;
         }
-        if compact_count != 1 || total_actions != 1 || !parsed.context_compacts.is_empty() {
-            parsed.repair_issue = Some("context_compact_must_be_exclusive".to_string());
+        if compact_positions.len() != 1 || !parsed.context_compacts.is_empty() {
+            parsed.repair_issue = Some("context_compact_only_once".to_string());
             return;
         }
-        let action = parsed
-            .action_groups
-            .iter()
-            .flat_map(|group| group.actions.iter())
-            .find(|action| action.action == "context_compact")
-            .expect("counted intrinsic action")
-            .clone();
+        let (group_index, action_index) = compact_positions[0];
+        if group_index != 0 || action_index != 0 {
+            parsed.repair_issue = Some("context_compact_must_be_first".to_string());
+            return;
+        }
+        let action = parsed.action_groups[0].actions.remove(0);
+        if parsed.action_groups[0].actions.is_empty() {
+            parsed.action_groups.remove(0);
+        }
         match context_compact::from_action(&action) {
             Ok(compact) => {
-                parsed.action_groups.clear();
                 parsed.context_compacts.push(compact);
                 parsed.continue_work = true;
-            }
-            Err(issue) if self.resolved_tool_call_mode == ToolCallMode::Native => {
-                parsed.runtime_note = Some(issue);
             }
             Err(issue) => parsed.repair_issue = Some(issue),
         }
@@ -4529,7 +4547,7 @@ Runtime tool_call ids:",
             .collect::<Vec<_>>()
             .join("\n");
         let tip = "TIPS: You can update your job list plan, steer and optimize your work based on the above work.";
-        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0. Until compaction succeeds, every response except one exclusive context_compact call is ignored without being shown or executed.";
+        let instruction = "Context is above 90% of the configured input window. Your tool calls must start with context_compact. Summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0. You may include later tool calls in the same response; they run only after context_compact succeeds. Until compaction succeeds, responses that do not start with context_compact are ignored without being shown or executed.";
         Some(format!(
             "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\ndynamic_context_tokens={dynamic_tokens}\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{tip}\n{instruction}",
             self.max_llm_input_tokens

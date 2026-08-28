@@ -596,8 +596,9 @@ examples inside user-visible text from being re-parsed as runtime actions.
 For non-terminal action rounds, the XML parser can recover accidental prose
 outside the root and emits a model-visible `SYSTEM TIPS` correction for the next
 round. Recovered terminal answers are never accepted. XML state branches are
-strict: `actions`, `final_answer`, and `context_compact` are mutually exclusive
-in one response; `<status>` is rejected. A terminal `<final_answer>` is accepted
+strict: `actions` and `final_answer` are mutually exclusive; `context_compact`
+may be the first capability inside `actions`, followed by later capabilities
+that run only after compaction succeeds. `<status>` is rejected. A terminal `<final_answer>` is accepted
 only when preceded by one `<finish_confirm>` whose content starts with the
 protocol's exact confirmation prefix.
 
@@ -1192,8 +1193,10 @@ payload shape.
 
 Each inline response parses into the same runtime envelope: optional `status`,
 optional `free_talk`, optional `working_still_action`, and optional
-`final_answer`. `context_compact` is an intrinsic action capability and must be
-exclusive with other actions. Protocols may express completion differently:
+`final_answer`. `context_compact` is an intrinsic action capability. When a
+response also contains other actions, compaction must be first and acts as a
+barrier: later actions run only after it succeeds. Protocols may express
+completion differently:
 JSON uses its status field, while XML uses a validated
 `<finish_confirm>` followed by `<final_answer>` as the completion branch.
 `free_talk` is the visible working note for the Thought/Action panel while
@@ -1255,7 +1258,7 @@ in the Thought/Action panel. With `status:"finished"`, `final_answer` is
 required and shown as the closing answer before runtime stops this task's
 action/model loop. In XML, `<final_answer>` is the completion branch, requires a
 valid preceding `<finish_confirm>`, and must not appear together with `<actions>`
-or `<context_compact>`. If the
+or a top-level `<context_compact>`. If the
 model still needs evidence, it must stay working, run actions, and answer after
 the action result is visible. The parser also tolerates common model service drift
 such as a valid JSON envelope embedded in Markdown text, but it never shows raw
@@ -1288,7 +1291,10 @@ model response:
 ```
 
 Runtime validates `discard` and `offload` delta ids against currently visible
-dynamic prompt refs. If all refs exist, it writes offloaded deltas into scratch,
+dynamic prompt refs. The same response may include later capability calls, but
+`context_compact` must be first. Runtime applies it as an execution barrier: if
+compaction fails, later calls are not executed; if it succeeds, they execute in
+their declared order. On success, runtime writes offloaded deltas into scratch,
 hides discarded/offloaded refs, and appends the summary as a new assistant
 checkpoint slice in a fresh dynamic delta. Markdown prompt rendering marks it as
 `## ASSISTANT_ID (context compaction summary)`; XML prompt rendering uses

@@ -1238,7 +1238,8 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
     assert_eq!(outcome.text, "已根据上下文预算停止回填大输出。");
     assert_eq!(model.prompts.len(), 3);
     assert!(model.prompts[1].contains("Your action's output is too large:"));
-    assert!(model.prompts[1].ends_with("Context too long, please compress first:"));
+    assert!(model.prompts[1]
+        .ends_with("Context is too long. Your tool calls must start with context_compact:"));
     assert!(model.prompts[2].contains("context compacted successfully."));
     assert!(model.prompts[1].contains("optimize your action or compact context"));
     assert!(!model.prompts[1].contains(&"0".repeat(1_000)));

@@ -1386,6 +1386,12 @@ pub fn xml_repair_instruction(issue: &str) -> &'static str {
         "truncated_model_output" => {
             "检查到刚刚的输出被 max output token 截断。上一次已收到的截断回复和原生工具参数片段已附在上下文中，请不要再次生成同样长的整段内容。请继续使用 XML response protocol，把工作拆成小块：本次只生成一个较小、完整的 <actions>、<free_talk> 或 <final_answer>，拿到结果后再继续下一小块；长报告可分段写入文件，最后给出简短总结和路径。"
         }
+        "context_compact_must_be_first" => {
+            "检查到 <context_compact> 不是 <actions> 中的第一个 capability。请把它移到所有其他工具之前；后续工具可以保留，它们只会在压缩成功后执行。"
+        }
+        "context_compact_only_once" => {
+            "检查到本次响应包含多个 <context_compact>。每次响应最多调用一次，并将它放在 <actions> 的第一个位置。"
+        }
         "external_tool_call_protocol" => {
             "检查到刚刚的输出用了外部 tool_call/function_call 格式。请使用 XML-native actions：<ASSISTANT><actions><tool_id><argument>value</argument></tool_id></actions></ASSISTANT>；并行工具放入 <parallel>。"
         }
