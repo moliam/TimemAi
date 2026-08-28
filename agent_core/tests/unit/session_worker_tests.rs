@@ -23,6 +23,7 @@ fn failed_durable_supplement_append_releases_command_id_for_retry() {
         reply_tx,
         accepted_command_ids: Arc::new(Mutex::new(BTreeSet::new())),
         pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
+        background_cancel: Arc::new(|| {}),
     };
 
     assert_eq!(
@@ -64,6 +65,7 @@ fn failed_runtime_update_notification_rolls_back_pending_update() {
         reply_tx,
         accepted_command_ids: Arc::new(Mutex::new(BTreeSet::new())),
         pending_runtime_updates: Arc::clone(&pending_runtime_updates),
+        background_cancel: Arc::new(|| {}),
     };
 
     assert_eq!(
@@ -102,6 +104,7 @@ fn recovered_turn_batch_rejects_duplicate_ids_and_rolls_back_closed_send() {
         reply_tx,
         accepted_command_ids: Arc::new(Mutex::new(BTreeSet::new())),
         pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
+        background_cancel: Arc::new(|| {}),
     };
     assert_eq!(
         handle.run_turn_batch_with_command_ids(

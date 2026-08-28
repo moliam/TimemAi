@@ -55,9 +55,15 @@ enum ProbeState {
     },
 }
 
+enum ProbeCacheDisposition {
+    Permanent,
+    Transient(Duration),
+    None,
+}
+
 struct ProbeOutcome {
     profile: InteractionProfile,
-    cache_ttl: Option<Duration>,
+    cache: ProbeCacheDisposition,
 }
 
 struct ProbeCache {
@@ -130,13 +136,29 @@ pub fn negotiate_interaction(
         .entries
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    entries.insert(
-        key,
-        ProbeState::Ready {
-            profile: outcome.profile.clone(),
-            expires_at: outcome.cache_ttl.map(|ttl| Instant::now() + ttl),
-        },
-    );
+    match outcome.cache {
+        ProbeCacheDisposition::Permanent => {
+            entries.insert(
+                key,
+                ProbeState::Ready {
+                    profile: outcome.profile.clone(),
+                    expires_at: None,
+                },
+            );
+        }
+        ProbeCacheDisposition::Transient(ttl) => {
+            entries.insert(
+                key,
+                ProbeState::Ready {
+                    profile: outcome.profile.clone(),
+                    expires_at: Some(Instant::now() + ttl),
+                },
+            );
+        }
+        ProbeCacheDisposition::None => {
+            entries.remove(&key);
+        }
+    }
     cache.ready.notify_all();
     outcome.profile
 }
@@ -156,6 +178,10 @@ fn run_probe(
         .as_ref()
         .is_ok_and(|response| !response.tool_calls.is_empty());
     if !native_supported {
+        let cancelled = single_result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.trim().eq_ignore_ascii_case("cancelled_by_user"));
         let transient_failure = single_result
             .as_ref()
             .err()
@@ -184,7 +210,16 @@ fn run_probe(
                 probe_latency_ms: Some(elapsed_millis(started)),
                 observed_tool_calls: 0,
             },
-            cache_ttl: transient_failure.then_some(TRANSIENT_PROBE_FAILURE_TTL),
+            cache: if cancelled {
+                // Cancellation says nothing about provider capability. Returning
+                // the fallback profile lets the cancelled turn unwind, while
+                // removing the cache entry makes the next turn probe again.
+                ProbeCacheDisposition::None
+            } else if transient_failure {
+                ProbeCacheDisposition::Transient(TRANSIENT_PROBE_FAILURE_TTL)
+            } else {
+                ProbeCacheDisposition::Permanent
+            },
         };
     }
 
@@ -233,7 +268,7 @@ fn run_probe(
             probe_latency_ms: Some(elapsed_millis(started)),
             observed_tool_calls,
         },
-        cache_ttl: None,
+        cache: ProbeCacheDisposition::Permanent,
     }
 }
 

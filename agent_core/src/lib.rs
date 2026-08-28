@@ -1754,6 +1754,18 @@ impl AgentCore {
             .unwrap_or_else(|| "unknown_turn".to_string())
     }
 
+    /// Cancels detached background resources belonging to one Session.
+    /// Foreground work is interrupted by the worker cancellation token.
+    pub fn cancel_background_resources_for_session(&self, session_id: &str) -> usize {
+        self.shell_jobs
+            .cancel_unfinished_for_session(session_id)
+            .len()
+            + self
+                .tool_jobs
+                .cancel_unfinished_for_session(session_id)
+                .len()
+    }
+
     pub fn running_shell_jobs_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
         self.shell_jobs.running_for_session(session_id)
     }
@@ -5382,7 +5394,12 @@ Runtime tool_call ids:",
             "args": action.raw_input,
         });
         if action.background() {
-            return self.tool_jobs.spawn_outcome(&action.action, path, &payload);
+            return self.tool_jobs.spawn_outcome(
+                &self.current_session_id(),
+                &action.action,
+                path,
+                &payload,
+            );
         }
         executor::execute_command_action_outcome(
             &action.action,

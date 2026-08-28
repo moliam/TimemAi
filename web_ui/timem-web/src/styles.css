@@ -4403,8 +4403,13 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 :root[data-theme="light"] .chat-library-search-row:hover { background: #f7faf9; box-shadow: 0 7px 18px #29443b22; }
 :root[data-theme="light"] .chat-library-search-main p { color: #43534d; }
 
-/* Chat Library performance: isolate row layout and avoid full-screen live backdrop filtering. */
-.chat-library-center-backdrop { backdrop-filter: none; }
+/* Modal centers obscure and block the inactive workspace behind them. */
+body.workspace-modal-open { overflow: hidden; }
+body.workspace-modal-open .app-shell { user-select: none; }
+.chat-library-center-backdrop {
+  backdrop-filter: blur(9px) saturate(.78);
+  -webkit-backdrop-filter: blur(9px) saturate(.78);
+}
 .chat-library-list { contain: layout paint style; }
 .chat-library-search-row,
 .chat-library-favorite-row { contain: layout paint style; content-visibility: auto; contain-intrinsic-size: auto 82px; }
@@ -4428,9 +4433,10 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 }
 :root[data-theme="light"] .session-interrupted-icon { color: #7b6854; }
 
-/* Borderless surface pass: paint-cheap Settings navigation and shadow-led overlays. */
+/* Borderless surface pass: paint-cheap Settings navigation and a modal workspace veil. */
 .settings-center-backdrop {
-  backdrop-filter: none;
+  backdrop-filter: blur(9px) saturate(.78);
+  -webkit-backdrop-filter: blur(9px) saturate(.78);
   background: #030706c7;
 }
 .settings-center {

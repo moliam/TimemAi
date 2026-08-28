@@ -32,6 +32,20 @@ fn reliable_command_wire_is_legacy_compatible_and_ack_is_correlated() {
     }))
     .unwrap();
     assert!(legacy.command_id.is_none());
+    let targeted: BrowserCommand = serde_json::from_value(json!({
+        "type": "turn_cancel",
+        "session_id": "session_a",
+        "target_command_id": "submit_1",
+        "command_id": "cancel_2"
+    }))
+    .unwrap();
+    assert!(matches!(
+        targeted.command,
+        ClientCommand::TurnCancel {
+            ref session_id,
+            target_command_id: Some(ref target_command_id),
+        } if session_id == "session_a" && target_command_id == "submit_1"
+    ));
     let ack = serde_json::to_value(command_ack(
         "cancel_1",
         CommandAckStatus::Rejected,
@@ -915,6 +929,7 @@ fn command_lanes_serialize_one_session_without_globally_serializing_other_sessio
     let state = routing_test_state();
     let command = |session_id: &str| ClientCommand::TurnCancel {
         session_id: session_id.to_string(),
+        target_command_id: None,
     };
     let (_, session_a_first) = command_lane(&state, &command("session_a")).unwrap();
     let (_, session_a_second) = command_lane(&state, &command("session_a")).unwrap();
@@ -940,6 +955,7 @@ fn completed_command_lanes_are_reclaimed_without_removing_a_lane_with_pending_ti
     for ordinal in 0..256 {
         let command = ClientCommand::TurnCancel {
             session_id: format!("ephemeral-session-{ordinal}"),
+            target_command_id: None,
         };
         let (key, lane) = command_lane(&state, &command).unwrap();
         let accepted = AcceptedCommandLane {
@@ -960,6 +976,7 @@ fn completed_command_lanes_are_reclaimed_without_removing_a_lane_with_pending_ti
 
     let command = ClientCommand::TurnCancel {
         session_id: "shared-pending-session".to_string(),
+        target_command_id: None,
     };
     let (first_key, lane) = command_lane(&state, &command).unwrap();
     let first = AcceptedCommandLane {
@@ -1253,6 +1270,113 @@ fn persisted_turn_command_id_prevents_reexecution_after_terminal_ack_loss() {
     };
     assert_eq!(turn.turn_id, first.turn_id);
     assert_eq!(state.sessions.lock().unwrap()[&session_id].turns.len(), 1);
+}
+
+#[test]
+fn pending_turn_identity_is_serialized_for_refresh_recovery() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "PENDING_SNAPSHOT");
+    let pending = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "recover this pending intent",
+        Some("submit-refresh"),
+    )
+    .unwrap();
+
+    let snapshot = serde_json::to_value(snapshot_for(&state, TEST_PORT)).unwrap();
+    let serialized = snapshot["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["session_id"] == session_id)
+        .unwrap();
+    assert_eq!(serialized["pending_turn_id"], pending.turn_id);
+    assert!(serialized["active_turn_id"].is_null());
+    assert_eq!(
+        serialized["turns"][0]["user_entries"][0]["command_id"],
+        "submit-refresh"
+    );
+}
+
+#[test]
+fn accepted_targeted_cancel_is_serialized_until_the_target_turn_finishes() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "CANCELLING_SNAPSHOT");
+    let pending = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "cancel and refresh",
+        Some("submit-cancelling"),
+    )
+    .unwrap();
+
+    let mut events = state.events.subscribe();
+    assert!(handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnCancel {
+            session_id: session_id.clone(),
+            target_command_id: Some("submit-cancelling".to_string()),
+        },
+    )
+    .unwrap()
+    .is_none());
+    assert!(drain_wire_events(&mut events).iter().any(|event| matches!(
+        event,
+        WireEvent::TurnCancelling {
+            session_id: event_session_id,
+            turn_id,
+            target_command_id: Some(target_command_id),
+        } if event_session_id == &session_id
+            && turn_id == &pending.turn_id
+            && target_command_id == "submit-cancelling"
+    )));
+
+    let snapshot = serde_json::to_value(snapshot_for(&state, TEST_PORT)).unwrap();
+    let serialized = snapshot["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["session_id"] == session_id)
+        .unwrap();
+    assert_eq!(serialized["pending_turn_id"], pending.turn_id);
+    assert_eq!(serialized["cancelling_turn_id"], pending.turn_id);
+    assert!(serialized["active_turn_id"].is_null());
+}
+
+#[test]
+fn targeted_cancel_rejects_a_different_current_turn_without_mutation() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "CANCEL_TARGET_MISMATCH");
+    let pending = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "do not cancel the wrong turn",
+        Some("submit-current"),
+    )
+    .unwrap();
+
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnCancel {
+            session_id: session_id.clone(),
+            target_command_id: Some("submit-other".to_string()),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, "turn_cancel_target_mismatch");
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(
+        session.pending_turn_id.as_deref(),
+        Some(pending.turn_id.as_str())
+    );
+    assert_eq!(session.state, "ready");
+    assert_eq!(session.turns.last().unwrap().state, "pending");
+    assert!(session.turns.last().unwrap().completion.is_none());
 }
 
 #[test]
@@ -6604,6 +6728,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         history_has_more: false,
         resume_notice_pending: false,
         active_turn_id: None,
+        cancelling_turn_id: None,
         pending_turn_id: None,
         pending_completion_message_id: None,
         pending_unconsumed_supplements: Vec::new(),
@@ -8059,6 +8184,7 @@ fn cancel_stops_all_session_workers_and_next_turn_runs_only_primary() {
         TEST_PORT,
         ClientCommand::TurnCancel {
             session_id: session_id.to_string(),
+            target_command_id: None,
         },
     )
     .unwrap();
@@ -8171,7 +8297,15 @@ fn concurrent_cancel_supplement_and_final_are_isolated_by_session() {
         let session_id = cancel_session.clone();
         thread::spawn(move || {
             barrier.wait();
-            handle_command(&state, TEST_PORT, ClientCommand::TurnCancel { session_id }).unwrap();
+            handle_command(
+                &state,
+                TEST_PORT,
+                ClientCommand::TurnCancel {
+                    session_id,
+                    target_command_id: None,
+                },
+            )
+            .unwrap();
         })
     };
     let supplement_thread = {
@@ -8309,8 +8443,15 @@ fn eight_working_sessions_keep_mixed_cancel_supplement_final_and_request_scoped(
                 barrier.wait();
                 match ordinal % 4 {
                     0 => {
-                        handle_command(&state, TEST_PORT, ClientCommand::TurnCancel { session_id })
-                            .unwrap();
+                        handle_command(
+                            &state,
+                            TEST_PORT,
+                            ClientCommand::TurnCancel {
+                                session_id,
+                                target_command_id: None,
+                            },
+                        )
+                        .unwrap();
                     }
                     1 => {
                         append_turn_supplement_with_pending_attachments(
@@ -9506,6 +9647,7 @@ fn duplicate_cancel_commands_are_idempotent_for_one_active_turn() {
             TEST_PORT,
             ClientCommand::TurnCancel {
                 session_id: session_id.clone(),
+                target_command_id: None,
             },
         )
         .unwrap()
@@ -9523,6 +9665,7 @@ fn duplicate_cancel_commands_are_idempotent_for_one_active_turn() {
         TEST_PORT,
         ClientCommand::TurnCancel {
             session_id: session_id.clone(),
+            target_command_id: None,
         },
     )
     .unwrap()
@@ -9651,6 +9794,7 @@ fn rapid_stop_and_send_clicks_during_active_turn_do_not_break_the_session() {
             TEST_PORT,
             ClientCommand::TurnCancel {
                 session_id: session_id.clone(),
+                target_command_id: None,
             },
         )
         .unwrap()
@@ -10854,6 +10998,85 @@ fn real_worker_self_tool_path_call_is_read_only_for_web_session_cwd() {
     assert_eq!(
         state.sessions.lock().unwrap()[&session_id].current_dir,
         root.display().to_string()
+    );
+}
+
+#[tokio::test]
+async fn targeted_cancel_finishes_a_turn_waiting_for_work_instruction_permission() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "CANCEL_PENDING_GUIDE");
+    let current_dir = {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.work_instruction_mode = WorkInstructionLoadMode::Ask;
+        PathBuf::from(&session.current_dir)
+    };
+    std::fs::write(
+        current_dir.join("AGENTS.md"),
+        "Never reaches Core after Stop.",
+    )
+    .unwrap();
+    let mut wire_events = state.events.subscribe();
+
+    handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("submit-guide"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "wait for permission".to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+    let pending_turn_id = state.sessions.lock().unwrap()[&session_id]
+        .pending_turn_id
+        .clone()
+        .unwrap();
+
+    assert!(handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnCancel {
+            session_id: session_id.clone(),
+            target_command_id: Some("submit-guide".to_string()),
+        },
+    )
+    .unwrap()
+    .is_none());
+
+    let published = drain_wire_events(&mut wire_events);
+    let finished = published.iter().find_map(|event| match event {
+        WireEvent::TurnFinished {
+            session_id: event_session_id,
+            turn_id,
+            outcome,
+        } if event_session_id == &session_id => Some((turn_id, outcome)),
+        _ => None,
+    });
+    let (turn_id, outcome) = finished.expect("Host-only pending cancel must publish TurnFinished");
+    assert_eq!(turn_id.as_deref(), Some(pending_turn_id.as_str()));
+    assert_eq!(outcome["completion"]["stop_reason"], "CancelledByUser");
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(session.pending_turn_id, None);
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(session.state, "ready");
+    assert!(session.pending_work_instruction_turn.is_none());
+    let turn = session
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == pending_turn_id)
+        .unwrap();
+    assert_eq!(turn.state, "finished");
+    assert_eq!(
+        turn.completion.as_ref().unwrap()["stop_reason"],
+        "CancelledByUser"
     );
 }
 
