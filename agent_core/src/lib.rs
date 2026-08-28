@@ -197,8 +197,7 @@ pub use session_worker::{
     CoreSessionWorkerLifecycleState, CoreSessionWorkerManager, CoreSessionWorkerRuntime,
     CoreSessionWorkerStatus, ToolGenRequest,
 };
-use shell_exec::FileShellJobStore;
-pub use shell_exec::ShellJobRecord;
+use shell_exec::ShellJobManager;
 pub use shell_exec::{RunningShellJob, ShellJobExitUpdate};
 pub use status_summary::{
     context_bar_filled, context_percent, meaningful_latest_usage, runtime_token_status_view,
@@ -1437,7 +1436,7 @@ pub struct AgentCore {
     pub(crate) memory: FileMemoryStore,
     pub(crate) scratch: FileScratchStore,
     pub(crate) chat_history: FileChatHistoryStore,
-    pub(crate) shell_jobs: FileShellJobStore,
+    pub(crate) shell_jobs: ShellJobManager,
     pub(crate) tool_jobs: FileToolJobStore,
     action_audit: FileActionAuditStore,
     pub(crate) self_tool: SelfToolState,
@@ -1521,7 +1520,7 @@ impl AgentCore {
             memory: FileMemoryStore::new(memory_dir),
             scratch: FileScratchStore::new(memory_dir),
             chat_history: FileChatHistoryStore::new(memory_dir),
-            shell_jobs: FileShellJobStore::new(memory_dir),
+            shell_jobs: ShellJobManager::new(memory_dir),
             tool_jobs: FileToolJobStore::new(memory_dir),
             action_audit: FileActionAuditStore::new(memory_dir),
             self_tool,
