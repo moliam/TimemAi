@@ -1256,74 +1256,6 @@ fn persisted_turn_command_id_prevents_reexecution_after_terminal_ack_loss() {
 }
 
 #[test]
-fn restore_does_not_revive_an_old_unfinished_turn_after_a_newer_turn_completed() {
-    let state = routing_test_state();
-    let session_id = register_real_worker(&state, "RESTORE_OLD_UNFINISHED");
-
-    let old_turn = start_web_turn_with_command_id(
-        &state,
-        &session_id,
-        "old command interrupted before completion",
-        Some("old_accepted_command"),
-    )
-    .unwrap();
-
-    {
-        let mut sessions = state.sessions.lock().unwrap();
-        let session = sessions.get_mut(&session_id).unwrap();
-        session.turns.last_mut().unwrap().user_entries[0].delivery_state =
-            Some(ChatCommandDeliveryState::CoreAccepted);
-        session.turns.last_mut().unwrap().state = "restored".to_string();
-
-        session.turns.push(WebTurn {
-            turn_id: "web_turn_newer_completed".to_string(),
-            state: "completed".to_string(),
-            created_at_ms: old_turn.created_at_ms.saturating_add(1),
-            user_entries: vec![WebTurnUserEntry {
-                kind: "task".to_string(),
-                text: "newer completed command".to_string(),
-                attachments: Vec::new(),
-                created_at_ms: old_turn.created_at_ms.saturating_add(1),
-                command_id: Some("newer_committed_command".to_string()),
-                delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
-                worker_roles: Vec::new(),
-            }],
-            events: Vec::new(),
-            sub_answers: Vec::new(),
-            // A turn can finish without an assistant message, for example after
-            // a protocol/model error. Its persisted completion is still terminal.
-            final_answer: None,
-            completion: Some(json!({"stop_reason": "model_error"})),
-        });
-        session.active_turn_id = None;
-        session.state = "ready".to_string();
-    }
-
-    resume_unfinished_core_command_after_restore(&state, &session_id).unwrap();
-
-    let sessions = state.sessions.lock().unwrap();
-    let session = &sessions[&session_id];
-    assert_eq!(session.state, "ready");
-    assert_eq!(session.active_turn_id, None);
-    assert_eq!(
-        session
-            .turns
-            .iter()
-            .find(|turn| turn.turn_id == old_turn.turn_id)
-            .unwrap()
-            .state,
-        "restored"
-    );
-
-    drop(sessions);
-    let manager = {
-        let mut guard = state.manager.lock().unwrap();
-        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
-    };
-    manager.shutdown_all().unwrap();
-}
-
-#[test]
 fn core_turn_started_immediately_publishes_authoritative_live_state() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "CORE_STARTED_WIRE");
@@ -1462,301 +1394,272 @@ fn unmatched_core_turn_started_does_not_activate_an_unrelated_pending_intent() {
 }
 
 #[test]
-fn restore_redrives_unfinished_core_accepted_intent_into_the_new_worker() {
-    let state = routing_test_state();
-    let session_id = register_real_worker(&state, "RESTORE_CORE_ACCEPTED");
-    let command_id = "accepted_before_process_crash";
-    let turn = start_web_turn_with_command_id(
-        &state,
-        &session_id,
-        "must resume after process restart",
-        Some(command_id),
-    )
-    .unwrap();
-    append_turn_supplement_with_pending_attachments(
-        &state,
-        &session_id,
-        "first supplement recorded before crash".to_string(),
-        Some("restore_supplement_1"),
-    )
-    .unwrap();
-    append_turn_supplement_with_pending_attachments(
-        &state,
-        &session_id,
-        "second supplement recorded before crash".to_string(),
-        Some("restore_supplement_2"),
-    )
-    .unwrap();
+fn restored_interrupted_marker_targets_only_the_persisted_last_turn() {
+    let mut turns = vec![
+        WebTurn {
+            turn_id: "older_unfinished".to_string(),
+            state: "restored".to_string(),
+            created_at_ms: 1,
+            user_entries: Vec::new(),
+            events: Vec::new(),
+            sub_answers: Vec::new(),
+            final_answer: None,
+            completion: None,
+        },
+        WebTurn {
+            turn_id: "persisted_last".to_string(),
+            state: "restored".to_string(),
+            created_at_ms: 2,
+            user_entries: Vec::new(),
+            events: Vec::new(),
+            sub_answers: Vec::new(),
+            final_answer: None,
+            completion: None,
+        },
+    ];
 
-    {
-        let mut sessions = state.sessions.lock().unwrap();
-        let session = sessions.get_mut(&session_id).unwrap();
-        for entry in &mut session.turns.last_mut().unwrap().user_entries {
-            entry.delivery_state = Some(ChatCommandDeliveryState::CoreAccepted);
-        }
-        session.turns.last_mut().unwrap().state = "restored".to_string();
-        session.active_turn_id = None;
-        session.pending_turn_id = None;
-        session.state = "ready".to_string();
-        for worker in &mut session.workers {
-            worker.state = "ready".to_string();
-        }
-    }
-
-    resume_unfinished_core_command_after_restore(&state, &session_id).unwrap();
-
-    {
-        let sessions = state.sessions.lock().unwrap();
-        let session = &sessions[&session_id];
-        assert_eq!(session.state, "ready");
-        assert_eq!(session.active_turn_id, None);
-        assert_eq!(session.pending_turn_id, None);
-        assert_eq!(session.turns.last().unwrap().state, "restored");
-        assert!(session.workers.iter().all(|worker| worker.state == "ready"));
-    }
-
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut observed_turn_started = false;
-    loop {
-        for (event_session_id, context_id, worker_id, event) in drain_worker_events(&state) {
-            let is_matching_start = matches!(
-                &event,
-                CoreSessionWorkerEvent::TurnStarted {
-                    command_id: Some(started_command_id)
-                } if started_command_id == command_id
-            );
-            handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
-
-            if is_matching_start {
-                observed_turn_started = true;
-                let sessions = state.sessions.lock().unwrap();
-                let session = &sessions[&session_id];
-                assert_eq!(session.state, "working");
-                assert_eq!(
-                    session.active_turn_id.as_deref(),
-                    Some(turn.turn_id.as_str())
-                );
-                assert_eq!(session.pending_turn_id, None);
-                assert_eq!(session.turns.last().unwrap().state, "working");
-                assert!(session
-                    .workers
-                    .iter()
-                    .any(|worker| worker.state == "working"));
-            }
-        }
-
-        if state.sessions.lock().unwrap()[&session_id]
-            .turns
-            .last()
-            .unwrap()
-            .final_answer
-            .as_deref()
-            == Some("RESTORE_CORE_ACCEPTED")
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "restored CoreAccepted intent was not re-driven"
-        );
-        thread::sleep(Duration::from_millis(2));
-    }
-    assert!(
-        observed_turn_started,
-        "restored work must cross the Core TurnStarted boundary"
+    mark_restored_interrupted_turn(
+        &mut turns,
+        StoredSessionState::Interrupted,
+        Some("persisted_last"),
     );
 
-    let manager = {
-        let mut guard = state.manager.lock().unwrap();
-        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
-    };
-    manager.shutdown_all().unwrap();
+    assert_eq!(turns[0].state, "restored");
+    assert_eq!(turns[1].state, "interrupted");
 }
 
 #[test]
-fn restore_submit_failure_keeps_session_ready_and_turn_restored() {
+fn restored_interrupted_marker_never_relabels_terminal_or_unrelated_turns() {
+    let terminal = WebTurn {
+        turn_id: "terminal_last".to_string(),
+        state: "completed".to_string(),
+        created_at_ms: 2,
+        user_entries: Vec::new(),
+        events: Vec::new(),
+        sub_answers: Vec::new(),
+        final_answer: None,
+        completion: Some(json!({"stop_reason": "model_error"})),
+    };
+    let older = WebTurn {
+        turn_id: "older_unfinished".to_string(),
+        state: "restored".to_string(),
+        created_at_ms: 1,
+        user_entries: Vec::new(),
+        events: Vec::new(),
+        sub_answers: Vec::new(),
+        final_answer: None,
+        completion: None,
+    };
+    let mut turns = vec![older, terminal];
+
+    mark_restored_interrupted_turn(
+        &mut turns,
+        StoredSessionState::Interrupted,
+        Some("terminal_last"),
+    );
+    assert_eq!(turns[0].state, "restored");
+    assert_eq!(turns[1].state, "completed");
+
+    mark_restored_interrupted_turn(
+        &mut turns,
+        StoredSessionState::Ready,
+        Some("older_unfinished"),
+    );
+    mark_restored_interrupted_turn(&mut turns, StoredSessionState::Interrupted, None);
+    mark_restored_interrupted_turn(
+        &mut turns,
+        StoredSessionState::Interrupted,
+        Some("missing_turn"),
+    );
+    assert_eq!(turns[0].state, "restored");
+    assert_eq!(turns[1].state, "completed");
+}
+
+#[test]
+fn aggregate_session_state_preserves_interrupted_until_real_activity_changes_it() {
+    let ready_worker = WebWorker {
+        worker_id: "worker".to_string(),
+        context_id: "context".to_string(),
+        display_name: "Worker".to_string(),
+        ordinal: 0,
+        state: "ready".to_string(),
+        parent_worker_id: None,
+    };
+    assert_eq!(
+        aggregate_web_session_state(std::slice::from_ref(&ready_worker), "interrupted"),
+        "interrupted"
+    );
+    assert_eq!(
+        aggregate_web_session_state(std::slice::from_ref(&ready_worker), "ready"),
+        "ready"
+    );
+
+    let mut working = ready_worker.clone();
+    working.state = "working".to_string();
+    assert_eq!(
+        aggregate_web_session_state(&[working], "interrupted"),
+        "working"
+    );
+
+    let mut error = ready_worker.clone();
+    error.state = "error".to_string();
+    assert_eq!(
+        aggregate_web_session_state(&[error], "interrupted"),
+        "error"
+    );
+
+    let mut stopped = ready_worker;
+    stopped.state = "stopped".to_string();
+    assert_eq!(
+        aggregate_web_session_state(&[stopped], "interrupted"),
+        "stopped"
+    );
+    assert_eq!(
+        aggregate_web_session_state(&[], "interrupted"),
+        "interrupted"
+    );
+}
+
+#[test]
+fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can_start() {
     let state = routing_test_state();
-    let session_id = register_real_worker(&state, "RESTORE_SUBMIT_FAILURE");
-    let command_id = "restore_command_without_live_worker";
+    let session_id = "session_a";
+    let worker_id = state.sessions.lock().unwrap()[session_id]
+        .primary_worker_id
+        .clone();
+    let stale_command_id = "stale_before_restart";
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.state = "interrupted".to_string();
+        session.turns.push(WebTurn {
+            turn_id: "interrupted_turn".to_string(),
+            state: "interrupted".to_string(),
+            created_at_ms: 1,
+            user_entries: vec![WebTurnUserEntry {
+                kind: "task".to_string(),
+                text: "old work".to_string(),
+                attachments: Vec::new(),
+                created_at_ms: 1,
+                command_id: Some(stale_command_id.to_string()),
+                delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
+                worker_roles: Vec::new(),
+            }],
+            events: Vec::new(),
+            sub_answers: Vec::new(),
+            final_answer: None,
+            completion: None,
+        });
+    }
+
+    assert!(
+        activate_core_started_turn(&state, session_id, &worker_id, Some(stale_command_id),)
+            .is_none()
+    );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        assert_eq!(sessions[session_id].state, "interrupted");
+        assert_eq!(
+            sessions[session_id].turns.last().unwrap().state,
+            "interrupted"
+        );
+    }
+
+    let new_turn = start_web_turn_with_command_id(
+        &state,
+        session_id,
+        "new work after restart",
+        Some("new_after_restart"),
+    )
+    .unwrap();
+    let started =
+        activate_core_started_turn(&state, session_id, &worker_id, Some("new_after_restart"))
+            .expect("a registered new pending command may start");
+    assert_eq!(started.turn_id, new_turn.turn_id);
+    assert_eq!(started.state, "working");
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(sessions[session_id].state, "working");
+    assert_eq!(sessions[session_id].turns[0].state, "interrupted");
+}
+
+#[test]
+fn restart_marks_running_session_and_latest_unfinished_turn_interrupted_without_redrive() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("restart_interrupted_session"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "restart_interrupted_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    state.sessions.lock().unwrap().clear();
+
+    let session_id = create_session(
+        &state,
+        Some("Interrupted on restart".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
     let turn = start_web_turn_with_command_id(
         &state,
         &session_id,
-        "must not look live when redrive submission fails",
-        Some(command_id),
+        "do not resume this command after restart",
+        Some("accepted_before_restart"),
     )
     .unwrap();
+    {
+        let store = current_session_store(&state).unwrap();
+        let stored = store.load_session(&session_id).unwrap().unwrap();
+        assert_eq!(stored.state, StoredSessionState::Interrupted);
+    }
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+    assert_eq!(
+        restore_stored_sessions_after_runtime_restart(&restarted).unwrap(),
+        1
+    );
 
     {
-        let mut sessions = state.sessions.lock().unwrap();
-        let session = sessions.get_mut(&session_id).unwrap();
-        session.turns.last_mut().unwrap().user_entries[0].delivery_state =
-            Some(ChatCommandDeliveryState::CoreAccepted);
-        session.turns.last_mut().unwrap().state = "restored".to_string();
-        session.active_turn_id = None;
-        session.pending_turn_id = None;
-        session.state = "ready".to_string();
-        for worker in &mut session.workers {
-            worker.state = "ready".to_string();
-        }
-    }
-
-    let old_manager = {
-        let mut guard = state.manager.lock().unwrap();
-        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
-    };
-
-    let error = resume_unfinished_core_command_after_restore(&state, &session_id)
-        .expect_err("redrive must fail without the restored Core worker");
-    assert_eq!(error, "session_worker_not_found");
-
-    {
-        let sessions = state.sessions.lock().unwrap();
-        let session = &sessions[&session_id];
-        assert_eq!(session.state, "ready");
-        assert_eq!(session.active_turn_id, None);
-        assert_eq!(session.pending_turn_id, None);
-        assert_eq!(
-            session
-                .turns
-                .iter()
-                .find(|candidate| candidate.turn_id == turn.turn_id)
-                .unwrap()
-                .state,
-            "restored"
-        );
-        assert!(session.workers.iter().all(|worker| worker.state == "ready"));
-    }
-
-    old_manager.shutdown_all().unwrap();
-}
-
-#[test]
-fn four_sessions_restore_task_and_supplements_as_parallel_isolated_atomic_batches() {
-    const SESSION_COUNT: usize = 4;
-    let state = routing_test_state();
-    let model_barrier = Arc::new(std::sync::Barrier::new(SESSION_COUNT));
-    let sessions = (0..SESSION_COUNT)
-        .map(|ordinal| {
-            let name = format!("RESTORE_PARALLEL_{ordinal}");
-            let prompts = Arc::new(Mutex::new(Vec::new()));
-            let session_id = register_restore_barrier_worker(
-                &state,
-                name.clone(),
-                Arc::clone(&model_barrier),
-                Arc::clone(&prompts),
-            );
-            start_web_turn_with_command_id(
-                &state,
-                &session_id,
-                &format!("{name}_TASK"),
-                Some(&format!("{name}_TASK_COMMAND")),
-            )
-            .unwrap();
-            for supplement in 0..2 {
-                append_turn_supplement_with_pending_attachments(
-                    &state,
-                    &session_id,
-                    format!("{name}_SUPPLEMENT_{supplement}"),
-                    Some(&format!("{name}_SUPPLEMENT_COMMAND_{supplement}")),
-                )
-                .unwrap();
-            }
-            {
-                let mut sessions = state.sessions.lock().unwrap();
-                let session = sessions.get_mut(&session_id).unwrap();
-                for entry in &mut session.turns.last_mut().unwrap().user_entries {
-                    entry.delivery_state = Some(ChatCommandDeliveryState::CoreAccepted);
-                }
-                session.active_turn_id = None;
-                session.state = "ready".to_string();
-            }
-            (session_id, name, prompts)
-        })
-        .collect::<Vec<_>>();
-
-    let callers = sessions
-        .iter()
-        .map(|(session_id, _, _)| {
-            let state = state.clone();
-            let session_id = session_id.clone();
-            thread::spawn(move || resume_unfinished_core_command_after_restore(&state, &session_id))
-        })
-        .collect::<Vec<_>>();
-    for caller in callers {
-        caller.join().unwrap().unwrap();
-    }
-
-    let deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        for (event_session_id, context_id, worker_id, event) in drain_worker_events(&state) {
-            handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
-        }
-        let all_finished = {
-            let stored = state.sessions.lock().unwrap();
-            sessions.iter().all(|(session_id, name, _)| {
-                stored[session_id]
-                    .turns
-                    .last()
-                    .and_then(|turn| turn.final_answer.as_deref())
-                    == Some(format!("{name}_FINAL").as_str())
-            })
-        };
-        if all_finished {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "parallel restore did not complete; model barrier would expose global serialization"
-        );
-        thread::yield_now();
-    }
-
-    let stored = state.sessions.lock().unwrap();
-    for (session_id, name, prompts) in &sessions {
-        let prompts = prompts.lock().unwrap();
-        assert_eq!(
-            prompts.len(),
-            1,
-            "restored batch should need one model call"
-        );
-        let prompt = &prompts[0];
-        assert!(prompt.contains(&format!("{name}_TASK")));
-        assert!(prompt.contains(&format!("{name}_SUPPLEMENT_0")));
-        assert!(prompt.contains(&format!("{name}_SUPPLEMENT_1")));
-        for (_, other_name, _) in &sessions {
-            if other_name != name {
-                assert!(
-                    !prompt.contains(other_name),
-                    "restored prompt leaked another session"
-                );
-            }
-        }
-        let turn = stored[session_id].turns.last().unwrap();
-        assert_eq!(
-            turn.final_answer.as_deref(),
-            Some(format!("{name}_FINAL").as_str())
-        );
-        assert_eq!(turn.user_entries.len(), 3);
-        assert_eq!(
-            turn.user_entries
-                .iter()
-                .filter_map(|entry| entry.command_id.as_deref())
-                .collect::<Vec<_>>(),
-            vec![
-                format!("{name}_TASK_COMMAND"),
-                format!("{name}_SUPPLEMENT_COMMAND_0"),
-                format!("{name}_SUPPLEMENT_COMMAND_1"),
-            ]
-        );
-        assert!(turn
-            .user_entries
+        let sessions = restarted.sessions.lock().unwrap();
+        let restored = &sessions[&session_id];
+        assert_eq!(restored.state, "interrupted");
+        assert_eq!(restored.active_turn_id, None);
+        assert_eq!(restored.pending_turn_id, None);
+        assert!(restored
+            .workers
             .iter()
-            .all(|entry| entry.delivery_state == Some(ChatCommandDeliveryState::CoreAccepted)));
+            .all(|worker| worker.state == "ready"));
+        let restored_turn = restored
+            .turns
+            .iter()
+            .find(|candidate| candidate.turn_id == turn.turn_id)
+            .unwrap();
+        assert_eq!(restored_turn.state, "interrupted");
+        assert_eq!(restored_turn.final_answer, None);
+        assert_eq!(restored_turn.completion, None);
     }
-    drop(stored);
+
+    thread::sleep(Duration::from_millis(30));
+    assert!(drain_worker_events(&restarted)
+        .iter()
+        .all(|(_, _, _, event)| { !matches!(event, CoreSessionWorkerEvent::TurnStarted { .. }) }));
+    let persisted = current_session_store(&restarted)
+        .unwrap()
+        .load_session(&session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(persisted.state, StoredSessionState::Interrupted);
 
     let manager = {
-        let mut guard = state.manager.lock().unwrap();
+        let mut guard = restarted.manager.lock().unwrap();
         std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
     };
     manager.shutdown_all().unwrap();
@@ -2747,6 +2650,34 @@ fn pending_upload_moves_into_the_submitted_user_entry_and_is_not_reinjected() {
         state.sessions.lock().unwrap()[session_id].attachments,
         vec![attachment]
     );
+}
+
+#[test]
+fn rolling_back_a_failed_new_turn_preserves_interrupted_session_state() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut(session_id).unwrap().state = "interrupted".to_string();
+    }
+    let turn = start_web_turn_with_command_id(
+        &state,
+        session_id,
+        "new work that fails before Core accepts it",
+        Some("failed_after_restart"),
+    )
+    .unwrap();
+
+    rollback_web_turn(&state, session_id, &turn.turn_id, Vec::new());
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[session_id];
+    assert_eq!(session.state, "interrupted");
+    assert_eq!(session.pending_turn_id, None);
+    assert!(session
+        .turns
+        .iter()
+        .all(|item| item.turn_id != turn.turn_id));
 }
 
 #[test]
@@ -9499,41 +9430,6 @@ impl ModelClient for TaggedFinalModel {
     }
 }
 
-struct RestoreBarrierModel {
-    barrier: Arc<std::sync::Barrier>,
-    prompts: Arc<Mutex<Vec<String>>>,
-    final_answer: String,
-}
-
-impl ModelClient for RestoreBarrierModel {
-    fn call_model(
-        &mut self,
-        _config: &ModelServiceConfig,
-        prompt: &str,
-        _audit_file: &Path,
-        _should_cancel: &mut dyn FnMut() -> bool,
-    ) -> Result<LlmResponse, String> {
-        self.prompts.lock().unwrap().push(prompt.to_string());
-        self.barrier.wait();
-        Ok(LlmResponse {
-            tool_calls: Vec::new(),
-            content: confirmed_xml_response(&format!(
-                "<final_answer>{}</final_answer>",
-                self.final_answer
-            )),
-            model_name: "test-model".to_string(),
-            usage: UsageStats {
-                llm_calls: 1,
-                prompt_tokens: 10,
-                completion_tokens: 2,
-                total_tokens: 12,
-                ..UsageStats::zero()
-            },
-            truncated: false,
-        })
-    }
-}
-
 struct ToolGenPromptCaptureModel {
     prompts: Arc<Mutex<Vec<String>>>,
 }
@@ -9754,69 +9650,6 @@ fn register_real_worker(state: &AppState, name: &'static str) -> String {
         )
         .unwrap();
     let mut session = test_web_session(&session_id, ordinal, name.to_string());
-    session.current_dir = worker_dir.display().to_string();
-    session.contexts[0] = WebContext {
-        context_id: context_id.clone(),
-        current_dir: worker_dir.display().to_string(),
-        worker_ids: vec![worker_id.clone()],
-    };
-    session.workers[0].worker_id = worker_id.clone();
-    session.workers[0].context_id = context_id;
-    session.active_context_id = session.contexts[0].context_id.clone();
-    session.primary_worker_id = worker_id;
-    state
-        .sessions
-        .lock()
-        .unwrap()
-        .insert(session_id.clone(), session);
-    session_id
-}
-
-fn register_restore_barrier_worker(
-    state: &AppState,
-    name: String,
-    barrier: Arc<std::sync::Barrier>,
-    prompts: Arc<Mutex<Vec<String>>>,
-) -> String {
-    let ordinal = state.sessions.lock().unwrap().len() as u32;
-    let session_id = unique_web_id("restore_parallel_session");
-    let context_id = test_context_id(&session_id);
-    let worker_dir =
-        std::env::temp_dir().join(format!("timem_web_parallel_restore_{}_{}", name, now_ms()));
-    std::fs::create_dir_all(&worker_dir).unwrap();
-    let core = AgentCore::new(
-        STATIC_PROMPT,
-        CoreProfile {
-            model: "test-model".to_string(),
-        },
-        &worker_dir,
-    );
-    let config = state.template.settings.lock().unwrap().config.clone();
-    let worker_id = state
-        .manager
-        .lock()
-        .unwrap()
-        .spawn_worker_in_session_with_model_client(
-            core,
-            config,
-            CoreSessionWorkerWorkspace::new(
-                &worker_dir,
-                worker_dir.join("audit.json"),
-                "test-web",
-                "local",
-            ),
-            session_id.clone(),
-            context_id.clone(),
-            Some(name.clone()),
-            None,
-            RestoreBarrierModel {
-                barrier,
-                prompts,
-                final_answer: format!("{name}_FINAL"),
-            },
-        )
-        .unwrap();
-    let mut session = test_web_session(&session_id, ordinal, name);
     session.current_dir = worker_dir.display().to_string();
     session.contexts[0] = WebContext {
         context_id: context_id.clone(),
