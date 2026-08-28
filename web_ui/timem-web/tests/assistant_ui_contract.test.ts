@@ -1278,8 +1278,8 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain(':root[data-theme="light"] .final-answer-outline-card { background: #f5f9f7f7;');
     expect(styles).toContain('.final-answer-outline.overlay.expanded .final-answer-outline-card { background: linear-gradient(90deg,');
     expect(styles).toContain('mask-image: linear-gradient(90deg, #000 0%, #000 70%, #000c 84%, transparent 100%);');
-    expect(styles).toContain('font-size: 11.5px; font-weight: 530; line-height: 1.42;');
-    expect(styles).toContain('.final-answer-outline-card nav > button.level-3 { padding-left: 25px; color: #747e79; font-size: 10.5px; }');
+    expect(styles).toContain('font-size: 11px; font-weight: 530; line-height: 1.42;');
+    expect(styles).toContain('.final-answer-outline-card nav > button.level-3 { padding-left: 25px; color: #747e79; font-size: 10px; }');
     expect(styles).toContain('.final-answer-outline-card nav > button { position: relative; flex: 0 0 auto; min-width: 0; overflow: hidden; border: 0; border-radius: 7px; padding: 6px 7px 6px 11px;');
     expect(styles).not.toContain('.final-answer-outline-card::after {');
     expect(source).not.toContain('sidebar-layout-change');

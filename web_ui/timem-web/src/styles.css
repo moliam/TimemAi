@@ -3050,7 +3050,7 @@ body {
 .final-answer-outline-card { position: relative; width: 172px; min-height: 0; max-height: 65vh; display: flex; flex-direction: column; overflow: hidden; border: 0; border-radius: 0 14px 14px 0; padding: 14px 9px 13px 11px; background: #222825f2; box-shadow: 18px 22px 54px #0000004a, 0 2px 14px #0000002e; color: #89958f; }
 .final-answer-outline.overlay.expanded .final-answer-outline-card { background: linear-gradient(90deg, #292d2bf2 0%, #222825df 58%, #1d23219c 82%, #1d232124 100%); box-shadow: 10px 18px 42px #00000034; transform-origin: left center; animation: final-outline-open .2s cubic-bezier(.2,.8,.2,1) both; backdrop-filter: blur(22px) saturate(120%); -webkit-mask-image: linear-gradient(90deg, #000 0%, #000 70%, #000c 84%, transparent 100%); mask-image: linear-gradient(90deg, #000 0%, #000 70%, #000c 84%, transparent 100%); }
 .final-answer-outline-card header { flex: 0 0 auto; min-height: 22px; display: flex; align-items: center; justify-content: flex-start; gap: 3px; margin: 0 2px 9px 0; }
-.final-answer-outline-card header > span { display: inline-flex; align-items: center; gap: 6px; color: #7f8e88; font-size: 9.5px; font-weight: 740; letter-spacing: .12em; text-transform: uppercase; }
+.final-answer-outline-card header > span { display: inline-flex; align-items: center; gap: 6px; color: #7f8e88; font-size: 9px; font-weight: 740; letter-spacing: .12em; text-transform: uppercase; }
 .final-answer-outline-card header > span svg { color: #6f9489; }
 .final-answer-outline-close { width: 28px; height: 28px; display: inline-flex; flex: none; align-items: center; justify-content: center; border: 0; border-radius: 8px; padding: 0; background: #75aa9a0a; color: #91aaa2; box-shadow: inset 0 0 0 1px #ffffff08; transition: color .16s ease, background .16s ease, box-shadow .16s ease, transform .16s ease; }
 .final-answer-outline-close:hover { background: #75aa9a1a; color: #d2e9e2; box-shadow: inset 0 0 0 1px #75aa9a28; transform: translateX(-1px); }
@@ -3059,17 +3059,17 @@ body {
 .final-answer-outline-card nav::-webkit-scrollbar-track { background: transparent; }
 .final-answer-outline-card nav::-webkit-scrollbar-thumb { border-radius: 999px; background: #78988e66; }
 
-.final-answer-outline-card nav > button.final-answer-outline-start { display: flex; align-items: center; gap: 7px; margin: 0 2px 7px 0; border-bottom: 1px solid #ffffff0c; border-radius: 7px 7px 4px 4px; padding: 6px 7px 8px 4px; color: #95aaa3; font-size: 8.5px; font-weight: 720; letter-spacing: .06em; text-transform: uppercase; }
+.final-answer-outline-card nav > button.final-answer-outline-start { display: flex; align-items: center; gap: 7px; margin: 0 2px 7px 0; border-bottom: 1px solid #ffffff0c; border-radius: 7px 7px 4px 4px; padding: 6px 7px 8px 4px; color: #95aaa3; font-size: 8px; font-weight: 720; letter-spacing: .06em; text-transform: uppercase; }
 .final-answer-outline-card nav > button.final-answer-outline-start::before { display: none; }
 .final-answer-outline-card nav > button.final-answer-outline-start > svg { flex: none; color: #6f9489; }
 .final-answer-outline-card nav > button.final-answer-outline-start.active { background: linear-gradient(90deg, #75b8a31a, transparent); color: #d8eee7; }
 .final-answer-outline-card nav > button.final-answer-outline-start.active > svg { color: #8bc9b7; filter: drop-shadow(0 0 5px #73b9a470); }
 
-.final-answer-outline-card nav > button { position: relative; flex: 0 0 auto; min-width: 0; overflow: hidden; border: 0; border-radius: 7px; padding: 6px 7px 6px 11px; background: transparent; color: #8b9691; font-size: 11.5px; font-weight: 530; line-height: 1.42; text-align: left; text-overflow: ellipsis; white-space: nowrap; transition: color .16s ease, background .16s ease, transform .16s ease; }
+.final-answer-outline-card nav > button { position: relative; flex: 0 0 auto; min-width: 0; overflow: hidden; border: 0; border-radius: 7px; padding: 6px 7px 6px 11px; background: transparent; color: #8b9691; font-size: 11px; font-weight: 530; line-height: 1.42; text-align: left; text-overflow: ellipsis; white-space: nowrap; transition: color .16s ease, background .16s ease, transform .16s ease; }
 .final-answer-outline-card nav > button::before { position: absolute; z-index: 1; top: 50%; left: 4px; width: 4px; height: 4px; border-radius: 50%; background: #68736f; box-shadow: 0 0 0 3px #232825; content: ""; transform: translate(-50%, -50%); transition: width .16s ease, height .16s ease, background .16s ease, box-shadow .16s ease; }
 .final-answer-outline-card nav > button.level-2 { padding-left: 18px; }
 .final-answer-outline-card nav > button.level-2::before { left: 10px; width: 3px; height: 3px; }
-.final-answer-outline-card nav > button.level-3 { padding-left: 25px; color: #747e79; font-size: 10.5px; }
+.final-answer-outline-card nav > button.level-3 { padding-left: 25px; color: #747e79; font-size: 10px; }
 .final-answer-outline-card nav > button.level-3::before { left: 17px; width: 2px; height: 2px; }
 .final-answer-outline-card nav > button:hover { background: #75aa9a10; color: #d0ded9; transform: translateX(2px); }
 .final-answer-outline-card nav > button.active { background: linear-gradient(90deg, #75b8a320, transparent); color: #e1f3ed; }
