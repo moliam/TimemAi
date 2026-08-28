@@ -9,7 +9,11 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 ## Belongs here
 
 - Protocol-neutral runtime data structures and algorithms.
-- Model request/response adapters and cache planning.
+- Model request/response adapters and cache planning. Provider-facing tool
+  schemas are rendered through a dedicated protocol-dialect module rather than
+  mutated in the capability registry or assembled ad hoc in hosts. The executor
+  always validates against the original registered schema; compatibility
+  renderers may only transform the model-facing copy.
 - Model API wire-request planning and transport, including endpoint, headers,
   payload shape, cache-control fields, structured-output fields, HTTP execution,
   response parsing, and audit redaction metadata. Hosts should not rebuild

@@ -80,6 +80,7 @@ pub mod tool_jobs;
 pub(crate) mod tool_registry;
 pub mod tool_repo;
 mod tool_result_gate;
+mod tool_schema_renderer;
 #[path = "../../resources/capabilities/tools/toolgen.rs"]
 pub mod toolgen;
 pub mod work_instructions;
