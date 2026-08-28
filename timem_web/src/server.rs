@@ -36,8 +36,8 @@ use agent_core::{
     CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
-    capability::CapabilityRegistry, self_tool::SelfToolPaths, shell_exec::FileShellJobStore,
-    tool_jobs::FileToolJobStore,
+    capability::CapabilityRegistry, rolling_file_store::RollingCapacity, self_tool::SelfToolPaths,
+    shell_exec::FileShellJobStore, tool_jobs::FileToolJobStore,
 };
 use axum::{
     extract::DefaultBodyLimit,
@@ -84,6 +84,12 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 const TEMPORARY_RETENTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
 const SESSION_HISTORY_PAGE_LIMIT: usize = 200;
 const DEFAULT_MEM_TEMPORARY_RETENTION_DAYS: u16 = 5;
+const MEM_CAPACITY_128_MB: u64 = 128 * 1024 * 1024;
+const MEM_CAPACITY_256_MB: u64 = 256 * 1024 * 1024;
+const MEM_CAPACITY_512_MB: u64 = 512 * 1024 * 1024;
+const MEM_CAPACITY_1_GB: u64 = 1024 * 1024 * 1024;
+const MEM_CAPACITY_5_GB: u64 = 5 * 1024 * 1024 * 1024;
+const MEM_CAPACITY_20_GB: u64 = 20 * 1024 * 1024 * 1024;
 const MILLIS_PER_DAY: i64 = 24 * 60 * 60 * 1_000;
 const MAX_MEM_TEMPORARY_SCAN_ENTRIES: usize = 20_000;
 const MAX_MEM_TEMPORARY_SCAN_DEPTH: usize = 32;
@@ -435,7 +441,16 @@ struct WebMemState {
 }
 
 impl WebMemState {
+    #[cfg(test)]
     fn new(data_dir: PathBuf, space: String) -> Result<Self, String> {
+        Self::new_with_debug_defaults(data_dir, space, false)
+    }
+
+    fn new_with_debug_defaults(
+        data_dir: PathBuf,
+        space: String,
+        debug: bool,
+    ) -> Result<Self, String> {
         let layout = if Path::new(&space).is_absolute() {
             let memory_dir = validate_web_mem_directory(Path::new(&space))?;
             create_memory_dir(&memory_dir)?;
@@ -449,7 +464,7 @@ impl WebMemState {
         let role_library = load_role_library_resilient(&role_library_path(&layout.memory_dir()))?;
         let model_endpoints = load_model_endpoints_resilient(&layout.memory_dir())?;
         let session_groups = load_session_groups(&layout.memory_dir())?;
-        let settings = load_web_mem_settings(&layout.memory_dir())?;
+        let settings = load_web_mem_settings(&layout.memory_dir(), debug)?;
         let session_store = SessionStore::new(layout.memory_dir());
         Ok(Self {
             space,
@@ -466,9 +481,12 @@ impl WebMemState {
         })
     }
 
-    fn from_directory(path: impl AsRef<Path>) -> Result<Self, String> {
+    fn from_directory_with_debug_defaults(
+        path: impl AsRef<Path>,
+        debug: bool,
+    ) -> Result<Self, String> {
         let path = validate_web_mem_directory(path.as_ref())?;
-        Self::new(path.clone(), path.display().to_string())
+        Self::new_with_debug_defaults(path.clone(), path.display().to_string(), debug)
     }
 
     fn info(&self) -> WebMemInfo {
@@ -480,6 +498,8 @@ impl WebMemState {
                 .display()
                 .to_string(),
             temporary_retention_days: self.settings.temporary_retention_days,
+            temporary_capacity_bytes: self.settings.temporary_capacity_bytes,
+            conversation_capacity_bytes: self.settings.conversation_capacity_bytes,
         }
     }
 }
@@ -491,12 +511,28 @@ struct WebMemSettings {
         alias = "history_retention_days"
     )]
     temporary_retention_days: Option<u16>,
+    #[serde(default)]
+    temporary_capacity_bytes: Option<u64>,
+    #[serde(default)]
+    conversation_capacity_bytes: Option<u64>,
 }
 
 impl Default for WebMemSettings {
     fn default() -> Self {
+        Self::for_debug(false)
+    }
+}
+
+impl WebMemSettings {
+    fn for_debug(debug: bool) -> Self {
         Self {
             temporary_retention_days: default_mem_temporary_retention_days(),
+            temporary_capacity_bytes: Some(if debug {
+                MEM_CAPACITY_512_MB
+            } else {
+                MEM_CAPACITY_128_MB
+            }),
+            conversation_capacity_bytes: Some(MEM_CAPACITY_128_MB),
         }
     }
 }
@@ -513,24 +549,86 @@ fn validate_mem_temporary_retention_days(days: Option<u16>) -> Result<(), String
     }
 }
 
+fn validate_mem_temporary_capacity_bytes(bytes: Option<u64>) -> Result<(), String> {
+    if matches!(
+        bytes,
+        None | Some(
+            MEM_CAPACITY_128_MB
+                | MEM_CAPACITY_256_MB
+                | MEM_CAPACITY_512_MB
+                | MEM_CAPACITY_1_GB
+                | MEM_CAPACITY_5_GB
+        )
+    ) {
+        Ok(())
+    } else {
+        Err("mem_temporary_capacity_bytes_invalid".to_string())
+    }
+}
+
+fn validate_mem_conversation_capacity_bytes(bytes: Option<u64>) -> Result<(), String> {
+    if matches!(
+        bytes,
+        None | Some(
+            MEM_CAPACITY_128_MB
+                | MEM_CAPACITY_512_MB
+                | MEM_CAPACITY_1_GB
+                | MEM_CAPACITY_5_GB
+                | MEM_CAPACITY_20_GB
+        )
+    ) {
+        Ok(())
+    } else {
+        Err("mem_conversation_capacity_bytes_invalid".to_string())
+    }
+}
+
+fn validate_web_mem_settings(settings: &WebMemSettings) -> Result<(), String> {
+    validate_mem_temporary_retention_days(settings.temporary_retention_days)?;
+    validate_mem_temporary_capacity_bytes(settings.temporary_capacity_bytes)?;
+    validate_mem_conversation_capacity_bytes(settings.conversation_capacity_bytes)
+}
+
 fn web_mem_settings_path(memory_dir: &Path) -> PathBuf {
     memory_dir.join("mem_settings.json")
 }
 
-fn load_web_mem_settings(memory_dir: &Path) -> Result<WebMemSettings, String> {
+fn load_web_mem_settings(memory_dir: &Path, debug: bool) -> Result<WebMemSettings, String> {
     let path = web_mem_settings_path(memory_dir);
     let settings = match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice::<WebMemSettings>(&bytes)
-            .map_err(|_| "mem_settings_parse_failed".to_string())?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => WebMemSettings::default(),
+        Ok(bytes) => {
+            let value = serde_json::from_slice::<Value>(&bytes)
+                .map_err(|_| "mem_settings_parse_failed".to_string())?;
+            let has_temporary_capacity = value
+                .as_object()
+                .ok_or_else(|| "mem_settings_parse_failed".to_string())?
+                .contains_key("temporary_capacity_bytes");
+            let has_conversation_capacity = value
+                .as_object()
+                .expect("object checked above")
+                .contains_key("conversation_capacity_bytes");
+            let mut settings = serde_json::from_value::<WebMemSettings>(value)
+                .map_err(|_| "mem_settings_parse_failed".to_string())?;
+            let defaults = WebMemSettings::for_debug(debug);
+            if !has_temporary_capacity {
+                settings.temporary_capacity_bytes = defaults.temporary_capacity_bytes;
+            }
+            if !has_conversation_capacity {
+                settings.conversation_capacity_bytes = defaults.conversation_capacity_bytes;
+            }
+            settings
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            WebMemSettings::for_debug(debug)
+        }
         Err(_) => return Err("mem_settings_read_failed".to_string()),
     };
-    validate_mem_temporary_retention_days(settings.temporary_retention_days)?;
+    validate_web_mem_settings(&settings)?;
     Ok(settings)
 }
 
 fn save_web_mem_settings(memory_dir: &Path, settings: &WebMemSettings) -> Result<(), String> {
-    validate_mem_temporary_retention_days(settings.temporary_retention_days)?;
+    validate_web_mem_settings(settings)?;
     let mut payload = serde_json::to_vec_pretty(settings)
         .map_err(|_| "mem_settings_serialize_failed".to_string())?;
     payload.push(b'\n');
@@ -635,20 +733,17 @@ fn collect_named_temporary_files(root: &Path) -> Result<Vec<MemTemporaryItem>, S
                 .to_str()
                 .ok_or_else(|| "mem_temporary_item_path_invalid".to_string())?
                 .replace('\\', "/");
-            retain_top_mem_temporary_item(
-                out,
-                MemTemporaryItem {
-                    id: format!("file:{relative}"),
-                    path: relative,
-                    kind: "temporary_file".to_string(),
-                    bytes: metadata.len(),
-                    modified_at_ms: modified_at_ms(&metadata),
-                },
-            );
+            out.push(MemTemporaryItem {
+                id: format!("file:{relative}"),
+                path: relative,
+                kind: "temporary_file".to_string(),
+                bytes: metadata.len(),
+                modified_at_ms: modified_at_ms(&metadata),
+            });
         }
         Ok(())
     }
-    let mut items = Vec::with_capacity(MAX_MEM_TEMPORARY_ITEMS);
+    let mut items = Vec::new();
     let mut visited = 0usize;
     if root.exists() {
         visit(root, root, 0, &mut visited, &mut items)?;
@@ -656,23 +751,28 @@ fn collect_named_temporary_files(root: &Path) -> Result<Vec<MemTemporaryItem>, S
     Ok(items)
 }
 
-fn list_mem_temporary_items_at(memory_dir: &Path) -> Result<Vec<MemTemporaryItem>, String> {
+fn all_mem_temporary_items_at(memory_dir: &Path) -> Result<Vec<MemTemporaryItem>, String> {
     let mut items = collect_named_temporary_files(memory_dir)?;
-    let shell_store = FileShellJobStore::new(memory_dir);
-    for item in shell_store
+    for item in FileShellJobStore::new(memory_dir)
         .finished_temporary_items()
         .map_err(|_| "mem_temporary_shell_jobs_read_failed".to_string())?
     {
-        retain_top_mem_temporary_item(
-            &mut items,
-            MemTemporaryItem {
-                id: format!("shell_job:{}", item.id),
-                path: format!("shell_jobs/{}", item.id),
-                kind: "shell_job".to_string(),
-                bytes: item.bytes,
-                modified_at_ms: item.created_at_ms,
-            },
-        );
+        items.push(MemTemporaryItem {
+            id: format!("shell_job:{}", item.id),
+            path: format!("shell_jobs/{}", item.id),
+            kind: "shell_job".to_string(),
+            bytes: item.bytes,
+            modified_at_ms: item.created_at_ms,
+        });
+    }
+    Ok(items)
+}
+
+fn list_mem_temporary_items_at(memory_dir: &Path) -> Result<Vec<MemTemporaryItem>, String> {
+    let mut all = all_mem_temporary_items_at(memory_dir)?;
+    let mut items = Vec::with_capacity(MAX_MEM_TEMPORARY_ITEMS);
+    for item in all.drain(..) {
+        retain_top_mem_temporary_item(&mut items, item);
     }
     items.sort_by(|left, right| {
         right
@@ -711,7 +811,7 @@ fn delete_mem_temporary_items_at(memory_dir: &Path, ids: &[String]) -> Result<us
     if selected.len() != ids.len() {
         return Err("mem_temporary_item_selection_invalid".to_string());
     }
-    let current = list_mem_temporary_items_at(memory_dir)?;
+    let current = all_mem_temporary_items_at(memory_dir)?;
     let available = current
         .iter()
         .map(|item| item.id.as_str())
@@ -853,29 +953,55 @@ fn schedule_mem_temporary_task(
     Ok(())
 }
 
+fn oldest_temporary_items_to_evict(
+    mut items: Vec<MemTemporaryItem>,
+    stable_bytes: u64,
+) -> Vec<String> {
+    items.sort_by_key(|item| (item.modified_at_ms, item.path.clone()));
+    let mut used = items.iter().map(|item| item.bytes).sum::<u64>();
+    let mut delete = Vec::new();
+    for item in items {
+        if used <= stable_bytes {
+            break;
+        }
+        used = used.saturating_sub(item.bytes);
+        delete.push(item.id);
+    }
+    delete
+}
+
 fn apply_temporary_retention(
     layout: &RuntimeDataLayout,
     store: &SessionStore,
     days: Option<u16>,
+    max_bytes: Option<u64>,
     now_ms: i64,
 ) -> Result<TemporaryRetentionResult, String> {
-    let Some(days) = days else {
-        return Ok(TemporaryRetentionResult::default());
-    };
-    validate_mem_temporary_retention_days(Some(days))?;
-    let cutoff_ms = now_ms.saturating_sub(i64::from(days).saturating_mul(MILLIS_PER_DAY));
     let mut result = TemporaryRetentionResult::default();
-    for session in store.list_sessions_resilient()?.sessions {
-        result.history_events = result.history_events.saturating_add(
-            store.prune_temporary_history_events_before(&session.session_id, cutoff_ms)?,
-        );
+    if let Some(days) = days {
+        validate_mem_temporary_retention_days(Some(days))?;
+        let cutoff_ms = now_ms.saturating_sub(i64::from(days).saturating_mul(MILLIS_PER_DAY));
+        for session in store.list_sessions_resilient()?.sessions {
+            result.history_events = result.history_events.saturating_add(
+                store.prune_temporary_history_events_before(&session.session_id, cutoff_ms)?,
+            );
+        }
+        result.shell_jobs = FileShellJobStore::new(&layout.memory_dir())
+            .prune_finished_before(cutoff_ms)
+            .map_err(|_| "shell_job_retention_failed".to_string())?;
+        result.api_audit_events =
+            agent_core::prune_api_audit_before(&layout.api_audit_file(), cutoff_ms, now_ms)
+                .map_err(|_| "api_audit_retention_failed".to_string())?;
     }
-    result.shell_jobs = FileShellJobStore::new(&layout.memory_dir())
-        .prune_finished_before(cutoff_ms)
-        .map_err(|_| "shell_job_retention_failed".to_string())?;
-    result.api_audit_events =
-        agent_core::prune_api_audit_before(&layout.api_audit_file(), cutoff_ms, now_ms)
-            .map_err(|_| "api_audit_retention_failed".to_string())?;
+    if let Some(total_bytes) = max_bytes {
+        let capacity = RollingCapacity::from_total_bytes(total_bytes)
+            .map_err(|_| "mem_temporary_capacity_bytes_invalid".to_string())?;
+        let items = all_mem_temporary_items_at(&layout.memory_dir())?;
+        let delete = oldest_temporary_items_to_evict(items, capacity.stable_bytes);
+        for ids in delete.chunks(100) {
+            delete_mem_temporary_items_at(&layout.memory_dir(), ids)?;
+        }
+    }
     Ok(result)
 }
 
@@ -883,7 +1009,7 @@ fn apply_current_mem_temporary_retention(
     state: &AppState,
     now_ms: i64,
 ) -> Result<TemporaryRetentionResult, String> {
-    let (layout, store, days) = {
+    let (layout, store, days, max_bytes) = {
         let mem = state
             .mem
             .lock()
@@ -892,9 +1018,58 @@ fn apply_current_mem_temporary_retention(
             mem.layout.clone(),
             mem.session_store.clone(),
             mem.settings.temporary_retention_days,
+            mem.settings.temporary_capacity_bytes,
         )
     };
-    apply_temporary_retention(&layout, &store, days, now_ms)
+    apply_temporary_retention(&layout, &store, days, max_bytes, now_ms)
+}
+
+fn apply_conversation_capacity(
+    state: &AppState,
+    store: &SessionStore,
+    max_bytes: Option<u64>,
+) -> Result<u64, String> {
+    let Some(total_bytes) = max_bytes else {
+        return Ok(0);
+    };
+    let capacity = RollingCapacity::from_total_bytes(total_bytes)
+        .map_err(|_| "mem_conversation_capacity_bytes_invalid".to_string())?;
+    let active = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_state_poisoned".to_string())?
+        .iter()
+        .filter_map(|(id, session)| {
+            (session.active_turn_id.is_some() || session.pending_turn_id.is_some())
+                .then_some(id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let mut sessions = store.list_sessions_resilient()?.sessions;
+    sessions.sort_by_key(|session| (session.updated_at_ms, session.session_id.clone()));
+    let mut used = sessions
+        .iter()
+        .map(|session| {
+            std::fs::metadata(store.history_path_for_session(&session.session_id))
+                .map(|meta| meta.len())
+                .unwrap_or(0)
+        })
+        .sum::<u64>();
+    let mut removed = 0u64;
+    for session in sessions {
+        if used <= capacity.stable_bytes {
+            break;
+        }
+        if active.contains(&session.session_id) {
+            continue;
+        }
+        let reclaimed = store.prune_oldest_history_turns(
+            &session.session_id,
+            used.saturating_sub(capacity.stable_bytes),
+        )?;
+        used = used.saturating_sub(reclaimed);
+        removed = removed.saturating_add(reclaimed);
+    }
+    Ok(removed)
 }
 
 async fn run_temporary_retention_in_file_thread(
@@ -904,7 +1079,21 @@ async fn run_temporary_retention_in_file_thread(
     std::thread::Builder::new()
         .name("timem-web-retention".to_string())
         .spawn(move || {
-            let result = apply_current_mem_temporary_retention(&state, now_ms_i64());
+            let result =
+                apply_current_mem_temporary_retention(&state, now_ms_i64()).and_then(|result| {
+                    let (store, max_bytes) = {
+                        let mem = state
+                            .mem
+                            .lock()
+                            .map_err(|_| "mem_state_poisoned".to_string())?;
+                        (
+                            mem.session_store.clone(),
+                            mem.settings.conversation_capacity_bytes,
+                        )
+                    };
+                    apply_conversation_capacity(&state, &store, max_bytes)?;
+                    Ok(result)
+                });
             let _ = result_tx.send(result);
         })
         .map_err(|error| format!("temporary_retention_worker_spawn_failed:{error}"))?;
@@ -1432,6 +1621,8 @@ enum WireEvent {
     },
     MemSettingsUpdated {
         temporary_retention_days: Option<u16>,
+        temporary_capacity_bytes: Option<u64>,
+        conversation_capacity_bytes: Option<u64>,
     },
     MemTemporaryItems {
         items: Vec<MemTemporaryItem>,
@@ -1524,6 +1715,8 @@ struct WebMemInfo {
     space_dir: String,
     memory_dir: String,
     temporary_retention_days: Option<u16>,
+    temporary_capacity_bytes: Option<u64>,
+    conversation_capacity_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1833,9 +2026,16 @@ enum ClientCommand {
     MemSwitch {
         #[serde(alias = "space")]
         path: String,
+        #[serde(default)]
+        stop_running: bool,
     },
     MemTemporaryRetentionUpdate {
         days: Option<u16>,
+        #[serde(default)]
+        max_bytes: Option<u64>,
+    },
+    MemConversationCapacityUpdate {
+        max_bytes: Option<u64>,
     },
     MemTemporaryItemsList,
     MemTemporaryItemsDelete {
@@ -1858,6 +2058,7 @@ impl ClientCommand {
             Self::RuntimeUpdate { .. }
             | Self::MemSwitch { .. }
             | Self::MemTemporaryRetentionUpdate { .. }
+            | Self::MemConversationCapacityUpdate { .. }
             | Self::MemTemporaryItemsDelete { .. }
             | Self::McpServerDelete { .. }
             | Self::ModelEndpointUpsert { .. }
@@ -1904,6 +2105,7 @@ impl ClientCommand {
             Self::RuntimeUpdate { .. }
                 | Self::MemSwitch { .. }
                 | Self::MemTemporaryRetentionUpdate { .. }
+                | Self::MemConversationCapacityUpdate { .. }
                 | Self::MemTemporaryItemsDelete { .. }
                 | Self::McpServerDelete { .. }
                 | Self::ModelEndpointUpsert { .. }
@@ -1980,6 +2182,7 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
     }
 
     let launch = WebLaunchOptions::parse(&args)?;
+    agent_core::configure_audit_storage(launch.debug);
     if std::env::var_os("TIMEM_DATA_DIR").is_some() {
         return Err("unsupported_env:TIMEM_DATA_DIR; MEM is the complete workspace".to_string());
     }
@@ -1992,7 +2195,11 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
     let manager = Arc::new(Mutex::new(CoreSessionWorkerManager::new()));
     let sessions = Arc::new(Mutex::new(BTreeMap::new()));
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-    let initial_mem = WebMemState::new(template.data_dir.clone(), template.initial_space.clone())?;
+    let initial_mem = WebMemState::new_with_debug_defaults(
+        template.data_dir.clone(),
+        template.initial_space.clone(),
+        launch.debug,
+    )?;
     let command_dedup = load_command_dedup_resilient(&command_dedup_path(&initial_mem))?;
     let instance_path = web_instance_path(&initial_mem);
     let web_instance = match open_web_instance_after_handoff(
@@ -4716,8 +4923,9 @@ fn handle_command_with_id(
             }
             schedule_mem_temporary_task(state, Some(ids))?;
         }
-        ClientCommand::MemTemporaryRetentionUpdate { days } => {
+        ClientCommand::MemTemporaryRetentionUpdate { days, max_bytes } => {
             validate_mem_temporary_retention_days(days)?;
+            validate_mem_temporary_capacity_bytes(max_bytes)?;
             let (memory_dir, layout, store, settings) = {
                 let mem = state
                     .mem
@@ -4725,6 +4933,7 @@ fn handle_command_with_id(
                     .map_err(|_| "mem_state_poisoned".to_string())?;
                 let mut settings = mem.settings.clone();
                 settings.temporary_retention_days = days;
+                settings.temporary_capacity_bytes = max_bytes;
                 (
                     mem.layout.memory_dir(),
                     mem.layout.clone(),
@@ -4734,25 +4943,53 @@ fn handle_command_with_id(
             };
             // Apply first: a failed cleanup must not persist a setting that the
             // running process did not successfully enforce.
-            apply_temporary_retention(&layout, &store, days, now_ms_i64())?;
+            apply_temporary_retention(&layout, &store, days, max_bytes, now_ms_i64())?;
             save_web_mem_settings(&memory_dir, &settings)?;
             state
                 .mem
                 .lock()
                 .map_err(|_| "mem_state_poisoned".to_string())?
-                .settings = settings;
+                .settings = settings.clone();
             let event = WireEvent::MemSettingsUpdated {
                 temporary_retention_days: days,
+                temporary_capacity_bytes: max_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
-        ClientCommand::MemSwitch { path } => {
+        ClientCommand::MemConversationCapacityUpdate { max_bytes } => {
+            validate_mem_conversation_capacity_bytes(max_bytes)?;
+            let (memory_dir, store, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.conversation_capacity_bytes = max_bytes;
+                (mem.layout.memory_dir(), mem.session_store.clone(), settings)
+            };
+            apply_conversation_capacity(state, &store, max_bytes)?;
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: max_bytes,
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::MemSwitch { path, stop_running } => {
             let mut epoch = state
                 .mem_epoch
                 .write()
                 .map_err(|_| "mem_epoch_poisoned".to_string())?;
-            switch_mem_space(state, port, &path)?;
+            switch_mem_space(state, port, &path, stop_running)?;
             *epoch = epoch.saturating_add(1);
             state.temporary_retention_wakeup.notify_one();
             state
@@ -4767,34 +5004,123 @@ fn handle_command_with_id(
     Ok(None)
 }
 
-fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapshot, String> {
-    if state
+fn session_has_live_work_for_mem_switch(session: &WebSession) -> bool {
+    session.active_turn_id.is_some()
+        || session.pending_turn_id.is_some()
+        || session.state == "working"
+        || session
+            .workers
+            .iter()
+            .any(|worker| worker.state == "working")
+        || !session.pending_unconsumed_supplements.is_empty()
+        || session.pending_work_instruction_turn.is_some()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MemSwitchLiveSession {
+    session_id: String,
+    turn_id: Option<String>,
+}
+
+fn live_sessions_for_mem_switch(state: &AppState) -> Result<Vec<MemSwitchLiveSession>, String> {
+    let sessions = state
         .sessions
         .lock()
-        .map_err(|_| "session_store_poisoned".to_string())?
+        .map_err(|_| "session_store_poisoned".to_string())?;
+    Ok(sessions
         .values()
-        .any(|session| {
-            session.active_turn_id.is_some()
-                || session.pending_turn_id.is_some()
-                || session.state == "working"
-                || !session.pending_unconsumed_supplements.is_empty()
-                || session.pending_work_instruction_turn.is_some()
+        .filter(|session| session_has_live_work_for_mem_switch(session))
+        .map(|session| MemSwitchLiveSession {
+            session_id: session.session_id.clone(),
+            turn_id: session
+                .active_turn_id
+                .as_ref()
+                .or(session.pending_turn_id.as_ref())
+                .cloned()
+                .or_else(|| {
+                    session
+                        .turns
+                        .iter()
+                        .rev()
+                        .find(|turn| turn.final_answer.is_none() && turn.completion.is_none())
+                        .map(|turn| turn.turn_id.clone())
+                }),
         })
+        .collect())
+}
+
+fn interrupt_old_mem_sessions_after_worker_shutdown(
+    state: &AppState,
+    live_sessions: &[MemSwitchLiveSession],
+) -> Result<(), String> {
     {
-        return Err("mem_switch_active_sessions".to_string());
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        for live in live_sessions {
+            let Some(session) = sessions.get_mut(&live.session_id) else {
+                continue;
+            };
+            for worker in &mut session.workers {
+                if worker.state == "working" {
+                    worker.state = "ready".to_string();
+                }
+            }
+            let target_finished = live.turn_id.as_ref().is_some_and(|turn_id| {
+                session.turns.iter().any(|turn| {
+                    turn.turn_id == *turn_id
+                        && (turn.final_answer.is_some() || turn.completion.is_some())
+                })
+            });
+            if !target_finished {
+                if let Some(turn_id) = &live.turn_id {
+                    if let Some(turn) = session.turns.iter_mut().find(|turn| {
+                        turn.turn_id == *turn_id
+                            && turn.final_answer.is_none()
+                            && turn.completion.is_none()
+                    }) {
+                        turn.state = "interrupted".to_string();
+                    }
+                }
+                session.state = "interrupted".to_string();
+            } else {
+                session.state = aggregate_web_session_state(&session.workers, "ready");
+            }
+            session.active_turn_id = None;
+            session.pending_turn_id = None;
+            session.pending_unconsumed_supplements.clear();
+            session.pending_work_instruction_turn = None;
+        }
     }
+    for live in live_sessions {
+        persist_web_session(state, &live.session_id)?;
+    }
+    Ok(())
+}
+
+fn switch_mem_space(
+    state: &AppState,
+    port: u16,
+    path: &str,
+    stop_running: bool,
+) -> Result<WebSnapshot, String> {
     let requested_path = Path::new(path);
     let next_mem = if requested_path.is_absolute() {
-        WebMemState::from_directory(requested_path)?
+        WebMemState::from_directory_with_debug_defaults(requested_path, state.debug.is_some())?
     } else {
         validate_web_space_name(path)?;
         let data_root = current_mem_state(state)?.layout.data_root().to_path_buf();
-        WebMemState::new(data_root, path.to_string())?
+        WebMemState::new_with_debug_defaults(data_root, path.to_string(), state.debug.is_some())?
     };
     let current_path = absolute_path(current_mem_state(state)?.layout.space_dir());
     let next_path = absolute_path(next_mem.layout.space_dir());
     if current_path == next_path {
         return Ok(snapshot_for(state, port));
+    }
+    let live_sessions = live_sessions_for_mem_switch(state)?;
+    if !live_sessions.is_empty() && !stop_running {
+        return Err("mem_switch_active_sessions_confirmation_required".to_string());
     }
     let next_command_dedup = load_command_dedup_resilient(&command_dedup_path(&next_mem))?;
     let running_instance_info = state
@@ -4823,7 +5149,9 @@ fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapsh
         }
         std::mem::take(&mut *manager)
     };
-    let _ = old_manager.shutdown_all();
+    let shutdown_result = old_manager.shutdown_all();
+    interrupt_old_mem_sessions_after_worker_shutdown(state, &live_sessions)?;
+    shutdown_result.map_err(|error| format!("mem_switch_worker_shutdown_failed:{error}"))?;
     {
         let mut sessions = state
             .sessions
@@ -5328,6 +5656,19 @@ fn mcp_updated_event(state: &AppState, session_id: Option<String>) -> Result<Wir
     })
 }
 
+fn next_untitled_session_name<'a>(display_names: impl Iterator<Item = &'a str>) -> String {
+    let used = display_names
+        .filter_map(|name| name.strip_prefix("Untitled "))
+        .filter_map(|suffix| suffix.parse::<u64>().ok())
+        .filter(|number| *number > 0)
+        .collect::<BTreeSet<_>>();
+    let mut number = 1_u64;
+    while used.contains(&number) {
+        number = number.saturating_add(1);
+    }
+    format!("Untitled {number}")
+}
+
 fn create_session(
     state: &AppState,
     display_name: Option<String>,
@@ -5365,15 +5706,24 @@ fn create_session(
         let mcp_server_ids = Vec::new();
         let (mcp_config_revision, applied_mcp_config_revision) =
             initial_mcp_revisions(&mcp_server_ids);
+        let session_display_name = display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                next_untitled_session_name(
+                    sessions
+                        .values()
+                        .map(|session| session.display_name.as_str()),
+                )
+            });
         sessions.insert(
             session_id.clone(),
             WebSession {
                 session_id: session_id.clone(),
                 group_id: None,
-                display_name: display_name
-                    .clone()
-                    .filter(|name| !name.trim().is_empty())
-                    .unwrap_or_else(|| format!("Session{ordinal}")),
+                display_name: session_display_name,
                 ordinal,
                 state: "ready".to_string(),
                 current_dir: current_dir.display().to_string(),
@@ -9669,6 +10019,12 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             space_dir: String::new(),
             memory_dir: String::new(),
             temporary_retention_days: default_mem_temporary_retention_days(),
+            temporary_capacity_bytes: Some(if state.debug.is_some() {
+                MEM_CAPACITY_512_MB
+            } else {
+                MEM_CAPACITY_128_MB
+            }),
+            conversation_capacity_bytes: Some(MEM_CAPACITY_128_MB),
         });
     let (role_library, session_groups) = current_mem_state(state)
         .map(|mem| (mem.role_library, mem.session_groups))
