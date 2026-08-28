@@ -8,6 +8,8 @@
 
 ### Changed
 
+- Add a subtle theme-aware shadow around the Web Thought/Action process panel, including a restrained upper-edge shadow, and progressively fade text at scrollable top/bottom edges instead of clipping it abruptly.
+
 - Reworked Web Session switching around a two-entry LRU of presentation-only
   timeline panes. Warm A/B switching now reuses parsed Markdown and mounted Turn
   DOM without duplicating composer or queue side effects; inactive panes freeze

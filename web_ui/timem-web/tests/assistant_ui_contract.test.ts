@@ -1061,15 +1061,23 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain(".turn-assistant-frame { position: relative; overflow: visible; padding-left: 0; border: 0; border-radius: 0; background: transparent;");
     expect(styles).toContain('.turn-user-frame { width: fit-content; max-width: min(86%, 680px); margin: 0 0 11px auto; }');
     expect(styles).not.toContain('.turn-user-content::after');
-    expect(styles).toContain('.turn-work-panel { position: relative; z-index: 1; margin-top: -4px; overflow: hidden; border-radius: 11px; background: #353535; }');
+    expect(styles).toContain('.turn-work-panel { position: relative; z-index: 1; margin-top: -4px; overflow: hidden; border-radius: 11px; background: #353535; box-shadow: inset 0 1px 0 #ffffff0a, 0 -2px 8px #0000001f, 0 4px 14px #0000002e; }');
     expect(styles).not.toContain('.turn-work-panel::before');
     expect(styles).not.toContain('.turn-assistant-heading::after');
-    expect(styles).toContain('.turn-work-scroll { padding: 14px 10px 7px; }');
-    expect(styles).toContain(':root[data-theme="light"] .turn-work-panel { background: #fafbfb; }');
+    expect(styles).toContain('.turn-work-scroll { --work-edge-fade-size: 16px; padding: 14px 10px 7px; }');
+    expect(styles).toContain('.turn-work-scroll.fade-top { -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--work-edge-fade-size));');
+    expect(styles).toContain('.turn-work-scroll.fade-bottom { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--work-edge-fade-size)), transparent 100%);');
+    expect(styles).toContain('.turn-work-scroll.fade-top.fade-bottom { -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--work-edge-fade-size), #000 calc(100% - var(--work-edge-fade-size)), transparent 100%);');
+    expect(styles).toContain(':root[data-theme="light"] .turn-work-panel { background: #fafbfb; box-shadow: inset 0 1px 0 #ffffffd9, 0 -2px 8px #30424b12, 0 4px 14px #30424b1a; }');
     expect(styles).not.toContain(':root[data-theme="light"]\n:root[data-theme="light"] .turn-work-panel');
     expect(styles).not.toContain(':root[data-theme="light"] :root[data-theme="light"] .turn-work-panel');
     expect(styles).not.toContain(':root[data-theme="light"] .turn-user-content::after');
     expect(source).toContain('{workStreamVisible && <div className="turn-work-panel">');
+    expect(source).toContain('const [workEdgeFades, setWorkEdgeFades] = useState({ top: false, bottom: false });');
+    expect(source).toContain('const next = scrollEdgeFades({');
+    expect(source).toContain('clientHeight: scroll.clientHeight');
+    expect(source).toContain('${workEdgeFades.top ? " fade-top" : ""}${workEdgeFades.bottom ? " fade-bottom" : ""}');
+    expect(source).toContain('updateWorkEdgeFades(event.currentTarget);');
   });
 
   it("keeps ToolGen retrospective attached to its final delivery", () => {
@@ -1564,7 +1572,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('`${ratio}%/${formatTokens(limit)}`');
     expect(source).toContain('{limit ? `${ratio}%/${formatTokens(limit)}` : "—"}');
     expect(source).toContain('role="status" aria-live="polite"');
-    expect(source).toContain('className={`turn-work-scroll has-content${pendingUpdates > 0 ? " has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"}');
+    expect(source).toContain('className={`turn-work-scroll has-content${workEdgeFades.top ? " fade-top" : ""}${workEdgeFades.bottom ? " fade-bottom" : ""}${pendingUpdates > 0 ? " has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"}');
     expect(source).toContain("const persistentToolGenItems = useMemo(() => visibleItems.filter");
     expect(source).toContain('activity.toolgen_phase === "published"');
     expect(source).toContain("const scrollItems = useMemo(() => visibleItems.filter");
@@ -2637,7 +2645,7 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('{hasVisibleProcess && <section className={`turn-assistant-frame');
     expect(source).toContain('<ActivityView key={item.key} activity={activity}/>');
     expect(source).not.toContain("function TurnEventView(");
-    expect(source).toContain('className={`turn-work-scroll has-content${pendingUpdates > 0 ? " has-pending-updates" : ""}`}');
+    expect(source).toContain('className={`turn-work-scroll has-content${workEdgeFades.top ? " fade-top" : ""}${workEdgeFades.bottom ? " fade-bottom" : ""}${pendingUpdates > 0 ? " has-pending-updates" : ""}`}');
     expect(source).toContain('className="turn-final-delivery"');
     expect(source).toContain('const supplementItems = useMemo(() => turn.user_entries');
  expect(source).toContain('entry.kind === "supplement"');
