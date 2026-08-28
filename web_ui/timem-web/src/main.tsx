@@ -203,6 +203,7 @@ function saveSidebarLayout(layout: SidebarLayout) {
 
 function TimemApp() {
   useDialogFocusTrap();
+  const appShellRef = useRef<HTMLDivElement | null>(null);
   const [appearance, setAppearance] = useState<Appearance>(loadAppearance);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [roleLibrary, setRoleLibrary] = useState<WorkerRoleLibrary>({ roles: [], groups: [] });
@@ -335,6 +336,7 @@ function TimemApp() {
   const toolRepoButtonRef = useRef<HTMLButtonElement | null>(null);
   const toolRepoPanelRef = useRef<HTMLElement | null>(null);
   const chatLibraryPanelRef = useRef<HTMLElement | null>(null);
+  const chatLibraryTriggerRef = useRef<HTMLButtonElement | null>(null);
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
   const activeSession = sessions.find((session) => session.session_id === activeSessionId) ?? sessions[0];
   sessionsRef.current = sessions;
@@ -353,7 +355,10 @@ function TimemApp() {
   const reportUiError = useCallback((title: string, detail: string, sessionId = activeSessionIdRef.current || "system") => {
     pushActivity({ id: clientId(), sessionId, tone: "error", title, detail, createdAt: Date.now() });
   }, [pushActivity]);
-  const closeChatLibrary = useCallback(() => setChatLibraryMode(null), []);
+  const closeChatLibrary = useCallback(() => {
+    setChatLibraryMode(null);
+    window.requestAnimationFrame(() => chatLibraryTriggerRef.current?.focus({ preventScroll: true }));
+  }, []);
   const closeToolRepoPanel = useCallback(() => {
     setShowToolRepo(false);
     toolRepoButtonRef.current?.focus({ preventScroll: true });
@@ -367,7 +372,7 @@ function TimemApp() {
   }, []);
   const closeAppearancePanel = useCallback((restoreFocus = true) => {
     setShowAppearance(false);
-    if (restoreFocus) settingsButtonRef.current?.focus({ preventScroll: true });
+    if (restoreFocus) window.requestAnimationFrame(() => settingsButtonRef.current?.focus({ preventScroll: true }));
   }, []);
   const closeMcpPanel = useCallback((restoreFocus = true) => {
     setShowMcp(false);
@@ -388,6 +393,22 @@ function TimemApp() {
       mobileSessionButtonRef.current?.focus({ preventScroll: true });
     }
   }, []);
+
+  const centerModalOpen = showAppearance || chatLibraryMode !== null;
+  useLayoutEffect(() => {
+    const workspace = appShellRef.current;
+    if (!workspace || !centerModalOpen) return;
+    workspace.setAttribute("inert", "");
+    workspace.setAttribute("aria-hidden", "true");
+    document.documentElement.classList.add("center-modal-open");
+    document.body.classList.add("center-modal-open");
+    return () => {
+      workspace.removeAttribute("inert");
+      workspace.removeAttribute("aria-hidden");
+      document.documentElement.classList.remove("center-modal-open");
+      document.body.classList.remove("center-modal-open");
+    };
+  }, [centerModalOpen]);
 
   useEffect(() => {
     applyAppearance(appearance);
@@ -1765,7 +1786,7 @@ function TimemApp() {
   const leftSidebarCollapsed = sidebarLayout.leftCollapsed && !showMobileSessions;
   const rightSidebarCollapsed = sidebarLayout.rightCollapsed && !showRoles;
   return <AssistantRuntimeProvider runtime={runtime}>
-    <div className={`app-shell ${leftSidebarCollapsed ? "left-sidebar-collapsed" : ""} ${!showToolRepo && rightSidebarCollapsed ? "right-sidebar-collapsed" : ""}`} style={{ "--left-sidebar-width": `${sidebarLayout.leftWidth}px`, "--right-sidebar-width": `${sidebarLayout.rightWidth}px` } as CSSProperties}>
+    <div ref={appShellRef} className={`app-shell ${leftSidebarCollapsed ? "left-sidebar-collapsed" : ""} ${!showToolRepo && rightSidebarCollapsed ? "right-sidebar-collapsed" : ""}`} style={{ "--left-sidebar-width": `${sidebarLayout.leftWidth}px`, "--right-sidebar-width": `${sidebarLayout.rightWidth}px` } as CSSProperties}>
       {showMobileSessions && <button type="button" className="mobile-sidebar-backdrop" aria-label="Close session navigation" onClick={() => closeMobileSidebar()}/>}
       <aside id="session-navigation" ref={mobileSidebarRef} className={`sidebar ${leftSidebarCollapsed ? "collapsed" : ""} ${showMobileSessions ? "mobile-open" : ""}`} aria-label="Session navigation" tabIndex={-1}>
         {leftSidebarCollapsed && <button type="button" className="collapsed-brand brand-logo-toggle brand-logo-restore" title="Show session navigation" aria-label="Show session navigation" onClick={() => setSidebarLayout((current) => ({ ...current, leftCollapsed: false }))}><img src="/timem_logo.png" alt="" className="brand-logo"/><span className="brand-scale-corner top-left" aria-hidden="true"/><span className="brand-scale-corner bottom-right" aria-hidden="true"/></button>}
@@ -1804,8 +1825,8 @@ function TimemApp() {
           <DragOverlay dropAnimation={prefersReducedMotion() ? null : { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" }}>{draggedSession && <div className="session-row session-overlay" aria-hidden="true"><span className="session-drag"><GripVertical size={13}/></span><span className="session-name">{draggedSession.display_name}</span></div>}</DragOverlay>
         </DndContext>
         <div className="sidebar-footer">
-          <button type="button" className={`sidebar-library-button ${chatLibraryMode === "search" ? "active" : ""}`} title="Search chats" aria-label="Search chats" aria-expanded={chatLibraryMode === "search"} aria-controls="chat-library-center" disabled={!runtimeReady || pendingMemSwitch} onClick={() => { setShowAppearance(false); setShowToolRepo(false); setShowRoles(false); const opening = chatLibraryMode !== "search"; setChatLibraryMode(opening ? "search" : null); if (opening) setChatSearchScope("all"); }}><Search size={17} aria-hidden="true"/>{!leftSidebarCollapsed && <span>Search</span>}</button>
-          <button type="button" className={`sidebar-library-button ${chatLibraryMode === "favorites" ? "active" : ""}`} title="Favorite answers" aria-label="Favorite answers" aria-expanded={chatLibraryMode === "favorites"} aria-controls="chat-library-center" disabled={!runtimeReady || pendingMemSwitch} onClick={() => { setShowAppearance(false); setShowToolRepo(false); setShowRoles(false); const opening = chatLibraryMode !== "favorites"; setChatLibraryMode(opening ? "favorites" : null); if (opening) { setChatSearchScope("favorites"); setFavoritesLoading(true); if (!sendCommand({ type: "favorites_list" })) setFavoritesLoading(false); } }}><Star size={17} aria-hidden="true"/>{!leftSidebarCollapsed && <span>Favorite</span>}</button>
+          <button type="button" className={`sidebar-library-button ${chatLibraryMode === "search" ? "active" : ""}`} title="Search chats" aria-label="Search chats" aria-expanded={chatLibraryMode === "search"} aria-controls="chat-library-center" disabled={!runtimeReady || pendingMemSwitch} onClick={(event) => { chatLibraryTriggerRef.current = event.currentTarget; setShowAppearance(false); setShowToolRepo(false); setShowRoles(false); const opening = chatLibraryMode !== "search"; setChatLibraryMode(opening ? "search" : null); if (opening) setChatSearchScope("all"); }}><Search size={17} aria-hidden="true"/>{!leftSidebarCollapsed && <span>Search</span>}</button>
+          <button type="button" className={`sidebar-library-button ${chatLibraryMode === "favorites" ? "active" : ""}`} title="Favorite answers" aria-label="Favorite answers" aria-expanded={chatLibraryMode === "favorites"} aria-controls="chat-library-center" disabled={!runtimeReady || pendingMemSwitch} onClick={(event) => { chatLibraryTriggerRef.current = event.currentTarget; setShowAppearance(false); setShowToolRepo(false); setShowRoles(false); const opening = chatLibraryMode !== "favorites"; setChatLibraryMode(opening ? "favorites" : null); if (opening) { setChatSearchScope("favorites"); setFavoritesLoading(true); if (!sendCommand({ type: "favorites_list" })) setFavoritesLoading(false); } }}><Star size={17} aria-hidden="true"/>{!leftSidebarCollapsed && <span>Favorite</span>}</button>
           <button type="button" ref={settingsButtonRef} className={`sidebar-settings-button ${showAppearance ? "active" : ""}`} title={settingsTitle} aria-label={settingsTitle} aria-expanded={showAppearance} aria-controls="settings-center" disabled={!runtimeReady || pendingMemSwitch} onClick={() => { setChatLibraryMode(null); setSettingsSection("appearance"); setShowAppearance(true); }}><Settings size={17} aria-hidden="true"/>{!leftSidebarCollapsed && <span>Settings</span>}</button>
         </div>
       </aside>
@@ -2548,7 +2569,7 @@ function ChatLibraryPanel({ panelRef, query, scope, activeSession, results, favo
     }
     if (allQueued) cancelFavoriteDelete();
   };
-  return <div className="chat-library-center-backdrop" role="presentation" onClick={onClose}>
+  return createPortal(<div className="chat-library-center-backdrop" role="presentation" onClick={onClose}>
     <section id="chat-library-center" ref={panelRef} className="chat-library-center" role="dialog" aria-modal="true" aria-label="Chat library" tabIndex={-1} onClick={(event) => event.stopPropagation()}>
     <header className="chat-library-header">
       <div><span className="eyebrow">CHAT LIBRARY</span><strong>Search</strong></div>
@@ -2582,7 +2603,7 @@ function ChatLibraryPanel({ panelRef, query, scope, activeSession, results, favo
       {visibleFavoriteCount < filteredFavoriteItems.length && <button type="button" className="chat-library-load-more" onClick={() => setVisibleFavoriteCount((current) => Math.min(current + CHAT_LIBRARY_MORE_ROWS, filteredFavoriteItems.length))}>Show {Math.min(CHAT_LIBRARY_MORE_ROWS, filteredFavoriteItems.length - visibleFavoriteCount)} more</button>}
     </div>}
     </section>
-  </div>;
+  </div>, document.body);
 }
 
 function formatChatLibraryDate(value: number) {
@@ -4966,7 +4987,7 @@ const SettingsCenter = memo(function SettingsCenter(props: SettingsCenterProps) 
     if (next === "memory") setMemoryPage("overview");
     onSectionChange(next);
   };
-  return <div className="settings-center-backdrop" role="presentation" aria-label="Dismiss settings" onClick={closeIfIdle}>
+  return createPortal(<div className="settings-center-backdrop" role="presentation" aria-label="Dismiss settings" onClick={closeIfIdle}>
     <section id="settings-center" ref={panelRef} className="settings-center" role="dialog" aria-modal="true" aria-labelledby="settings-center-title" tabIndex={-1} onClick={(event) => event.stopPropagation()}>
       <header className="settings-center-header"><div><span className="eyebrow">SETTINGS</span><h2 id="settings-center-title">Settings</h2><div className="settings-runtime-status" role="status" aria-live="polite" title={connectionLabel}><span className={`connection ${connected ? "online" : "offline"}`}/><span>{connectionLabel}</span></div></div><button type="button" className="icon-button" title="Close settings" aria-label="Close settings" disabled={busy} onClick={closeIfIdle}><X size={17}/></button></header>
       <div className="settings-center-layout">
@@ -5021,7 +5042,7 @@ const SettingsCenter = memo(function SettingsCenter(props: SettingsCenterProps) 
         </div>
       </div>
     </section>
-  </div>;
+  </div>, document.body);
 });
 
 function EndpointSettingsPane({ endpoints, endpointEditor, revealedEndpointApiKeys, revealedEndpointHeaders, onEdit, onDelete, onReveal, onSave }: {
@@ -5371,11 +5392,11 @@ function MemSwitchConfirmDialog({ candidate, pending, onClose, onConfirm }: { ca
   const closeIfIdle = () => { if (!pending) onClose(); };
   const descriptionId = "mem-switch-confirm-description";
   const statusId = "mem-switch-confirm-status";
-  return <div className="modal-backdrop" role="presentation" aria-label="Dismiss MEM switch confirmation" onClick={closeIfIdle}><section className="decision-modal mem-switch-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="mem-switch-confirm-title" aria-describedby={pending ? `${descriptionId} ${statusId}` : descriptionId} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">STOP AND SWITCH</span><h2 id="mem-switch-confirm-title">Stop current MEM work?</h2></div><button type="button" className="icon-button" title="Close MEM switch confirmation" aria-label="Close MEM switch confirmation" disabled={pending} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>Switching MEM will stop all work in the current MEM. {candidate.runningSessionCount} running Session{candidate.runningSessionCount === 1 ? "" : "s"} will be marked interrupted and will not continue in the background.</p><p className="mem-switch-alternative">To keep the current work running, start a separate instance for the destination MEM instead: <code>timem-web --space {shellQuoteCommandArgument(candidate.path)}</code></p><code className="mem-switch-confirm-path" title={candidate.path}>{candidate.path}</code>{pending && <p id={statusId} className="session-delete-status" role="status" aria-live="polite">Stopping current MEM workers and switching…</p>}<div className="decision-actions"><button type="button" className="secondary" disabled={pending} onClick={closeIfIdle}>Keep current MEM</button><button type="button" className={`danger ${pending ? "sending" : ""}`} disabled={pending} onClick={onConfirm}>{pending ? <LoaderCircle size={15}/> : <CircleStop size={15}/>} {pending ? "Stopping and switching…" : "Stop work and switch"}</button></div></section></div>;
+  return createPortal(<div className="modal-backdrop center-modal-secondary" role="presentation" aria-label="Dismiss MEM switch confirmation" onClick={closeIfIdle}><section className="decision-modal mem-switch-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="mem-switch-confirm-title" aria-describedby={pending ? `${descriptionId} ${statusId}` : descriptionId} onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeIfIdle(); } }}><div className="modal-titlebar"><div><span className="eyebrow">STOP AND SWITCH</span><h2 id="mem-switch-confirm-title">Stop current MEM work?</h2></div><button type="button" className="icon-button" title="Close MEM switch confirmation" aria-label="Close MEM switch confirmation" disabled={pending} onClick={closeIfIdle}><X size={16}/></button></div><p id={descriptionId}>Switching MEM will stop all work in the current MEM. {candidate.runningSessionCount} running Session{candidate.runningSessionCount === 1 ? "" : "s"} will be marked interrupted and will not continue in the background.</p><p className="mem-switch-alternative">To keep the current work running, start a separate instance for the destination MEM instead: <code>timem-web --space {shellQuoteCommandArgument(candidate.path)}</code></p><code className="mem-switch-confirm-path" title={candidate.path}>{candidate.path}</code>{pending && <p id={statusId} className="session-delete-status" role="status" aria-live="polite">Stopping current MEM workers and switching…</p>}<div className="decision-actions"><button type="button" className="secondary" disabled={pending} onClick={closeIfIdle}>Keep current MEM</button><button type="button" className={`danger ${pending ? "sending" : ""}`} disabled={pending} onClick={onConfirm}>{pending ? <LoaderCircle size={15}/> : <CircleStop size={15}/>} {pending ? "Stopping and switching…" : "Stop work and switch"}</button></div></section></div>, document.body);
 }
 
 function ModelEndpointDeleteDialog({ endpoint, onClose, onConfirm }: { endpoint: ModelEndpoint; onClose: () => void; onConfirm: () => void }) {
-  return <div className="modal-backdrop endpoint-delete-backdrop" role="presentation" onClick={onClose}><section className="decision-modal session-delete-dialog" role="dialog" aria-modal="true" aria-label={`Delete ${endpoint.name}`} onClick={(event) => event.stopPropagation()}><div className="modal-titlebar"><div><span className="eyebrow">DELETE ENDPOINT</span><h2>Delete “{endpoint.name}”?</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={16}/></button></div><p>This removes the shared endpoint from every Session dropdown. Existing Session settings are not changed.</p><div className="decision-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="button" className="danger" onClick={onConfirm}><Trash2 size={15}/> Delete endpoint</button></div></section></div>;
+  return createPortal(<div className="modal-backdrop endpoint-delete-backdrop center-modal-secondary" role="presentation" onClick={onClose}><section className="decision-modal session-delete-dialog" role="dialog" aria-modal="true" aria-label={`Delete ${endpoint.name}`} onClick={(event) => event.stopPropagation()}><div className="modal-titlebar"><div><span className="eyebrow">DELETE ENDPOINT</span><h2>Delete “{endpoint.name}”?</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={16}/></button></div><p>This removes the shared endpoint from every Session dropdown. Existing Session settings are not changed.</p><div className="decision-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="button" className="danger" onClick={onConfirm}><Trash2 size={15}/> Delete endpoint</button></div></section></div>, document.body);
 }
 
 function SessionDeleteDialog({ session, pending, onClose, onConfirm }: {

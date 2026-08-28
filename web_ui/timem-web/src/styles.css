@@ -4790,3 +4790,31 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .settings-capacity-grid .settings-field { min-width: 0; }
 .settings-capacity-card { margin-top: 10px; }
 @media (max-width: 720px) { .settings-capacity-grid { grid-template-columns: 1fr; } }
+
+/* True modal isolation for Settings, Search, and Favorite centers. */
+html.center-modal-open,
+body.center-modal-open {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+body.center-modal-open > #root {
+  pointer-events: none;
+  user-select: none;
+}
+.settings-center-backdrop,
+.chat-library-center-backdrop {
+  isolation: isolate;
+  overscroll-behavior: none;
+  background: #030706e8;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.settings-center-content,
+.chat-library-list {
+  overscroll-behavior: contain;
+}
+:root[data-theme="light"] .settings-center-backdrop,
+:root[data-theme="light"] .chat-library-center-backdrop {
+  background: #26302dd9;
+}
+.center-modal-secondary { z-index: 50; }
