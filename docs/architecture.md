@@ -226,9 +226,14 @@ process runs with no TTY or graphical display.
   as evidence, but hosts should render from the structured kind instead of
   parsing protocol-specific action JSON. Host adapters render these topic events
   as terminal panels, native app status, web events, or other UI-specific forms.
-- Owns API audit document append/migration mechanics and UI-neutral runtime
-  event builders in `agent_core::audit`. Host adapters choose audit file paths
-  and decide when to append events.
+- Owns API audit document append/migration mechanics, capacity enforcement, and
+  UI-neutral runtime event builders in `agent_core::audit`. Audit snapshots and
+  turn-grouped action/repair documents keep their existing schemas while evicting
+  oldest complete records in 16 MiB allocation units. API JSONL retains the newest
+  complete lines through lock-held in-place compaction, supports the legacy MEM-root
+  sidecar, removes stale retention temporaries, and reserves one 16 MiB slice for safe
+  replacement. Normal launch uses a 64 MiB audit bound; Web `--debug` uses 512 MiB.
+  Host adapters choose audit file paths and decide when to append events.
 - Executes structured actions through the capability registry. Built-in tool
   packages live under `resources/capabilities/tools/{tool}.yaml` plus a paired
   `{tool}.rs` callback; overlay command tools are loaded from the capability

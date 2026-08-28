@@ -1,3 +1,4 @@
+use crate::atomic_write_file;
 use crate::MemGuard;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -880,6 +881,99 @@ impl SessionStore {
                 let _ = fs::remove_file(&temporary);
             }
             result
+        })??;
+        self.history_indexes
+            .lock()
+            .map_err(|_| "chat_history_index_poisoned".to_string())?
+            .remove(&path);
+        Ok(removed)
+    }
+
+    /// Removes oldest complete contiguous Turn groups until at least
+    /// `bytes_to_remove` bytes have been reclaimed. Malformed lines are retained.
+    pub fn prune_oldest_history_turns(
+        &self,
+        session_id: &str,
+        bytes_to_remove: u64,
+    ) -> Result<u64, String> {
+        validate_session_id(session_id)?;
+        if bytes_to_remove == 0 {
+            return Ok(0);
+        }
+        let path = self.history_path_for_session(session_id);
+        let removed = MemGuard::for_memory_domain(
+            &self.root,
+            format!(
+                "session-data-{}",
+                sanitize_session_path_component(session_id)
+            ),
+        )
+        .with_write(|| {
+            if !path.exists() {
+                return Ok::<u64, String>(0);
+            }
+            let bytes = fs::read(&path).map_err(|_| "chat_history_read_failed".to_string())?;
+            let mut records: Vec<(Vec<u8>, Option<String>)> = Vec::new();
+            let mut start = 0usize;
+            for (index, byte) in bytes.iter().enumerate() {
+                if *byte != b'\n' {
+                    continue;
+                }
+                let raw = bytes[start..=index].to_vec();
+                let text = std::str::from_utf8(&raw).ok().map(str::trim_end);
+                let turn = text
+                    .and_then(parse_chat_history_record_line)
+                    .map(|record| record.turn_id().to_string());
+                records.push((raw, turn));
+                start = index + 1;
+            }
+            if start < bytes.len() {
+                let raw = bytes[start..].to_vec();
+                let turn = std::str::from_utf8(&raw)
+                    .ok()
+                    .and_then(parse_chat_history_record_line)
+                    .map(|record| record.turn_id().to_string());
+                records.push((raw, turn));
+            }
+            let mut groups: Vec<(usize, usize, u64, bool)> = Vec::new();
+            let mut index = 0usize;
+            while index < records.len() {
+                let group_start = index;
+                let turn = records[index].1.clone();
+                index += 1;
+                while index < records.len() && turn.is_some() && records[index].1 == turn {
+                    index += 1;
+                }
+                let size = records[group_start..index]
+                    .iter()
+                    .map(|(raw, _)| raw.len() as u64)
+                    .sum();
+                groups.push((group_start, index, size, turn.is_some()));
+            }
+            let mut reclaimed = 0u64;
+            let mut remove = BTreeSet::new();
+            for (group_start, group_end, size, removable) in groups {
+                if reclaimed >= bytes_to_remove {
+                    break;
+                }
+                if !removable {
+                    continue;
+                }
+                reclaimed = reclaimed.saturating_add(size);
+                remove.extend(group_start..group_end);
+            }
+            if remove.is_empty() {
+                return Ok(0);
+            }
+            let retained = records
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, (raw, _))| (!remove.contains(&index)).then_some(raw))
+                .collect::<Vec<_>>();
+            let retained_bytes = retained.into_iter().flatten().collect::<Vec<_>>();
+            atomic_write_file(&path, &retained_bytes)
+                .map_err(|_| "chat_history_replace_failed".to_string())?;
+            Ok(reclaimed)
         })??;
         self.history_indexes
             .lock()

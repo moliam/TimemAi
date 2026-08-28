@@ -1747,3 +1747,88 @@ fn prompt_marks_logical_turns_independently_from_deltas() {
     assert!(deferred < second_marker, "{second}");
     assert!(second_marker < second_question, "{second}");
 }
+
+#[test]
+fn action_audit_capacity_removes_oldest_turns_without_changing_schema() {
+    let turns = (0..6)
+        .map(|index| ActionAuditTurn {
+            turn_id: format!("turn_{index}"),
+            started_at_ms: index,
+            user_question: format!("question {index} {}", "x".repeat(120)),
+            interactions: vec![ActionAuditInteraction {
+                round: 1,
+                actions: vec![ActionAuditEntry {
+                    time_ms: index,
+                    round: 1,
+                    action: "readfile".to_string(),
+                    status: "completed".to_string(),
+                    input: json!({"path": format!("file_{index}")}),
+                    result_summary: Some("ok".to_string()),
+                }],
+            }],
+        })
+        .collect::<Vec<_>>();
+    let doc = ActionAuditDocument { version: 1, turns };
+
+    let text = bounded_action_audit_text(&doc, 1_400).unwrap();
+    let retained: ActionAuditDocument = serde_json::from_str(&text).unwrap();
+
+    assert_eq!(retained.version, 1);
+    assert!(!retained.turns.is_empty());
+    assert_eq!(retained.turns.last().unwrap().turn_id, "turn_5");
+    assert_ne!(retained.turns.first().unwrap().turn_id, "turn_0");
+    assert!(text.len() <= 1_400 || retained.turns.len() == 1);
+    assert_eq!(retained.turns.last().unwrap().interactions[0].round, 1);
+}
+
+#[test]
+fn action_audit_capacity_summarizes_one_oversized_turn_without_changing_schema() {
+    let doc = ActionAuditDocument {
+        version: 1,
+        turns: vec![ActionAuditTurn {
+            turn_id: "turn_large".to_string(),
+            started_at_ms: 1,
+            user_question: "q".repeat(20_000),
+            interactions: vec![ActionAuditInteraction {
+                round: 1,
+                actions: vec![
+                    ActionAuditEntry {
+                        time_ms: 1,
+                        round: 1,
+                        action: "old_action".to_string(),
+                        status: "completed".to_string(),
+                        input: json!({"payload": "x".repeat(2_000_000)}),
+                        result_summary: Some("old".repeat(10_000)),
+                    },
+                    ActionAuditEntry {
+                        time_ms: 2,
+                        round: 1,
+                        action: "latest_action".to_string(),
+                        status: "completed".to_string(),
+                        input: json!({"payload": "y".repeat(2_000_000)}),
+                        result_summary: Some("latest".repeat(10_000)),
+                    },
+                ],
+            }],
+        }],
+    };
+
+    let text = bounded_action_audit_text(&doc, 32 * 1024).unwrap();
+    let retained: ActionAuditDocument = serde_json::from_str(&text).unwrap();
+
+    assert!(text.len() <= 32 * 1024, "{}", text.len());
+    assert_eq!(retained.version, 1);
+    assert_eq!(retained.turns.len(), 1);
+    assert_eq!(retained.turns[0].interactions.len(), 1);
+    assert_eq!(retained.turns[0].interactions[0].actions.len(), 1);
+    let latest = &retained.turns[0].interactions[0].actions[0];
+    assert_eq!(latest.action, "latest_action");
+    assert_eq!(latest.input["payload_omitted"], true);
+    assert!(latest.input["payload_bytes"].as_u64().unwrap() > 1_000_000);
+    assert!(retained.turns[0].user_question.contains("original_chars="));
+    assert!(latest
+        .result_summary
+        .as_deref()
+        .unwrap()
+        .contains("original_chars="));
+}

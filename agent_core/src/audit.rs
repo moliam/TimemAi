@@ -1,14 +1,46 @@
 use crate::{
-    atomic_write_file, bash_approval_mode_label, ApiProtocol, ApprovalRequest, BashApprovalMode,
-    MemGuard, TurnStopSummary, UsageStats,
+    atomic_write_file, bash_approval_mode_label, rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+    ApiProtocol, ApprovalRequest, BashApprovalMode, MemGuard, TurnStopSummary, UsageStats,
 };
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const AUDIT_SIDECAR_THRESHOLD_BYTES: u64 = 1024 * 1024;
+pub const DEFAULT_AUDIT_DIRECTORY_MAX_BYTES: u64 = 64 * 1024 * 1024;
+pub const DEBUG_AUDIT_DIRECTORY_MAX_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const ACTION_AUDIT_MAX_BYTES: u64 = AUDIT_ROLLING_SLICE_BYTES;
+const API_AUDIT_BASE_MAX_BYTES: u64 = AUDIT_ROLLING_SLICE_BYTES;
+const REPAIR_OUTPUT_MAX_BYTES: u64 = AUDIT_ROLLING_SLICE_BYTES;
+static AUDIT_DIRECTORY_MAX_BYTES: AtomicU64 = AtomicU64::new(DEFAULT_AUDIT_DIRECTORY_MAX_BYTES);
+
+pub fn configure_audit_storage(debug: bool) {
+    AUDIT_DIRECTORY_MAX_BYTES.store(
+        if debug {
+            DEBUG_AUDIT_DIRECTORY_MAX_BYTES
+        } else {
+            DEFAULT_AUDIT_DIRECTORY_MAX_BYTES
+        },
+        Ordering::Release,
+    );
+}
+
+fn audit_directory_max_bytes() -> u64 {
+    AUDIT_DIRECTORY_MAX_BYTES.load(Ordering::Acquire)
+}
+
+fn audit_stable_max_bytes() -> u64 {
+    audit_directory_max_bytes().saturating_sub(AUDIT_ROLLING_SLICE_BYTES)
+}
+
+fn api_audit_jsonl_max_bytes() -> u64 {
+    audit_stable_max_bytes()
+}
+const AUDIT_EVENT_MAX_BYTES: usize = 16 * 1024 * 1024;
+const AUDIT_COPY_BUFFER_BYTES: usize = 64 * 1024;
 const REPAIR_OUTPUT_RESPONSE_LIMIT_CHARS: usize = 12_000;
 
 pub fn append_audit_event(path: &Path, event: &Value) -> std::io::Result<()> {
@@ -18,17 +50,19 @@ pub fn append_audit_event(path: &Path, event: &Value) -> std::io::Result<()> {
                 fs::create_dir_all(parent)?;
             }
             let now_ms = audit_now_ms();
-            let event = timestamp_audit_event(event, now_ms);
+            let event = bounded_audit_event(timestamp_audit_event(event, now_ms))?;
             if should_append_audit_sidecar(path) {
-                return append_audit_jsonl(&audit_sidecar_path(path), &event);
+                append_audit_jsonl(&audit_sidecar_path(path), &event)?;
+            } else {
+                let mut doc = read_audit_doc(path)?;
+                doc["events"]
+                    .as_array_mut()
+                    .expect("audit doc events must be an array")
+                    .push(event);
+                let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
+                atomic_write_file(path, format!("{text}\n").as_bytes())?;
             }
-            let mut doc = read_audit_doc(path)?;
-            doc["events"]
-                .as_array_mut()
-                .expect("audit doc events must be an array")
-                .push(event);
-            let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
-            atomic_write_file(path, format!("{text}\n").as_bytes())
+            enforce_audit_storage_budget_unlocked(path)
         })
         .map_err(std::io::Error::other)?
 }
@@ -46,10 +80,214 @@ pub fn append_repair_output_event(api_audit_file: &Path, event: &Value) -> std::
                 .expect("repair output doc records must be an array")
                 .push(event.clone());
             doc["updated_at_ms"] = json!(audit_now_ms());
+            shrink_repair_output_doc(&mut doc)?;
             let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
             atomic_write_file(&repair_file, format!("{text}\n").as_bytes())
         })
+        .map_err(std::io::Error::other)??;
+    enforce_audit_storage_budget(api_audit_file)
+}
+
+fn bounded_audit_event(event: Value) -> std::io::Result<Value> {
+    let encoded = serde_json::to_vec(&event).map_err(std::io::Error::other)?;
+    if encoded.len() <= AUDIT_EVENT_MAX_BYTES {
+        return Ok(event);
+    }
+    let mut summary = serde_json::Map::new();
+    if let Some(object) = event.as_object() {
+        for key in [
+            "type",
+            "time_ms",
+            "session",
+            "turn_id",
+            "model",
+            "api_protocol",
+            "endpoint",
+            "status",
+            "error_kind",
+        ] {
+            if let Some(value) = object.get(key) {
+                summary.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    summary.insert("payload_omitted".into(), json!(true));
+    summary.insert("payload_bytes".into(), json!(encoded.len()));
+    summary.insert("payload_limit_bytes".into(), json!(AUDIT_EVENT_MAX_BYTES));
+    Ok(Value::Object(summary))
+}
+
+fn shrink_repair_output_doc(doc: &mut Value) -> std::io::Result<()> {
+    loop {
+        let encoded_len = serde_json::to_vec(doc)
+            .map_err(std::io::Error::other)?
+            .len() as u64;
+        if encoded_len <= REPAIR_OUTPUT_MAX_BYTES {
+            return Ok(());
+        }
+        let Some(records) = doc.get_mut("records").and_then(Value::as_array_mut) else {
+            return Ok(());
+        };
+        if records.is_empty() {
+            return Ok(());
+        }
+        records.remove(0);
+    }
+}
+
+pub fn enforce_audit_storage_budget(path: &Path) -> std::io::Result<()> {
+    MemGuard::for_audit_file(path)
+        .with_write(|| enforce_audit_storage_budget_unlocked(path))
         .map_err(std::io::Error::other)?
+}
+
+fn enforce_audit_storage_budget_unlocked(path: &Path) -> std::io::Result<()> {
+    let Some(audit_dir) = path.parent() else {
+        return Ok(());
+    };
+    cleanup_stale_audit_temps(audit_dir)?;
+    if path.exists() {
+        compact_json_array_document(path, "events", API_AUDIT_BASE_MAX_BYTES)?;
+    }
+    let sidecar = audit_sidecar_path(path);
+    if sidecar.exists() {
+        compact_jsonl_tail_in_place(&sidecar, api_audit_jsonl_max_bytes())?;
+    }
+    let legacy_sidecar = audit_dir
+        .parent()
+        .map(|space_dir| space_dir.join("api_audit.jsonl"));
+    if let Some(legacy) = legacy_sidecar.as_ref().filter(|legacy| legacy.exists()) {
+        compact_jsonl_tail_in_place(legacy, api_audit_jsonl_max_bytes())?;
+    }
+
+    // Fixed per-file budgets leave room for metadata. If an old layout and the
+    // current sidecar coexist, discard oldest legacy bytes before current bytes.
+    let mut total = audit_storage_bytes(audit_dir, legacy_sidecar.as_deref())?;
+    for candidate in [legacy_sidecar.as_deref(), Some(sidecar.as_path())]
+        .into_iter()
+        .flatten()
+    {
+        if total <= audit_stable_max_bytes() || !candidate.exists() {
+            continue;
+        }
+        let len = fs::metadata(candidate)?.len();
+        let excess = total.saturating_sub(audit_stable_max_bytes());
+        compact_jsonl_tail_in_place(candidate, len.saturating_sub(excess))?;
+        total = audit_storage_bytes(audit_dir, legacy_sidecar.as_deref())?;
+    }
+    if total > audit_stable_max_bytes() || total > audit_directory_max_bytes() {
+        return Err(std::io::Error::other("audit_directory_budget_exceeded"));
+    }
+    Ok(())
+}
+
+fn cleanup_stale_audit_temps(audit_dir: &Path) -> std::io::Result<()> {
+    let Ok(entries) = fs::read_dir(audit_dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.')
+            && (name.contains(".retention.tmp-") || name.contains(".audit-compact.tmp-"))
+        {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
+}
+
+fn audit_storage_bytes(audit_dir: &Path, legacy_sidecar: Option<&Path>) -> std::io::Result<u64> {
+    let mut total = 0u64;
+    for path in [
+        audit_dir.join("api_audit.json"),
+        audit_dir.join("api_audit.jsonl"),
+        audit_dir.join("action_audit.json"),
+        audit_dir.join("api_output_repair.json"),
+    ]
+    .into_iter()
+    .chain(legacy_sidecar.map(Path::to_path_buf))
+    {
+        match fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => total = total.saturating_add(metadata.len()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(total)
+}
+
+fn compact_json_array_document(
+    path: &Path,
+    array_key: &str,
+    max_bytes: u64,
+) -> std::io::Result<()> {
+    if fs::metadata(path)?.len() <= max_bytes {
+        return Ok(());
+    }
+    let bytes = fs::read(path)?;
+    let mut doc = match serde_json::from_slice::<Value>(&bytes) {
+        Ok(value) => value,
+        Err(_) if array_key == "events" => read_audit_doc_single(path)?,
+        Err(_) => return Ok(()),
+    };
+    loop {
+        let encoded = serde_json::to_vec_pretty(&doc).map_err(std::io::Error::other)?;
+        if encoded.len() as u64 <= max_bytes {
+            let mut bytes = encoded;
+            bytes.push(b'\n');
+            return atomic_write_file(path, &bytes);
+        }
+        let Some(records) = doc.get_mut(array_key).and_then(Value::as_array_mut) else {
+            return Ok(());
+        };
+        if records.is_empty() {
+            let mut bytes = serde_json::to_vec_pretty(&doc).map_err(std::io::Error::other)?;
+            bytes.push(b'\n');
+            return atomic_write_file(path, &bytes);
+        }
+        let remove_count = (records.len() / 8).max(1);
+        records.drain(..remove_count.min(records.len()));
+    }
+}
+
+fn compact_jsonl_tail_in_place(path: &Path, max_bytes: u64) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+    let file_len = file.metadata()?.len();
+    if file_len <= max_bytes {
+        return Ok(());
+    }
+    if max_bytes == 0 {
+        file.set_len(0)?;
+        return file.sync_all();
+    }
+
+    let approximate_start = file_len.saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(approximate_start))?;
+    let mut reader = BufReader::new(file.try_clone()?);
+    let mut discarded = Vec::new();
+    reader.read_until(b'\n', &mut discarded)?;
+    let source_start = reader.stream_position()?;
+    if source_start >= file_len {
+        file.set_len(0)?;
+        return file.sync_all();
+    }
+
+    let mut buffer = vec![0u8; AUDIT_COPY_BUFFER_BYTES];
+    let mut read_offset = source_start;
+    let mut write_offset = 0u64;
+    while read_offset < file_len {
+        let wanted = buffer.len().min((file_len - read_offset) as usize);
+        file.seek(SeekFrom::Start(read_offset))?;
+        file.read_exact(&mut buffer[..wanted])?;
+        file.seek(SeekFrom::Start(write_offset))?;
+        file.write_all(&buffer[..wanted])?;
+        read_offset += wanted as u64;
+        write_offset += wanted as u64;
+    }
+    file.set_len(write_offset)?;
+    file.sync_all()
 }
 
 fn timestamp_audit_event(event: &Value, now_ms: i64) -> Value {
@@ -109,61 +347,33 @@ fn retained_audit_time_ms(event: &Value, cutoff_ms: i64, now_ms: i64) -> Option<
 
 fn prune_audit_jsonl(path: &Path, cutoff_ms: i64, now_ms: i64) -> std::io::Result<usize> {
     let input = fs::File::open(path)?;
-    let temporary = audit_retention_temp_path(path);
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let output = options.open(&temporary)?;
-    let mut writer = BufWriter::new(output);
+    let mut file = OpenOptions::new().write(true).open(path)?;
+    let mut reader = BufReader::new(input);
     let mut removed = 0usize;
-
-    let result = (|| -> std::io::Result<()> {
-        let mut reader = BufReader::new(input);
-        let mut line = Vec::new();
-        loop {
-            line.clear();
-            if reader.read_until(b'\n', &mut line)? == 0 {
-                break;
-            }
-            let Ok(event) = serde_json::from_slice::<Value>(&line) else {
-                removed = removed.saturating_add(1);
-                continue;
-            };
-            if retained_audit_time_ms(&event, cutoff_ms, now_ms).is_none() {
-                removed = removed.saturating_add(1);
-                continue;
-            }
-            serde_json::to_writer(&mut writer, &event).map_err(std::io::Error::other)?;
-            writer.write_all(b"\n")?;
+    let mut write_offset = 0u64;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
         }
-        writer.flush()?;
-        writer.get_ref().sync_all()
-    })();
-    if let Err(error) = result {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
+        let Ok(event) = serde_json::from_slice::<Value>(&line) else {
+            removed = removed.saturating_add(1);
+            continue;
+        };
+        if retained_audit_time_ms(&event, cutoff_ms, now_ms).is_none() {
+            removed = removed.saturating_add(1);
+            continue;
+        }
+        let encoded = serde_json::to_vec(&event).map_err(std::io::Error::other)?;
+        file.seek(SeekFrom::Start(write_offset))?;
+        file.write_all(&encoded)?;
+        file.write_all(b"\n")?;
+        write_offset = write_offset.saturating_add(encoded.len() as u64 + 1);
     }
-    if let Err(error) = fs::rename(&temporary, path) {
-        let _ = fs::remove_file(&temporary);
-        return Err(error);
-    }
+    file.set_len(write_offset)?;
+    file.sync_all()?;
     Ok(removed)
-}
-
-fn audit_retention_temp_path(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("api_audit.jsonl");
-    path.with_file_name(format!(
-        ".{file_name}.retention.tmp-{}-{}",
-        std::process::id(),
-        audit_now_ms()
-    ))
 }
 
 fn repair_output_file_for_api_audit(api_audit_file: &Path) -> std::path::PathBuf {
