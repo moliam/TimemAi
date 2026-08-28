@@ -37,7 +37,7 @@ use agent_core::{
 };
 use agent_core::{
     capability::CapabilityRegistry, rolling_file_store::RollingCapacity, self_tool::SelfToolPaths,
-    shell_exec::FileShellJobStore, tool_jobs::FileToolJobStore,
+    tool_jobs::FileToolJobStore,
 };
 use axum::{
     extract::DefaultBodyLimit,
@@ -638,7 +638,6 @@ fn save_web_mem_settings(memory_dir: &Path, settings: &WebMemSettings) -> Result
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct TemporaryRetentionResult {
     history_events: usize,
-    shell_jobs: usize,
     api_audit_events: usize,
 }
 
@@ -752,50 +751,8 @@ fn collect_named_temporary_files(root: &Path) -> Result<Vec<MemTemporaryItem>, S
     Ok(items)
 }
 
-fn append_finished_shell_job_items(
-    items: &mut Vec<MemTemporaryItem>,
-    store_memory_dir: &Path,
-    id_prefix: &str,
-    path_prefix: &str,
-) -> Result<(), String> {
-    for item in FileShellJobStore::new(store_memory_dir)
-        .finished_temporary_items()
-        .map_err(|_| "mem_temporary_shell_jobs_read_failed".to_string())?
-    {
-        items.push(MemTemporaryItem {
-            id: format!("{id_prefix}{}", item.id),
-            path: format!("{path_prefix}{}", item.id),
-            kind: "shell_job".to_string(),
-            bytes: item.bytes,
-            modified_at_ms: item.created_at_ms,
-            deletable: item.deletable,
-            delete_reason: item.delete_reason,
-        });
-    }
-    Ok(())
-}
-
-fn legacy_nested_memory_dir(memory_dir: &Path) -> Option<PathBuf> {
-    let legacy = memory_dir.join("memory");
-    legacy
-        .join("shell_jobs")
-        .join("jobs.jsonl")
-        .is_file()
-        .then_some(legacy)
-}
-
 fn all_mem_temporary_items_at(memory_dir: &Path) -> Result<Vec<MemTemporaryItem>, String> {
-    let mut items = collect_named_temporary_files(memory_dir)?;
-    append_finished_shell_job_items(&mut items, memory_dir, "shell_job:", "shell_jobs/")?;
-    if let Some(legacy) = legacy_nested_memory_dir(memory_dir) {
-        append_finished_shell_job_items(
-            &mut items,
-            &legacy,
-            "legacy_shell_job:",
-            "memory/shell_jobs/",
-        )?;
-    }
-    Ok(items)
+    collect_named_temporary_files(memory_dir)
 }
 
 fn list_mem_temporary_items_at(memory_dir: &Path) -> Result<Vec<MemTemporaryItem>, String> {
@@ -846,6 +803,9 @@ fn delete_mem_temporary_items_at(memory_dir: &Path, ids: &[String]) -> Result<us
         .iter()
         .map(|item| (item.id.as_str(), item))
         .collect::<std::collections::BTreeMap<_, _>>();
+    let canonical_root = std::fs::canonicalize(memory_dir)
+        .map_err(|_| "mem_temporary_item_path_invalid".to_string())?;
+    let mut file_paths = Vec::new();
     for id in ids {
         let item = available
             .get(id.as_str())
@@ -853,63 +813,31 @@ fn delete_mem_temporary_items_at(memory_dir: &Path, ids: &[String]) -> Result<us
         if !item.deletable {
             return Err("mem_temporary_item_not_deletable".to_string());
         }
-    }
-    let canonical_root = std::fs::canonicalize(memory_dir)
-        .map_err(|_| "mem_temporary_item_path_invalid".to_string())?;
-    let mut shell_ids = Vec::new();
-    let mut legacy_shell_ids = Vec::new();
-    let mut file_paths = Vec::new();
-    for id in ids {
-        if let Some(shell_id) = id.strip_prefix("legacy_shell_job:") {
-            if shell_id.is_empty() {
-                return Err("mem_temporary_item_id_invalid".to_string());
-            }
-            legacy_shell_ids.push(shell_id.to_string());
-        } else if let Some(shell_id) = id.strip_prefix("shell_job:") {
-            if shell_id.is_empty() {
-                return Err("mem_temporary_item_id_invalid".to_string());
-            }
-            shell_ids.push(shell_id.to_string());
-        } else if let Some(relative) = id.strip_prefix("file:") {
-            let relative = safe_temporary_relative_path(relative)?;
-            let path = memory_dir.join(relative);
-            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    "mem_temporary_item_not_found".to_string()
-                } else {
-                    "mem_temporary_item_metadata_failed".to_string()
-                }
-            })?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err("mem_temporary_item_not_deletable".to_string());
-            }
-            let canonical = std::fs::canonicalize(&path)
-                .map_err(|_| "mem_temporary_item_path_invalid".to_string())?;
-            if !canonical.starts_with(&canonical_root) {
-                return Err("mem_temporary_item_path_invalid".to_string());
-            }
-            file_paths.push(path);
-        } else {
-            return Err("mem_temporary_item_id_invalid".to_string());
-        }
-    }
-    let mut deleted = FileShellJobStore::new(memory_dir)
-        .delete_finished_temporary_items(&shell_ids)
-        .map_err(|_| "mem_temporary_shell_jobs_delete_failed".to_string())?;
-    if !legacy_shell_ids.is_empty() {
-        let legacy = legacy_nested_memory_dir(memory_dir)
+        let relative = id
+            .strip_prefix("file:")
             .ok_or_else(|| "mem_temporary_item_id_invalid".to_string())?;
-        deleted = deleted.saturating_add(
-            FileShellJobStore::new(&legacy)
-                .delete_finished_temporary_items(&legacy_shell_ids)
-                .map_err(|_| "mem_temporary_shell_jobs_delete_failed".to_string())?,
-        );
+        let path = memory_dir.join(safe_temporary_relative_path(relative)?);
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "mem_temporary_item_not_found".to_string()
+            } else {
+                "mem_temporary_item_metadata_failed".to_string()
+            }
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("mem_temporary_item_not_deletable".to_string());
+        }
+        let canonical = std::fs::canonicalize(&path)
+            .map_err(|_| "mem_temporary_item_path_invalid".to_string())?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err("mem_temporary_item_path_invalid".to_string());
+        }
+        file_paths.push(path);
     }
-    for path in file_paths {
+    for path in &file_paths {
         std::fs::remove_file(path).map_err(|_| "mem_temporary_item_delete_failed".to_string())?;
-        deleted = deleted.saturating_add(1);
     }
-    Ok(deleted)
+    Ok(file_paths.len())
 }
 
 fn oldest_temporary_items_to_evict(
@@ -944,17 +872,6 @@ fn apply_temporary_retention(
         for session in store.list_sessions_resilient()?.sessions {
             result.history_events = result.history_events.saturating_add(
                 store.prune_temporary_history_events_before(&session.session_id, cutoff_ms)?,
-            );
-        }
-        let memory_dir = layout.memory_dir();
-        result.shell_jobs = FileShellJobStore::new(&memory_dir)
-            .prune_finished_before(cutoff_ms)
-            .map_err(|_| "shell_job_retention_failed".to_string())?;
-        if let Some(legacy) = legacy_nested_memory_dir(&memory_dir) {
-            result.shell_jobs = result.shell_jobs.saturating_add(
-                FileShellJobStore::new(&legacy)
-                    .prune_finished_before(cutoff_ms)
-                    .map_err(|_| "shell_job_retention_failed".to_string())?,
             );
         }
         result.api_audit_events =
@@ -2447,7 +2364,6 @@ fn shutdown_web_runtime(state: &AppState) -> Result<(), String> {
         }
     };
 
-    FileShellJobStore::new(&memory_dir).terminate_owned_running();
     FileToolJobStore::new(&memory_dir).terminate_owned_running();
 
     if let Some(debug) = state.debug.as_ref() {
