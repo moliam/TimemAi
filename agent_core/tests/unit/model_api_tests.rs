@@ -1300,7 +1300,7 @@ fn native_exchanges_follow_owning_delta_order_for_all_providers() {
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n",
         "[BEGIN DELTA delta_id: pd_1, time_ms: 1]\n\n## USER\nQ1\n",
         "[BEGIN DELTA delta_id: pd_2, time_ms: 2]\n\n## USER\nQ2\n\n",
-        "Continue the work in the user's language. Call API tools when more evidence or actions are needed; otherwise give the final user-facing answer:"
+        "Continue the work and express thought in the user's language. Call API tools when more evidence or actions are needed; otherwise give the final user-facing answer:"
     ).to_string();
     let exchange = |delta_id: &str, call_id: &str, result: &str| NativeExchange {
         delta_id: delta_id.to_string(),

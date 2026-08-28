@@ -15,13 +15,11 @@ description: |
   include relevant sub-answers, explicitly correcting any contradiction.
 prompt_input: |
   Provide a non-empty task summarizing one or more current-turn questions or concerns,
-  and a non-empty user-facing Markdown answer. Multiple successful interim answers may
-  be shown in one turn; the UI groups them in one Interim tab with a distinct section
-  for each task. This tool is available only to the primary worker. Multiple independent
-  sub_answer calls may be submitted in one parallel tool group; Timem preserves their declared order.
+  and a non-empty user-facing Markdown answer. Use separate calls when independently
+  useful answers should be shown before the overall task is finished.
 prompt_result: |
   Success returns `Shown to user successfully.` The answer is visible immediately but
-  does not finish the turn. Failures precisely report invalid input or worker eligibility.
+  does not finish the turn. Failures report invalid input.
 input_schema: |
   {
     "type": "object",
