@@ -63,6 +63,8 @@ pub struct ShellJobTemporaryItem {
     pub id: String,
     pub created_at_ms: i64,
     pub bytes: u64,
+    pub deletable: bool,
+    pub delete_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -684,17 +686,24 @@ impl FileShellJobStore {
                 Ok(self
                     .records_unlocked()
                     .into_iter()
-                    .filter(|record| self.record_finished(record))
-                    .map(|record| ShellJobTemporaryItem {
-                        bytes: self
-                            .shell_job_artifact_paths(&record)
-                            .iter()
-                            .filter_map(|path| fs::symlink_metadata(path).ok())
-                            .filter(|metadata| metadata.file_type().is_file())
-                            .map(|metadata| metadata.len())
-                            .sum(),
-                        id: record.id,
-                        created_at_ms: record.created_at_ms,
+                    .filter(|record| self.record_finished_for_listing(record))
+                    .map(|record| {
+                        let local_paths = self.shell_job_listing_artifact_paths(&record);
+                        let deletable = self.shell_job_local_artifact_paths(&record).is_ok();
+                        ShellJobTemporaryItem {
+                            bytes: local_paths
+                                .iter()
+                                .filter_map(|path| fs::symlink_metadata(path).ok())
+                                .filter(|metadata| metadata.file_type().is_file())
+                                .map(|metadata| metadata.len())
+                                .sum(),
+                            id: record.id,
+                            created_at_ms: record.created_at_ms,
+                            deletable,
+                            delete_reason: (!deletable).then(|| {
+                                "Artifact paths are inconsistent with this shell job".to_string()
+                            }),
+                        }
                     })
                     .collect())
             })
@@ -761,13 +770,127 @@ impl FileShellJobStore {
         Ok(removed)
     }
 
-    fn shell_job_artifact_paths(&self, record: &ShellJobRecord) -> [PathBuf; 4] {
-        [
-            PathBuf::from(&record.output_file),
-            PathBuf::from(&record.stderr_file),
-            PathBuf::from(&record.status_file),
-            PathBuf::from(format!("{}.notified", record.status_file)),
+    fn safe_expected_shell_job_name(record: &ShellJobRecord, suffix: &str) -> Option<String> {
+        let name = format!("{}.{suffix}", record.id);
+        let path = Path::new(&name);
+        (path.parent() == Some(Path::new(""))
+            && path.file_name() == Some(std::ffi::OsStr::new(&name)))
+        .then_some(name)
+    }
+
+    fn shell_job_listing_artifact_path(
+        &self,
+        recorded: &str,
+        expected_name: Option<&str>,
+    ) -> Option<PathBuf> {
+        if recorded.is_empty() {
+            return None;
+        }
+        let recorded_path = Path::new(recorded);
+        if recorded_path.parent() == Some(self.dir.as_path()) {
+            return Some(recorded_path.to_path_buf());
+        }
+        let expected_name = expected_name?;
+        (recorded_path.file_name() == Some(std::ffi::OsStr::new(expected_name)))
+            .then(|| self.dir.join(expected_name))
+    }
+
+    fn shell_job_listing_artifact_paths(&self, record: &ShellJobRecord) -> Vec<PathBuf> {
+        let output = Self::safe_expected_shell_job_name(record, "out");
+        let stderr = Self::safe_expected_shell_job_name(record, "err");
+        let status = Self::safe_expected_shell_job_name(record, "status");
+        let mut paths = Vec::with_capacity(4);
+        for path in [
+            self.shell_job_listing_artifact_path(&record.output_file, output.as_deref()),
+            self.shell_job_listing_artifact_path(&record.stderr_file, stderr.as_deref()),
+            self.shell_job_listing_artifact_path(&record.status_file, status.as_deref()),
         ]
+        .into_iter()
+        .flatten()
+        {
+            paths.push(path);
+        }
+        if let Some(status) = paths.last() {
+            paths.push(PathBuf::from(format!("{}.notified", status.display())));
+        }
+        paths
+    }
+
+    fn record_finished_for_listing(&self, record: &ShellJobRecord) -> bool {
+        let expected = Self::safe_expected_shell_job_name(record, "status");
+        self.shell_job_listing_artifact_path(&record.status_file, expected.as_deref())
+            .and_then(|path| fs::read_to_string(path).ok())
+            .map(|text| !text.trim().is_empty())
+            .unwrap_or(false)
+    }
+
+    fn shell_job_local_artifact_path(
+        &self,
+        recorded: &str,
+        expected_name: &str,
+        optional: bool,
+    ) -> std::io::Result<Option<PathBuf>> {
+        if optional && recorded.is_empty() {
+            return Ok(None);
+        }
+        let expected_path = Path::new(expected_name);
+        if expected_path.parent() != Some(Path::new(""))
+            || expected_path.file_name() != Some(std::ffi::OsStr::new(expected_name))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "shell job artifact name is not a single safe file name",
+            ));
+        }
+        let recorded_path = Path::new(recorded);
+        if recorded_path.parent() == Some(self.dir.as_path()) {
+            return Ok(Some(recorded_path.to_path_buf()));
+        }
+        if recorded_path.file_name() == Some(std::ffi::OsStr::new(expected_name)) {
+            return Ok(Some(self.dir.join(expected_name)));
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "shell job artifact escaped its store with a mismatched name",
+        ))
+    }
+
+    fn shell_job_local_artifact_paths(
+        &self,
+        record: &ShellJobRecord,
+    ) -> std::io::Result<Vec<PathBuf>> {
+        let expected = [
+            (&record.output_file, format!("{}.out", record.id), false),
+            (&record.stderr_file, format!("{}.err", record.id), true),
+            (&record.status_file, format!("{}.status", record.id), false),
+        ];
+        let mut paths = Vec::with_capacity(4);
+        for (recorded, expected_name, optional) in expected {
+            if let Some(path) =
+                self.shell_job_local_artifact_path(recorded, &expected_name, optional)?
+            {
+                paths.push(path);
+            }
+        }
+        let status = paths
+            .last()
+            .expect("a valid shell job always has a status artifact");
+        paths.push(PathBuf::from(format!("{}.notified", status.display())));
+        Ok(paths)
+    }
+
+    fn shell_job_local_status_path(&self, record: &ShellJobRecord) -> std::io::Result<PathBuf> {
+        self.shell_job_local_artifact_path(
+            &record.status_file,
+            &format!("{}.status", record.id),
+            false,
+        )?
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "shell job status artifact is missing",
+            )
+        })
     }
 
     /// Removes finished shell-job records and their output artifacts older than
@@ -824,17 +947,7 @@ impl FileShellJobStore {
     }
 
     fn remove_shell_job_artifacts(&self, record: &ShellJobRecord) -> std::io::Result<()> {
-        let paths = self.shell_job_artifact_paths(record);
-        if paths
-            .iter()
-            .any(|path| path.parent() != Some(self.dir.as_path()))
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "shell job artifact escaped the shell_jobs directory",
-            ));
-        }
-        for path in paths {
+        for path in self.shell_job_local_artifact_paths(record)? {
             match fs::remove_file(path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -899,8 +1012,9 @@ impl FileShellJobStore {
     }
 
     fn record_finished(&self, record: &ShellJobRecord) -> bool {
-        fs::read_to_string(&record.status_file)
+        self.shell_job_local_status_path(record)
             .ok()
+            .and_then(|path| fs::read_to_string(path).ok())
             .map(|text| !text.trim().is_empty())
             .unwrap_or(false)
     }

@@ -729,8 +729,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('role="status" aria-live="polite">{switchPending ? "Switching MEM and loading its sessions…"');
     expect(styles).toContain('.settings-center-backdrop { position: fixed; z-index: 45;');
     expect(styles).toContain('.settings-center { width: min(880px, 100%);');
-    expect(styles).toContain('/* Borderless surface pass: paint-cheap Settings navigation and shadow-led overlays. */');
-    expect(styles).toContain('.settings-center-backdrop {\n  backdrop-filter: none;');
+    expect(styles).toContain('/* Borderless surface pass: paint-cheap Settings navigation and a modal workspace veil. */');
+    expect(styles).toContain('.settings-center-backdrop {\n  backdrop-filter: blur(9px) saturate(.78);\n  -webkit-backdrop-filter: blur(9px) saturate(.78);');
     expect(styles).toContain('.settings-center-nav button:hover:not(:disabled) {\n  background: #202824;\n  color: #f0f6f3;\n  box-shadow: none;\n  transform: none;');
     expect(styles).toContain('.decision-modal,\n.session-modal {\n  border: 0;');
     expect(styles).toContain('.endpoint-menu,\n.mcp-panel {\n  border: 0;');
@@ -1738,8 +1738,18 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('const memTemporaryItemsLoadedForRef = useRef("");');
     expect(source).toContain('if (memTemporaryItemsLoadedForRef.current === memPath) return;');
     expect(source).toContain('memTemporaryItemsLoadedForRef.current = memPath;');
+    expect(source).toContain('if (!memTemporaryItemsLoading) return;');
+    expect(source).toContain('Temporary files took too long to load. Reconnecting to try again…');
+    expect(source).toContain('socket.current?.close();');
+    expect(source).toContain("Limited tiers include a 4 MiB safe-write reserve.");
     expect(source).toContain('sendCommand({ type: "mem_temporary_items_list" })');
     expect(source).toContain('sendCommand({ type: "mem_temporary_items_delete", ids })');
+    expect(source).toContain('const deletableTemporaryItems = temporaryItems.filter((item) => item.deletable !== false);');
+    expect(source).toContain('Availability is shown here and verified again when deletion starts.');
+    expect(source).toContain('disabled={!temporaryDeleteMode || temporaryItemsDeleting || !deletable}');
+    expect(source).toContain('item.delete_reason || "Not currently deletable"');
+    expect(source).toContain('{deletableTemporaryItems.length} deletable');
+    expect(styles).toContain('.settings-temporary-row.unavailable');
     expect(source).toContain('sendCommand({ type: "mem_temporary_retention_update", days, max_bytes: maxBytes })');
     expect(source).toContain('sendCommand({ type: "mem_switch", path, stop_running: false })');
     expect(source).toContain('sendCommand({ type: "mem_switch", path: memSwitchCandidate.path, stop_running: true })');
@@ -3073,7 +3083,7 @@ describe("chat library modal and favorite management", () => {
     expect(source).toContain('visibleFavoriteItems.map');
     expect(source).toContain('const ChatLibrarySearchRow = memo');
     expect(source).toContain('const ChatLibraryFavoriteRow = memo');
-    expect(styles).toContain('.chat-library-center-backdrop { backdrop-filter: none; }');
+    expect(styles).toContain('.chat-library-center-backdrop {\n  backdrop-filter: blur(9px) saturate(.78);\n  -webkit-backdrop-filter: blur(9px) saturate(.78);');
     expect(styles).toContain('content-visibility: auto;');
   });
 });

@@ -223,6 +223,8 @@ export type MemTemporaryItem = {
   kind: "shell_job" | "temporary_file" | string;
   bytes: number;
   modified_at_ms: number;
+  deletable?: boolean;
+  delete_reason?: string;
 };
 
 export type ChatSearchHit = {

@@ -3325,6 +3325,9 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .settings-temporary-row:hover:not(:disabled), .settings-temporary-row.selected { background: #202824; }
 .settings-temporary-row.selected { box-shadow: inset 3px 0 #65aa9b; }
 .settings-temporary-row:disabled { opacity: 1; cursor: default; }
+.settings-temporary-row.unavailable { background: #151817; color: #8b9691; }
+.settings-temporary-row.unavailable .settings-temporary-copy small { color: #a48178; }
+.settings-temporary-row.selecting.unavailable .settings-temporary-select { border-style: dashed; border-color: #574943; }
 .settings-temporary-rank { color: #596660; font: 10px/1 "SFMono-Regular", Consolas, monospace; text-align: right; }
 .settings-temporary-select { width: 16px; height: 16px; display: grid; place-items: center; overflow: hidden; border: 1px solid transparent; border-radius: 4px; color: #dff8f2; }
 .settings-temporary-row.selecting .settings-temporary-select { border-color: #43514c; }
@@ -3344,6 +3347,8 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 :root[data-theme="light"] .settings-temporary-list { border-color: #d7e0dd; background: #fff; }
 :root[data-theme="light"] .settings-temporary-row { border-color: #e4eae7; color: #26342f; }
 :root[data-theme="light"] .settings-temporary-row:hover:not(:disabled), :root[data-theme="light"] .settings-temporary-row.selected { background: #edf5f1; }
+:root[data-theme="light"] .settings-temporary-row.unavailable { background: #f7f5f4; color: #7b8580; }
+:root[data-theme="light"] .settings-temporary-row.unavailable .settings-temporary-copy small { color: #9a6f65; }
 :root[data-theme="light"] .settings-temporary-copy small, :root[data-theme="light"] .settings-temporary-summary { color: #77857f; }
 @media (max-width: 720px) {
   .endpoint-settings-toolbar { align-items: flex-end; }
@@ -4403,8 +4408,11 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 :root[data-theme="light"] .chat-library-search-row:hover { background: #f7faf9; box-shadow: 0 7px 18px #29443b22; }
 :root[data-theme="light"] .chat-library-search-main p { color: #43534d; }
 
-/* Chat Library performance: isolate row layout and avoid full-screen live backdrop filtering. */
-.chat-library-center-backdrop { backdrop-filter: none; }
+/* Modal centers obscure and block the inactive workspace behind them. */
+.chat-library-center-backdrop {
+  backdrop-filter: blur(9px) saturate(.78);
+  -webkit-backdrop-filter: blur(9px) saturate(.78);
+}
 .chat-library-list { contain: layout paint style; }
 .chat-library-search-row,
 .chat-library-favorite-row { contain: layout paint style; content-visibility: auto; contain-intrinsic-size: auto 82px; }
@@ -4428,9 +4436,10 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 }
 :root[data-theme="light"] .session-interrupted-icon { color: #7b6854; }
 
-/* Borderless surface pass: paint-cheap Settings navigation and shadow-led overlays. */
+/* Borderless surface pass: paint-cheap Settings navigation and a modal workspace veil. */
 .settings-center-backdrop {
-  backdrop-filter: none;
+  backdrop-filter: blur(9px) saturate(.78);
+  -webkit-backdrop-filter: blur(9px) saturate(.78);
   background: #030706c7;
 }
 .settings-center {
