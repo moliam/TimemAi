@@ -3251,13 +3251,7 @@ function TimemApp() {
     const timeoutId = window.setTimeout(() => {
       memTemporaryItemsLoadedForRef.current = "";
       setMemTemporaryItemsLoading(false);
-      setMemTemporaryItemsError(
-        "Temporary files took too long to load. Reconnecting to try again…",
-      );      // OPEN only reflects the browser's local socket state. A half-open connection can
-      // accept send() while the Host never receives the command. Force the existing
-      // reconnect path to obtain a fresh Hello snapshot and retry this best-effort read.
-      socket.current?.close();
-    }, 15_000);
+      setMemTemporaryItemsError("Temporary files took too long to load. Select Refresh to try again.");    }, 15_000);
     return () => window.clearTimeout(timeoutId);
   }, [memTemporaryItemsLoading]);
   useEffect(() => {
