@@ -2944,7 +2944,7 @@ describe("assistant-ui thread integration", () => {
       /if \(sent\) \{[\s\S]*?updateQueuedMessages\(\(\) => nextQueues\);[\s\S]*?\}/,
     );
     expect(source).toContain(
-      "shouldDirectManualMessage(activeSession.state, existingQueue.length, !!queuedMessagesPause)",
+      "shouldDirectManualMessage(activeSession.state, existingQueue.length, !!queuedMessagesPause, isCancelling || !!activeSession.cancelling_turn_id)",
     );
     const submitDraftStart = source.indexOf("const submitDraft = () =>");
     const submitDraftEnd = source.indexOf(
@@ -3252,6 +3252,11 @@ describe("assistant-ui thread integration", () => {
       "Reconnect to Timem Web before renaming this session.",
     );
     expect(source).toContain("session-working-icon");
+    expect(source).toContain("const visuallyWorking = sessionVisuallyWorking(");
+    expect(viewModelSource).toContain("!session.cancelling_turn_id");
+    expect(viewModelSource).toContain(
+      "!locallyCancellingSessionIds.has(session.session_id)",
+    );
     expect(source).toContain('aria-label="Session working"');
     expect(source).toContain('aria-hidden="true"');
     expect(source).toContain(
@@ -3387,7 +3392,7 @@ describe("assistant-ui thread integration", () => {
       'className="session-working-icon" size={15} aria-label="Session working"',
     );
     expect(source).toContain(
-      'session.state === "working" ? <LoaderCircle className="session-working-icon"',
+      'visuallyWorking ? <LoaderCircle className="session-working-icon"',
     );
     expect(source).toContain(
       'session.state === "interrupted" ? <CircleStop className="session-interrupted-icon" size={15} aria-label="Session interrupted by runtime restart"',

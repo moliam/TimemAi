@@ -784,13 +784,14 @@ export function upsertTurn(session: Session, incoming: WebTurn): Session {
         )
       : [...session.turns, boundedIncoming],
   );
-  const working = incoming.state === "working";
+  const started = incoming.state === "working";
+  const visuallyWorking = started && !session.cancelling_turn_id;
   const pending = incoming.state === "pending";
   return {
     ...session,
-    state: working ? "working" : session.state,
-    active_turn_id: working ? incoming.turn_id : session.active_turn_id,
-    pending_turn_id: working
+    state: visuallyWorking ? "working" : session.state,
+    active_turn_id: started ? incoming.turn_id : session.active_turn_id,
+    pending_turn_id: started
       ? null
       : pending
         ? incoming.turn_id
@@ -1129,6 +1130,32 @@ function finalAnswerFromTurnEvent(session: Session, event: WebTurnEvent) {
     : undefined;
 }
 
+export function sessionVisuallyWorking(
+  session: Pick<Session, "session_id" | "state" | "cancelling_turn_id">,
+  locallyCancellingSessionIds: ReadonlySet<string> = new Set(),
+): boolean {
+  return (
+    session.state === "working" &&
+    !session.cancelling_turn_id &&
+    !locallyCancellingSessionIds.has(session.session_id)
+  );
+}
+
+export function markSessionCancelling(
+  session: Session,
+  turnId: string | null | undefined,
+): Session {
+  const workers = session.workers.map((worker) =>
+    worker.state === "working" ? { ...worker, state: "ready" } : worker,
+  );
+  return {
+    ...session,
+    workers,
+    state: aggregateSessionState(workers, "ready"),
+    cancelling_turn_id: turnId ?? session.cancelling_turn_id,
+  };
+}
+
 export function finishTurn(
   session: Session,
   turnId: string | null | undefined,
@@ -1162,6 +1189,7 @@ export function updateSessionWorkerState(
   workerId: string,
   state: string,
 ): Session {
+  if (state === "working" && session.cancelling_turn_id) return session;
   let found = false;
   let changed = false;
   const workers = session.workers.map((worker) => {

@@ -1311,6 +1311,17 @@ fn accepted_targeted_cancel_is_serialized_until_the_target_turn_finishes() {
     )
     .unwrap();
 
+    let (context_id, worker_id) = primary_worker_scope(&state, &session_id).unwrap();
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnStarted {
+            command_id: Some("submit-cancelling".to_string()),
+        },
+    );
+
     let mut events = state.events.subscribe();
     assert!(handle_command(
         &state,
@@ -1340,9 +1351,99 @@ fn accepted_targeted_cancel_is_serialized_until_the_target_turn_finishes() {
         .iter()
         .find(|session| session["session_id"] == session_id)
         .unwrap();
-    assert_eq!(serialized["pending_turn_id"], pending.turn_id);
+    assert!(serialized["pending_turn_id"].is_null());
     assert_eq!(serialized["cancelling_turn_id"], pending.turn_id);
-    assert!(serialized["active_turn_id"].is_null());
+    assert_eq!(serialized["active_turn_id"], pending.turn_id);
+    assert_eq!(serialized["state"], "ready");
+    assert!(serialized["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|worker| worker["state"] != "working"));
+}
+
+#[test]
+fn late_core_working_events_cannot_revive_an_accepted_cancellation() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "CANCELLING_LATE_EVENTS");
+    let command_id = "submit-cancelling-late";
+    let pending = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "cancel before late Core events",
+        Some(command_id),
+    )
+    .unwrap();
+    let (context_id, worker_id) = primary_worker_scope(&state, &session_id).unwrap();
+
+    assert!(handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnCancel {
+            session_id: session_id.clone(),
+            target_command_id: Some(command_id.to_string()),
+        },
+    )
+    .unwrap()
+    .is_none());
+
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnStarted {
+            command_id: Some(command_id.to_string()),
+        },
+    );
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
+            api_payload: None,
+        },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(
+        session.cancelling_turn_id.as_deref(),
+        Some(pending.turn_id.as_str())
+    );
+    assert_eq!(
+        session.active_turn_id.as_deref(),
+        Some(pending.turn_id.as_str())
+    );
+    assert_eq!(session.pending_turn_id, None);
+    assert_eq!(session.turns.last().unwrap().state, "working");
+    assert_eq!(session.state, "ready");
+    assert!(session
+        .workers
+        .iter()
+        .all(|worker| worker.state != "working"));
+    drop(sessions);
+
+    let snapshot = serde_json::to_value(snapshot_for(&state, TEST_PORT)).unwrap();
+    let serialized = snapshot["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["session_id"] == session_id)
+        .unwrap();
+    assert_eq!(serialized["cancelling_turn_id"], pending.turn_id);
+    assert_eq!(serialized["active_turn_id"], pending.turn_id);
+    assert_eq!(serialized["state"], "ready");
+    assert!(serialized["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|worker| worker["state"] != "working"));
 }
 
 #[test]
