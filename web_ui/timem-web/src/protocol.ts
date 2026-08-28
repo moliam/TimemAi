@@ -272,6 +272,8 @@ export type Snapshot = {
       space_dir: string;
       memory_dir: string;
       temporary_retention_days: 1 | 5 | 10 | null;
+      temporary_capacity_bytes: number | null;
+      conversation_capacity_bytes: number | null;
     };
     runtime_options: Array<{ key: string; value: string; applies_to: "new_sessions" | string }>;
     session_env_defaults: Record<string, string>;
@@ -313,7 +315,7 @@ export type WireEvent =
   | { type: "host_error"; message: string }
   | { type: "runtime_notice"; session_id: string; level: "notice" | "warning" | "error" | string; title: string; message: string }
   | { type: "host_config_updated"; key: string; value: string; session_env_defaults: Record<string, string> }
-  | { type: "mem_settings_updated"; temporary_retention_days: 1 | 5 | 10 | null }
+  | { type: "mem_settings_updated"; temporary_retention_days: 1 | 5 | 10 | null; temporary_capacity_bytes: number | null; conversation_capacity_bytes: number | null }
   | { type: "mem_temporary_items"; items: MemTemporaryItem[]; error?: string }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
   | { type: "attachment_removed"; session_id: string; attachment_id: string }
@@ -371,8 +373,9 @@ export type ClientCommand =
   | { type: "mcp_session_toggle"; session_id: string; server_id: string; enabled: boolean }
   | { type: "mcp_server_reconnect"; session_id: string; server_id: string }
   | { type: "mcp_server_secrets_reveal"; server_id: string }
-  | { type: "mem_switch"; path: string }
-  | { type: "mem_temporary_retention_update"; days: 1 | 5 | 10 | null }
+  | { type: "mem_switch"; path: string; stop_running: boolean }
+  | { type: "mem_temporary_retention_update"; days: 1 | 5 | 10 | null; max_bytes: number | null }
+  | { type: "mem_conversation_capacity_update"; max_bytes: number | null }
   | { type: "mem_temporary_items_list" }
   | { type: "mem_temporary_items_delete"; ids: string[] }
   | {

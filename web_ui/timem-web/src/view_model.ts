@@ -812,14 +812,18 @@ export function turnLiveUsage(turn: WebTurn): { total: import("./protocol").Usag
   return turnLiveUsageSince(turn);
 }
 
-export function sessionContextUsage(session: Session): import("./protocol").UsageStats | undefined {
-  const runtimeRestartAtMs = session.messages.reduce<number | undefined>((latest, message) => (
+function sessionRuntimeRestartAtMs(session: Session): number | undefined {
+  return session.messages.reduce<number | undefined>((latest, message) => (
     message.role === "system"
       && message.kind === "runtime_restart"
       && (latest === undefined || message.created_at_ms > latest)
       ? message.created_at_ms
       : latest
   ), undefined);
+}
+
+export function sessionContextUsage(session: Session): import("./protocol").UsageStats | undefined {
+  const runtimeRestartAtMs = sessionRuntimeRestartAtMs(session);
 
   for (let index = session.turns.length - 1; index >= 0; index -= 1) {
     const turn = session.turns[index];
@@ -838,6 +842,42 @@ export function sessionContextUsage(session: Session): import("./protocol").Usag
     if (latest) return latest;
   }
   return undefined;
+}
+
+export function sessionRuntimeUsage(session: Session): import("./protocol").UsageStats | undefined {
+  const runtimeRestartAtMs = sessionRuntimeRestartAtMs(session);
+  const total: import("./protocol").UsageStats = {};
+  let found = false;
+
+  const add = (usage: import("./protocol").UsageStats | undefined) => {
+    if (!usage) return;
+    found = true;
+    for (const field of USAGE_FIELDS) {
+      const value = usage[field];
+      if (typeof value === "number" && Number.isFinite(value)) total[field] = (total[field] ?? 0) + value;
+    }
+  };
+
+  for (const turn of session.turns) {
+    if (turn.state === "restored") continue;
+    const live = turnLiveUsageSince(turn, runtimeRestartAtMs);
+    if (live) {
+      add(live.total);
+      continue;
+    }
+    // Completion stats have no independent timestamp, so they count only when
+    // the complete turn started in this runtime instance.
+    if (runtimeRestartAtMs !== undefined && turn.created_at_ms < runtimeRestartAtMs) continue;
+    add(turn.completion?.stats);
+  }
+  return found ? total : undefined;
+}
+
+export function sessionCacheHitPercent(session: Session): number | undefined {
+  const usage = sessionRuntimeUsage(session);
+  const promptTokens = usage?.prompt_tokens ?? 0;
+  if (promptTokens <= 0) return undefined;
+  return Math.min(100, Math.max(0, (usage?.cached_tokens ?? 0) * 100 / promptTokens));
 }
 
 export function decisionKey(decision: Decision) {

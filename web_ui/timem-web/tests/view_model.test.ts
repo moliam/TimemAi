@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ChatHistoryRecord, ChatMessage, CoreTopicEvent, Session, WebTurn, WebTurnEvent } from "../src/protocol";
-import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionWorkerTreeRows, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnTimelinePlacement, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
+import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForSession, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishDraftSubmission, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, hasOnlyFreeTalkActivity, manualToolGenCommand, MAX_CLIENT_TURNS, MAX_RENDERED_MESSAGES, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, redactSensitiveDisplayText, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveDraftSubmission, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionCacheHitPercent, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason, sessionRenameDecision, sessionWorkerTreeRows, sessionTurnKey, setSessionDraft, tailPath, trimMessages, turnLiveUsage, turnTimelinePlacement, turnsFromHistoryRecords, visibleRuntimeRestartMarkers, updateSessionWorkerState, upsertSession, upsertTurn, workspacePathLabel } from "../src/view_model";
 
 const topic = (name: string, payload: Record<string, unknown>, state = "running"): CoreTopicEvent => ({
   session_id: "session_1",
@@ -74,6 +74,33 @@ describe("interrupted session state", () => {
 
     const working = updateSessionWorkerState(interrupted, interrupted.primary_worker_id, "working");
     expect(working.state).toBe("working");
+  });
+
+  it("applies worker priority without inventing an interrupted worker state", () => {
+    const interrupted = { ...session("session_1"), state: "interrupted" };
+    interrupted.workers.push({ worker_id: "worker_child", context_id: "context_session_1", display_name: "Child", ordinal: 1, state: "ready", parent_worker_id: interrupted.primary_worker_id });
+
+    const errored = updateSessionWorkerState(interrupted, "worker_child", "error");
+    expect(errored.state).toBe("error");
+    expect(errored.workers.map((worker) => worker.state)).toEqual(["ready", "error"]);
+
+    const recovered = updateSessionWorkerState(errored, "worker_child", "ready");
+    expect(recovered.state).toBe("ready");
+    expect(recovered.workers.every((worker) => worker.state === "ready")).toBe(true);
+  });
+
+  it("returns to ready when post-restart work finishes while preserving the old interrupted turn", () => {
+    const interrupted = { ...session("session_1"), state: "interrupted" };
+    interrupted.turns = [turn("old_turn", "interrupted"), turn("new_turn", "working")];
+    interrupted.active_turn_id = "new_turn";
+    interrupted.workers[0] = { ...interrupted.workers[0], state: "working" };
+
+    const finished = finishTurn(interrupted, "new_turn", { stop_reason: "completed" });
+    expect(finished.state).toBe("ready");
+    expect(finished.active_turn_id).toBeNull();
+    expect(finished.turns[0].state).toBe("interrupted");
+    expect(finished.turns[1].state).toBe("finished");
+    expect(finished.workers[0].state).toBe("ready");
   });
 });
 
@@ -1185,6 +1212,54 @@ describe("web topic view model", () => {
 
     expect(sessionContextUsage(current)?.prompt_tokens).toBe(8_200);
     expect(sessionContextUsage(session("session_2"))).toBeUndefined();
+  });
+
+  it("aggregates this runtime instance cache hit rate per session without double counting completion", () => {
+    const current = session("session_cache");
+    const first = turn("first", "finished");
+    first.created_at_ms = 210;
+    first.events = [
+      { event_id: "first_1", source: "worker_activity", created_at_ms: 220, payload: { kind: "model_response", usage: { prompt_tokens: 4_000, cached_tokens: 3_000 } } },
+      { event_id: "first_2", source: "worker_activity", created_at_ms: 230, payload: { kind: "model_response", usage: { prompt_tokens: 6_000, cached_tokens: 5_000 } } },
+    ];
+    // This is the same turn total and must not be added again when events exist.
+    first.completion = { stats: { prompt_tokens: 10_000, cached_tokens: 8_000 } };
+
+    const second = turn("second", "finished");
+    second.created_at_ms = 240;
+    second.completion = { stats: { prompt_tokens: 2_000, cached_tokens: 1_000 } };
+    current.turns = [first, second];
+
+    expect(sessionCacheHitPercent(current)).toBeCloseTo(75, 8);
+    expect(sessionCacheHitPercent(session("other_session"))).toBeUndefined();
+  });
+
+  it("resets session cache hit rate at the latest runtime restart boundary", () => {
+    const restarted = session("session_cache_restarted");
+    restarted.messages = [{
+      id: "restart",
+      role: "system",
+      kind: "runtime_restart",
+      text: "runtime restarted",
+      created_at_ms: 200,
+    }];
+    const oldTurn = turn("old", "finished");
+    oldTurn.created_at_ms = 100;
+    oldTurn.events = [
+      { event_id: "old_usage", source: "worker_activity", created_at_ms: 120, payload: { kind: "model_response", usage: { prompt_tokens: 10_000, cached_tokens: 9_000 } } },
+    ];
+    oldTurn.completion = { stats: { prompt_tokens: 10_000, cached_tokens: 9_000 } };
+    restarted.turns = [oldTurn];
+    expect(sessionCacheHitPercent(restarted)).toBeUndefined();
+
+    const resumed = turn("resumed", "working");
+    resumed.created_at_ms = 150;
+    resumed.events = [
+      { event_id: "restored_usage", source: "worker_activity", created_at_ms: 180, payload: { kind: "model_response", usage: { prompt_tokens: 20_000, cached_tokens: 18_000 } } },
+      { event_id: "runtime_usage", source: "worker_activity", created_at_ms: 220, payload: { kind: "model_response", usage: { prompt_tokens: 5_000, cached_tokens: 2_000 } } },
+    ];
+    restarted.turns.push(resumed);
+    expect(sessionCacheHitPercent(restarted)).toBeCloseTo(40, 8);
   });
 
   it("resets session context usage at the latest runtime restart boundary", () => {
