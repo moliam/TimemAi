@@ -3253,8 +3253,7 @@ function TimemApp() {
       setMemTemporaryItemsLoading(false);
       setMemTemporaryItemsError(
         "Temporary files took too long to load. Reconnecting to try again…",
-      );
-      // OPEN only reflects the browser's local socket state. A half-open connection can
+      );      // OPEN only reflects the browser's local socket state. A half-open connection can
       // accept send() while the Host never receives the command. Force the existing
       // reconnect path to obtain a fresh Hello snapshot and retry this best-effort read.
       socket.current?.close();
@@ -12276,14 +12275,9 @@ function SettingsCenter(props: SettingsCenterProps) {
     temporaryItemsDeleting;
   const cleanedPath = path.trim();
   const pathUnchanged = cleanedPath === memPath;
-  const selectedTemporaryBytes = temporaryItems
-    .filter((item) => selectedTemporaryIds.has(item.id))
-    .reduce((total, item) => total + item.bytes, 0);
-  const updateAppearance = <K extends keyof Appearance>(
-    key: K,
-    value: Appearance[K],
-  ) => onAppearanceChange({ ...appearance, [key]: value });
-  useEffect(() => setDays(retentionDays), [retentionDays]);
+  const deletableTemporaryItems = temporaryItems.filter((item) => item.deletable !== false);
+  const selectedTemporaryBytes = deletableTemporaryItems.filter((item) => selectedTemporaryIds.has(item.id)).reduce((total, item) => total + item.bytes, 0);
+  const updateAppearance = <K extends keyof Appearance>(key: K, value: Appearance[K]) => onAppearanceChange({ ...appearance, [key]: value });  useEffect(() => setDays(retentionDays), [retentionDays]);
   useEffect(
     () => setTemporaryCapacity(temporaryCapacityBytes),
     [temporaryCapacityBytes],
@@ -12301,15 +12295,7 @@ function SettingsCenter(props: SettingsCenterProps) {
     setMemoryPage("overview");
   }, [memPath]);
   useEffect(() => {
-    setSelectedTemporaryIds(
-      (current) =>
-        new Set(
-          Array.from(current).filter((id) =>
-            temporaryItems.some((item) => item.id === id),
-          ),
-        ),
-    );
-    if (temporaryItemsDeleting) return;
+    setSelectedTemporaryIds((current) => new Set(Array.from(current).filter((id) => temporaryItems.some((item) => item.id === id && item.deletable !== false))));    if (temporaryItemsDeleting) return;
     if (temporaryItems.length === 0) setTemporaryDeleteMode(false);
   }, [temporaryItems, temporaryItemsDeleting]);
   const cancelTemporaryDelete = () => {
@@ -13205,8 +13191,7 @@ function SettingsCenter(props: SettingsCenterProps) {
                 </section>
               </section>
             )}
-          </div>
-        </div>
+          </div>        </div>
       </section>
     </div>,
     document.body,

@@ -1290,6 +1290,136 @@ fn shell_job_retention_rejects_artifact_paths_outside_its_store() {
 }
 
 #[test]
+fn shell_job_retention_cleans_legacy_paths_without_deleting_external_spool_files() {
+    let dir = tmp_memory_dir("retention_legacy_paths");
+    let store = FileShellJobStore::new(&dir);
+    let shell_dir = dir.join("shell_jobs");
+    let id = "legacy-finished";
+    let local_status = shell_dir.join(format!("{id}.status"));
+    let local_notified = shell_dir.join(format!("{id}.status.notified"));
+    let external_dir = tmp_memory_dir("retention_legacy_external_spool");
+    let external_output = external_dir.join(format!("{id}.out"));
+    fs::write(&external_output, "legacy output must remain").unwrap();
+    fs::write(&local_status, "exit:0").unwrap();
+    fs::write(&local_notified, "1").unwrap();
+    let record = ShellJobRecord {
+        id: id.to_string(),
+        created_at_ms: 1,
+        kind: "background".to_string(),
+        session_id: "legacy-session".to_string(),
+        turn_id: "legacy-turn".to_string(),
+        pid: std::process::id(),
+        process_identity: None,
+        tool_call_id: "legacy-call".to_string(),
+        owner_id: None,
+        command: "legacy command".to_string(),
+        cwd: dir.display().to_string(),
+        output_file: external_output.display().to_string(),
+        stderr_file: String::new(),
+        status_file: format!("data/.test_mem/memory/shell_jobs/{id}.status"),
+        tail_out: false,
+    };
+    store.append(&record).unwrap();
+
+    let items = store.finished_temporary_items().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, id);
+    assert_eq!(items[0].bytes, 7);
+    assert!(items[0].deletable);
+    assert!(items[0].delete_reason.is_none());
+    assert_eq!(
+        store
+            .delete_finished_temporary_items(&[id.to_string()])
+            .unwrap(),
+        1
+    );
+    assert!(external_output.exists());
+    assert!(!local_status.exists());
+    assert!(!local_notified.exists());
+    assert!(store.records_unlocked().is_empty());
+
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_dir_all(&external_dir);
+}
+
+#[test]
+fn shell_job_temporary_items_display_mismatched_artifact_names_as_not_deletable() {
+    let dir = tmp_memory_dir("temporary_items_path_mismatch");
+    let store = FileShellJobStore::new(&dir);
+    let shell_dir = dir.join("shell_jobs");
+    let status = shell_dir.join("mismatch.status");
+    fs::write(&status, "exit:0").unwrap();
+    let record = ShellJobRecord {
+        id: "mismatch".to_string(),
+        created_at_ms: 1,
+        kind: "background".to_string(),
+        session_id: "session".to_string(),
+        turn_id: "turn".to_string(),
+        pid: std::process::id(),
+        process_identity: None,
+        tool_call_id: "call".to_string(),
+        owner_id: None,
+        command: "command".to_string(),
+        cwd: dir.display().to_string(),
+        output_file: dir.join("must-remain.out").display().to_string(),
+        stderr_file: shell_dir.join("mismatch.err").display().to_string(),
+        status_file: status.display().to_string(),
+        tail_out: false,
+    };
+    store.append(&record).unwrap();
+
+    let items = store.finished_temporary_items().unwrap();
+    assert_eq!(items.len(), 1);
+    assert!(!items[0].deletable);
+    assert!(items[0].delete_reason.is_some());
+    assert!(store
+        .delete_finished_temporary_items(&["mismatch".to_string()])
+        .is_err());
+    assert_eq!(store.records_unlocked(), vec![record]);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn shell_job_temporary_items_display_unsafe_job_ids_as_not_deletable() {
+    let dir = tmp_memory_dir("temporary_items_unsafe_job_id");
+    let store = FileShellJobStore::new(&dir);
+    let shell_dir = dir.join("shell_jobs");
+    let local_status = shell_dir.join("escape.status");
+    let outside_status = dir.join("escape.status");
+    fs::write(&local_status, "exit:0").unwrap();
+    fs::write(&outside_status, "must remain").unwrap();
+    let record = ShellJobRecord {
+        id: "../escape".to_string(),
+        created_at_ms: 1,
+        kind: "background".to_string(),
+        session_id: "session".to_string(),
+        turn_id: "turn".to_string(),
+        pid: std::process::id(),
+        process_identity: None,
+        tool_call_id: "call".to_string(),
+        owner_id: None,
+        command: "command".to_string(),
+        cwd: dir.display().to_string(),
+        output_file: shell_dir.join("escape.out").display().to_string(),
+        stderr_file: String::new(),
+        status_file: local_status.display().to_string(),
+        tail_out: false,
+    };
+    store.append(&record).unwrap();
+
+    let items = store.finished_temporary_items().unwrap();
+    assert_eq!(items.len(), 1);
+    assert!(!items[0].deletable);
+    assert!(items[0].delete_reason.is_some());
+    assert_eq!(store.prune_finished_before(2).unwrap(), 0);
+    assert!(outside_status.exists());
+    assert_eq!(store.records_unlocked(), vec![record]);
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn shutdown_terminates_only_shell_jobs_owned_by_this_process() {
     let dir = tmp_memory_dir("owned_shutdown");
     let store = FileShellJobStore::new(&dir);
