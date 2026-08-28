@@ -1398,9 +1398,12 @@ struct WebSession {
     #[serde(skip)]
     resume_notice_pending: bool,
     active_turn_id: Option<String>,
+    /// The current pending/active Turn after a cancel command has been accepted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cancelling_turn_id: Option<String>,
     /// A durable Host intent that has not yet emitted Core TurnStarted.
     /// This is routing metadata, not live working state.
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pending_turn_id: Option<String>,
     #[serde(skip)]
     pending_completion_message_id: Option<String>,
@@ -1642,6 +1645,11 @@ enum WireEvent {
         session_id: String,
         turn_id: Option<String>,
         outcome: Value,
+    },
+    TurnCancelling {
+        session_id: String,
+        turn_id: String,
+        target_command_id: Option<String>,
     },
     TurnStarted {
         session_id: String,
@@ -2000,6 +2008,8 @@ enum ClientCommand {
     },
     TurnCancel {
         session_id: String,
+        #[serde(default)]
+        target_command_id: Option<String>,
     },
     AttachmentRemove {
         session_id: String,
@@ -2142,7 +2152,7 @@ impl ClientCommand {
             | Self::ChatMessageDelete { session_id, .. }
             | Self::TurnSubmit { session_id, .. }
             | Self::TurnSupplement { session_id, .. }
-            | Self::TurnCancel { session_id }
+            | Self::TurnCancel { session_id, .. }
             | Self::AttachmentRemove { session_id, .. }
             | Self::ToolRepoRename { session_id, .. }
             | Self::ToolRepoOpenTerminal { session_id, .. }
@@ -2570,7 +2580,7 @@ fn client_command_trace_fields(command: &ClientCommand) -> (&'static str, Option
         ClientCommand::TurnSupplement { session_id, .. } => {
             ("turn_supplement", Some(session_id.clone()))
         }
-        ClientCommand::TurnCancel { session_id } => ("turn_cancel", Some(session_id.clone())),
+        ClientCommand::TurnCancel { session_id, .. } => ("turn_cancel", Some(session_id.clone())),
         _ => ("other", None),
     }
 }
@@ -4584,15 +4594,72 @@ fn handle_command_with_id(
             );
             return Ok(Some(event));
         }
-        ClientCommand::TurnCancel { session_id } => {
-            for worker_id in session_worker_ids(state, &session_id)? {
-                state
-                    .manager
+        ClientCommand::TurnCancel {
+            session_id,
+            target_command_id,
+        } => {
+            if let Some(target_command_id) = target_command_id.as_deref() {
+                let sessions = state
+                    .sessions
                     .lock()
-                    .map_err(|_| "worker_manager_poisoned")?
-                    .handle(&worker_id)
-                    .ok_or_else(|| "session_worker_not_found".to_string())?
-                    .cancel_current_turn();
+                    .map_err(|_| "session_store_poisoned")?;
+                let session = sessions
+                    .get(&session_id)
+                    .ok_or_else(|| "session_not_found".to_string())?;
+                let target_matches_current_turn = current_turn_id(session)
+                    .and_then(|turn_id| session.turns.iter().find(|turn| turn.turn_id == turn_id))
+                    .is_some_and(|turn| {
+                        turn.user_entries
+                            .iter()
+                            .any(|entry| entry.command_id.as_deref() == Some(target_command_id))
+                    });
+                if !target_matches_current_turn {
+                    return Err("turn_cancel_target_mismatch".to_string());
+                }
+            }
+            if cancel_pending_work_instruction_turn(
+                state,
+                &session_id,
+                target_command_id.as_deref(),
+            )? {
+                return Ok(None);
+            }
+            let cancelling_turn_id = {
+                let mut sessions = state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session_store_poisoned")?;
+                let session = sessions
+                    .get_mut(&session_id)
+                    .ok_or_else(|| "session_not_found".to_string())?;
+                let turn_id = current_turn_id(session).map(str::to_string);
+                session.cancelling_turn_id = turn_id.clone();
+                turn_id
+            };
+            let cancelled_workers = state
+                .manager
+                .lock()
+                .map_err(|_| "worker_manager_poisoned")?
+                .cancel_session_turns(&session_id);
+            if cancelled_workers == 0 {
+                if let Ok(mut sessions) = state.sessions.lock() {
+                    if let Some(session) = sessions.get_mut(&session_id) {
+                        if session.cancelling_turn_id == cancelling_turn_id {
+                            session.cancelling_turn_id = None;
+                        }
+                    }
+                }
+                return Err("session_worker_not_found".to_string());
+            }
+            if let Some(turn_id) = cancelling_turn_id {
+                publish_semantic(
+                    state,
+                    WireEvent::TurnCancelling {
+                        session_id: session_id.clone(),
+                        turn_id,
+                        target_command_id,
+                    },
+                );
             }
         }
         ClientCommand::AttachmentRemove {
@@ -5143,6 +5210,7 @@ fn interrupt_old_mem_sessions_after_worker_shutdown(
                 session.state = aggregate_web_session_state(&session.workers, "ready");
             }
             session.active_turn_id = None;
+            session.cancelling_turn_id = None;
             session.pending_turn_id = None;
             session.pending_unconsumed_supplements.clear();
             session.pending_work_instruction_turn = None;
@@ -5807,6 +5875,7 @@ fn create_session(
                 history_has_more: false,
                 resume_notice_pending: false,
                 active_turn_id: None,
+                cancelling_turn_id: None,
                 pending_turn_id: None,
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
@@ -6130,6 +6199,7 @@ fn restore_stored_session(
                 history_has_more: history_page.has_more,
                 resume_notice_pending: true,
                 active_turn_id: None,
+                cancelling_turn_id: None,
                 pending_turn_id: None,
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
@@ -7159,6 +7229,90 @@ fn submit_turn_with_selected_attachments(
         return Err(error);
     }
     Ok(turn)
+}
+
+fn cancel_pending_work_instruction_turn(
+    state: &AppState,
+    session_id: &str,
+    target_command_id: Option<&str>,
+) -> Result<bool, String> {
+    let completion = json!({
+        "stats": {
+            "llm_calls": 0,
+            "repair_calls": 0,
+            "tool_calls": 0,
+            "mem_reads": 0,
+            "mem_writes": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "cache_created_tokens": 0,
+            "shrunk_tokens": 0,
+        },
+        "latest_usage": Value::Null,
+        "elapsed_ms": 0,
+        "repair_issue": Value::Null,
+        "stop_reason": "CancelledByUser",
+        "toolgen_retrospect": Value::Null,
+    });
+    let turn_id = {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned")?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        let Some(pending) = session.pending_work_instruction_turn.as_ref() else {
+            return Ok(false);
+        };
+        if target_command_id.is_some() && pending.command_id.as_deref() != target_command_id {
+            return Err("turn_cancel_target_mismatch".to_string());
+        }
+        let turn_id = session
+            .pending_turn_id
+            .clone()
+            .ok_or_else(|| "pending_turn_missing".to_string())?;
+        let turn = session
+            .turns
+            .iter_mut()
+            .find(|turn| turn.turn_id == turn_id)
+            .ok_or_else(|| "pending_turn_not_found".to_string())?;
+        turn.state = "finished".to_string();
+        turn.completion = Some(completion.clone());
+        session.pending_work_instruction_turn = None;
+        session.pending_turn_id = None;
+        session.active_turn_id = None;
+        session.cancelling_turn_id = None;
+        session.state = aggregate_web_session_state(&session.workers, "ready");
+        turn_id
+    };
+    let mut extra = BTreeMap::new();
+    extra.insert("completion".to_string(), completion.clone());
+    append_history_record_and_schedule_retention(
+        state,
+        session_id,
+        &ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: turn_id.clone(),
+            created_at_ms: now_ms_i64(),
+            kind: ChatHistoryEventKind::Stats,
+            content: "Turn completed.".to_string(),
+            extra,
+        },
+    )?;
+    persist_web_session(state, session_id)?;
+    publish_core_semantic(
+        state,
+        session_id,
+        WireEvent::TurnFinished {
+            session_id: session_id.to_string(),
+            turn_id: Some(turn_id),
+            outcome: json!({ "text": "", "message_id": Value::Null, "completion": completion }),
+        },
+    );
+    Ok(true)
 }
 
 fn resolve_work_instruction_decision(
@@ -8633,6 +8787,9 @@ fn rollback_web_turn(
             if session.pending_turn_id.as_deref() == Some(turn_id) {
                 session.pending_turn_id = None;
             }
+            if session.cancelling_turn_id.as_deref() == Some(turn_id) {
+                session.cancelling_turn_id = None;
+            }
             session.state = aggregate_web_session_state(&session.workers, &session.state);
             session.attachments.splice(0..0, attachments);
         }
@@ -9836,6 +9993,7 @@ fn handle_scoped_worker_event(
                     .map(|session| {
                         let turn_id = session.active_turn_id.take();
                         session.pending_turn_id = None;
+                        session.cancelling_turn_id = None;
                         if let Some(active_turn_id) = turn_id.as_deref() {
                             if let Some(turn) = session
                                 .turns

@@ -12,6 +12,10 @@ struct TransientFailureClient {
     calls: usize,
 }
 
+struct CancelledThenNativeClient {
+    calls: usize,
+}
+
 impl ModelClient for ProbeClient {
     fn call_model(
         &mut self,
@@ -31,6 +35,46 @@ impl ModelClient for ProbeClient {
         _should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<LlmResponse, String> {
         self.calls += 1;
+        let count = if request.parallel_tool_calls { 2 } else { 1 };
+        Ok(LlmResponse {
+            tool_calls: (0..count)
+                .map(|index| NativeToolCall {
+                    id: format!("probe_{index}"),
+                    name: PROBE_TOOL_NAME.to_string(),
+                    arguments: json!({"slot": index + 1}),
+                    raw_arguments: format!("{{\"slot\":{}}}", index + 1),
+                })
+                .collect(),
+            content: String::new(),
+            model_name: config.model.clone(),
+            usage: UsageStats::zero(),
+            truncated: false,
+        })
+    }
+}
+
+impl ModelClient for CancelledThenNativeClient {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        Err("unexpected_inline_call".to_string())
+    }
+
+    fn call_model_interaction(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.calls += 1;
+        if self.calls == 1 {
+            return Err("cancelled_by_user".to_string());
+        }
         let count = if request.parallel_tool_calls { 2 } else { 1 };
         Ok(LlmResponse {
             tool_calls: (0..count)
@@ -128,4 +172,24 @@ fn transient_probe_failure_does_not_permanently_pin_inline_mode() {
     assert_eq!(recovered.resolved_mode, ToolCallMode::Native);
     assert_eq!(recovered.source, CapabilityProbeSource::Probe);
     assert_eq!(recovered_client.calls, 2);
+}
+
+#[test]
+fn cancelled_probe_is_not_cached_and_next_turn_can_restore_native_mode() {
+    let model = format!("cancelled-probe-test-{}", std::process::id());
+    let config = auto_config(&model);
+    let audit = std::env::temp_dir().join(format!("timem-negotiation-{model}.json"));
+    let mut client = CancelledThenNativeClient { calls: 0 };
+
+    let cancelled = negotiate_interaction(&mut client, &config, &audit, &mut || false);
+    assert_eq!(cancelled.resolved_mode, ToolCallMode::Inline);
+    assert_eq!(cancelled.source, CapabilityProbeSource::Fallback);
+    assert_eq!(cancelled.reason, "native_probe_failed:cancelled_by_user");
+    assert_eq!(client.calls, 1);
+
+    let recovered = negotiate_interaction(&mut client, &config, &audit, &mut || false);
+    assert_eq!(recovered.resolved_mode, ToolCallMode::Native);
+    assert_eq!(recovered.source, CapabilityProbeSource::Probe);
+    assert_eq!(recovered.active_prompt_protocol, "json");
+    assert_eq!(client.calls, 3);
 }

@@ -18,6 +18,8 @@ pub struct ToolJobRecord {
     pub pid: u32,
     #[serde(default)]
     pub owner_id: Option<String>,
+    #[serde(default)]
+    pub session_id: String,
     pub action: String,
     pub command_path: String,
     pub payload_file: String,
@@ -44,11 +46,12 @@ impl FileToolJobStore {
     }
 
     pub fn spawn(&self, action: &str, path: &Path, payload: &Value) -> String {
-        self.spawn_outcome(action, path, payload).text
+        self.spawn_outcome("default", action, path, payload).text
     }
 
     pub(crate) fn spawn_outcome(
         &self,
+        session_id: &str,
         action: &str,
         path: &Path,
         payload: &Value,
@@ -96,6 +99,7 @@ impl FileToolJobStore {
             created_at_ms: now_ms(),
             pid: child.id(),
             owner_id: Some(crate::runtime_process_owner_id().to_string()),
+            session_id: session_id.to_string(),
             action: action.to_string(),
             command_path: path.to_string_lossy().to_string(),
             payload_file: payload_file.to_string_lossy().to_string(),
@@ -190,6 +194,28 @@ impl FileToolJobStore {
             terminated += 1;
         }
         terminated
+    }
+
+    /// Terminates unfinished command-tool jobs owned by this process and Session.
+    pub fn cancel_unfinished_for_session(&self, session_id: &str) -> Vec<String> {
+        let clean_session = session_id.trim();
+        if clean_session.is_empty() {
+            return Vec::new();
+        }
+        let owner_id = crate::runtime_process_owner_id();
+        let mut cancelled = Vec::new();
+        for record in self.records_unlocked() {
+            if record.owner_id.as_deref() != Some(owner_id)
+                || record.session_id != clean_session
+                || completed_status(&record.status_file).is_some()
+            {
+                continue;
+            }
+            terminate_process(record.pid);
+            let _ = fs::write(&record.status_file, "cancelled");
+            cancelled.push(record.id);
+        }
+        cancelled
     }
 
     pub fn cancel(&self, job_id: &str) -> String {

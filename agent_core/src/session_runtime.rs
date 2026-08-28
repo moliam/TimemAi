@@ -591,14 +591,18 @@ fn run_session_turn_with_model_client_and_reminder_override(
         }
         _ => unreachable!("session turn loop must produce exactly one outcome kind"),
     };
+    if outcome.stop_reason == Some(TurnStopReason::CancelledByUser) {
+        // Stop performs an immediate best-effort resource sweep. Repeat it at
+        // the authoritative turn boundary to catch a background job whose
+        // registration raced the first sweep.
+        core.cancel_background_resources_for_session(request.session);
+        core.mark_user_interrupted_work();
+    }
     let mut action_runtime = TurnActionRuntime::new(ui);
     outcome = outcome.with_running_jobs(core.refresh_running_shell_jobs_for_session_with_runtime(
         request.session,
         Some(&mut action_runtime),
     ));
-    if outcome.stop_reason == Some(TurnStopReason::CancelledByUser) {
-        core.mark_user_interrupted_work();
-    }
     if let Some(profiler) = profiler {
         profiler.record_turn(elapsed, model_wait_this_turn);
     }

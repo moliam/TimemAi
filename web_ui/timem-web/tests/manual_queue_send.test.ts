@@ -1,7 +1,14 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+const source = readFileSync(
+  new URL("../src/main.tsx", import.meta.url),
+  "utf8",
+);
+
+function normalizedSource(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
 
 function functionBody(startMarker: string, endMarker: string): string {
   const start = source.indexOf(startMarker);
@@ -18,11 +25,17 @@ describe("manual sending while the durable queue is paused", () => {
       "const submitDraftAsSupplement = () => {",
     );
 
-    expect(body).toContain("shouldDirectManualMessage(activeSession.state, existingQueue.length, !!queuedMessagesPause)");
+    expect(normalizedSource(body)).toContain(
+      "shouldDirectManualMessage( activeSession.state, existingQueue.length, !!queuedMessagesPause, )",
+    );
     expect(body).toContain("onSendForSession(");
     expect(body).toContain('directCommandId = clientId("submit")');
-    expect(body).toContain("directSubmissionsRef.current.set(reserved.sessionId, {");
-    expect(body).toContain("submittingDraftSessionIdsRef.current.add(reserved.sessionId)");
+    expect(normalizedSource(body)).toContain(
+      "directSubmissionsRef.current.set(reserved.sessionId, {",
+    );
+    expect(body).toContain(
+      "submittingDraftSessionIdsRef.current.add(reserved.sessionId)",
+    );
     expect(body).toContain("saveQueuedMessages(");
     expect(body).toContain("updateQueuedMessages(() => nextQueues)");
     expect(body).not.toContain("resumeQueuedMessages()");
@@ -33,8 +46,11 @@ describe("manual sending while the durable queue is paused", () => {
       "const submitDraftAsSupplement = () => {",
       "const toggleQueuedMessages = () => {",
     );
-    const composerStart = source.indexOf('<form className="composer"');
-    const keyboardStart = source.indexOf("onKeyDown={(event) => {", composerStart);
+    const composerStart = source.indexOf('className="composer"');
+    const keyboardStart = source.indexOf(
+      "onKeyDown={(event) => {",
+      composerStart,
+    );
     const keyboardEnd = source.indexOf("/>", keyboardStart);
     expect(composerStart).toBeGreaterThanOrEqual(0);
     expect(keyboardStart).toBeGreaterThan(composerStart);

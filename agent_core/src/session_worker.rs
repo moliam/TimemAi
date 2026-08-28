@@ -349,6 +349,7 @@ pub struct CoreSessionWorkerHandle {
     reply_tx: Sender<TopicReply>,
     accepted_command_ids: Arc<Mutex<BTreeSet<String>>>,
     pending_runtime_updates: Arc<Mutex<Vec<PendingRuntimeUpdate>>>,
+    background_cancel: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl CoreSessionWorkerHandle {
@@ -603,6 +604,11 @@ impl CoreSessionWorkerHandle {
     }
 
     pub fn cancel_current_turn(&self) {
+        self.signal_turn_cancel();
+        (self.background_cancel)();
+    }
+
+    fn signal_turn_cancel(&self) {
         self.cancel_generation.fetch_add(1, Ordering::SeqCst);
         self.cancel_requested.store(true, Ordering::SeqCst);
     }
@@ -857,6 +863,24 @@ impl CoreSessionWorkerManager {
         self.workers
             .get(worker_id)
             .map(|worker| worker.worker.handle())
+    }
+
+    /// Broadcast cancellation to every worker in a Session without waiting for
+    /// model transports, tools, or worker cleanup to finish.
+    pub fn cancel_session_turns(&self, session_id: &str) -> usize {
+        let handles = self
+            .workers
+            .values()
+            .filter(|worker| worker.identity.session_id == session_id)
+            .map(|worker| worker.worker.handle())
+            .collect::<Vec<_>>();
+        for handle in &handles {
+            handle.signal_turn_cancel();
+        }
+        if let Some(handle) = handles.first() {
+            (handle.background_cancel)();
+        }
+        handles.len()
     }
 
     pub fn ensure_default_worker(
@@ -1272,6 +1296,13 @@ impl CoreSessionWorker {
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let accepted_command_ids = Arc::new(Mutex::new(BTreeSet::new()));
         let pending_runtime_updates = Arc::new(Mutex::new(Vec::new()));
+        let cancel_shell_jobs = core.shell_jobs.clone();
+        let cancel_tool_jobs = core.tool_jobs.clone();
+        let cancel_session_id = worker_config.identity.session_id.clone();
+        let background_cancel: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            cancel_shell_jobs.cancel_unfinished_for_session(&cancel_session_id);
+            cancel_tool_jobs.cancel_unfinished_for_session(&cancel_session_id);
+        });
         let handle = CoreSessionWorkerHandle {
             command_tx,
             supplement_mailbox: Arc::clone(&supplement_mailbox),
@@ -1281,6 +1312,7 @@ impl CoreSessionWorker {
             reply_tx,
             accepted_command_ids,
             pending_runtime_updates: Arc::clone(&pending_runtime_updates),
+            background_cancel,
         };
         let join = thread::spawn(move || {
             let mut identity = worker_config.identity.clone();

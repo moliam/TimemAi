@@ -73,6 +73,48 @@ fn command_tool_background_job_can_be_cancelled() {
 }
 
 #[test]
+fn session_cancel_is_idempotent_and_does_not_touch_other_sessions() {
+    let dir = temp_case_dir("command_tool_session_cancel");
+    let script = dir.join("sleep_payload.sh");
+    fs::write(
+        &script,
+        "#!/bin/sh\npython3 -c 'import time; print(\"started\", flush=True); time.sleep(30)'\n",
+    )
+    .unwrap();
+    let store = FileToolJobStore::new(&dir);
+
+    let started_a = store.spawn_outcome("session-a", "local_sleep", &script, &json!({"args":{}}));
+    let started_b = store.spawn_outcome("session-b", "local_sleep", &script, &json!({"args":{}}));
+    let job_id_a = started_a
+        .text
+        .lines()
+        .find_map(|line| line.strip_prefix("job_id: "))
+        .unwrap()
+        .to_string();
+    let job_id_b = started_b
+        .text
+        .lines()
+        .find_map(|line| line.strip_prefix("job_id: "))
+        .unwrap()
+        .to_string();
+
+    assert_eq!(
+        store.cancel_unfinished_for_session("session-a"),
+        vec![job_id_a.clone()]
+    );
+    assert!(store.status(&job_id_a, 0).contains("state: cancelled"));
+    assert!(store.status(&job_id_b, 0).contains("state: running"));
+    assert!(store.cancel_unfinished_for_session("session-a").is_empty());
+    assert_eq!(
+        store.cancel_unfinished_for_session("session-b"),
+        vec![job_id_b.clone()]
+    );
+    assert!(store.status(&job_id_b, 0).contains("state: cancelled"));
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn shutdown_terminates_only_background_jobs_owned_by_this_process() {
     let dir = temp_case_dir("command_tool_shutdown");
     let script = dir.join("sleep_payload.sh");
@@ -105,6 +147,7 @@ fn shutdown_does_not_signal_a_job_record_owned_by_another_process() {
         created_at_ms: now_ms(),
         pid: std::process::id(),
         owner_id: Some("foreign-runtime-owner".to_string()),
+        session_id: "foreign-session".to_string(),
         action: "foreign".to_string(),
         command_path: "/tmp/foreign".to_string(),
         payload_file: dir.join("foreign.payload").display().to_string(),

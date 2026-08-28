@@ -55,7 +55,7 @@ describe("optimistic worker role UI", () => {
     expect(source).toContain('clientId("worker-role-command")');
     expect(source).toContain('role_id: command.role_id ?? clientId("role")');
     expect(source).toContain("pendingWorkerRoleMutationsRef.current.delete(event.command_id)");
-    expect(source).toContain("replayWorkerRoleMutations(event.library, pendingWorkerRoleMutationsRef.current.values())");
+    expect(source).toMatch(/replayWorkerRoleMutations\(\s*event\.library,\s*pendingWorkerRoleMutationsRef\.current\.values\(\),\s*\)/);
   });
 
   it("provides a coherent expanded editor for role descriptions and user messages", () => {
@@ -66,9 +66,9 @@ describe("optimistic worker role UI", () => {
     expect(source).toContain('aria-label="展开编辑用户信息"');
     expect(source).toContain('输入内容会在完成编辑时一次性同步；不会自动保存或发送');
     expect(source).toContain('const [draft, setDraft] = useState(value);');
-    expect(source).toContain('const finish = () => { onCommit(draft); onClose(); };');
-    expect(source).toContain('spellCheck={false} placeholder={placeholder} onChange={(event) => setDraft(event.target.value)}');
-    expect(source).toContain('onCommit={(value) => setDraftsBySession((current) => setSessionDraft(current, activeSessionId, value))}');
+    expect(source).toMatch(/const finish = \(\) => \{\s*onCommit\(draft\);\s*onClose\(\);\s*\};/);
+    expect(source).toMatch(/spellCheck=\{false\}\s+placeholder=\{placeholder\}\s+onChange=\{\(event\) => setDraft\(event\.target\.value\)\}/);
+    expect(source).toMatch(/onCommit=\{\(value\) =>\s*setDraftsBySession\(\(current\) =>\s*setSessionDraft\(current, activeSessionId, value\),?\s*\)\s*\}/);
     expect(source).not.toContain('composerDraftBeforeExpand');
     expect(source).not.toContain('descriptionBeforeExpand');
     expect(styles).toContain('.worker-role-description-field textarea { padding-right: 40px; resize: none; }');
