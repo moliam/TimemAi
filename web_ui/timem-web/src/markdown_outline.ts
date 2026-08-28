@@ -207,6 +207,29 @@ export function markdownOutlineActiveId(
   return activeId;
 }
 
+export function markdownOutlineRailScrollTop(
+  currentScrollTop: number,
+  viewportHeight: number,
+  contentHeight: number,
+  targetTop: number,
+  targetHeight: number,
+  edgePadding: number,
+) {
+  const values = [currentScrollTop, viewportHeight, contentHeight, targetTop, targetHeight, edgePadding];
+  if (!values.every(Number.isFinite)) return Math.max(0, Number.isFinite(currentScrollTop) ? currentScrollTop : 0);
+  const viewport = Math.max(0, viewportHeight);
+  const content = Math.max(viewport, contentHeight);
+  const height = Math.max(0, targetHeight);
+  const padding = Math.min(Math.max(0, edgePadding), viewport / 2);
+  const scrollTop = Math.max(0, currentScrollTop);
+  const visibleTop = scrollTop + padding;
+  const visibleBottom = scrollTop + viewport - padding;
+  let next = scrollTop;
+  if (targetTop < visibleTop) next = targetTop - padding;
+  else if (targetTop + height > visibleBottom) next = targetTop + height - viewport + padding;
+  return Math.min(Math.max(0, next), Math.max(0, content - viewport));
+}
+
 export function markdownOutlineTargetScrollTop(
   currentScrollTop: number,
   targetViewportTop: number,

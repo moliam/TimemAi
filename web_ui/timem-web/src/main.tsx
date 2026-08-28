@@ -11,7 +11,7 @@ import { Activity, ChatFavorite, ChatLibraryCapacity, ChatMessage, ChatSearchHit
 import { applyWorkerRoleMutation, isOptimisticWorkerRoleMutation, replayWorkerRoleMutations, WorkerRoleMutation } from "./worker_roles_ui";
 import { adjacentUserMessageIndex, canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, UserMessageNavigationDirection, wheelDeltaPixels } from "./scroll";
 import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, manualToolGenCommand, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, sessionWorkerTreeRows, setSessionDraft, tailPath, toolActivityDisplayName, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn } from "./view_model";
-import { extractMarkdownOutline, finalAnswerNeedsOutline, markdownHeadingId, markdownFloatingNavigationLayout, markdownOutlineActiveId, markdownOutlineAnimationPosition, MARKDOWN_OUTLINE_START_ID, markdownOutlineTargetScrollTop, MarkdownOutlineItem } from "./markdown_outline";
+import { extractMarkdownOutline, finalAnswerNeedsOutline, markdownHeadingId, markdownFloatingNavigationLayout, markdownOutlineActiveId, markdownOutlineAnimationPosition, markdownOutlineRailScrollTop, MARKDOWN_OUTLINE_START_ID, markdownOutlineTargetScrollTop, MarkdownOutlineItem } from "./markdown_outline";
 import { createMcpTransportDrafts, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
 import { reconcileRuntimeDrafts, runtimeOptionLabel, sessionRuntimeOptions, shouldAutoRevealSessionApiKey, updateRevealedSessionApiKeys } from "./runtime_settings";
 import { commandSessionId, isModelSubmissionCommand, modelDisplayName, modelServiceIssue, NO_MODEL_ENDPOINTS_ISSUE, UNCONFIGURED_MODEL_LABEL } from "./model_service_ui";
@@ -1689,7 +1689,7 @@ function TimemApp() {
                       <button type="button" className="session-drag" disabled={runtimeLocked || sessionDeleteMode || renamingSessionId === session.session_id} title={`拖动 ${session.display_name} 到其他分组`} aria-label={`拖动 ${session.display_name} 到其他分组`} {...attributes} {...listeners}><GripVertical size={13}/></button>
                       {server?.debug_mode && <button type="button" className={`session-expand ${session.workers.length > 0 ? "available" : ""} ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.workers.length === 0 ? "No workers in this session" : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`} aria-label={runtimeLocked ? `Workers locked while the runtime synchronizes for ${session.display_name}` : session.workers.length === 0 ? `No workers for ${session.display_name}` : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`} aria-expanded={session.workers.length > 0 && expandedSessionIds.has(session.session_id)} disabled={runtimeLocked || sessionDeleteMode || renamingSessionId === session.session_id || session.workers.length === 0} onClick={() => setExpandedSessionIds((current) => { const next = new Set(current); if (next.has(session.session_id)) next.delete(session.session_id); else next.add(session.session_id); return next; })}><ChevronRight size={13}/></button>}
                       {renamingSessionId === session.session_id ? <input className="session-rename-input" autoFocus value={renameDraft} aria-label={`Rename ${session.display_name}`} disabled={runtimeLocked} onChange={(event) => setRenameDraft(event.target.value)} onBlur={() => finishRename(session.session_id)} onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); } if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); } }}/>: <button type="button" className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`} title={runtimeLocked ? "Session controls are temporarily locked" : session.display_name} aria-label={runtimeLocked ? `${session.display_name} locked while the runtime synchronizes` : renamingSession ? `${session.display_name} rename is being saved` : undefined} aria-current={session.session_id === activeSession?.session_id ? "page" : undefined} disabled={runtimeLocked} onClick={() => { if (sessionDeleteMode) { setSelectedDeleteSessionId((current) => current === session.session_id ? "" : session.session_id); return; } performanceTraceRef.current.beginSessionSelection(session.session_id); if (session.session_id === activeSessionIdRef.current) performanceTraceRef.current.observeSessionPainted(session.session_id); setActiveSessionId(session.session_id); closeMobileSidebar(); }}>
-                        {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : unreadCompletedSessionIds.has(session.session_id) ? <span className="session-unread-dot" aria-label="Session has new completed work"/> : null}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && !sessionDeleteMode && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span></span><span className={`session-endpoint-reveal ${renamingSession ? "pending" : ""}`} title={renamingSession ? "Saving name" : sessionEndpointName}>{renamingSession ? <span className="session-pending">Saving name...</span> : <span>{sessionEndpointName}</span>}</span><span className="sr-only">Session state: {session.state}</span>
+                        {session.state === "working" ? <LoaderCircle className="session-working-icon" size={15} aria-label="Session working"/> : session.state === "interrupted" ? <CircleStop className="session-interrupted-icon" size={15} aria-label="Session interrupted by runtime restart"/> : unreadCompletedSessionIds.has(session.session_id) ? <span className="session-unread-dot" aria-label="Session has new completed work"/> : null}<span className="session-identity"><span className="session-name" title={session.display_name} onDoubleClick={() => { if (!runtimeLocked && !sessionDeleteMode && renamingSessionId !== session.session_id) beginRename(session); }}>{session.display_name}</span></span><span className={`session-endpoint-reveal ${renamingSession ? "pending" : ""}`} title={renamingSession ? "Saving name" : sessionEndpointName}>{renamingSession ? <span className="session-pending">Saving name...</span> : <span>{sessionEndpointName}</span>}</span><span className="sr-only">Session state: {session.state}</span>
                       </button>}
                       {sessionDeleteMode && <button type="button" className={`session-delete-select ${selectedDeleteSessionId === session.session_id ? "selected" : ""}`} title={`选择删除 ${session.display_name}`} aria-label={`选择删除 ${session.display_name}`} aria-pressed={selectedDeleteSessionId === session.session_id} disabled={runtimeLocked || deletingSession} onClick={() => setSelectedDeleteSessionId((current) => current === session.session_id ? "" : session.session_id)}>{deletingSession ? <LoaderCircle size={14}/> : selectedDeleteSessionId === session.session_id ? <Check size={14}/> : null}</button>}
                     </div>
@@ -3923,12 +3923,13 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
  [toolActivityRuns],
  );
  const hasVisibleProcess = processActivities.length > 0 || supplementItems.length > 0 || decisions.length > 0 || turn.state === "working";
-  const interruptedByUser = turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
+  const interrupted = turn.state === "interrupted"
+    || turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
   const [showWorkStream, setShowWorkStream] = useState(() => turn.state === "working");
   const isToolGenTurn = turn.turn_id.startsWith("web_toolgen_turn_")
     || turn.user_entries.some((entry) => entry.kind === "toolgen_instruction")
     || turn.events.some((event) => (event.payload.topic as { name?: string } | undefined)?.name === "core.toolgen");
-  const canCollapseCompletedWork = turn.state !== "working" && (!!turn.final_answer || interruptedByUser);
+  const canCollapseCompletedWork = turn.state !== "working" && (!!turn.final_answer || interrupted);
   const canToggleWorkStream = turn.state === "working" || canCollapseCompletedWork;
   const workStreamVisible = !canToggleWorkStream || showWorkStream;
   const canDeleteConversationContent = turn.state !== "working" && !sessionInteractionLocked;
@@ -4001,7 +4002,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
       </div>)}</div>
     </section>}
     {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state} ${workStreamVisible ? "" : "collapsed-work"}`}>
-      {canToggleWorkStream && <div className="turn-assistant-heading"><button type="button" className={`working-chip work-title-chip work-collapse-toggle${turn.state === "working" ? " active-work-title" : " completed-work-title"}${interruptedByUser ? " interrupted-work-title" : ""}${isToolGenTurn ? ` toolgen-working${turn.state === "working" ? "" : " toolgen-completed-title"}` : ""}`} title={showWorkStream ? "Hide work details" : "Show work details"} aria-label={showWorkStream ? "Hide work details" : "Show work details"} aria-expanded={showWorkStream} onClick={() => setShowWorkStream((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>{isToolGenTurn && <Wrench size={11}/>} {turn.state === "working" ? (isToolGenTurn ? "Generating tools…" : <span className="working-label">working</span>) : (isToolGenTurn ? "ToolGen" : "Thought/Action")}{turn.state === "working" && <WorkingElapsed createdAtMs={turn.created_at_ms}/>}{interruptedByUser && <span className="work-title-status">(Interrupted)</span>}</button>{modelRetryStatus && <details className={`model-retry-status ${modelRetryStatus.kind}`}><summary title={`展开 ${modelRetryStatus.label} 详情`} aria-label={`展开 ${modelRetryStatus.label} 详情`}><ChevronRight size={12} aria-hidden="true"/><span>{modelRetryStatus.label}</span>{modelRetryStatus.progress && <small>{modelRetryStatus.progress}</small>}</summary><div className="model-retry-detail"><MarkdownContent text={modelRetryStatus.detail}/></div></details>}</div>}
+      {canToggleWorkStream && <div className="turn-assistant-heading"><button type="button" className={`working-chip work-title-chip work-collapse-toggle${turn.state === "working" ? " active-work-title" : " completed-work-title"}${interrupted ? " interrupted-work-title" : ""}${isToolGenTurn ? ` toolgen-working${turn.state === "working" ? "" : " toolgen-completed-title"}` : ""}`} title={showWorkStream ? "Hide work details" : "Show work details"} aria-label={showWorkStream ? "Hide work details" : "Show work details"} aria-expanded={showWorkStream} onClick={() => setShowWorkStream((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>{isToolGenTurn && <Wrench size={11}/>} {turn.state === "working" ? (isToolGenTurn ? "Generating tools…" : <span className="working-label">working</span>) : (isToolGenTurn ? "ToolGen" : "Thought/Action")}{turn.state === "working" && <WorkingElapsed createdAtMs={turn.created_at_ms}/>}{interrupted && <span className="work-title-status">(Interrupted)</span>}</button>{modelRetryStatus && <details className={`model-retry-status ${modelRetryStatus.kind}`}><summary title={`展开 ${modelRetryStatus.label} 详情`} aria-label={`展开 ${modelRetryStatus.label} 详情`}><ChevronRight size={12} aria-hidden="true"/><span>{modelRetryStatus.label}</span>{modelRetryStatus.progress && <small>{modelRetryStatus.progress}</small>}</summary><div className="model-retry-detail"><MarkdownContent text={modelRetryStatus.detail}/></div></details>}</div>}
       {workStreamVisible && <div className="turn-work-panel">
         <div className={`turn-work-scroll ${pendingUpdates > 0 ? "has-pending-updates" : ""}${visibleItems.length === 0 && decisions.length === 0 ? " empty" : " has-content"}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
           followLatest.current = isNearScrollBottom({ scrollTop: event.currentTarget.scrollTop, scrollHeight: event.currentTarget.scrollHeight, clientHeight: event.currentTarget.clientHeight }, 36);
@@ -4085,7 +4086,7 @@ function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, favorite, fa
           <FinalAnswerContent text={turn.final_answer}/>
           <button type="button" className={`final-favorite standalone ${favorite || favoritePending ? "active" : ""} ${favoritePending ? "pending" : ""}`} title={favoritePending ? "Saving favorite" : favorite ? "Remove from favorites" : "Favorite this answer"} aria-label={favoritePending ? "Saving favorite" : favorite ? "Remove answer from favorites" : "Favorite answer"} aria-pressed={!!favorite || favoritePending} disabled={favoritePending} onClick={onToggleFavorite}><Star size={13} fill={favorite || favoritePending ? "currentColor" : "none"}/></button>
           {turn.completion ? <CompletionCard completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen}/> : null}
-        </> : <div className="turn-final-placeholder" role="status" aria-live="polite">{turn.state === "working" ? "Still working ..." : "No final answer was produced."}</div>}
+        </> : <div className="turn-final-placeholder" role="status" aria-live="polite">{turn.state === "working" ? "Still working ..." : turn.state === "interrupted" ? "Interrupted by runtime restart." : "No final answer was produced."}</div>}
       </div>}
       {hasInterim && <div className={`turn-answer-view ${selected === "interim" ? "selected" : "inactive"}`} aria-hidden={selected !== "interim"}>
         <div className="turn-interim-list">{turn.sub_answers.map((item, index) => <section className="turn-interim-item" key={item.sub_answer_id}>
@@ -4120,6 +4121,7 @@ function FinalAnswerDelivery({ text, completion, toolGenPending, toolGenBlocked,
 const FINAL_ANSWER_OUTLINE_MIN_SECTIONS = 2;
 const FINAL_ANSWER_OUTLINE_SCROLL_OFFSET = 24;
 const FINAL_ANSWER_OUTLINE_SCROLL_DURATION_MS = 180;
+const FINAL_ANSWER_OUTLINE_RAIL_EDGE_PADDING = 12;
 
 const FINAL_ANSWER_OUTLINE_EDGE_GUARD = 12;
 
@@ -4134,6 +4136,7 @@ function FinalAnswerContent({ text }: { text: string }) {
   const readingId = `final-answer-reading-${stableId}`;
   const rootRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const outlineNavRef = useRef<HTMLElement | null>(null);
   const outlineNavigationAnimationRef = useRef<number | null>(null);
   const outlineHeadingOffsetsRef = useRef(new Map<string, number>());
   const outlineActiveTaskRef = useRef<FrameTask | null>(null);
@@ -4147,6 +4150,25 @@ function FinalAnswerContent({ text }: { text: string }) {
   const [activeId, setActiveId] = useState(MARKDOWN_OUTLINE_START_ID);
 
   useEffect(() => setActiveId(MARKDOWN_OUTLINE_START_ID), [outline]);
+
+  useLayoutEffect(() => {
+    if (outlineCollapsed || !showOutline) return;
+    const nav = outlineNavRef.current;
+    const activeItem = nav?.querySelector<HTMLElement>('[aria-current="location"]');
+    if (!nav || !activeItem) return;
+    const navRect = nav.getBoundingClientRect();
+    const itemRect = activeItem.getBoundingClientRect();
+    const targetTop = nav.scrollTop + itemRect.top - navRect.top;
+    const nextScrollTop = markdownOutlineRailScrollTop(
+      nav.scrollTop,
+      nav.clientHeight,
+      nav.scrollHeight,
+      targetTop,
+      itemRect.height,
+      FINAL_ANSWER_OUTLINE_RAIL_EDGE_PADDING,
+    );
+    if (Math.abs(nextScrollTop - nav.scrollTop) > .5) nav.scrollTop = nextScrollTop;
+  }, [activeId, outlineCollapsed, showOutline]);
 
   useLayoutEffect(() => {
     const root = rootRef.current;
@@ -4340,12 +4362,12 @@ function FinalAnswerContent({ text }: { text: string }) {
   >
       <div className="final-answer-outline-anchor">
         {outlineCollapsed && <button type="button" className="final-answer-outline-toggle" aria-expanded={false} aria-label="Show table of contents" title="Show table of contents" onClick={() => setOutlineCollapsed(false)}>
-          <Bookmark size={15} strokeWidth={1.8} aria-hidden="true"/><ChevronRight className="final-answer-outline-toggle-arrow" size={10} strokeWidth={2.2} aria-hidden="true"/>
+          <Bookmark size={18} fill="currentColor" strokeWidth={1.6} aria-hidden="true"/><ChevronRight className="final-answer-outline-toggle-arrow" size={14} strokeWidth={2.4} aria-hidden="true"/>
         </button>}
         {!outlineCollapsed && <div className="final-answer-outline-card">
 
-          <header><button type="button" className="final-answer-outline-close" aria-label="Hide table of contents" title="Hide table of contents" onClick={() => setOutlineCollapsed(true)}><ChevronLeft size={13} aria-hidden="true"/></button><span><Bookmark size={12} aria-hidden="true"/>Contents</span></header>
-          <nav><button
+          <header><button type="button" className="final-answer-outline-close" aria-label="Hide table of contents" title="Hide table of contents" onClick={() => setOutlineCollapsed(true)}><ChevronLeft size={16} strokeWidth={2.4} aria-hidden="true"/></button><span><Bookmark size={12} aria-hidden="true"/>Contents</span></header>
+          <nav ref={outlineNavRef}><button
             type="button"
             className={`final-answer-outline-start${activeId === MARKDOWN_OUTLINE_START_ID ? " active" : ""}`}
             aria-current={activeId === MARKDOWN_OUTLINE_START_ID ? "location" : undefined}

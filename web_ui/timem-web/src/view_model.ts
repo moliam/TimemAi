@@ -784,7 +784,7 @@ function aggregateSessionState(workers: Session["workers"], fallback: string) {
   if (workers.some((worker) => worker.state === "working")) return "working";
   if (workers.some((worker) => worker.state === "error")) return "error";
   if (workers.every((worker) => worker.state === "stopped")) return "stopped";
-  return "ready";
+  return fallback === "interrupted" ? "interrupted" : "ready";
 }
 
 function turnLiveUsageSince(

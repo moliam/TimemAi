@@ -65,6 +65,18 @@ const actionEvent = (
   },
 });
 
+describe("interrupted session state", () => {
+  it("survives idle worker lifecycle updates until real work starts", () => {
+    const interrupted = { ...session("session_1"), state: "interrupted" };
+    const idleUpdate = updateSessionWorkerState(interrupted, interrupted.primary_worker_id, "ready");
+    expect(idleUpdate).toBe(interrupted);
+    expect(idleUpdate.state).toBe("interrupted");
+
+    const working = updateSessionWorkerState(interrupted, interrupted.primary_worker_id, "working");
+    expect(working.state).toBe("working");
+  });
+});
+
 describe("user message clipboard normalization", () => {
   it("removes only trailing line breaks added by DOM selection serialization", () => {
     expect(normalizeCopiedUserMessageText("hello\n\n\n")).toBe("hello");

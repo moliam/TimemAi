@@ -77,7 +77,7 @@ export type Session = {
   display_name: string;
   group_id?: string | null;
   ordinal: number;
-  state: "ready" | "working" | "error" | "stopped" | string;
+  state: "ready" | "working" | "interrupted" | "error" | "stopped" | string;
   current_dir: string;
   debug_dir?: string | null;
   max_llm_input_tokens: number;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractMarkdownOutline, finalAnswerNeedsOutline, markdownFloatingNavigationLayout, markdownHeadingSlug, markdownHeadingText, markdownOutlineActiveId, markdownOutlineAnimationPosition, markdownOutlineFitsBesideContent, MARKDOWN_OUTLINE_START_ID, markdownOutlineTargetScrollTop, MAX_OUTLINE_HEADINGS, MAX_OUTLINE_HEADING_SOURCE_CHARS, MAX_OUTLINE_LINE_CHARS, MAX_OUTLINE_SOURCE_CHARS, MAX_OUTLINE_TITLE_CHARS } from "../src/markdown_outline";
+import { extractMarkdownOutline, finalAnswerNeedsOutline, markdownFloatingNavigationLayout, markdownHeadingSlug, markdownHeadingText, markdownOutlineActiveId, markdownOutlineAnimationPosition, markdownOutlineFitsBesideContent, markdownOutlineRailScrollTop, MARKDOWN_OUTLINE_START_ID, markdownOutlineTargetScrollTop, MAX_OUTLINE_HEADINGS, MAX_OUTLINE_HEADING_SOURCE_CHARS, MAX_OUTLINE_LINE_CHARS, MAX_OUTLINE_SOURCE_CHARS, MAX_OUTLINE_TITLE_CHARS } from "../src/markdown_outline";
 
 describe("final answer markdown outline", () => {
   it("extracts level one through three ATX headings in document order", () => {
@@ -93,6 +93,19 @@ describe("final answer markdown outline", () => {
     expect(markdownFloatingNavigationLayout(44, 34, 16, 320, 10)).toEqual({ left: 10, overlap: "none" });
     expect(markdownFloatingNavigationLayout(800, 34, 16, 320, 10)).toEqual({ left: 276, overlap: "none" });
     expect(markdownFloatingNavigationLayout(Number.NaN, 34, 16, 320, 10)).toEqual({ left: 0, overlap: "none" });
+  });
+
+  it("keeps the active long-outline entry visible with nearest-distance rail scrolling", () => {
+    expect(markdownOutlineRailScrollTop(0, 200, 1000, 40, 28, 12)).toBe(0);
+    expect(markdownOutlineRailScrollTop(0, 200, 1000, 260, 28, 12)).toBe(100);
+    expect(markdownOutlineRailScrollTop(300, 200, 1000, 250, 28, 12)).toBe(238);
+    expect(markdownOutlineRailScrollTop(800, 200, 1000, 980, 40, 12)).toBe(800);
+  });
+
+  it("clamps outline rail synchronization and ignores malformed measurements", () => {
+    expect(markdownOutlineRailScrollTop(900, 200, 1000, 980, 40, 12)).toBe(800);
+    expect(markdownOutlineRailScrollTop(-20, 200, 1000, 10, 20, -5)).toBe(0);
+    expect(markdownOutlineRailScrollTop(120, Number.NaN, 1000, 500, 20, 12)).toBe(120);
   });
 
   it("computes Start and heading targets in viewport coordinates and clamps above-page targets", () => {

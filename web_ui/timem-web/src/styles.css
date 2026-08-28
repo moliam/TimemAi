@@ -3038,21 +3038,22 @@ body {
 .final-answer-reading .markdown-body :is(h1, h2, h3)[id] { scroll-margin-top: 24px; }
 .final-answer-outline { position: absolute; z-index: 5; left: 0; width: var(--final-outline-width); pointer-events: none; }
 .final-answer-outline-anchor { position: sticky; top: 50%; width: max-content; min-height: 86px; max-height: calc(100vh - 24px); display: flex; align-items: flex-start; transform: translateY(-50%); pointer-events: auto; }
-.final-answer-outline-toggle { position: relative; display: inline-flex; flex: none; width: 30px; height: 48px; align-items: center; justify-content: center; border: 0; border-radius: 0 9px 9px 0; padding: 0 2px 0 0; background: linear-gradient(155deg, #2d3734e8, #202725f2); color: #91aaa2; box-shadow: 6px 9px 24px #0000003d, inset 0 0 0 1px #ffffff09; backdrop-filter: blur(18px) saturate(118%); transition: transform .18s ease, background .18s ease, color .18s ease, box-shadow .18s ease; }
+.final-answer-outline-toggle { position: relative; display: inline-flex; flex: none; width: 34px; height: 52px; align-items: center; justify-content: center; border: 0; border-radius: 0 10px 10px 0; padding: 0 3px 0 0; background: linear-gradient(155deg, #2d3734e8, #202725f2); color: #91aaa2; box-shadow: 6px 9px 24px #0000003d, inset 0 0 0 1px #ffffff09; backdrop-filter: blur(18px) saturate(118%); transition: transform .18s ease, background .18s ease, color .18s ease, box-shadow .18s ease; }
 .final-answer-outline-toggle:hover { background: linear-gradient(155deg, #36433fe8, #27302df2); color: #d2e9e2; box-shadow: 8px 11px 28px #00000047, inset 0 0 0 1px #75aa9a35; transform: translateX(2px); }
 .final-answer-outline-toggle > svg:first-child { flex: none; transform: translate(-1px, -1px); }
-.final-answer-outline-toggle-arrow { position: absolute; right: 3px; bottom: 4px; color: #6f9288; filter: drop-shadow(0 1px 2px #0008); transition: color .16s ease, transform .16s ease; }
-.final-answer-outline-toggle:hover .final-answer-outline-toggle-arrow { color: #a9d2c6; transform: translateX(1px); }
+.final-answer-outline-toggle-arrow { position: absolute; top: 50%; right: 1px; visibility: hidden; opacity: 0; color: #6f9288; filter: drop-shadow(0 1px 2px #0008); transform: translate(-4px, -50%) scale(.88); transition: visibility 0s linear .16s, opacity .16s ease, color .16s ease, transform .16s ease; }
+.final-answer-outline-toggle:is(:hover, :focus-visible) .final-answer-outline-toggle-arrow { visibility: visible; opacity: 1; color: #a9d2c6; transform: translate(1px, -50%) scale(1); transition-delay: 0s; animation: final-outline-arrow-nudge .72s ease-in-out infinite alternate; }
+@keyframes final-outline-arrow-nudge { to { transform: translate(3px, -50%) scale(1); } }
 .final-answer-outline-toggle:focus-visible, .final-answer-outline-close:focus-visible { outline: 1px solid #80b7a7; outline-offset: 3px; }
 
-.final-answer-outline.collapsed { width: 32px; }
+.final-answer-outline.collapsed { width: 36px; }
 .final-answer-outline-card { position: relative; width: 208px; min-height: 0; max-height: min(64vh, 498px, calc(100vh - 24px)); display: flex; flex-direction: column; overflow: hidden; border: 0; border-radius: 0 14px 14px 0; padding: 14px 9px 13px 11px; background: linear-gradient(90deg, #292d2bf2 0%, #222825e9 72%, #1d2321dc 100%); box-shadow: 18px 22px 54px #0000004a, 0 2px 14px #0000002e; color: #89958f; transform-origin: left center; animation: final-outline-open .2s cubic-bezier(.2,.8,.2,1) both; backdrop-filter: blur(22px) saturate(120%); }
 .final-answer-outline.overlay.expanded .final-answer-outline-card { background: linear-gradient(90deg, #292d2bf2 0%, #222825df 58%, #1d23219c 82%, #1d232124 100%); box-shadow: 10px 18px 42px #00000034; -webkit-mask-image: linear-gradient(90deg, #000 0%, #000 70%, #000c 84%, transparent 100%); mask-image: linear-gradient(90deg, #000 0%, #000 70%, #000c 84%, transparent 100%); }
 .final-answer-outline-card header { flex: 0 0 auto; min-height: 22px; display: flex; align-items: center; justify-content: flex-start; gap: 3px; margin: 0 2px 9px 0; }
 .final-answer-outline-card header > span { display: inline-flex; align-items: center; gap: 6px; color: #7f8e88; font-size: 10px; font-weight: 740; letter-spacing: .12em; text-transform: uppercase; }
 .final-answer-outline-card header > span svg { color: #6f9489; }
-.final-answer-outline-close { width: 24px; height: 24px; display: inline-flex; flex: none; align-items: center; justify-content: center; border: 0; border-radius: 7px; padding: 0; background: transparent; color: #72817c; transition: color .16s ease, background .16s ease; }
-.final-answer-outline-close:hover { background: #75aa9a12; color: #d2e9e2; }
+.final-answer-outline-close { width: 28px; height: 28px; display: inline-flex; flex: none; align-items: center; justify-content: center; border: 0; border-radius: 8px; padding: 0; background: #75aa9a0a; color: #91aaa2; box-shadow: inset 0 0 0 1px #ffffff08; transition: color .16s ease, background .16s ease, box-shadow .16s ease, transform .16s ease; }
+.final-answer-outline-close:hover { background: #75aa9a1a; color: #d2e9e2; box-shadow: inset 0 0 0 1px #75aa9a28; transform: translateX(-1px); }
 .final-answer-outline-card nav { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 7px; scroll-padding-block: 7px; scrollbar-gutter: stable; scrollbar-color: #78988e66 transparent; scrollbar-width: thin; mask-image: linear-gradient(180deg, transparent 0, #000 7px, #000 calc(100% - 7px), transparent 100%); }
 .final-answer-outline-card nav::-webkit-scrollbar { width: 5px; }
 .final-answer-outline-card nav::-webkit-scrollbar-track { background: transparent; }
@@ -3082,8 +3083,8 @@ body {
 :root[data-theme="light"] .final-answer-outline.overlay.expanded .final-answer-outline-card { background: linear-gradient(90deg, #fffffff7 0%, #f0f6f3e5 58%, #f0f6f39c 82%, #f0f6f324 100%); box-shadow: 10px 18px 40px #29434d1d; }
 :root[data-theme="light"] .final-answer-outline-card header > span { color: #72837d; }
 :root[data-theme="light"] .final-answer-outline-card header > span svg { color: #5f887d; }
-:root[data-theme="light"] .final-answer-outline-close { color: #70827b; }
-:root[data-theme="light"] .final-answer-outline-close:hover { background: #31564b0d; color: #245f51; }
+:root[data-theme="light"] .final-answer-outline-close { background: #31564b08; color: #5f776f; box-shadow: inset 0 0 0 1px #31564b0b; }
+:root[data-theme="light"] .final-answer-outline-close:hover { background: #31564b14; color: #245f51; box-shadow: inset 0 0 0 1px #31564b1c; }
 :root[data-theme="light"] .final-answer-outline-card nav > button { color: #687973; }
 :root[data-theme="light"] .final-answer-outline-card nav > button.final-answer-outline-start { border-bottom-color: #31564b12; color: #647a73; }
 :root[data-theme="light"] .final-answer-outline-card nav > button.final-answer-outline-start > svg { color: #5f887d; }
@@ -3094,7 +3095,7 @@ body {
 :root[data-theme="light"] .final-answer-outline-card nav > button:hover { background: #31564b0d; color: #304a42; }
 :root[data-theme="light"] .final-answer-outline-card nav > button.active { background: linear-gradient(90deg, #287e6817, transparent); color: #185f50; }
 :root[data-theme="light"] .final-answer-outline-card nav > button.active::before { background: #287e68; box-shadow: 0 0 0 3px #287e6818, 0 0 10px #287e684a; }
-@media (prefers-reduced-motion: reduce) { .final-answer-outline-card { animation: none; }.final-answer-outline-card nav > button, .final-answer-outline-card nav > button::before, .final-answer-outline-toggle, .final-answer-outline-close { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .final-answer-outline-card, .final-answer-outline-toggle-arrow { animation: none; }.final-answer-outline-card nav > button, .final-answer-outline-card nav > button::before, .final-answer-outline-toggle, .final-answer-outline-toggle-arrow, .final-answer-outline-close { transition: none; } }
 
 @media (max-width: 720px) { .final-answer-outline-card { width: min(208px, calc(100vw - 40px)); }.user-message-navigation { left: 6px; } }
 
@@ -4335,3 +4336,12 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .chat-library-favorite-row { box-shadow: none; transition: background-color .1s linear; }
 .chat-library-search-row:hover,
 .chat-library-favorite-row:hover { box-shadow: none; }
+
+/* A restored interrupted Session is idle and actionable, but remains visibly distinct from ready. */
+.session-interrupted-icon {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: #b8a58e;
+}
+:root[data-theme="light"] .session-interrupted-icon { color: #7b6854; }

@@ -5666,7 +5666,8 @@ fn restore_stored_session(
     )?;
     let history_records = history_page.records;
     let messages = restored_messages_from_history_records(&history_records);
-    let turns = restored_turns_from_history_records(&history_records);
+    let mut turns = restored_turns_from_history_records(&history_records);
+    mark_restored_interrupted_turn(&mut turns, stored.state, stored.last_turn_id.as_deref());
     let tools = tool_repo.list()?;
     let debug_dir = state
         .debug
@@ -5699,7 +5700,8 @@ fn restore_stored_session(
                 ordinal,
                 state: match stored.state {
                     StoredSessionState::Error => "error",
-                    StoredSessionState::Interrupted | StoredSessionState::Ready => "ready",
+                    StoredSessionState::Interrupted => "interrupted",
+                    StoredSessionState::Ready => "ready",
                 }
                 .to_string(),
                 current_dir: current_dir.display().to_string(),
@@ -5742,7 +5744,6 @@ fn restore_stored_session(
         None,
         true,
     )?;
-    resume_unfinished_core_command_after_restore(state, &stored.session_id)?;
     persist_restored_session_runtime_cache(state, &stored)?;
     Ok(())
 }
@@ -5766,90 +5767,22 @@ fn append_runtime_restart_history_marker(state: &AppState, session_id: &str) -> 
     )
 }
 
-fn resume_unfinished_core_command_after_restore(
-    state: &AppState,
-    session_id: &str,
-) -> Result<(), String> {
-    let pending = {
-        let mut sessions = state
-            .sessions
-            .lock()
-            .map_err(|_| "session_store_poisoned".to_string())?;
-        let session = sessions
-            .get_mut(session_id)
-            .ok_or_else(|| "session_not_found".to_string())?;
-        // Only the newest turn may represent work interrupted by the process
-        // restart. Never skip a completed newer turn and revive an older,
-        // abandoned turn: doing so makes a restored ready session appear to be
-        // working immediately after Web startup.
-        let pending = session.turns.last().and_then(|turn| {
-            if turn.final_answer.is_some() || turn.completion.is_some() {
-                return None;
-            }
-            let entries = turn
-                .user_entries
-                .iter()
-                .filter_map(|entry| {
-                    entry.delivery_state.as_ref()?;
-                    Some((
-                        entry.command_id.clone()?,
-                        entry.text.clone(),
-                        entry.attachments.clone(),
-                        entry.kind.clone(),
-                    ))
-                })
-                .collect::<Vec<_>>();
-            (!entries.is_empty()).then(|| (turn.turn_id.clone(), entries))
-        });
-        // Persisted history may restore chat content and an intent to redrive,
-        // but it is not evidence that the new Core process is executing.
-        // Keep the session ready and the turn restored until TurnStarted.
-        pending
+fn mark_restored_interrupted_turn(
+    turns: &mut [WebTurn],
+    state: StoredSessionState,
+    last_turn_id: Option<&str>,
+) {
+    if state != StoredSessionState::Interrupted {
+        return;
+    }
+    let Some(last_turn_id) = last_turn_id else {
+        return;
     };
-    let Some((_turn_id, entries)) = pending else {
-        return Ok(());
-    };
-    let worker = primary_worker_handle(state, session_id)?;
-    let spec = {
-        let sessions = state
-            .sessions
-            .lock()
-            .map_err(|_| "session_store_poisoned".to_string())?;
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| "session_not_found".to_string())?;
-        session
-            .runtime
-            .settings
-            .config
-            .response_protocol
-            .suite()
-            .prompt_boundaries()
-    };
-    let (command_id, text, attachments, kind) = entries[0].clone();
-    if kind == "toolgen_instruction" {
-        worker.run_toolgen_with_command_id(ToolGenRequest::new(Some(text)), Some(command_id))
-    } else {
-        worker.run_turn_batch_with_command_ids(
-            text,
-            session_context_with_roles(state, session_id, &attachments, &[])?,
-            Some(command_id),
-            entries
-                .iter()
-                .skip(1)
-                .filter(|(_, _, _, kind)| kind == "supplement")
-                .map(|(command_id, text, attachments, _)| {
-                    let mut worker_text = text.clone();
-                    if let Some(context) = uploaded_files_context(attachments, spec) {
-                        worker_text.push_str("\n\n");
-                        worker_text.push_str(&context);
-                    }
-                    (worker_text, Some(command_id.clone()))
-                })
-                .collect(),
-        )
-    }?;
-    Ok(())
+    if let Some(turn) = turns.iter_mut().find(|turn| turn.turn_id == last_turn_id) {
+        if turn.final_answer.is_none() && turn.completion.is_none() {
+            turn.state = "interrupted".to_string();
+        }
+    }
 }
 
 fn persist_restored_session_runtime_cache(
@@ -6215,7 +6148,7 @@ fn stored_session_from_web_session_with_store(
             StoredSessionState::Error
         } else if session.active_turn_id.is_some()
             || session.pending_turn_id.is_some()
-            || session.state == "working"
+            || matches!(session.state.as_str(), "working" | "interrupted")
         {
             StoredSessionState::Interrupted
         } else {
@@ -8283,16 +8216,7 @@ fn rollback_web_turn(
             if session.pending_turn_id.as_deref() == Some(turn_id) {
                 session.pending_turn_id = None;
             }
-            session.state = if session
-                .workers
-                .iter()
-                .any(|worker| worker.state == "working")
-            {
-                "working"
-            } else {
-                "ready"
-            }
-            .to_string();
+            session.state = aggregate_web_session_state(&session.workers, &session.state);
             session.attachments.splice(0..0, attachments);
         }
     }
@@ -9017,14 +8941,19 @@ fn activate_core_started_turn(
     let mut sessions = state.sessions.lock().ok()?;
     let session = sessions.get_mut(session_id)?;
     let turn_id = if let Some(command_id) = command_id {
-        session.turns.iter().rev().find_map(|turn| {
-            let matches_command = turn
-                .user_entries
-                .iter()
-                .any(|entry| entry.command_id.as_deref() == Some(command_id));
-            (matches_command && turn.final_answer.is_none() && turn.completion.is_none())
-                .then(|| turn.turn_id.clone())
-        })?
+        let pending_turn_id = session.pending_turn_id.as_deref()?;
+        let pending_turn = session
+            .turns
+            .iter()
+            .find(|turn| turn.turn_id == pending_turn_id)?;
+        let matches_command = pending_turn
+            .user_entries
+            .iter()
+            .any(|entry| entry.command_id.as_deref() == Some(command_id));
+        (matches_command
+            && pending_turn.final_answer.is_none()
+            && pending_turn.completion.is_none())
+        .then(|| pending_turn.turn_id.clone())?
     } else {
         session
             .pending_turn_id
@@ -9664,6 +9593,21 @@ fn is_primary_worker(state: &AppState, session_id: &str, worker_id: &str) -> boo
         .unwrap_or(false)
 }
 
+fn aggregate_web_session_state(workers: &[WebWorker], fallback: &str) -> String {
+    if workers.iter().any(|worker| worker.state == "working") {
+        "working"
+    } else if workers.iter().any(|worker| worker.state == "error") {
+        "error"
+    } else if !workers.is_empty() && workers.iter().all(|worker| worker.state == "stopped") {
+        "stopped"
+    } else if fallback == "interrupted" {
+        "interrupted"
+    } else {
+        "ready"
+    }
+    .to_string()
+}
+
 fn set_worker_state(state: &AppState, session_id: &str, worker_id: &str, worker_state: &str) {
     if let Ok(mut sessions) = state.sessions.lock() {
         if let Some(session) = sessions.get_mut(session_id) {
@@ -9674,24 +9618,7 @@ fn set_worker_state(state: &AppState, session_id: &str, worker_id: &str, worker_
             {
                 worker.state = worker_state.to_string();
             }
-            session.state = if session
-                .workers
-                .iter()
-                .any(|worker| worker.state == "working")
-            {
-                "working"
-            } else if session.workers.iter().any(|worker| worker.state == "error") {
-                "error"
-            } else if session
-                .workers
-                .iter()
-                .all(|worker| worker.state == "stopped")
-            {
-                "stopped"
-            } else {
-                "ready"
-            }
-            .to_string();
+            session.state = aggregate_web_session_state(&session.workers, &session.state);
         }
     }
 }
