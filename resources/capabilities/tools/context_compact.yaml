@@ -6,10 +6,17 @@ summary: Compact selected dynamic prompt deltas while preserving an essential su
 prompt_synopsis: |
   {"context_compact":{"discard":["pd_1"],"offload":["pd_2"],"summary":"Essential active state..."}}
 description: |
-  Maintain long-running context by discarding stale dynamic prompt deltas and/or
-  offloading important but bulky deltas to scratch memory. Preserve the active
-  task, progress, evidence, important user-provided work-env information(enough connection methods, config, variable, paths, etc....), and next steps in summary. This action
-  is exclusive: do not request another capability in the same response.
+  Maintain long-running context by summarizing then discarding stale or
+  redundant dynamic prompt deltas, and/or offloading important but bulky deltas
+  to scratch memory. Preserve everything useful for continuing the work. For
+  example, the summary should capture:
+  1. the active task, current progress, evidence, running jobs, and temp data
+     still to be cleaned up;
+  2. important user-provided work-env information (connection methods, config,
+     variables, paths, etc.);
+  3. next steps for continued work.
+  When combined with other capability calls, `context_compact` must be the first
+  call. Later calls run only after compaction succeeds.
 prompt_input: |
   Use only runtime-provided dynamic delta ids. Provide at least one id in
   discard or offload, plus a non-empty summary.
