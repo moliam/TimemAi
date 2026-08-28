@@ -9,7 +9,7 @@ import { Appearance, applyAppearance, loadAppearance } from "./appearance";
 import { loadToolGenEnabled, saveToolGenEnabled } from "./beta_features";
 import { Activity, ChatFavorite, ChatLibraryCapacity, ChatMessage, ChatSearchHit, ClientCommand, clientId, CommandWithId, Decision, McpServerConfig, McpServerReport, McpTransport, MemTemporaryItem, ModelEndpoint, Session, Snapshot, ToolDetail, ToolSummary, WebTurn, WebTurnEvent, WireEvent, WorkerRole, WorkerRoleGroup, WorkerRoleLibrary, SessionGroup } from "./protocol";
 import { applyWorkerRoleMutation, isOptimisticWorkerRoleMutation, replayWorkerRoleMutations, WorkerRoleMutation } from "./worker_roles_ui";
-import { adjacentUserMessageIndex, canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, ScrollMetrics, SessionScrollPosition, UserMessageNavigationDirection, wheelDeltaPixels } from "./scroll";
+import { adjacentUserMessageIndex, canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, scrollEdgeFades, ScrollMetrics, SessionScrollPosition, UserMessageNavigationDirection, wheelDeltaPixels } from "./scroll";
 import { activeModelRetryStatus, activityFromTopic, applySessionRuntimeProfile, appendActivityToCurrentTurn, appendTurnEvent, applyChatMessageDeleted, applyCoreTopicToSession, attachTurnCompletion, boundSessionHistory, clearDecisionsForWorker, coalesceActionLifecycle, compareTurnTimelineItems, composerPrimaryAction, composerSendDecision, decisionKey, decisionsFromSessions, draftForSession, enqueueDecision, finishSessionDraftSubmission, finishTurn, groupDecisionsBySessionTurn, manualToolGenCommand, normalizeCopiedUserMessageText, prependHistoryRecords, pruneSessionDrafts, pruneSessionSubmissionLocks, releaseSessionDraftSubmission, removePendingAttachment, requestDecision, reserveSessionDraftSubmission, resolveActiveSessionId, runtimeConnectionLabel, sessionCacheHitPercent, sessionContextUsage, sessionCreateDecision, sessionInteractionLockReason as sessionInteractionLockReasonForState, sessionRenameDecision, sessionTurnKey, sessionWorkerTreeRows, setSessionDraft, tailPath, toolActivityDisplayName, toolDisplayName, turnLiveUsage, turnTimelinePlacement, updateSessionWorkerState, visibleRuntimeRestartMarkers, upsertSession, upsertTurn } from "./view_model";
 import { extractMarkdownOutline, finalAnswerNeedsOutline, markdownHeadingId, markdownFloatingNavigationLayout, markdownOutlineActiveId, markdownOutlineAnimationPosition, markdownOutlineRailScrollTop, MARKDOWN_OUTLINE_START_ID, markdownOutlineTargetScrollTop, MarkdownOutlineItem } from "./markdown_outline";
 import { createMcpTransportDrafts, mcpTransportLabel, mergeMcpSecrets } from "./mcp";
@@ -4023,6 +4023,15 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
   );
   const previousTurnState = useRef(turn.state);
   const [pendingUpdates, setPendingUpdates] = useState(0);
+  const [workEdgeFades, setWorkEdgeFades] = useState({ top: false, bottom: false });
+  const updateWorkEdgeFades = useCallback((scroll: HTMLDivElement) => {
+    const next = scrollEdgeFades({
+      scrollTop: scroll.scrollTop,
+      scrollHeight: scroll.scrollHeight,
+      clientHeight: scroll.clientHeight,
+    });
+    setWorkEdgeFades((current) => current.top === next.top && current.bottom === next.bottom ? current : next);
+  }, []);
   const lifecycleEvents = useMemo(() => coalesceActionLifecycle(turn.events), [turn.events]);
  const lifecycleItems = useMemo(() => lifecycleEvents.map((event) => ({
  type: "event" as const,
@@ -4105,7 +4114,8 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
     } else if (added > 0) {
       setPendingUpdates((count) => count + added);
     }
-  }, [turn.events.length, supplementItems.length, decisions.length]);
+    updateWorkEdgeFades(scroll);
+  }, [turn.events.length, supplementItems.length, decisions.length, updateWorkEdgeFades]);
  useLayoutEffect(() => {
  const scroll = workScrollRef.current;
  const content = workContentRef.current;
@@ -4126,6 +4136,19 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
  if (scrollFrame !== undefined) window.cancelAnimationFrame(scrollFrame);
  };
  }, [workStreamVisible]);
+
+  useLayoutEffect(() => {
+    const scroll = workScrollRef.current;
+    const content = workContentRef.current;
+    if (!scroll || !content) return;
+    const update = () => updateWorkEdgeFades(scroll);
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(update);
+    observer.observe(scroll);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [updateWorkEdgeFades, workStreamVisible]);
 
 
   const scrollWorkToLatest = () => {
@@ -4157,9 +4180,10 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
     {hasVisibleProcess && <section className={`turn-assistant-frame ${turn.state} ${workStreamVisible ? "" : "collapsed-work"}`}>
       {canToggleWorkStream && <div className="turn-assistant-heading"><button type="button" className={`working-chip work-title-chip work-collapse-toggle${turn.state === "working" ? " active-work-title" : " completed-work-title"}${interrupted ? " interrupted-work-title" : ""}${isToolGenTurn ? ` toolgen-working${turn.state === "working" ? "" : " toolgen-completed-title"}` : ""}`} title={showWorkStream ? "Hide work details" : "Show work details"} aria-label={showWorkStream ? "Hide work details" : "Show work details"} aria-expanded={showWorkStream} onClick={() => setShowWorkStream((visible) => !visible)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>{isToolGenTurn && <Wrench size={11}/>} {turn.state === "working" ? (isToolGenTurn ? "Generating tools…" : <span className="working-label">working</span>) : (isToolGenTurn ? "ToolGen" : "Thought/Action")}{turn.state === "working" && <WorkingElapsed createdAtMs={turn.created_at_ms}/>}{interrupted && <span className="work-title-status">(Interrupted)</span>}</button>{modelRetryStatus && <details className={`model-retry-status ${modelRetryStatus.kind}`}><summary title={`展开 ${modelRetryStatus.label} 详情`} aria-label={`展开 ${modelRetryStatus.label} 详情`}><ChevronRight size={12} aria-hidden="true"/><span>{modelRetryStatus.label}</span>{modelRetryStatus.progress && <small>{modelRetryStatus.progress}</small>}</summary><div className="model-retry-detail"><MarkdownContent text={modelRetryStatus.detail}/></div></details>}</div>}
       {workStreamVisible && <div className="turn-work-panel">
-        <div className={`turn-work-scroll has-content${pendingUpdates > 0 ? " has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
+        <div className={`turn-work-scroll has-content${workEdgeFades.top ? " fade-top" : ""}${workEdgeFades.bottom ? " fade-bottom" : ""}${pendingUpdates > 0 ? " has-pending-updates" : ""}`} role="region" aria-label={isToolGenTurn ? "ToolGen work stream" : "Task work stream"} ref={workScrollRef} onScroll={(event) => {
           followLatest.current = isNearScrollBottom({ scrollTop: event.currentTarget.scrollTop, scrollHeight: event.currentTarget.scrollHeight, clientHeight: event.currentTarget.clientHeight }, 36);
           if (followLatest.current) setPendingUpdates(0);
+          updateWorkEdgeFades(event.currentTarget);
         }}>
           <div className="turn-work-content" ref={workContentRef}> {scrollItems.map((item, index) => { const { activity } = item; if (activity?.tone === "action") { const summary = toolActivityRunByStartIndex.get(index); return summary ? <ToolActivityGroup key={`tool-activity-group-${item.key}`} summary={summary}/> : null; } return activity ? <ActivityView key={item.key} activity={activity}/> : null; })} {decisions.map((decision, index) => <InlineDecision key={decisionKey(decision)} decision={decision} pending={pendingDecisionKeys.has(decisionKey(decision))} locked={sessionInteractionLocked} position={index + 1} total={decisions.length} onReply={(reply) => onDecisionReply(decision, reply)} />)}
           {turn.state === "working" && <LiveTurnUsage turn={turn}/>}
