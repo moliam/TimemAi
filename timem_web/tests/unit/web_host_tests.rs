@@ -5755,6 +5755,57 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
 }
 
 #[test]
+fn conversation_capacity_skips_running_session_and_prunes_another_session() {
+    let state = routing_test_state();
+    let store = state.mem.lock().unwrap().session_store.clone();
+    let web_sessions = state.sessions.lock().unwrap().clone();
+    for session in web_sessions.values() {
+        store
+            .upsert_session(&stored_session_from_web_session_with_store(&store, session))
+            .unwrap();
+        for turn in 0..2 {
+            for role in [ChatHistoryRole::User, ChatHistoryRole::Assistant] {
+                store
+                    .append_history_record(
+                        &session.session_id,
+                        &ChatHistoryRecord::Message {
+                            role,
+                            turn_id: format!("{}_turn_{turn}", session.session_id),
+                            created_at_ms: turn,
+                            kind: None,
+                            command_id: None,
+                            delivery_state: None,
+                            content: "capacity payload ".repeat(64),
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+    }
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .active_turn_id = Some("session_a_turn_1".to_string());
+    let active_path = store.history_path_for_session("session_a");
+    let inactive_path = store.history_path_for_session("session_b");
+    let active_before = std::fs::read(&active_path).unwrap();
+    let inactive_before = std::fs::metadata(&inactive_path).unwrap().len();
+    let total = active_before.len() as u64 + inactive_before;
+
+    let removed = apply_conversation_stable_capacity(&state, &store, total - 1).unwrap();
+
+    assert!(
+        removed > 0,
+        "another Session must still be pruned when the oldest candidate is active"
+    );
+    assert_eq!(std::fs::read(active_path).unwrap(), active_before);
+    assert!(std::fs::metadata(inactive_path).unwrap().len() < inactive_before);
+}
+
+#[test]
 fn temporary_capacity_evicts_only_complete_oldest_items() {
     let item = |id: &str, bytes: u64, modified_at_ms: i64| MemTemporaryItem {
         id: id.to_string(),
@@ -5772,6 +5823,16 @@ fn temporary_capacity_evicts_only_complete_oldest_items() {
         11,
     );
     assert_eq!(evicted, vec!["old"]);
+    assert_eq!(
+        oldest_temporary_items_to_evict(vec![item("old", 5, 1), item("new", 6, 2)], 11,),
+        Vec::<String>::new(),
+        "content exactly at the stable capacity must be retained",
+    );
+    assert_eq!(
+        oldest_temporary_items_to_evict(vec![item("old", 5, 1), item("new", 7, 2)], 11,),
+        vec!["old"],
+        "crossing capacity by one byte must evict the oldest complete item",
+    );
     assert!(
         oldest_temporary_items_to_evict(vec![item("only", 12, 1)], 11)
             .iter()
@@ -5796,6 +5857,11 @@ fn temporary_retention_rolls_forward_is_idempotent_and_unlimited_skips_cleanup()
     let base_now = 20 * day;
     for (created_at_ms, content) in [
         (base_now - 4 * day, "first expires on later tick"),
+        (base_now - 5 * day, "exact cutoff remains"),
+        (
+            base_now - 5 * day - 1,
+            "one millisecond before cutoff expires",
+        ),
         (base_now - day, "second remains"),
     ] {
         store
@@ -5817,14 +5883,25 @@ fn temporary_retention_rolls_forward_is_idempotent_and_unlimited_skips_cleanup()
         apply_temporary_retention(&layout, &store, Some(5), None, base_now)
             .unwrap()
             .history_events,
-        0
+        1,
+        "age retention is strict: the exact cutoff remains and one millisecond older expires",
     );
+    let after_boundary_pass =
+        read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert!(after_boundary_pass.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Event { content, .. } if content == "exact cutoff remains"
+    )));
+    assert!(!after_boundary_pass.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Event { content, .. } if content == "one millisecond before cutoff expires"
+    )));
     assert_eq!(
         apply_temporary_retention(&layout, &store, Some(5), None, base_now + 2 * day)
             .unwrap()
             .history_events,
-        1,
-        "the moving cutoff must expire data on a later periodic pass"
+        2,
+        "the moving cutoff must expire both records that became old on a later periodic pass"
     );
     assert_eq!(
         apply_temporary_retention(&layout, &store, Some(5), None, base_now + 2 * day).unwrap(),
@@ -5942,6 +6019,75 @@ fn mem_temporary_items_include_only_finished_shell_job_bundles() {
     assert!(std::fs::read_to_string(shell_dir.join("jobs.jsonl"))
         .unwrap()
         .contains("active"));
+    let _ = std::fs::remove_dir_all(memory_dir);
+}
+
+#[test]
+fn mem_temporary_items_manage_finished_jobs_from_legacy_nested_memory_layout() {
+    let memory_dir = std::env::temp_dir().join(unique_web_id("mem_temporary_legacy_shell_jobs"));
+    let make_record = |store_memory_dir: &Path, id: &str, finished: bool, bytes: usize| {
+        let shell_dir = store_memory_dir.join("shell_jobs");
+        std::fs::create_dir_all(&shell_dir).unwrap();
+        let output = shell_dir.join(format!("{id}.out"));
+        let stderr = shell_dir.join(format!("{id}.err"));
+        let status = shell_dir.join(format!("{id}.status"));
+        std::fs::write(&output, vec![b'x'; bytes]).unwrap();
+        std::fs::write(&stderr, b"err").unwrap();
+        std::fs::write(&status, if finished { "0" } else { "" }).unwrap();
+        agent_core::ShellJobRecord {
+            id: id.to_string(),
+            created_at_ms: 7,
+            kind: "test".to_string(),
+            session_id: "session_a".to_string(),
+            turn_id: "turn_a".to_string(),
+            pid: std::process::id(),
+            process_identity: None,
+            tool_call_id: format!("call-{id}"),
+            owner_id: None,
+            command: "true".to_string(),
+            cwd: memory_dir.display().to_string(),
+            output_file: output.display().to_string(),
+            stderr_file: stderr.display().to_string(),
+            status_file: status.display().to_string(),
+            tail_out: false,
+        }
+    };
+    let current = make_record(&memory_dir, "current-finished", true, 5);
+    let legacy_dir = memory_dir.join("memory");
+    let legacy_finished = make_record(&legacy_dir, "legacy-finished", true, 50);
+    let legacy_active = make_record(&legacy_dir, "legacy-active", false, 500);
+    std::fs::write(
+        memory_dir.join("shell_jobs/jobs.jsonl"),
+        format!("{}\n", serde_json::to_string(&current).unwrap()),
+    )
+    .unwrap();
+    std::fs::write(
+        legacy_dir.join("shell_jobs/jobs.jsonl"),
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&legacy_finished).unwrap(),
+            serde_json::to_string(&legacy_active).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let items = list_mem_temporary_items_at(&memory_dir).unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].id, "legacy_shell_job:legacy-finished");
+    assert_eq!(items[0].path, "memory/shell_jobs/legacy-finished");
+    assert_eq!(items[1].id, "shell_job:current-finished");
+    assert!(!items.iter().any(|item| item.id.contains("legacy-active")));
+
+    assert_eq!(
+        delete_mem_temporary_items_at(&memory_dir, &[items[0].id.clone()]).unwrap(),
+        1
+    );
+    assert!(!Path::new(&legacy_finished.output_file).exists());
+    assert!(Path::new(&legacy_active.output_file).exists());
+    assert!(Path::new(&current.output_file).exists());
+    let legacy_index = std::fs::read_to_string(legacy_dir.join("shell_jobs/jobs.jsonl")).unwrap();
+    assert!(!legacy_index.contains("legacy-finished"));
+    assert!(legacy_index.contains("legacy-active"));
     let _ = std::fs::remove_dir_all(memory_dir);
 }
 
@@ -6397,6 +6543,19 @@ fn routing_test_state() -> AppState {
         debug: None,
         runtime_log: RuntimeLog::default(),
     }
+}
+
+#[test]
+fn concurrent_mem_temporary_list_request_is_rejected_instead_of_silently_dropped() {
+    let state = routing_test_state();
+    state
+        .mem_temporary_task_running
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    assert_eq!(
+        schedule_mem_temporary_task(&state, None),
+        Err("mem_temporary_task_busy".to_string())
+    );
 }
 
 fn set_test_mem(state: &AppState, data_dir: PathBuf, space: &str) {
