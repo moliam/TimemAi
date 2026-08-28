@@ -26,7 +26,7 @@ impl RollingCapacity {
     pub fn with_slice_bytes(total_bytes: u64, slice_bytes: u64) -> Result<Self, &'static str> {
         if slice_bytes == 0
             || total_bytes < slice_bytes.saturating_mul(2)
-            || total_bytes % slice_bytes != 0
+            || total_bytes.checked_rem(slice_bytes) != Some(0)
         {
             return Err("rolling_capacity_invalid");
         }
