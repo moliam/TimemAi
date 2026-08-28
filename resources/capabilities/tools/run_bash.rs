@@ -1,21 +1,19 @@
 use crate::response_protocol::ParsedAction;
-use crate::MemGuard;
 use crate::{
     ActionExecution, ActionOutcome, ActionRuntime, ActionStatus, AgentCore, ApprovalRequest,
     BashApprovalMode, BashResultEvidence, LongRunningCommandStatus, PendingApproval,
     PendingApprovedAction,
 };
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const LONG_RUNNING_COMMAND_PROMPT_AFTER: Duration = Duration::from_secs(60);
 
@@ -26,46 +24,7 @@ fn configure_run_bash_environment(command: &mut Command) {
         .env("TERM", "dumb");
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ShellJobRecord {
-    pub id: String,
-    pub created_at_ms: i64,
-    #[serde(default = "default_shell_job_kind")]
-    pub kind: String,
-    #[serde(default)]
-    pub session_id: String,
-    #[serde(default)]
-    pub turn_id: String,
-    pub pid: u32,
-    #[serde(default)]
-    pub process_identity: Option<String>,
-    #[serde(default)]
-    pub tool_call_id: String,
-    #[serde(default)]
-    pub owner_id: Option<String>,
-    pub command: String,
-    #[serde(default)]
-    pub cwd: String,
-    pub output_file: String,
-    #[serde(default)]
-    pub stderr_file: String,
-    pub status_file: String,
-    #[serde(default)]
-    pub tail_out: bool,
-}
-
-fn default_shell_job_kind() -> String {
-    "background".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct ShellJobTemporaryItem {
-    pub id: String,
-    pub created_at_ms: i64,
-    pub bytes: u64,
-    pub deletable: bool,
-    pub delete_reason: Option<String>,
-}
+const SHELL_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningShellJob {
@@ -109,7 +68,6 @@ impl RunningShellJob {
     pub fn elapsed_ms(&self) -> i64 {
         now_ms().saturating_sub(self.created_at_ms).max(0)
     }
-
     pub fn description(&self) -> &'static str {
         match self.kind.as_str() {
             "timeout" => "old job timeout",
@@ -118,184 +76,200 @@ impl RunningShellJob {
     }
 }
 
+#[derive(Debug)]
+struct BoundedShellOutput {
+    bytes: std::collections::VecDeque<u8>,
+    retain_tail: bool,
+    truncated: bool,
+}
+
+impl BoundedShellOutput {
+    fn new(retain_tail: bool) -> Self {
+        Self {
+            bytes: std::collections::VecDeque::with_capacity(SHELL_OUTPUT_LIMIT_BYTES),
+            retain_tail,
+            truncated: false,
+        }
+    }
+    fn push(&mut self, chunk: &[u8]) {
+        if self.retain_tail {
+            if chunk.len() >= SHELL_OUTPUT_LIMIT_BYTES {
+                self.bytes.clear();
+                self.bytes.extend(
+                    chunk[chunk.len() - SHELL_OUTPUT_LIMIT_BYTES..]
+                        .iter()
+                        .copied(),
+                );
+                self.truncated = true;
+                return;
+            }
+            let overflow = self
+                .bytes
+                .len()
+                .saturating_add(chunk.len())
+                .saturating_sub(SHELL_OUTPUT_LIMIT_BYTES);
+            if overflow > 0 {
+                self.bytes.drain(..overflow);
+                self.truncated = true;
+            }
+            self.bytes.extend(chunk.iter().copied());
+        } else {
+            let remaining = SHELL_OUTPUT_LIMIT_BYTES.saturating_sub(self.bytes.len());
+            self.bytes.extend(chunk.iter().take(remaining).copied());
+            self.truncated = self.truncated || chunk.len() > remaining;
+        }
+    }
+    fn text(&self) -> String {
+        let bytes = self.bytes.iter().copied().collect::<Vec<_>>();
+        let text = String::from_utf8_lossy(&bytes);
+        if !self.truncated {
+            return text.into_owned();
+        }
+        if self.retain_tail {
+            format!("[output truncated; retained last {SHELL_OUTPUT_LIMIT_BYTES} bytes]\n{text}")
+        } else {
+            format!("{text}\n[output truncated; retained first {SHELL_OUTPUT_LIMIT_BYTES} bytes]")
+        }
+    }
+}
+
+type SharedShellOutput = Arc<Mutex<BoundedShellOutput>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellJobDelivery {
+    Direct,
+    Background,
+    Delivered,
+}
+
 #[derive(Debug, Clone)]
-pub struct FileShellJobStore {
-    dir: PathBuf,
-    index_file: PathBuf,
-    guard: MemGuard,
-    watcher: ShellJobWatcher,
+struct FinishedShellJob {
+    status: String,
+    stdout: String,
+    stderr: String,
+    output: String,
+}
+
+#[derive(Debug)]
+enum ShellJobLifecycle {
+    Running,
+    Finished(FinishedShellJob),
+}
+
+#[derive(Debug)]
+struct ShellJobState {
+    delivery: ShellJobDelivery,
+    lifecycle: ShellJobLifecycle,
+}
+
+#[derive(Debug)]
+struct ManagedShellJob {
+    pid: u32,
+    tool_call_id: String,
+    kind: String,
+    command: String,
+    cwd: String,
+    session_id: String,
+    turn_id: String,
+    created_at_ms: i64,
+    stdout: SharedShellOutput,
+    stderr: SharedShellOutput,
+    state: Mutex<ShellJobState>,
+    changed: Condvar,
+    supervisor: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl ManagedShellJob {
+    fn running(&self) -> RunningShellJob {
+        RunningShellJob {
+            pid: self.pid,
+            tool_call_id: self.tool_call_id.clone(),
+            kind: self.kind.clone(),
+            command: self.command.clone(),
+            cwd: self.cwd.clone(),
+            session_id: self.session_id.clone(),
+            turn_id: self.turn_id.clone(),
+            created_at_ms: self.created_at_ms,
+        }
+    }
+
+    fn partial_streams(&self) -> (String, String) {
+        (
+            shell_output_text(&self.stdout),
+            shell_output_text(&self.stderr),
+        )
+    }
+
+    fn exit_update(&self, finished: &FinishedShellJob) -> ShellJobExitUpdate {
+        ShellJobExitUpdate {
+            pid: self.pid,
+            tool_call_id: self.tool_call_id.clone(),
+            kind: self.kind.clone(),
+            command: self.command.clone(),
+            cwd: self.cwd.clone(),
+            session_id: self.session_id.clone(),
+            turn_id: self.turn_id.clone(),
+            created_at_ms: self.created_at_ms,
+            elapsed_ms: now_ms().saturating_sub(self.created_at_ms),
+            status: finished.status.clone(),
+            stdout: finished.stdout.clone(),
+            stderr: finished.stderr.clone(),
+            output: finished.output.clone(),
+        }
+    }
+
+    fn signal(&self) {
+        crate::os::terminate_process_group(self.pid);
+    }
+
+    fn join_supervisor(&self) {
+        let supervisor = self
+            .supervisor
+            .lock()
+            .ok()
+            .and_then(|mut supervisor| supervisor.take());
+        if let Some(supervisor) = supervisor {
+            let _ = supervisor.join();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ShellJobManagerState {
+    jobs: Mutex<HashMap<u32, Arc<ManagedShellJob>>>,
+}
+
+impl Drop for ShellJobManagerState {
+    fn drop(&mut self) {
+        let jobs = self
+            .jobs
+            .get_mut()
+            .map(|jobs| jobs.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for job in &jobs {
+            if job_is_running(job) {
+                job.signal();
+            }
+        }
+        for job in jobs {
+            job.join_supervisor();
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellJobManager {
+    state: Arc<ShellJobManagerState>,
     long_running_prompt_after: Duration,
 }
 
-#[derive(Debug, Clone)]
-struct ShellJobWatcher {
-    state: Arc<ShellJobWatcherState>,
-}
-
-#[derive(Debug)]
-struct ShellJobWatcherState {
-    jobs: Mutex<HashMap<u32, WatchedShellChild>>,
-    changed: Condvar,
-    started: AtomicBool,
-}
-
-#[derive(Debug)]
-struct WatchedShellChild {
-    child: Child,
-    status_file: PathBuf,
-    launcher_status: Option<String>,
-}
-
-impl ShellJobWatcher {
-    fn new() -> Self {
-        Self {
-            state: Arc::new(ShellJobWatcherState {
-                jobs: Mutex::new(HashMap::new()),
-                changed: Condvar::new(),
-                started: AtomicBool::new(false),
-            }),
-        }
-    }
-
-    fn register(&self, pid: u32, child: Child, status_file: PathBuf) {
-        self.ensure_started();
-        if let Ok(mut jobs) = self.state.jobs.lock() {
-            jobs.insert(
-                pid,
-                WatchedShellChild {
-                    child,
-                    status_file,
-                    launcher_status: None,
-                },
-            );
-            self.state.changed.notify_one();
-        }
-    }
-
-    fn is_watching(&self, pid: u32) -> bool {
-        self.state
-            .jobs
-            .lock()
-            .ok()
-            .map(|jobs| jobs.contains_key(&pid))
-            .unwrap_or(false)
-    }
-
-    fn refresh_pid(&self, pid: u32) {
-        let Ok(mut jobs) = self.state.jobs.lock() else {
-            return;
-        };
-        let Some(watched) = jobs.get_mut(&pid) else {
-            return;
-        };
-        refresh_watched_shell_child(pid, watched);
-        if watched_shell_child_finished(pid, watched) {
-            if let Some(watched) = jobs.remove(&pid) {
-                write_status_if_empty(
-                    &watched.status_file,
-                    watched.launcher_status.as_deref().unwrap_or("unknown"),
-                );
-            }
-        }
-    }
-
-    fn ensure_started(&self) {
-        if self
-            .state
-            .started
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return;
-        }
-        let state = Arc::clone(&self.state);
-        thread::spawn(move || shell_job_watcher_loop(state));
-    }
-}
-
-fn watched_shell_child_finished(pid: u32, watched: &WatchedShellChild) -> bool {
-    watched
-        .launcher_status
-        .as_deref()
-        .is_some_and(|status| status.starts_with("signal:"))
-        || (watched.launcher_status.is_some() && !crate::os::process_group_running(pid))
-}
-
-fn refresh_watched_shell_child(pid: u32, watched: &mut WatchedShellChild) {
-    if watched.launcher_status.is_some() {
-        return;
-    }
-    watched.launcher_status = match watched.child.try_wait() {
-        Ok(Some(status)) => {
-            if exit_signal(&status).is_some() {
-                crate::os::kill_process_group(pid);
-            }
-            Some(exit_status_text(&status))
-        }
-        Ok(None) => None,
-        Err(_) => Some("unknown".to_string()),
-    };
-}
-
-fn shell_job_watcher_loop(state: Arc<ShellJobWatcherState>) {
-    let mut jobs = match state.jobs.lock() {
-        Ok(jobs) => jobs,
-        Err(_) => return,
-    };
-    loop {
-        while jobs.is_empty() {
-            jobs = match state.changed.wait(jobs) {
-                Ok(jobs) => jobs,
-                Err(_) => return,
-            };
-        }
-
-        let mut finished = Vec::new();
-        for (pid, watched) in jobs.iter_mut() {
-            refresh_watched_shell_child(*pid, watched);
-            if watched_shell_child_finished(*pid, watched) {
-                finished.push(*pid);
-            }
-        }
-        for pid in finished {
-            if let Some(watched) = jobs.remove(&pid) {
-                write_status_if_empty(
-                    &watched.status_file,
-                    watched.launcher_status.as_deref().unwrap_or("unknown"),
-                );
-            }
-        }
-
-        if jobs.is_empty() {
-            continue;
-        }
-        jobs = match state.changed.wait_timeout(jobs, Duration::from_millis(100)) {
-            Ok((jobs, _)) => jobs,
-            Err(_) => return,
-        };
-    }
-}
-
-fn write_status_if_empty(path: &Path, status: &str) {
-    if fs::read_to_string(path)
-        .ok()
-        .map(|text| !text.trim().is_empty())
-        .unwrap_or(false)
-    {
-        return;
-    }
-    let _ = fs::write(path, status);
-}
-
-impl FileShellJobStore {
+impl ShellJobManager {
     pub fn new(memory_dir: &Path) -> Self {
-        let dir = memory_dir.join("shell_jobs");
-        let _ = fs::create_dir_all(&dir);
+        cleanup_legacy_shell_job_artifacts(memory_dir);
         Self {
-            index_file: dir.join("jobs.jsonl"),
-            dir,
-            guard: MemGuard::for_memory_domain(memory_dir, "shell-jobs"),
-            watcher: ShellJobWatcher::new(),
+            state: Arc::new(ShellJobManagerState {
+                jobs: Mutex::new(HashMap::new()),
+            }),
             long_running_prompt_after: LONG_RUNNING_COMMAND_PROMPT_AFTER,
         }
     }
@@ -303,13 +277,6 @@ impl FileShellJobStore {
     #[cfg(test)]
     pub(crate) fn set_long_running_prompt_after_for_tests(&mut self, duration: Duration) {
         self.long_running_prompt_after = duration.max(Duration::from_millis(1));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn forget_watched_job_for_tests(&self, pid: u32) {
-        if let Ok(mut jobs) = self.watcher.state.jobs.lock() {
-            jobs.remove(&pid);
-        }
     }
 
     pub fn spawn_background(
@@ -349,7 +316,7 @@ impl FileShellJobStore {
                 reason,
             );
         }
-        let record = match self.spawn_record(
+        let job = match self.spawn_managed(
             clean,
             cwd,
             "background",
@@ -357,8 +324,9 @@ impl FileShellJobStore {
             turn_id,
             tool_call_id,
             tail_out,
+            ShellJobDelivery::Background,
         ) {
-            Ok(record) => record,
+            Ok(job) => job,
             Err(_) => {
                 let reason = "The background command could not be started by the local shell.";
                 return bash_finished_error_outcome(
@@ -368,17 +336,16 @@ impl FileShellJobStore {
                 );
             }
         };
-        let _ = self.append(&record);
         ActionOutcome::background_running(format!(
             "Action result: run_bash\npid={}, now keeps running in background",
-            record.pid
+            job.pid
         ))
         .with_bash_result(BashResultEvidence {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: None,
             signal: None,
-            pid: Some(record.pid),
+            pid: Some(job.pid),
             timed_out: false,
             pid_kind: Some(runtime_child_pid_kind().to_string()),
             error_type: None,
@@ -386,7 +353,7 @@ impl FileShellJobStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn spawn_record(
+    fn spawn_managed(
         &self,
         clean: &str,
         cwd: &Path,
@@ -395,22 +362,8 @@ impl FileShellJobStore {
         turn_id: &str,
         tool_call_id: &str,
         tail_out: bool,
-    ) -> std::io::Result<ShellJobRecord> {
-        fs::create_dir_all(&self.dir)?;
-        let id = unique_shell_id("job");
-        let output_file = self.dir.join(format!("{id}.out"));
-        let stderr_file = self.dir.join(format!("{id}.err"));
-        let status_file = self.dir.join(format!("{id}.status"));
-        let output = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&output_file)?;
-        let stderr = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&stderr_file)?;
+        delivery: ShellJobDelivery,
+    ) -> std::io::Result<Arc<ManagedShellJob>> {
         let mut command = Command::new(crate::os::BASH_EXECUTABLE);
         configure_run_bash_environment(&mut command);
         command
@@ -418,35 +371,60 @@ impl FileShellJobStore {
             .arg(clean)
             .current_dir(cwd)
             .stdin(Stdio::null())
-            .stdout(Stdio::from(output))
-            .stderr(Stdio::from(stderr));
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         crate::os::configure_child_process_group(&mut command);
-        let child = command.spawn()?;
+        let mut child = command.spawn()?;
         let pid = child.id();
         if !is_runtime_child_pid(pid) {
             terminate_process(pid);
+            let _ = child.wait();
             return Err(std::io::Error::other(
-                "spawned process did not satisfy the managed-child PID invariant",
+                "spawned process did not satisfy managed-child invariant",
             ));
         }
-        self.watcher.register(pid, child, status_file.clone());
-        Ok(ShellJobRecord {
-            id,
-            created_at_ms: now_ms(),
-            kind: kind.to_string(),
-            session_id: session_id.trim().to_string(),
-            turn_id: turn_id.trim().to_string(),
+        let stdout = Arc::new(Mutex::new(BoundedShellOutput::new(tail_out)));
+        let stderr = Arc::new(Mutex::new(BoundedShellOutput::new(tail_out)));
+        let stdout_drain = child
+            .stdout
+            .take()
+            .map(|pipe| spawn_output_drain(pipe, Arc::clone(&stdout)));
+        let stderr_drain = child
+            .stderr
+            .take()
+            .map(|pipe| spawn_output_drain(pipe, Arc::clone(&stderr)));
+        let job = Arc::new(ManagedShellJob {
             pid,
-            process_identity: crate::os::process_identity(pid),
             tool_call_id: tool_call_id.trim().to_string(),
-            owner_id: Some(crate::runtime_process_owner_id().to_string()),
+            kind: kind.to_string(),
             command: clean.to_string(),
             cwd: cwd.to_string_lossy().to_string(),
-            output_file: output_file.to_string_lossy().to_string(),
-            stderr_file: stderr_file.to_string_lossy().to_string(),
-            status_file: status_file.to_string_lossy().to_string(),
-            tail_out,
-        })
+            session_id: session_id.trim().to_string(),
+            turn_id: turn_id.trim().to_string(),
+            created_at_ms: now_ms(),
+            stdout,
+            stderr,
+            state: Mutex::new(ShellJobState {
+                delivery,
+                lifecycle: ShellJobLifecycle::Running,
+            }),
+            changed: Condvar::new(),
+            supervisor: Mutex::new(None),
+        });
+        let supervised = Arc::clone(&job);
+        let supervisor = thread::spawn(move || {
+            supervise_shell_job(supervised, child, stdout_drain, stderr_drain)
+        });
+        *job.supervisor
+            .lock()
+            .map_err(|_| std::io::Error::other("shell job supervisor poisoned"))? =
+            Some(supervisor);
+        self.state
+            .jobs
+            .lock()
+            .map_err(|_| std::io::Error::other("shell job manager poisoned"))?
+            .insert(pid, Arc::clone(&job));
+        Ok(job)
     }
 
     pub fn run_with_timeout(
@@ -512,7 +490,7 @@ impl FileShellJobStore {
         if timeout_ms <= 0 {
             return bash_error(clean, "invalid_timeout");
         }
-        let Ok(record) = self.spawn_record(
+        let job = match self.spawn_managed(
             clean,
             cwd,
             "timeout",
@@ -520,441 +498,168 @@ impl FileShellJobStore {
             turn_id,
             tool_call_id,
             tail_out,
-        ) else {
-            return bash_error(clean, "command_failed");
+            ShellJobDelivery::Direct,
+        ) {
+            Ok(job) => job,
+            Err(_) => return bash_error(clean, "command_failed"),
         };
         let started = Instant::now();
         let timeout = Duration::from_millis(timeout_ms as u64);
-        let next_long_running_check = self.long_running_prompt_after;
         loop {
             if runtime.should_cancel() {
-                terminate_process(record.pid);
-                write_status_if_empty(Path::new(&record.status_file), "cancelled");
-                return bash_error(clean, "cancelled");
+                match cancel_or_take_direct_result(&job) {
+                    CancelJobDecision::Finished(finished) => {
+                        self.remove_job(job.pid);
+                        job.join_supervisor();
+                        return finished_output(clean, tail_out, &finished);
+                    }
+                    CancelJobDecision::Cancel => {
+                        job.signal();
+                        job.join_supervisor();
+                        self.remove_job(job.pid);
+                        return bash_error(clean, "cancelled");
+                    }
+                }
             }
-            self.watcher.refresh_pid(record.pid);
-            if let Some(status) = read_process_status(&record.status_file) {
-                let (stdout, stderr) = read_shell_job_streams(&record);
-                return BashCommandOutput {
-                    command: clean.to_string(),
-                    status: status.code,
-                    signal: status.signal,
-                    output: normalized_shell_output(&combined_shell_output(&stdout, &stderr)),
-                    stdout,
-                    stderr,
-                    error: None,
-                    tail_out,
-                };
-            }
-            if started.elapsed() >= next_long_running_check && started.elapsed() < timeout {
-                let status = LongRunningCommandStatus {
-                    action: "run_bash".to_string(),
-                    command: clean.to_string(),
-                    pid: record.pid,
-                    elapsed: started.elapsed(),
-                    timeout_ms: Some(timeout_ms),
-                };
-                runtime.on_long_running_command(&status);
-                let _ = self.append(&record);
-                let (stdout, stderr) = read_shell_job_streams(&record);
-                return BashCommandOutput {
-                    command: clean.to_string(),
-                    status: None,
-                    signal: None,
-                    output: combined_shell_output(&stdout, &stderr),
-                    stdout,
-                    stderr,
-                    error: Some(format!(
+            let elapsed = started.elapsed();
+            let handoff = if elapsed >= self.long_running_prompt_after && elapsed < timeout {
+                Some((
+                    true,
+                    format!(
                         "long_running_still_running:{}:{}",
-                        record.pid,
-                        status.elapsed.as_millis()
-                    )),
-                    tail_out,
-                };
+                        job.pid,
+                        elapsed.as_millis()
+                    ),
+                ))
+            } else if elapsed >= timeout {
+                Some((false, format!("timeout_still_running:{}", job.pid)))
+            } else {
+                None
+            };
+            if let Some((long_running, error)) = handoff {
+                match promote_or_take_direct_result(&job) {
+                    DirectJobDecision::Finished(finished) => {
+                        self.remove_job(job.pid);
+                        job.join_supervisor();
+                        return finished_output(clean, tail_out, &finished);
+                    }
+                    DirectJobDecision::Promoted => {
+                        if long_running {
+                            runtime.on_long_running_command(&LongRunningCommandStatus {
+                                action: "run_bash".to_string(),
+                                command: clean.to_string(),
+                                pid: job.pid,
+                                elapsed,
+                                timeout_ms: Some(timeout_ms),
+                            });
+                        }
+                        return running_output_for_job(&job, clean, tail_out, error);
+                    }
+                }
             }
-            if started.elapsed() >= timeout {
-                let _ = self.append(&record);
-                let (stdout, stderr) = read_shell_job_streams(&record);
-                return BashCommandOutput {
-                    command: clean.to_string(),
-                    status: None,
-                    signal: None,
-                    output: combined_shell_output(&stdout, &stderr),
-                    stdout,
-                    stderr,
-                    error: Some(format!("timeout_still_running:{}", record.pid)),
-                    tail_out,
-                };
+            if let Some(finished) = take_direct_result(&job) {
+                self.remove_job(job.pid);
+                job.join_supervisor();
+                return finished_output(clean, tail_out, &finished);
             }
-            thread::sleep(Duration::from_millis(50));
+            wait_for_job_change(&job, Duration::from_millis(20));
         }
     }
 
-    /// Terminates unfinished shell jobs launched by this process.
-    ///
-    /// Historical records without the current process-unique owner identity
-    /// are ignored, including records from a process whose PID was later reused.
-    pub fn terminate_owned_running(&self) -> usize {
-        let owner_id = crate::runtime_process_owner_id();
-        let records = self.records_unlocked();
-        let mut terminated = 0;
-        for record in records {
-            if record.owner_id.as_deref() != Some(owner_id) || self.record_finished(&record) {
-                continue;
-            }
-            if !self.record_still_owned_process(&record) {
-                write_status_if_empty(Path::new(&record.status_file), "pid_identity_changed");
-                continue;
-            }
-            crate::os::terminate_process_group(record.pid);
-            write_status_if_empty(Path::new(&record.status_file), "cancelled");
-            terminated += 1;
+    fn remove_job(&self, pid: u32) {
+        if let Ok(mut jobs) = self.state.jobs.lock() {
+            jobs.remove(&pid);
         }
-        terminated
+    }
+
+    fn selected_jobs(
+        &self,
+        predicate: impl Fn(&ManagedShellJob) -> bool,
+    ) -> Vec<Arc<ManagedShellJob>> {
+        let jobs = self
+            .state
+            .jobs
+            .lock()
+            .ok()
+            .map(|jobs| jobs.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        jobs.into_iter()
+            .filter(|job| predicate(job) && job_is_cancellable(job))
+            .collect()
+    }
+
+    pub fn terminate_owned_running(&self) -> usize {
+        let jobs = self.selected_jobs(|_| true);
+        for job in &jobs {
+            job.signal();
+        }
+        jobs.len()
     }
 
     pub fn cancel_unfinished_for_session(&self, session_id: &str) -> Vec<String> {
-        let clean_session = session_id.trim();
-        if clean_session.is_empty() {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
             return Vec::new();
         }
-        let records = self.records_unlocked();
-        let owner_id = crate::runtime_process_owner_id();
-        let mut cancelled = Vec::new();
-        for record in records {
-            if record.owner_id.as_deref() != Some(owner_id)
-                || record.session_id != clean_session
-                || self.record_finished(&record)
-            {
-                continue;
-            }
-            if !self.record_still_owned_process(&record) {
-                write_status_if_empty(Path::new(&record.status_file), "pid_identity_changed");
-                continue;
-            }
-            crate::os::terminate_process_group(record.pid);
-            write_status_if_empty(Path::new(&record.status_file), "cancelled");
-            cancelled.push(record.id);
+        let jobs = self.selected_jobs(|job| job.session_id == session_id);
+        for job in &jobs {
+            job.signal();
         }
-        cancelled
-    }
-
-    fn record_still_owned_process(&self, record: &ShellJobRecord) -> bool {
-        self.watcher.refresh_pid(record.pid);
-        if self.watcher.is_watching(record.pid) {
-            return true;
-        }
-        record.process_identity.as_deref().is_some_and(|expected| {
-            crate::os::process_identity(record.pid).as_deref() == Some(expected)
-                && is_runtime_child_pid(record.pid)
-        })
+        jobs.into_iter().map(|job| job.pid.to_string()).collect()
     }
 
     pub fn running_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
-        let (running, _) = self.refresh_for_session(session_id);
-        running
+        self.refresh_for_session(session_id).0
     }
 
     pub fn refresh_for_session(
         &self,
         session_id: &str,
     ) -> (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>) {
-        let clean_session = session_id.trim();
-        if clean_session.is_empty() {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
             return (Vec::new(), Vec::new());
         }
+        let jobs = self
+            .state
+            .jobs
+            .lock()
+            .ok()
+            .map(|jobs| {
+                jobs.values()
+                    .filter(|job| job.session_id == session_id)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let mut running = Vec::new();
         let mut exited = Vec::new();
-        let owner_id = crate::runtime_process_owner_id();
-        for record in self.records_unlocked().into_iter().filter(|record| {
-            record.owner_id.as_deref() == Some(owner_id) && record.session_id == clean_session
-        }) {
-            match self.refresh_record_unlocked(record) {
-                ShellJobRefresh::Running(job) => running.push(job),
-                ShellJobRefresh::Exited(update) => exited.push(update),
-                ShellJobRefresh::Finished => {}
+        let mut remove = Vec::new();
+        for job in jobs {
+            let Ok(mut state) = job.state.lock() else {
+                continue;
+            };
+            match (&state.delivery, &state.lifecycle) {
+                (
+                    ShellJobDelivery::Direct | ShellJobDelivery::Background,
+                    ShellJobLifecycle::Running,
+                ) => {
+                    running.push(job.running());
+                }
+                (ShellJobDelivery::Background, ShellJobLifecycle::Finished(finished)) => {
+                    let update = job.exit_update(finished);
+                    state.delivery = ShellJobDelivery::Delivered;
+                    exited.push(update);
+                    remove.push(Arc::clone(&job));
+                }
+                _ => {}
             }
+        }
+        for job in remove {
+            self.remove_job(job.pid);
+            job.join_supervisor();
         }
         (running, exited)
-    }
-
-    /// Lists finished shell jobs as deletable temporary artifact bundles.
-    /// Running jobs are never returned.
-    pub fn finished_temporary_items(&self) -> std::io::Result<Vec<ShellJobTemporaryItem>> {
-        self.guard
-            .with_read(|| {
-                Ok(self
-                    .records_unlocked()
-                    .into_iter()
-                    .filter(|record| self.record_finished_for_listing(record))
-                    .map(|record| {
-                        let local_paths = self.shell_job_listing_artifact_paths(&record);
-                        let deletable = self.shell_job_local_artifact_paths(&record).is_ok();
-                        ShellJobTemporaryItem {
-                            bytes: local_paths
-                                .iter()
-                                .filter_map(|path| fs::symlink_metadata(path).ok())
-                                .filter(|metadata| metadata.file_type().is_file())
-                                .map(|metadata| metadata.len())
-                                .sum(),
-                            id: record.id,
-                            created_at_ms: record.created_at_ms,
-                            deletable,
-                            delete_reason: (!deletable).then(|| {
-                                "Artifact paths are inconsistent with this shell job".to_string()
-                            }),
-                        }
-                    })
-                    .collect())
-            })
-            .map_err(std::io::Error::other)?
-    }
-
-    /// Deletes complete artifact bundles for selected finished shell jobs and
-    /// rewrites the index. Unknown or running job ids are rejected.
-    pub fn delete_finished_temporary_items(&self, ids: &[String]) -> std::io::Result<usize> {
-        self.guard
-            .with_write(|| self.delete_finished_temporary_items_unlocked(ids))
-            .map_err(std::io::Error::other)?
-    }
-
-    fn delete_finished_temporary_items_unlocked(&self, ids: &[String]) -> std::io::Result<usize> {
-        let selected = ids
-            .iter()
-            .map(String::as_str)
-            .collect::<std::collections::BTreeSet<_>>();
-        if selected.is_empty() {
-            return Ok(0);
-        }
-        let records = self.records_unlocked();
-        if selected.iter().any(|id| {
-            !records
-                .iter()
-                .any(|record| record.id == *id && self.record_finished(record))
-        }) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "shell job is unknown or still running",
-            ));
-        }
-        let temporary = self.dir.join(format!(
-            ".jobs.jsonl.delete.tmp-{}-{}",
-            std::process::id(),
-            now_ms()
-        ));
-        let mut output = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)?;
-        let mut removed = 0usize;
-        let result = (|| -> std::io::Result<()> {
-            for record in records {
-                if selected.contains(record.id.as_str()) {
-                    self.remove_shell_job_artifacts(&record)?;
-                    removed = removed.saturating_add(1);
-                } else {
-                    writeln!(
-                        output,
-                        "{}",
-                        serde_json::to_string(&record).unwrap_or_default()
-                    )?;
-                }
-            }
-            output.sync_all()?;
-            fs::rename(&temporary, &self.index_file)
-        })();
-        if let Err(error) = result {
-            let _ = fs::remove_file(&temporary);
-            return Err(error);
-        }
-        Ok(removed)
-    }
-
-    fn safe_expected_shell_job_name(record: &ShellJobRecord, suffix: &str) -> Option<String> {
-        let name = format!("{}.{suffix}", record.id);
-        let path = Path::new(&name);
-        (path.parent() == Some(Path::new(""))
-            && path.file_name() == Some(std::ffi::OsStr::new(&name)))
-        .then_some(name)
-    }
-
-    fn shell_job_listing_artifact_path(
-        &self,
-        recorded: &str,
-        expected_name: Option<&str>,
-    ) -> Option<PathBuf> {
-        if recorded.is_empty() {
-            return None;
-        }
-        let recorded_path = Path::new(recorded);
-        if recorded_path.parent() == Some(self.dir.as_path()) {
-            return Some(recorded_path.to_path_buf());
-        }
-        let expected_name = expected_name?;
-        (recorded_path.file_name() == Some(std::ffi::OsStr::new(expected_name)))
-            .then(|| self.dir.join(expected_name))
-    }
-
-    fn shell_job_listing_artifact_paths(&self, record: &ShellJobRecord) -> Vec<PathBuf> {
-        let output = Self::safe_expected_shell_job_name(record, "out");
-        let stderr = Self::safe_expected_shell_job_name(record, "err");
-        let status = Self::safe_expected_shell_job_name(record, "status");
-        let mut paths = Vec::with_capacity(4);
-        for path in [
-            self.shell_job_listing_artifact_path(&record.output_file, output.as_deref()),
-            self.shell_job_listing_artifact_path(&record.stderr_file, stderr.as_deref()),
-            self.shell_job_listing_artifact_path(&record.status_file, status.as_deref()),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            paths.push(path);
-        }
-        if let Some(status) = paths.last() {
-            paths.push(PathBuf::from(format!("{}.notified", status.display())));
-        }
-        paths
-    }
-
-    fn record_finished_for_listing(&self, record: &ShellJobRecord) -> bool {
-        let expected = Self::safe_expected_shell_job_name(record, "status");
-        self.shell_job_listing_artifact_path(&record.status_file, expected.as_deref())
-            .and_then(|path| fs::read_to_string(path).ok())
-            .map(|text| !text.trim().is_empty())
-            .unwrap_or(false)
-    }
-
-    fn shell_job_local_artifact_path(
-        &self,
-        recorded: &str,
-        expected_name: &str,
-        optional: bool,
-    ) -> std::io::Result<Option<PathBuf>> {
-        if optional && recorded.is_empty() {
-            return Ok(None);
-        }
-        let expected_path = Path::new(expected_name);
-        if expected_path.parent() != Some(Path::new(""))
-            || expected_path.file_name() != Some(std::ffi::OsStr::new(expected_name))
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "shell job artifact name is not a single safe file name",
-            ));
-        }
-        let recorded_path = Path::new(recorded);
-        if recorded_path.parent() == Some(self.dir.as_path()) {
-            return Ok(Some(recorded_path.to_path_buf()));
-        }
-        if recorded_path.file_name() == Some(std::ffi::OsStr::new(expected_name)) {
-            return Ok(Some(self.dir.join(expected_name)));
-        }
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "shell job artifact escaped its store with a mismatched name",
-        ))
-    }
-
-    fn shell_job_local_artifact_paths(
-        &self,
-        record: &ShellJobRecord,
-    ) -> std::io::Result<Vec<PathBuf>> {
-        let expected = [
-            (&record.output_file, format!("{}.out", record.id), false),
-            (&record.stderr_file, format!("{}.err", record.id), true),
-            (&record.status_file, format!("{}.status", record.id), false),
-        ];
-        let mut paths = Vec::with_capacity(4);
-        for (recorded, expected_name, optional) in expected {
-            if let Some(path) =
-                self.shell_job_local_artifact_path(recorded, &expected_name, optional)?
-            {
-                paths.push(path);
-            }
-        }
-        let status = paths
-            .last()
-            .expect("a valid shell job always has a status artifact");
-        paths.push(PathBuf::from(format!("{}.notified", status.display())));
-        Ok(paths)
-    }
-
-    fn shell_job_local_status_path(&self, record: &ShellJobRecord) -> std::io::Result<PathBuf> {
-        self.shell_job_local_artifact_path(
-            &record.status_file,
-            &format!("{}.status", record.id),
-            false,
-        )?
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "shell job status artifact is missing",
-            )
-        })
-    }
-
-    /// Removes finished shell-job records and their output artifacts older than
-    /// `cutoff_ms`. Running jobs are retained regardless of age.
-    pub fn prune_finished_before(&self, cutoff_ms: i64) -> std::io::Result<usize> {
-        self.guard
-            .with_write(|| self.prune_finished_before_unlocked(cutoff_ms))
-            .map_err(std::io::Error::other)?
-    }
-
-    fn prune_finished_before_unlocked(&self, cutoff_ms: i64) -> std::io::Result<usize> {
-        if !self.index_file.exists() {
-            return Ok(0);
-        }
-        let input = fs::File::open(&self.index_file)?;
-        let temporary = self.dir.join(format!(
-            ".jobs.jsonl.retention.tmp-{}-{}",
-            std::process::id(),
-            now_ms()
-        ));
-        let mut options = OpenOptions::new();
-        options.create_new(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut output = options.open(&temporary)?;
-        let mut removed_records = Vec::new();
-        let result = (|| -> std::io::Result<()> {
-            for line in BufReader::new(input).lines() {
-                let line = line?;
-                let parsed = serde_json::from_str::<ShellJobRecord>(&line).ok();
-                let remove = parsed.as_ref().is_some_and(|record| {
-                    record.created_at_ms < cutoff_ms && self.record_finished(record)
-                });
-                if remove {
-                    let record = parsed.expect("checked above");
-                    if self.remove_shell_job_artifacts(&record).is_ok() {
-                        removed_records.push(record);
-                        continue;
-                    }
-                }
-                writeln!(output, "{line}")?;
-            }
-            output.sync_all()?;
-            fs::rename(&temporary, &self.index_file)
-        })();
-        if let Err(error) = result {
-            let _ = fs::remove_file(&temporary);
-            return Err(error);
-        }
-        Ok(removed_records.len())
-    }
-
-    fn remove_shell_job_artifacts(&self, record: &ShellJobRecord) -> std::io::Result<()> {
-        for path in self.shell_job_local_artifact_paths(record)? {
-            match fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(())
     }
 
     pub fn running_job_list_context(&self, session_id: &str) -> Option<String> {
@@ -973,132 +678,230 @@ impl FileShellJobStore {
                 job.elapsed_ms()
             ));
         }
-        out.push_str(
-            "\nContinue the task by deciding whether to wait, inspect, terminate, or take another appropriate action. Do not ask the user merely because a command is still running.",
-        );
+        out.push_str("\nContinue the task by deciding whether to wait, inspect, terminate, or take another appropriate action. Do not ask the user merely because a command is still running.");
         Some(out)
     }
 
-    fn append(&self, record: &ShellJobRecord) -> std::io::Result<()> {
-        self.guard
-            .with_write(|| self.append_unlocked(record))
-            .map_err(std::io::Error::other)?
-    }
-
-    fn append_unlocked(&self, record: &ShellJobRecord) -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.index_file)?;
-        writeln!(
-            file,
-            "{}",
-            serde_json::to_string(record).unwrap_or_default()
-        )
-    }
-
-    fn records_unlocked(&self) -> Vec<ShellJobRecord> {
-        let Ok(file) = OpenOptions::new().read(true).open(&self.index_file) else {
-            return Vec::new();
-        };
-        let mut records = Vec::new();
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
-            let Ok(record) = serde_json::from_str::<ShellJobRecord>(&line) else {
-                continue;
-            };
-            records.push(record);
-        }
-        records
-    }
-
-    fn record_finished(&self, record: &ShellJobRecord) -> bool {
-        self.shell_job_local_status_path(record)
-            .ok()
-            .and_then(|path| fs::read_to_string(path).ok())
-            .map(|text| !text.trim().is_empty())
-            .unwrap_or(false)
-    }
-
-    fn refresh_record_unlocked(&self, record: ShellJobRecord) -> ShellJobRefresh {
-        if self.record_finished(&record) {
-            return self.exit_update_once_unlocked(record);
-        }
-        if self.watcher.is_watching(record.pid) {
-            self.watcher.refresh_pid(record.pid);
-            if self.record_finished(&record) {
-                return self.exit_update_once_unlocked(record);
-            }
-            return ShellJobRefresh::Running(RunningShellJob {
-                pid: record.pid,
-                tool_call_id: record.tool_call_id.clone(),
-                kind: record.kind,
-                command: record.command,
-                cwd: record.cwd,
-                session_id: record.session_id,
-                turn_id: record.turn_id,
-                created_at_ms: record.created_at_ms,
-            });
-        }
-        if !process_running(record.pid) {
-            write_status_if_empty(Path::new(&record.status_file), "exited");
-            return self.exit_update_once_unlocked(record);
-        }
-        let identity_matches = record.process_identity.as_deref().is_some_and(|expected| {
-            crate::os::process_identity(record.pid).as_deref() == Some(expected)
-        });
-        if !identity_matches {
-            write_status_if_empty(Path::new(&record.status_file), "pid_identity_changed");
-            return self.exit_update_once_unlocked(record);
-        }
-        ShellJobRefresh::Running(RunningShellJob {
-            pid: record.pid,
-            tool_call_id: record.tool_call_id.clone(),
-            kind: record.kind,
-            command: record.command,
-            cwd: record.cwd,
-            session_id: record.session_id,
-            turn_id: record.turn_id,
-            created_at_ms: record.created_at_ms,
-        })
-    }
-
-    fn exit_update_once_unlocked(&self, record: ShellJobRecord) -> ShellJobRefresh {
-        let notified_file = format!("{}.notified", record.status_file);
-        let claimed = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&notified_file)
-            .and_then(|mut file| write!(file, "{}", now_ms()));
-        if claimed.is_err() {
-            return ShellJobRefresh::Finished;
-        }
-        let (stdout, stderr) = read_shell_job_streams(&record);
-        let output = normalized_shell_output(&combined_shell_output(&stdout, &stderr));
-        ShellJobRefresh::Exited(ShellJobExitUpdate {
-            pid: record.pid,
-            tool_call_id: record.tool_call_id,
-            kind: record.kind,
-            command: record.command,
-            cwd: record.cwd,
-            session_id: record.session_id,
-            turn_id: record.turn_id,
-            created_at_ms: record.created_at_ms,
-            elapsed_ms: now_ms().saturating_sub(record.created_at_ms),
-            status: fs::read_to_string(&record.status_file)
-                .unwrap_or_else(|_| "unknown".to_string())
-                .trim()
-                .to_string(),
-            stdout,
-            stderr,
-            output,
-        })
+    #[cfg(test)]
+    pub(crate) fn tracked_job_count_for_tests(&self) -> usize {
+        self.state
+            .jobs
+            .lock()
+            .map(|jobs| jobs.len())
+            .unwrap_or_default()
     }
 }
 
-enum ShellJobRefresh {
-    Running(RunningShellJob),
-    Exited(ShellJobExitUpdate),
-    Finished,
+#[derive(Debug)]
+enum DirectJobDecision {
+    Finished(FinishedShellJob),
+    Promoted,
+}
+
+#[derive(Debug)]
+enum CancelJobDecision {
+    Finished(FinishedShellJob),
+    Cancel,
+}
+
+fn cancel_or_take_direct_result(job: &ManagedShellJob) -> CancelJobDecision {
+    let mut state = job.state.lock().expect("shell job state poisoned");
+    match &state.lifecycle {
+        ShellJobLifecycle::Finished(finished) => CancelJobDecision::Finished(finished.clone()),
+        ShellJobLifecycle::Running => {
+            state.delivery = ShellJobDelivery::Delivered;
+            CancelJobDecision::Cancel
+        }
+    }
+}
+
+fn promote_or_take_direct_result(job: &ManagedShellJob) -> DirectJobDecision {
+    let mut state = job.state.lock().expect("shell job state poisoned");
+    match &state.lifecycle {
+        ShellJobLifecycle::Finished(finished) => DirectJobDecision::Finished(finished.clone()),
+        ShellJobLifecycle::Running => {
+            state.delivery = ShellJobDelivery::Background;
+            DirectJobDecision::Promoted
+        }
+    }
+}
+
+fn take_direct_result(job: &ManagedShellJob) -> Option<FinishedShellJob> {
+    let state = job.state.lock().ok()?;
+    if state.delivery != ShellJobDelivery::Direct {
+        return None;
+    }
+    match &state.lifecycle {
+        ShellJobLifecycle::Finished(finished) => Some(finished.clone()),
+        ShellJobLifecycle::Running => None,
+    }
+}
+
+fn wait_for_job_change(job: &ManagedShellJob, duration: Duration) {
+    if let Ok(state) = job.state.lock() {
+        if matches!(state.lifecycle, ShellJobLifecycle::Running) {
+            let _ = job.changed.wait_timeout(state, duration);
+        }
+    }
+}
+
+fn job_is_running(job: &ManagedShellJob) -> bool {
+    job.state
+        .lock()
+        .map(|state| matches!(state.lifecycle, ShellJobLifecycle::Running))
+        .unwrap_or(false)
+}
+
+fn job_is_cancellable(job: &ManagedShellJob) -> bool {
+    job.state
+        .lock()
+        .map(|state| {
+            state.delivery != ShellJobDelivery::Delivered
+                && matches!(state.lifecycle, ShellJobLifecycle::Running)
+        })
+        .unwrap_or(false)
+}
+
+fn running_output_for_job(
+    job: &ManagedShellJob,
+    command: &str,
+    tail_out: bool,
+    error: String,
+) -> BashCommandOutput {
+    let (stdout, stderr) = job.partial_streams();
+    BashCommandOutput {
+        command: command.to_string(),
+        status: None,
+        signal: None,
+        output: combined_shell_output(&stdout, &stderr),
+        stdout,
+        stderr,
+        error: Some(error),
+        tail_out,
+    }
+}
+
+fn finished_output(
+    command: &str,
+    tail_out: bool,
+    finished: &FinishedShellJob,
+) -> BashCommandOutput {
+    let (status, signal) = parse_exit_status_text(&finished.status);
+    BashCommandOutput {
+        command: command.to_string(),
+        status,
+        signal,
+        output: finished.output.clone(),
+        stdout: finished.stdout.clone(),
+        stderr: finished.stderr.clone(),
+        error: None,
+        tail_out,
+    }
+}
+
+fn cleanup_legacy_shell_job_artifacts(memory_dir: &Path) {
+    for dir in [
+        memory_dir.join("shell_jobs"),
+        memory_dir.join("memory").join("shell_jobs"),
+    ] {
+        let Ok(metadata) = std::fs::symlink_metadata(&dir) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || metadata.is_file() {
+            let _ = std::fs::remove_file(&dir);
+        } else if metadata.is_dir() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+fn spawn_output_drain<R: std::io::Read + Send + 'static>(
+    mut reader: R,
+    output: SharedShellOutput,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut chunk = [0_u8; 8192];
+        loop {
+            match std::io::Read::read(&mut reader, &mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if let Ok(mut output) = output.lock() {
+                        output.push(&chunk[..read]);
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn join_output_drains(
+    stdout: Option<thread::JoinHandle<()>>,
+    stderr: Option<thread::JoinHandle<()>>,
+) {
+    if let Some(stdout) = stdout {
+        let _ = stdout.join();
+    }
+    if let Some(stderr) = stderr {
+        let _ = stderr.join();
+    }
+}
+
+fn shell_output_text(output: &SharedShellOutput) -> String {
+    output
+        .lock()
+        .map(|output| output.text())
+        .unwrap_or_default()
+}
+
+fn supervise_shell_job(
+    job: Arc<ManagedShellJob>,
+    mut child: Child,
+    stdout_drain: Option<thread::JoinHandle<()>>,
+    stderr_drain: Option<thread::JoinHandle<()>>,
+) {
+    let status = match child.wait() {
+        Ok(status) => {
+            if exit_signal(&status).is_some() {
+                crate::os::kill_process_group(job.pid);
+            }
+            exit_status_text(&status)
+        }
+        Err(_) => {
+            crate::os::kill_process_group(job.pid);
+            "unknown".to_string()
+        }
+    };
+    join_output_drains(stdout_drain, stderr_drain);
+    while crate::os::process_group_running(job.pid) {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let stdout = shell_output_text(&job.stdout);
+    let stderr = shell_output_text(&job.stderr);
+    let finished = FinishedShellJob {
+        status,
+        output: normalized_shell_output(&combined_shell_output(&stdout, &stderr)),
+        stdout,
+        stderr,
+    };
+    if let Ok(mut state) = job.state.lock() {
+        state.lifecycle = ShellJobLifecycle::Finished(finished);
+        job.changed.notify_all();
+    }
+}
+
+fn parse_exit_status_text(status: &str) -> (Option<i32>, Option<i32>) {
+    if let Ok(code) = status.parse::<i32>() {
+        (Some(code), None)
+    } else if let Some(signal) = status
+        .strip_prefix("signal:")
+        .and_then(|value| value.parse().ok())
+    {
+        (None, Some(signal))
+    } else {
+        (None, None)
+    }
 }
 
 pub fn validate_bash_request(command: &str) -> Result<(), String> {
@@ -1654,7 +1457,7 @@ pub(crate) fn execute_run_bash(
     interval_ms: Option<u64>,
     once_timeout_ms: u64,
     approval_mode: BashApprovalMode,
-    shell_jobs: &FileShellJobStore,
+    shell_jobs: &ShellJobManager,
     session_id: &str,
     turn_id: &str,
     is_regular_command: bool,
@@ -1687,7 +1490,7 @@ pub(crate) fn execute_run_bash_with_tail(
     interval_ms: Option<u64>,
     once_timeout_ms: u64,
     approval_mode: BashApprovalMode,
-    shell_jobs: &FileShellJobStore,
+    shell_jobs: &ShellJobManager,
     session_id: &str,
     turn_id: &str,
     tool_call_id: &str,
@@ -1842,7 +1645,7 @@ pub(crate) fn execute_approved_bash(
     turn_id: &str,
     is_regular_command: bool,
     request: &ApprovalRequest,
-    shell_jobs: &FileShellJobStore,
+    shell_jobs: &ShellJobManager,
     runtime: &mut dyn ActionRuntime,
 ) -> ActionOutcome {
     execute_approved_bash_with_tail(
@@ -1877,7 +1680,7 @@ pub(crate) fn execute_approved_bash_with_tail(
     _is_regular_command: bool,
     tail_out: bool,
     request: &ApprovalRequest,
-    shell_jobs: &FileShellJobStore,
+    shell_jobs: &ShellJobManager,
     runtime: &mut dyn ActionRuntime,
 ) -> ActionOutcome {
     let clean = command.trim();
@@ -2351,18 +2154,28 @@ fn execute_one_bash_structured_with_prompt_after(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     crate::os::configure_child_process_group(&mut shell);
-    let spawn = shell.spawn();
-    let mut child = match spawn {
+    let mut child = match shell.spawn() {
         Ok(child) => child,
         Err(_) => return bash_error(command, "command_failed"),
     };
+    let stdout = Arc::new(Mutex::new(BoundedShellOutput::new(false)));
+    let stderr = Arc::new(Mutex::new(BoundedShellOutput::new(false)));
+    let stdout_drain = child
+        .stdout
+        .take()
+        .map(|pipe| spawn_output_drain(pipe, Arc::clone(&stdout)));
+    let stderr_drain = child
+        .stderr
+        .take()
+        .map(|pipe| spawn_output_drain(pipe, Arc::clone(&stderr)));
     let started = Instant::now();
     let timeout = Duration::from_millis(timeout_ms as u64);
     let mut next_long_running_check = long_running_prompt_after;
-    loop {
+    let exit_status = loop {
         if runtime.should_cancel() {
             terminate_process(child.id());
             let _ = child.wait();
+            join_output_drains(stdout_drain, stderr_drain);
             return bash_error(command, "cancelled");
         }
         if started.elapsed() >= next_long_running_check && started.elapsed() < timeout {
@@ -2378,46 +2191,35 @@ fn execute_one_bash_structured_with_prompt_after(
                 next_long_running_check.saturating_add(long_running_prompt_after);
         }
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= timeout => {
                 terminate_process(child.id());
                 let _ = child.wait();
+                join_output_drains(stdout_drain, stderr_drain);
                 return bash_error(command, "timeout");
             }
-            Ok(None) => thread::sleep(Duration::from_millis(50)),
-            Err(_) => return bash_error(command, "command_failed"),
-        }
-    }
-    match child.wait_with_output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            let combined = combined_shell_output(&stdout, &stderr);
-            BashCommandOutput {
-                command: command.to_string(),
-                status: output.status.code(),
-                signal: exit_signal(&output.status),
-                stdout,
-                stderr,
-                output: combined,
-                error: None,
-                tail_out: false,
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(_) => {
+                terminate_process(child.id());
+                let _ = child.wait();
+                join_output_drains(stdout_drain, stderr_drain);
+                return bash_error(command, "command_failed");
             }
         }
-        Err(_) => bash_error(command, "command_failed"),
-    }
-}
-
-fn read_shell_job_streams(record: &ShellJobRecord) -> (String, String) {
-    let stdout = fs::read_to_string(&record.output_file).unwrap_or_default();
-    let stderr = if record.stderr_file.trim().is_empty() {
-        // Historical records merged both streams into output_file. Treat that
-        // file as stdout and never guess which lines originally came from stderr.
-        String::new()
-    } else {
-        fs::read_to_string(&record.stderr_file).unwrap_or_default()
     };
-    (stdout, stderr)
+    join_output_drains(stdout_drain, stderr_drain);
+    let stdout = shell_output_text(&stdout);
+    let stderr = shell_output_text(&stderr);
+    BashCommandOutput {
+        command: command.to_string(),
+        status: exit_status.code(),
+        signal: exit_signal(&exit_status),
+        output: combined_shell_output(&stdout, &stderr),
+        stdout,
+        stderr,
+        error: None,
+        tail_out: false,
+    }
 }
 
 fn combined_shell_output(stdout: &str, stderr: &str) -> String {
@@ -2545,29 +2347,6 @@ fn bash_runtime_error_message(error: &str) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ProcessStatus {
-    code: Option<i32>,
-    signal: Option<i32>,
-}
-
-fn read_process_status(status_file: &str) -> Option<ProcessStatus> {
-    let text = fs::read_to_string(status_file)
-        .ok()
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())?;
-    if let Some(signal) = text.strip_prefix("signal:") {
-        return signal.parse::<i32>().ok().map(|signal| ProcessStatus {
-            code: None,
-            signal: Some(signal),
-        });
-    }
-    text.parse::<i32>().ok().map(|code| ProcessStatus {
-        code: Some(code),
-        signal: None,
-    })
-}
-
 fn exit_status_text(status: &std::process::ExitStatus) -> String {
     if let Some(code) = status.code() {
         return code.to_string();
@@ -2587,6 +2366,7 @@ fn normalized_shell_output(output: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn process_running(pid: u32) -> bool {
     crate::os::child_process_running(pid)
 }
@@ -2619,6 +2399,7 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+#[cfg(test)]
 fn unique_shell_id(prefix: &str) -> String {
     let seq = SHELL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{}_{}_{}", prefix, now_ms(), seq)

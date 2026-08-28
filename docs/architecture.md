@@ -857,9 +857,10 @@ identity = realpath(resolved MEM path)
 ```
 
 Within one identity, durable memory, scratch memory, chat history, SQL snapshots,
-memory git snapshots, shell job indexes, and audit files are different layers of
-the same mem space. They must not be split into per-session stores merely
-because the UI has multiple sessions.
+memory git snapshots, and audit files are different layers of the same mem
+space. They must not be split into per-session stores merely because the UI has
+multiple sessions. Live `run_bash` jobs are intentionally outside this storage
+identity: they belong to the current process and are never recovered from MEM.
 
 Current CLI implementation uses an in-process `MemGuard` object plus a
 cross-process lock directory under the selected space:
@@ -871,7 +872,6 @@ cross-process lock directory under the selected space:
 │  └─ mem.lock.d/
 ├─ memory.jsonl
 ├─ scratch_notes.jsonl
-├─ shell_jobs/jobs.jsonl
 └─ audit/
       ├─ api_audit.json
       └─ action_audit.json
@@ -911,7 +911,6 @@ Guarded operations include:
 - read-only SQL snapshots over durable memory and chat history
 - `api_audit.json` event-document updates
 - `action_audit.json` grouped action audit updates
-- shell job index append/query
 
 Session-local state stays outside shared memory ownership:
 
@@ -1395,19 +1394,19 @@ attributes; Runtime does not encode process or business success as the
 lifecycle status.
 
 A model-visible Bash PID must belong to a child launched and tracked by the
-current Runtime owner. Unix jobs are placed in independent child process
+current Runtime process. Unix jobs are placed in independent child process
 groups, and the process-group leader PID is distinct from Timem's process and
-process group. Session cancellation, running-job refresh, and model context
-filter out historical or foreign-owner records before inspecting or
-terminating a PID. Bounded truncation occurs inside
-stream boundaries and preserves all closing
-markers and XML result tags. Background and timeout job records write stdout
-and stderr to separate files; historical merged records are treated as stdout
-without guessing old stderr boundaries. JSON, audit, and host-facing output
-retain the existing readable text rendering. Later prompt re-rendering
-preserves the committed evidence boundary. That runtime evidence is the only
-action-result evidence the model may claim it has
-seen.
+process group. Live job metadata, `Child` handles, notification state, and
+stdout/stderr buffers are process-local. Each stream is continuously drained
+into a bounded 1 MiB buffer that retains either its head or tail according to
+`tail_out`, preventing pipe deadlock and unbounded growth. A job is complete
+only after its launcher has exited, its process group is empty, and both output
+readers reached EOF. Runtime restart drops all tracking state; startup may
+remove the known legacy `shell_jobs` directories but never reads their indexes,
+adopts their PIDs, or signals historical processes. JSON, audit, and
+host-facing output retain the existing readable text rendering. Later prompt
+re-rendering preserves the committed evidence boundary. That runtime evidence
+is the only action-result evidence the model may claim it has seen.
 
 Example:
 
@@ -1623,11 +1622,16 @@ preserves the model/runtime boundary: the model defines the command, while core
 owns the fixed success condition, approval, wait bounds, audit, bounded output,
 and cancellation.
 
-Background and timed-out shell jobs are owned by the session that created them.
-Core tracks their pid lifecycle and injects status changes as prompt evidence.
-It does not automatically terminate them on normal timeout, final answer, or
-context compact; the model/user must explicitly inspect or stop a still-running
-pid when cleanup is desired.
+Background and timed-out shell jobs are owned by the process-local manager and
+associated with the session that created them. Core tracks their pid lifecycle
+and injects status changes as prompt evidence. It does not automatically
+terminate them on normal timeout, final answer, or context compact; the
+model/user must explicitly inspect or stop a still-running pid when cleanup is
+desired. Dropping the last manager owner (including worker/runtime shutdown)
+terminates and reaps unfinished child process groups. Restart does not restore
+or adopt jobs from the previous process. The detailed ownership, state-machine,
+cancellation, output, and test contracts are documented in
+[`run-bash-job-supervision.md`](run-bash-job-supervision.md).
 
 ### Context Compact Execution
 
