@@ -43,10 +43,22 @@ function sanitizeModelServiceError(rawError: string): string {
     .trim();
 }
 
+function providerReason(safeError: string): string {
+  return safeError
+    .replace(/^model_http_\d{3}\s*:\s*/i, "")
+    .replace(/^http\s+\d{3}\s*:?\s*/i, "")
+    .trim();
+}
+
+function serviceDetail(reason: string, guidance: string): string {
+  return reason ? `Model service response: ${reason}\n${guidance}` : guidance;
+}
+
 export function modelServiceIssue(rawError: unknown): ModelServiceIssue {
   const raw = typeof rawError === "string" ? rawError : "";
   const safe = sanitizeModelServiceError(raw);
   const lower = safe.toLowerCase();
+  const reason = providerReason(safe);
 
   if (
     lower.includes("session_model_service_config_incomplete")
@@ -60,7 +72,20 @@ export function modelServiceIssue(rawError: unknown): ModelServiceIssue {
   }
 
   if (
-    /\b(?:401|403)\b/.test(lower)
+    lower.includes("cache_control")
+    && (lower.includes("maximum of") || lower.includes("too many") || lower.includes("found "))
+  ) {
+    return {
+      title: "Model request rejected",
+      detail: serviceDetail(
+        reason,
+        "The endpoint rejected the request cache layout. Retry after reducing the number of cache_control blocks or updating Timem.",
+      ),
+    };
+  }
+
+  if (
+    /(?:\b|model_http_)(?:401|403)\b/.test(lower)
     || lower.includes("unauthorized")
     || lower.includes("forbidden")
     || lower.includes("authentication failed")
@@ -69,19 +94,25 @@ export function modelServiceIssue(rawError: unknown): ModelServiceIssue {
   ) {
     return {
       title: "Model authentication failed",
-      detail: "Open Runtime settings and verify the Session API key. If the key is correct, check that it has access to the configured model and Base URL.",
+      detail: serviceDetail(
+        reason,
+        "Open Runtime settings and verify the Session API key. If the key is correct, check that it has access to the configured model and Base URL.",
+      ),
     };
   }
 
   if (
-    /\b404\b/.test(lower)
+    /(?:\b|model_http_)404\b/.test(lower)
     || lower.includes("model not found")
     || lower.includes("unknown model")
     || lower.includes("model_not_found")
   ) {
     return {
       title: "Model unavailable",
-      detail: "Open Runtime settings and verify the model name and Base URL. The configured model may not exist or may not be available to this account.",
+      detail: serviceDetail(
+        reason,
+        "Open Runtime settings and verify the model name and Base URL. The configured model may not exist or may not be available to this account.",
+      ),
     };
   }
 
@@ -95,7 +126,10 @@ export function modelServiceIssue(rawError: unknown): ModelServiceIssue {
   ) {
     return {
       title: "Model service unavailable",
-      detail: "Check the Base URL, network connection, and model service status, then retry.",
+      detail: serviceDetail(
+        reason,
+        "Check the Base URL, network connection, and model service status, then retry.",
+      ),
     };
   }
 
