@@ -1714,6 +1714,54 @@ function TimemApp() {
       setMemTemporaryItemsLoading(false);
     }
   }, [runtimeReady, sendCommand, server?.mem.space_dir, settingsSection, showAppearance]);
+  const closeSettingsCenter = useCallback(() => closeAppearancePanel(), [closeAppearancePanel]);
+  const refreshMemTemporaryItems = useCallback(() => {
+    setMemTemporaryItemsLoading(true);
+    setMemTemporaryItemsError("");
+    if (!sendCommand({ type: "mem_temporary_items_list" })) setMemTemporaryItemsLoading(false);
+  }, [sendCommand]);
+  const deleteMemTemporaryItems = useCallback((ids: string[]) => {
+    setMemTemporaryItemsDeleting(true);
+    if (!sendCommand({ type: "mem_temporary_items_delete", ids })) setMemTemporaryItemsDeleting(false);
+  }, [sendCommand]);
+  const revealModelEndpoint = useCallback((endpointId: string) => {
+    sendCommand({ type: "model_endpoint_secret_reveal", endpoint_id: endpointId });
+  }, [sendCommand]);
+  const saveModelEndpoint = useCallback((endpoint: ModelEndpointDraft) => {
+    sendCommand({ type: "model_endpoint_upsert", endpoint });
+  }, [sendCommand]);
+  const saveMemTemporaryPolicy = useCallback((days: 1 | 5 | 10 | null, maxBytes: number | null) => {
+    setPendingMemRetention(true);
+    if (!sendCommand({ type: "mem_temporary_retention_update", days, max_bytes: maxBytes })) {
+      setPendingMemRetention(false);
+      reportUiError("Mem settings failed", "Reconnect to Timem Web before updating temporary-data policy.", "system");
+    }
+  }, [reportUiError, sendCommand]);
+  const saveMemConversationCapacity = useCallback((maxBytes: number | null) => {
+    setPendingMemConversationCapacity(true);
+    if (!sendCommand({ type: "mem_conversation_capacity_update", max_bytes: maxBytes })) {
+      setPendingMemConversationCapacity(false);
+      reportUiError("Mem settings failed", "Reconnect to Timem Web before updating conversation capacity.", "system");
+    }
+  }, [reportUiError, sendCommand]);
+  const saveMemFavoriteCapacity = useCallback((maxBytes: number | null) => {
+    setFavoriteCapacityUpdating(true);
+    if (!sendCommand({ type: "favorite_capacity_update", max_bytes: maxBytes })) setFavoriteCapacityUpdating(false);
+  }, [sendCommand]);
+  const switchMemWorkspace = useCallback((path: string) => {
+    const runningSessionCount = memSwitchRunningSessionCount(sessionsRef.current);
+    if (runningSessionCount > 0) {
+      setMemSwitchCandidate({ path, runningSessionCount });
+      return;
+    }
+    setRenamingSessionId("");
+    setRenameDraft("");
+    setPendingMemSwitch(true);
+    if (!sendCommand({ type: "mem_switch", path, stop_running: false })) {
+      setPendingMemSwitch(false);
+      reportUiError("Mem switch failed", "Reconnect to Timem Web before switching the mem directory.", "system");
+    }
+  }, [reportUiError, sendCommand]);
   const leftSidebarCollapsed = sidebarLayout.leftCollapsed && !showMobileSessions;
   const rightSidebarCollapsed = sidebarLayout.rightCollapsed && !showRoles;
   return <AssistantRuntimeProvider runtime={runtime}>
@@ -1799,52 +1847,17 @@ function TimemApp() {
           endpointEditor={endpointEditor}
           revealedEndpointApiKeys={revealedEndpointApiKeys}
           revealedEndpointHeaders={revealedEndpointHeaders}
-          onClose={() => { if (!pendingMemRetention && !pendingMemConversationCapacity && !favoriteCapacityUpdating && !pendingMemSwitch && !memTemporaryItemsDeleting) closeAppearancePanel(); }}
-          onRefreshTemporaryItems={() => {
-            setMemTemporaryItemsLoading(true);
-            setMemTemporaryItemsError("");
-            if (!sendCommand({ type: "mem_temporary_items_list" })) setMemTemporaryItemsLoading(false);
-          }}
-          onDeleteTemporaryItems={(ids) => {
-            setMemTemporaryItemsDeleting(true);
-            if (!sendCommand({ type: "mem_temporary_items_delete", ids })) setMemTemporaryItemsDeleting(false);
-          }}
+          onClose={closeSettingsCenter}
+          onRefreshTemporaryItems={refreshMemTemporaryItems}
+          onDeleteTemporaryItems={deleteMemTemporaryItems}
           onEditEndpoint={setEndpointEditor}
           onDeleteEndpoint={setDeleteEndpointCandidate}
-          onRevealEndpoint={(endpointId) => sendCommand({ type: "model_endpoint_secret_reveal", endpoint_id: endpointId })}
-          onSaveEndpoint={(endpoint) => sendCommand({ type: "model_endpoint_upsert", endpoint })}
-          onSaveTemporaryPolicy={(days, maxBytes) => {
-            setPendingMemRetention(true);
-            if (!sendCommand({ type: "mem_temporary_retention_update", days, max_bytes: maxBytes })) {
-              setPendingMemRetention(false);
-              reportUiError("Mem settings failed", "Reconnect to Timem Web before updating temporary-data policy.", "system");
-            }
-          }}
-          onSaveConversationCapacity={(maxBytes) => {
-            setPendingMemConversationCapacity(true);
-            if (!sendCommand({ type: "mem_conversation_capacity_update", max_bytes: maxBytes })) {
-              setPendingMemConversationCapacity(false);
-              reportUiError("Mem settings failed", "Reconnect to Timem Web before updating conversation capacity.", "system");
-            }
-          }}
-          onSaveFavoriteCapacity={(maxBytes) => {
-            setFavoriteCapacityUpdating(true);
-            if (!sendCommand({ type: "favorite_capacity_update", max_bytes: maxBytes })) setFavoriteCapacityUpdating(false);
-          }}
-          onSwitchMemory={(path) => {
-            const runningSessionCount = memSwitchRunningSessionCount(sessions);
-            if (runningSessionCount > 0) {
-              setMemSwitchCandidate({ path, runningSessionCount });
-              return;
-            }
-            setRenamingSessionId("");
-            setRenameDraft("");
-            setPendingMemSwitch(true);
-            if (!sendCommand({ type: "mem_switch", path, stop_running: false })) {
-              setPendingMemSwitch(false);
-              reportUiError("Mem switch failed", "Reconnect to Timem Web before switching the mem directory.", "system");
-            }
-          }}
+          onRevealEndpoint={revealModelEndpoint}
+          onSaveEndpoint={saveModelEndpoint}
+          onSaveTemporaryPolicy={saveMemTemporaryPolicy}
+          onSaveConversationCapacity={saveMemConversationCapacity}
+          onSaveFavoriteCapacity={saveMemFavoriteCapacity}
+          onSwitchMemory={switchMemWorkspace}
         />}
         {showMcp && <McpPanel
           key={activeSession?.session_id ?? "no-session"}
@@ -4908,7 +4921,7 @@ type SettingsCenterProps = {
   onSaveEndpoint: (endpoint: ModelEndpointDraft) => void;
 };
 
-function SettingsCenter(props: SettingsCenterProps) {
+const SettingsCenter = memo(function SettingsCenter(props: SettingsCenterProps) {
   const { panelRef, section, onSectionChange, appearance, onAppearanceChange, toolGenEnabled, toolGenToggleDisabled, onToolGenEnabledChange, memPath, connected, connectionLabel, retentionDays, temporaryCapacityBytes, conversationCapacityBytes, favoriteCapacity, retentionPending, conversationCapacityPending, favoriteCapacityPending, switchPending, temporaryItems, temporaryItemsLoading, temporaryItemsDeleting, temporaryItemsError, endpoints, endpointEditor, revealedEndpointApiKeys, revealedEndpointHeaders, onClose, onSaveTemporaryPolicy, onSaveConversationCapacity, onSaveFavoriteCapacity, onSwitchMemory, onRefreshTemporaryItems, onDeleteTemporaryItems, onEditEndpoint, onDeleteEndpoint, onRevealEndpoint, onSaveEndpoint } = props;
   const [days, setDays] = useState<1 | 5 | 10 | null>(retentionDays);
   const [temporaryCapacity, setTemporaryCapacity] = useState<number | null>(temporaryCapacityBytes);
@@ -4921,8 +4934,8 @@ function SettingsCenter(props: SettingsCenterProps) {
   const busy = retentionPending || conversationCapacityPending || favoriteCapacityPending || switchPending || temporaryItemsDeleting;
   const cleanedPath = path.trim();
   const pathUnchanged = cleanedPath === memPath;
-  const deletableTemporaryItems = temporaryItems.filter((item) => item.deletable !== false);
-  const selectedTemporaryBytes = deletableTemporaryItems.filter((item) => selectedTemporaryIds.has(item.id)).reduce((total, item) => total + item.bytes, 0);
+  const deletableTemporaryItems = useMemo(() => temporaryItems.filter((item) => item.deletable !== false), [temporaryItems]);
+  const selectedTemporaryBytes = useMemo(() => deletableTemporaryItems.filter((item) => selectedTemporaryIds.has(item.id)).reduce((total, item) => total + item.bytes, 0), [deletableTemporaryItems, selectedTemporaryIds]);
   const updateAppearance = <K extends keyof Appearance>(key: K, value: Appearance[K]) => onAppearanceChange({ ...appearance, [key]: value });
   useEffect(() => setDays(retentionDays), [retentionDays]);
   useEffect(() => setTemporaryCapacity(temporaryCapacityBytes), [temporaryCapacityBytes]);
@@ -4933,10 +4946,14 @@ function SettingsCenter(props: SettingsCenterProps) {
     setMemoryPage("overview");
   }, [memPath]);
   useEffect(() => {
-    setSelectedTemporaryIds((current) => new Set(Array.from(current).filter((id) => temporaryItems.some((item) => item.id === id && item.deletable !== false))));
+    const availableIds = new Set(deletableTemporaryItems.map((item) => item.id));
+    setSelectedTemporaryIds((current) => {
+      if (current.size === 0 || Array.from(current).every((id) => availableIds.has(id))) return current;
+      return new Set(Array.from(current).filter((id) => availableIds.has(id)));
+    });
     if (temporaryItemsDeleting) return;
     if (temporaryItems.length === 0) setTemporaryDeleteMode(false);
-  }, [temporaryItems, temporaryItemsDeleting]);
+  }, [deletableTemporaryItems, temporaryItems.length, temporaryItemsDeleting]);
   const cancelTemporaryDelete = () => { setTemporaryDeleteMode(false); setSelectedTemporaryIds(new Set()); };
   const toggleTemporaryItem = (id: string) => setSelectedTemporaryIds((current) => {
     const next = new Set(current);
@@ -5005,7 +5022,7 @@ function SettingsCenter(props: SettingsCenterProps) {
       </div>
     </section>
   </div>;
-}
+});
 
 function EndpointSettingsPane({ endpoints, endpointEditor, revealedEndpointApiKeys, revealedEndpointHeaders, onEdit, onDelete, onReveal, onSave }: {
   endpoints: ModelEndpoint[];
