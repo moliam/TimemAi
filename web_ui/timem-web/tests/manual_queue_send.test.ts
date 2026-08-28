@@ -26,7 +26,7 @@ describe("manual sending while the durable queue is paused", () => {
     );
 
     expect(normalizedSource(body)).toContain(
-      "shouldDirectManualMessage( activeSession.state, existingQueue.length, !!queuedMessagesPause, )",
+      "shouldDirectManualMessage( activeSession.state, existingQueue.length, !!queuedMessagesPause, isCancelling || !!activeSession.cancelling_turn_id, )",
     );
     expect(body).toContain("onSendForSession(");
     expect(body).toContain('directCommandId = clientId("submit")');

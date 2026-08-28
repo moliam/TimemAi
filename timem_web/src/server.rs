@@ -4651,6 +4651,18 @@ fn handle_command_with_id(
                 }
                 return Err("session_worker_not_found".to_string());
             }
+            if let Ok(mut sessions) = state.sessions.lock() {
+                if let Some(session) = sessions.get_mut(&session_id) {
+                    if session.cancelling_turn_id == cancelling_turn_id {
+                        for worker in &mut session.workers {
+                            if worker.state == "working" {
+                                worker.state = "ready".to_string();
+                            }
+                        }
+                        session.state = aggregate_web_session_state(&session.workers, "ready");
+                    }
+                }
+            }
             if let Some(turn_id) = cancelling_turn_id {
                 publish_semantic(
                     state,
@@ -9543,8 +9555,11 @@ fn activate_core_started_turn(
     if session.pending_turn_id.as_deref() == Some(turn_id.as_str()) {
         session.pending_turn_id = None;
     }
-    session.active_turn_id = Some(turn_id);
-    session.state = "working".to_string();
+    session.active_turn_id = Some(turn_id.clone());
+    let cancelling = session.cancelling_turn_id.as_deref() == Some(turn_id.as_str());
+    if !cancelling {
+        session.state = "working".to_string();
+    }
     session.reported_session_working_worker_count = None;
     session.turns[turn_index].state = "working".to_string();
 
@@ -9553,7 +9568,9 @@ fn activate_core_started_turn(
         .iter_mut()
         .find(|worker| worker.worker_id == worker_id)
     {
-        worker.state = "working".to_string();
+        if !cancelling {
+            worker.state = "working".to_string();
+        }
     }
 
     Some(session.turns[turn_index].clone())
@@ -10185,6 +10202,9 @@ fn aggregate_web_session_state(workers: &[WebWorker], fallback: &str) -> String 
 fn set_worker_state(state: &AppState, session_id: &str, worker_id: &str, worker_state: &str) {
     if let Ok(mut sessions) = state.sessions.lock() {
         if let Some(session) = sessions.get_mut(session_id) {
+            if worker_state == "working" && session.cancelling_turn_id.is_some() {
+                return;
+            }
             if let Some(worker) = session
                 .workers
                 .iter_mut()

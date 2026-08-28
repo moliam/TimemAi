@@ -159,6 +159,7 @@ import {
   finishTurn,
   groupDecisionsBySessionTurn,
   manualToolGenCommand,
+  markSessionCancelling,
   normalizeCopiedUserMessageText,
   prependHistoryRecords,
   pruneSessionDrafts,
@@ -175,6 +176,7 @@ import {
   sessionInteractionLockReason as sessionInteractionLockReasonForState,
   sessionRenameDecision,
   sessionTurnKey,
+  sessionVisuallyWorking,
   sessionWorkerTreeRows,
   setSessionDraft,
   tailPath,
@@ -2016,7 +2018,7 @@ function TimemApp() {
         setSessions((current) =>
           current.map((session) =>
             session.session_id === event.session_id
-              ? { ...session, cancelling_turn_id: event.turn_id }
+              ? markSessionCancelling(session, event.turn_id)
               : session,
           ),
         );
@@ -2907,6 +2909,13 @@ function TimemApp() {
       cancellingSessionIds.current.add(sessionId);
       cancellingSessionCommandIds.current.set(sessionId, commandId);
       setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
+      setSessions((current) =>
+        current.map((session) =>
+          session.session_id === sessionId
+            ? markSessionCancelling(session, authoritativeTurnId)
+            : session,
+        ),
+      );
       const previousTimeoutId =
         cancellingSessionTimeouts.current.get(sessionId);
       if (previousTimeoutId !== undefined)
@@ -3691,6 +3700,10 @@ function TimemApp() {
                                 pendingRenameSessionIds.has(session.session_id);
                               const deletingSession =
                                 pendingDeleteSessionIds.has(session.session_id);
+                              const visuallyWorking = sessionVisuallyWorking(
+                                session,
+                                cancellingSessionIdSet,
+                              );
                               const sessionEndpointName =
                                 endpointNameForProfile(
                                   server?.model_endpoints ?? [],
@@ -3713,7 +3726,7 @@ function TimemApp() {
                                       <div
                                         ref={setNodeRef}
                                         style={style}
-                                        className={`session-row ${server?.debug_mode && session.workers.length > 0 ? "has-workers" : ""} ${session.session_id === activeSession?.session_id ? "active" : ""} ${session.state === "working" ? "working" : ""} ${unreadCompletedSessionIds.has(session.session_id) ? "has-unread-completion" : ""} ${renamingSession ? "renaming-session" : ""} ${renamingSessionId === session.session_id || runtimeLocked || isDragging ? "controls-suppressed" : ""} ${sessionDeleteMode ? "delete-selecting" : ""} ${selectedDeleteSessionId === session.session_id ? "delete-selected" : ""} ${isDragging ? "dragging" : ""}`}
+                                        className={`session-row ${server?.debug_mode && session.workers.length > 0 ? "has-workers" : ""} ${session.session_id === activeSession?.session_id ? "active" : ""} ${visuallyWorking ? "working" : ""} ${unreadCompletedSessionIds.has(session.session_id) ? "has-unread-completion" : ""} ${renamingSession ? "renaming-session" : ""} ${renamingSessionId === session.session_id || runtimeLocked || isDragging ? "controls-suppressed" : ""} ${sessionDeleteMode ? "delete-selecting" : ""} ${selectedDeleteSessionId === session.session_id ? "delete-selected" : ""} ${isDragging ? "dragging" : ""}`}
                                         aria-busy={
                                           renamingSession ||
                                           deletingSession ||
@@ -3870,7 +3883,7 @@ function TimemApp() {
                                               closeMobileSidebar();
                                             }}
                                           >
-                                            {session.state === "working" ? (
+                                            {visuallyWorking ? (
                                               <LoaderCircle
                                                 className="session-working-icon"
                                                 size={15}
@@ -8550,6 +8563,7 @@ function TimemThread({
         activeSession.state,
         existingQueue.length,
         !!queuedMessagesPause,
+        isCancelling || !!activeSession.cancelling_turn_id,
       );
     let sent: boolean;
     let directCommandId: string | undefined;
