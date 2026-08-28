@@ -1739,8 +1739,13 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain('if (memTemporaryItemsLoadedForRef.current === memPath) return;');
     expect(source).toContain('memTemporaryItemsLoadedForRef.current = memPath;');
     expect(source).toContain('if (!memTemporaryItemsLoading) return;');
-    expect(source).toContain('Temporary files took too long to load. Reconnecting to try again…');
-    expect(source).toContain('socket.current?.close();');
+    expect(source).toContain('Temporary files took too long to load. Select Refresh to try again.');
+    const temporaryItemsTimeout = source.slice(
+      source.indexOf('if (!memTemporaryItemsLoading) return;'),
+      source.indexOf('}, [memTemporaryItemsLoading]);') + '}, [memTemporaryItemsLoading]);'.length,
+    );
+    expect(temporaryItemsTimeout).not.toContain('socket.current?.close();');
+    expect(temporaryItemsTimeout).not.toContain('Reconnecting');
     expect(source).toContain("Limited tiers include a 4 MiB safe-write reserve.");
     expect(source).toContain('sendCommand({ type: "mem_temporary_items_list" })');
     expect(source).toContain('sendCommand({ type: "mem_temporary_items_delete", ids })');
