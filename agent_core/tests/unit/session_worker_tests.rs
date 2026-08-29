@@ -147,6 +147,7 @@ fn test_config() -> ModelServiceConfig {
         base_url: "http://127.0.0.1/v1".to_string(),
         api_key: "dummy".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         timeout_secs: 10,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,

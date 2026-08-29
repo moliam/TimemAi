@@ -87,8 +87,8 @@ pub mod toolgen;
 pub mod work_instructions;
 pub mod workspace;
 pub use audit::{
-    append_audit_event, append_repair_output_event, configure_audit_storage,
-    host_start_audit_event, max_llm_output_increased_audit_event,
+    api_audit_maintenance_hint_path, append_audit_event, append_repair_output_event,
+    configure_audit_storage, host_start_audit_event, max_llm_output_increased_audit_event,
     model_input_overflow_recovery_audit_event, model_repair_output_event,
     model_repair_request_audit_event, model_retry_audit_event, prune_api_audit_before,
     read_audit_doc, round_limit_audit_event, stale_context_choice_audit_event,
@@ -149,10 +149,11 @@ pub use model_api::{
     model_prompt_blocks, model_request_audit_event, model_response_audit_event, parse_api_protocol,
     parse_model_response, parse_openai_compatible_cache_mode, plan_structured_output,
     prepare_model_http_request, prepare_model_interaction_http_request, prepare_model_request,
-    prompt_cache_plan_audit, validate_model_http_headers, without_openai_compatible_cache_control,
-    ApiProtocol, ModelCacheControl, ModelHttpResponseInterpretation, ModelPromptBlock,
-    ModelPromptRole, ModelServiceConfig, OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
-    PreparedModelHttpRequest, PreparedModelRequest, StructuredOutputHint,
+    prompt_cache_plan_audit, validate_model_http_headers, validate_model_request_fields,
+    without_openai_compatible_cache_control, ApiProtocol, ModelCacheControl,
+    ModelHttpResponseInterpretation, ModelPromptBlock, ModelPromptRole, ModelServiceConfig,
+    OpenAiCompatibleCacheMode, OpenAiCompatibleOptions, PreparedModelHttpRequest,
+    PreparedModelRequest, StructuredOutputHint,
 };
 pub use model_service_config::{
     apply_openai_compatible_env_value, model_service_config_from_sources,
@@ -1201,8 +1202,8 @@ const ACTION_AUDIT_ACTIVE_TURN_MAX_BYTES: u64 = 512 * 1024;
 #[derive(Debug, Clone)]
 struct FileActionAuditStore {
     file: PathBuf,
-    turns_dir: PathBuf,
-    capacity_bytes: Arc<std::sync::Mutex<Option<u64>>>,
+    active_dir: PathBuf,
+    legacy_turns_dir: PathBuf,
     guard: MemGuard,
 }
 
@@ -1210,150 +1211,302 @@ impl FileActionAuditStore {
     fn new(memory_dir: &Path) -> Self {
         let space_dir = space_dir_for_memory_dir(memory_dir);
         let file = space_dir.join("audit").join("action_audit.json");
-        let turns_dir = file.with_file_name("action_audit.json.turns");
-        let guard = MemGuard::for_audit_file(&file);
         Self {
+            active_dir: file.with_file_name("action_audit.active"),
+            legacy_turns_dir: file.with_file_name("action_audit.json.turns"),
+            guard: MemGuard::for_audit_file(&file),
             file,
-            turns_dir,
-            capacity_bytes: Arc::new(std::sync::Mutex::new(None)),
-            guard,
         }
     }
 
     fn begin_turn(&self, turn_id: &str, started_at_ms: i64, user_question: &str) {
-        let wrote = self
-            .guard
-            .with_write(|| {
-                if !self.ensure_segmented_unlocked() {
-                    return false;
-                }
-                let path = self.turn_path(turn_id);
-                if path.exists() {
-                    return self
-                        .read_turn_unlocked(&path)
-                        .is_some_and(|turn| turn.turn_id == turn_id);
-                }
-                let turn = ActionAuditTurn {
+        let _ = self.guard.with_write(|| {
+            if !self.ensure_archive_unlocked() {
+                return false;
+            }
+            self.recover_stale_active_turns_unlocked();
+            let path = self.active_turn_path(turn_id);
+            if path.exists() {
+                return self
+                    .read_turn_unlocked(&path)
+                    .is_some_and(|turn| turn.turn_id == turn_id);
+            }
+            self.write_turn_unlocked(
+                &path,
+                &ActionAuditTurn {
                     turn_id: turn_id.to_string(),
                     started_at_ms,
                     user_question: user_question.to_string(),
                     interactions: Vec::new(),
-                };
-                self.write_active_turn_unlocked(&path, &turn)
-            })
-            .unwrap_or(false);
-        let _ = wrote;
+                },
+            )
+        });
     }
 
     fn record_action(&self, entry: ActionAuditEntry, turn_id: &str, user_question: &str) {
-        let wrote = self
-            .guard
-            .with_write(|| {
-                if !self.ensure_segmented_unlocked() {
-                    return false;
-                }
-                let path = self.turn_path(turn_id);
-                let existing = self.read_turn_unlocked(&path);
-                if existing
-                    .as_ref()
-                    .is_some_and(|turn| turn.turn_id != turn_id)
-                {
-                    return false;
-                }
-                let mut turn = existing.unwrap_or_else(|| ActionAuditTurn {
-                    turn_id: turn_id.to_string(),
-                    started_at_ms: now_ms(),
-                    user_question: user_question.to_string(),
-                    interactions: Vec::new(),
-                });
-                let interaction_index = if let Some(index) = turn
-                    .interactions
-                    .iter()
-                    .position(|interaction| interaction.round == entry.round)
-                {
-                    index
-                } else {
+        let _ = self.guard.with_write(|| {
+            if !self.ensure_archive_unlocked() {
+                return false;
+            }
+            let path = self.active_turn_path(turn_id);
+            let existing = self.read_turn_unlocked(&path);
+            if existing
+                .as_ref()
+                .is_some_and(|turn| turn.turn_id != turn_id)
+            {
+                return false;
+            }
+            let mut turn = existing.unwrap_or_else(|| ActionAuditTurn {
+                turn_id: turn_id.to_string(),
+                started_at_ms: now_ms(),
+                user_question: user_question.to_string(),
+                interactions: Vec::new(),
+            });
+            let interaction_index = turn
+                .interactions
+                .iter()
+                .position(|interaction| interaction.round == entry.round)
+                .unwrap_or_else(|| {
                     turn.interactions.push(ActionAuditInteraction {
                         round: entry.round,
                         actions: Vec::new(),
                     });
-                    turn.interactions.len().saturating_sub(1)
-                };
-                turn.interactions[interaction_index].actions.push(entry);
-                self.write_active_turn_unlocked(&path, &turn)
-            })
-            .unwrap_or(false);
-        let _ = wrote;
+                    turn.interactions.len() - 1
+                });
+            turn.interactions[interaction_index].actions.push(entry);
+            self.write_turn_unlocked(&path, &turn)
+        });
     }
 
-    fn turn_path(&self, turn_id: &str) -> PathBuf {
-        self.turn_path_in(&self.turns_dir, turn_id)
+    fn finish_turn(&self, turn_id: &str) {
+        let _ = self.guard.with_write(|| {
+            if !self.ensure_archive_unlocked() {
+                return false;
+            }
+            let path = self.active_turn_path(turn_id);
+            let Some(turn) = self.read_turn_unlocked(&path) else {
+                return true;
+            };
+            if turn.turn_id != turn_id {
+                return false;
+            }
+            // The compatibility view is written only after the canonical
+            // segmented append. If checkpoint deletion failed after that
+            // commit, a same-process retry must remove the checkpoint rather
+            // than append the completed Turn a second time.
+            let already_committed = self
+                .read_doc_unlocked()
+                .turns
+                .last()
+                .is_some_and(|archived| archived.turn_id == turn_id)
+                && rolling_file_store::segmented_directory(&self.file).exists();
+            if !already_committed && !self.archive_turn_unlocked(&turn) {
+                return false;
+            }
+            fs::remove_file(path).is_ok()
+        });
     }
 
-    fn turn_path_in(&self, directory: &Path, turn_id: &str) -> PathBuf {
+    fn active_turn_path(&self, turn_id: &str) -> PathBuf {
         let mut hasher = DefaultHasher::new();
         turn_id.hash(&mut hasher);
-        directory.join(format!("turn-{:016x}.json", hasher.finish()))
-    }
-
-    fn ensure_segmented_unlocked(&self) -> bool {
-        if self.turns_dir.exists() {
-            return self.ensure_capacity_initialized_unlocked();
-        }
-        let Some(parent) = self.turns_dir.parent() else {
-            return false;
-        };
-        if fs::create_dir_all(parent).is_err() {
-            return false;
-        }
-        let temporary = parent.join(format!(
-            ".action-audit-turns.tmp-{}-{}",
+        self.active_dir.join(format!(
+            "active-{}-{:016x}.json",
             std::process::id(),
-            unique_id("migrate")
-        ));
-        if fs::create_dir(&temporary).is_err() {
-            return false;
-        }
-        let legacy = self.read_doc_unlocked();
-        let result = (|| {
-            for turn in &legacy.turns {
-                let path = self.turn_path_in(&temporary, &turn.turn_id);
-                if path.exists() {
-                    return false;
-                }
-                if !self.write_turn_unlocked(&path, turn) {
-                    return false;
-                }
-            }
-            if fs::rename(&temporary, &self.turns_dir).is_err() {
-                return false;
-            }
-            if let Some(latest) = legacy.turns.last() {
-                if !self.write_latest_view_unlocked(latest) {
-                    return false;
-                }
-            } else if !self.write_empty_view_unlocked() {
-                return false;
-            }
-            self.ensure_capacity_initialized_unlocked()
-        })();
-        if !result {
-            let _ = fs::remove_dir_all(&temporary);
-        }
-        result
+            hasher.finish()
+        ))
     }
 
-    fn ensure_capacity_initialized_unlocked(&self) -> bool {
-        let Ok(mut cached) = self.capacity_bytes.lock() else {
+    fn archive_capacity() -> Option<rolling_file_store::RollingCapacity> {
+        rolling_file_store::RollingCapacity::with_slice_bytes(
+            audit::ACTION_AUDIT_MAX_BYTES
+                .saturating_add(rolling_file_store::AUDIT_ROLLING_SLICE_BYTES),
+            rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+        )
+        .ok()
+    }
+
+    fn ensure_archive_unlocked(&self) -> bool {
+        if fs::create_dir_all(&self.active_dir).is_err() {
+            return false;
+        }
+        let segmented = rolling_file_store::segmented_directory(&self.file);
+        if segmented.exists() {
+            return self.migrate_legacy_sources_unlocked();
+        }
+        let mut turns = self.read_doc_unlocked().turns;
+        let mut seen = turns
+            .iter()
+            .map(|turn| turn.turn_id.clone())
+            .collect::<BTreeSet<_>>();
+        if let Ok(entries) = fs::read_dir(&self.legacy_turns_dir) {
+            let mut entries = entries.flatten().collect::<Vec<_>>();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                if let Some(turn) = self.read_turn_unlocked(&entry.path()) {
+                    if seen.insert(turn.turn_id.clone()) {
+                        turns.push(turn);
+                    }
+                }
+            }
+        }
+        let records = turns
+            .iter()
+            .filter_map(Self::turn_record)
+            .collect::<Vec<_>>();
+        let Some(capacity) = Self::archive_capacity() else {
             return false;
         };
-        if cached.is_some() {
+        if rolling_file_store::rewrite_segmented_records(
+            &self.file,
+            &records,
+            capacity,
+            rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        // Clean up only legacy files that are valid and now confirmed in the
+        // canonical archive. Unreadable files are deliberately retained so an
+        // upgrade never destroys the user’s only recoverable copy.
+        if !self.migrate_legacy_sources_unlocked() {
+            return false;
+        }
+        turns.last().map_or_else(
+            || self.write_empty_view_unlocked(),
+            |turn| self.write_latest_view_unlocked(turn),
+        )
+    }
+
+    fn migrate_legacy_sources_unlocked(&self) -> bool {
+        let mut archived = rolling_file_store::read_segmented_records(&self.file)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|record| serde_json::from_slice::<ActionAuditTurn>(&record).ok())
+            .map(|turn| turn.turn_id)
+            .collect::<BTreeSet<_>>();
+
+        // A previous new-version run, a downgrade, or an interrupted upgrade
+        // can leave the compatibility JSON document beside the segmented
+        // archive. Treat every Turn in it as a legacy candidate; turn_id makes
+        // this safe and idempotent when the document is merely our latest-Turn
+        // compatibility view.
+        if let Ok(bytes) = fs::read(&self.file) {
+            if let Ok(doc) = serde_json::from_slice::<ActionAuditDocument>(&bytes) {
+                for turn in doc.turns {
+                    if archived.insert(turn.turn_id.clone()) && !self.archive_turn_unlocked(&turn) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        if !self.legacy_turns_dir.exists() {
             return true;
         }
-        let Ok(total) = self.scan_capacity_bytes_unlocked() else {
+        let Ok(entries) = fs::read_dir(&self.legacy_turns_dir) else {
             return false;
         };
-        *cached = Some(total);
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let Some(turn) = self.read_turn_unlocked(&path) else {
+                // Preserve malformed or unknown legacy files. They may be the
+                // user’s only recoverable copy and must not be erased merely
+                // because a newer version cannot parse them.
+                continue;
+            };
+            if archived.insert(turn.turn_id.clone()) && !self.archive_turn_unlocked(&turn) {
+                return false;
+            }
+            if fs::remove_file(path).is_err() {
+                return false;
+            }
+        }
+        match fs::remove_dir(&self.legacy_turns_dir) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(_) => false,
+        }
+    }
+
+    fn recover_stale_active_turns_unlocked(&self) {
+        let Ok(entries) = fs::read_dir(&self.active_dir) else {
+            return;
+        };
+        let mut archived_turn_ids: Option<BTreeSet<String>> = None;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(pid) = name
+                .strip_prefix("active-")
+                .and_then(|rest| rest.split('-').next())
+                .and_then(|pid| pid.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if process_is_alive(pid) != Some(false) {
+                continue;
+            }
+            let path = entry.path();
+            let Some(turn) = self.read_turn_unlocked(&path) else {
+                continue;
+            };
+            let archived = archived_turn_ids.get_or_insert_with(|| {
+                rolling_file_store::read_segmented_records(&self.file)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|record| serde_json::from_slice::<ActionAuditTurn>(&record).ok())
+                    .map(|turn| turn.turn_id)
+                    .collect()
+            });
+            if archived.contains(&turn.turn_id) || self.archive_turn_unlocked(&turn) {
+                archived.insert(turn.turn_id.clone());
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    fn turn_record(turn: &ActionAuditTurn) -> Option<Vec<u8>> {
+        let text = bounded_action_audit_text(
+            &ActionAuditDocument {
+                version: 1,
+                turns: vec![turn.clone()],
+            },
+            ACTION_AUDIT_ACTIVE_TURN_MAX_BYTES,
+        )
+        .ok()?;
+        let bounded = serde_json::from_str::<ActionAuditDocument>(&text)
+            .ok()?
+            .turns
+            .into_iter()
+            .next()?;
+        let mut bytes = serde_json::to_vec(&bounded).ok()?;
+        bytes.push(b'\n');
+        Some(bytes)
+    }
+
+    fn archive_turn_unlocked(&self, turn: &ActionAuditTurn) -> bool {
+        let (Some(record), Some(capacity)) = (Self::turn_record(turn), Self::archive_capacity())
+        else {
+            return false;
+        };
+        if rolling_file_store::append_rolling_record(
+            &self.file,
+            &record,
+            capacity,
+            rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        // The segmented archive is canonical. A compatibility-view write
+        // failure must not retain the active checkpoint and duplicate the Turn
+        // on retry; a later successful Turn will refresh the view.
+        let _ = self.write_latest_view_unlocked(turn);
         true
     }
 
@@ -1365,37 +1518,21 @@ impl FileActionAuditStore {
     }
 
     fn read_turn_unlocked(&self, path: &Path) -> Option<ActionAuditTurn> {
-        let bytes = fs::read(path).ok()?;
-        serde_json::from_slice(&bytes).ok()
+        serde_json::from_slice(&fs::read(path).ok()?).ok()
     }
 
     fn write_turn_unlocked(&self, path: &Path, turn: &ActionAuditTurn) -> bool {
-        let doc = ActionAuditDocument {
-            version: 1,
-            turns: vec![turn.clone()],
-        };
-        let Ok(text) = bounded_action_audit_text(&doc, ACTION_AUDIT_ACTIVE_TURN_MAX_BYTES) else {
+        if fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new("."))).is_err() {
             return false;
-        };
-        let Ok(doc) = serde_json::from_str::<ActionAuditDocument>(&text) else {
-            return false;
-        };
-        let Some(turn) = doc.turns.first() else {
-            return false;
-        };
-        let Ok(mut bytes) = serde_json::to_vec(turn) else {
-            return false;
-        };
-        bytes.push(b'\n');
-        atomic_write_file(path, &bytes).is_ok()
+        }
+        Self::turn_record(turn).is_some_and(|bytes| atomic_write_file(path, &bytes).is_ok())
     }
 
     fn write_latest_view_unlocked(&self, turn: &ActionAuditTurn) -> bool {
-        let doc = ActionAuditDocument {
+        self.write_doc_unlocked(&ActionAuditDocument {
             version: 1,
             turns: vec![turn.clone()],
-        };
-        self.write_doc_unlocked(&doc)
+        })
     }
 
     fn write_empty_view_unlocked(&self) -> bool {
@@ -1410,96 +1547,6 @@ impl FileActionAuditStore {
             return false;
         };
         atomic_write_file(&self.file, format!("{text}\n").as_bytes()).is_ok()
-    }
-
-    fn write_active_turn_unlocked(&self, path: &Path, turn: &ActionAuditTurn) -> bool {
-        let old_turn_bytes = fs::metadata(path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        let old_latest_bytes = fs::metadata(&self.file)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        if !self.write_turn_unlocked(path, turn) || !self.write_latest_view_unlocked(turn) {
-            return false;
-        }
-        let new_turn_bytes = fs::metadata(path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        let new_latest_bytes = fs::metadata(&self.file)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        let Ok(mut cached) = self.capacity_bytes.lock() else {
-            return false;
-        };
-        let Some(total) = *cached else {
-            return false;
-        };
-        let total = total
-            .saturating_sub(old_turn_bytes)
-            .saturating_sub(old_latest_bytes)
-            .saturating_add(new_turn_bytes)
-            .saturating_add(new_latest_bytes);
-        *cached = Some(total);
-        drop(cached);
-        if total > audit::ACTION_AUDIT_MAX_BYTES {
-            self.reclaim_capacity_unlocked(Some(path))
-        } else {
-            true
-        }
-    }
-
-    fn scan_capacity_bytes_unlocked(&self) -> std::io::Result<u64> {
-        let mut total = fs::metadata(&self.file)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        for entry in fs::read_dir(&self.turns_dir)? {
-            let metadata = entry?.metadata()?;
-            if metadata.is_file() {
-                total = total.saturating_add(metadata.len());
-            }
-        }
-        Ok(total)
-    }
-
-    fn reclaim_capacity_unlocked(&self, active: Option<&Path>) -> bool {
-        let Ok(entries) = fs::read_dir(&self.turns_dir) else {
-            return false;
-        };
-        let mut files = entries
-            .flatten()
-            .filter_map(|entry| {
-                let metadata = entry.metadata().ok()?;
-                metadata.is_file().then_some((
-                    metadata.modified().ok(),
-                    metadata.len(),
-                    entry.path(),
-                ))
-            })
-            .collect::<Vec<_>>();
-        files.sort_by_key(|(modified, _, path)| (*modified, path.clone()));
-        let latest_bytes = fs::metadata(&self.file)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        let mut total =
-            latest_bytes.saturating_add(files.iter().map(|(_, bytes, _)| *bytes).sum::<u64>());
-        let target = audit::ACTION_AUDIT_MAX_BYTES.saturating_mul(3) / 4;
-        for (_, bytes, path) in files {
-            if total <= target {
-                break;
-            }
-            if active.is_some_and(|active| active == path) {
-                continue;
-            }
-            if fs::remove_file(&path).is_err() {
-                return false;
-            }
-            total = total.saturating_sub(bytes);
-        }
-        let Ok(mut cached) = self.capacity_bytes.lock() else {
-            return false;
-        };
-        *cached = Some(total);
-        total <= audit::ACTION_AUDIT_MAX_BYTES
     }
 
     fn empty_doc() -> ActionAuditDocument {
@@ -1961,6 +2008,12 @@ impl AgentCore {
         self.current_action_turn_id
             .clone()
             .unwrap_or_else(|| "unknown_turn".to_string())
+    }
+
+    pub fn finish_action_audit_turn(&mut self) {
+        if let Some(turn_id) = self.current_action_turn_id.take() {
+            self.action_audit.finish_turn(&turn_id);
+        }
     }
 
     pub fn running_shell_jobs_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {

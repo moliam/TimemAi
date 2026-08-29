@@ -215,6 +215,7 @@ export type ModelEndpoint = {
   stream: boolean;
   api_key_configured: boolean;
   http_headers: Record<string, string>;
+  request_fields: Record<string, unknown>;
 };
 
 export type MemTemporaryItem = {
@@ -328,7 +329,7 @@ export type WireEvent =
   | { type: "mcp_updated"; session_id?: string | null; servers: McpServerReport[]; enabled_server_ids: string[] }
   | { type: "mcp_server_secrets_revealed"; server_id: string; values: Record<string, string> }
   | { type: "model_endpoints_updated"; endpoints: ModelEndpoint[] }
-  | { type: "model_endpoint_secret_revealed"; endpoint_id: string; api_key: string; http_headers: Record<string, string> };
+  | { type: "model_endpoint_secret_revealed"; endpoint_id: string; api_key: string; http_headers: Record<string, string>; request_fields: Record<string, unknown> };
 
 export type ClientCommand =
   | { type: "session_create"; display_name?: string; workspace_dir?: string; env?: Record<string, string> }
@@ -366,7 +367,7 @@ export type ClientCommand =
   | { type: "tool_repo_open_terminal"; session_id: string; tool_id: string }
   | { type: "runtime_update"; key: string; value: string }
   | { type: "session_runtime_update"; session_id: string; key: string; value: string }
-  | { type: "model_endpoint_upsert"; endpoint: { id?: string; name: string; model: string; api_protocol: string; response_protocol: string; base_url: string; max_llm_input_tokens: number; max_llm_output_tokens: number; stream: boolean; api_key?: string; http_headers: Record<string, string> } }
+  | { type: "model_endpoint_upsert"; endpoint: { id?: string; name: string; model: string; api_protocol: string; response_protocol: string; base_url: string; max_llm_input_tokens: number; max_llm_output_tokens: number; stream: boolean; api_key?: string; http_headers: Record<string, string>; request_fields: Record<string, unknown> } }
   | { type: "model_endpoint_delete"; endpoint_id: string }
   | { type: "model_endpoint_apply"; session_id: string; endpoint_id: string }
   | { type: "model_endpoint_secret_reveal"; endpoint_id: string }

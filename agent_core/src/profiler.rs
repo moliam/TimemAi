@@ -141,9 +141,13 @@ pub fn collect_storage_profile(
                     .unwrap_or("api_audit.json")
             ))),
         ),
-        action_audit_bytes: file_size(action_audit_file).saturating_add(directory_file_bytes(
-            &action_audit_file.with_file_name("action_audit.json.turns"),
-        )),
+        action_audit_bytes: rolling_storage_bytes(action_audit_file)
+            .saturating_add(directory_file_bytes(
+                &action_audit_file.with_file_name("action_audit.active"),
+            ))
+            .saturating_add(directory_file_bytes(
+                &action_audit_file.with_file_name("action_audit.json.turns"),
+            )),
     }
 }
 

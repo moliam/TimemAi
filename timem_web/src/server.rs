@@ -69,7 +69,7 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{broadcast, mpsc as tokio_mpsc, oneshot, Notify},
+    sync::{broadcast, mpsc as tokio_mpsc, oneshot},
     time::{sleep, timeout, Instant},
 };
 
@@ -81,7 +81,9 @@ const PORT_END: u16 = 23_456;
 const DEFAULT_MEM_PREFERRED_PORT: u16 = 13_764;
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(40);
 const EVENT_CHANNEL_CAPACITY: usize = 256;
-const TEMPORARY_RETENTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const TEMPORARY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const TEMPORARY_MAINTENANCE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const TEMPORARY_MAINTENANCE_BUSY_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const SESSION_HISTORY_PAGE_LIMIT: usize = 200;
 const DEFAULT_MEM_TEMPORARY_RETENTION_DAYS: u16 = 5;
 const MEM_CAPACITY_128_MB: u64 = 128 * 1024 * 1024;
@@ -128,7 +130,6 @@ struct AppState {
     command_lanes: Arc<Mutex<HashMap<String, Arc<TicketCommandLane>>>>,
     command_global_barrier: Arc<RwLock<()>>,
     mem_epoch: Arc<RwLock<u64>>,
-    temporary_retention_wakeup: Arc<Notify>,
     debug: Option<Arc<DebugStore>>,
     runtime_log: RuntimeLog,
 }
@@ -437,6 +438,7 @@ struct WebMemState {
     role_library: WorkerRoleLibrary,
     session_groups: Vec<SessionGroup>,
     settings: WebMemSettings,
+    temporary_maintenance: TemporaryMaintenanceRuntimeState,
 }
 
 impl WebMemState {
@@ -464,6 +466,7 @@ impl WebMemState {
         let model_endpoints = load_model_endpoints_resilient(&layout.memory_dir())?;
         let session_groups = load_session_groups(&layout.memory_dir())?;
         let settings = load_web_mem_settings(&layout.memory_dir(), debug)?;
+        let temporary_maintenance = load_temporary_maintenance_runtime_state(&layout.memory_dir())?;
         let session_store = SessionStore::new(layout.memory_dir());
         Ok(Self {
             space,
@@ -476,6 +479,7 @@ impl WebMemState {
             role_library,
             session_groups,
             settings,
+            temporary_maintenance,
             layout,
         })
     }
@@ -501,6 +505,84 @@ impl WebMemState {
             conversation_capacity_bytes: self.settings.conversation_capacity_bytes,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct PersistedTemporaryMaintenanceState {
+    #[serde(default)]
+    accumulated_runtime_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct TemporaryMaintenanceRuntimeState {
+    accumulated_runtime: Duration,
+    checkpoint_started_at: Instant,
+}
+
+impl TemporaryMaintenanceRuntimeState {
+    fn from_persisted(state: PersistedTemporaryMaintenanceState) -> Self {
+        Self {
+            accumulated_runtime: Duration::from_millis(state.accumulated_runtime_ms),
+            checkpoint_started_at: Instant::now(),
+        }
+    }
+
+    fn checkpoint(&mut self, now: Instant) {
+        self.accumulated_runtime = self
+            .accumulated_runtime
+            .saturating_add(now.saturating_duration_since(self.checkpoint_started_at));
+        self.checkpoint_started_at = now;
+    }
+
+    fn persisted(&self) -> PersistedTemporaryMaintenanceState {
+        PersistedTemporaryMaintenanceState {
+            accumulated_runtime_ms: u64::try_from(self.accumulated_runtime.as_millis())
+                .unwrap_or(u64::MAX),
+        }
+    }
+}
+
+fn temporary_maintenance_state_path(memory_dir: &Path) -> PathBuf {
+    memory_dir.join("temporary_maintenance_state.json")
+}
+
+fn load_temporary_maintenance_runtime_state(
+    memory_dir: &Path,
+) -> Result<TemporaryMaintenanceRuntimeState, String> {
+    let path = temporary_maintenance_state_path(memory_dir);
+    let persisted = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|_| "temporary_maintenance_state_parse_failed".to_string())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            PersistedTemporaryMaintenanceState::default()
+        }
+        Err(_) => return Err("temporary_maintenance_state_read_failed".to_string()),
+    };
+    Ok(TemporaryMaintenanceRuntimeState::from_persisted(persisted))
+}
+
+fn save_temporary_maintenance_runtime_state(
+    memory_dir: &Path,
+    state: &TemporaryMaintenanceRuntimeState,
+) -> Result<(), String> {
+    let mut payload = serde_json::to_vec_pretty(&state.persisted())
+        .map_err(|_| "temporary_maintenance_state_serialize_failed".to_string())?;
+    payload.push(b'\n');
+    agent_core::atomic_write_file(&temporary_maintenance_state_path(memory_dir), &payload)
+        .map_err(|_| "temporary_maintenance_state_write_failed".to_string())
+}
+
+fn checkpoint_temporary_maintenance_runtime(
+    mem: &mut WebMemState,
+    now: Instant,
+) -> Result<Duration, String> {
+    mem.temporary_maintenance.checkpoint(now);
+    save_temporary_maintenance_runtime_state(&mem.layout.memory_dir(), &mem.temporary_maintenance)?;
+    Ok(mem.temporary_maintenance.accumulated_runtime)
+}
+
+fn temporary_maintenance_hint_exists(mem: &WebMemState) -> bool {
+    agent_core::api_audit_maintenance_hint_path(&mem.layout.api_audit_file()).exists()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -890,25 +972,6 @@ fn apply_temporary_retention(
     Ok(result)
 }
 
-fn apply_current_mem_temporary_retention(
-    state: &AppState,
-    now_ms: i64,
-) -> Result<TemporaryRetentionResult, String> {
-    let (layout, store, days, max_bytes) = {
-        let mem = state
-            .mem
-            .lock()
-            .map_err(|_| "mem_state_poisoned".to_string())?;
-        (
-            mem.layout.clone(),
-            mem.session_store.clone(),
-            mem.settings.temporary_retention_days,
-            mem.settings.temporary_capacity_bytes,
-        )
-    };
-    apply_temporary_retention(&layout, &store, days, max_bytes, now_ms)
-}
-
 fn apply_conversation_capacity(
     state: &AppState,
     store: &SessionStore,
@@ -963,45 +1026,181 @@ fn apply_conversation_stable_capacity(
     Ok(removed)
 }
 
-async fn run_temporary_retention_in_file_thread(
+fn has_live_mem_work(state: &AppState) -> Result<bool, String> {
+    Ok(state
+        .sessions
+        .lock()
+        .map_err(|_| "session_state_poisoned".to_string())?
+        .values()
+        .any(session_has_live_work_for_mem_switch))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemporaryMaintenanceAttempt {
+    Completed,
+    Busy,
+}
+
+async fn run_idle_temporary_maintenance(
     state: AppState,
-) -> Result<TemporaryRetentionResult, String> {
+) -> Result<TemporaryMaintenanceAttempt, String> {
+    if has_live_mem_work(&state)? {
+        return Ok(TemporaryMaintenanceAttempt::Busy);
+    }
     let (result_tx, result_rx) = oneshot::channel();
     std::thread::Builder::new()
-        .name("timem-web-retention".to_string())
+        .name("timem-web-idle-maintenance".to_string())
         .spawn(move || {
-            let result =
-                apply_current_mem_temporary_retention(&state, now_ms_i64()).and_then(|result| {
-                    let (store, max_bytes) = {
+            // Serialize the maintenance pass against every browser mutation.
+            // Recheck idleness after acquiring the barrier so a newly queued or
+            // started task can never overlap the scan.
+            let result = state
+                .command_global_barrier
+                .write()
+                .map_err(|_| "command_global_barrier_poisoned".to_string())
+                .and_then(|_guard| {
+                    if has_live_mem_work(&state)? {
+                        return Ok(TemporaryMaintenanceAttempt::Busy);
+                    }
+                    let (layout, store, days, temporary_max_bytes, conversation_max_bytes) = {
                         let mem = state
                             .mem
                             .lock()
                             .map_err(|_| "mem_state_poisoned".to_string())?;
                         (
+                            mem.layout.clone(),
                             mem.session_store.clone(),
+                            mem.settings.temporary_retention_days,
+                            mem.settings.temporary_capacity_bytes,
                             mem.settings.conversation_capacity_bytes,
                         )
                     };
-                    apply_conversation_capacity(&state, &store, max_bytes)?;
-                    Ok(result)
+                    apply_temporary_retention(
+                        &layout,
+                        &store,
+                        days,
+                        temporary_max_bytes,
+                        now_ms_i64(),
+                    )?;
+                    apply_conversation_stable_capacity_if_configured(
+                        &store,
+                        conversation_max_bytes,
+                    )?;
+                    // Reset the same MEM while the global barrier is still held.
+                    // This prevents a concurrent MEM switch from redirecting the
+                    // completion state or hint removal to a different MEM.
+                    complete_temporary_maintenance(&state, Instant::now())?;
+                    Ok(TemporaryMaintenanceAttempt::Completed)
                 });
             let _ = result_tx.send(result);
         })
-        .map_err(|error| format!("temporary_retention_worker_spawn_failed:{error}"))?;
+        .map_err(|error| format!("temporary_maintenance_worker_spawn_failed:{error}"))?;
     result_rx
         .await
-        .map_err(|_| "temporary_retention_worker_stopped".to_string())?
+        .map_err(|_| "temporary_maintenance_worker_stopped".to_string())?
 }
 
-fn spawn_temporary_retention_loop(state: AppState) {
+fn apply_conversation_stable_capacity_if_configured(
+    store: &SessionStore,
+    max_bytes: Option<u64>,
+) -> Result<(), String> {
+    let Some(total_bytes) = max_bytes else {
+        return Ok(());
+    };
+    let capacity = RollingCapacity::from_total_bytes(total_bytes)
+        .map_err(|_| "mem_conversation_capacity_bytes_invalid".to_string())?;
+    // The periodic pass runs only when no Session is active, so no active-work
+    // exclusion is required after the idle check.
+    let mut sessions = store.list_sessions_resilient()?.sessions;
+    sessions.sort_by_key(|session| (session.updated_at_ms, session.session_id.clone()));
+    let mut used = sessions
+        .iter()
+        .map(|session| {
+            std::fs::metadata(store.history_path_for_session(&session.session_id))
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+        })
+        .sum::<u64>();
+    for session in sessions {
+        if used <= capacity.stable_bytes {
+            break;
+        }
+        let reclaimed = store.prune_oldest_history_turns(
+            &session.session_id,
+            used.saturating_sub(capacity.stable_bytes),
+        )?;
+        used = used.saturating_sub(reclaimed);
+    }
+    Ok(())
+}
+
+fn checkpoint_and_get_temporary_maintenance_trigger(
+    state: &AppState,
+    now: Instant,
+) -> Result<bool, String> {
+    let mut mem = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?;
+    let accumulated = checkpoint_temporary_maintenance_runtime(&mut mem, now)?;
+    Ok(accumulated >= TEMPORARY_MAINTENANCE_INTERVAL || temporary_maintenance_hint_exists(&mem))
+}
+
+fn complete_temporary_maintenance(state: &AppState, now: Instant) -> Result<(), String> {
+    let hint_path = {
+        let mut mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        let completed = TemporaryMaintenanceRuntimeState {
+            accumulated_runtime: Duration::ZERO,
+            checkpoint_started_at: now,
+        };
+        // Persist first and only then update memory, so a failed tiny-state write
+        // cannot accidentally suppress a still-due maintenance request.
+        save_temporary_maintenance_runtime_state(&mem.layout.memory_dir(), &completed)?;
+        mem.temporary_maintenance = completed;
+        agent_core::api_audit_maintenance_hint_path(&mem.layout.api_audit_file())
+    };
+    match std::fs::remove_file(hint_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("temporary_maintenance_hint_clear_failed".to_string()),
+    }
+}
+
+fn spawn_idle_temporary_maintenance_loop(state: AppState) {
     tokio::spawn(async move {
         loop {
-            if let Err(error) = run_temporary_retention_in_file_thread(state.clone()).await {
-                eprintln!("[timem_web_warning] temporary_retention_failed error={error}");
+            sleep(TEMPORARY_MAINTENANCE_CHECKPOINT_INTERVAL).await;
+            let triggered =
+                match checkpoint_and_get_temporary_maintenance_trigger(&state, Instant::now()) {
+                    Ok(triggered) => triggered,
+                    Err(error) => {
+                        eprintln!(
+                        "[timem_web_warning] temporary_maintenance_checkpoint_failed error={error}"
+                    );
+                        continue;
+                    }
+                };
+            if !triggered {
+                continue;
             }
-            tokio::select! {
-                () = sleep(TEMPORARY_RETENTION_INTERVAL) => {}
-                () = state.temporary_retention_wakeup.notified() => {}
+            loop {
+                match run_idle_temporary_maintenance(state.clone()).await {
+                    Ok(TemporaryMaintenanceAttempt::Completed) => break,
+                    Ok(TemporaryMaintenanceAttempt::Busy) => {
+                        // Retry only the cheap live-work check. No checkpoint write and no
+                        // full scan occurs while work is active.
+                        sleep(TEMPORARY_MAINTENANCE_BUSY_RETRY_INTERVAL).await;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "[timem_web_warning] idle_temporary_maintenance_failed error={error}"
+                        );
+                        break;
+                    }
+                }
             }
         }
     });
@@ -1024,6 +1223,8 @@ struct ModelEndpointConfig {
     api_key: String,
     #[serde(default)]
     http_headers: BTreeMap<String, String>,
+    #[serde(default)]
+    request_fields: BTreeMap<String, Value>,
 }
 
 fn default_endpoint_max_input_tokens() -> u32 {
@@ -1047,6 +1248,7 @@ struct ModelEndpointReport {
     stream: bool,
     api_key_configured: bool,
     http_headers: BTreeMap<String, String>,
+    request_fields: BTreeMap<String, Value>,
 }
 
 impl From<&ModelEndpointConfig> for ModelEndpointReport {
@@ -1066,6 +1268,11 @@ impl From<&ModelEndpointConfig> for ModelEndpointReport {
                 .http_headers
                 .keys()
                 .map(|name| (name.clone(), "****".to_string()))
+                .collect(),
+            request_fields: endpoint
+                .request_fields
+                .keys()
+                .map(|name| (name.clone(), Value::String("****".to_string())))
                 .collect(),
         }
     }
@@ -1566,6 +1773,7 @@ enum WireEvent {
         endpoint_id: String,
         api_key: String,
         http_headers: BTreeMap<String, String>,
+        request_fields: BTreeMap<String, Value>,
     },
 }
 
@@ -1712,6 +1920,8 @@ struct ModelEndpointInput {
     api_key: Option<String>,
     #[serde(default)]
     http_headers: BTreeMap<String, String>,
+    #[serde(default)]
+    request_fields: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2164,7 +2374,6 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
-        temporary_retention_wakeup: Arc::new(Notify::new()),
         debug,
         runtime_log,
     };
@@ -2245,11 +2454,10 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         "{}",
         highlighted_browser_url(&browser_url, stdout_supports_color())
     );
-    // Retention can scan and atomically rewrite large history, shell-job, and
-    // audit files. Start it only after readiness is published and keep that
-    // blocking filesystem work off Tokio runtime threads. A dedicated file
-    // thread also keeps runtime shutdown from waiting for a large rewrite.
-    spawn_temporary_retention_loop(state.clone());
+    // Full MEM scans never run on startup or ordinary history writes. Settings
+    // commands may run them explicitly. The fallback checkpoints a tiny cumulative
+    // runtime counter every 15 minutes and scans only when due and fully idle.
+    spawn_idle_temporary_maintenance_loop(state.clone());
     let shutdown_reason = Arc::new(Mutex::new(None));
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(
@@ -2354,8 +2562,11 @@ fn shutdown_web_runtime(state: &AppState) -> Result<(), String> {
     let fallback_memory_dir =
         web_layout_for_space(&state.template.data_dir, &state.template.initial_space).memory_dir();
     let memory_dir = match state.mem.lock() {
-        Ok(mem) => {
+        Ok(mut mem) => {
             mem.mcp_runtime.disconnect_all();
+            if let Err(error) = checkpoint_temporary_maintenance_runtime(&mut mem, Instant::now()) {
+                first_error.get_or_insert(error);
+            }
             mem.layout.memory_dir()
         }
         Err(_) => {
@@ -4745,11 +4956,12 @@ fn handle_command_with_id(
             );
         }
         ClientCommand::ModelEndpointSecretReveal { endpoint_id } => {
-            let (api_key, http_headers) = model_endpoint_secrets(state, &endpoint_id)?;
+            let secrets = model_endpoint_secrets(state, &endpoint_id)?;
             return Ok(Some(WireEvent::ModelEndpointSecretRevealed {
                 endpoint_id,
-                api_key,
-                http_headers,
+                api_key: secrets.api_key,
+                http_headers: secrets.http_headers,
+                request_fields: secrets.request_fields,
             }));
         }
         ClientCommand::McpServerUpsert { session_id, config } => {
@@ -4898,7 +5110,6 @@ fn handle_command_with_id(
                 .map_err(|_| "mem_epoch_poisoned".to_string())?;
             switch_mem_space(state, port, &path, stop_running)?;
             *epoch = epoch.saturating_add(1);
-            state.temporary_retention_wakeup.notify_one();
             state
                 .semantic_delivery
                 .broadcast_baseline_with(|event_cursor| WireEvent::Hello {
@@ -5013,7 +5224,7 @@ fn switch_mem_space(
     stop_running: bool,
 ) -> Result<WebSnapshot, String> {
     let requested_path = Path::new(path);
-    let next_mem = if requested_path.is_absolute() {
+    let mut next_mem = if requested_path.is_absolute() {
         WebMemState::from_directory_with_debug_defaults(requested_path, state.debug.is_some())?
     } else {
         validate_web_space_name(path)?;
@@ -5071,6 +5282,9 @@ fn switch_mem_space(
             .mem
             .lock()
             .map_err(|_| "mem_state_poisoned".to_string())?;
+        let switched_at = Instant::now();
+        checkpoint_temporary_maintenance_runtime(&mut mem, switched_at)?;
+        next_mem.temporary_maintenance.checkpoint_started_at = switched_at;
         *mem = next_mem;
     }
     {
@@ -6013,9 +6227,9 @@ fn append_history_record(
     session_id: &str,
     record: &ChatHistoryRecord,
 ) -> Result<(), String> {
-    // History appends are the hot path. Retention is periodic and settings
-    // updates apply synchronously; waking the global worker here made every
-    // chat record scan unrelated temporary stores and API audit history.
+    // History appends are the hot path. They never trigger repository/MEM-wide
+    // scans; retention and capacity work runs only from explicit Settings
+    // commands.
     current_session_store(state)?.append_history_record(session_id, record)
 }
 
@@ -6089,7 +6303,12 @@ fn persist_restored_session_runtime_cache(
                 .runtime
                 .env_overrides
                 .iter()
-                .filter(|(key, _)| !matches!(key.as_str(), "TIMEM_API_KEY" | "TIMEM_HTTP_HEADERS"))
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "TIMEM_API_KEY" | "TIMEM_HTTP_HEADERS" | "TIMEM_REQUEST_FIELDS"
+                    )
+                })
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
         )
@@ -6408,7 +6627,12 @@ fn stored_session_from_web_session_with_store(
                 .runtime
                 .env_overrides
                 .iter()
-                .filter(|(key, _)| !matches!(key.as_str(), "TIMEM_API_KEY" | "TIMEM_HTTP_HEADERS"))
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "TIMEM_API_KEY" | "TIMEM_HTTP_HEADERS" | "TIMEM_REQUEST_FIELDS"
+                    )
+                })
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
         ),
@@ -7164,6 +7388,18 @@ fn normalize_model_endpoint_input(
     }
     agent_core::validate_model_http_headers(&http_headers)
         .map_err(|error| format!("invalid_model_endpoint_headers:{error}"))?;
+    let mut request_fields = input.request_fields;
+    if let Some(existing) = existing {
+        for (name, value) in &mut request_fields {
+            if value == &Value::String("****".to_string()) {
+                if let Some(previous) = existing.request_fields.get(name) {
+                    *value = previous.clone();
+                }
+            }
+        }
+    }
+    agent_core::validate_model_request_fields(&request_fields)
+        .map_err(|error| format!("invalid_model_endpoint_request_fields:{error}"))?;
     if input.stream && api_protocol != "openai-compatible" {
         return Err("model_endpoint_stream_requires_openai_compatible".to_string());
     }
@@ -7212,6 +7448,7 @@ fn normalize_model_endpoint_input(
         stream: input.stream,
         api_key,
         http_headers,
+        request_fields,
     })
 }
 
@@ -7223,6 +7460,7 @@ fn testable_endpoint_validation_settings() -> RuntimeSettings {
             base_url: "http://127.0.0.1".to_string(),
             api_key: String::new(),
             http_headers: Default::default(),
+            request_fields: Default::default(),
             timeout_secs: 60,
             max_llm_output_tokens: 4_096,
             max_llm_input_tokens: 32_000,
@@ -7321,6 +7559,7 @@ fn session_uses_model_endpoint(session: &WebSession, endpoint: &ModelEndpointCon
         && config.openai_compatible.stream == endpoint.stream
         && config.api_key == endpoint.api_key
         && config.http_headers == endpoint.http_headers
+        && config.request_fields == endpoint.request_fields
 }
 
 fn sync_endpoint_runtime_fields(
@@ -7331,6 +7570,7 @@ fn sync_endpoint_runtime_fields(
     if previous.max_llm_input_tokens == updated.max_llm_input_tokens
         && previous.max_llm_output_tokens == updated.max_llm_output_tokens
         && previous.stream == updated.stream
+        && previous.request_fields == updated.request_fields
     {
         return Ok(Vec::new());
     }
@@ -7381,6 +7621,13 @@ fn sync_endpoint_runtime_fields(
                 .1,
             );
         }
+        if previous.request_fields != updated.request_fields {
+            runtime_profile = Some(update_session_request_fields(
+                state,
+                &session_id,
+                updated.request_fields.clone(),
+            )?);
+        }
         if let Some(runtime_profile) = runtime_profile {
             updates.push((session_id, runtime_profile));
         }
@@ -7401,10 +7648,16 @@ fn delete_model_endpoint(state: &AppState, endpoint_id: &str) -> Result<(), Stri
     save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints)
 }
 
+struct ModelEndpointSecrets {
+    api_key: String,
+    http_headers: BTreeMap<String, String>,
+    request_fields: BTreeMap<String, Value>,
+}
+
 fn model_endpoint_secrets(
     state: &AppState,
     endpoint_id: &str,
-) -> Result<(String, BTreeMap<String, String>), String> {
+) -> Result<ModelEndpointSecrets, String> {
     state
         .mem
         .lock()
@@ -7412,7 +7665,11 @@ fn model_endpoint_secrets(
         .model_endpoints
         .iter()
         .find(|item| item.id == endpoint_id)
-        .map(|item| (item.api_key.clone(), item.http_headers.clone()))
+        .map(|item| ModelEndpointSecrets {
+            api_key: item.api_key.clone(),
+            http_headers: item.http_headers.clone(),
+            request_fields: item.request_fields.clone(),
+        })
         .ok_or_else(|| "model_endpoint_not_found".to_string())
 }
 
@@ -7452,6 +7709,7 @@ fn apply_model_endpoint(
         update_session_runtime_setting(state, session_id, key, &value)?;
     }
     update_session_http_headers(state, session_id, endpoint.http_headers)?;
+    update_session_request_fields(state, session_id, endpoint.request_fields)?;
     update_session_api_key(state, session_id, endpoint.api_key)
 }
 
@@ -7490,6 +7748,50 @@ fn update_session_http_headers(
         session.runtime.env.insert(
             "TIMEM_HTTP_HEADERS".to_string(),
             serde_json::to_string(&http_headers).map_err(|e| e.to_string())?,
+        );
+        session.runtime_profile =
+            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile.clone()
+    };
+    persist_web_session(state, session_id)?;
+    Ok(runtime_profile)
+}
+
+fn update_session_request_fields(
+    state: &AppState,
+    session_id: &str,
+    request_fields: BTreeMap<String, Value>,
+) -> Result<WebSessionRuntimeProfile, String> {
+    agent_core::validate_model_request_fields(&request_fields)
+        .map_err(|error| format!("invalid_model_endpoint_request_fields:{error}"))?;
+    if session_has_active_turn(state, session_id)? {
+        return Err("session_request_fields_update_while_working".to_string());
+    }
+    let worker_ids = session_worker_ids(state, session_id)?;
+    {
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        for worker_id in &worker_ids {
+            manager
+                .handle(worker_id)
+                .ok_or_else(|| "session_worker_not_found".to_string())?
+                .update_request_fields(request_fields.clone())?;
+        }
+    }
+    let runtime_profile = {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        session.runtime.settings.config.request_fields = request_fields.clone();
+        session.runtime.env.insert(
+            "TIMEM_REQUEST_FIELDS".to_string(),
+            serde_json::to_string(&request_fields).map_err(|e| e.to_string())?,
         );
         session.runtime_profile =
             WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
@@ -10419,6 +10721,7 @@ const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_BASE_URL",
     "TIMEM_API_KEY",
     "TIMEM_HTTP_HEADERS",
+    "TIMEM_REQUEST_FIELDS",
     "TIMEM_TIMEOUT",
     "TIMEM_MAX_LLM_INPUT",
     "TIMEM_MAX_LLM_OUTPUT",
@@ -10602,6 +10905,10 @@ fn session_cached_env_values(settings: &RuntimeSettings) -> BTreeMap<String, Str
         "TIMEM_HTTP_HEADERS".to_string(),
         serde_json::to_string(&settings.config.http_headers).unwrap_or_else(|_| "{}".to_string()),
     );
+    env.insert(
+        "TIMEM_REQUEST_FIELDS".to_string(),
+        serde_json::to_string(&settings.config.request_fields).unwrap_or_else(|_| "{}".to_string()),
+    );
     env
 }
 
@@ -10756,6 +11063,7 @@ impl WebLaunchOptions {
             api_protocol: self.api_protocol.clone(),
             api_key: self.api_key.clone(),
             http_headers: None,
+            request_fields: None,
             model: self.model.clone(),
             base_url: self.base_url.clone(),
             timeout_secs: self.timeout_secs,

@@ -253,6 +253,7 @@ function TimemApp() {
   const [deleteEndpointCandidate, setDeleteEndpointCandidate] = useState<ModelEndpoint | null>(null);
   const [revealedEndpointApiKeys, setRevealedEndpointApiKeys] = useState<Record<string, string>>({});
   const [revealedEndpointHeaders, setRevealedEndpointHeaders] = useState<Record<string, Record<string, string>>>({});
+  const [revealedEndpointRequestFields, setRevealedEndpointRequestFields] = useState<Record<string, Record<string, unknown>>>({});
   const [showAppearance, setShowAppearance] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>("appearance");
   const [memTemporaryItems, setMemTemporaryItems] = useState<MemTemporaryItem[]>([]);
@@ -369,6 +370,7 @@ function TimemApp() {
     setRevealedSessionApiKeys({});
     setRevealedEndpointApiKeys({});
     setRevealedEndpointHeaders({});
+    setRevealedEndpointRequestFields({});
     if (restoreFocus) runtimeButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeAppearancePanel = useCallback((restoreFocus = true) => {
@@ -1183,11 +1185,13 @@ function TimemApp() {
       setDeleteEndpointCandidate(null);
       setRevealedEndpointApiKeys({});
       setRevealedEndpointHeaders({});
+      setRevealedEndpointRequestFields({});
       return;
     }
     if (event.type === "model_endpoint_secret_revealed") {
       setRevealedEndpointApiKeys((current) => ({ ...current, [event.endpoint_id]: event.api_key }));
       setRevealedEndpointHeaders((current) => ({ ...current, [event.endpoint_id]: event.http_headers }));
+      setRevealedEndpointRequestFields((current) => ({ ...current, [event.endpoint_id]: event.request_fields }));
       return;
     }
     if (event.type === "file_uploaded") {
@@ -1869,6 +1873,7 @@ function TimemApp() {
           endpointEditor={endpointEditor}
           revealedEndpointApiKeys={revealedEndpointApiKeys}
           revealedEndpointHeaders={revealedEndpointHeaders}
+          revealedEndpointRequestFields={revealedEndpointRequestFields}
           onClose={closeSettingsCenter}
           onRefreshTemporaryItems={refreshMemTemporaryItems}
           onDeleteTemporaryItems={deleteMemTemporaryItems}
@@ -4806,6 +4811,24 @@ function structuredRecord(rows: StructuredRow[]): Record<string, string> {
   return Object.fromEntries(rows.map((row) => [row.key.trim(), row.value]).filter(([key]) => key));
 }
 
+const RESERVED_REQUEST_FIELDS = new Set(["model", "messages", "max_tokens", "max_output_tokens", "instructions", "input", "tools", "tool_choice", "parallel_tool_calls", "stream", "stream_options", "response_format", "enable_thinking", "reasoning_effort", "system"]);
+
+function requestFieldRows(value: Record<string, unknown>): StructuredRow[] {
+  return Object.entries(value).map(([key, item]) => ({ id: clientId(), key, value: item === "****" ? "****" : JSON.stringify(item) }));
+}
+
+function parseRequestFieldRows(rows: StructuredRow[]): { value: Record<string, unknown>; error: string } {
+  const value: Record<string, unknown> = {};
+  for (const row of rows) {
+    const key = row.key.trim();
+    if (!key) continue;
+    if (RESERVED_REQUEST_FIELDS.has(key.toLowerCase())) return { value: {}, error: `${key} 由 Timem 管理，不能覆盖。` };
+    if (!row.value.trim()) return { value: {}, error: `${key} 的 Value 不能为空。` };
+    try { value[key] = JSON.parse(row.value); } catch { return { value: {}, error: `${key} 的 Value 必须是合法 JSON。字符串请使用双引号，例如 \"fast\"。` }; }
+  }
+  return { value, error: "" };
+}
+
 function hasDuplicateStructuredKeys(rows: StructuredRow[]) {
   const keys = rows.map((row) => row.key.trim().toLowerCase()).filter(Boolean);
   return new Set(keys).size !== keys.length;
@@ -4932,6 +4955,7 @@ type SettingsCenterProps = {
   endpointEditor: ModelEndpoint | "new" | null;
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
+  revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
   onClose: () => void;
   onSaveTemporaryPolicy: (days: 1 | 5 | 10 | null, maxBytes: number | null) => void;
   onSaveConversationCapacity: (maxBytes: number | null) => void;
@@ -4946,7 +4970,7 @@ type SettingsCenterProps = {
 };
 
 const SettingsCenter = memo(function SettingsCenter(props: SettingsCenterProps) {
-  const { panelRef, section, onSectionChange, appearance, onAppearanceChange, toolGenEnabled, toolGenToggleDisabled, onToolGenEnabledChange, memPath, connected, connectionLabel, retentionDays, temporaryCapacityBytes, conversationCapacityBytes, favoriteCapacity, retentionPending, conversationCapacityPending, favoriteCapacityPending, switchPending, temporaryItems, temporaryItemsLoading, temporaryItemsDeleting, temporaryItemsError, endpoints, endpointEditor, revealedEndpointApiKeys, revealedEndpointHeaders, onClose, onSaveTemporaryPolicy, onSaveConversationCapacity, onSaveFavoriteCapacity, onSwitchMemory, onRefreshTemporaryItems, onDeleteTemporaryItems, onEditEndpoint, onDeleteEndpoint, onRevealEndpoint, onSaveEndpoint } = props;
+  const { panelRef, section, onSectionChange, appearance, onAppearanceChange, toolGenEnabled, toolGenToggleDisabled, onToolGenEnabledChange, memPath, connected, connectionLabel, retentionDays, temporaryCapacityBytes, conversationCapacityBytes, favoriteCapacity, retentionPending, conversationCapacityPending, favoriteCapacityPending, switchPending, temporaryItems, temporaryItemsLoading, temporaryItemsDeleting, temporaryItemsError, endpoints, endpointEditor, revealedEndpointApiKeys, revealedEndpointHeaders, revealedEndpointRequestFields, onClose, onSaveTemporaryPolicy, onSaveConversationCapacity, onSaveFavoriteCapacity, onSwitchMemory, onRefreshTemporaryItems, onDeleteTemporaryItems, onEditEndpoint, onDeleteEndpoint, onRevealEndpoint, onSaveEndpoint } = props;
   const [days, setDays] = useState<1 | 5 | 10 | null>(retentionDays);
   const [temporaryCapacity, setTemporaryCapacity] = useState<number | null>(temporaryCapacityBytes);
   const [conversationCapacity, setConversationCapacity] = useState<number | null>(conversationCapacityBytes);
@@ -5008,7 +5032,7 @@ const SettingsCenter = memo(function SettingsCenter(props: SettingsCenterProps) 
             <section className="appearance-role-fonts" aria-labelledby="appearance-agent-fonts-title"><h4 id="appearance-agent-fonts-title">Agent</h4><div className="appearance-font-selects"><label><span>汉语字体</span><select value={appearance.agentChineseFont} aria-label="Agent Chinese font" onChange={(event) => updateAppearance("agentChineseFont", event.target.value as Appearance["agentChineseFont"])}><option value="system">系统</option><option value="heiti">黑体</option><option value="kaiti">楷体</option><option value="songti">宋体</option></select></label><label><span>其他语言字体</span><select value={appearance.agentFont} aria-label="Agent other language font" onChange={(event) => updateAppearance("agentFont", event.target.value as Appearance["agentFont"])}><option value="system">System</option><option value="serif">Serif</option><option value="mono">Mono</option></select></label></div><label className="appearance-bold-option"><input type="checkbox" checked={appearance.agentBold} onChange={(event) => updateAppearance("agentBold", event.target.checked)}/><span className="appearance-checkbox" aria-hidden="true"><Check size={12} strokeWidth={3}/></span><span>粗体</span></label></section>
             <fieldset><legend>Text size</legend><div className="segmented-control text-size-control">{(["small", "medium", "large"] as const).map((size) => <button type="button" title={`Use ${size === "medium" ? "default" : size} text size`} className={appearance.textSize === size ? "active" : ""} aria-pressed={appearance.textSize === size} key={size} onClick={() => updateAppearance("textSize", size)}>{size === "small" ? "Small" : size === "medium" ? "Default" : "Large"}</button>)}</div></fieldset>
           </section>}
-          {section === "endpoints" && <EndpointSettingsPane endpoints={endpoints} endpointEditor={endpointEditor} revealedEndpointApiKeys={revealedEndpointApiKeys} revealedEndpointHeaders={revealedEndpointHeaders} onEdit={onEditEndpoint} onDelete={onDeleteEndpoint} onReveal={onRevealEndpoint} onSave={onSaveEndpoint}/>}
+          {section === "endpoints" && <EndpointSettingsPane endpoints={endpoints} endpointEditor={endpointEditor} revealedEndpointApiKeys={revealedEndpointApiKeys} revealedEndpointHeaders={revealedEndpointHeaders} revealedEndpointRequestFields={revealedEndpointRequestFields} onEdit={onEditEndpoint} onDelete={onDeleteEndpoint} onReveal={onRevealEndpoint} onSave={onSaveEndpoint}/>}
           {section === "toolgen" && <section className="settings-pane toolgen-settings-pane" aria-labelledby="toolgen-settings-title">
             <div className="settings-pane-heading"><h3 id="toolgen-settings-title">ToolGen</h3><Wrench size={19} aria-hidden="true"/></div>
             <section className="settings-group toolgen-beta-card"><div className="settings-group-heading"><div><strong>Enable ToolGen</strong><p>When enabled, completed answers show a ToolGen action and can start the generation workflow. This preference is stored only in this browser.</p></div><button type="button" role="switch" className="settings-feature-switch" aria-checked={toolGenEnabled} aria-label="Enable ToolGen Beta" disabled={toolGenToggleDisabled} onClick={() => onToolGenEnabledChange(!toolGenEnabled)}><span className="settings-feature-switch-thumb"/></button></div><div className="toolgen-beta-status" role="status" aria-live="polite"><span className={toolGenEnabled ? "enabled" : "disabled"}/><strong>{toolGenEnabled ? "Enabled" : "Disabled by default"}</strong><small>{toolGenToggleDisabled ? "A ToolGen task is active; wait for it to finish before changing this setting." : toolGenEnabled ? "ToolGen actions and generation UI are available." : "ToolGen actions and generation UI are hidden."}</small></div></section>
@@ -5048,11 +5072,12 @@ const SettingsCenter = memo(function SettingsCenter(props: SettingsCenterProps) 
   </div>, document.body);
 });
 
-function EndpointSettingsPane({ endpoints, endpointEditor, revealedEndpointApiKeys, revealedEndpointHeaders, onEdit, onDelete, onReveal, onSave }: {
+function EndpointSettingsPane({ endpoints, endpointEditor, revealedEndpointApiKeys, revealedEndpointHeaders, revealedEndpointRequestFields, onEdit, onDelete, onReveal, onSave }: {
   endpoints: ModelEndpoint[];
   endpointEditor: ModelEndpoint | "new" | null;
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
+  revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
   onEdit: (endpoint: ModelEndpoint | "new" | null) => void;
   onDelete: (endpoint: ModelEndpoint) => void;
   onReveal: (endpointId: string) => void;
@@ -5064,12 +5089,12 @@ function EndpointSettingsPane({ endpoints, endpointEditor, revealedEndpointApiKe
     if (selectedEndpointId && !endpoints.some((endpoint) => endpoint.id === selectedEndpointId)) setSelectedEndpointId("");
     if (deleteMode && endpoints.length === 0) setDeleteMode(false);
   }, [deleteMode, endpoints, selectedEndpointId]);
-  if (endpointEditor) return <section className="settings-pane endpoint-settings-pane editing" aria-label="Model endpoint editor"><ModelEndpointEditor endpoint={endpointEditor === "new" ? undefined : endpointEditor} revealedApiKey={endpointEditor === "new" ? "" : revealedEndpointApiKeys[endpointEditor.id]} revealedHeaders={endpointEditor === "new" ? {} : revealedEndpointHeaders[endpointEditor.id]} onClose={() => onEdit(null)} onSave={onSave}/></section>;
+  if (endpointEditor) return <section className="settings-pane endpoint-settings-pane editing" aria-label="Model endpoint editor"><ModelEndpointEditor endpoint={endpointEditor === "new" ? undefined : endpointEditor} revealedApiKey={endpointEditor === "new" ? "" : revealedEndpointApiKeys[endpointEditor.id]} revealedHeaders={endpointEditor === "new" ? {} : revealedEndpointHeaders[endpointEditor.id]} revealedRequestFields={endpointEditor === "new" ? {} : revealedEndpointRequestFields[endpointEditor.id]} onClose={() => onEdit(null)} onSave={onSave}/></section>;
   const selected = endpoints.find((endpoint) => endpoint.id === selectedEndpointId);
   return <section className="settings-pane endpoint-settings-pane" aria-labelledby="endpoint-settings-title">
     <div className="settings-pane-heading"><h3 id="endpoint-settings-title">Model Endpoints</h3><Sparkles size={19} aria-hidden="true"/></div>
     <div className="endpoint-settings-toolbar"><span>{endpoints.length} endpoint{endpoints.length === 1 ? "" : "s"}</span><div>{deleteMode && <button type="button" className="secondary compact" onClick={() => { setDeleteMode(false); setSelectedEndpointId(""); }}>Cancel</button>}<button type="button" className={`danger compact ${deleteMode ? "confirm" : ""}`} disabled={endpoints.length === 0 || (deleteMode && !selected)} onClick={() => { if (!deleteMode) { setDeleteMode(true); setSelectedEndpointId(""); } else if (selected) onDelete(selected); }}>{deleteMode ? <Check size={14}/> : <Trash2 size={14}/>} {deleteMode ? "Delete selected" : "Delete"}</button><button type="button" className="primary compact" disabled={deleteMode} onClick={() => onEdit("new")}><Plus size={14}/> Add endpoint</button></div></div>
-    <div className="endpoint-settings-list">{endpoints.length === 0 ? <div className="endpoint-empty">No model endpoints yet. Add one to configure model access.</div> : endpoints.map((endpoint) => { const selectedForDelete = selectedEndpointId === endpoint.id; return <div className={`endpoint-settings-row ${deleteMode ? "delete-selecting" : ""} ${selectedForDelete ? "delete-selected" : ""}`} key={endpoint.id}><button type="button" className="endpoint-settings-select" aria-pressed={deleteMode ? selectedForDelete : undefined} onClick={() => { if (deleteMode) setSelectedEndpointId((current) => current === endpoint.id ? "" : endpoint.id); else { onEdit(endpoint); if ((endpoint.api_key_configured || Object.keys(endpoint.http_headers).length > 0) && revealedEndpointApiKeys[endpoint.id] === undefined) onReveal(endpoint.id); } }}><span><strong>{endpoint.name}</strong>{deleteMode && <span className="endpoint-delete-select">{selectedForDelete && <Check size={13}/>}</span>}</span><small>{endpoint.model} · {endpoint.api_protocol} · {endpoint.max_llm_input_tokens / 1_000}K / {endpoint.max_llm_output_tokens / 1_000}K</small><code title={endpoint.base_url}>{endpoint.base_url}</code></button>{!deleteMode && <button type="button" className="endpoint-settings-edit" title={`Edit ${endpoint.name}`} aria-label={`Edit ${endpoint.name}`} onClick={() => { onEdit(endpoint); if ((endpoint.api_key_configured || Object.keys(endpoint.http_headers).length > 0) && revealedEndpointApiKeys[endpoint.id] === undefined) onReveal(endpoint.id); }}><Pencil size={14}/></button>}</div>; })}</div>
+    <div className="endpoint-settings-list">{endpoints.length === 0 ? <div className="endpoint-empty">No model endpoints yet. Add one to configure model access.</div> : endpoints.map((endpoint) => { const selectedForDelete = selectedEndpointId === endpoint.id; return <div className={`endpoint-settings-row ${deleteMode ? "delete-selecting" : ""} ${selectedForDelete ? "delete-selected" : ""}`} key={endpoint.id}><button type="button" className="endpoint-settings-select" aria-pressed={deleteMode ? selectedForDelete : undefined} onClick={() => { if (deleteMode) setSelectedEndpointId((current) => current === endpoint.id ? "" : endpoint.id); else { onEdit(endpoint); if ((endpoint.api_key_configured || Object.keys(endpoint.http_headers).length > 0 || Object.keys(endpoint.request_fields).length > 0) && revealedEndpointApiKeys[endpoint.id] === undefined) onReveal(endpoint.id); } }}><span><strong>{endpoint.name}</strong>{deleteMode && <span className="endpoint-delete-select">{selectedForDelete && <Check size={13}/>}</span>}</span><small>{endpoint.model} · {endpoint.api_protocol} · {endpoint.max_llm_input_tokens / 1_000}K / {endpoint.max_llm_output_tokens / 1_000}K</small><code title={endpoint.base_url}>{endpoint.base_url}</code></button>{!deleteMode && <button type="button" className="endpoint-settings-edit" title={`Edit ${endpoint.name}`} aria-label={`Edit ${endpoint.name}`} onClick={() => { onEdit(endpoint); if ((endpoint.api_key_configured || Object.keys(endpoint.http_headers).length > 0 || Object.keys(endpoint.request_fields).length > 0) && revealedEndpointApiKeys[endpoint.id] === undefined) onReveal(endpoint.id); }}><Pencil size={14}/></button>}</div>; })}</div>
   </section>;
 }
 
@@ -5174,24 +5199,33 @@ function ModelEndpointPanel({ panelRef, server, session, onEdit, onApply }: {
   </section>;
 }
 
-function ModelEndpointEditor({ endpoint, revealedApiKey, revealedHeaders, onClose, onSave }: { endpoint?: ModelEndpoint; revealedApiKey?: string; revealedHeaders?: Record<string, string>; onClose: () => void; onSave: (endpoint: ModelEndpointDraft) => void }) {
-  const [draft, setDraft] = useState<ModelEndpointDraft>(() => ({ id: endpoint?.id, name: endpoint?.name ?? "", model: endpoint?.model ?? "", api_protocol: endpoint?.api_protocol ?? "openai-compatible", response_protocol: endpoint?.response_protocol ?? "xml", base_url: endpoint?.base_url ?? "", max_llm_input_tokens: endpoint?.max_llm_input_tokens ?? 100_000, max_llm_output_tokens: endpoint?.max_llm_output_tokens ?? 10_000, stream: endpoint?.stream ?? true, api_key: revealedApiKey, http_headers: endpoint?.http_headers ?? {} }));
+function ModelEndpointEditor({ endpoint, revealedApiKey, revealedHeaders, revealedRequestFields, onClose, onSave }: { endpoint?: ModelEndpoint; revealedApiKey?: string; revealedHeaders?: Record<string, string>; revealedRequestFields?: Record<string, unknown>; onClose: () => void; onSave: (endpoint: ModelEndpointDraft) => void }) {
+  const [draft, setDraft] = useState<ModelEndpointDraft>(() => ({ id: endpoint?.id, name: endpoint?.name ?? "", model: endpoint?.model ?? "", api_protocol: endpoint?.api_protocol ?? "openai-compatible", response_protocol: endpoint?.response_protocol ?? "xml", base_url: endpoint?.base_url ?? "", max_llm_input_tokens: endpoint?.max_llm_input_tokens ?? 100_000, max_llm_output_tokens: endpoint?.max_llm_output_tokens ?? 10_000, stream: endpoint?.stream ?? true, api_key: revealedApiKey, http_headers: endpoint?.http_headers ?? {}, request_fields: endpoint?.request_fields ?? {} }));
   const [headerRows, setHeaderRows] = useState<StructuredRow[]>(() => structuredRows(endpoint?.http_headers ?? {}));
+  const [requestRows, setRequestRows] = useState<StructuredRow[]>(() => requestFieldRows(endpoint?.request_fields ?? {}));
   const [showApiKey, setShowApiKey] = useState(false);
   const [showHeaders, setShowHeaders] = useState(!endpoint);
+  const [showRequestFields, setShowRequestFields] = useState(!endpoint);
   useEffect(() => { if (revealedApiKey !== undefined) setDraft((current) => ({ ...current, api_key: revealedApiKey })); }, [revealedApiKey]);
   useEffect(() => {
     if (!revealedHeaders) return;
     setHeaderRows((rows) => rows.map((row) => ({ ...row, value: revealedHeaders[row.key] ?? row.value })));
   }, [revealedHeaders]);
-  useEffect(() => { setShowApiKey(false); setShowHeaders(!endpoint); }, [endpoint?.id]);
+  useEffect(() => {
+    if (!revealedRequestFields) return;
+    setRequestRows((rows) => rows.map((row) => ({ ...row, value: Object.hasOwn(revealedRequestFields, row.key) ? JSON.stringify(revealedRequestFields[row.key]) : row.value })));
+  }, [revealedRequestFields]);
+  useEffect(() => { setShowApiKey(false); setShowHeaders(!endpoint); setShowRequestFields(!endpoint); }, [endpoint?.id]);
   const apiKey = draft.api_key ?? "";
   const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(apiKey, { idle: "复制 API Key", copied: "API Key 已复制", failed: "API Key 复制失败" });
   const apiKeyVisibilityLabel = showApiKey ? "隐藏 API Key" : "显示 API Key";
   const headers = structuredRecord(headerRows);
-  const endpointDraft = { ...draft, http_headers: headers };
+  const parsedRequestFields = parseRequestFieldRows(requestRows);
+  const endpointDraft = { ...draft, http_headers: headers, request_fields: parsedRequestFields.value };
   const duplicateHeaderNames = hasDuplicateStructuredKeys(headerRows);
-  const save = () => { if (!duplicateHeaderNames && endpointDraftValid(endpointDraft)) onSave(endpointDraft); };
+  const duplicateRequestNames = hasDuplicateStructuredKeys(requestRows);
+  const saveDisabled = duplicateHeaderNames || duplicateRequestNames || !!parsedRequestFields.error || !endpointDraftValid(endpointDraft);
+  const save = () => { if (!saveDisabled) onSave(endpointDraft); };
   return <div className="endpoint-editor"><div className="endpoint-editor-heading"><strong>{endpoint ? "编辑接入点" : "新增接入点"}</strong><button type="button" aria-label="Close endpoint editor" onClick={onClose}><X size={14}/></button></div><div className="endpoint-editor-grid">
     <label>名称<input autoFocus value={draft.name} placeholder="例如：生产环境 GPT" onChange={(event) => setDraft({ ...draft, name: event.target.value })}/></label><label>模型<input value={draft.model} placeholder="gpt-4.1" onChange={(event) => setDraft({ ...draft, model: event.target.value })}/></label>
     <div className="endpoint-api-protocol"><label>API 协议<select value={draft.api_protocol} onChange={(event) => { const api_protocol = event.target.value; setDraft({ ...draft, api_protocol, stream: api_protocol === "openai-compatible" }); }}><option value="openai-compatible">openai-compatible</option><option value="openai-responses">openai-responses</option><option value="anthropic">anthropic</option></select></label><label className="endpoint-stream-toggle" title="以流式 SSE 接收 OpenAI-compatible 响应"><input type="checkbox" checked={draft.stream} disabled={draft.api_protocol !== "openai-compatible"} onChange={(event) => setDraft({ ...draft, stream: event.target.checked })}/><span>Stream</span></label></div><label>响应协议<select value={draft.response_protocol} onChange={(event) => setDraft({ ...draft, response_protocol: event.target.value })}><option value="xml">xml</option><option value="json">json</option></select></label>
@@ -5199,7 +5233,8 @@ function ModelEndpointEditor({ endpoint, revealedApiKey, revealedHeaders, onClos
     <label>最大上下文窗口<select value={draft.max_llm_input_tokens} onChange={(event) => setDraft({ ...draft, max_llm_input_tokens: Number(event.target.value) })}>{MODEL_CONTEXT_WINDOW_OPTIONS.map((tokens) => <option key={tokens} value={tokens}>{tokens === 1_000_000 ? "1M" : `${tokens / 1_000}K`}</option>)}</select></label><label>最大输出<select value={draft.max_llm_output_tokens} onChange={(event) => setDraft({ ...draft, max_llm_output_tokens: Number(event.target.value) })}>{MODEL_OUTPUT_TOKEN_OPTIONS.map((tokens) => <option key={tokens} value={tokens}>{tokens / 1_000}K</option>)}</select></label>
     <label className="wide">API Key<div className="endpoint-api-key"><input type={showApiKey ? "text" : "password"} autoComplete="new-password" spellCheck={false} value={apiKey} placeholder={endpoint?.api_key_configured && revealedApiKey === undefined ? "正在读取…" : "可留空"} onChange={(event) => setDraft({ ...draft, api_key: event.target.value })}/><div className="endpoint-api-key-actions"><button type="button" className={copyClass} title={copyLabel} aria-label={copyLabel} disabled={!apiKey} onClick={() => void copy()}>{copyState === "copied" ? <CheckCheck size={12}/> : <Copy size={12}/>}</button><button type="button" title={apiKeyVisibilityLabel} aria-label={apiKeyVisibilityLabel} onClick={() => setShowApiKey((visible) => !visible)}>{showApiKey ? <EyeOff size={13}/> : <Eye size={13}/>}</button></div></div></label>
     <div className="wide endpoint-structured-headers"><StructuredKeyValueEditor label="Headers" description="可选。每个 HTTP Header 单独填写，无需输入 JSON 或多行格式文本。" rows={headerRows} keyLabel="Name" keyPlaceholder="Header name" valuePlaceholder="Header value" addLabel="添加 Header" showValues={showHeaders} revealAction={headerRows.length > 0 ? <button type="button" className="structured-field-visibility" title={showHeaders ? "隐藏 Header Value" : "显示 Header Value"} aria-label={showHeaders ? "隐藏 Header Value" : "显示 Header Value"} onClick={() => setShowHeaders((visible) => !visible)}>{showHeaders ? <EyeOff size={14}/> : <Eye size={14}/>}</button> : undefined} onChange={(rows) => { setShowHeaders(true); setHeaderRows(rows); }}/></div>
-  </div><div className="endpoint-editor-buttons"><button type="button" className="secondary compact" onClick={onClose}>取消</button><button type="button" className="primary compact" disabled={duplicateHeaderNames || !endpointDraftValid(endpointDraft)} onClick={save}>保存接入点</button></div></div>;
+    <div className="wide endpoint-structured-headers"><StructuredKeyValueEditor label="Request Fields" description={'可选。作为 JSON 请求体顶层字段发送；字符串需写成 "fast"，也支持数字、布尔值、数组和对象。'} rows={requestRows} keyLabel="Field" keyPlaceholder="例如：service_tier" valuePlaceholder={'例如："fast"'} addLabel="Add Req Field" showValues={showRequestFields} revealAction={requestRows.length > 0 ? <button type="button" className="structured-field-visibility" title={showRequestFields ? "隐藏 Request Field Value" : "显示 Request Field Value"} aria-label={showRequestFields ? "隐藏 Request Field Value" : "显示 Request Field Value"} onClick={() => setShowRequestFields((visible) => !visible)}>{showRequestFields ? <EyeOff size={14}/> : <Eye size={14}/>}</button> : undefined} onChange={(rows) => { setShowRequestFields(true); setRequestRows(rows); }}/>{parsedRequestFields.error && !duplicateRequestNames && <small className="structured-field-error" role="alert">{parsedRequestFields.error}</small>}</div>
+  </div><div className="endpoint-editor-buttons"><button type="button" className="secondary compact" onClick={onClose}>取消</button><button type="button" className="primary compact" disabled={saveDisabled} onClick={save}>保存接入点</button></div></div>;
 }
 
 function RuntimeSettingsPanel({ panelRef, server, session, pendingKeys, credentialPending, revealedApiKey, onUpdate, onApiKeyUpdate, onApiKeyReveal }: {
