@@ -9,6 +9,11 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 ## Belongs here
 
 - Protocol-neutral runtime data structures and algorithms.
+- The authoritative per-Session Turn Gate and minimal Turn reducer: durable
+  `TurnId`, monotonic `TurnEpoch`, exact `TurnToken` validation, Active-Turn
+  ownership, stop intent, immutable terminal outcome, and rejection of stale or
+  late worker/model/tool events. Worker activity and topic state are subordinate
+  facts and must never create or revive a Turn.
 - Model request/response adapters and cache planning. Provider-facing tool
   schemas are rendered through a dedicated protocol-dialect module rather than
   mutated in the capability registry or assembled ad hoc in hosts. The executor
@@ -60,8 +65,16 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   response parsing/execution batch use the same earliest logical timestamp so
   they appear before later user/runtime submissions. Logical timestamps are only
   for prompt assembly order and must not be rendered into the model prompt.
-- Active-turn context updates such as user supplements entered while a model
-  turn is in progress, including their prompt-slice insertion and audit events.
+- Active-turn context updates such as explicit user supplements entered while a
+  model turn is in progress, including their prompt-slice insertion and audit
+  events. Core owns the Turn's one-way input-admission gate and seals a
+  `PromptCut` before each model request to record exactly which input sequence
+  that request consumes. Command acceptance alone does not prove that a
+  supplement influenced the current model response. When Core accepts a
+  terminal/final response, it keeps only input covered by an already-sent
+  PromptCut in the current Turn and returns every accepted-but-unconsumed task
+  input to the Host for atomic conversion into a new-turn intent. The new Turn
+  starts from its first model round with a fresh `TurnToken`.
 - Active-turn reminders. Core evaluates the host-loaded, user-global reminder
   schedules independently for active-time and completed-round intervals, then
   submits each due random selection as a SYSTEM component before the next model

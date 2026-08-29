@@ -18,9 +18,11 @@ It may contain:
 - MCP server management presentation: transport-specific forms, connection and
   tool-count status, per-Session enable switches, reconnect/edit/delete
   controls, responsive layout, and redacted secret placeholders.
-- Bounded client history and strict session-aware reducers for WebSocket
-  events, plus progressive DOM mounting and UI-owned scroll anchoring for long
-  conversations.
+- Bounded client history and revision-aware projection storage for WebSocket
+  data, plus progressive DOM mounting and UI-owned scroll anchoring for long
+  conversations. Agent lifecycle state is rendered from the authoritative Pod
+  projection; browser reducers must not infer Session/Turn working, cancellation,
+  or terminal state from core topics or worker activity.
 - Frame-budgeted, order-preserving inbound event batching; memoized turn
   subtrees; and browser layout/paint containment for completed offscreen turns.
   These presentation optimizations must not drop or reorder semantic events.
@@ -28,7 +30,9 @@ It may contain:
   one stable `command_id`, keeps user content until the matching committed
   acknowledgement, and retries the same ID after reconnect. Accepted commands
   remain owned and cannot be silently replaced by editing, deleting, reordering,
-  switching Session, or another tab.
+  switching Session, or another tab. The UI may render Pod-projected input as
+  waiting for the next Turn, but it must not decide this from whether a final
+  answer is visible: Core's input-admission result is authoritative.
 - Per-tab semantic event cursors and strict sequenced delivery. In cursor mode,
   authoritative state is reduced only from `semantic_event` envelopes; raw
   legacy duplicates are ignored. The cursor advances only after the reducer
@@ -38,6 +42,11 @@ It may contain:
 
 It must not contain:
 
+- A second Agent lifecycle state machine. Browser-local command delivery may show
+  Sending/Retrying, but it must not create, cancel, finish, or revive a Turn.
+- Direct lifecycle decisions from `turn_started`, `turn_finished`, `core_topic`,
+  or `worker_activity`; those events may populate a timeline only after Pod/Core
+  has assigned them to an authoritative Turn projection.
 - Model service/model networking, prompt or response-protocol parsing, memory/tool
   execution, command approval policy, or audit persistence.
 - Reinterpretation of core topic semantics from unstructured strings when a
