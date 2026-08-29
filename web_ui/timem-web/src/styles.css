@@ -1205,8 +1205,11 @@ button:disabled { cursor: not-allowed; }
 .turn-assistant-frame { position: relative; overflow: visible; padding-left: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
 .turn-assistant-frame.working { animation: none; }
 .turn-assistant-heading { position: relative; z-index: 2; min-height: 28px; padding: 0 0 0 10px; border-bottom: 0; }
-.turn-work-panel { position: relative; z-index: 1; margin-top: -4px; overflow: hidden; border-radius: 11px; background: #353535; }
-.turn-work-scroll { padding: 14px 10px 7px; }
+.turn-work-panel { position: relative; z-index: 1; margin-top: -4px; overflow: hidden; border: 1px solid #4a4a4a; border-radius: 11px; background: #353535; box-shadow: none; }
+.turn-work-scroll { --work-edge-fade-size: 16px; padding: 14px 10px 7px; }
+.turn-work-scroll.fade-top { -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--work-edge-fade-size)); mask-image: linear-gradient(to bottom, transparent 0, #000 var(--work-edge-fade-size)); }
+.turn-work-scroll.fade-bottom { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--work-edge-fade-size)), transparent 100%); mask-image: linear-gradient(to bottom, #000 calc(100% - var(--work-edge-fade-size)), transparent 100%); }
+.turn-work-scroll.fade-top.fade-bottom { -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--work-edge-fade-size), #000 calc(100% - var(--work-edge-fade-size)), transparent 100%); mask-image: linear-gradient(to bottom, transparent 0, #000 var(--work-edge-fade-size), #000 calc(100% - var(--work-edge-fade-size)), transparent 100%); }
 .tool-activity { margin: 0; }
 .tool-activity summary,
 .tool-activity-static { min-height: 27px; padding: 2px 4px; gap: 6px; }
@@ -1221,7 +1224,7 @@ button:disabled { cursor: not-allowed; }
 .composer-actions > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 :root[data-theme="light"] .turn-assistant-frame,
 :root[data-theme="light"] .turn-assistant-frame.working { border: 0; border-radius: 0; background: transparent; box-shadow: none; }
-:root[data-theme="light"] .turn-work-panel { background: #fafbfb; }
+:root[data-theme="light"] .turn-work-panel { border-color: #d3ddda; background: #fafbfb; box-shadow: none; }
 :root[data-theme="light"] .turn-assistant-heading { border-bottom: 0; }
 @media (max-width: 720px) {
   .turn-user-frame { max-width: 94%; }
@@ -3005,32 +3008,27 @@ body {
 :root[data-theme="light"] .worker-role-item.delete-selecting input[type="checkbox"] { accent-color: #c84b45; }
 :root[data-theme="light"] .mem-card:disabled .mem-card-copy small { color: #66716d; }
 
-/* Structured sub-answers share one compact delivery surface with the final answer. */
+/* Chat sub-answers use the same quiet disclosure language as Thought/Action. */
 .turn-answer-delivery { margin-top: 15px; min-width: 0; }
-.turn-answer-tabs { display: flex; align-items: end; gap: 3px; overflow-x: auto; border-bottom: 1px solid #2b3943; }
-.turn-answer-tabs button { flex: none; border: 0; border-bottom: 2px solid transparent; padding: 7px 10px 6px; background: transparent; color: #8498a3; font-size: 11px; font-weight: 700; }
-.turn-answer-tabs button:hover { color: #c7d8de; background: #162129; }
-.turn-answer-tabs button.selected { border-bottom-color: #62bba9; color: #dff4ef; }
-.turn-answer-panel { display: grid; padding: 12px 2px 2px; color: #e6edf4; font-size: var(--content-size); line-height: 1.68; }
-.turn-answer-view { min-width: 0; grid-area: 1 / 1; }
-.turn-answer-view.inactive { visibility: hidden; pointer-events: none; user-select: none; }
-.turn-final-placeholder { padding: 3px 0 15px; color: #7d8b93; font-size: 13px; font-style: italic; }
+.turn-chat-delivery { min-width: 0; }
+.turn-chat-heading { position: relative; z-index: 2; min-height: 28px; display: flex; align-items: center; padding: 0 0 0 10px; }
+.chat-title-chip { color: #b9d8cf; font-size: 12px; }
+.chat-title-chip:hover { color: #e1f2ed; }
+.turn-chat-panel { position: relative; z-index: 1; margin-top: -4px; overflow: hidden; border: 1px solid #315048; border-radius: 11px; padding: 14px 12px 5px; background: linear-gradient(145deg, #1f302b, #1b2925); color: #e6f1ed; font-size: var(--content-size); line-height: 1.68; }
+.turn-chat-delivery.collapsed + .turn-final-delivery { margin-top: 7px; }
 .turn-interim-list { display: grid; gap: 0; }
 .turn-interim-item { padding: 2px 0 16px; }
-.turn-interim-item + .turn-interim-item { border-top: 1px solid #2b3943; padding-top: 16px; }
-.turn-interim-item h3 { margin: 0 0 10px; color: #c8d7de; font-size: 13px; line-height: 1.45; font-weight: 750; }
-.turn-interim-item h3 span { color: #6fc4b3; }
-.turn-interim-item .message-content { color: #e6edf4; }
-:root[data-theme="light"] .turn-answer-tabs { border-bottom-color: #d4dee2; }
-:root[data-theme="light"] .turn-answer-tabs button { color: #667980; }
-:root[data-theme="light"] .turn-answer-tabs button:hover { color: #274149; background: #edf3f4; }
-:root[data-theme="light"] .turn-answer-tabs button.selected { border-bottom-color: #248879; color: #185f55; }
-:root[data-theme="light"] .turn-answer-panel { color: #22343b; }
-:root[data-theme="light"] .turn-final-placeholder { color: #78878d; }
-:root[data-theme="light"] .turn-interim-item + .turn-interim-item { border-top-color: #d4dee2; }
-:root[data-theme="light"] .turn-interim-item h3 { color: #38515a; }
+.turn-interim-item + .turn-interim-item { border-top: 1px solid #3b554e; padding-top: 16px; }
+.turn-interim-item h3 { margin: 0 0 10px; color: #d2e5df; font-size: calc(var(--content-size) + 1px); line-height: 1.4; font-weight: 750; }
+.turn-interim-item h3 span { color: #76c8b5; }
+.turn-interim-item .message-content { color: #e6f1ed; }
+:root[data-theme="light"] .chat-title-chip { color: #356f62; }
+:root[data-theme="light"] .chat-title-chip:hover { color: #174f44; }
+:root[data-theme="light"] .turn-chat-panel { border-color: #bddbd2; background: linear-gradient(145deg, #edf8f4, #e5f2ed); color: #213a33; }
+:root[data-theme="light"] .turn-interim-item + .turn-interim-item { border-top-color: #c9ded7; }
+:root[data-theme="light"] .turn-interim-item h3 { color: #31574d; }
 :root[data-theme="light"] .turn-interim-item h3 span { color: #237f72; }
-:root[data-theme="light"] .turn-interim-item .message-content { color: #22343b; }
+:root[data-theme="light"] .turn-interim-item .message-content { color: #213a33; }
 
 /* Long final answers expose a bookmark directory drawer from the session/chat divider. */
 
@@ -4409,11 +4407,22 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 :root[data-theme="light"] .chat-library-search-main p { color: #43534d; }
 
 /* Modal centers obscure and block the inactive workspace behind them. */
-body.workspace-modal-open { overflow: hidden; }
-body.workspace-modal-open .app-shell { user-select: none; }.chat-library-center-backdrop {
-  backdrop-filter: blur(9px) saturate(.78);
-  -webkit-backdrop-filter: blur(9px) saturate(.78);
+html:has(body.workspace-modal-open),
+body.workspace-modal-open { overflow: hidden; overscroll-behavior: none; }
+body.workspace-modal-open .app-shell { user-select: none; }
+.settings-center-backdrop,
+.chat-library-center-backdrop {
+  isolation: isolate;
+  overscroll-behavior: none;
+  background: #030706e8;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
+.settings-center-content,
+.chat-library-list { overscroll-behavior: contain; }
+:root[data-theme="light"] .settings-center-backdrop,
+:root[data-theme="light"] .chat-library-center-backdrop { background: #26302dd9; }
+.center-modal-secondary { z-index: 50; }
 .chat-library-list { contain: layout paint style; }
 .chat-library-search-row,
 .chat-library-favorite-row { contain: layout paint style; content-visibility: auto; contain-intrinsic-size: auto 82px; }
@@ -4791,3 +4800,22 @@ body.workspace-modal-open .app-shell { user-select: none; }.chat-library-center-
 .settings-capacity-grid .settings-field { min-width: 0; }
 .settings-capacity-card { margin-top: 10px; }
 @media (max-width: 720px) { .settings-capacity-grid { grid-template-columns: 1fr; } }
+
+
+/* True modal isolation for Settings, Search, and Favorite centers. */
+html:has(body.workspace-modal-open),
+body.workspace-modal-open { overflow: hidden; overscroll-behavior: none; }
+body.workspace-modal-open .app-shell { user-select: none; }
+.settings-center-backdrop,
+.chat-library-center-backdrop {
+  isolation: isolate;
+  overscroll-behavior: none;
+  background: #030706e8;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.settings-center-content,
+.chat-library-list { overscroll-behavior: contain; }
+:root[data-theme="light"] .settings-center-backdrop,
+:root[data-theme="light"] .chat-library-center-backdrop { background: #26302dd9; }
+.center-modal-secondary { z-index: 50; }

@@ -1201,9 +1201,13 @@ struct ActionAuditEntry {
     result_summary: Option<String>,
 }
 
+const ACTION_AUDIT_ACTIVE_TURN_MAX_BYTES: u64 = 512 * 1024;
+
 #[derive(Debug, Clone)]
 struct FileActionAuditStore {
     file: PathBuf,
+    turns_dir: PathBuf,
+    capacity_bytes: Arc<std::sync::Mutex<Option<u64>>>,
     guard: MemGuard,
 }
 
@@ -1211,52 +1215,62 @@ impl FileActionAuditStore {
     fn new(memory_dir: &Path) -> Self {
         let space_dir = space_dir_for_memory_dir(memory_dir);
         let file = space_dir.join("audit").join("action_audit.json");
+        let turns_dir = file.with_file_name("action_audit.json.turns");
         let guard = MemGuard::for_audit_file(&file);
-        Self { file, guard }
+        Self {
+            file,
+            turns_dir,
+            capacity_bytes: Arc::new(std::sync::Mutex::new(None)),
+            guard,
+        }
     }
 
     fn begin_turn(&self, turn_id: &str, started_at_ms: i64, user_question: &str) {
         let wrote = self
             .guard
             .with_write(|| {
-                let mut doc = self.read_doc_unlocked();
-                if doc.turns.iter().any(|turn| turn.turn_id == turn_id) {
+                if !self.ensure_segmented_unlocked() {
                     return false;
                 }
-                doc.turns.push(ActionAuditTurn {
+                let path = self.turn_path(turn_id);
+                if path.exists() {
+                    return self
+                        .read_turn_unlocked(&path)
+                        .is_some_and(|turn| turn.turn_id == turn_id);
+                }
+                let turn = ActionAuditTurn {
                     turn_id: turn_id.to_string(),
                     started_at_ms,
                     user_question: user_question.to_string(),
                     interactions: Vec::new(),
-                });
-                self.write_doc_unlocked(&doc)
+                };
+                self.write_active_turn_unlocked(&path, &turn)
             })
             .unwrap_or(false);
-        if wrote {
-            let api_audit = self.file.with_file_name("api_audit.json");
-            let _ = audit::enforce_audit_storage_budget(&api_audit);
-        }
+        let _ = wrote;
     }
 
     fn record_action(&self, entry: ActionAuditEntry, turn_id: &str, user_question: &str) {
         let wrote = self
             .guard
             .with_write(|| {
-                let mut doc = self.read_doc_unlocked();
-                let turn_index = if let Some(index) =
-                    doc.turns.iter().position(|turn| turn.turn_id == turn_id)
+                if !self.ensure_segmented_unlocked() {
+                    return false;
+                }
+                let path = self.turn_path(turn_id);
+                let existing = self.read_turn_unlocked(&path);
+                if existing
+                    .as_ref()
+                    .is_some_and(|turn| turn.turn_id != turn_id)
                 {
-                    index
-                } else {
-                    doc.turns.push(ActionAuditTurn {
-                        turn_id: turn_id.to_string(),
-                        started_at_ms: now_ms(),
-                        user_question: user_question.to_string(),
-                        interactions: Vec::new(),
-                    });
-                    doc.turns.len().saturating_sub(1)
-                };
-                let turn = &mut doc.turns[turn_index];
+                    return false;
+                }
+                let mut turn = existing.unwrap_or_else(|| ActionAuditTurn {
+                    turn_id: turn_id.to_string(),
+                    started_at_ms: now_ms(),
+                    user_question: user_question.to_string(),
+                    interactions: Vec::new(),
+                });
                 let interaction_index = if let Some(index) = turn
                     .interactions
                     .iter()
@@ -1271,13 +1285,81 @@ impl FileActionAuditStore {
                     turn.interactions.len().saturating_sub(1)
                 };
                 turn.interactions[interaction_index].actions.push(entry);
-                self.write_doc_unlocked(&doc)
+                self.write_active_turn_unlocked(&path, &turn)
             })
             .unwrap_or(false);
-        if wrote {
-            let api_audit = self.file.with_file_name("api_audit.json");
-            let _ = audit::enforce_audit_storage_budget(&api_audit);
+        let _ = wrote;
+    }
+
+    fn turn_path(&self, turn_id: &str) -> PathBuf {
+        self.turn_path_in(&self.turns_dir, turn_id)
+    }
+
+    fn turn_path_in(&self, directory: &Path, turn_id: &str) -> PathBuf {
+        let mut hasher = DefaultHasher::new();
+        turn_id.hash(&mut hasher);
+        directory.join(format!("turn-{:016x}.json", hasher.finish()))
+    }
+
+    fn ensure_segmented_unlocked(&self) -> bool {
+        if self.turns_dir.exists() {
+            return self.ensure_capacity_initialized_unlocked();
         }
+        let Some(parent) = self.turns_dir.parent() else {
+            return false;
+        };
+        if fs::create_dir_all(parent).is_err() {
+            return false;
+        }
+        let temporary = parent.join(format!(
+            ".action-audit-turns.tmp-{}-{}",
+            std::process::id(),
+            unique_id("migrate")
+        ));
+        if fs::create_dir(&temporary).is_err() {
+            return false;
+        }
+        let legacy = self.read_doc_unlocked();
+        let result = (|| {
+            for turn in &legacy.turns {
+                let path = self.turn_path_in(&temporary, &turn.turn_id);
+                if path.exists() {
+                    return false;
+                }
+                if !self.write_turn_unlocked(&path, turn) {
+                    return false;
+                }
+            }
+            if fs::rename(&temporary, &self.turns_dir).is_err() {
+                return false;
+            }
+            if let Some(latest) = legacy.turns.last() {
+                if !self.write_latest_view_unlocked(latest) {
+                    return false;
+                }
+            } else if !self.write_empty_view_unlocked() {
+                return false;
+            }
+            self.ensure_capacity_initialized_unlocked()
+        })();
+        if !result {
+            let _ = fs::remove_dir_all(&temporary);
+        }
+        result
+    }
+
+    fn ensure_capacity_initialized_unlocked(&self) -> bool {
+        let Ok(mut cached) = self.capacity_bytes.lock() else {
+            return false;
+        };
+        if cached.is_some() {
+            return true;
+        }
+        let Ok(total) = self.scan_capacity_bytes_unlocked() else {
+            return false;
+        };
+        *cached = Some(total);
+        true
     }
 
     fn read_doc_unlocked(&self) -> ActionAuditDocument {
@@ -1287,14 +1369,142 @@ impl FileActionAuditStore {
         serde_json::from_str(&text).unwrap_or_else(|_| Self::empty_doc())
     }
 
+    fn read_turn_unlocked(&self, path: &Path) -> Option<ActionAuditTurn> {
+        let bytes = fs::read(path).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    fn write_turn_unlocked(&self, path: &Path, turn: &ActionAuditTurn) -> bool {
+        let doc = ActionAuditDocument {
+            version: 1,
+            turns: vec![turn.clone()],
+        };
+        let Ok(text) = bounded_action_audit_text(&doc, ACTION_AUDIT_ACTIVE_TURN_MAX_BYTES) else {
+            return false;
+        };
+        let Ok(doc) = serde_json::from_str::<ActionAuditDocument>(&text) else {
+            return false;
+        };
+        let Some(turn) = doc.turns.first() else {
+            return false;
+        };
+        let Ok(mut bytes) = serde_json::to_vec(turn) else {
+            return false;
+        };
+        bytes.push(b'\n');
+        atomic_write_file(path, &bytes).is_ok()
+    }
+
+    fn write_latest_view_unlocked(&self, turn: &ActionAuditTurn) -> bool {
+        let doc = ActionAuditDocument {
+            version: 1,
+            turns: vec![turn.clone()],
+        };
+        self.write_doc_unlocked(&doc)
+    }
+
+    fn write_empty_view_unlocked(&self) -> bool {
+        self.write_doc_unlocked(&Self::empty_doc())
+    }
+
     fn write_doc_unlocked(&self, doc: &ActionAuditDocument) -> bool {
         if let Some(parent) = self.file.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let Ok(text) = bounded_action_audit_text(doc, audit::ACTION_AUDIT_MAX_BYTES) else {
+        let Ok(text) = bounded_action_audit_text(doc, ACTION_AUDIT_ACTIVE_TURN_MAX_BYTES) else {
             return false;
         };
         atomic_write_file(&self.file, format!("{text}\n").as_bytes()).is_ok()
+    }
+
+    fn write_active_turn_unlocked(&self, path: &Path, turn: &ActionAuditTurn) -> bool {
+        let old_turn_bytes = fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let old_latest_bytes = fs::metadata(&self.file)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if !self.write_turn_unlocked(path, turn) || !self.write_latest_view_unlocked(turn) {
+            return false;
+        }
+        let new_turn_bytes = fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let new_latest_bytes = fs::metadata(&self.file)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let Ok(mut cached) = self.capacity_bytes.lock() else {
+            return false;
+        };
+        let Some(total) = *cached else {
+            return false;
+        };
+        let total = total
+            .saturating_sub(old_turn_bytes)
+            .saturating_sub(old_latest_bytes)
+            .saturating_add(new_turn_bytes)
+            .saturating_add(new_latest_bytes);
+        *cached = Some(total);
+        drop(cached);
+        if total > audit::ACTION_AUDIT_MAX_BYTES {
+            self.reclaim_capacity_unlocked(Some(path))
+        } else {
+            true
+        }
+    }
+
+    fn scan_capacity_bytes_unlocked(&self) -> std::io::Result<u64> {
+        let mut total = fs::metadata(&self.file)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        for entry in fs::read_dir(&self.turns_dir)? {
+            let metadata = entry?.metadata()?;
+            if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+            }
+        }
+        Ok(total)
+    }
+
+    fn reclaim_capacity_unlocked(&self, active: Option<&Path>) -> bool {
+        let Ok(entries) = fs::read_dir(&self.turns_dir) else {
+            return false;
+        };
+        let mut files = entries
+            .flatten()
+            .filter_map(|entry| {
+                let metadata = entry.metadata().ok()?;
+                metadata.is_file().then_some((
+                    metadata.modified().ok(),
+                    metadata.len(),
+                    entry.path(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        files.sort_by_key(|(modified, _, path)| (*modified, path.clone()));
+        let latest_bytes = fs::metadata(&self.file)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let mut total =
+            latest_bytes.saturating_add(files.iter().map(|(_, bytes, _)| *bytes).sum::<u64>());
+        let target = audit::ACTION_AUDIT_MAX_BYTES.saturating_mul(3) / 4;
+        for (_, bytes, path) in files {
+            if total <= target {
+                break;
+            }
+            if active.is_some_and(|active| active == path) {
+                continue;
+            }
+            if fs::remove_file(&path).is_err() {
+                return false;
+            }
+            total = total.saturating_sub(bytes);
+        }
+        let Ok(mut cached) = self.capacity_bytes.lock() else {
+            return false;
+        };
+        *cached = Some(total);
+        total <= audit::ACTION_AUDIT_MAX_BYTES
     }
 
     fn empty_doc() -> ActionAuditDocument {
@@ -6430,7 +6640,9 @@ impl FileChatHistoryStore {
         MemGuard::for_audit_file(&self.audit_file).with_write(|| {
             let mut deleted_turn_ids = HashSet::new();
             for audit_file in self.audit_files() {
-                if !audit_file.exists() {
+                if !audit_file.exists()
+                    && !rolling_file_store::segmented_directory(&audit_file).exists()
+                {
                     continue;
                 }
                 let events = read_audit_events_unlocked(&audit_file)
@@ -6539,6 +6751,12 @@ impl FileChatHistoryStore {
 }
 
 fn read_audit_events_unlocked(path: &Path) -> std::io::Result<Vec<Value>> {
+    if rolling_file_store::segmented_directory(path).exists() {
+        return Ok(rolling_file_store::read_segmented_records(path)?
+            .into_iter()
+            .filter_map(|record| serde_json::from_slice::<Value>(&record).ok())
+            .collect());
+    }
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -6561,12 +6779,37 @@ fn read_audit_events_unlocked(path: &Path) -> std::io::Result<Vec<Value>> {
 fn write_audit_events_unlocked(path: &Path, events: &[Value]) -> std::io::Result<()> {
     let mut bytes = Vec::new();
     if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+        let mut records = Vec::with_capacity(events.len());
         for event in events {
-            writeln!(
-                &mut bytes,
-                "{}",
-                serde_json::to_string(event).unwrap_or_default()
+            let mut record = serde_json::to_vec(event).map_err(std::io::Error::other)?;
+            record.push(b'\n');
+            records.push(record);
+        }
+        if rolling_file_store::segmented_directory(path).exists() {
+            let stable_bytes = records
+                .iter()
+                .map(|record| record.len() as u64)
+                .sum::<u64>();
+            let slices = stable_bytes
+                .div_ceil(rolling_file_store::AUDIT_ROLLING_SLICE_BYTES)
+                .max(1);
+            let capacity = rolling_file_store::RollingCapacity::with_slice_bytes(
+                slices
+                    .saturating_add(1)
+                    .saturating_mul(rolling_file_store::AUDIT_ROLLING_SLICE_BYTES),
+                rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+            )
+            .map_err(std::io::Error::other)?;
+            rolling_file_store::rewrite_segmented_records(
+                path,
+                &records,
+                capacity,
+                rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
             )?;
+            return Ok(());
+        }
+        for record in records {
+            bytes.extend_from_slice(&record);
         }
     } else {
         let doc = json!({"version": 1, "events": events});

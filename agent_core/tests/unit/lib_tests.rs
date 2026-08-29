@@ -1832,3 +1832,61 @@ fn action_audit_capacity_summarizes_one_oversized_turn_without_changing_schema()
         .unwrap()
         .contains("original_chars="));
 }
+
+#[test]
+fn legacy_multi_turn_action_audit_migrates_before_new_turn_without_losing_history() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_action_audit_migration_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let audit_dir = root.join("audit");
+    fs::create_dir_all(&audit_dir).unwrap();
+    let legacy = ActionAuditDocument {
+        version: 1,
+        turns: vec![
+            ActionAuditTurn {
+                turn_id: "legacy_one".to_string(),
+                started_at_ms: 1,
+                user_question: "first".to_string(),
+                interactions: Vec::new(),
+            },
+            ActionAuditTurn {
+                turn_id: "legacy_two".to_string(),
+                started_at_ms: 2,
+                user_question: "second".to_string(),
+                interactions: Vec::new(),
+            },
+        ],
+    };
+    fs::write(
+        audit_dir.join("action_audit.json"),
+        serde_json::to_vec_pretty(&legacy).unwrap(),
+    )
+    .unwrap();
+
+    let store = FileActionAuditStore::new(&root);
+    store.begin_turn("new_turn", 3, "third");
+
+    let turns_dir = audit_dir.join("action_audit.json.turns");
+    let migrated = fs::read_dir(&turns_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| fs::read(entry.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice::<ActionAuditTurn>(&bytes).ok())
+        .map(|turn| turn.turn_id)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        migrated,
+        BTreeSet::from([
+            "legacy_one".to_string(),
+            "legacy_two".to_string(),
+            "new_turn".to_string(),
+        ])
+    );
+    let latest: ActionAuditDocument =
+        serde_json::from_slice(&fs::read(audit_dir.join("action_audit.json")).unwrap()).unwrap();
+    assert_eq!(latest.turns.len(), 1);
+    assert_eq!(latest.turns[0].turn_id, "new_turn");
+    let _ = fs::remove_dir_all(root);
+}

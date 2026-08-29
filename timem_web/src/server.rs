@@ -6187,19 +6187,20 @@ fn restore_stored_session(
 const RUNTIME_RESTART_HISTORY_KIND: &str = "runtime_restart";
 const RUNTIME_RESTART_HISTORY_CONTENT: &str = "Timem Web 已重新启动，以下内容来自新的运行实例";
 
-fn append_history_record_and_schedule_retention(
+fn append_history_record(
     state: &AppState,
     session_id: &str,
     record: &ChatHistoryRecord,
 ) -> Result<(), String> {
-    current_session_store(state)?.append_history_record(session_id, record)?;
-    state.temporary_retention_wakeup.notify_one();
-    Ok(())
+    // History appends are the hot path. Retention is periodic and settings
+    // updates apply synchronously; waking the global worker here made every
+    // chat record scan unrelated temporary stores and API audit history.
+    current_session_store(state)?.append_history_record(session_id, record)
 }
 
 fn append_runtime_restart_history_marker(state: &AppState, session_id: &str) -> Result<(), String> {
     let created_at_ms = now_ms_i64();
-    append_history_record_and_schedule_retention(
+    append_history_record(
         state,
         session_id,
         &ChatHistoryRecord::Message {
@@ -7610,7 +7611,7 @@ fn cancel_pending_work_instruction_turn(
     };
     let mut extra = BTreeMap::new();
     extra.insert("completion".to_string(), completion.clone());
-    append_history_record_and_schedule_retention(
+    append_history_record(
         state,
         session_id,
         &ChatHistoryRecord::Event {
@@ -8906,7 +8907,7 @@ fn start_web_toolgen_turn(
         "source_turn_id".to_string(),
         Value::String(source_turn_id.to_string()),
     );
-    append_history_record_and_schedule_retention(
+    append_history_record(
         state,
         session_id,
         &ChatHistoryRecord::Event {
@@ -9224,7 +9225,7 @@ fn append_chat_history_message(
         "system" => ChatHistoryRole::System,
         _ => ChatHistoryRole::System,
     };
-    append_history_record_and_schedule_retention(
+    append_history_record(
         state,
         session_id,
         &ChatHistoryRecord::Message {
@@ -9252,7 +9253,7 @@ fn append_chat_history_event(
     let mut extra = BTreeMap::new();
     extra.insert("source".to_string(), Value::String(source.to_string()));
     extra.insert("payload".to_string(), payload);
-    let _ = append_history_record_and_schedule_retention(
+    let _ = append_history_record(
         state,
         session_id,
         &ChatHistoryRecord::Event {
@@ -9290,7 +9291,7 @@ fn append_worker_roles_history(
         "user_entry_created_at_ms".to_string(),
         Value::from(created_at_ms),
     );
-    append_history_record_and_schedule_retention(
+    append_history_record(
         state,
         session_id,
         &ChatHistoryRecord::Event {
@@ -9782,7 +9783,7 @@ fn mark_core_command_accepted(state: &AppState, session_id: &str, command_id: &s
     extra.insert("kind".to_string(), json!("command_delivery"));
     extra.insert("command_id".to_string(), json!(command_id));
     extra.insert("delivery_state".to_string(), json!("core_accepted"));
-    let persist_result = append_history_record_and_schedule_retention(
+    let persist_result = append_history_record(
         state,
         session_id,
         &ChatHistoryRecord::Event {
@@ -10433,7 +10434,7 @@ fn handle_scoped_worker_event(
             if let Some(turn_id) = turn_id.as_deref() {
                 let mut extra = BTreeMap::new();
                 extra.insert("completion".to_string(), completion.clone());
-                let _ = append_history_record_and_schedule_retention(
+                let _ = append_history_record(
                     state,
                     session_id,
                     &ChatHistoryRecord::Event {

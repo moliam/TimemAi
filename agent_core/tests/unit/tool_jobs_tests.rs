@@ -180,3 +180,20 @@ fn temp_case_dir(name: &str) -> PathBuf {
     fs::create_dir_all(&dir).unwrap();
     dir
 }
+
+#[test]
+fn output_tail_is_bounded_and_starts_at_a_utf8_boundary() {
+    let dir = temp_case_dir("bounded_output_tail");
+    let path = dir.join("large.out");
+    let mut bytes = vec![b'x'; 128 * 1024];
+    bytes.extend_from_slice("前缀🙂tail-marker".as_bytes());
+    fs::write(&path, bytes).unwrap();
+
+    let tail = read_output_tail(&path, 17);
+
+    assert!(tail.starts_with("[truncated before]\n"), "{tail:?}");
+    assert!(tail.ends_with("tail-marker"), "{tail:?}");
+    assert!(!tail.contains('�'), "{tail:?}");
+    assert!(tail.len() < 128, "{}", tail.len());
+    let _ = fs::remove_dir_all(dir);
+}

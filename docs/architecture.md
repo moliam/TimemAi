@@ -952,6 +952,26 @@ Session-local state stays outside shared memory ownership:
 - current turn rounds remaining
 - transient cancellation and approval state
 
+
+## High-Frequency Persistence Performance Invariants
+
+Persistence code on a request, message, action, status-poll, or ordinary pagination path must have work bounded by the new record and a fixed-size state window. These paths must not read or rewrite an entire growing JSON, JSONL, or history file, and must not enumerate a directory whose entry count grows with retained history.
+
+Scanning existing records or enumerating segment files is permitted only for explicitly low-frequency work:
+
+- one-time migration from a legacy layout;
+- recovery when a manifest, capacity counter, index, or retention summary is missing, malformed, or fails validation against file length or active-segment metadata;
+- explicit maintenance, diagnostics, export, or user-requested full-history work;
+- retention or capacity reclamation after a hard threshold is actually crossed.
+
+Normal append paths must incrementally maintain their index, capacity manifest, and retention summary. A persisted summary is evidence only after validation against the corresponding file length; an active rolling-segment length is similarly checked against that segment's metadata before append. Failed validation must fall back to the low-frequency recovery path rather than trusting stale state. Capacity reclamation should recover to a lower watermark so a store near its limit does not rescan on every append.
+
+Polling a running or completed job must read a bounded output tail with UTF-8-safe boundary handling; it must never load an unbounded output file merely to compact the result afterward. Compatibility snapshots must also have a fixed byte bound and may not reintroduce whole-history rewrites.
+
+Regression tests for these stores must cover legacy migration, missing or corrupt state recovery, preservation of closed segments or inactive turns during normal append, and fixed-size output-tail behavior. Code review must treat an unbounded `read`, `read_to_string`, read-modify-write, or `read_dir` added to a high-frequency path as an architecture violation unless the call is guarded by one of the low-frequency cases above.
+
+On-disk compatibility is forward-migration oriented: a new binary must ingest supported legacy layouts under the same lock and commit a recoverable migration before removing legacy data. It is not required to keep new layouts writable by older binaries, because continuously mirroring a growing legacy document would violate the bounded-work invariant. Downgrade requires backup or export, and mixed-version concurrent writers for one MEM are unsupported.
+
 ## Prompt Concepts
 
 Timem Shell treats prompt construction as a small event log. The model never

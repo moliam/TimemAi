@@ -132,8 +132,18 @@ pub fn collect_storage_profile(
         durable_bytes: file_size(&durable_file),
         scratch_entries: count_jsonl_entries(&scratch_file),
         scratch_bytes: file_size(&scratch_file),
-        api_audit_bytes: file_size(api_audit_file),
-        action_audit_bytes: file_size(action_audit_file),
+        api_audit_bytes: rolling_storage_bytes(api_audit_file).saturating_add(
+            rolling_storage_bytes(&api_audit_file.with_file_name(format!(
+                "{}l",
+                api_audit_file
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("api_audit.json")
+            ))),
+        ),
+        action_audit_bytes: file_size(action_audit_file).saturating_add(directory_file_bytes(
+            &action_audit_file.with_file_name("action_audit.json.turns"),
+        )),
     }
 }
 
@@ -164,6 +174,28 @@ fn count_jsonl_entries(path: &Path) -> usize {
 
 fn file_size(path: &Path) -> u64 {
     fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
+fn rolling_storage_bytes(path: &Path) -> u64 {
+    let segmented = path.with_file_name(format!(
+        "{}.segments",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("records")
+    ));
+    file_size(path).saturating_add(directory_file_bytes(&segmented))
+}
+
+fn directory_file_bytes(path: &Path) -> u64 {
+    fs::read_dir(path)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|entry| entry.metadata().ok())
+                .filter(|metadata| metadata.is_file())
+                .fold(0u64, |total, metadata| total.saturating_add(metadata.len()))
+        })
+        .unwrap_or(0)
 }
 
 pub fn profile_cache_hit_percent_tenths(cached_tokens: u64, input_tokens: u64) -> Option<u32> {
