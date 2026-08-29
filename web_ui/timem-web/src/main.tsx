@@ -4023,6 +4023,7 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
       + decisions.length,
   );
   const previousTurnState = useRef(turn.state);
+  const previousFinalAnswer = useRef(!!turn.final_answer);
   const [pendingUpdates, setPendingUpdates] = useState(0);
   const [workEdgeFades, setWorkEdgeFades] = useState({ top: false, bottom: false });
   const updateWorkEdgeFades = useCallback((scroll: HTMLDivElement) => {
@@ -4098,10 +4099,12 @@ const TurnInteraction = memo(function TurnInteraction({ sessionId, turn, decisio
 
   useEffect(() => {
     const wasWorking = previousTurnState.current === "working";
+    const finalArrived = !previousFinalAnswer.current && !!turn.final_answer;
     previousTurnState.current = turn.state;
+    previousFinalAnswer.current = !!turn.final_answer;
     if (!wasWorking && turn.state === "working") setShowWorkStream(true);
-    if (wasWorking && turn.state !== "working") setShowWorkStream(false);
-  }, [turn.state]);
+    if (finalArrived || (wasWorking && turn.state === "interrupted")) setShowWorkStream(false);
+  }, [turn.final_answer, turn.state]);
 
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
@@ -4223,65 +4226,31 @@ function areTurnInteractionPropsEqual(previous: TurnInteractionProps, next: Turn
 
 function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, favorite, favoritePending, onToggleFavorite, onToolGen, onDelete }: { turn: WebTurn; toolGenPending: boolean; toolGenBlocked: boolean; favorite?: ChatFavorite; favoritePending: boolean; onToggleFavorite: () => boolean; onToolGen?: () => void; onDelete?: () => void }) {
   const hasFinal = !!turn.final_answer;
-  const hasInterim = turn.sub_answers.length > 0;
-  const showFinalTab = hasFinal || hasInterim;
-  const availableKeys = [...(showFinalTab ? ["final"] : []), ...(hasInterim ? ["interim"] : [])];
-  const newestKey = hasFinal ? "final" : "interim";
-  const [selectedKey, setSelectedKey] = useState(newestKey);
-  const [interimCollapsed, setInterimCollapsed] = useState(false);
-  const interimItems = newestInterimAnswersFirst(turn.sub_answers);
-  const interimPanelId = `turn-interim-${turn.turn_id}`;
-  const previousFinal = useRef<string | null | undefined>(turn.final_answer);
-  const previousSubCount = useRef(turn.sub_answers.length);
-  const manualSelection = useRef(false);
-  const interactingUntil = useRef(0);
-  const markInteracting = () => { interactingUntil.current = Date.now() + 1_500; };
-  const selectPanel = (key: string) => {
-    manualSelection.current = true;
-    if (key === "interim") setInterimCollapsed(false);
-    setSelectedKey(key);
-  };
+  const hasChat = turn.sub_answers.length > 0;
+  const [chatExpanded, setChatExpanded] = useState(() => !hasFinal);
+  const previousFinal = useRef(hasFinal);
+  const chatPanelId = `turn-chat-${turn.turn_id}`;
+  const chatItems = newestInterimAnswersFirst(turn.sub_answers);
 
   useEffect(() => {
     const finalArrived = !previousFinal.current && !!turn.final_answer;
-    const interimArrived = turn.sub_answers.length > previousSubCount.current;
-    previousFinal.current = turn.final_answer;
-    previousSubCount.current = turn.sub_answers.length;
-    if (manualSelection.current || Date.now() < interactingUntil.current) return;
-    if (finalArrived) setSelectedKey("final");
-    else if (interimArrived && !turn.final_answer) setSelectedKey("interim");
-  }, [turn.final_answer, turn.sub_answers]);
+    previousFinal.current = !!turn.final_answer;
+    if (finalArrived) setChatExpanded(false);
+  }, [turn.final_answer]);
 
-  const selected = availableKeys.includes(selectedKey) ? selectedKey : availableKeys[0];
-  if (!selected) return null;
-  if (availableKeys.length === 1 && selected === "final" && turn.final_answer) {
-    return <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} favorite={favorite} favoritePending={favoritePending} onToggleFavorite={onToggleFavorite} onToolGen={onToolGen} onDelete={onDelete}/>;
-  }
-  return <section className="turn-answer-delivery" onPointerDown={markInteracting} onFocus={markInteracting} onCopy={markInteracting}>
-    {hasInterim && <div className="turn-answer-tabs">
-      <div className="turn-answer-tablist" role="tablist" aria-label="Turn answers">
-        {showFinalTab && <button type="button" role="tab" aria-selected={selected === "final"} className={selected === "final" ? "selected" : ""} onClick={() => selectPanel("final")}>Final Answer</button>}
-        {hasInterim && <button type="button" role="tab" aria-selected={selected === "interim"} aria-controls={interimPanelId} className={selected === "interim" ? "selected" : ""} onClick={() => selectPanel("interim")}>Interim</button>}
+  return <section className="turn-answer-delivery">
+    {hasChat && <section className={`turn-chat-delivery${chatExpanded ? " expanded" : " collapsed"}`}>
+      <div className="turn-chat-heading">
+        <button type="button" className="working-chip work-title-chip work-collapse-toggle chat-title-chip" title={chatExpanded ? "Hide chat answers" : "Show chat answers"} aria-label={chatExpanded ? "Hide chat answers" : "Show chat answers"} aria-expanded={chatExpanded} aria-controls={chatPanelId} onClick={() => setChatExpanded((expanded) => !expanded)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>Chat</button>
       </div>
-      <button type="button" className="turn-interim-collapse" aria-expanded={!interimCollapsed} aria-controls={interimPanelId} aria-label={interimCollapsed ? "Expand interim answers" : "Collapse interim answers"} title={interimCollapsed ? "Expand interim answers" : "Collapse interim answers"} onClick={() => setInterimCollapsed((collapsed) => !collapsed)}>
-        {interimCollapsed ? <ChevronRight size={12} aria-hidden="true"/> : <ChevronDown size={12} aria-hidden="true"/>}
-      </button>
-    </div>}
-    <div className={`turn-answer-panel${selected === "interim" && interimCollapsed ? " interim-collapsed" : ""}`} role="tabpanel">
-      {showFinalTab && <div className={`turn-answer-view ${selected === "final" ? "selected" : "inactive"}`} aria-hidden={selected !== "final"}>
-        {hasFinal && turn.final_answer ? <>
-          <FinalAnswerContent text={turn.final_answer}/>
-          <button type="button" className={`final-favorite standalone ${favorite || favoritePending ? "active" : ""} ${favoritePending ? "pending" : ""}`} title={favoritePending ? "Saving favorite" : favorite ? "Remove from favorites" : "Favorite this answer"} aria-label={favoritePending ? "Saving favorite" : favorite ? "Remove answer from favorites" : "Favorite answer"} aria-pressed={!!favorite || favoritePending} disabled={favoritePending} onClick={onToggleFavorite}><Star size={13} fill={favorite || favoritePending ? "currentColor" : "none"}/></button>
-          {turn.completion ? <CompletionCard completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen}/> : null}
-        </> : <div className="turn-final-placeholder" role="status" aria-live="polite">{turn.state === "working" ? "Still working ..." : turn.state === "interrupted" ? "Interrupted by runtime restart." : "No final answer was produced."}</div>}
-      </div>}
-      {hasInterim && <div id={interimPanelId} className={`turn-answer-view ${selected === "interim" ? "selected" : "inactive"}${interimCollapsed ? " collapsed" : ""}`} aria-hidden={selected !== "interim" || interimCollapsed}>
-        {!interimCollapsed && <div className="turn-interim-list">{interimItems.map(({ item, ordinal }) => <section className="turn-interim-item" key={item.sub_answer_id}>
+      {chatExpanded && <div id={chatPanelId} className="turn-chat-panel" role="region" aria-label="Chat answers">
+        <div className="turn-interim-list">{chatItems.map(({ item, ordinal }) => <section className="turn-interim-item" key={item.sub_answer_id}>
           <h3><span>{ordinal}.</span> {item.task}</h3>
           <div className="message-content"><MarkdownContent text={item.answer}/></div>
-        </section>)}</div>}
+        </section>)}</div>
       </div>}
-    </div>
+    </section>}
+    {hasFinal && turn.final_answer && <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} favorite={favorite} favoritePending={favoritePending} onToggleFavorite={onToggleFavorite} onToolGen={onToolGen} onDelete={onDelete}/>}
   </section>;
 }
 

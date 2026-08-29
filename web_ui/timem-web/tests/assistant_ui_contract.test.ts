@@ -195,9 +195,14 @@ describe("assistant-ui thread integration", () => {
     expect(styles).toContain(".chat-scroll { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow-y: auto;");
     expect(styles).toContain("padding: 34px max(26px, calc((100% - 840px)/2 - 22px)) 24px max(26px, calc((100% - 840px)/2 + 22px));");
     expect(styles).toContain("padding: 16px max(26px, calc((100% - 840px)/2 - 22px)) 20px max(26px, calc((100% - 840px)/2 + 22px));");
+    const viewportOpen = source.indexOf('<ThreadPrimitive.Viewport');
+    const viewportFooter = source.indexOf('<ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">');
+    const viewportClose = source.indexOf("</ThreadPrimitive.Viewport>", viewportFooter);
+    expect(viewportFooter).toBeGreaterThan(viewportOpen);
+    expect(viewportClose).toBeGreaterThan(viewportFooter);
     expect(styles).toMatch(/\.composer-wrap\s*\{[^}]*position:\s*sticky;/);
-    expect(styles).toMatch(/\.composer-wrap\s*\{[^}]*bottom:\s*0;/);
     expect(styles).toMatch(/\.composer-wrap\s*\{[^}]*z-index:\s*3;/);
+    expect(styles).toMatch(/\.composer-wrap\s*\{[^}]*bottom:\s*0;/);
     expect(source).not.toContain("ThreadPrimitive.ScrollToBottom");
     expect(source).not.toContain('title="Scroll to latest message" aria-label="Scroll to latest message"');
     expect(source).toContain('title={userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"}');
@@ -700,7 +705,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("completed-work-title");
     expect(source).toContain("toolgen-completed-title");
     expect(styles).toContain(".working-chip.completed-work-title { color: #d4d4d4; }");
-    expect(styles).toContain(".working-chip.work-title-chip { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }");
+    expect(styles).toContain(".working-chip.work-title-chip { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; font-size: 12px; }");
     expect(styles).not.toContain(".work-title-dot");
     expect(styles).toContain(':root[data-theme="light"] .working-chip.completed-work-title { color: #465a63; }');
   });
@@ -945,6 +950,7 @@ describe("assistant-ui thread integration", () => {
 
   it("carries the live working marker into the completed Thought Action chip", () => {
     expect(styles).toContain(".turn-assistant-frame.working .working-chip { font-size: 14px; font-weight: 720; color: #7ebce8; letter-spacing: 0; }");
+    expect(styles).toContain(".working-chip { gap: 5px; border: 0; padding: 0; background: transparent; color: #8d8d8d; font-size: 10px; }");
     expect(styles).toContain(".turn-assistant-frame.working .working-chip .pulse { width: 8px; height: 8px; background: #3485dc; box-shadow: 0 0 0 4px #3485dc24; }");
     expect(source).toContain("working-chip work-title-chip work-collapse-toggle");
     expect(source).toContain('turn.state === "working" ? " active-work-title" : " completed-work-title"');
@@ -954,8 +960,8 @@ describe("assistant-ui thread integration", () => {
     expect(styles).not.toContain(".work-collapse-toggle:hover { border-color:");
     expect(styles).not.toContain(".working-chip.interrupted-work-title { border-color:");
     expect(styles).not.toContain(".working-chip.completed-work-title.toolgen-completed-title { border-color:");
-    expect(styles).toContain(".working-chip.work-title-chip { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }");
-    expect(styles).toContain(".turn-assistant-frame.working .working-chip.active-work-title { min-width: 0; color: #8fc9f1; font-size: 11px; font-weight: 700; letter-spacing: 0; }");
+    expect(styles).toContain(".working-chip.work-title-chip { min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; font-size: 12px; }");
+    expect(styles).toContain(".turn-assistant-frame.working .working-chip.active-work-title { min-width: 0; color: #8fc9f1; font-size: 12px; font-weight: 700; letter-spacing: 0; }");
     expect(source).toContain('<span className="working-label">working</span>');
     expect(styles).toContain(".turn-assistant-frame.working .working-label {");
     expect(styles).toContain("color: #8fc9f1;");
@@ -976,6 +982,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain('activity.kind === "free_talk" ? " free-talk" : ""');
     expect(styles).toContain(".activity-thinking-dot { width: 5px; height: 5px; border-radius: 50%; background: #111; }");
     expect(styles).toContain(".turn-work-item.free-talk .turn-work-detail { font-size: 90%; }");
+    expect(styles).toContain(".turn-work-item.thinking, .turn-work-item.thinking .message-content { font-size: max(14px, var(--content-size)); }");
+    expect(styles).toContain(".turn-work-item.thinking, .turn-work-item.thinking .message-content { font-size: var(--content-size); }");
     expect(styles).toContain(".turn-work-item.free-talk .turn-work-detail .message-content { font-size: inherit; }");
     expect(styles).toContain(".worker-role-editor input::placeholder, .worker-role-editor textarea::placeholder { font-size: inherit; }");
 expect(source).toContain('className={`worker-role-editor ${editingId ? "editing" : "creating"}`}');
@@ -1057,18 +1065,18 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).toContain("font-variant-numeric: tabular-nums;");
   });
 
-  it("renders Thought Action as an independent trigger attached to a softly tinted process panel", () => {
+  it("renders Thought Action as an independent trigger attached to a finely bordered process panel", () => {
     expect(styles).toContain(".turn-assistant-frame { position: relative; overflow: visible; padding-left: 0; border: 0; border-radius: 0; background: transparent;");
     expect(styles).toContain('.turn-user-frame { width: fit-content; max-width: min(86%, 680px); margin: 0 0 11px auto; }');
     expect(styles).not.toContain('.turn-user-content::after');
-    expect(styles).toContain('.turn-work-panel { position: relative; z-index: 1; margin-top: -4px; overflow: hidden; border-radius: 11px; background: #353535; box-shadow: inset 0 1px 0 #ffffff0a, 0 -2px 8px #0000001f, 0 4px 14px #0000002e; }');
+    expect(styles).toContain('.turn-work-panel { position: relative; z-index: 1; margin-top: -4px; overflow: hidden; border: 1px solid #4a4a4a; border-radius: 11px; background: #353535; box-shadow: none; }');
     expect(styles).not.toContain('.turn-work-panel::before');
     expect(styles).not.toContain('.turn-assistant-heading::after');
     expect(styles).toContain('.turn-work-scroll { --work-edge-fade-size: 16px; padding: 14px 10px 7px; }');
     expect(styles).toContain('.turn-work-scroll.fade-top { -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--work-edge-fade-size));');
     expect(styles).toContain('.turn-work-scroll.fade-bottom { -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--work-edge-fade-size)), transparent 100%);');
     expect(styles).toContain('.turn-work-scroll.fade-top.fade-bottom { -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--work-edge-fade-size), #000 calc(100% - var(--work-edge-fade-size)), transparent 100%);');
-    expect(styles).toContain(':root[data-theme="light"] .turn-work-panel { background: #fafbfb; box-shadow: inset 0 1px 0 #ffffffd9, 0 -2px 8px #30424b12, 0 4px 14px #30424b1a; }');
+    expect(styles).toContain(':root[data-theme="light"] .turn-work-panel { border-color: #d3ddda; background: #fafbfb; box-shadow: none; }');
     expect(styles).not.toContain(':root[data-theme="light"]\n:root[data-theme="light"] .turn-work-panel');
     expect(styles).not.toContain(':root[data-theme="light"] :root[data-theme="light"] .turn-work-panel');
     expect(styles).not.toContain(':root[data-theme="light"] .turn-user-content::after');
@@ -1198,10 +1206,9 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).toContain("attachTurnCompletion(session, event.outcome.message_id");
     expect(source).toContain('className="turn-final-delivery"');
     expect(source).toContain("<TurnAnswerDelivery turn={turn}");
-    expect(source).toContain('if (availableKeys.length === 1 && selected === "final" && turn.final_answer)');
     expect(source).toContain('<FinalAnswerDelivery text={turn.final_answer}');
     expect(source).toContain('<FinalAnswerContent text={text}/>');
-    expect(source).toContain('<FinalAnswerContent text={turn.final_answer}/>');
+    expect(source).not.toContain('<FinalAnswerContent text={turn.final_answer}/>');
 
     expect(source).toContain('const chatShell = viewport?.closest<HTMLElement>(".chat-shell");');
     expect(source).toContain('const bodyInset = Math.max(0, contentRect.left - viewportRect.left);');
@@ -1313,35 +1320,32 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(styles).not.toContain('.final-answer-outline-anchor { position: sticky; top: 33.333%;');
     expect(styles).not.toContain('.final-answer-outline { display: none; }');
     expect(styles).toContain('@media (max-width: 720px) { .final-answer-outline-card');
-    expect(source).toContain('{hasInterim && <div className="turn-answer-tabs">');
-    expect(source).toContain('className="turn-answer-tablist" role="tablist" aria-label="Turn answers"');
-    expect(source).toContain('const showFinalTab = hasFinal || hasInterim;');
-    expect(source).toContain('{showFinalTab && <button type="button" role="tab"');
-    expect(source).toContain('>Final Answer</button>');
-    expect(source).toContain('>Interim</button>');
-    expect(source).toContain('className="turn-final-placeholder" role="status" aria-live="polite"');
-    expect(source).toContain('turn.state === "interrupted" ? "Interrupted by runtime restart."');
-    expect(styles).toContain('.turn-final-placeholder { padding: 3px 0 15px; color: #7d8b93; font-size: 13px; font-style: italic; }');
-    expect(source).toContain('className="turn-answer-tablist"');
-    expect(source).toContain('className="turn-interim-collapse"');
-    expect(source).toContain('aria-expanded={!interimCollapsed}');
-    expect(source).toContain('aria-controls={interimPanelId}');
-    expect(source).toContain('if (key === "interim") setInterimCollapsed(false);');
-    expect(source).toContain('const interimItems = newestInterimAnswersFirst(turn.sub_answers);');
+    expect(source).toContain('const hasChat = turn.sub_answers.length > 0;');
+    expect(source).toContain('const [chatExpanded, setChatExpanded] = useState(() => !hasFinal);');
+    expect(source).toContain('const previousFinal = useRef(hasFinal);');
+    expect(source).toContain('const chatPanelId = `turn-chat-${turn.turn_id}`;');
+    expect(source).toContain('const chatItems = newestInterimAnswersFirst(turn.sub_answers);');
+    expect(source).toContain('const finalArrived = !previousFinal.current && !!turn.final_answer;');
+    expect(source).toContain('if (finalArrived) setChatExpanded(false);');
+    expect(source).toContain('className={`turn-chat-delivery${chatExpanded ? " expanded" : " collapsed"}`}');
+    expect(source).toContain('className="working-chip work-title-chip work-collapse-toggle chat-title-chip"');
+    expect(source).toContain('aria-expanded={chatExpanded}');
+    expect(source).toContain('aria-controls={chatPanelId}');
+    expect(source).toContain('onClick={() => setChatExpanded((expanded) => !expanded)}');
+    expect(source).toContain('{chatExpanded && <div id={chatPanelId} className="turn-chat-panel" role="region" aria-label="Chat answers">');
     expect(source).toContain('className="turn-interim-list"');
     expect(source).toContain('className="turn-interim-item"');
-    expect(source).toContain('className={`turn-answer-view ${selected === "final" ? "selected" : "inactive"}`}');
-    expect(source).toContain('className={`turn-answer-view ${selected === "interim" ? "selected" : "inactive"}${interimCollapsed ? " collapsed" : ""}`}');
-    expect(source).toContain('aria-hidden={selected !== "final"}');
-    expect(source).toContain('aria-hidden={selected !== "interim" || interimCollapsed}');
-    expect(styles).toContain('.turn-answer-panel { display: grid;');
-    expect(styles).toContain('.turn-answer-panel.interim-collapsed { display: none; }');
-    expect(source).toContain('selected === "interim" && interimCollapsed ? " interim-collapsed" : ""');
-    expect(styles).toContain('.turn-answer-view { min-width: 0; grid-area: 1 / 1; }');
-    expect(styles).toContain('.turn-answer-view.inactive { visibility: hidden; pointer-events: none; user-select: none; }');
     expect(source).toContain('<h3><span>{ordinal}.</span> {item.task}</h3>');
+    expect(source).toContain('{hasFinal && turn.final_answer && <FinalAnswerDelivery text={turn.final_answer}');
+    expect(source).not.toContain('className="turn-answer-tabs"');
+    expect(source).not.toContain('--turn-answer-tabs-sticky-top');
+    expect(styles).toContain('.turn-chat-heading { position: relative; z-index: 2; min-height: 28px;');
+    expect(styles).toContain('.turn-chat-panel { position: relative; z-index: 1; margin-top: -4px; overflow: hidden; border: 1px solid #315048;');
+    expect(styles).toContain('.chat-title-chip { color: #b9d8cf; font-size: 12px; }');
+    expect(styles).toContain('font-size: var(--content-size); line-height: 1.68;');
+    expect(styles).toContain('background: linear-gradient(145deg, #1f302b, #1b2925);');
+    expect(styles).toContain(':root[data-theme="light"] .turn-chat-panel { border-color: #bddbd2; background: linear-gradient(145deg, #edf8f4, #e5f2ed);');
     expect(styles).toContain('.turn-interim-item + .turn-interim-item');
-    expect(styles).toContain('.turn-answer-view.collapsed { display: none; }');
     expect(styles).toContain('font-size: calc(var(--content-size) + 1px);');
     expect(source).not.toContain('label: `Answer ${item.ordinal}`');
     expect(source).not.toContain('className="turn-final-toolbar"');
@@ -2675,8 +2679,11 @@ expect(styles).toContain(':root[data-theme="light"] .worker-role-item.delete-sel
     expect(source).not.toContain('const hasOnlyFreeTalk = hasOnlyFreeTalkActivity(processActivities, decisions.length);');
     expect(source).toContain('const interrupted = turn.state === "interrupted"');
     expect(source).toContain('const [showWorkStream, setShowWorkStream] = useState(() => turn.state === "working");');
+    expect(source).toContain('const previousFinalAnswer = useRef(!!turn.final_answer);');
+    expect(source).toContain('const finalArrived = !previousFinalAnswer.current && !!turn.final_answer;');
     expect(source).toContain('if (!wasWorking && turn.state === "working") setShowWorkStream(true);');
-    expect(source).toContain('if (wasWorking && turn.state !== "working") setShowWorkStream(false);');
+    expect(source).toContain('if (finalArrived || (wasWorking && turn.state === "interrupted")) setShowWorkStream(false);');
+    expect(source).not.toContain('if (wasWorking && turn.state !== "working") setShowWorkStream(false);');
     expect(source).toContain('const canCollapseCompletedWork = turn.state !== "working" && (!!turn.final_answer || interrupted);');
     expect(source).toContain('const canToggleWorkStream = turn.state === "working" || canCollapseCompletedWork;');
     expect(source).toContain('const workStreamVisible = !canToggleWorkStream || showWorkStream;');
