@@ -6408,7 +6408,9 @@ impl FileChatHistoryStore {
         MemGuard::for_audit_file(&self.audit_file).with_write(|| {
             let mut deleted_turn_ids = HashSet::new();
             for audit_file in self.audit_files() {
-                if !audit_file.exists() {
+                if !audit_file.exists()
+                    && !rolling_file_store::segmented_directory(&audit_file).exists()
+                {
                     continue;
                 }
                 let events = read_audit_events_unlocked(&audit_file)
@@ -6517,6 +6519,12 @@ impl FileChatHistoryStore {
 }
 
 fn read_audit_events_unlocked(path: &Path) -> std::io::Result<Vec<Value>> {
+    if rolling_file_store::segmented_directory(path).exists() {
+        return Ok(rolling_file_store::read_segmented_records(path)?
+            .into_iter()
+            .filter_map(|record| serde_json::from_slice::<Value>(&record).ok())
+            .collect());
+    }
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -6539,12 +6547,37 @@ fn read_audit_events_unlocked(path: &Path) -> std::io::Result<Vec<Value>> {
 fn write_audit_events_unlocked(path: &Path, events: &[Value]) -> std::io::Result<()> {
     let mut bytes = Vec::new();
     if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+        let mut records = Vec::with_capacity(events.len());
         for event in events {
-            writeln!(
-                &mut bytes,
-                "{}",
-                serde_json::to_string(event).unwrap_or_default()
+            let mut record = serde_json::to_vec(event).map_err(std::io::Error::other)?;
+            record.push(b'\n');
+            records.push(record);
+        }
+        if rolling_file_store::segmented_directory(path).exists() {
+            let stable_bytes = records
+                .iter()
+                .map(|record| record.len() as u64)
+                .sum::<u64>();
+            let slices = stable_bytes
+                .div_ceil(rolling_file_store::AUDIT_ROLLING_SLICE_BYTES)
+                .max(1);
+            let capacity = rolling_file_store::RollingCapacity::with_slice_bytes(
+                slices
+                    .saturating_add(1)
+                    .saturating_mul(rolling_file_store::AUDIT_ROLLING_SLICE_BYTES),
+                rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+            )
+            .map_err(std::io::Error::other)?;
+            rolling_file_store::rewrite_segmented_records(
+                path,
+                &records,
+                capacity,
+                rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
             )?;
+            return Ok(());
+        }
+        for record in records {
+            bytes.extend_from_slice(&record);
         }
     } else {
         let doc = json!({"version": 1, "events": events});

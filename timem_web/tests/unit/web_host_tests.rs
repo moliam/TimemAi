@@ -5712,6 +5712,40 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
     );
 }
 
+#[tokio::test]
+async fn ordinary_history_append_does_not_wake_global_temporary_retention() {
+    let state = routing_test_state();
+    let session = state.sessions.lock().unwrap()["session_a"].clone();
+    let store = current_session_store(&state).unwrap();
+    store
+        .upsert_session(&stored_session_from_web_session_with_store(
+            &store, &session,
+        ))
+        .unwrap();
+
+    append_history_record(
+        &state,
+        "session_a",
+        &ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "ordinary_append".to_string(),
+            created_at_ms: 1,
+            kind: None,
+            command_id: None,
+            delivery_state: None,
+            content: "hi".to_string(),
+        },
+    )
+    .unwrap();
+
+    assert!(tokio::time::timeout(
+        Duration::from_millis(20),
+        state.temporary_retention_wakeup.notified()
+    )
+    .await
+    .is_err());
+}
+
 #[test]
 fn conversation_capacity_skips_running_session_and_prunes_another_session() {
     let state = routing_test_state();
