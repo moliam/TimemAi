@@ -9,15 +9,15 @@ fn append_audit_writes_json_document() {
     append_audit_event(&path, &json!({"type":"turn_final","ok":true})).unwrap();
     append_audit_event(&path, &json!({"type":"llm_request","ok":true})).unwrap();
 
-    let text = std::fs::read_to_string(&path).unwrap();
-    let doc: Value = serde_json::from_str(&text).unwrap();
+    let doc = read_audit_doc(&path).unwrap();
     assert_eq!(doc["version"], 1);
     let events = doc["events"].as_array().unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[0]["type"], "turn_final");
     assert_eq!(events[1]["type"], "llm_request");
     assert!(events.iter().all(|event| event["time_ms"].is_i64()));
-    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(segmented_directory(&audit_sidecar_path(&path)));
 }
 
 #[test]
@@ -49,8 +49,7 @@ fn append_audit_migrates_legacy_jsonl_without_applying_retention_policy() {
 
     append_audit_event(&path, &json!({"type":"turn_final","ok":true})).unwrap();
 
-    let text = std::fs::read_to_string(&path).unwrap();
-    let doc: Value = serde_json::from_str(&text).unwrap();
+    let doc = read_audit_doc(&path).unwrap();
     assert_eq!(doc["version"], 1);
     let events = doc["events"].as_array().unwrap();
     assert_eq!(events.len(), 2);
@@ -58,12 +57,12 @@ fn append_audit_migrates_legacy_jsonl_without_applying_retention_policy() {
     assert!(events[0].get("time_ms").is_none());
     assert_eq!(events[1]["type"], "turn_final");
     assert!(events[1]["time_ms"].is_i64());
-    assert!(!text.lines().next().unwrap().starts_with(r#"{"type""#));
-    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(segmented_directory(&audit_sidecar_path(&path)));
 }
 
 #[test]
-fn append_audit_uses_jsonl_sidecar_for_large_documents_and_read_merges_events() {
+fn append_audit_uses_segmented_sidecar_and_read_merges_existing_snapshot_events() {
     let mut path = std::env::temp_dir();
     path.push(format!(
         "timem_core_large_audit_{}.json",
@@ -73,7 +72,7 @@ fn append_audit_uses_jsonl_sidecar_for_large_documents_and_read_merges_events() 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&sidecar);
 
-    let large_text = "x".repeat(AUDIT_SIDECAR_THRESHOLD_BYTES as usize);
+    let large_text = "x".repeat(1024);
     let now_ms = audit_now_ms();
     std::fs::write(
         &path,

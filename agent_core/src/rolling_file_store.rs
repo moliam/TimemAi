@@ -5,6 +5,7 @@
 //! are evicted.
 
 use crate::atomic_write_file;
+use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -75,6 +76,9 @@ pub fn segmented_directory(path: &Path) -> std::path::PathBuf {
 
 fn recover_segmented_directory(path: &Path) -> std::io::Result<()> {
     let directory = segmented_directory(path);
+    if directory.exists() {
+        return Ok(());
+    }
     let Some(parent) = directory.parent() else {
         return Ok(());
     };
@@ -110,6 +114,80 @@ fn recover_segmented_directory(path: &Path) -> std::io::Result<()> {
 pub struct RollingSegment {
     pub path: PathBuf,
     pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RollingManifest {
+    version: u32,
+    next_index: u64,
+    segments: Vec<RollingManifestSegment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RollingManifestSegment {
+    file_name: String,
+    bytes: u64,
+}
+
+fn rolling_manifest_path(path: &Path) -> PathBuf {
+    segmented_directory(path).join("manifest.json")
+}
+
+fn write_rolling_manifest(path: &Path, manifest: &RollingManifest) -> std::io::Result<()> {
+    let mut bytes = serde_json::to_vec(manifest).map_err(std::io::Error::other)?;
+    bytes.push(b'\n');
+    atomic_write_file(&rolling_manifest_path(path), &bytes)
+}
+
+fn manifest_from_segments(segments: &[RollingSegment]) -> RollingManifest {
+    let next_index = segments
+        .last()
+        .and_then(|segment| segment.path.file_stem())
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.strip_prefix("segment-"))
+        .and_then(|index| index.parse::<u64>().ok())
+        .unwrap_or(0)
+        .saturating_add(1);
+    RollingManifest {
+        version: 1,
+        next_index,
+        segments: segments
+            .iter()
+            .filter_map(|segment| {
+                Some(RollingManifestSegment {
+                    file_name: segment.path.file_name()?.to_str()?.to_string(),
+                    bytes: segment.bytes,
+                })
+            })
+            .collect(),
+    }
+}
+
+fn load_or_rebuild_manifest(path: &Path) -> std::io::Result<RollingManifest> {
+    recover_segmented_directory(path)?;
+    if let Ok(bytes) = fs::read(rolling_manifest_path(path)) {
+        if let Ok(manifest) = serde_json::from_slice::<RollingManifest>(&bytes) {
+            if manifest.version == 1 {
+                return Ok(manifest);
+            }
+        }
+    }
+    let segments = segment_entries(path)?;
+    let manifest = manifest_from_segments(&segments);
+    write_rolling_manifest(path, &manifest)?;
+    Ok(manifest)
+}
+
+fn manifest_segments(path: &Path, manifest: &RollingManifest) -> Vec<RollingSegment> {
+    let directory = segmented_directory(path);
+    manifest
+        .segments
+        .iter()
+        .map(|segment| RollingSegment {
+            path: directory.join(&segment.file_name),
+            bytes: segment.bytes,
+        })
+        .collect()
 }
 
 /// Returns the companion metadata path for a physical segment.
@@ -160,19 +238,11 @@ fn segment_entries(path: &Path) -> std::io::Result<Vec<RollingSegment>> {
 
 /// Returns the physical slices in oldest-to-newest order.
 pub fn rolling_segments(path: &Path) -> std::io::Result<Vec<RollingSegment>> {
-    segment_entries(path)
-}
-
-fn next_segment_path(path: &Path, segments: &[RollingSegment]) -> PathBuf {
-    let next = segments
-        .last()
-        .and_then(|segment| segment.path.file_stem())
-        .and_then(|stem| stem.to_str())
-        .and_then(|stem| stem.strip_prefix("segment-"))
-        .and_then(|index| index.parse::<u64>().ok())
-        .unwrap_or(0)
-        .saturating_add(1);
-    segmented_directory(path).join(format!("segment-{next:016}.jsonl"))
+    if !segmented_directory(path).exists() {
+        return Ok(Vec::new());
+    }
+    let manifest = load_or_rebuild_manifest(path)?;
+    Ok(manifest_segments(path, &manifest))
 }
 
 /// Migrates a legacy newline-delimited file into bounded physical slices. This
@@ -230,6 +300,27 @@ pub fn migrate_legacy_file(path: &Path, slice_bytes: u64) -> std::io::Result<()>
         if let Some(file) = output.as_mut() {
             file.sync_all()?;
         }
+        let mut entries = fs::read_dir(&temporary)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        let segments = entries
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .file_type()
+                    .map(|kind| kind.is_file())
+                    .unwrap_or(false)
+            })
+            .map(|entry| {
+                Ok(RollingSegment {
+                    bytes: entry.metadata()?.len(),
+                    path: entry.path(),
+                })
+            })
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let manifest = manifest_from_segments(&segments);
+        let mut manifest_bytes = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
+        manifest_bytes.push(b'\n');
+        atomic_write_file(&temporary.join("manifest.json"), &manifest_bytes)?;
         fs::rename(&temporary, &directory)?;
         fs::remove_file(path)
     })();
@@ -256,25 +347,52 @@ pub fn append_rolling_record(
     migrate_legacy_file(path, slice_bytes)?;
     let directory = segmented_directory(path);
     fs::create_dir_all(&directory)?;
-    let mut segments = segment_entries(path)?;
-    let target = match segments.last() {
+    let mut manifest = load_or_rebuild_manifest(path)?;
+    if let Some(last) = manifest.segments.last_mut() {
+        let actual_bytes = fs::metadata(directory.join(&last.file_name))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        last.bytes = actual_bytes;
+    }
+    let mut created_segment = false;
+    let target_index = match manifest.segments.last() {
         Some(last) if last.bytes.saturating_add(record.len() as u64) <= slice_bytes => {
-            last.path.clone()
+            manifest.segments.len().saturating_sub(1)
         }
-        _ => next_segment_path(path, &segments),
+        _ => {
+            let file_name = format!("segment-{:016}.jsonl", manifest.next_index.max(1));
+            manifest.next_index = manifest.next_index.max(1).saturating_add(1);
+            manifest.segments.push(RollingManifestSegment {
+                file_name,
+                bytes: 0,
+            });
+            created_segment = true;
+            manifest.segments.len().saturating_sub(1)
+        }
     };
+    if created_segment {
+        write_rolling_manifest(path, &manifest)?;
+    }
+    let target = directory.join(&manifest.segments[target_index].file_name);
     let mut file = OpenOptions::new().create(true).append(true).open(&target)?;
     file.write_all(record)?;
     file.sync_data()?;
-    segments = segment_entries(path)?;
-    let mut total = segments.iter().map(|segment| segment.bytes).sum::<u64>();
+    manifest.segments[target_index].bytes = manifest.segments[target_index]
+        .bytes
+        .saturating_add(record.len() as u64);
+    let mut total = manifest
+        .segments
+        .iter()
+        .map(|segment| segment.bytes)
+        .sum::<u64>();
     let mut removed = 0usize;
-    while total > capacity.stable_bytes && segments.len() > 1 {
-        let oldest = segments.remove(0);
-        remove_segment(&oldest.path)?;
+    while total > capacity.stable_bytes && manifest.segments.len() > 1 {
+        let oldest = manifest.segments.remove(0);
+        remove_segment(&directory.join(&oldest.file_name))?;
         total = total.saturating_sub(oldest.bytes);
         removed = removed.saturating_add(1);
     }
+    write_rolling_manifest(path, &manifest)?;
     Ok(removed)
 }
 
@@ -285,15 +403,24 @@ pub fn trim_rolling_segments(
     slice_bytes: u64,
 ) -> std::io::Result<usize> {
     migrate_legacy_file(path, slice_bytes)?;
-    let mut segments = segment_entries(path)?;
-    let mut total = segments.iter().map(|segment| segment.bytes).sum::<u64>();
+    if !segmented_directory(path).exists() {
+        return Ok(0);
+    }
+    let directory = segmented_directory(path);
+    let mut manifest = load_or_rebuild_manifest(path)?;
+    let mut total = manifest
+        .segments
+        .iter()
+        .map(|segment| segment.bytes)
+        .sum::<u64>();
     let mut removed = 0usize;
-    while total > max_bytes && !segments.is_empty() {
-        let oldest = segments.remove(0);
-        remove_segment(&oldest.path)?;
+    while total > max_bytes && !manifest.segments.is_empty() {
+        let oldest = manifest.segments.remove(0);
+        remove_segment(&directory.join(&oldest.file_name))?;
         total = total.saturating_sub(oldest.bytes);
         removed = removed.saturating_add(1);
     }
+    write_rolling_manifest(path, &manifest)?;
     Ok(removed)
 }
 

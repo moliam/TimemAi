@@ -2,7 +2,7 @@ use crate::{ActionOutcome, MemGuard};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -134,7 +134,7 @@ impl FileToolJobStore {
                 .map(|text| text.trim().to_string())
                 .filter(|text| !text.is_empty())
             {
-                let output = fs::read_to_string(&record.output_file).unwrap_or_default();
+                let output = read_output_tail(&record.output_file, 16 * 1024);
                 if code == "cancelled" {
                     return ActionOutcome::cancelled(format!(
                         "Action result: capmgr\nop: job_status\njob_id: {}\naction: {}\nstate: cancelled\nwaited_ms: {}\noutput_file: {}\npartial_output:\n{}",
@@ -156,7 +156,7 @@ impl FileToolJobStore {
                 ));
             }
             if started.elapsed() >= wait {
-                let output = fs::read_to_string(&record.output_file).unwrap_or_default();
+                let output = read_output_tail(&record.output_file, 16 * 1024);
                 return ActionOutcome::background_running(format!(
                     "Action result: capmgr\nop: job_status\njob_id: {}\naction: {}\nstate: running\npid: {}\nwaited_ms: {}\noutput_file: {}\npartial_output:\n{}",
                     record.id,
@@ -228,7 +228,7 @@ impl FileToolJobStore {
 
         terminate_process(record.pid);
         let _ = fs::write(&record.status_file, "cancelled");
-        let output = fs::read_to_string(&record.output_file).unwrap_or_default();
+        let output = read_output_tail(&record.output_file, 16 * 1024);
         ActionOutcome::cancelled(format!(
             "Action result: capmgr\nop: job_cancel\njob_id: {}\naction: {}\nstate: cancelled\npid: {}\noutput_file: {}\npartial_output:\n{}",
             record.id,
@@ -277,6 +277,39 @@ impl FileToolJobStore {
             .map_while(Result::ok)
             .filter_map(|line| serde_json::from_str::<ToolJobRecord>(&line).ok())
             .collect()
+    }
+}
+
+fn read_output_tail(path: impl AsRef<Path>, max_bytes: usize) -> String {
+    if max_bytes == 0 {
+        return String::new();
+    }
+    let Ok(mut file) = fs::File::open(path) else {
+        return String::new();
+    };
+    let Ok(len) = file.metadata().map(|metadata| metadata.len()) else {
+        return String::new();
+    };
+    let start = len.saturating_sub(max_bytes as u64);
+    if file.seek(SeekFrom::Start(start)).is_err() {
+        return String::new();
+    }
+    let mut bytes = Vec::with_capacity((len - start) as usize);
+    if file.read_to_end(&mut bytes).is_err() {
+        return String::new();
+    }
+    if start > 0 {
+        let first_boundary = bytes
+            .iter()
+            .position(|byte| byte & 0b1100_0000 != 0b1000_0000)
+            .unwrap_or(bytes.len());
+        bytes.drain(..first_boundary);
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    if start > 0 {
+        format!("[truncated before]\n{text}")
+    } else {
+        text.into_owned()
     }
 }
 

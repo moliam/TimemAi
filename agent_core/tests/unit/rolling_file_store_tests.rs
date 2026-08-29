@@ -173,3 +173,74 @@ fn trimming_shared_budget_may_remove_the_last_complete_segment() {
     assert!(read_segmented_records(&path).unwrap().is_empty());
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn append_repairs_an_active_segment_length_left_ahead_of_its_manifest() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_rolling_manifest_repair_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("audit.jsonl");
+    let capacity = RollingCapacity::with_slice_bytes(32, 8).unwrap();
+    append_rolling_record(&path, b"one\n", capacity, 8).unwrap();
+    let active = rolling_segments(&path)
+        .unwrap()
+        .last()
+        .unwrap()
+        .path
+        .clone();
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&active)
+        .unwrap()
+        .write_all(b"two\n")
+        .unwrap();
+    append_rolling_record(&path, b"three\n", capacity, 8).unwrap();
+
+    assert_eq!(
+        read_segmented_records(&path).unwrap(),
+        vec![b"one\n".to_vec(), b"two\n".to_vec(), b"three\n".to_vec()]
+    );
+    assert_eq!(rolling_segments(&path).unwrap().len(), 2);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn append_rebuilds_a_corrupt_manifest_without_losing_segments() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_rolling_corrupt_manifest_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("audit.jsonl");
+    let capacity = RollingCapacity::with_slice_bytes(32, 8).unwrap();
+    append_rolling_record(&path, b"one---\n", capacity, 8).unwrap();
+    append_rolling_record(&path, b"two---\n", capacity, 8).unwrap();
+    std::fs::write(rolling_manifest_path(&path), b"not-json").unwrap();
+
+    append_rolling_record(&path, b"three-\n", capacity, 8).unwrap();
+
+    assert_eq!(
+        read_segmented_records(&path).unwrap(),
+        vec![
+            b"one---\n".to_vec(),
+            b"two---\n".to_vec(),
+            b"three-\n".to_vec(),
+        ]
+    );
+    let repaired: RollingManifest =
+        serde_json::from_slice(&std::fs::read(rolling_manifest_path(&path)).unwrap()).unwrap();
+    assert_eq!(repaired.version, 1);
+    assert_eq!(repaired.segments.len(), 3);
+    let _ = std::fs::remove_dir_all(root);
+}
