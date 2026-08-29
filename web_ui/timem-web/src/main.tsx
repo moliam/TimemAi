@@ -129,11 +129,13 @@ import {
   isNearScrollBottom,
   preservePrependScrollTop,
   restoreSessionScrollTop,
+  scrollEdgeFades,
   ScrollMetrics,
   SessionScrollPosition,
   UserMessageNavigationDirection,
   wheelDeltaPixels,
 } from "./scroll";
+import { newestInterimAnswersFirst } from "./interim_answers";
 import {
   applyTurnProjection,
   activeModelRetryStatus,
@@ -794,6 +796,7 @@ function TimemApp() {
   const toolRepoButtonRef = useRef<HTMLButtonElement | null>(null);
   const toolRepoPanelRef = useRef<HTMLElement | null>(null);
   const chatLibraryPanelRef = useRef<HTMLElement | null>(null);
+  const chatLibraryTriggerRef = useRef<HTMLButtonElement | null>(null);
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
   const activeSession =
     sessions.find((session) => session.session_id === activeSessionId) ??
@@ -834,7 +837,10 @@ function TimemApp() {
     },
     [pushActivity],
   );
-  const closeChatLibrary = useCallback(() => setChatLibraryMode(null), []);
+  const closeChatLibrary = useCallback(() => {
+    setChatLibraryMode(null);
+    window.requestAnimationFrame(() => chatLibraryTriggerRef.current?.focus({ preventScroll: true }));
+  }, []);
   const closeToolRepoPanel = useCallback(() => {
     setShowToolRepo(false);
     toolRepoButtonRef.current?.focus({ preventScroll: true });
@@ -848,7 +854,7 @@ function TimemApp() {
   }, []);
   const closeAppearancePanel = useCallback((restoreFocus = true) => {
     setShowAppearance(false);
-    if (restoreFocus) settingsButtonRef.current?.focus({ preventScroll: true });
+    if (restoreFocus) window.requestAnimationFrame(() => settingsButtonRef.current?.focus({ preventScroll: true }));
   }, []);
   const closeMcpPanel = useCallback((restoreFocus = true) => {
     setShowMcp(false);
@@ -1083,6 +1089,57 @@ function TimemApp() {
     },
     [snapshotReady],
   );
+
+  const closeSettingsCenter = useCallback(() => {
+    if (!pendingMemRetention && !pendingMemConversationCapacity && !favoriteCapacityUpdating && !pendingMemSwitch && !memTemporaryItemsDeleting) closeAppearancePanel();
+  }, [closeAppearancePanel, favoriteCapacityUpdating, memTemporaryItemsDeleting, pendingMemConversationCapacity, pendingMemRetention, pendingMemSwitch]);
+  const refreshMemTemporaryItems = useCallback(() => {
+    setMemTemporaryItemsLoading(true);
+    setMemTemporaryItemsError("");
+    if (!sendCommand({ type: "mem_temporary_items_list" })) setMemTemporaryItemsLoading(false);
+  }, [sendCommand]);
+  const deleteMemTemporaryItems = useCallback((ids: string[]) => {
+    setMemTemporaryItemsDeleting(true);
+    if (!sendCommand({ type: "mem_temporary_items_delete", ids })) setMemTemporaryItemsDeleting(false);
+  }, [sendCommand]);
+  const revealModelEndpoint = useCallback((endpointId: string) => {
+    sendCommand({ type: "model_endpoint_secret_reveal", endpoint_id: endpointId });
+  }, [sendCommand]);
+  const saveModelEndpoint = useCallback((endpoint: ModelEndpointDraft) => {
+    sendCommand({ type: "model_endpoint_upsert", endpoint });
+  }, [sendCommand]);
+  const saveMemTemporaryPolicy = useCallback((days: 1 | 5 | 10 | null, maxBytes: number | null) => {
+    setPendingMemRetention(true);
+    if (!sendCommand({ type: "mem_temporary_retention_update", days, max_bytes: maxBytes })) {
+      setPendingMemRetention(false);
+      reportUiError("Mem settings failed", "Reconnect to Timem Web before updating temporary-data policy.", "system");
+    }
+  }, [reportUiError, sendCommand]);
+  const saveMemConversationCapacity = useCallback((maxBytes: number | null) => {
+    setPendingMemConversationCapacity(true);
+    if (!sendCommand({ type: "mem_conversation_capacity_update", max_bytes: maxBytes })) {
+      setPendingMemConversationCapacity(false);
+      reportUiError("Mem settings failed", "Reconnect to Timem Web before updating conversation capacity.", "system");
+    }
+  }, [reportUiError, sendCommand]);
+  const saveMemFavoriteCapacity = useCallback((maxBytes: number | null) => {
+    setFavoriteCapacityUpdating(true);
+    if (!sendCommand({ type: "favorite_capacity_update", max_bytes: maxBytes })) setFavoriteCapacityUpdating(false);
+  }, [sendCommand]);
+  const switchMemWorkspace = useCallback((path: string) => {
+    const runningSessionCount = memSwitchRunningSessionCount(sessionsRef.current);
+    if (runningSessionCount > 0) {
+      setMemSwitchCandidate({ path, runningSessionCount });
+      return;
+    }
+    setRenamingSessionId("");
+    setRenameDraft("");
+    setPendingMemSwitch(true);
+    if (!sendCommand({ type: "mem_switch", path, stop_running: false })) {
+      setPendingMemSwitch(false);
+      reportUiError("Mem switch failed", "Reconnect to Timem Web before switching the mem directory.", "system");
+    }
+  }, [reportUiError, sendCommand]);
 
   const toggleFavorite = useCallback(
     (
@@ -4060,7 +4117,8 @@ function TimemApp() {
               aria-expanded={chatLibraryMode === "search"}
               aria-controls="chat-library-center"
               disabled={!runtimeReady || pendingMemSwitch}
-              onClick={() => {
+              onClick={(event) => {
+                chatLibraryTriggerRef.current = event.currentTarget;
                 setShowAppearance(false);
                 setShowToolRepo(false);
                 setShowRoles(false);
@@ -4080,7 +4138,8 @@ function TimemApp() {
               aria-expanded={chatLibraryMode === "favorites"}
               aria-controls="chat-library-center"
               disabled={!runtimeReady || pendingMemSwitch}
-              onClick={() => {
+              onClick={(event) => {
+                chatLibraryTriggerRef.current = event.currentTarget;
                 setShowAppearance(false);
                 setShowToolRepo(false);
                 setShowRoles(false);
@@ -4277,106 +4336,17 @@ function TimemApp() {
               endpointEditor={endpointEditor}
               revealedEndpointApiKeys={revealedEndpointApiKeys}
               revealedEndpointHeaders={revealedEndpointHeaders}
-              onClose={() => {
-                if (
-                  !pendingMemRetention &&
-                  !pendingMemConversationCapacity &&
-                  !favoriteCapacityUpdating &&
-                  !pendingMemSwitch &&
-                  !memTemporaryItemsDeleting
-                )
-                  closeAppearancePanel();
-              }}
-              onRefreshTemporaryItems={() => {
-                setMemTemporaryItemsLoading(true);
-                setMemTemporaryItemsError("");
-                if (!sendCommand({ type: "mem_temporary_items_list" }))
-                  setMemTemporaryItemsLoading(false);
-              }}
-              onDeleteTemporaryItems={(ids) => {
-                setMemTemporaryItemsDeleting(true);
-                if (!sendCommand({ type: "mem_temporary_items_delete", ids }))
-                  setMemTemporaryItemsDeleting(false);
-              }}
+              onClose={closeSettingsCenter}
+              onRefreshTemporaryItems={refreshMemTemporaryItems}
+              onDeleteTemporaryItems={deleteMemTemporaryItems}
               onEditEndpoint={setEndpointEditor}
               onDeleteEndpoint={setDeleteEndpointCandidate}
-              onRevealEndpoint={(endpointId) =>
-                sendCommand({
-                  type: "model_endpoint_secret_reveal",
-                  endpoint_id: endpointId,
-                })
-              }
-              onSaveEndpoint={(endpoint) =>
-                sendCommand({ type: "model_endpoint_upsert", endpoint })
-              }
-              onSaveTemporaryPolicy={(days, maxBytes) => {
-                setPendingMemRetention(true);
-                if (
-                  !sendCommand({
-                    type: "mem_temporary_retention_update",
-                    days,
-                    max_bytes: maxBytes,
-                  })
-                ) {
-                  setPendingMemRetention(false);
-                  reportUiError(
-                    "Mem settings failed",
-                    "Reconnect to Timem Web before updating temporary-data policy.",
-                    "system",
-                  );
-                }
-              }}
-              onSaveConversationCapacity={(maxBytes) => {
-                setPendingMemConversationCapacity(true);
-                if (
-                  !sendCommand({
-                    type: "mem_conversation_capacity_update",
-                    max_bytes: maxBytes,
-                  })
-                ) {
-                  setPendingMemConversationCapacity(false);
-                  reportUiError(
-                    "Mem settings failed",
-                    "Reconnect to Timem Web before updating conversation capacity.",
-                    "system",
-                  );
-                }
-              }}
-              onSaveFavoriteCapacity={(maxBytes) => {
-                setFavoriteCapacityUpdating(true);
-                if (
-                  !sendCommand({
-                    type: "favorite_capacity_update",
-                    max_bytes: maxBytes,
-                  })
-                )
-                  setFavoriteCapacityUpdating(false);
-              }}
-              onSwitchMemory={(path) => {
-                const runningSessionCount =
-                  memSwitchRunningSessionCount(sessions);
-                if (runningSessionCount > 0) {
-                  setMemSwitchCandidate({ path, runningSessionCount });
-                  return;
-                }
-                setRenamingSessionId("");
-                setRenameDraft("");
-                setPendingMemSwitch(true);
-                if (
-                  !sendCommand({
-                    type: "mem_switch",
-                    path,
-                    stop_running: false,
-                  })
-                ) {
-                  setPendingMemSwitch(false);
-                  reportUiError(
-                    "Mem switch failed",
-                    "Reconnect to Timem Web before switching the mem directory.",
-                    "system",
-                  );
-                }
-              }}
+              onRevealEndpoint={revealModelEndpoint}
+              onSaveEndpoint={saveModelEndpoint}
+              onSaveTemporaryPolicy={saveMemTemporaryPolicy}
+              onSaveConversationCapacity={saveMemConversationCapacity}
+              onSaveFavoriteCapacity={saveMemFavoriteCapacity}
+              onSwitchMemory={switchMemWorkspace}
             />
           )}
           {showMcp && (
@@ -9707,7 +9677,17 @@ const TurnInteraction = memo(function TurnInteraction({
       decisions.length,
   );
   const previousTurnState = useRef(turn.state);
+  const previousFinalAnswer = useRef(!!turn.final_answer);
   const [pendingUpdates, setPendingUpdates] = useState(0);
+  const [workEdgeFades, setWorkEdgeFades] = useState({ top: false, bottom: false });
+  const updateWorkEdgeFades = useCallback((scroll: HTMLDivElement) => {
+    const next = scrollEdgeFades({
+      scrollTop: scroll.scrollTop,
+      scrollHeight: scroll.scrollHeight,
+      clientHeight: scroll.clientHeight,
+    });
+    setWorkEdgeFades((current) => current.top === next.top && current.bottom === next.bottom ? current : next);
+  }, []);
   const lifecycleEvents = useMemo(
     () => coalesceActionLifecycle(turn.events),
     [turn.events],
@@ -9815,10 +9795,12 @@ const TurnInteraction = memo(function TurnInteraction({
 
   useEffect(() => {
     const wasWorking = previousTurnState.current === "working";
-    previousTurnState.current = isWorking ? "working" : "finished";
+    const finalArrived = !previousFinalAnswer.current && !!turn.final_answer;
+    previousTurnState.current = isWorking ? "working" : turn.state;
+    previousFinalAnswer.current = !!turn.final_answer;
     if (!wasWorking && isWorking) setShowWorkStream(true);
-    if (wasWorking && !isWorking) setShowWorkStream(false);
-  }, [isWorking]);
+    if (finalArrived || (wasWorking && turn.state === "interrupted")) setShowWorkStream(false);
+  }, [isWorking, turn.final_answer, turn.state]);
 
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
@@ -9833,7 +9815,8 @@ const TurnInteraction = memo(function TurnInteraction({
     } else if (added > 0) {
       setPendingUpdates((count) => count + added);
     }
-  }, [turn.events.length, supplementItems.length, decisions.length]);
+    updateWorkEdgeFades(scroll);
+  }, [turn.events.length, supplementItems.length, decisions.length, updateWorkEdgeFades]);
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
     const content = workContentRef.current;
@@ -9854,6 +9837,19 @@ const TurnInteraction = memo(function TurnInteraction({
       if (scrollFrame !== undefined) window.cancelAnimationFrame(scrollFrame);
     };
   }, [workStreamVisible]);
+
+  useLayoutEffect(() => {
+    const scroll = workScrollRef.current;
+    const content = workContentRef.current;
+    if (!scroll || !content) return;
+    const update = () => updateWorkEdgeFades(scroll);
+    update();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(update);
+    observer.observe(scroll);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [updateWorkEdgeFades, workStreamVisible]);
 
   const scrollWorkToLatest = () => {
     const scroll = workScrollRef.current;
@@ -10034,13 +10030,14 @@ const TurnInteraction = memo(function TurnInteraction({
           {workStreamVisible && (
             <div className="turn-work-panel">
               <div
-                className={`turn-work-scroll has-content${pendingUpdates > 0 ? " has-pending-updates" : ""}`}
+                className={`turn-work-scroll has-content${workEdgeFades.top ? " fade-top" : ""}${workEdgeFades.bottom ? " fade-bottom" : ""}${pendingUpdates > 0 ? " has-pending-updates" : ""}`}
                 role="region"
                 aria-label={
                   isToolGenTurn ? "ToolGen work stream" : "Task work stream"
                 }
                 ref={workScrollRef}
                 onScroll={(event) => {
+                  updateWorkEdgeFades(event.currentTarget);
                   followLatest.current = isNearScrollBottom(
                     {
                       scrollTop: event.currentTarget.scrollTop,
@@ -10181,194 +10178,33 @@ function areTurnInteractionPropsEqual(
   });
 }
 
-function TurnAnswerDelivery({
-  turn,
-  toolGenPending,
-  toolGenBlocked,
-  favorite,
-  favoritePending,
-  onToggleFavorite,
-  onToolGen,
-  onDelete,
-}: {
-  turn: WebTurn;
-  toolGenPending: boolean;
-  toolGenBlocked: boolean;
-  favorite?: ChatFavorite;
-  favoritePending: boolean;
-  onToggleFavorite: () => boolean;
-  onToolGen?: () => void;
-  onDelete?: () => void;
-}) {
+function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, favorite, favoritePending, onToggleFavorite, onToolGen, onDelete }: { turn: WebTurn; toolGenPending: boolean; toolGenBlocked: boolean; favorite?: ChatFavorite; favoritePending: boolean; onToggleFavorite: () => boolean; onToolGen?: () => void; onDelete?: () => void }) {
   const hasFinal = !!turn.final_answer;
-  const hasInterim = turn.sub_answers.length > 0;
-  const showFinalTab = hasFinal || hasInterim;
-  const availableKeys = [
-    ...(showFinalTab ? ["final"] : []),
-    ...(hasInterim ? ["interim"] : []),
-  ];
-  const newestKey = hasFinal ? "final" : "interim";
-  const [selectedKey, setSelectedKey] = useState(newestKey);
-  const previousFinal = useRef<string | null | undefined>(turn.final_answer);
-  const previousSubCount = useRef(turn.sub_answers.length);
-  const manualSelection = useRef(false);
-  const interactingUntil = useRef(0);
-  const markInteracting = () => {
-    interactingUntil.current = Date.now() + 1_500;
-  };
-  const selectPanel = (key: string) => {
-    manualSelection.current = true;
-    setSelectedKey(key);
-  };
-
+  const hasChat = turn.sub_answers.length > 0;
+  const [chatExpanded, setChatExpanded] = useState(() => !hasFinal);
+  const previousFinal = useRef(hasFinal);
+  const chatPanelId = `turn-chat-${turn.turn_id}`;
+  const chatItems = newestInterimAnswersFirst(turn.sub_answers);
   useEffect(() => {
     const finalArrived = !previousFinal.current && !!turn.final_answer;
-    const interimArrived = turn.sub_answers.length > previousSubCount.current;
-    previousFinal.current = turn.final_answer;
-    previousSubCount.current = turn.sub_answers.length;
-    if (manualSelection.current || Date.now() < interactingUntil.current)
-      return;
-    if (finalArrived) setSelectedKey("final");
-    else if (interimArrived && !turn.final_answer) setSelectedKey("interim");
-  }, [turn.final_answer, turn.sub_answers]);
-
-  const selected = availableKeys.includes(selectedKey)
-    ? selectedKey
-    : availableKeys[0];
-  if (!selected) return null;
-  if (availableKeys.length === 1 && selected === "final" && turn.final_answer) {
-    return (
-      <FinalAnswerDelivery
-        text={turn.final_answer}
-        completion={turn.completion}
-        toolGenPending={toolGenPending}
-        toolGenBlocked={toolGenBlocked}
-        favorite={favorite}
-        favoritePending={favoritePending}
-        onToggleFavorite={onToggleFavorite}
-        onToolGen={onToolGen}
-        onDelete={onDelete}
-      />
-    );
-  }
-  return (
-    <section
-      className="turn-answer-delivery"
-      onPointerDown={markInteracting}
-      onFocus={markInteracting}
-      onCopy={markInteracting}
-    >
-      {hasInterim && (
-        <div
-          className="turn-answer-tabs"
-          role="tablist"
-          aria-label="Turn answers"
-        >
-          {showFinalTab && (
-            <button
-              type="button"
-              role="tab"
-              aria-selected={selected === "final"}
-              className={selected === "final" ? "selected" : ""}
-              onClick={() => selectPanel("final")}
-            >
-              Final Answer
-            </button>
-          )}
-          {hasInterim && (
-            <button
-              type="button"
-              role="tab"
-              aria-selected={selected === "interim"}
-              className={selected === "interim" ? "selected" : ""}
-              onClick={() => selectPanel("interim")}
-            >
-              Interim
-            </button>
-          )}
-        </div>
-      )}
-      <div className="turn-answer-panel" role="tabpanel">
-        {showFinalTab && (
-          <div
-            className={`turn-answer-view ${selected === "final" ? "selected" : "inactive"}`}
-            aria-hidden={selected !== "final"}
-          >
-            {hasFinal && turn.final_answer ? (
-              <>
-                <FinalAnswerContent text={turn.final_answer} />
-                <button
-                  type="button"
-                  className={`final-favorite standalone ${favorite || favoritePending ? "active" : ""} ${favoritePending ? "pending" : ""}`}
-                  title={
-                    favoritePending
-                      ? "Saving favorite"
-                      : favorite
-                        ? "Remove from favorites"
-                        : "Favorite this answer"
-                  }
-                  aria-label={
-                    favoritePending
-                      ? "Saving favorite"
-                      : favorite
-                        ? "Remove answer from favorites"
-                        : "Favorite answer"
-                  }
-                  aria-pressed={!!favorite || favoritePending}
-                  disabled={favoritePending}
-                  onClick={onToggleFavorite}
-                >
-                  <Star
-                    size={13}
-                    fill={favorite || favoritePending ? "currentColor" : "none"}
-                  />
-                </button>
-                {turn.completion ? (
-                  <CompletionCard
-                    completion={turn.completion}
-                    toolGenPending={toolGenPending}
-                    toolGenBlocked={toolGenBlocked}
-                    onToolGen={onToolGen}
-                  />
-                ) : null}
-              </>
-            ) : (
-              <div
-                className="turn-final-placeholder"
-                role="status"
-                aria-live="polite"
-              >
-                {turn.state === "working"
-                  ? "Still working ..."
-                  : turn.state === "interrupted"
-                    ? "Interrupted by runtime restart."
-                    : "No final answer was produced."}
-              </div>
-            )}
-          </div>
-        )}
-        {hasInterim && (
-          <div
-            className={`turn-answer-view ${selected === "interim" ? "selected" : "inactive"}`}
-            aria-hidden={selected !== "interim"}
-          >
-            <div className="turn-interim-list">
-              {turn.sub_answers.map((item, index) => (
-                <section className="turn-interim-item" key={item.sub_answer_id}>
-                  <h3>
-                    <span>{index + 1}.</span> {item.task}
-                  </h3>
-                  <div className="message-content">
-                    <MarkdownContent text={item.answer} />
-                  </div>
-                </section>
-              ))}
-            </div>
-          </div>
-        )}
+    previousFinal.current = !!turn.final_answer;
+    if (finalArrived) setChatExpanded(false);
+  }, [turn.final_answer]);
+  if (!hasChat && !hasFinal) return null;
+  return <section className="turn-answer-delivery">
+    {hasChat && <section className={`turn-chat-delivery${chatExpanded ? " expanded" : " collapsed"}`}>
+      <div className="turn-chat-heading">
+        <button type="button" className="working-chip work-title-chip work-collapse-toggle chat-title-chip" title={chatExpanded ? "Hide chat answers" : "Show chat answers"} aria-label={chatExpanded ? "Hide chat answers" : "Show chat answers"} aria-expanded={chatExpanded} aria-controls={chatPanelId} onClick={() => setChatExpanded((expanded) => !expanded)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>Chat</button>
       </div>
-    </section>
-  );
+      {chatExpanded && <div id={chatPanelId} className="turn-chat-panel" role="region" aria-label="Chat answers">
+        <div className="turn-interim-list">{chatItems.map(({ item, ordinal }) => <section className="turn-interim-item" key={item.sub_answer_id}>
+          <h3><span>{ordinal}.</span> {item.task}</h3>
+          <div className="message-content"><MarkdownContent text={item.answer}/></div>
+        </section>)}</div>
+      </div>}
+    </section>}
+    {hasFinal && turn.final_answer && <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} favorite={favorite} favoritePending={favoritePending} onToggleFavorite={onToggleFavorite} onToolGen={onToolGen} onDelete={onDelete}/>}
+  </section>;
 }
 
 function FinalAnswerDelivery({
@@ -12177,7 +12013,7 @@ type SettingsCenterProps = {
   onSaveEndpoint: (endpoint: ModelEndpointDraft) => void;
 };
 
-function SettingsCenter(props: SettingsCenterProps) {
+const SettingsCenter = memo(function SettingsCenter(props: SettingsCenterProps) {
   const {
     panelRef,
     section,
@@ -12244,8 +12080,8 @@ function SettingsCenter(props: SettingsCenterProps) {
     temporaryItemsDeleting;
   const cleanedPath = path.trim();
   const pathUnchanged = cleanedPath === memPath;
-  const deletableTemporaryItems = temporaryItems.filter((item) => item.deletable !== false);
-  const selectedTemporaryBytes = deletableTemporaryItems.filter((item) => selectedTemporaryIds.has(item.id)).reduce((total, item) => total + item.bytes, 0);
+  const deletableTemporaryItems = useMemo(() => temporaryItems.filter((item) => item.deletable !== false), [temporaryItems]);
+  const selectedTemporaryBytes = useMemo(() => deletableTemporaryItems.filter((item) => selectedTemporaryIds.has(item.id)).reduce((total, item) => total + item.bytes, 0), [deletableTemporaryItems, selectedTemporaryIds]);
   const updateAppearance = <K extends keyof Appearance>(key: K, value: Appearance[K]) => onAppearanceChange({ ...appearance, [key]: value });  useEffect(() => setDays(retentionDays), [retentionDays]);
   useEffect(
     () => setTemporaryCapacity(temporaryCapacityBytes),
@@ -12264,9 +12100,14 @@ function SettingsCenter(props: SettingsCenterProps) {
     setMemoryPage("overview");
   }, [memPath]);
   useEffect(() => {
-    setSelectedTemporaryIds((current) => new Set(Array.from(current).filter((id) => temporaryItems.some((item) => item.id === id && item.deletable !== false))));    if (temporaryItemsDeleting) return;
+    const availableIds = new Set(deletableTemporaryItems.map((item) => item.id));
+    setSelectedTemporaryIds((current) => {
+      if (current.size === 0 || Array.from(current).every((id) => availableIds.has(id))) return current;
+      return new Set(Array.from(current).filter((id) => availableIds.has(id)));
+    });
+    if (temporaryItemsDeleting) return;
     if (temporaryItems.length === 0) setTemporaryDeleteMode(false);
-  }, [temporaryItems, temporaryItemsDeleting]);
+  }, [deletableTemporaryItems, temporaryItems.length, temporaryItemsDeleting]);
   const cancelTemporaryDelete = () => {
     setTemporaryDeleteMode(false);
     setSelectedTemporaryIds(new Set());
@@ -13164,7 +13005,8 @@ function SettingsCenter(props: SettingsCenterProps) {
       </section>
     </div>,
     document.body,
-  );}
+  );
+});
 
 function EndpointSettingsPane({
   endpoints,

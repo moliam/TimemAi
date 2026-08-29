@@ -213,9 +213,10 @@ always win over launch defaults.
 
 After Timem Web has published readiness, it applies temporary-data age and capacity
 limits in a background blocking-file task; it runs again after a MEM switch and once
-per hour while Timem Web is running. Conversation capacity is enforced by the same
-periodic task. A direct setting change applies the new limit before reporting success.
-This keeps large audit/history rewrites off the listener-startup path. Temporary-data
+per hour while Timem Web is running. Ordinary chat-history appends do not wake this
+global retention task. Conversation capacity is enforced by the same periodic task.
+A direct setting change applies the new limit before reporting success. This keeps
+large audit/history work off the listener-startup and chat-append paths. Temporary-data
 age cleanup covers:
 
 - raw-chat event kinds `action`, `action_result`, `context_compact`, and `repair`;
@@ -226,28 +227,44 @@ User/assistant messages and all other history event kinds are never removed by t
 setting. Running shell jobs are retained regardless of age. Unlimited mode skips the
 time-based cleanup, but audit storage remains capacity-bounded. Cleanup uses the same
 MEM lock domains as writers, retains records exactly on the cutoff boundary, and is safe
-to repeat. Snapshot JSON files are replaced atomically; large API-audit JSONL files are
-compacted in place while holding the audit lock, preserving only complete records and
-avoiding a second large temporary copy.
+to repeat. Snapshot JSON files are replaced atomically. Large API-audit JSONL storage
+uses physical 16 MiB segment files plus a small validated per-segment time/count summary.
+Appending touches only the active segment; capacity cleanup unlinks complete oldest
+segments; age cleanup unlinks wholly expired segments and rewrites only a segment whose
+time range crosses the cutoff. Event timestamps need not be ordered inside a segment.
 
 All bounded stores reserve one allocation slice for safe replacement and evict only
 complete records or business items. Audit uses 16 MiB slices: normal launch has a
 64 MiB hard bound and 48 MiB stable budget, while `--debug` has a 512 MiB hard bound
 and 496 MiB stable budget. The API snapshot, action audit, and repair-output audit are
-each individually bounded to one 16 MiB slice; JSONL sidecars use the remaining shared
-directory budget and retain the newest complete lines. A single API event over 16 MiB
-is replaced by a metadata-only `payload_omitted` record so one event cannot defeat the
+each individually bounded to one 16 MiB slice; the segmented API JSONL stream uses the
+remaining directory budget (16 MiB normally and 464 MiB in debug mode) and retains the
+newest complete segments/lines. A single API event over
+16 MiB is replaced by a metadata-only `payload_omitted` record so one event cannot defeat the
 bound. Conversations evict oldest complete turns, temporary capacity evicts oldest
 complete temporary items, and favorites use physical 4 MiB segment files while keeping
 complete favorite records. Capacity compaction preserves existing JSON/JSONL schemas.
 
-Existing MEM directories require no migration. Timem continues to recognize both
-`audit/api_audit.jsonl` and the older MEM-root `api_audit.jsonl`; the first audit writes
-under the new version progressively retain their newest complete records within the same
-budget. Obsolete `.retention.tmp-*` audit copies left by older versions are removed while
-the audit lock is held. Do not manually rewrite or delete a live audit file from another
-process; restart the Timem host on the new version and let its locked writer converge the
-store.
+Existing MEM directories require no manual migration. Upgrade readers recognize legacy
+API-audit JSON documents, JSONL files at both `audit/api_audit.jsonl` and the older
+MEM-root path, action-audit documents containing multiple Turns, segmented stores without
+a manifest, and Session histories without an index or retention summary. The first
+locked write or low-frequency maintenance pass builds the new manifest, per-Turn files,
+or retention summary. Directory-based migrations are prepared in a sibling temporary
+directory and installed by rename; legacy source data is removed or reduced only after
+the new representation is committed, so an interrupted migration is safe to retry.
+Malformed or missing small state files are rebuilt from retained records, while normal
+appends validate state with file length or active-segment metadata and remain incremental.
+
+This is an **upgrade compatibility** guarantee, not a bidirectional on-disk format
+guarantee. Older Timem binaries do not understand every manifest, segment directory, or
+summary introduced by newer releases. Keeping a complete legacy snapshot synchronized on
+every append would reintroduce unbounded rewrites, so downgrade-in-place is unsupported.
+Back up or export the MEM before downgrading, and never let old and new Timem versions
+write the same MEM concurrently. Obsolete `.retention.tmp-*` audit copies left by older
+versions are removed while the audit lock is held. Do not manually rewrite or delete a
+live audit file from another process; restart the Timem host on the new version and let
+its locked writer converge the store.
 
 Session metadata is stored per Session rather than in one shared mutable index. If one
 `sessions/<session-id>/session.json` is malformed or carries a mismatched ID,

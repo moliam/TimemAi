@@ -1,15 +1,25 @@
 use crate::{
-    atomic_write_file, bash_approval_mode_label, rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+    atomic_write_file, bash_approval_mode_label,
+    rolling_file_store::{
+        append_rolling_record, migrate_legacy_file, read_segmented_records, rolling_segments,
+        segment_metadata_path, segmented_directory, trim_rolling_segments, RollingCapacity,
+        AUDIT_ROLLING_SLICE_BYTES,
+    },
     ApiProtocol, ApprovalRequest, BashApprovalMode, MemGuard, TurnStopSummary, UsageStats,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::{
+    fs::OpenOptions,
+    io::{Read, Seek, SeekFrom, Write},
+};
 
-const AUDIT_SIDECAR_THRESHOLD_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_AUDIT_DIRECTORY_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEBUG_AUDIT_DIRECTORY_MAX_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const ACTION_AUDIT_MAX_BYTES: u64 = AUDIT_ROLLING_SLICE_BYTES;
@@ -37,9 +47,10 @@ fn audit_stable_max_bytes() -> u64 {
 }
 
 fn api_audit_jsonl_max_bytes() -> u64 {
-    audit_stable_max_bytes()
+    audit_directory_max_bytes().saturating_sub(AUDIT_ROLLING_SLICE_BYTES.saturating_mul(3))
 }
-const AUDIT_EVENT_MAX_BYTES: usize = 16 * 1024 * 1024;
+const AUDIT_EVENT_MAX_BYTES: usize = AUDIT_ROLLING_SLICE_BYTES as usize - 1;
+#[cfg(test)]
 const AUDIT_COPY_BUFFER_BYTES: usize = 64 * 1024;
 const REPAIR_OUTPUT_RESPONSE_LIMIT_CHARS: usize = 12_000;
 
@@ -51,18 +62,12 @@ pub fn append_audit_event(path: &Path, event: &Value) -> std::io::Result<()> {
             }
             let now_ms = audit_now_ms();
             let event = bounded_audit_event(timestamp_audit_event(event, now_ms))?;
-            if should_append_audit_sidecar(path) {
-                append_audit_jsonl(&audit_sidecar_path(path), &event)?;
-            } else {
-                let mut doc = read_audit_doc(path)?;
-                doc["events"]
-                    .as_array_mut()
-                    .expect("audit doc events must be an array")
-                    .push(event);
-                let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
+            if !path.exists() {
+                let text = serde_json::to_string_pretty(&empty_audit_doc())
+                    .map_err(std::io::Error::other)?;
                 atomic_write_file(path, format!("{text}\n").as_bytes())?;
             }
-            enforce_audit_storage_budget_unlocked(path)
+            append_audit_jsonl(&audit_sidecar_path(path), &event)
         })
         .map_err(std::io::Error::other)?
 }
@@ -85,7 +90,7 @@ pub fn append_repair_output_event(api_audit_file: &Path, event: &Value) -> std::
             atomic_write_file(&repair_file, format!("{text}\n").as_bytes())
         })
         .map_err(std::io::Error::other)??;
-    enforce_audit_storage_budget(api_audit_file)
+    Ok(())
 }
 
 fn bounded_audit_event(event: Value) -> std::io::Result<Value> {
@@ -150,14 +155,25 @@ fn enforce_audit_storage_budget_unlocked(path: &Path) -> std::io::Result<()> {
         compact_json_array_document(path, "events", API_AUDIT_BASE_MAX_BYTES)?;
     }
     let sidecar = audit_sidecar_path(path);
-    if sidecar.exists() {
-        compact_jsonl_tail_in_place(&sidecar, api_audit_jsonl_max_bytes())?;
+    if sidecar.exists() || segmented_directory(&sidecar).exists() {
+        trim_rolling_segments(
+            &sidecar,
+            api_audit_jsonl_max_bytes(),
+            AUDIT_ROLLING_SLICE_BYTES,
+        )?;
     }
     let legacy_sidecar = audit_dir
         .parent()
         .map(|space_dir| space_dir.join("api_audit.jsonl"));
-    if let Some(legacy) = legacy_sidecar.as_ref().filter(|legacy| legacy.exists()) {
-        compact_jsonl_tail_in_place(legacy, api_audit_jsonl_max_bytes())?;
+    if let Some(legacy) = legacy_sidecar
+        .as_ref()
+        .filter(|legacy| legacy.exists() || segmented_directory(legacy).exists())
+    {
+        trim_rolling_segments(
+            legacy,
+            api_audit_jsonl_max_bytes(),
+            AUDIT_ROLLING_SLICE_BYTES,
+        )?;
     }
 
     // Fixed per-file budgets leave room for metadata. If an old layout and the
@@ -167,12 +183,18 @@ fn enforce_audit_storage_budget_unlocked(path: &Path) -> std::io::Result<()> {
         .into_iter()
         .flatten()
     {
-        if total <= audit_stable_max_bytes() || !candidate.exists() {
+        if total <= audit_stable_max_bytes()
+            || (!candidate.exists() && !segmented_directory(candidate).exists())
+        {
             continue;
         }
-        let len = fs::metadata(candidate)?.len();
+        let record_bytes = rolling_record_bytes(candidate)?;
         let excess = total.saturating_sub(audit_stable_max_bytes());
-        compact_jsonl_tail_in_place(candidate, len.saturating_sub(excess))?;
+        trim_rolling_segments(
+            candidate,
+            record_bytes.saturating_sub(excess),
+            AUDIT_ROLLING_SLICE_BYTES,
+        )?;
         total = audit_storage_bytes(audit_dir, legacy_sidecar.as_deref())?;
     }
     if total > audit_stable_max_bytes() || total > audit_directory_max_bytes() {
@@ -197,6 +219,53 @@ fn cleanup_stale_audit_temps(audit_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn rolling_path_bytes(path: &Path) -> std::io::Result<u64> {
+    let mut total = match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => metadata.len(),
+        Ok(_) => 0,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error),
+    };
+    let mut directories = vec![segmented_directory(path)];
+    if path
+        .file_name()
+        .is_some_and(|name| name == "action_audit.json")
+    {
+        directories.push(path.with_file_name("action_audit.json.turns"));
+    }
+    for directory in directories {
+        match fs::read_dir(directory) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    if let Ok(metadata) = entry.metadata() {
+                        if metadata.is_file() {
+                            total = total.saturating_add(metadata.len());
+                        }
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(total)
+}
+
+fn rolling_record_bytes(path: &Path) -> std::io::Result<u64> {
+    if segmented_directory(path).exists() {
+        return Ok(rolling_segments(path)?
+            .iter()
+            .map(|segment| segment.bytes)
+            .sum());
+    }
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => Ok(metadata.len()),
+        Ok(_) => Ok(0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
+    }
+}
+
 fn audit_storage_bytes(audit_dir: &Path, legacy_sidecar: Option<&Path>) -> std::io::Result<u64> {
     let mut total = 0u64;
     for path in [
@@ -208,12 +277,7 @@ fn audit_storage_bytes(audit_dir: &Path, legacy_sidecar: Option<&Path>) -> std::
     .into_iter()
     .chain(legacy_sidecar.map(Path::to_path_buf))
     {
-        match fs::metadata(path) {
-            Ok(metadata) if metadata.is_file() => total = total.saturating_add(metadata.len()),
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
+        total = total.saturating_add(rolling_path_bytes(&path)?);
     }
     Ok(total)
 }
@@ -252,6 +316,7 @@ fn compact_json_array_document(
     }
 }
 
+#[cfg(test)]
 fn compact_jsonl_tail_in_place(path: &Path, max_bytes: u64) -> std::io::Result<()> {
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     let file_len = file.metadata()?.len();
@@ -331,7 +396,7 @@ fn prune_api_audit_before_unlocked(
         atomic_write_file(path, format!("{text}\n").as_bytes())?;
     }
     let sidecar = audit_sidecar_path(path);
-    if sidecar != path && sidecar.exists() {
+    if sidecar != path && (sidecar.exists() || segmented_directory(&sidecar).exists()) {
         removed = removed.saturating_add(prune_audit_jsonl(&sidecar, cutoff_ms, now_ms)?);
     }
     Ok(removed)
@@ -345,34 +410,172 @@ fn retained_audit_time_ms(event: &Value, cutoff_ms: i64, now_ms: i64) -> Option<
     Some(time_ms)
 }
 
-fn prune_audit_jsonl(path: &Path, cutoff_ms: i64, now_ms: i64) -> std::io::Result<usize> {
-    let input = fs::File::open(path)?;
-    let mut file = OpenOptions::new().write(true).open(path)?;
-    let mut reader = BufReader::new(input);
-    let mut removed = 0usize;
-    let mut write_offset = 0u64;
+fn audit_record_time(record: &[u8]) -> Option<i64> {
+    serde_json::from_slice::<Value>(record)
+        .ok()?
+        .get("time_ms")?
+        .as_i64()
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+struct AuditSegmentSummary {
+    bytes: u64,
+    records: usize,
+    min_time_ms: i64,
+    max_time_ms: i64,
+}
+
+fn summarize_audit_segment(path: &Path) -> std::io::Result<Option<AuditSegmentSummary>> {
+    let bytes = fs::metadata(path)?.len();
+    let mut reader = BufReader::new(fs::File::open(path)?);
+    let mut records = 0usize;
+    let mut min_time_ms = i64::MAX;
+    let mut max_time_ms = i64::MIN;
     let mut line = Vec::new();
     loop {
         line.clear();
         if reader.read_until(b'\n', &mut line)? == 0 {
             break;
         }
-        let Ok(event) = serde_json::from_slice::<Value>(&line) else {
-            removed = removed.saturating_add(1);
-            continue;
+        let Some(time_ms) = audit_record_time(&line) else {
+            return Ok(None);
         };
-        if retained_audit_time_ms(&event, cutoff_ms, now_ms).is_none() {
-            removed = removed.saturating_add(1);
-            continue;
-        }
-        let encoded = serde_json::to_vec(&event).map_err(std::io::Error::other)?;
-        file.seek(SeekFrom::Start(write_offset))?;
-        file.write_all(&encoded)?;
-        file.write_all(b"\n")?;
-        write_offset = write_offset.saturating_add(encoded.len() as u64 + 1);
+        records = records.saturating_add(1);
+        min_time_ms = min_time_ms.min(time_ms);
+        max_time_ms = max_time_ms.max(time_ms);
     }
-    file.set_len(write_offset)?;
-    file.sync_all()?;
+    if records == 0 {
+        return Ok(None);
+    }
+    Ok(Some(AuditSegmentSummary {
+        bytes,
+        records,
+        min_time_ms,
+        max_time_ms,
+    }))
+}
+
+fn write_audit_segment_summary(path: &Path, summary: AuditSegmentSummary) -> std::io::Result<()> {
+    let mut bytes = serde_json::to_vec(&summary).map_err(std::io::Error::other)?;
+    bytes.push(b'\n');
+    atomic_write_file(&segment_metadata_path(path), &bytes)
+}
+
+fn audit_segment_summary(path: &Path) -> std::io::Result<Option<AuditSegmentSummary>> {
+    let current_bytes = fs::metadata(path)?.len();
+    let metadata_path = segment_metadata_path(path);
+    if let Ok(bytes) = fs::read(&metadata_path) {
+        if let Ok(summary) = serde_json::from_slice::<AuditSegmentSummary>(&bytes) {
+            if summary.bytes == current_bytes {
+                return Ok(Some(summary));
+            }
+        }
+    }
+    let summary = summarize_audit_segment(path)?;
+    if let Some(summary) = summary {
+        write_audit_segment_summary(path, summary)?;
+    }
+    Ok(summary)
+}
+
+fn update_active_audit_segment_summary(
+    path: &Path,
+    event_time_ms: i64,
+    record_bytes: u64,
+) -> std::io::Result<()> {
+    let Some(segment) = rolling_segments(path)?.last().cloned() else {
+        return Ok(());
+    };
+    let metadata_path = segment_metadata_path(&segment.path);
+    let previous = fs::read(&metadata_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<AuditSegmentSummary>(&bytes).ok());
+    let summary = match previous {
+        Some(previous) if previous.bytes.saturating_add(record_bytes) == segment.bytes => {
+            AuditSegmentSummary {
+                bytes: segment.bytes,
+                records: previous.records.saturating_add(1),
+                min_time_ms: previous.min_time_ms.min(event_time_ms),
+                max_time_ms: previous.max_time_ms.max(event_time_ms),
+            }
+        }
+        None if segment.bytes == record_bytes => AuditSegmentSummary {
+            bytes: segment.bytes,
+            records: 1,
+            min_time_ms: event_time_ms,
+            max_time_ms: event_time_ms,
+        },
+        _ => match summarize_audit_segment(&segment.path)? {
+            Some(summary) => summary,
+            None => return Ok(()),
+        },
+    };
+    write_audit_segment_summary(&segment.path, summary)
+}
+
+fn remove_audit_segment(path: &Path) -> std::io::Result<()> {
+    fs::remove_file(path)?;
+    match fs::remove_file(segment_metadata_path(path)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn prune_audit_segment(path: &Path, cutoff_ms: i64, now_ms: i64) -> std::io::Result<usize> {
+    let input = fs::File::open(path)?;
+    let mut reader = BufReader::new(input);
+    let mut retained = Vec::new();
+    let mut removed = 0usize;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        let keep = serde_json::from_slice::<Value>(&line)
+            .ok()
+            .and_then(|event| retained_audit_time_ms(&event, cutoff_ms, now_ms))
+            .is_some();
+        if keep {
+            retained.extend_from_slice(&line);
+        } else {
+            removed = removed.saturating_add(1);
+        }
+    }
+    if removed == 0 {
+        return Ok(0);
+    }
+    if retained.is_empty() {
+        remove_audit_segment(path)?;
+    } else {
+        atomic_write_file(path, &retained)?;
+        match summarize_audit_segment(path)? {
+            Some(summary) => write_audit_segment_summary(path, summary)?,
+            None => {
+                let _ = fs::remove_file(segment_metadata_path(path));
+            }
+        }
+    }
+    Ok(removed)
+}
+
+fn prune_audit_jsonl(path: &Path, cutoff_ms: i64, now_ms: i64) -> std::io::Result<usize> {
+    migrate_legacy_file(path, AUDIT_ROLLING_SLICE_BYTES)?;
+    let mut removed = 0usize;
+    for segment in rolling_segments(path)? {
+        match audit_segment_summary(&segment.path)? {
+            Some(summary) if summary.max_time_ms < cutoff_ms || summary.min_time_ms > now_ms => {
+                removed = removed.saturating_add(summary.records);
+                remove_audit_segment(&segment.path)?;
+            }
+            Some(summary) if summary.min_time_ms >= cutoff_ms && summary.max_time_ms <= now_ms => {}
+            _ => {
+                removed =
+                    removed.saturating_add(prune_audit_segment(&segment.path, cutoff_ms, now_ms)?);
+            }
+        }
+    }
     Ok(removed)
 }
 
@@ -431,6 +634,13 @@ pub fn read_audit_doc(path: &Path) -> std::io::Result<Value> {
 }
 
 fn read_audit_doc_single(path: &Path) -> std::io::Result<Value> {
+    if segmented_directory(path).exists() {
+        let events = read_segmented_records(path)?
+            .into_iter()
+            .filter_map(|record| serde_json::from_slice::<Value>(&record).ok())
+            .collect::<Vec<_>>();
+        return Ok(json!({"version": 1, "events": events}));
+    }
     let Ok(text) = fs::read_to_string(path) else {
         return Ok(empty_audit_doc());
     };
@@ -449,19 +659,20 @@ fn read_audit_doc_single(path: &Path) -> std::io::Result<Value> {
     Ok(json!({"version": 1, "events": events}))
 }
 
-fn should_append_audit_sidecar(path: &Path) -> bool {
-    if audit_sidecar_path(path).exists() {
-        return true;
-    }
-    fs::metadata(path)
-        .map(|metadata| metadata.len() >= AUDIT_SIDECAR_THRESHOLD_BYTES)
-        .unwrap_or(false)
-}
-
 fn append_audit_jsonl(path: &Path, event: &Value) -> std::io::Result<()> {
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut file, event).map_err(std::io::Error::other)?;
-    file.write_all(b"\n")
+    let mut record = serde_json::to_vec(event).map_err(std::io::Error::other)?;
+    record.push(b'\n');
+    let capacity = RollingCapacity::with_slice_bytes(
+        api_audit_jsonl_max_bytes().saturating_add(AUDIT_ROLLING_SLICE_BYTES),
+        AUDIT_ROLLING_SLICE_BYTES,
+    )
+    .map_err(std::io::Error::other)?;
+    append_rolling_record(path, &record, capacity, AUDIT_ROLLING_SLICE_BYTES)?;
+    let event_time_ms = event
+        .get("time_ms")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| std::io::Error::other("audit_event_time_missing"))?;
+    update_active_audit_segment_summary(path, event_time_ms, record.len() as u64)
 }
 
 fn audit_sidecar_path(path: &Path) -> std::path::PathBuf {

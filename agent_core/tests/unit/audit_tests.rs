@@ -9,15 +9,15 @@ fn append_audit_writes_json_document() {
     append_audit_event(&path, &json!({"type":"turn_final","ok":true})).unwrap();
     append_audit_event(&path, &json!({"type":"llm_request","ok":true})).unwrap();
 
-    let text = std::fs::read_to_string(&path).unwrap();
-    let doc: Value = serde_json::from_str(&text).unwrap();
+    let doc = read_audit_doc(&path).unwrap();
     assert_eq!(doc["version"], 1);
     let events = doc["events"].as_array().unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[0]["type"], "turn_final");
     assert_eq!(events[1]["type"], "llm_request");
     assert!(events.iter().all(|event| event["time_ms"].is_i64()));
-    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(segmented_directory(&audit_sidecar_path(&path)));
 }
 
 #[test]
@@ -49,8 +49,7 @@ fn append_audit_migrates_legacy_jsonl_without_applying_retention_policy() {
 
     append_audit_event(&path, &json!({"type":"turn_final","ok":true})).unwrap();
 
-    let text = std::fs::read_to_string(&path).unwrap();
-    let doc: Value = serde_json::from_str(&text).unwrap();
+    let doc = read_audit_doc(&path).unwrap();
     assert_eq!(doc["version"], 1);
     let events = doc["events"].as_array().unwrap();
     assert_eq!(events.len(), 2);
@@ -58,12 +57,12 @@ fn append_audit_migrates_legacy_jsonl_without_applying_retention_policy() {
     assert!(events[0].get("time_ms").is_none());
     assert_eq!(events[1]["type"], "turn_final");
     assert!(events[1]["time_ms"].is_i64());
-    assert!(!text.lines().next().unwrap().starts_with(r#"{"type""#));
-    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_dir_all(segmented_directory(&audit_sidecar_path(&path)));
 }
 
 #[test]
-fn append_audit_uses_jsonl_sidecar_for_large_documents_and_read_merges_events() {
+fn append_audit_uses_segmented_sidecar_and_read_merges_existing_snapshot_events() {
     let mut path = std::env::temp_dir();
     path.push(format!(
         "timem_core_large_audit_{}.json",
@@ -73,7 +72,7 @@ fn append_audit_uses_jsonl_sidecar_for_large_documents_and_read_merges_events() 
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&sidecar);
 
-    let large_text = "x".repeat(AUDIT_SIDECAR_THRESHOLD_BYTES as usize);
+    let large_text = "x".repeat(1024);
     let now_ms = audit_now_ms();
     std::fs::write(
         &path,
@@ -87,9 +86,15 @@ fn append_audit_uses_jsonl_sidecar_for_large_documents_and_read_merges_events() 
 
     append_audit_event(&path, &json!({"type":"turn_final","ok":true})).unwrap();
 
-    assert!(sidecar.exists());
-    let sidecar_text = std::fs::read_to_string(&sidecar).unwrap();
-    assert!(sidecar_text.contains("\"turn_final\""));
+    assert!(segmented_directory(&sidecar).exists());
+    let sidecar_text = read_segmented_records(&sidecar)
+        .unwrap()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    assert!(String::from_utf8(sidecar_text)
+        .unwrap()
+        .contains("\"turn_final\""));
     let doc = read_audit_doc(&path).unwrap();
     let events = doc["events"].as_array().unwrap();
     assert_eq!(events.len(), 2);
@@ -299,7 +304,12 @@ fn api_audit_retention_uses_the_requested_rolling_cutoff_across_json_and_jsonl()
         .map(|event| event["type"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(types, vec!["base_boundary", "sidecar_fresh"]);
-    let sidecar_text = std::fs::read_to_string(&sidecar).unwrap();
+    let sidecar_text = read_segmented_records(&sidecar)
+        .unwrap()
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let sidecar_text = String::from_utf8(sidecar_text).unwrap();
     assert!(sidecar_text.contains("sidecar_fresh"));
     assert!(!sidecar_text.contains("sidecar_future"));
     assert!(!sidecar_text.contains("sidecar_missing"));
@@ -437,6 +447,74 @@ fn legacy_root_sidecar_remains_readable_and_counts_toward_workspace_budget() {
     let legacy_doc = read_audit_doc_single(&legacy).unwrap();
     assert_eq!(legacy_doc["events"][0]["type"], "legacy");
 
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn audit_age_prune_deletes_expired_slice_without_rewriting_fresh_slice() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_core_audit_slice_prune_{}_{}",
+        std::process::id(),
+        audit_now_ms()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("api_audit.jsonl");
+    let directory = segmented_directory(&path);
+    std::fs::create_dir_all(&directory).unwrap();
+    let expired = directory.join("segment-0000000000000001.jsonl");
+    let fresh = directory.join("segment-0000000000000002.jsonl");
+    std::fs::write(
+        &expired,
+        b"{\"type\":\"old_1\",\"time_ms\":10}\n{\"type\":\"old_2\",\"time_ms\":20}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &fresh,
+        b"{\"type\":\"new_1\",\"time_ms\":100}\n{\"type\":\"new_2\",\"time_ms\":110}\n",
+    )
+    .unwrap();
+    let fresh_bytes = std::fs::read(&fresh).unwrap();
+    let fresh_modified = std::fs::metadata(&fresh).unwrap().modified().unwrap();
+
+    assert_eq!(prune_audit_jsonl(&path, 50, 120).unwrap(), 2);
+
+    assert!(!expired.exists());
+    assert_eq!(std::fs::read(&fresh).unwrap(), fresh_bytes);
+    assert_eq!(
+        std::fs::metadata(&fresh).unwrap().modified().unwrap(),
+        fresh_modified
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn audit_segment_summary_handles_out_of_order_event_times() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_core_audit_unordered_slice_{}_{}",
+        std::process::id(),
+        audit_now_ms()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("api_audit.jsonl");
+    let directory = segmented_directory(&path);
+    std::fs::create_dir_all(&directory).unwrap();
+    let mixed = directory.join("segment-0000000000000001.jsonl");
+    std::fs::write(
+        &mixed,
+        b"{\"type\":\"fresh_first\",\"time_ms\":100}\n{\"type\":\"expired_middle\",\"time_ms\":10}\n{\"type\":\"fresh_last\",\"time_ms\":110}\n",
+    )
+    .unwrap();
+
+    assert_eq!(prune_audit_jsonl(&path, 50, 120).unwrap(), 1);
+
+    let retained = std::fs::read_to_string(&mixed).unwrap();
+    assert!(retained.contains("fresh_first"));
+    assert!(retained.contains("fresh_last"));
+    assert!(!retained.contains("expired_middle"));
+    let summary = audit_segment_summary(&mixed).unwrap().unwrap();
+    assert_eq!(summary.records, 2);
+    assert_eq!(summary.min_time_ms, 100);
+    assert_eq!(summary.max_time_ms, 110);
     let _ = std::fs::remove_dir_all(root);
 }
 

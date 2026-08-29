@@ -110,8 +110,7 @@ fn prompt_field_values(prompt: &str, field: &str) -> Vec<String> {
 }
 
 fn read_audit_events(path: &Path) -> Vec<Value> {
-    let text = std::fs::read_to_string(path).unwrap();
-    let doc: Value = serde_json::from_str(&text).unwrap();
+    let doc = crate::audit::read_audit_doc(path).unwrap();
     doc["events"].as_array().unwrap().clone()
 }
 
