@@ -27,6 +27,8 @@
 
 ### Fixed
 
+- Store large API-audit JSONL data in physical 16 MiB slices with validated per-slice time/count summaries. Audit appends now touch only the active slice, capacity cleanup deletes complete oldest slices, age retention deletes fully expired slices and rewrites only cutoff-crossing slices, and ordinary chat-history appends no longer wake the global temporary-retention worker. Legacy single JSONL files migrate once by sequential slicing instead of being repeatedly parsed and rewritten.
+
 - Keep long-chat scrolling stable without giving up warm Session switching.
   Variable-height Turn cards no longer use intrinsic-height `content-visibility`;
   ordinary chat scroll frames derive user-message and Markdown-outline state

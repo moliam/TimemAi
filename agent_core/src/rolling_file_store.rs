@@ -5,8 +5,9 @@
 //! are evicted.
 
 use crate::atomic_write_file;
-use std::fs;
-use std::path::Path;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 
 pub const DEFAULT_ROLLING_SLICE_BYTES: u64 = 4 * 1024 * 1024;
 pub const AUDIT_ROLLING_SLICE_BYTES: u64 = 16 * 1024 * 1024;
@@ -26,7 +27,7 @@ impl RollingCapacity {
     pub fn with_slice_bytes(total_bytes: u64, slice_bytes: u64) -> Result<Self, &'static str> {
         if slice_bytes == 0
             || total_bytes < slice_bytes.saturating_mul(2)
-            || total_bytes % slice_bytes != 0
+            || total_bytes.checked_rem(slice_bytes) != Some(0)
         {
             return Err("rolling_capacity_invalid");
         }
@@ -105,6 +106,197 @@ fn recover_segmented_directory(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RollingSegment {
+    pub path: PathBuf,
+    pub bytes: u64,
+}
+
+/// Returns the companion metadata path for a physical segment.
+pub fn segment_metadata_path(segment: &Path) -> PathBuf {
+    let name = segment
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("segment.jsonl");
+    segment.with_file_name(format!(".{name}.meta.json"))
+}
+
+fn remove_segment(segment: &Path) -> std::io::Result<()> {
+    fs::remove_file(segment)?;
+    match fs::remove_file(segment_metadata_path(segment)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
+fn segment_entries(path: &Path) -> std::io::Result<Vec<RollingSegment>> {
+    recover_segmented_directory(path)?;
+    let directory = segmented_directory(path);
+    if !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let mut entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    entries
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+                && entry.file_name().to_string_lossy().starts_with("segment-")
+                && entry.file_name().to_string_lossy().ends_with(".jsonl")
+        })
+        .map(|entry| {
+            Ok(RollingSegment {
+                bytes: entry.metadata()?.len(),
+                path: entry.path(),
+            })
+        })
+        .collect()
+}
+
+/// Returns the physical slices in oldest-to-newest order.
+pub fn rolling_segments(path: &Path) -> std::io::Result<Vec<RollingSegment>> {
+    segment_entries(path)
+}
+
+fn next_segment_path(path: &Path, segments: &[RollingSegment]) -> PathBuf {
+    let next = segments
+        .last()
+        .and_then(|segment| segment.path.file_stem())
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.strip_prefix("segment-"))
+        .and_then(|index| index.parse::<u64>().ok())
+        .unwrap_or(0)
+        .saturating_add(1);
+    segmented_directory(path).join(format!("segment-{next:016}.jsonl"))
+}
+
+/// Migrates a legacy newline-delimited file into bounded physical slices. This
+/// is a single sequential copy and never parses or reserializes records.
+pub fn migrate_legacy_file(path: &Path, slice_bytes: u64) -> std::io::Result<()> {
+    recover_segmented_directory(path)?;
+    if segmented_directory(path).exists() || !path.exists() {
+        return Ok(());
+    }
+    if slice_bytes == 0 {
+        return Err(std::io::Error::other("rolling_capacity_invalid"));
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let directory = segmented_directory(path);
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = parent.join(format!(
+        ".rolling-segments.tmp-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&temporary)?;
+    let result = (|| {
+        let mut reader = BufReader::new(fs::File::open(path)?);
+        let mut index = 1u64;
+        let mut current_bytes = 0u64;
+        let mut output: Option<fs::File> = None;
+        let mut record = Vec::new();
+        loop {
+            record.clear();
+            if reader.read_until(b'\n', &mut record)? == 0 {
+                break;
+            }
+            if record.len() as u64 > slice_bytes {
+                return Err(std::io::Error::other("rolling_record_exceeds_slice"));
+            }
+            if output.is_none() || current_bytes.saturating_add(record.len() as u64) > slice_bytes {
+                output = Some(
+                    OpenOptions::new()
+                        .create_new(true)
+                        .write(true)
+                        .open(temporary.join(format!("segment-{index:016}.jsonl")))?,
+                );
+                index = index.saturating_add(1);
+                current_bytes = 0;
+            }
+            output
+                .as_mut()
+                .expect("segment file exists")
+                .write_all(&record)?;
+            current_bytes = current_bytes.saturating_add(record.len() as u64);
+        }
+        if let Some(file) = output.as_mut() {
+            file.sync_all()?;
+        }
+        fs::rename(&temporary, &directory)?;
+        fs::remove_file(path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&temporary);
+    }
+    result
+}
+
+/// Appends one complete record to the active slice and evicts only complete
+/// oldest slices when the stable capacity is exceeded.
+pub fn append_rolling_record(
+    path: &Path,
+    record: &[u8],
+    capacity: RollingCapacity,
+    slice_bytes: u64,
+) -> std::io::Result<usize> {
+    if record.is_empty()
+        || record.len() as u64 > slice_bytes
+        || capacity.reserved_bytes != slice_bytes
+    {
+        return Err(std::io::Error::other("rolling_record_exceeds_slice"));
+    }
+    migrate_legacy_file(path, slice_bytes)?;
+    let directory = segmented_directory(path);
+    fs::create_dir_all(&directory)?;
+    let mut segments = segment_entries(path)?;
+    let target = match segments.last() {
+        Some(last) if last.bytes.saturating_add(record.len() as u64) <= slice_bytes => {
+            last.path.clone()
+        }
+        _ => next_segment_path(path, &segments),
+    };
+    let mut file = OpenOptions::new().create(true).append(true).open(&target)?;
+    file.write_all(record)?;
+    file.sync_data()?;
+    segments = segment_entries(path)?;
+    let mut total = segments.iter().map(|segment| segment.bytes).sum::<u64>();
+    let mut removed = 0usize;
+    while total > capacity.stable_bytes && segments.len() > 1 {
+        let oldest = segments.remove(0);
+        remove_segment(&oldest.path)?;
+        total = total.saturating_sub(oldest.bytes);
+        removed = removed.saturating_add(1);
+    }
+    Ok(removed)
+}
+
+/// Removes complete oldest slices until at most `max_bytes` remain.
+pub fn trim_rolling_segments(
+    path: &Path,
+    max_bytes: u64,
+    slice_bytes: u64,
+) -> std::io::Result<usize> {
+    migrate_legacy_file(path, slice_bytes)?;
+    let mut segments = segment_entries(path)?;
+    let mut total = segments.iter().map(|segment| segment.bytes).sum::<u64>();
+    let mut removed = 0usize;
+    while total > max_bytes && !segments.is_empty() {
+        let oldest = segments.remove(0);
+        remove_segment(&oldest.path)?;
+        total = total.saturating_sub(oldest.bytes);
+        removed = removed.saturating_add(1);
+    }
+    Ok(removed)
+}
+
 /// Reads complete records from physical segment files, falling back to the
 /// legacy newline-delimited file when no segmented representation exists.
 pub fn read_segmented_records(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
@@ -117,6 +309,7 @@ pub fn read_segmented_records(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
         for entry in entries {
             if entry.file_type()?.is_file()
                 && entry.file_name().to_string_lossy().starts_with("segment-")
+                && entry.file_name().to_string_lossy().ends_with(".jsonl")
             {
                 bytes.extend_from_slice(&fs::read(entry.path())?);
             }
