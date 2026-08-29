@@ -87,9 +87,11 @@ For a new contributor, read these in order:
 3. This file: runtime architecture and module ownership.
 4. [`core-ui-topic-protocol.md`](core-ui-topic-protocol.md): cross-language
    topic contract between core and hosts.
-5. [`capability-system.md`](capability-system.md): tool manifests and executor
+5. [`turn-state-projection-architecture.md`](turn-state-projection-architecture.md):
+   authoritative Turn state, epoch fencing, Pod projection, and WebUI rendering boundary.
+6. [`capability-system.md`](capability-system.md): tool manifests and executor
    registration.
-6. [`test-strategy.md`](test-strategy.md) and
+7. [`test-strategy.md`](test-strategy.md) and
    [`feature-test-management.md`](feature-test-management.md): quality gates and
    feature coverage ledger.
 
@@ -824,14 +826,20 @@ Session, attachment removal, inline decisions, rename, and runtime config
 updates so repeated clicks show immediate feedback instead of issuing duplicate
 commands. The server remains authoritative: repeated Stop is harmless; ordinary
 Send during an active turn is durably queued as the next task; only an explicit
-supplement command joins the active turn. For Web workers, a final answer is a
-host-visible turn boundary: any explicit supplement still pending when that
-answer arrives is handed back to the Host and starts a distinct follow-up turn,
-so the first answer remains attached to its original bubble; stale supplements
-can also start a new turn
-after cancellation/completion; repeated attachment removal for the same
-session is treated as success, and stale decision replies after a turn has
-finished are ignored before they reach a worker.
+supplement command may request to join the active turn. Before every model
+request, Core seals a `PromptCut` identifying the exact input sequence consumed
+by that request. Command arrival or acceptance alone does not establish that an
+input affected the response. On terminal/final-response commit, Core closes the
+input gate: input covered by an already-sent PromptCut remains in the current
+Turn, while accepted-but-unconsumed task input is atomically retained by the
+Host as distinct next-turn intent under the same command ownership. The
+follow-up receives a fresh `TurnToken`, starts at its first model round, and
+cannot inherit the prior Turn's round count, stop state, pending decision, or
+attachment-consumption state. The first final answer remains attached to its
+original bubble. Repeated
+attachment removal for the same session is treated as success, and stale
+decision replies after a turn has finished are ignored before they reach a
+worker rather than being reinterpreted as new task input.
 
 Stopped-turn outcomes are returned as `TurnStopSummary`/`TurnStopDetail`
 structure. The terminal host renders those structures into Chinese shell text;

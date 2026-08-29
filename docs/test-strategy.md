@@ -113,6 +113,10 @@ checks. If a dimension is not applicable, record that residual decision in
   restored task/supplement batches, and four Sessions restoring concurrently
   without cross-talk. The normative case list is
   `docs/web_reliability_test_matrix.md`.
+- Turn concurrency stress: a focused stress entry runs the four real concurrent
+  Turn scenarios with seeded replay, resource convergence checks, and latency
+  percentiles. It uses hundreds/thousands of iterations per scenario rather than
+  the two-iteration generic edge loop.
 - Performance guard: `scripts/performance_guard.sh` runs bounded hot-path
   checks for large prompt rendering, topic fan-out, observation panel
   rendering with long rows, Web action-lifecycle coalescing, browser event
@@ -122,6 +126,23 @@ checks. If a dimension is not applicable, record that residual decision in
   re-expansion, quadratic row trimming, or topic fan-out regressions.
 - Repeated edge regression: high-risk state machines run multiple times in CI
   through `scripts/edge_regression.sh`.
+
+## Turn Concurrency Stress Standard
+
+Turn lifecycle/final-answer/input-admission changes require a small number of heavy stress scenarios, not a large list of shallow synchronous cases. The normative design and budgets are in `docs/turn-state-projection-architecture.md` section 13.
+
+Required properties:
+
+- real independent Core/model and user/Host threads or tasks;
+- real `CoreSessionWorker`, Pod command/projection, persistence, WebSocket, and release-browser paths where applicable;
+- a controllable fake model may sleep briefly, but sleeps never establish ordering or causality; barriers/test hooks hit exact race windows;
+- seeded jitter and hundreds to thousands of iterations inside each test binary;
+- command/attachment ownership, final projection, resource cleanup, and user-visible latency percentiles are all asserted;
+- failures print a replayable seed and named stage trace.
+
+The implementation gate must add and run four heavy scenarios: PromptCut/terminal ownership, Stop/Start lifecycle storm, WebSocket reconnect/FIFO ownership, and real-Chrome interaction latency. PR CI runs at least 300 iterations per core scenario, Linux/macOS release certification at least 1,000, and scheduled/manual soak runs 10,000 or ten minutes. Do not replace these with repeated pure reducers or by running the entire workspace thousands of times.
+
+Latency evidence follows the same rule as Web performance tracing: use monotonic elapsed durations within one clock domain and command-correlated named stages. Timestamp order is not causality, and browser/server wall clocks must not be subtracted. Fake-model delay and intentional reconnect backoff are reported separately from Timem-added latency.
 
 ## Feature Coverage Matrix
 

@@ -37,6 +37,12 @@ that is corrected from the runtime's next-round feedback.
 - Synchronous single-thread tests are useful for deterministic core logic, but
   worker/session concurrency must also have true multi-thread interaction tests
   that exercise ordering, cancellation, and cross-session isolation.
+- Turn lifecycle and input-admission changes additionally require the four
+  concentrated stress profiles in `docs/turn-state-projection-architecture.md`:
+  PromptCut/final ownership, Stop/Start storm, WebSocket reconnect/FIFO ownership,
+  and real-Chrome latency. PR runs use at least 300 iterations per core scenario,
+  release runs 1,000, and soak runs 10,000 or ten minutes. Seeded failures must
+  be replayable; a handful of scripted interleavings is not release evidence.
 - Every release-ready feature row should have roughly four independent test
   protections across the following dimensions, or explicitly document why a
   dimension is not applicable:
