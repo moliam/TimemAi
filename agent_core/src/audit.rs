@@ -20,7 +20,6 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
 };
 
-const AUDIT_SIDECAR_THRESHOLD_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_AUDIT_DIRECTORY_MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const DEBUG_AUDIT_DIRECTORY_MAX_BYTES: u64 = 512 * 1024 * 1024;
 pub(crate) const ACTION_AUDIT_MAX_BYTES: u64 = AUDIT_ROLLING_SLICE_BYTES;
@@ -48,7 +47,7 @@ fn audit_stable_max_bytes() -> u64 {
 }
 
 fn api_audit_jsonl_max_bytes() -> u64 {
-    audit_stable_max_bytes()
+    audit_directory_max_bytes().saturating_sub(AUDIT_ROLLING_SLICE_BYTES.saturating_mul(3))
 }
 const AUDIT_EVENT_MAX_BYTES: usize = AUDIT_ROLLING_SLICE_BYTES as usize - 1;
 #[cfg(test)]
@@ -63,18 +62,12 @@ pub fn append_audit_event(path: &Path, event: &Value) -> std::io::Result<()> {
             }
             let now_ms = audit_now_ms();
             let event = bounded_audit_event(timestamp_audit_event(event, now_ms))?;
-            if should_append_audit_sidecar(path) {
-                append_audit_jsonl(&audit_sidecar_path(path), &event)?;
-            } else {
-                let mut doc = read_audit_doc(path)?;
-                doc["events"]
-                    .as_array_mut()
-                    .expect("audit doc events must be an array")
-                    .push(event);
-                let text = serde_json::to_string_pretty(&doc).map_err(std::io::Error::other)?;
+            if !path.exists() {
+                let text = serde_json::to_string_pretty(&empty_audit_doc())
+                    .map_err(std::io::Error::other)?;
                 atomic_write_file(path, format!("{text}\n").as_bytes())?;
             }
-            enforce_audit_storage_budget_unlocked(path)
+            append_audit_jsonl(&audit_sidecar_path(path), &event)
         })
         .map_err(std::io::Error::other)?
 }
@@ -97,7 +90,7 @@ pub fn append_repair_output_event(api_audit_file: &Path, event: &Value) -> std::
             atomic_write_file(&repair_file, format!("{text}\n").as_bytes())
         })
         .map_err(std::io::Error::other)??;
-    enforce_audit_storage_budget(api_audit_file)
+    Ok(())
 }
 
 fn bounded_audit_event(event: Value) -> std::io::Result<Value> {
@@ -233,19 +226,27 @@ fn rolling_path_bytes(path: &Path) -> std::io::Result<u64> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
         Err(error) => return Err(error),
     };
-    let directory = segmented_directory(path);
-    match fs::read_dir(directory) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        total = total.saturating_add(metadata.len());
+    let mut directories = vec![segmented_directory(path)];
+    if path
+        .file_name()
+        .is_some_and(|name| name == "action_audit.json")
+    {
+        directories.push(path.with_file_name("action_audit.json.turns"));
+    }
+    for directory in directories {
+        match fs::read_dir(directory) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    if let Ok(metadata) = entry.metadata() {
+                        if metadata.is_file() {
+                            total = total.saturating_add(metadata.len());
+                        }
                     }
                 }
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
     }
     Ok(total)
 }
@@ -658,22 +659,14 @@ fn read_audit_doc_single(path: &Path) -> std::io::Result<Value> {
     Ok(json!({"version": 1, "events": events}))
 }
 
-fn should_append_audit_sidecar(path: &Path) -> bool {
-    let sidecar = audit_sidecar_path(path);
-    if sidecar.exists() || segmented_directory(&sidecar).exists() {
-        return true;
-    }
-    fs::metadata(path)
-        .map(|metadata| metadata.len() >= AUDIT_SIDECAR_THRESHOLD_BYTES)
-        .unwrap_or(false)
-}
-
 fn append_audit_jsonl(path: &Path, event: &Value) -> std::io::Result<()> {
     let mut record = serde_json::to_vec(event).map_err(std::io::Error::other)?;
     record.push(b'\n');
-    let capacity =
-        RollingCapacity::with_slice_bytes(audit_directory_max_bytes(), AUDIT_ROLLING_SLICE_BYTES)
-            .map_err(std::io::Error::other)?;
+    let capacity = RollingCapacity::with_slice_bytes(
+        api_audit_jsonl_max_bytes().saturating_add(AUDIT_ROLLING_SLICE_BYTES),
+        AUDIT_ROLLING_SLICE_BYTES,
+    )
+    .map_err(std::io::Error::other)?;
     append_rolling_record(path, &record, capacity, AUDIT_ROLLING_SLICE_BYTES)?;
     let event_time_ms = event
         .get("time_ms")

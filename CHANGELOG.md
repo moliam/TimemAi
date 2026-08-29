@@ -27,6 +27,8 @@
 
 ### Fixed
 
+- Bound high-frequency persistence work by replacing whole-file action-audit rewrites, API-audit directory scans, chat-history index rebuilds, and unbounded tool-job output reads with per-Turn bounded snapshots, manifest-backed incremental segments, length-validated history indexes/retention summaries, and UTF-8-safe output tails. Legacy audit/history layouts migrate under lock with recoverable state rebuilds, and the architecture now defines scanning as a migration, recovery, explicit-maintenance, or threshold-reclamation operation only.
+
 - Store large API-audit JSONL data in physical 16 MiB slices with validated per-slice time/count summaries. Audit appends now touch only the active slice, capacity cleanup deletes complete oldest slices, age retention deletes fully expired slices and rewrites only cutoff-crossing slices, and ordinary chat-history appends no longer wake the global temporary-retention worker. Legacy single JSONL files migrate once by sequential slicing instead of being repeatedly parsed and rewritten.
 
 - Keep long-chat scrolling stable without giving up warm Session switching.
