@@ -653,6 +653,8 @@ function TimemApp() {
   const [revealedEndpointHeaders, setRevealedEndpointHeaders] = useState<
     Record<string, Record<string, string>>
   >({});
+  const [revealedEndpointRequestFields, setRevealedEndpointRequestFields] =
+    useState<Record<string, Record<string, unknown>>>({});
   const [showAppearance, setShowAppearance] = useState(false);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSection>("appearance");
@@ -839,7 +841,9 @@ function TimemApp() {
   );
   const closeChatLibrary = useCallback(() => {
     setChatLibraryMode(null);
-    window.requestAnimationFrame(() => chatLibraryTriggerRef.current?.focus({ preventScroll: true }));
+    window.requestAnimationFrame(() =>
+      chatLibraryTriggerRef.current?.focus({ preventScroll: true }),
+    );
   }, []);
   const closeToolRepoPanel = useCallback(() => {
     setShowToolRepo(false);
@@ -854,7 +858,10 @@ function TimemApp() {
   }, []);
   const closeAppearancePanel = useCallback((restoreFocus = true) => {
     setShowAppearance(false);
-    if (restoreFocus) window.requestAnimationFrame(() => settingsButtonRef.current?.focus({ preventScroll: true }));
+    if (restoreFocus)
+      window.requestAnimationFrame(() =>
+        settingsButtonRef.current?.focus({ preventScroll: true }),
+      );
   }, []);
   const closeMcpPanel = useCallback((restoreFocus = true) => {
     setShowMcp(false);
@@ -1091,55 +1098,123 @@ function TimemApp() {
   );
 
   const closeSettingsCenter = useCallback(() => {
-    if (!pendingMemRetention && !pendingMemConversationCapacity && !favoriteCapacityUpdating && !pendingMemSwitch && !memTemporaryItemsDeleting) closeAppearancePanel();
-  }, [closeAppearancePanel, favoriteCapacityUpdating, memTemporaryItemsDeleting, pendingMemConversationCapacity, pendingMemRetention, pendingMemSwitch]);
+    if (
+      !pendingMemRetention &&
+      !pendingMemConversationCapacity &&
+      !favoriteCapacityUpdating &&
+      !pendingMemSwitch &&
+      !memTemporaryItemsDeleting
+    )
+      closeAppearancePanel();
+  }, [
+    closeAppearancePanel,
+    favoriteCapacityUpdating,
+    memTemporaryItemsDeleting,
+    pendingMemConversationCapacity,
+    pendingMemRetention,
+    pendingMemSwitch,
+  ]);
   const refreshMemTemporaryItems = useCallback(() => {
     setMemTemporaryItemsLoading(true);
     setMemTemporaryItemsError("");
-    if (!sendCommand({ type: "mem_temporary_items_list" })) setMemTemporaryItemsLoading(false);
+    if (!sendCommand({ type: "mem_temporary_items_list" }))
+      setMemTemporaryItemsLoading(false);
   }, [sendCommand]);
-  const deleteMemTemporaryItems = useCallback((ids: string[]) => {
-    setMemTemporaryItemsDeleting(true);
-    if (!sendCommand({ type: "mem_temporary_items_delete", ids })) setMemTemporaryItemsDeleting(false);
-  }, [sendCommand]);
-  const revealModelEndpoint = useCallback((endpointId: string) => {
-    sendCommand({ type: "model_endpoint_secret_reveal", endpoint_id: endpointId });
-  }, [sendCommand]);
-  const saveModelEndpoint = useCallback((endpoint: ModelEndpointDraft) => {
-    sendCommand({ type: "model_endpoint_upsert", endpoint });
-  }, [sendCommand]);
-  const saveMemTemporaryPolicy = useCallback((days: 1 | 5 | 10 | null, maxBytes: number | null) => {
-    setPendingMemRetention(true);
-    if (!sendCommand({ type: "mem_temporary_retention_update", days, max_bytes: maxBytes })) {
-      setPendingMemRetention(false);
-      reportUiError("Mem settings failed", "Reconnect to Timem Web before updating temporary-data policy.", "system");
-    }
-  }, [reportUiError, sendCommand]);
-  const saveMemConversationCapacity = useCallback((maxBytes: number | null) => {
-    setPendingMemConversationCapacity(true);
-    if (!sendCommand({ type: "mem_conversation_capacity_update", max_bytes: maxBytes })) {
-      setPendingMemConversationCapacity(false);
-      reportUiError("Mem settings failed", "Reconnect to Timem Web before updating conversation capacity.", "system");
-    }
-  }, [reportUiError, sendCommand]);
-  const saveMemFavoriteCapacity = useCallback((maxBytes: number | null) => {
-    setFavoriteCapacityUpdating(true);
-    if (!sendCommand({ type: "favorite_capacity_update", max_bytes: maxBytes })) setFavoriteCapacityUpdating(false);
-  }, [sendCommand]);
-  const switchMemWorkspace = useCallback((path: string) => {
-    const runningSessionCount = memSwitchRunningSessionCount(sessionsRef.current);
-    if (runningSessionCount > 0) {
-      setMemSwitchCandidate({ path, runningSessionCount });
-      return;
-    }
-    setRenamingSessionId("");
-    setRenameDraft("");
-    setPendingMemSwitch(true);
-    if (!sendCommand({ type: "mem_switch", path, stop_running: false })) {
-      setPendingMemSwitch(false);
-      reportUiError("Mem switch failed", "Reconnect to Timem Web before switching the mem directory.", "system");
-    }
-  }, [reportUiError, sendCommand]);
+  const deleteMemTemporaryItems = useCallback(
+    (ids: string[]) => {
+      setMemTemporaryItemsDeleting(true);
+      if (!sendCommand({ type: "mem_temporary_items_delete", ids }))
+        setMemTemporaryItemsDeleting(false);
+    },
+    [sendCommand],
+  );
+  const revealModelEndpoint = useCallback(
+    (endpointId: string) => {
+      sendCommand({
+        type: "model_endpoint_secret_reveal",
+        endpoint_id: endpointId,
+      });
+    },
+    [sendCommand],
+  );
+  const saveModelEndpoint = useCallback(
+    (endpoint: ModelEndpointDraft) => {
+      sendCommand({ type: "model_endpoint_upsert", endpoint });
+    },
+    [sendCommand],
+  );
+  const saveMemTemporaryPolicy = useCallback(
+    (days: 1 | 5 | 10 | null, maxBytes: number | null) => {
+      setPendingMemRetention(true);
+      if (
+        !sendCommand({
+          type: "mem_temporary_retention_update",
+          days,
+          max_bytes: maxBytes,
+        })
+      ) {
+        setPendingMemRetention(false);
+        reportUiError(
+          "Mem settings failed",
+          "Reconnect to Timem Web before updating temporary-data policy.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
+  const saveMemConversationCapacity = useCallback(
+    (maxBytes: number | null) => {
+      setPendingMemConversationCapacity(true);
+      if (
+        !sendCommand({
+          type: "mem_conversation_capacity_update",
+          max_bytes: maxBytes,
+        })
+      ) {
+        setPendingMemConversationCapacity(false);
+        reportUiError(
+          "Mem settings failed",
+          "Reconnect to Timem Web before updating conversation capacity.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
+  const saveMemFavoriteCapacity = useCallback(
+    (maxBytes: number | null) => {
+      setFavoriteCapacityUpdating(true);
+      if (
+        !sendCommand({ type: "favorite_capacity_update", max_bytes: maxBytes })
+      )
+        setFavoriteCapacityUpdating(false);
+    },
+    [sendCommand],
+  );
+  const switchMemWorkspace = useCallback(
+    (path: string) => {
+      const runningSessionCount = memSwitchRunningSessionCount(
+        sessionsRef.current,
+      );
+      if (runningSessionCount > 0) {
+        setMemSwitchCandidate({ path, runningSessionCount });
+        return;
+      }
+      setRenamingSessionId("");
+      setRenameDraft("");
+      setPendingMemSwitch(true);
+      if (!sendCommand({ type: "mem_switch", path, stop_running: false })) {
+        setPendingMemSwitch(false);
+        reportUiError(
+          "Mem switch failed",
+          "Reconnect to Timem Web before switching the mem directory.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
 
   const toggleFavorite = useCallback(
     (
@@ -2228,6 +2303,7 @@ function TimemApp() {
         setDeleteEndpointCandidate(null);
         setRevealedEndpointApiKeys({});
         setRevealedEndpointHeaders({});
+        setRevealedEndpointRequestFields({});
         return;
       }
       if (event.type === "model_endpoint_secret_revealed") {
@@ -2238,6 +2314,10 @@ function TimemApp() {
         setRevealedEndpointHeaders((current) => ({
           ...current,
           [event.endpoint_id]: event.http_headers,
+        }));
+        setRevealedEndpointRequestFields((current) => ({
+          ...current,
+          [event.endpoint_id]: event.request_fields,
         }));
         return;
       }
@@ -4336,6 +4416,7 @@ function TimemApp() {
               endpointEditor={endpointEditor}
               revealedEndpointApiKeys={revealedEndpointApiKeys}
               revealedEndpointHeaders={revealedEndpointHeaders}
+              revealedEndpointRequestFields={revealedEndpointRequestFields}
               onClose={closeSettingsCenter}
               onRefreshTemporaryItems={refreshMemTemporaryItems}
               onDeleteTemporaryItems={deleteMemTemporaryItems}
@@ -7476,9 +7557,8 @@ function TimemThread({
   const hasDraftText = !!draft.trim();
   const showStopAction =
     composerPrimaryAction(interactionPhase, draft) === "stop";
-  const sendLabel = activeSession?.state === "working"
-    ? "Queue message"
-    : "Send message";
+  const sendLabel =
+    activeSession?.state === "working" ? "Queue message" : "Send message";
   const lockedControlHint = sessionInteractionLocked
     ? sessionInteractionLockReason
     : "";
@@ -9679,14 +9759,21 @@ const TurnInteraction = memo(function TurnInteraction({
   const previousTurnState = useRef(turn.state);
   const previousFinalAnswer = useRef(!!turn.final_answer);
   const [pendingUpdates, setPendingUpdates] = useState(0);
-  const [workEdgeFades, setWorkEdgeFades] = useState({ top: false, bottom: false });
+  const [workEdgeFades, setWorkEdgeFades] = useState({
+    top: false,
+    bottom: false,
+  });
   const updateWorkEdgeFades = useCallback((scroll: HTMLDivElement) => {
     const next = scrollEdgeFades({
       scrollTop: scroll.scrollTop,
       scrollHeight: scroll.scrollHeight,
       clientHeight: scroll.clientHeight,
     });
-    setWorkEdgeFades((current) => current.top === next.top && current.bottom === next.bottom ? current : next);
+    setWorkEdgeFades((current) =>
+      current.top === next.top && current.bottom === next.bottom
+        ? current
+        : next,
+    );
   }, []);
   const lifecycleEvents = useMemo(
     () => coalesceActionLifecycle(turn.events),
@@ -9799,7 +9886,8 @@ const TurnInteraction = memo(function TurnInteraction({
     previousTurnState.current = isWorking ? "working" : turn.state;
     previousFinalAnswer.current = !!turn.final_answer;
     if (!wasWorking && isWorking) setShowWorkStream(true);
-    if (finalArrived || (wasWorking && turn.state === "interrupted")) setShowWorkStream(false);
+    if (finalArrived || (wasWorking && turn.state === "interrupted"))
+      setShowWorkStream(false);
   }, [isWorking, turn.final_answer, turn.state]);
 
   useLayoutEffect(() => {
@@ -9816,7 +9904,12 @@ const TurnInteraction = memo(function TurnInteraction({
       setPendingUpdates((count) => count + added);
     }
     updateWorkEdgeFades(scroll);
-  }, [turn.events.length, supplementItems.length, decisions.length, updateWorkEdgeFades]);
+  }, [
+    turn.events.length,
+    supplementItems.length,
+    decisions.length,
+    updateWorkEdgeFades,
+  ]);
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
     const content = workContentRef.current;
@@ -10138,9 +10231,7 @@ const TurnInteraction = memo(function TurnInteraction({
         (turn.completion || cancelled) && (
           <section className="turn-completion-only">
             <CompletionCard
-              completion={
-                turn.completion ?? { stop_reason: "CancelledByUser" }
-              }
+              completion={turn.completion ?? { stop_reason: "CancelledByUser" }}
             />
           </section>
         )}
@@ -10178,7 +10269,25 @@ function areTurnInteractionPropsEqual(
   });
 }
 
-function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, favorite, favoritePending, onToggleFavorite, onToolGen, onDelete }: { turn: WebTurn; toolGenPending: boolean; toolGenBlocked: boolean; favorite?: ChatFavorite; favoritePending: boolean; onToggleFavorite: () => boolean; onToolGen?: () => void; onDelete?: () => void }) {
+function TurnAnswerDelivery({
+  turn,
+  toolGenPending,
+  toolGenBlocked,
+  favorite,
+  favoritePending,
+  onToggleFavorite,
+  onToolGen,
+  onDelete,
+}: {
+  turn: WebTurn;
+  toolGenPending: boolean;
+  toolGenBlocked: boolean;
+  favorite?: ChatFavorite;
+  favoritePending: boolean;
+  onToggleFavorite: () => boolean;
+  onToolGen?: () => void;
+  onDelete?: () => void;
+}) {
   const hasFinal = !!turn.final_answer;
   const hasChat = turn.sub_answers.length > 0;
   const [chatExpanded, setChatExpanded] = useState(() => !hasFinal);
@@ -10191,20 +10300,73 @@ function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, favorite, fa
     if (finalArrived) setChatExpanded(false);
   }, [turn.final_answer]);
   if (!hasChat && !hasFinal) return null;
-  return <section className="turn-answer-delivery">
-    {hasChat && <section className={`turn-chat-delivery${chatExpanded ? " expanded" : " collapsed"}`}>
-      <div className="turn-chat-heading">
-        <button type="button" className="working-chip work-title-chip work-collapse-toggle chat-title-chip" title={chatExpanded ? "Hide chat answers" : "Show chat answers"} aria-label={chatExpanded ? "Hide chat answers" : "Show chat answers"} aria-expanded={chatExpanded} aria-controls={chatPanelId} onClick={() => setChatExpanded((expanded) => !expanded)}><ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true"/>Chat</button>
-      </div>
-      {chatExpanded && <div id={chatPanelId} className="turn-chat-panel" role="region" aria-label="Chat answers">
-        <div className="turn-interim-list">{chatItems.map(({ item, ordinal }) => <section className="turn-interim-item" key={item.sub_answer_id}>
-          <h3><span>{ordinal}.</span> {item.task}</h3>
-          <div className="message-content"><MarkdownContent text={item.answer}/></div>
-        </section>)}</div>
-      </div>}
-    </section>}
-    {hasFinal && turn.final_answer && <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} favorite={favorite} favoritePending={favoritePending} onToggleFavorite={onToggleFavorite} onToolGen={onToolGen} onDelete={onDelete}/>}
-  </section>;
+  return (
+    <section className="turn-answer-delivery">
+      {hasChat && (
+        <section
+          className={`turn-chat-delivery${chatExpanded ? " expanded" : " collapsed"}`}
+        >
+          <div className="turn-chat-heading">
+            <button
+              type="button"
+              className="working-chip work-title-chip work-collapse-toggle chat-title-chip"
+              title={chatExpanded ? "Hide chat answers" : "Show chat answers"}
+              aria-label={
+                chatExpanded ? "Hide chat answers" : "Show chat answers"
+              }
+              aria-expanded={chatExpanded}
+              aria-controls={chatPanelId}
+              onClick={() => setChatExpanded((expanded) => !expanded)}
+            >
+              <ChevronRight
+                className="work-collapse-arrow"
+                size={13}
+                aria-hidden="true"
+              />
+              Chat
+            </button>
+          </div>
+          {chatExpanded && (
+            <div
+              id={chatPanelId}
+              className="turn-chat-panel"
+              role="region"
+              aria-label="Chat answers"
+            >
+              <div className="turn-interim-list">
+                {chatItems.map(({ item, ordinal }) => (
+                  <section
+                    className="turn-interim-item"
+                    key={item.sub_answer_id}
+                  >
+                    <h3>
+                      <span>{ordinal}.</span> {item.task}
+                    </h3>
+                    <div className="message-content">
+                      <MarkdownContent text={item.answer} />
+                    </div>
+                  </section>
+                ))}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+      {hasFinal && turn.final_answer && (
+        <FinalAnswerDelivery
+          text={turn.final_answer}
+          completion={turn.completion}
+          toolGenPending={toolGenPending}
+          toolGenBlocked={toolGenBlocked}
+          favorite={favorite}
+          favoritePending={favoritePending}
+          onToggleFavorite={onToggleFavorite}
+          onToolGen={onToolGen}
+          onDelete={onDelete}
+        />
+      )}
+    </section>
+  );
 }
 
 function FinalAnswerDelivery({
@@ -11533,6 +11695,56 @@ function structuredRecord(rows: StructuredRow[]): Record<string, string> {
   );
 }
 
+const RESERVED_REQUEST_FIELDS = new Set([
+  "model",
+  "messages",
+  "max_tokens",
+  "max_output_tokens",
+  "instructions",
+  "input",
+  "tools",
+  "tool_choice",
+  "parallel_tool_calls",
+  "stream",
+  "stream_options",
+  "response_format",
+  "enable_thinking",
+  "reasoning_effort",
+  "system",
+]);
+
+function requestFieldRows(value: Record<string, unknown>): StructuredRow[] {
+  return Object.entries(value).map(([key, item]) => ({
+    id: clientId(),
+    key,
+    value: item === "****" ? "****" : JSON.stringify(item),
+  }));
+}
+
+function parseRequestFieldRows(rows: StructuredRow[]): {
+  value: Record<string, unknown>;
+  error: string;
+} {
+  const value: Record<string, unknown> = {};
+  for (const row of rows) {
+    const key = row.key.trim();
+    if (!key) continue;
+    if (RESERVED_REQUEST_FIELDS.has(key.toLowerCase()))
+      return { value: {}, error: `${key} 由 Timem 管理，不能覆盖。` };
+    if (!row.value.trim())
+      return { value: {}, error: `${key} 的 Value 不能为空。` };
+    try {
+      value[key] = JSON.parse(row.value);
+    } catch {
+      return {
+        value: {},
+        error: `${key} 的 Value 必须是合法 JSON。字符串请使用双引号，例如 \"fast\"。`,
+      };
+    }
+  }
+  return { value, error: "" };
+}
+
 function hasDuplicateStructuredKeys(rows: StructuredRow[]) {
   const keys = rows.map((row) => row.key.trim().toLowerCase()).filter(Boolean);
   return new Set(keys).size !== keys.length;
@@ -11997,6 +12209,7 @@ type SettingsCenterProps = {
   endpointEditor: ModelEndpoint | "new" | null;
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
+  revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
   onClose: () => void;
   onSaveTemporaryPolicy: (
     days: 1 | 5 | 10 | null,
@@ -12013,7 +12226,9 @@ type SettingsCenterProps = {
   onSaveEndpoint: (endpoint: ModelEndpointDraft) => void;
 };
 
-const SettingsCenter = memo(function SettingsCenter(props: SettingsCenterProps) {
+const SettingsCenter = memo(function SettingsCenter(
+  props: SettingsCenterProps,
+) {
   const {
     panelRef,
     section,
@@ -12042,6 +12257,7 @@ const SettingsCenter = memo(function SettingsCenter(props: SettingsCenterProps) 
     endpointEditor,
     revealedEndpointApiKeys,
     revealedEndpointHeaders,
+    revealedEndpointRequestFields,
     onClose,
     onSaveTemporaryPolicy,
     onSaveConversationCapacity,
@@ -12080,9 +12296,22 @@ const SettingsCenter = memo(function SettingsCenter(props: SettingsCenterProps) 
     temporaryItemsDeleting;
   const cleanedPath = path.trim();
   const pathUnchanged = cleanedPath === memPath;
-  const deletableTemporaryItems = useMemo(() => temporaryItems.filter((item) => item.deletable !== false), [temporaryItems]);
-  const selectedTemporaryBytes = useMemo(() => deletableTemporaryItems.filter((item) => selectedTemporaryIds.has(item.id)).reduce((total, item) => total + item.bytes, 0), [deletableTemporaryItems, selectedTemporaryIds]);
-  const updateAppearance = <K extends keyof Appearance>(key: K, value: Appearance[K]) => onAppearanceChange({ ...appearance, [key]: value });  useEffect(() => setDays(retentionDays), [retentionDays]);
+  const deletableTemporaryItems = useMemo(
+    () => temporaryItems.filter((item) => item.deletable !== false),
+    [temporaryItems],
+  );
+  const selectedTemporaryBytes = useMemo(
+    () =>
+      deletableTemporaryItems
+        .filter((item) => selectedTemporaryIds.has(item.id))
+        .reduce((total, item) => total + item.bytes, 0),
+    [deletableTemporaryItems, selectedTemporaryIds],
+  );
+  const updateAppearance = <K extends keyof Appearance>(
+    key: K,
+    value: Appearance[K],
+  ) => onAppearanceChange({ ...appearance, [key]: value });
+  useEffect(() => setDays(retentionDays), [retentionDays]);
   useEffect(
     () => setTemporaryCapacity(temporaryCapacityBytes),
     [temporaryCapacityBytes],
@@ -12100,9 +12329,15 @@ const SettingsCenter = memo(function SettingsCenter(props: SettingsCenterProps) 
     setMemoryPage("overview");
   }, [memPath]);
   useEffect(() => {
-    const availableIds = new Set(deletableTemporaryItems.map((item) => item.id));
+    const availableIds = new Set(
+      deletableTemporaryItems.map((item) => item.id),
+    );
     setSelectedTemporaryIds((current) => {
-      if (current.size === 0 || Array.from(current).every((id) => availableIds.has(id))) return current;
+      if (
+        current.size === 0 ||
+        Array.from(current).every((id) => availableIds.has(id))
+      )
+        return current;
       return new Set(Array.from(current).filter((id) => availableIds.has(id)));
     });
     if (temporaryItemsDeleting) return;
@@ -12391,6 +12626,7 @@ const SettingsCenter = memo(function SettingsCenter(props: SettingsCenterProps) 
                 endpointEditor={endpointEditor}
                 revealedEndpointApiKeys={revealedEndpointApiKeys}
                 revealedEndpointHeaders={revealedEndpointHeaders}
+                revealedEndpointRequestFields={revealedEndpointRequestFields}
                 onEdit={onEditEndpoint}
                 onDelete={onDeleteEndpoint}
                 onReveal={onRevealEndpoint}
@@ -13001,7 +13237,8 @@ const SettingsCenter = memo(function SettingsCenter(props: SettingsCenterProps) 
                 </section>
               </section>
             )}
-          </div>        </div>
+          </div>{" "}
+        </div>
       </section>
     </div>,
     document.body,
@@ -13013,6 +13250,7 @@ function EndpointSettingsPane({
   endpointEditor,
   revealedEndpointApiKeys,
   revealedEndpointHeaders,
+  revealedEndpointRequestFields,
   onEdit,
   onDelete,
   onReveal,
@@ -13022,6 +13260,7 @@ function EndpointSettingsPane({
   endpointEditor: ModelEndpoint | "new" | null;
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
+  revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
   onEdit: (endpoint: ModelEndpoint | "new" | null) => void;
   onDelete: (endpoint: ModelEndpoint) => void;
   onReveal: (endpointId: string) => void;
@@ -13054,6 +13293,11 @@ function EndpointSettingsPane({
             endpointEditor === "new"
               ? {}
               : revealedEndpointHeaders[endpointEditor.id]
+          }
+          revealedRequestFields={
+            endpointEditor === "new"
+              ? {}
+              : revealedEndpointRequestFields[endpointEditor.id]
           }
           onClose={() => onEdit(null)}
           onSave={onSave}
@@ -13139,7 +13383,8 @@ function EndpointSettingsPane({
                       onEdit(endpoint);
                       if (
                         (endpoint.api_key_configured ||
-                          Object.keys(endpoint.http_headers).length > 0) &&
+                          Object.keys(endpoint.http_headers).length > 0 ||
+                          Object.keys(endpoint.request_fields).length > 0) &&
                         revealedEndpointApiKeys[endpoint.id] === undefined
                       )
                         onReveal(endpoint.id);
@@ -13171,7 +13416,8 @@ function EndpointSettingsPane({
                       onEdit(endpoint);
                       if (
                         (endpoint.api_key_configured ||
-                          Object.keys(endpoint.http_headers).length > 0) &&
+                          Object.keys(endpoint.http_headers).length > 0 ||
+                          Object.keys(endpoint.request_fields).length > 0) &&
                         revealedEndpointApiKeys[endpoint.id] === undefined
                       )
                         onReveal(endpoint.id);
@@ -13460,12 +13706,14 @@ function ModelEndpointEditor({
   endpoint,
   revealedApiKey,
   revealedHeaders,
+  revealedRequestFields,
   onClose,
   onSave,
 }: {
   endpoint?: ModelEndpoint;
   revealedApiKey?: string;
   revealedHeaders?: Record<string, string>;
+  revealedRequestFields?: Record<string, unknown>;
   onClose: () => void;
   onSave: (endpoint: ModelEndpointDraft) => void;
 }) {
@@ -13481,12 +13729,17 @@ function ModelEndpointEditor({
     stream: endpoint?.stream ?? true,
     api_key: revealedApiKey,
     http_headers: endpoint?.http_headers ?? {},
+    request_fields: endpoint?.request_fields ?? {},
   }));
   const [headerRows, setHeaderRows] = useState<StructuredRow[]>(() =>
     structuredRows(endpoint?.http_headers ?? {}),
   );
+  const [requestRows, setRequestRows] = useState<StructuredRow[]>(() =>
+    requestFieldRows(endpoint?.request_fields ?? {}),
+  );
   const [showApiKey, setShowApiKey] = useState(false);
   const [showHeaders, setShowHeaders] = useState(!endpoint);
+  const [showRequestFields, setShowRequestFields] = useState(!endpoint);
   useEffect(() => {
     if (revealedApiKey !== undefined)
       setDraft((current) => ({ ...current, api_key: revealedApiKey }));
@@ -13501,8 +13754,20 @@ function ModelEndpointEditor({
     );
   }, [revealedHeaders]);
   useEffect(() => {
+    if (!revealedRequestFields) return;
+    setRequestRows((rows) =>
+      rows.map((row) => ({
+        ...row,
+        value: Object.hasOwn(revealedRequestFields, row.key)
+          ? JSON.stringify(revealedRequestFields[row.key])
+          : row.value,
+      })),
+    );
+  }, [revealedRequestFields]);
+  useEffect(() => {
     setShowApiKey(false);
     setShowHeaders(!endpoint);
+    setShowRequestFields(!endpoint);
   }, [endpoint?.id]);
   const apiKey = draft.api_key ?? "";
   const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(
@@ -13515,11 +13780,21 @@ function ModelEndpointEditor({
   );
   const apiKeyVisibilityLabel = showApiKey ? "隐藏 API Key" : "显示 API Key";
   const headers = structuredRecord(headerRows);
-  const endpointDraft = { ...draft, http_headers: headers };
+  const parsedRequestFields = parseRequestFieldRows(requestRows);
+  const endpointDraft = {
+    ...draft,
+    http_headers: headers,
+    request_fields: parsedRequestFields.value,
+  };
   const duplicateHeaderNames = hasDuplicateStructuredKeys(headerRows);
+  const duplicateRequestNames = hasDuplicateStructuredKeys(requestRows);
+  const saveDisabled =
+    duplicateHeaderNames ||
+    duplicateRequestNames ||
+    !!parsedRequestFields.error ||
+    !endpointDraftValid(endpointDraft);
   const save = () => {
-    if (!duplicateHeaderNames && endpointDraftValid(endpointDraft))
-      onSave(endpointDraft);
+    if (!saveDisabled) onSave(endpointDraft);
   };
   return (
     <div className="endpoint-editor">
@@ -13723,6 +13998,50 @@ function ModelEndpointEditor({
             }}
           />
         </div>
+        <div className="wide endpoint-structured-headers">
+          <StructuredKeyValueEditor
+            label="Request Fields"
+            description={
+              '可选。作为 JSON 请求体顶层字段发送；字符串需写成 "fast"，也支持数字、布尔值、数组和对象。'
+            }
+            rows={requestRows}
+            keyLabel="Field"
+            keyPlaceholder="例如：service_tier"
+            valuePlaceholder={'例如："fast"'}
+            addLabel="Add Req Field"
+            showValues={showRequestFields}
+            revealAction={
+              requestRows.length > 0 ? (
+                <button
+                  type="button"
+                  className="structured-field-visibility"
+                  title={
+                    showRequestFields
+                      ? "隐藏 Request Field Value"
+                      : "显示 Request Field Value"
+                  }
+                  aria-label={
+                    showRequestFields
+                      ? "隐藏 Request Field Value"
+                      : "显示 Request Field Value"
+                  }
+                  onClick={() => setShowRequestFields((visible) => !visible)}
+                >
+                  {showRequestFields ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+              ) : undefined
+            }
+            onChange={(rows) => {
+              setShowRequestFields(true);
+              setRequestRows(rows);
+            }}
+          />
+          {parsedRequestFields.error && !duplicateRequestNames && (
+            <small className="structured-field-error" role="alert">
+              {parsedRequestFields.error}
+            </small>
+          )}
+        </div>
       </div>
       <div className="endpoint-editor-buttons">
         <button type="button" className="secondary compact" onClick={onClose}>
@@ -13731,7 +14050,7 @@ function ModelEndpointEditor({
         <button
           type="button"
           className="primary compact"
-          disabled={duplicateHeaderNames || !endpointDraftValid(endpointDraft)}
+          disabled={saveDisabled}
           onClick={save}
         >
           保存接入点

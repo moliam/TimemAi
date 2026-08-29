@@ -317,6 +317,7 @@ export type ModelEndpoint = {
   stream: boolean;
   api_key_configured: boolean;
   http_headers: Record<string, string>;
+  request_fields: Record<string, unknown>;
 };
 
 export type MemTemporaryItem = {
