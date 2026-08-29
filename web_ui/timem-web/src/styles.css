@@ -94,10 +94,6 @@ button:disabled { cursor: not-allowed; }
 .turn-work-item .message-content pre { margin: 7px 0 0; max-height: 260px; }
 .turn-work-detail { color: #9eb2bd; overflow-wrap: anywhere; }
 .turn-work-scroll .working-indicator { margin: 8px 2px; }
-.turn-starting-status { width: fit-content; min-height: 44px; display: inline-flex; align-items: flex-start; gap: 7px; margin: 12px 0 8px 10px; padding-top: 2px; color: #8ca0ab; font-size: 12px; font-weight: 650; letter-spacing: .01em; }
-.turn-starting-mark { position: relative; width: 7px; height: 7px; flex: none; border-radius: 50%; background: #6caee0; box-shadow: 0 0 0 3px #4f9bd51a, 0 0 8px #5ba9e052; }
-.turn-starting-mark::after { content: ""; position: absolute; inset: -4px; border: 1px solid #6db6eb57; border-radius: inherit; animation: turn-starting-ripple 1.8s ease-out infinite; }
-@keyframes turn-starting-ripple { 0% { opacity: .8; transform: scale(.55); } 75%, 100% { opacity: 0; transform: scale(1.25); } }
 .turn-work-scroll .inline-decision { max-width: none; margin: 8px 0; }
 .turn-new-updates { position: absolute; z-index: 2; right: 12px; bottom: 10px; display: inline-flex; align-items: center; gap: 6px; border: 1px solid #40616c; border-radius: 999px; padding: 6px 10px; background: #17303a; color: #cce9e4; box-shadow: 0 5px 18px #0008; font-size: 11px; font-weight: 700; }
 .turn-new-updates:hover { border-color: #62a89d; background: #1d3c43; }
@@ -518,7 +514,7 @@ button:disabled { cursor: not-allowed; }
 @keyframes working-frame-breathe { 50% { border-left-color: #e4bc72; box-shadow: inset 3px 0 12px #d0a75f12; } }
 
 @media (max-width: 720px) { .user-message-navigation { left: 6px; }.user-message-navigation button { width: 30px; height: 30px; border-radius: 8px; } }
-@media (prefers-reduced-motion: reduce) { .chat-scroll { scroll-behavior: auto; }.live-turn-usage, .pulse, .turn-starting-mark::after, .connection.offline, .session-row.working, .session-working-icon, .load-history.loading svg, .send-button.sending svg, .stop-button.sending svg, .decision-actions .primary.sending svg, .completion-toolgen.sending svg, .context-compact-notice, .compact-before, .compact-after, .turn-assistant-frame.working, .working-chip.toolgen-working svg, .turn-work-item, .toolrepo-header-button.count-pulse .toolrepo-header-count, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot { animation: none; }.mcp-session-toggle-thumb { transition: none; }.user-message-navigation, .user-message-navigation button, .session-row .session, .session-drag, .session-expand { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .chat-scroll { scroll-behavior: auto; }.live-turn-usage, .pulse, .connection.offline, .session-row.working, .session-working-icon, .load-history.loading svg, .send-button.sending svg, .stop-button.sending svg, .decision-actions .primary.sending svg, .completion-toolgen.sending svg, .context-compact-notice, .compact-before, .compact-after, .turn-assistant-frame.working, .working-chip.toolgen-working svg, .turn-work-item, .toolrepo-header-button.count-pulse .toolrepo-header-count, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot { animation: none; }.mcp-session-toggle-thumb { transition: none; }.user-message-navigation, .user-message-navigation button, .session-row .session, .session-drag, .session-expand { transition: none; } }
 @media (max-width: 1050px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 214px minmax(0, 1fr); }.side-panel-backdrop { display: block; position: fixed; z-index: 3; inset: 0; width: 100%; border: 0; background: #02060973; }.toolrepo-side-panel { position: fixed; z-index: 4; right: 0; top: 0; bottom: 0; width: min(360px, 88vw); } }
 @media (max-width: 720px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 1fr; }.context-compact-notice { max-width: calc(100% - 10px); margin-left: 0; grid-template-columns: 22px minmax(0, auto) minmax(42px, 64px); }.compact-copy span { overflow: hidden; text-overflow: ellipsis; }.compact-copy small { display: none; }.compact-meter { width: 100%; } }
 @media (max-width: 720px) { .session-runtime-grid { grid-template-columns: 1fr; } }
@@ -602,8 +598,6 @@ button:disabled { cursor: not-allowed; }
 :root[data-theme="light"] .turn-final-delivery > .message-content td { border-color: #c7d2d8; }
 :root[data-theme="light"] .turn-final-delivery > .message-content th { background: #e7eef0; color: #28434a; }
 :root[data-theme="light"] .working-indicator { color: #5f7782; }
-:root[data-theme="light"] .turn-starting-status { color: #657983; }
-:root[data-theme="light"] .turn-starting-mark { background: #3687c5; box-shadow: 0 0 0 3px #3687c514, 0 0 7px #3687c53d; }
 :root[data-theme="light"] .composer { border-color: #b9c9d0; background: #fff; }
 :root[data-theme="light"] .composer textarea { color: #172229; }
 :root[data-theme="light"] .composer textarea::placeholder,
@@ -3030,7 +3024,7 @@ body {
 :root[data-theme="light"] .turn-interim-item h3 span { color: #237f72; }
 :root[data-theme="light"] .turn-interim-item .message-content { color: #213a33; }
 
-/* Long final answers expose a bookmark directory drawer from the session/chat divider. */
+/* Long final answers expose a compact single-book contents drawer from the session/chat divider. */
 
 .final-answer-reading { --final-outline-width: 165px; position: relative; min-width: 0; }
 .final-answer-reading .markdown-body :is(h1, h2, h3)[id] { scroll-margin-top: 24px; }
@@ -3038,7 +3032,7 @@ body {
 .final-answer-outline-anchor { position: sticky; top: var(--final-outline-sticky-top, 15vh); width: max-content; min-height: 86px; max-height: 65vh; display: flex; align-items: flex-start; pointer-events: auto; }
 .final-answer-outline-toggle { position: relative; display: inline-flex; flex: none; width: 34px; height: 52px; align-items: center; justify-content: center; border: 0; border-radius: 0 10px 10px 0; padding: 0 3px 0 0; background: linear-gradient(155deg, #2d3734e8, #202725f2); color: #91aaa2; box-shadow: 6px 9px 24px #0000003d, inset 0 0 0 1px #ffffff09; backdrop-filter: blur(18px) saturate(118%); transition: transform .18s ease, background .18s ease, color .18s ease, box-shadow .18s ease; }
 .final-answer-outline-toggle:hover { background: linear-gradient(155deg, #36433fe8, #27302df2); color: #d2e9e2; box-shadow: 8px 11px 28px #00000047, inset 0 0 0 1px #75aa9a35; transform: translateX(2px); }
-.final-answer-outline-toggle > svg:first-child { flex: none; transform: translate(-1px, -1px); }
+.final-answer-outline-toggle > svg:first-child { flex: none; transform: translate(-1px, 0); }
 .final-answer-outline-toggle-arrow { position: absolute; top: 50%; right: 1px; visibility: hidden; opacity: 0; color: #6f9288; filter: drop-shadow(0 1px 2px #0008); transform: translate(-4px, -50%) scale(.88); transition: visibility 0s linear .16s, opacity .16s ease, color .16s ease, transform .16s ease; }
 .final-answer-outline-toggle:is(:hover, :focus-visible) .final-answer-outline-toggle-arrow { visibility: visible; opacity: 1; color: #a9d2c6; transform: translate(1px, -50%) scale(1); transition-delay: 0s; animation: final-outline-arrow-nudge .72s ease-in-out infinite alternate; }
 @keyframes final-outline-arrow-nudge { to { transform: translate(3px, -50%) scale(1); } }

@@ -80,6 +80,11 @@ echo "== web production build =="
 pnpm --dir web_ui/timem-web build
 git diff --exit-code -- web_ui/timem-web/dist
 
+if [[ "$(uname -s)" == "Linux" ]]; then
+  echo "== real Chrome Web UI acceptance =="
+  pnpm --dir web_ui/timem-web test:browser
+fi
+
 echo "== performance guard =="
 scripts/performance_guard.sh
 

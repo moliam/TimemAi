@@ -7,9 +7,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "vitest run --exclude tests/assistant_ui_contract.test.ts",
-    "test:legacy-contract": "vitest run tests/assistant_ui_contract.test.ts",
+    "test": "vitest run --exclude tests/performance_guard.test.ts",
     "test:watch": "vitest",
+    "test:browser": "node tests/browser/stop-ui-acceptance.mjs",
     "test:ui:stop": "pnpm build && node tests/browser/stop-ui-acceptance.mjs"
   },
   "dependencies": {

@@ -28,7 +28,7 @@ import {
   ArrowDownToLine,
   ArrowLeftRight,
   BriefcaseBusiness,
-  Bookmark,
+  BookText,
   Check,
   CheckCheck,
   ChevronDown,
@@ -174,6 +174,7 @@ import {
   runtimeConnectionLabel,
   sessionCacheHitPercent,
   sessionCancellationApplies,
+  shouldRenderTurnWorkFrame,
   sessionContextUsage,
   sessionCreateDecision,
   sessionInteractionLockReason as sessionInteractionLockReasonForState,
@@ -185,6 +186,7 @@ import {
   tailPath,
   toolActivityDisplayName,
   toolDisplayName,
+  turnElapsedMs,
   turnLiveUsage,
   turnShouldRenderInTimeline,
   turnTimelinePlacement,
@@ -9712,19 +9714,22 @@ type TurnInteractionProps = {
 
 const WorkingElapsed = memo(function WorkingElapsed({
   createdAtMs,
+  endedAtMs,
 }: {
   createdAtMs: number;
+  endedAtMs?: number | null;
 }) {
-  const [elapsedMs, setElapsedMs] = useState(() =>
-    Math.max(0, Date.now() - createdAtMs),
+  const elapsedAt = useCallback(
+    () => turnElapsedMs(createdAtMs, Date.now(), endedAtMs),
+    [createdAtMs, endedAtMs],
   );
+  const [elapsedMs, setElapsedMs] = useState(elapsedAt);
   useEffect(() => {
-    const updateElapsed = () =>
-      setElapsedMs(Math.max(0, Date.now() - createdAtMs));
-    updateElapsed();
-    const timer = window.setInterval(updateElapsed, 1_000);
+    setElapsedMs(elapsedAt());
+    if (endedAtMs != null) return;
+    const timer = window.setInterval(() => setElapsedMs(elapsedAt()), 1_000);
     return () => window.clearInterval(timer);
-  }, [createdAtMs]);
+  }, [elapsedAt, endedAtMs]);
   return (
     <span className="working-elapsed" aria-hidden="true">
       {formatDuration(elapsedMs)}
@@ -9860,6 +9865,11 @@ const TurnInteraction = memo(function TurnInteraction({
   const hasVisibleProcess =
     scrollItems.some((item) => item.activity !== null) || decisions.length > 0;
   const isWorking = turn.state === "working" && !isCancelling;
+  const showWorkFrame = shouldRenderTurnWorkFrame(
+    turn.state,
+    isCancelling,
+    hasVisibleProcess,
+  );
   const cancelled =
     isCancelling ||
     turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
@@ -10049,13 +10059,7 @@ const TurnInteraction = memo(function TurnInteraction({
           </div>
         </section>
       )}
-      {isWorking && !hasVisibleProcess && (
-        <div className="turn-starting-status" role="status" aria-live="polite">
-          <span className="turn-starting-mark" aria-hidden="true" />
-          <span>working</span>
-        </div>
-      )}
-      {hasVisibleProcess && (
+      {showWorkFrame && (
         <section
           className={`turn-assistant-frame ${isWorking ? "working" : interrupted ? "interrupted" : turn.state} ${workStreamVisible ? "" : "collapsed-work"}`}
         >
@@ -10093,6 +10097,14 @@ const TurnInteraction = memo(function TurnInteraction({
                 {isWorking && (
                   <WorkingElapsed createdAtMs={turn.created_at_ms} />
                 )}
+                {!isWorking &&
+                  turn.state === "interrupted" &&
+                  turn.interrupted_at_ms != null && (
+                    <WorkingElapsed
+                      createdAtMs={turn.created_at_ms}
+                      endedAtMs={turn.interrupted_at_ms}
+                    />
+                  )}
                 {interrupted && (
                   <span className="work-title-status">
                     ({cancelled ? "Cancelled" : "Interrupted"})
@@ -10845,10 +10857,9 @@ function FinalAnswerContent({ text }: { text: string }) {
                   title="Show table of contents"
                   onClick={() => setOutlineCollapsed(false)}
                 >
-                  <Bookmark
-                    size={18}
-                    fill="currentColor"
-                    strokeWidth={1.6}
+                  <BookText
+                    size={19}
+                    strokeWidth={1.8}
                     aria-hidden="true"
                   />
                   <ChevronRight
@@ -10876,7 +10887,7 @@ function FinalAnswerContent({ text }: { text: string }) {
                       />
                     </button>
                     <span>
-                      <Bookmark size={12} aria-hidden="true" />
+                      <BookText size={13} strokeWidth={1.8} aria-hidden="true" />
                       Contents
                     </span>
                   </header>

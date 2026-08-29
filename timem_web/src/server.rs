@@ -1531,6 +1531,8 @@ struct WebTurn {
     turn_id: String,
     state: String,
     created_at_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interrupted_at_ms: Option<u128>,
     user_entries: Vec<WebTurnUserEntry>,
     events: Vec<WebTurnEvent>,
     sub_answers: Vec<WebSubAnswer>,
@@ -5326,6 +5328,7 @@ fn interrupt_old_mem_sessions_after_worker_shutdown(
             .sessions
             .lock()
             .map_err(|_| "session_store_poisoned".to_string())?;
+        let interrupted_at_ms = now_ms();
         for live in live_sessions {
             let Some(session) = sessions.get_mut(&live.session_id) else {
                 continue;
@@ -5349,6 +5352,7 @@ fn interrupt_old_mem_sessions_after_worker_shutdown(
                             && turn.completion.is_none()
                     }) {
                         turn.state = "interrupted".to_string();
+                        turn.interrupted_at_ms.get_or_insert(interrupted_at_ms);
                     }
                 }
                 session.state = "interrupted".to_string();
@@ -6292,7 +6296,12 @@ fn restore_stored_session(
     let history_records = history_page.records;
     let messages = restored_messages_from_history_records(&history_records);
     let mut turns = restored_turns_from_history_records(&history_records);
-    mark_restored_interrupted_turn(&mut turns, stored.state, stored.last_turn_id.as_deref());
+    mark_restored_interrupted_turn(
+        &mut turns,
+        stored.state,
+        stored.last_turn_id.as_deref(),
+        stored.updated_at_ms.max(0) as u128,
+    );
     let tools = tool_repo.list()?;
     let debug_dir = state
         .debug
@@ -6315,6 +6324,8 @@ fn restore_stored_session(
             && turn.completion.is_none()
         {
             turn.state = "interrupted".to_string();
+            turn.interrupted_at_ms
+                .get_or_insert(stored.updated_at_ms.max(0) as u128);
         }
     }
     let next_turn_intents = NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS);
@@ -6433,6 +6444,7 @@ fn mark_restored_interrupted_turn(
     turns: &mut [WebTurn],
     state: StoredSessionState,
     last_turn_id: Option<&str>,
+    interrupted_at_ms: u128,
 ) {
     if state != StoredSessionState::Interrupted {
         return;
@@ -6443,6 +6455,7 @@ fn mark_restored_interrupted_turn(
     if let Some(turn) = turns.iter_mut().find(|turn| turn.turn_id == last_turn_id) {
         if turn.final_answer.is_none() && turn.completion.is_none() {
             turn.state = "interrupted".to_string();
+            turn.interrupted_at_ms.get_or_insert(interrupted_at_ms);
         }
     }
 }
@@ -6538,6 +6551,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     turn_id: turn_id.clone(),
                     state: "restored".to_string(),
                     created_at_ms: created_at_ms as u128,
+                    interrupted_at_ms: None,
                     user_entries: Vec::new(),
                     events: Vec::new(),
                     sub_answers: Vec::new(),
@@ -6638,6 +6652,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     turn_id: turn_id.clone(),
                     state: "restored".to_string(),
                     created_at_ms: created_at_ms as u128,
+                    interrupted_at_ms: None,
                     user_entries: Vec::new(),
                     events: Vec::new(),
                     sub_answers: Vec::new(),
@@ -6917,6 +6932,7 @@ fn enqueue_next_turn_intent(
             turn_id,
             state: "pending".to_string(),
             created_at_ms,
+            interrupted_at_ms: None,
             user_entries: vec![WebTurnUserEntry {
                 kind: "task".to_string(),
                 text: text.clone(),
@@ -9002,6 +9018,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
         turn_id: unique_web_id("web_turn"),
         state: "pending".to_string(),
         created_at_ms: now_ms(),
+        interrupted_at_ms: None,
         user_entries: vec![WebTurnUserEntry {
             kind: "task".to_string(),
             text: text.to_string(),
@@ -9177,6 +9194,7 @@ fn start_web_toolgen_turn(
         turn_id: unique_web_id("web_toolgen_turn"),
         state: "pending".to_string(),
         created_at_ms,
+        interrupted_at_ms: None,
         user_entries,
         events: Vec::new(),
         sub_answers: Vec::new(),

@@ -87,9 +87,9 @@ checks. If a dimension is not applicable, record that residual decision in
   Same-Session tests also create separate Context/Worker identities, verify the
   child inherits the owning Session profile/environment, reject scope mismatch,
   and prove a child finishing cannot mark a still-running primary worker ready.
-- Web frontend: Vitest protects session-aware reducers and rendering contracts;
+- Web frontend: Vitest protects session-aware reducers and behavior-level rendering decisions;
   Vite production build is regenerated in CI and must match the tracked bundle.
-  Release review also includes a real browser smoke for scrolling, composer
+  Linux CI runs real Chrome against that built bundle, and release review also includes broader browser smoke for scrolling, composer
   docking, session creation/rename, persistent theme/font/text-size choices,
   GFM tables/task lists, syntax-highlighted copyable code blocks, responsive
   overflow, working-turn input, and concurrent activity. Turn-flow
@@ -202,8 +202,8 @@ Latency evidence follows the same rule as Web performance tracing: use monotonic
 7. `cargo fmt --check`
 8. clippy warning gate via `scripts/clippy_check.sh`
 9. `cargo test --workspace`
-10. Web dependency license scan, frontend tests, and reproducible production build
-11. performance guard via `scripts/performance_guard.sh`
+10. Web dependency license scan, frontend functional tests, reproducible production build, and Linux real-Chrome acceptance
+11. dedicated performance guard via `scripts/performance_guard.sh`
 12. repeated edge regression via `scripts/edge_regression.sh`
 13. CLI and Web release builds
 14. cross-host resume smoke

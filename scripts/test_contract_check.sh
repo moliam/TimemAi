@@ -34,88 +34,14 @@ search_lines_regex() {
   fi
 }
 
-required_patterns=(
-  "session_turn_forced_shrink_runs_to_final_without_repeated_shrink"
-  "session_turn_truncated_output_expands_limit_and_retries_same_turn"
-  "session_turn_truncated_output_stop_sets_structured_stop_reason"
-  "session_turn_round_limit_continue_recharges_and_finishes_same_task"
-  "session_turn_round_limit_stop_sets_structured_stop_reason"
-  "session_turn_bash_approval_executes_action_then_finishes_with_audit"
-  "session_turn_scratch_context_offload_records_id_and_continues"
-  "session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rendering"
-  "successful_prompt_shrink_invalidates_stale_observed_prompt_tokens"
-  "forced_shrink_is_not_reissued_when_dynamic_context_cannot_reduce_enough"
-  "memory_update_concurrent_same_version_conflicts_allow_only_one_winner"
-  "mem_guard_keeps_concurrent_memory_updates_from_losing_records"
-  "concurrent_session_store_instances_never_expose_partial_or_lose_index_records"
-  "run_bash_can_start_and_poll_background_job"
-  "timeout_job_is_reported_running_and_model_can_kill_by_pid"
-  "running_job_list_is_injected_when_discard_references_running_job_delta"
-  "running_job_list_is_injected_when_offload_references_running_job_delta"
-  "running_job_list_is_injected_when_compact_references_running_job_delta"
-  "running_job_list_is_not_injected_when_discard_refs_unrelated_delta"
-  "ci_realistic_multiturn_memory_tools_security_and_shrink_story"
-  "run_multiline_paste_cancel_smoke"
-  "run_edited_paste_recovery_ctrl_c_smoke"
-  "run_edited_paste_recovery_esc_smoke"
-  "run_edited_paste_recovery_return_to_edit_smoke"
-  "run_shift_enter_cancel_smoke"
-  "run_wrapped_edit_cancel_smoke"
-  "run_config_value_cancel_smoke"
-  "run_config_protocol_switch_smoke"
-  "run_workspace_add_cancel_smoke"
-  "real_tty_supplement_smoke"
-  "raw_multiline_paste_requires_confirmation_before_model_submit"
-  "queued_paste_fallback_handles_crlf_boundary_without_extra_blank_line"
-  "config_report_is_ui_neutral_and_groups_effective_values"
-  "config_menu_report_is_ui_neutral_command_data"
-  "workspace_menu_report_is_ui_neutral_command_data"
-  "runtime_status_snapshot_groups_retry_state_for_host_rendering"
-  "runtime_status_snapshot_keeps_memory_activity_structured_for_host_rendering"
-  "turn_ui_decision_requests_are_structured_and_ui_neutral"
-  "stale_context_decision_request_is_structured_and_ui_neutral"
-  "config_apply_report_is_ui_neutral_command_data"
-  "performance_guard_large_context_prompt_render_is_bounded"
-  "performance_guard_topic_generation_for_many_actions_is_bounded"
-  "performance_guard_many_observation_events_render_bounded"
-  "session_turn_preserves_cache_plan_with_xml_response_protocol"
-  "restored_web_turns_follow_history_time_not_turn_id_lexical_order"
-  "restored_web_turns_preserve_user_entry_kinds"
-  "turn_user_entries_are_persisted_with_raw_text_and_semantic_kind"
-  "sorts restored entries and events within one turn by creation time"
-  "shell_resume_uses_stored_session_cwd_for_core_prompt_context"
-  "shell_resume_prefers_non_empty_launch_env_then_cli_over_stored_session_env"
-  "shell_can_resume_web_style_session_history"
-  "formatted_response_trailer_parser_preserves_assistant_heading"
-  "append_result_reports_only_real_segment_rollovers"
-  "audit_maintenance_hint_is_written_only_for_a_segment_rollover"
-  "temporary_maintenance_runtime_accumulates_across_restarts_without_counting_stopped_time"
-  "busy_temporary_maintenance_does_not_reset_due_runtime_or_hint"
-  "successful_temporary_maintenance_completion_resets_runtime_and_clears_hint"
-)
-
-for pattern in "${required_patterns[@]}"; do
-  if ! search_regex "$pattern" agent_core timem_shell scripts docs; then
-    echo "missing required test/contract pattern: $pattern" >&2
-    exit 1
-  fi
-done
-
-inline_test_hits="$(
-  search_lines_regex '#\[test\]' \
-    agent_core/src timem_shell/src resources/capabilities/tools \
-    || true
-)"
-if [ -n "$inline_test_hits" ]; then
-  echo "test functions must live under a crate tests directory, not src:" >&2
-  echo "$inline_test_hits" >&2
-  exit 1
-fi
+# This script checks repository/CI contracts. Behavioral coverage belongs to
+# executable tests; test names and source-file placement are not evidence.
 
 ci_required=(
   "cargo test --workspace"
   "pnpm --dir web_ui/timem-web test"
   "pnpm --dir web_ui/timem-web build"
+  "pnpm --dir web_ui/timem-web test:browser"
   "cargo build --locked -p timem_shell -p timem_web --release"
   "scripts/edge_regression.sh"
   "scripts/real_tty_smoke.expect"
@@ -402,84 +328,8 @@ for pattern in "${web_ui_matrix_required[@]}"; do
   fi
 done
 
-web_ui_required_test_names=(
-  "turn_submit_during_an_active_turn_cannot_merge_into_the_current_turn"
-  "repeated_user_sends_during_an_active_turn_are_ordered_supplements"
-  "active_turn_supplement_consumes_pending_attachments_into_the_same_turn"
-  "failed_active_turn_supplement_does_not_drop_pending_attachments"
-  "stale_supplement_after_cancel_completion_starts_a_new_turn"
-  "stale_supplement_after_cancel_consumes_pending_attachments_as_a_new_task"
-  "duplicate_cancel_commands_are_idempotent_for_one_active_turn"
-  "uses synchronous pending guards for rapid repeated browser clicks"
-  "guards one browser draft submission while preserving text typed during the pending send"
-  "keeps drafts and pending send guards isolated by session"
-  "prunes stale drafts and pending send locks when a snapshot swaps out sessions"
-  "recovers from an in-flight old-mem send after a mem snapshot swaps sessions"
-  "moves the active session to a live session when a snapshot swaps out the old one"
-  "moves active selection to a live session when a reconnect or mem snapshot swaps sessions"
-  "uses session terminology consistently for the creation workflow"
-  "supports agent rename and a distinct animated working state"
-  "expands each session into its scoped worker status list"
-  "accepts lifecycle topics that introduce a new scoped worker and context"
-  "binds assistant-ui running state to the authoritative session lifecycle"
-  "creates sessions with independent runtime environment overrides"
-  "does not send new tasks or supplements while a mem switch is pending"
-  "does not rename a session while mem switching or another rename is pending"
-  "locks old-session interactions while a mem switch snapshot is pending"
-  "does not send while cancellation is still in flight"
-  "keeps draft text and releases the pending guard when cancellation blocks a reserved send"
-  "sends a new task after a cancelled active turn is marked finished"
-  "keeps rapid ordinary sends during a working turn as separate next-turn submissions"
-  "keeps a human click storm bounded and session scoped"
-  "lets users remove pending attachments without losing access to long file names"
-  "keeps working-turn input visually consistent with a normal send"
-  "restores task, supplement, and approval user entries inside one turn"
-  "moves submitted files from the composer into a compact user attachment list"
-  "queues concurrent decisions by session and request id without cross-session replacement"
-  "clears only the resumed workers decision within a shared session"
-  "uses an explicit session-created event and session-scoped inline decisions"
-  "does not turn work-instruction bookkeeping into user-visible activity"
-  "pairs duplicate concurrent actions in order without collapsing either invocation"
-  "pairs action lifecycle events even when input object key order changes"
-  "pairs action lifecycle events when nested input object key order changes"
-  "applies a model response only to the session named by the core topic"
-  "applies a structured cwd update only to the matching session"
-  "rejects core topics scoped to an unknown context before mutating a session"
-  "keeps a matched agent working without changing unrelated sessions"
-  "renders context compaction as a compact status pill with a reduced-motion fallback"
-  "keeps context compaction as a typed system activity with token metrics"
-  "uses the Markdown highlighter for final answers and Bash activity commands"
-  "renders GFM, mathematical notation, and highlighted code with a copy affordance"
-  "groups each task into user input, bounded process, and separate final delivery"
-  "uses frame styling without repeating user or session identity labels"
-  "coalesces tool lifecycles and renders tools as compact subordinate rows"
-  "replaces an action start with its terminal lifecycle event"
-  "keeps cwd in the composer footer instead of repeating it in session navigation"
-  "uses only the selected session's latest real model usage for context"
-  "renders live task usage and session context without replacing final telemetry"
-  "attaches completion telemetry only to the matching final answer"
-  "persists appearance preferences inside the unified settings center without changing core state"
-  "removes the access token from the visible URL while retaining the session credential"
-  "public_web_launch_keeps_token_auth_and_reports_bind_mode"
-  "local_static_web_entry_needs_no_token_and_public_entry_sets_auth_cookie"
-  "reuses_the_same_authenticated_url_after_closing_and_reopening_a_page"
-  "restarts_timem_web_after_runtime_shutdown_with_the_same_data_and_port"
-  "corrupt_command_dedup_cache_is_backed_up_without_blocking_web_startup"
-  "corrupt_mcp_config_is_backed_up_without_blocking_web_startup"
-  "corrupt_session_index_record_is_backed_up_while_valid_sessions_remain_usable"
-  "shows the runtime bind host and public-token mode from the server snapshot"
-  "keeps only global runtime availability in a banner and puts other errors in the task work stream"
-  "bounds a reconnect snapshot with many turns and high-frequency events"
-  "bounds newly appended turns without changing chronological order"
-  "keeps repeated live event bursts bounded and isolated across sessions"
-)
-
-for pattern in "${web_ui_required_test_names[@]}"; do
-  if ! search_fixed "$pattern" timem_web/tests web_ui/timem-web/tests; then
-    echo "missing required Web UI regression test implementation: $pattern" >&2
-    exit 1
-  fi
-done
+# Behavioral coverage is enforced by executable Rust, Vitest, smoke, and
+# real-browser tests. Do not treat test-name strings as proof of coverage.
 
 manual_smoke_required=(
   "Manual Release Smoke"

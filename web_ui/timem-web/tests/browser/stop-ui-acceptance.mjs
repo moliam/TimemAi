@@ -1,12 +1,27 @@
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { extname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = resolve(new URL("../..", import.meta.url).pathname);
-const chrome = process.env.CHROME_BIN ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
+const chromeCandidates = [
+  process.env.CHROME_BIN,
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/usr/bin/google-chrome",
+  "/usr/bin/google-chrome-stable",
+  "/usr/bin/chromium",
+  "/usr/bin/chromium-browser",
+].filter(Boolean);
+const chrome = chromeCandidates.find((candidate) => existsSync(candidate));
+if (!chrome) {
+  throw new Error(
+    `Chrome/Chromium not found; checked: ${chromeCandidates.join(", ")}`,
+  );
+}
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 async function waitFor(check, message, timeout = 10000) {
@@ -172,61 +187,91 @@ async function startHost() {
   };
 }
 
+async function stopBrowserProcess(child, profile) {
+  if (child.exitCode === null) child.kill("SIGTERM");
+  await Promise.race([
+    new Promise((resolve) => child.once("exit", resolve)),
+    sleep(2500),
+  ]);
+  if (child.exitCode === null) child.kill("SIGKILL");
+  await rm(profile, { recursive: true, force: true });
+}
+
+async function readDevToolsPort(profile) {
+  try {
+    const [portLine] = (await readFile(join(profile, "DevToolsActivePort"), "utf8"))
+      .trim()
+      .split("\n");
+    const port = Number(portLine);
+    return Number.isInteger(port) && port > 0 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
 async function startBrowser(url) {
   const profile = await mkdtemp(join(tmpdir(), "timem-stop-ui-"));
-  const port = 9300 + Math.floor(Math.random() * 500);
   const child = spawn(chrome, [
-    `--remote-debugging-port=${port}`, `--user-data-dir=${profile}`,
-    "--headless=new", "--no-first-run", "--no-default-browser-check",
+    "--remote-debugging-port=0", `--user-data-dir=${profile}`,
+    "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+    "--no-first-run", "--no-default-browser-check",
     "--disable-background-networking", "--disable-component-update", "--disable-sync",
     "--window-size=1440,1000", "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"] });
   let chromeError = "";
   child.stderr.on("data", (chunk) => { chromeError += String(chunk); });
-  await waitFor(async () => {
-    try { return (await fetch(`http://127.0.0.1:${port}/json/version`)).ok; }
-    catch { return false; }
-  }, `Chrome DevTools did not start: ${chromeError}`, 12000);
-  const target = await (await fetch(
-    `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`,
-    { method: "PUT" },
-  )).json();
-  const socket = new WebSocket(target.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => {
-    socket.addEventListener("open", resolve, { once: true });
-    socket.addEventListener("error", reject, { once: true });
-  });
-  let sequence = 0;
-  const requests = new Map();
-  socket.addEventListener("message", ({ data }) => {
-    const message = JSON.parse(String(data));
-    if (!message.id || !requests.has(message.id)) return;
-    const { resolve, reject } = requests.get(message.id);
-    requests.delete(message.id);
-    if (message.error) reject(new Error(message.error.message));
-    else resolve(message.result);
-  });
-  const call = (method, params = {}) => new Promise((resolve, reject) => {
-    const id = ++sequence;
-    requests.set(id, { resolve, reject });
-    socket.send(JSON.stringify({ id, method, params }));
-  });
-  await call("Runtime.enable"); await call("Page.enable");
-  const evaluate = async (expression) => {
-    const result = await call("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-    if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
-    return result.result.value;
-  };
-  return {
-    call, evaluate,
-    async close() {
-      socket.close();
-      child.kill("SIGTERM");
-      await Promise.race([new Promise((resolve) => child.once("exit", resolve)), sleep(2500)]);
-      if (child.exitCode === null) child.kill("SIGKILL");
-      await rm(profile, { recursive: true, force: true });
-    },
-  };
+
+  try {
+    let port = null;
+    await waitFor(async () => {
+      if (child.exitCode !== null) return false;
+      port = await readDevToolsPort(profile);
+      if (port === null) return false;
+      try { return (await fetch(`http://127.0.0.1:${port}/json/version`)).ok; }
+      catch { return false; }
+    }, `Chrome DevTools did not start: ${chromeError}`, 12000);
+
+    const target = await (await fetch(
+      `http://127.0.0.1:${port}/json/new?${encodeURIComponent(url)}`,
+      { method: "PUT" },
+    )).json();
+    const socket = new WebSocket(target.webSocketDebuggerUrl);
+    await new Promise((resolve, reject) => {
+      socket.addEventListener("open", resolve, { once: true });
+      socket.addEventListener("error", reject, { once: true });
+    });
+    let sequence = 0;
+    const requests = new Map();
+    socket.addEventListener("message", ({ data }) => {
+      const message = JSON.parse(String(data));
+      if (!message.id || !requests.has(message.id)) return;
+      const { resolve, reject } = requests.get(message.id);
+      requests.delete(message.id);
+      if (message.error) reject(new Error(message.error.message));
+      else resolve(message.result);
+    });
+    const call = (method, params = {}) => new Promise((resolve, reject) => {
+      const id = ++sequence;
+      requests.set(id, { resolve, reject });
+      socket.send(JSON.stringify({ id, method, params }));
+    });
+    await call("Runtime.enable"); await call("Page.enable");
+    const evaluate = async (expression) => {
+      const result = await call("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
+      if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+      return result.result.value;
+    };
+    return {
+      call, evaluate,
+      async close() {
+        socket.close();
+        await stopBrowserProcess(child, profile);
+      },
+    };
+  } catch (error) {
+    await stopBrowserProcess(child, profile);
+    throw error;
+  }
 }
 
 async function main() {
@@ -250,6 +295,29 @@ async function main() {
   try {
     await waitFor(() => exists('.session-working-icon[aria-label="Session working"]'), "initial working spinner missing");
     await waitFor(() => exists('button[aria-label="Cancel current turn"]'), "Stop button missing");
+    await waitFor(() => exists('.turn-assistant-frame.working'), "formal working frame missing before the first process event");
+    assert(!(await exists('.turn-starting-status')), "obsolete placeholder working rendered before the first process event");
+    assert(
+      await contains('.turn-assistant-frame.working .working-label', "working"),
+      "formal working header missing before the first process event",
+    );
+    await browser.evaluate(`(() => {
+      document.querySelector('.turn-assistant-frame.working').dataset.acceptanceWorkingFrame = 'stable';
+    })()`);
+    host.send({
+      type: "worker_activity", session_id: "session-1", context_id: "context-1",
+      worker_id: "worker-1", turn_id: "turn-1",
+      event: { kind: "worker_started", phase: "processing" },
+    });
+    await waitFor(
+      () => exists('.turn-assistant-frame.working .turn-work-item'),
+      "first process event did not populate the formal working frame",
+    );
+    assert(
+      await exists('.turn-assistant-frame.working[data-acceptance-working-frame="stable"]'),
+      "first process event replaced the formal working frame",
+    );
+    assert(!(await exists('.turn-starting-status')), "obsolete placeholder working returned after the first process event");
 
     // Irregular action: two immediate clicks must still emit one targeted cancellation.
     await browser.evaluate(`(() => {
@@ -376,6 +444,8 @@ async function main() {
     );
 
     console.log("PASS real Chrome Stop UI acceptance");
+    console.log("- formal working frame is present before the first process event and remains the same DOM node afterward");
+    console.log("- obsolete placeholder working never renders");
     console.log("- double Stop -> one targeted turn_cancel");
     console.log("- Stop click does not change business UI before Host state arrives");
     console.log("- Host-confirmed and reconnect Session state render Cancelled");

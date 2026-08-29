@@ -1638,6 +1638,7 @@ fn restored_interrupted_marker_targets_only_the_persisted_last_turn() {
             turn_id: "older_unfinished".to_string(),
             state: "restored".to_string(),
             created_at_ms: 1,
+            interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
             sub_answers: Vec::new(),
@@ -1648,6 +1649,7 @@ fn restored_interrupted_marker_targets_only_the_persisted_last_turn() {
             turn_id: "persisted_last".to_string(),
             state: "restored".to_string(),
             created_at_ms: 2,
+            interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
             sub_answers: Vec::new(),
@@ -1660,10 +1662,12 @@ fn restored_interrupted_marker_targets_only_the_persisted_last_turn() {
         &mut turns,
         StoredSessionState::Interrupted,
         Some("persisted_last"),
+        99,
     );
 
     assert_eq!(turns[0].state, "restored");
     assert_eq!(turns[1].state, "interrupted");
+    assert_eq!(turns[1].interrupted_at_ms, Some(99));
 }
 
 #[test]
@@ -1672,6 +1676,7 @@ fn restored_interrupted_marker_never_relabels_terminal_or_unrelated_turns() {
         turn_id: "terminal_last".to_string(),
         state: "completed".to_string(),
         created_at_ms: 2,
+        interrupted_at_ms: None,
         user_entries: Vec::new(),
         events: Vec::new(),
         sub_answers: Vec::new(),
@@ -1682,6 +1687,7 @@ fn restored_interrupted_marker_never_relabels_terminal_or_unrelated_turns() {
         turn_id: "older_unfinished".to_string(),
         state: "restored".to_string(),
         created_at_ms: 1,
+        interrupted_at_ms: None,
         user_entries: Vec::new(),
         events: Vec::new(),
         sub_answers: Vec::new(),
@@ -1694,6 +1700,7 @@ fn restored_interrupted_marker_never_relabels_terminal_or_unrelated_turns() {
         &mut turns,
         StoredSessionState::Interrupted,
         Some("terminal_last"),
+        99,
     );
     assert_eq!(turns[0].state, "restored");
     assert_eq!(turns[1].state, "completed");
@@ -1702,12 +1709,14 @@ fn restored_interrupted_marker_never_relabels_terminal_or_unrelated_turns() {
         &mut turns,
         StoredSessionState::Ready,
         Some("older_unfinished"),
+        99,
     );
-    mark_restored_interrupted_turn(&mut turns, StoredSessionState::Interrupted, None);
+    mark_restored_interrupted_turn(&mut turns, StoredSessionState::Interrupted, None, 99);
     mark_restored_interrupted_turn(
         &mut turns,
         StoredSessionState::Interrupted,
         Some("missing_turn"),
+        99,
     );
     assert_eq!(turns[0].state, "restored");
     assert_eq!(turns[1].state, "completed");
@@ -1771,6 +1780,7 @@ fn interrupted_session_persists_without_an_active_or_pending_turn() {
         turn_id: "interrupted_turn".to_string(),
         state: "interrupted".to_string(),
         created_at_ms: 1,
+        interrupted_at_ms: None,
         user_entries: Vec::new(),
         events: Vec::new(),
         sub_answers: Vec::new(),
@@ -1800,6 +1810,7 @@ fn stale_turn_started_without_command_id_cannot_revive_an_interrupted_session() 
             turn_id: "old_interrupted_turn".to_string(),
             state: "interrupted".to_string(),
             created_at_ms: 1,
+            interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
             sub_answers: Vec::new(),
@@ -1859,6 +1870,7 @@ fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can
             turn_id: "interrupted_turn".to_string(),
             state: "interrupted".to_string(),
             created_at_ms: 1,
+            interrupted_at_ms: None,
             user_entries: vec![WebTurnUserEntry {
                 kind: "task".to_string(),
                 text: "old work".to_string(),
@@ -4174,6 +4186,7 @@ fn session_runtime_update_is_allowed_during_an_active_turn() {
             turn_id: "turn_active".to_string(),
             state: "working".to_string(),
             created_at_ms: now_ms(),
+            interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
             sub_answers: Vec::new(),
@@ -4237,6 +4250,7 @@ fn session_api_key_update_is_rejected_during_an_active_turn() {
         turn_id: "turn_active".to_string(),
         state: "working".to_string(),
         created_at_ms: now_ms(),
+        interrupted_at_ms: None,
         user_entries: Vec::new(),
         events: Vec::new(),
         sub_answers: Vec::new(),
@@ -10920,6 +10934,7 @@ fn background_exit_event_is_appended_to_its_original_turn() {
             turn_id: "turn_newer".to_string(),
             state: "working".to_string(),
             created_at_ms: now_ms(),
+            interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
             sub_answers: Vec::new(),
