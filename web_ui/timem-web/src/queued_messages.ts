@@ -216,9 +216,12 @@ export function shouldDirectManualMessage(
  sessionState: string,
  queuedMessageCount: number,
  paused: boolean,
- cancelling = false,
+ _cancelling = false,
 ) {
- return !cancelling && (sessionState === "ready" || sessionState === "stopped" || sessionState === "error") && queuedMessageCount === 0 && !paused;
+ // Stop is a visual hand-off, not a browser queue state. The Host accepts the
+ // next turn immediately and privately holds Core dispatch behind its terminal
+ // barrier while the cancelled execution finishes cleaning up.
+ return (sessionState === "ready" || sessionState === "stopped" || sessionState === "error") && queuedMessageCount === 0 && !paused;
 }
 
 export type QueuedMessageClaims = Set<string>;

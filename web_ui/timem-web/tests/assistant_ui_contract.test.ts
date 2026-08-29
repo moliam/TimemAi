@@ -845,8 +845,9 @@ describe("assistant-ui thread integration", () => {
     expect(protocolSource).toContain('type: "turn_cancelling"');
     expect(source).toContain('if (event.type === "turn_cancelling")');
     expect(source).toContain("sessionCancellationApplies(");
-    expect(viewModelSource).toContain("targetedCancelStillApplies(");
-    expect(source).toContain("persistedCancelTargetCommandIds");
+    expect(source).toContain("event.session.session_id");
+    expect(source).toContain("? event.session");
+    expect(viewModelSource).not.toContain("targetedCancelStillApplies(");
     expect(viewModelSource).toContain("previousIsTerminal");
   });
 
@@ -861,8 +862,9 @@ describe("assistant-ui thread integration", () => {
     );
     expect(source).toContain("await onCancel(pendingDirectSubmission);");
     expect(source).toContain(
-      'const sendLabel = isCancelling ? "Send after stop" : activeSession?.state === "working" ? "Queue message" : "Send message";',
+      'const sendLabel = activeSession?.state === "working"',
     );
+    expect(source).not.toContain('"Send after stop"');
     expect(source).toContain(
       'const missingSessionHint = activeSession ? "" : "Create a session before using Timem";',
     );
@@ -2812,7 +2814,7 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain(
       "const cancellingSessionIds = useRef<Set<string>>(new Set());",
     );
-    expect(source).toContain("const [cancellingSessionIdSet");
+    expect(source).toContain("const cancellingSessionIds = useRef");
     expect(source).toContain(
       "if (cancellingSessionIds.current.has(activeSession.session_id)) return;",
     );
@@ -2829,15 +2831,19 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("TURN_CANCEL_UI_TIMEOUT_MS = 15_000");
     expect(source).toContain('const commandId = clientId("turn-cancel");');
     expect(source).toContain(
-      "cancellingSessionCommandIds.current.get(sessionId) === event.command_id",
+      "cancellingSessionCommandIds.current.get(sessionId)",
     );
-    expect(source).toContain(
-      'sendCommand({ type: "turn_cancel", session_id: sessionId }, commandId)',
-    );
-    expect(source).toContain(
+    expect(source).toContain("event.command_id");
+    expect(source).toContain('type: "turn_cancel"');
+    expect(source).toContain("session_id: sessionId");
+    expect(source).toContain("commandId");
+    expect(source).not.toContain(
       '"Background cleanup is taking longer than expected"',
     );
-    expect(source).toContain("This timer is diagnostic only");
+    expect(source).toContain(
+      "This timer is transport bookkeeping only",
+    );
+    expect(source).not.toContain("markSessionCancelling(");
     expect(source).not.toContain('"Stopping…"');
     expect(source).toContain("const cancelActiveSessionTurn = async () =>");
     expect(source).toContain(
@@ -2849,37 +2855,31 @@ describe("assistant-ui thread integration", () => {
     expect(source).not.toContain(
       "clearSessionQueuedMessages(previous, activeSessionId)",
     );
-    expect(source).toContain(
-      "releaseSessionQueuedMessageClaims(queuedMessageClaimsRef.current, sessionId)",
-    );
     expect(source).toContain("onClick={() => void cancelActiveSessionTurn()}");
   });
 
-  it("removes the transient working presentation immediately after Stop", () => {
-    expect(source).toContain(
-      "isCancelling={session.session_id === activeSessionId && isCancelling}",
-    );
+  it("removes working presentation only from the Host-confirmed Session", () => {
+    expect(source).toContain("isCancelling={sessionCancellationApplies(");
     expect(source).toContain(
       'isCancelling={isCancelling && turn.state === "working"}',
     );
     expect(source).toContain(
       'const isWorking = turn.state === "working" && !isCancelling;',
     );
-    expect(source).toContain(
-      '{isWorking && !hasVisibleProcess && <div className="turn-starting-status"',
-    );
-    expect(source).toContain(
-      "{isWorking && <WorkingElapsed createdAtMs={turn.created_at_ms}/>}",
-    );
-    expect(source).toContain("{isWorking && <LiveTurnUsage turn={turn}/>}");
+    expect(source).toContain("isWorking && !hasVisibleProcess");
+    expect(source).toContain('className="turn-starting-status"');
+    expect(source).toContain("<WorkingElapsed createdAtMs={turn.created_at_ms}");
+    expect(source).toContain("isWorking && <LiveTurnUsage turn={turn}");
     expect(source).toContain("previous.isCancelling !== next.isCancelling");
   });
 
-  it("queues send invisibly while cancellation finishes in the background", () => {
+  it("submits the next task directly while cancellation finishes in the background", () => {
     const start = source.indexOf("const sendTextForSession = useCallback");
     const end = source.indexOf("const uploadFile = useCallback", start);
     const sendText = source.slice(start, end);
-    expect(sendText).toContain(
+    expect(sendText).toContain("composerSendDecision(");
+    expect(sendText).toContain("false,");
+    expect(sendText).not.toContain(
       "cancellingSessionIds.current.has(targetSession.session_id)",
     );
     expect(sendText).toContain("sendCommand(command, commandId)");
@@ -3253,12 +3253,13 @@ describe("assistant-ui thread integration", () => {
       "Reconnect to Timem Web before renaming this session.",
     );
     expect(source).toContain("session-working-icon");
-    expect(source).toContain("const visuallyWorking = sessionVisuallyWorking(");
+    expect(source).toContain("const visuallyWorking =");
+    expect(source).toContain("sessionVisuallyWorking(session)");
     expect(viewModelSource).toContain("sessionCancellationApplies(");
     expect(viewModelSource).toContain(
-      "locallyCancellingSessionIds.has(session.session_id)",
+      "return !!session?.cancelling_turn_id",
     );
-    expect(source).toContain("persistedCancelTargetCommandIds[");
+    expect(source).not.toContain("cancellingSessionIdSet");
     expect(source).toContain('aria-label="Session working"');
     expect(source).toContain('aria-hidden="true"');
     expect(source).toMatch(
@@ -5170,7 +5171,7 @@ describe("assistant-ui thread integration", () => {
     );
     expect(source).toContain('turn.state === "interrupted"');
     expect(source).toContain(
-      '<span className="work-title-status">(Interrupted)</span>',
+      '({cancelled ? "Cancelled" : "Interrupted"})',
     );
     expect(styles).toContain(".working-chip.interrupted-work-title");
     expect(source).toContain(

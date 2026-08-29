@@ -1511,8 +1511,7 @@ enum WireEvent {
         projection: VersionedTurnProjection,
     },
     TurnCancelling {
-        session_id: String,
-        turn_id: String,
+        session: Box<WebSession>,
         target_command_id: Option<String>,
     },
     TurnStarted {
@@ -4515,7 +4514,11 @@ fn handle_command_with_id(
             )? {
                 return Ok(None);
             }
-            let cancelling_turn_id = {
+            // Host UI projection and Core execution are separate channels.
+            // Record and publish the authoritative user-visible state first;
+            // Core cancellation then proceeds without participating in rendering.
+            primary_worker_handle(state, &session_id)?;
+            let projection_update = {
                 let mut sessions = state
                     .sessions
                     .lock()
@@ -4524,43 +4527,59 @@ fn handle_command_with_id(
                     .get_mut(&session_id)
                     .ok_or_else(|| "session_not_found".to_string())?;
                 let turn_id = current_turn_id(session).map(str::to_string);
-                session.cancelling_turn_id = turn_id.clone();
-                turn_id
-            };
-            let cancelled_workers = state
-                .manager
-                .lock()
-                .map_err(|_| "worker_manager_poisoned")?
-                .cancel_session_turns(&session_id);
-            if cancelled_workers == 0 {
-                if let Ok(mut sessions) = state.sessions.lock() {
-                    if let Some(session) = sessions.get_mut(&session_id) {
-                        if session.cancelling_turn_id == cancelling_turn_id {
-                            session.cancelling_turn_id = None;
-                        }
-                    }
-                }
-                return Err("session_worker_not_found".to_string());
-            }
-            if let Ok(mut sessions) = state.sessions.lock() {
-                if let Some(session) = sessions.get_mut(&session_id) {
-                    if session.cancelling_turn_id == cancelling_turn_id {
+                let turn_index = turn_id.as_deref().and_then(|turn_id| {
+                    session
+                        .turns
+                        .iter()
+                        .position(|turn| turn.turn_id == turn_id)
+                });
+                match (turn_id, turn_index) {
+                    (Some(turn_id), Some(turn_index)) => {
+                        let previous_session = session.clone();
+                        session.cancelling_turn_id = Some(turn_id);
                         for worker in &mut session.workers {
                             if worker.state == "working" {
                                 worker.state = "ready".to_string();
                             }
                         }
                         session.state = aggregate_web_session_state(&session.workers, "ready");
+                        let turn = &mut session.turns[turn_index];
+                        turn.state = "finished".to_string();
+                        turn.completion = Some(json!({ "stop_reason": "CancelledByUser" }));
+                        Some((previous_session, session.clone()))
                     }
+                    // A Core worker can briefly exist without a Web Turn (for
+                    // example in legacy/restored paths). Cancellation remains
+                    // a successful idempotent Core operation, but there is no
+                    // user-visible Turn projection to manufacture.
+                    _ => None,
                 }
-            }
-            if let Some(turn_id) = cancelling_turn_id {
+            };
+            if let Some((previous_session, cancelled_session)) = projection_update {
+                if let Err(error) = persist_web_session(state, &session_id) {
+                    if let Ok(mut sessions) = state.sessions.lock() {
+                        sessions.insert(session_id.clone(), previous_session);
+                    }
+                    return Err(error);
+                }
                 publish_semantic(
                     state,
                     WireEvent::TurnCancelling {
-                        session_id: session_id.clone(),
-                        turn_id,
+                        session: Box::new(cancelled_session),
                         target_command_id,
+                    },
+                );
+            }
+            let cancelled_workers = state
+                .manager
+                .lock()
+                .map_err(|_| "worker_manager_poisoned")?
+                .cancel_session_turns(&session_id);
+            if cancelled_workers == 0 {
+                publish_semantic(
+                    state,
+                    WireEvent::HostError {
+                        message: format!("turn_cancel_core_signal_missing:{session_id}"),
                     },
                 );
             }
@@ -9826,9 +9845,10 @@ fn activate_core_started_turn(
             .user_entries
             .iter()
             .any(|entry| entry.command_id.as_deref() == Some(command_id));
+        let host_cancelled = session.cancelling_turn_id.as_deref() == Some(pending_turn_id);
         (matches_command
-            && pending_turn.final_answer.is_none()
-            && pending_turn.completion.is_none())
+            && (host_cancelled
+                || (pending_turn.final_answer.is_none() && pending_turn.completion.is_none())))
         .then(|| pending_turn.turn_id.clone())?
     } else {
         session
@@ -9847,18 +9867,22 @@ fn activate_core_started_turn(
     }
     session.active_turn_id = Some(turn_id.clone());
     let cancelling = session.cancelling_turn_id.as_deref() == Some(turn_id.as_str());
-    if !cancelling {
+    let terminal = session.turns[turn_index].state == "finished"
+        || session.turns[turn_index].completion.is_some();
+    if !cancelling && !terminal {
         session.state = "working".to_string();
     }
     session.reported_session_working_worker_count = None;
-    session.turns[turn_index].state = "working".to_string();
+    if !terminal {
+        session.turns[turn_index].state = "working".to_string();
+    }
 
     if let Some(worker) = session
         .workers
         .iter_mut()
         .find(|worker| worker.worker_id == worker_id)
     {
-        if !cancelling {
+        if !cancelling && !terminal {
             worker.state = "working".to_string();
         }
     }

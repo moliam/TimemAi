@@ -42,6 +42,15 @@ const makeSession = (extra = {}) => ({
   active_turn_id: "turn-1", cancelling_turn_id: null, pending_turn_id: null,
   ...extra,
 });
+const makeCancelledSession = (base = makeSession()) => ({
+  ...base,
+  state: "ready",
+  workers: [worker("ready")],
+  cancelling_turn_id: "turn-1",
+  turns: base.turns.map((item) => item.turn_id === "turn-1"
+    ? { ...item, state: "finished", completion: { stop_reason: "CancelledByUser" } }
+    : item),
+});
 const makeSnapshot = (session) => ({
   server: {
     version: "ui-acceptance", protocol_version: 1, port: 0,
@@ -225,7 +234,7 @@ async function main() {
   const browser = await startBrowser(host.url);
   const exists = (selector) => browser.evaluate(`Boolean(document.querySelector(${JSON.stringify(selector)}))`);
   const contains = (selector, text) => browser.evaluate(
-    `document.querySelector(${JSON.stringify(selector)})?.textContent?.includes(${JSON.stringify(text)}) === true`,
+    `[...document.querySelectorAll(${JSON.stringify(selector)})].some((node) => node.textContent?.includes(${JSON.stringify(text)}) === true)`,
   );
   const sent = (type) => host.commands.filter((command) => command.type === type);
   const enterMessage = async (text) => {
@@ -249,19 +258,58 @@ async function main() {
     })()`);
     await waitFor(() => sent("turn_cancel").length === 1, "rapid double Stop did not emit exactly one turn_cancel");
     assert(sent("turn_cancel")[0].target_command_id === "submit-original", "turn_cancel target mismatch");
-    await waitFor(async () => !(await exists('.session-working-icon[aria-label="Session working"]')), "spinner did not stop immediately");
 
+    // Clicking Stop is transport-only. Until Host returns its authoritative
+    // Session, the browser must keep rendering the previous Host state.
+    assert(await exists('.session-working-icon[aria-label="Session working"]'), "Stop click changed the spinner before Host state arrived");
+    assert(
+      !(await contains('.completion-card[aria-label="Turn completion statistics"]', "Cancelled")),
+      "Stop click rendered Cancelled before Host state arrived",
+    );
+
+    const cancelledSession = makeCancelledSession();
+    host.setSession(cancelledSession);
     host.send({
-      type: "turn_cancelling", session_id: "session-1", turn_id: "turn-1",
+      type: "turn_cancelling", session: cancelledSession,
       target_command_id: "submit-original",
     });
 
-    // Irregular action: two rapid Enter presses during cleanup must be durable FIFO, not direct submits.
+    await waitFor(async () => !(await exists('.session-working-icon[aria-label="Session working"]')), "Host-confirmed Session did not stop the spinner");
+    await waitFor(
+      () => contains('.completion-card[aria-label="Turn completion statistics"]', "Cancelled"),
+      "Host-confirmed Session did not render Cancelled",
+    );
+
+    // A new message is a normal direct submit. The runtime may still hold Core
+    // execution behind its private terminal barrier, but the browser must not
+    // expose that as a waiting queue.
     await enterMessage("First after Stop");
-    await enterMessage("Second after Stop");
-    await waitFor(() => contains(".queued-message-list", "First after Stop"), "first post-Stop input not queued");
-    await waitFor(() => contains(".queued-message-list", "Second after Stop"), "second post-Stop input not queued");
-    assert(sent("turn_submit").length === 0, "post-Stop input escaped the cancellation barrier");
+    await waitFor(
+      () => sent("turn_submit").some((command) => command.text === "First after Stop"),
+      "post-Stop task was not submitted immediately",
+    );
+    assert(
+      !(await contains(".queued-message-list", "First after Stop")),
+      "post-Stop task leaked into the visible waiting queue",
+    );
+    const nextSubmit = sent("turn_submit").find(
+      (command) => command.text === "First after Stop",
+    );
+    host.send({
+      type: "turn_updated", session_id: "session-1",
+      turn: {
+        ...turn("turn-2", "First after Stop"),
+        state: "pending",
+        user_entries: [{
+          kind: "task", text: "First after Stop",
+          command_id: nextSubmit.command_id, created_at_ms: Date.now(),
+        }],
+      },
+    });
+    await waitFor(
+      () => contains(".turn-user-entry", "First after Stop"),
+      "accepted post-Stop task was not rendered as an independent Turn",
+    );
 
     // Delayed Core events cannot revive visible work.
     host.send({
@@ -275,12 +323,15 @@ async function main() {
     await sleep(180);
     assert(!(await exists('.session-working-icon[aria-label="Session working"]')), "late Core event revived spinner");
 
-    // Refresh/reconnect may briefly receive the stale pre-cancel working
-    // snapshot. The durable targeted cancel must remain the shared visual truth.
-    host.setSession(makeSession());
+    // Refresh/reconnect derives presentation only from Host snapshot. The
+    // browser outbox must not synthesize or override cancellation state.
+    host.setSession(cancelledSession);
     await browser.call("Page.reload", { ignoreCache: true });
-    await waitFor(() => contains(".queued-message-list", "First after Stop"), "durable queue lost after refresh");
-    assert(!(await exists('.session-working-icon[aria-label="Session working"]')), "stale working reconnect snapshot revived spinner");
+    await waitFor(
+      () => contains('.completion-card[aria-label="Turn completion statistics"]', "Cancelled"),
+      "Host snapshot did not restore Cancelled after refresh",
+    );
+    assert(!(await exists('.session-working-icon[aria-label="Session working"]')), "Host cancelled snapshot revived spinner");
 
     host.send({
       type: "turn_finished", session_id: "session-1", turn_id: "turn-1",
@@ -304,68 +355,33 @@ async function main() {
 
     const cancelCommand = sent("turn_cancel")[0];
     host.send({ type: "command_ack", command_id: cancelCommand.command_id, status: "committed" });
-    try {
-      await waitFor(
-        () => sent("turn_submit").some((command) => command.text === "First after Stop"),
-        "FIFO head was not released after authoritative cancellation completion",
-        3000,
-      );
-    } catch (error) {
-      const diagnostics = await browser.evaluate(`(() => ({
-        sessionRows: [...document.querySelectorAll('.session-row')].map((row) => ({ className: row.className, text: row.textContent })),
-        stopButton: document.querySelector('.stop-button')?.outerHTML ?? null,
-        sendButton: document.querySelector('.send-button')?.outerHTML ?? null,
-        queue: document.querySelector('.queued-message-list')?.outerHTML ?? null,
-        storage: Object.fromEntries(Object.keys(localStorage).map((key) => [key, localStorage.getItem(key)])),
-        alerts: [...document.querySelectorAll('[role="alert"]')].map((node) => node.textContent),
-      }))()`);
-      console.error("UI_DIAGNOSTICS", JSON.stringify(diagnostics, null, 2));
-      console.error("HOST_COMMANDS", JSON.stringify(host.commands, null, 2));
-      throw error;
-    }
-    assert(!sent("turn_submit").some((command) => command.text === "Second after Stop"), "second queued input released too early");
 
-    // Duplicate terminal event cannot grant a second continuation.
+    // Duplicate terminal events cannot alter the already terminal presentation
+    // or redeliver the accepted next task.
+    const submittedCount = sent("turn_submit").filter(
+      (command) => command.text === "First after Stop",
+    ).length;
     host.send({
       type: "turn_finished", session_id: "session-1", turn_id: "turn-1",
       outcome: { completion: { stop_reason: "CancelledByUser", elapsed_ms: 100 } },
     });
-    await sleep(180);
-    assert(!sent("turn_submit").some((command) => command.text === "Second after Stop"), "duplicate completion released an extra input");
-
-    host.send({
-      type: "turn_started", session_id: "session-1", context_id: "context-1",
-      worker_id: "worker-1", turn: turn("turn-2", "First after Stop"),
-    });
-    host.send({
-      type: "turn_finished", session_id: "session-1", turn_id: "turn-2",
-      outcome: { completion: {} },
-    });
-    try {
-      await waitFor(
-        () => sent("turn_submit").some((command) => command.text === "Second after Stop"),
-        "second FIFO input was not released after the next Turn finished",
-        3000,
-      );
-    } catch (error) {
-      const diagnostics = await browser.evaluate(`(() => ({
-        sessionRows: [...document.querySelectorAll('.session-row')].map((row) => ({ className: row.className, text: row.textContent })),
-        stopButton: document.querySelector('.stop-button')?.outerHTML ?? null,
-        sendButton: document.querySelector('.send-button')?.outerHTML ?? null,
-        queue: document.querySelector('.queued-message-list')?.outerHTML ?? null,
-        storage: Object.fromEntries(Object.keys(localStorage).map((key) => [key, localStorage.getItem(key)])),
-        alerts: [...document.querySelectorAll('[role="alert"]')].map((node) => node.textContent),
-      }))()`);
-      console.error("SECOND_UI_DIAGNOSTICS", JSON.stringify(diagnostics, null, 2));
-      console.error("SECOND_HOST_COMMANDS", JSON.stringify(host.commands, null, 2));
-      throw error;
-    }
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    assert(
+      sent("turn_submit").filter((command) => command.text === "First after Stop").length === submittedCount,
+      "duplicate completion redelivered the post-Stop task",
+    );
+    assert(
+      await contains('.completion-card[aria-label="Turn completion statistics"]', "Cancelled"),
+      "duplicate completion changed the Cancelled presentation",
+    );
 
     console.log("PASS real Chrome Stop UI acceptance");
     console.log("- double Stop -> one targeted turn_cancel");
-    console.log("- stale reconnect snapshots and post-finish late events cannot revive spinner");
-    console.log("- rapid post-Stop inputs persist and release strictly FIFO");
-    console.log("- duplicate completion cannot release an extra queued input");
+    console.log("- Stop click does not change business UI before Host state arrives");
+    console.log("- Host-confirmed and reconnect Session state render Cancelled");
+    console.log("- post-confirmation late Core events cannot revive spinner");
+    console.log("- the next task submits directly and never appears in the waiting queue");
+    console.log("- refresh and duplicate completion preserve the terminal presentation");
   } finally {
     await browser.close();
     await host.close();

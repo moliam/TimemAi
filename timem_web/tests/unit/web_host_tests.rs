@@ -1336,11 +1336,14 @@ fn accepted_targeted_cancel_is_serialized_until_the_target_turn_finishes() {
     assert!(drain_wire_events(&mut events).iter().any(|event| matches!(
         event,
         WireEvent::TurnCancelling {
-            session_id: event_session_id,
-            turn_id,
+            session,
             target_command_id: Some(target_command_id),
-        } if event_session_id == &session_id
-            && turn_id == &pending.turn_id
+        } if session.session_id == session_id
+            && session.cancelling_turn_id.as_deref() == Some(pending.turn_id.as_str())
+            && session.turns.iter().any(|turn| turn.turn_id == pending.turn_id
+                && turn.state == "finished"
+                && turn.completion.as_ref().and_then(|value| value["stop_reason"].as_str())
+                    == Some("CancelledByUser"))
             && target_command_id == "submit-cancelling"
     )));
 
@@ -1354,6 +1357,11 @@ fn accepted_targeted_cancel_is_serialized_until_the_target_turn_finishes() {
     assert!(serialized["pending_turn_id"].is_null());
     assert_eq!(serialized["cancelling_turn_id"], pending.turn_id);
     assert_eq!(serialized["active_turn_id"], pending.turn_id);
+    assert_eq!(serialized["turns"][0]["state"], "finished");
+    assert_eq!(
+        serialized["turns"][0]["completion"]["stop_reason"],
+        "CancelledByUser"
+    );
     assert_eq!(serialized["state"], "ready");
     assert!(serialized["workers"]
         .as_array()
@@ -1421,7 +1429,11 @@ fn late_core_working_events_cannot_revive_an_accepted_cancellation() {
         Some(pending.turn_id.as_str())
     );
     assert_eq!(session.pending_turn_id, None);
-    assert_eq!(session.turns.last().unwrap().state, "working");
+    assert_eq!(session.turns.last().unwrap().state, "finished");
+    assert_eq!(
+        session.turns.last().unwrap().completion.as_ref().unwrap()["stop_reason"],
+        "CancelledByUser"
+    );
     assert_eq!(session.state, "ready");
     assert!(session
         .workers

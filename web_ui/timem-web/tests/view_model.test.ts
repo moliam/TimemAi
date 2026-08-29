@@ -58,7 +58,6 @@ import {
   sessionTurnKey,
   setSessionDraft,
   tailPath,
-  targetedCancelStillApplies,
   trimMessages,
   turnInteractionPhase,
   turnLiveUsage,
@@ -495,7 +494,7 @@ describe("web topic view model", () => {
     ).toBeNull();
   });
 
-  it("waits for authoritative work before rendering an ordinary pending Turn", () => {
+  it("renders a Host-accepted user task before Core starts while hiding empty pending placeholders", () => {
     const pending = {
       ...turn("turn_pending", "pending"),
       user_entries: [
@@ -507,7 +506,13 @@ describe("web topic view model", () => {
         },
       ],
     };
-    expect(turnShouldRenderInTimeline(pending)).toBe(false);
+    expect(turnShouldRenderInTimeline(pending)).toBe(true);
+    expect(
+      turnShouldRenderInTimeline({
+        ...pending,
+        user_entries: [],
+      }),
+    ).toBe(false);
     expect(turnShouldRenderInTimeline({ ...pending, state: "working" })).toBe(
       true,
     );
@@ -654,13 +659,6 @@ describe("web topic view model", () => {
       turnId: "turn_working",
       commandId: "submit-working",
     });
-    expect(targetedCancelStillApplies(session("pre-host"), "submit-new")).toBe(
-      true,
-    );
-    expect(targetedCancelStillApplies(pending, "submit-pending")).toBe(true);
-    expect(targetedCancelStillApplies(working, "submit-working")).toBe(true);
-    expect(targetedCancelStillApplies(finished, "submit-pending")).toBe(false);
-    expect(targetedCancelStillApplies(pending, "submit-other")).toBe(true);
   });
 
   it("submits a new user turn when the active session is ready", () => {

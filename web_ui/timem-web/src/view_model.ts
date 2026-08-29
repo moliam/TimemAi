@@ -82,6 +82,11 @@ export type TurnTimelinePlacement = {
 export function turnShouldRenderInTimeline(turn: WebTurn): boolean {
   if (turn.state !== "pending") return true;
   return (
+    // A Host-accepted user task is already an independent visible Turn even
+    // while Core dispatch remains behind a private terminal barrier.
+    turn.user_entries.some(
+      (entry) => entry.kind === "task" && !!entry.text.trim(),
+    ) ||
     turn.events.length > 0 ||
     turn.user_entries.some((entry) => entry.kind === "approval") ||
     turn.sub_answers.length > 0 ||
@@ -446,35 +451,10 @@ export function turnCommandId(
   return turn?.user_entries.find((entry) => entry.kind === "task")?.command_id;
 }
 
-export function targetedCancelStillApplies(
-  session: Session | undefined,
-  targetCommandId: string | undefined,
-) {
-  if (!targetCommandId) return false;
-  if (!session) return false;
-  const matchingTurn = session.turns.find((turn) =>
-    turn.user_entries.some((entry) => entry.command_id === targetCommandId),
-  );
-  if (!matchingTurn) return true;
-  if (matchingTurn.completion || matchingTurn.state === "finished")
-    return false;
-  return (
-    session.pending_turn_id === matchingTurn.turn_id ||
-    session.active_turn_id === matchingTurn.turn_id
-  );
-}
-
 export function sessionCancellationApplies(
   session: Session | undefined,
-  locallyCancellingSessionIds: ReadonlySet<string> = new Set(),
-  targetCommandId?: string,
 ): boolean {
-  return !!(
-    session &&
-    (locallyCancellingSessionIds.has(session.session_id) ||
-      session.cancelling_turn_id ||
-      targetedCancelStillApplies(session, targetCommandId))
-  );
+  return !!session?.cancelling_turn_id;
 }
 
 export function turnInteractionPhase(
@@ -1163,35 +1143,10 @@ function finalAnswerFromTurnEvent(session: Session, event: WebTurnEvent) {
     : undefined;
 }
 
-export function sessionVisuallyWorking(
-  session: Session,
-  locallyCancellingSessionIds: ReadonlySet<string> = new Set(),
-  targetCancelCommandId?: string,
-): boolean {
-  return (
-    session.state === "working" &&
-    !sessionCancellationApplies(
-      session,
-      locallyCancellingSessionIds,
-      targetCancelCommandId,
-    )
-  );
+export function sessionVisuallyWorking(session: Session): boolean {
+  return session.state === "working" && !sessionCancellationApplies(session);
 }
 
-export function markSessionCancelling(
-  session: Session,
-  turnId: string | null | undefined,
-): Session {
-  const workers = session.workers.map((worker) =>
-    worker.state === "working" ? { ...worker, state: "ready" } : worker,
-  );
-  return {
-    ...session,
-    workers,
-    state: aggregateSessionState(workers, "ready"),
-    cancelling_turn_id: turnId ?? session.cancelling_turn_id,
-  };
-}
 
 export function finishTurn(
   session: Session,
