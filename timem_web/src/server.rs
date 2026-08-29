@@ -31,9 +31,9 @@ use agent_core::{
     CoreSessionWorkerEvent, CoreSessionWorkerManager, CoreSessionWorkerWorkspace, HostDecision,
     HostDecisionRequest, ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind,
     RuntimeDataLayout, SessionToolRepo, ToolDetail, ToolGenRequest, ToolSummary, TopicReply,
-    WorkInstructionLoadMode, CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE,
-    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_SUB_ANSWER, CORE_TOPIC_TOOLGEN,
-    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    TurnProjection, WorkInstructionLoadMode, CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_REPAIR,
+    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_SUB_ANSWER,
+    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, rolling_file_store::RollingCapacity, self_tool::SelfToolPaths,
@@ -51,6 +51,7 @@ use axum::{
     Json, Router,
 };
 use futures_util::{sink::SinkExt, stream::StreamExt};
+use host_projection::{ProjectionApplyResult, TurnProjectionCache, VersionedTurnProjection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -1241,6 +1242,9 @@ struct WebSession {
     /// This is routing metadata, not live working state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pending_turn_id: Option<String>,
+    /// Latest complete Core-owned lifecycle projection. Pod caches and delivers
+    /// this value but never reconstructs it from worker or topic events.
+    turn_projection: TurnProjectionCache,
     #[serde(skip)]
     pending_completion_message_id: Option<String>,
     #[serde(skip)]
@@ -1484,6 +1488,10 @@ enum WireEvent {
         session_id: String,
         turn_id: Option<String>,
         outcome: Value,
+    },
+    TurnProjection {
+        session_id: String,
+        projection: VersionedTurnProjection,
     },
     TurnCancelling {
         session_id: String,
@@ -5741,6 +5749,7 @@ fn create_session(
                 active_turn_id: None,
                 cancelling_turn_id: None,
                 pending_turn_id: None,
+                turn_projection: TurnProjectionCache::default(),
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
                 reported_session_working_worker_count: None,
@@ -6065,6 +6074,7 @@ fn restore_stored_session(
                 active_turn_id: None,
                 cancelling_turn_id: None,
                 pending_turn_id: None,
+                turn_projection: TurnProjectionCache::default(),
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
                 reported_session_working_worker_count: None,
@@ -9450,6 +9460,44 @@ fn handle_scoped_worker_event(
                         context_id: context_id.to_string(),
                         worker_id: worker_id.to_string(),
                         turn,
+                    },
+                );
+            }
+        }
+        CoreSessionWorkerEvent::TurnProjection(projection) => {
+            if !is_primary_worker(state, session_id, worker_id) {
+                emit_worker_activity(
+                    state,
+                    session_id,
+                    context_id,
+                    worker_id,
+                    json!({ "kind": "subworker_turn_projection", "projection": projection }),
+                );
+                return;
+            }
+            let applied = state.sessions.lock().ok().and_then(|mut sessions| {
+                let session = sessions.get_mut(session_id)?;
+                match session.turn_projection.apply(projection) {
+                    ProjectionApplyResult::Applied { .. } => {
+                        let versioned = session.turn_projection.current()?;
+                        session.state = match &versioned.projection {
+                            TurnProjection::Active(_) => "working",
+                            TurnProjection::Finished(_) => "ready",
+                        }
+                        .to_string();
+                        Some(versioned)
+                    }
+                    ProjectionApplyResult::Duplicate { .. }
+                    | ProjectionApplyResult::IgnoredStale { .. } => None,
+                }
+            });
+            if let Some(projection) = applied {
+                publish_core_semantic(
+                    state,
+                    session_id,
+                    WireEvent::TurnProjection {
+                        session_id: session_id.to_string(),
+                        projection,
                     },
                 );
             }

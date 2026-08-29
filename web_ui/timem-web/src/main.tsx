@@ -135,6 +135,7 @@ import {
   wheelDeltaPixels,
 } from "./scroll";
 import {
+  applyTurnProjection,
   activeModelRetryStatus,
   activityFromTopic,
   applySessionRuntimeProfile,
@@ -2012,6 +2013,16 @@ function TimemApp() {
           ...current,
           [event.session_id]: event.api_key,
         }));
+        return;
+      }
+      if (event.type === "turn_projection") {
+        setSessions((current) =>
+          current.map((session) =>
+            session.session_id === event.session_id
+              ? applyTurnProjection(session, event.projection)
+              : session,
+          ),
+        );
         return;
       }
       if (event.type === "turn_cancelling") {

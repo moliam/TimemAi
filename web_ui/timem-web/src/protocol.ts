@@ -75,6 +75,43 @@ export type WorkerRoleLibrary = {
 };
 export type SessionGroup = { id: string; name: string };
 
+export type TurnToken = {
+  session_id: string;
+  turn_id: string;
+  epoch: number;
+};
+
+export type TurnActivity =
+  | { kind: "running" }
+  | { kind: "waiting_model"; round: number }
+  | { kind: "waiting_user" }
+  | { kind: "running_tools" };
+
+export type TurnProjectionOutcome =
+  | { kind: "completed" }
+  | { kind: "cancelled" }
+  | { kind: "failed"; code: string }
+  | { kind: "interrupted"; code: string };
+
+export type TurnProjection =
+  | {
+      state: "active";
+      token: TurnToken;
+      stop_requested: boolean;
+      input_admission: "open" | "closed";
+      activity: TurnActivity;
+    }
+  | {
+      state: "finished";
+      token: TurnToken;
+      outcome: TurnProjectionOutcome;
+    };
+
+export type VersionedTurnProjection = {
+  revision: number;
+  projection: TurnProjection;
+};
+
 export type Session = {
   session_id: string;
   display_name: string;
@@ -115,6 +152,8 @@ export type Session = {
   cancelling_turn_id?: string | null;
   /** Durable Host intent recorded before Core emits TurnStarted. */
   pending_turn_id?: string | null;
+  /** Exact Core lifecycle projection plus Host delivery revision. */
+  turn_projection?: VersionedTurnProjection | null;
 };
 
 export type McpTransport =
@@ -443,6 +482,11 @@ export type WireEvent =
         message_id?: string | null;
         completion?: TurnCompletion;
       };
+    }
+  | {
+      type: "turn_projection";
+      session_id: string;
+      projection: VersionedTurnProjection;
     }
   | {
       type: "turn_cancelling";

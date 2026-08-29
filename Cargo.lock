@@ -613,6 +613,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "host_projection"
+version = "1.2.0"
+dependencies = [
+ "agent_core",
+ "serde",
+]
+
+[[package]]
 name = "http"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1448,6 +1456,7 @@ dependencies = [
  "axum",
  "chrono",
  "futures-util",
+ "host_projection",
  "libc",
  "serde",
  "serde_json",
