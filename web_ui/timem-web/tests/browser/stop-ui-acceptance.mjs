@@ -136,7 +136,11 @@ async function startHost() {
       commands.push(command);
       if (command.command_id) {
         peer.send({ type: "command_ack", command_id: command.command_id, status: "accepted" });
-        peer.send({ type: "command_ack", command_id: command.command_id, status: "committed" });
+        // Keep turn_cancel durable until authoritative TurnFinished. This
+        // reproduces a reload that receives an older working snapshot while
+        // cancellation is already accepted by Host.
+        if (command.type !== "turn_cancel")
+          peer.send({ type: "command_ack", command_id: command.command_id, status: "committed" });
       }
     });
     peers.add(peer);
@@ -271,18 +275,35 @@ async function main() {
     await sleep(180);
     assert(!(await exists('.session-working-icon[aria-label="Session working"]')), "late Core event revived spinner");
 
-    // Refresh/reconnect uses authoritative cancelling snapshot and keeps local durable queue.
-    host.setSession(makeSession({
-      state: "ready", workers: [worker("ready")], cancelling_turn_id: "turn-1",
-    }));
+    // Refresh/reconnect may briefly receive the stale pre-cancel working
+    // snapshot. The durable targeted cancel must remain the shared visual truth.
+    host.setSession(makeSession());
     await browser.call("Page.reload", { ignoreCache: true });
     await waitFor(() => contains(".queued-message-list", "First after Stop"), "durable queue lost after refresh");
-    assert(!(await exists('.session-working-icon[aria-label="Session working"]')), "refresh/reconnect revived spinner");
+    assert(!(await exists('.session-working-icon[aria-label="Session working"]')), "stale working reconnect snapshot revived spinner");
 
     host.send({
       type: "turn_finished", session_id: "session-1", turn_id: "turn-1",
-      outcome: { completion: { stop_reason: "CancelledByUser" } },
+      outcome: { completion: { stop_reason: "CancelledByUser", elapsed_ms: 100 } },
     });
+    await waitFor(() => contains('.completion-card[aria-label="Turn completion statistics"]', "Cancelled"), "chat did not render terminal Cancelled state");
+
+    // Events already in flight after terminal completion must not revive the
+    // Session spinner while the chat remains Cancelled.
+    host.send({
+      type: "turn_started", session_id: "session-1", context_id: "context-1",
+      worker_id: "worker-1", turn: turn("turn-1"),
+    });
+    host.send({
+      type: "worker_activity", session_id: "session-1", context_id: "context-1",
+      worker_id: "worker-1", turn_id: "turn-1", event: { kind: "model_request", round: 2 },
+    });
+    await sleep(180);
+    assert(await contains('.completion-card[aria-label="Turn completion statistics"]', "Cancelled"), "late event erased terminal Cancelled state");
+    assert(!(await exists('.session-working-icon[aria-label="Session working"]')), "late post-finish event revived Session spinner");
+
+    const cancelCommand = sent("turn_cancel")[0];
+    host.send({ type: "command_ack", command_id: cancelCommand.command_id, status: "committed" });
     try {
       await waitFor(
         () => sent("turn_submit").some((command) => command.text === "First after Stop"),
@@ -307,7 +328,7 @@ async function main() {
     // Duplicate terminal event cannot grant a second continuation.
     host.send({
       type: "turn_finished", session_id: "session-1", turn_id: "turn-1",
-      outcome: { completion: { stop_reason: "CancelledByUser" } },
+      outcome: { completion: { stop_reason: "CancelledByUser", elapsed_ms: 100 } },
     });
     await sleep(180);
     assert(!sent("turn_submit").some((command) => command.text === "Second after Stop"), "duplicate completion released an extra input");
@@ -342,7 +363,7 @@ async function main() {
 
     console.log("PASS real Chrome Stop UI acceptance");
     console.log("- double Stop -> one targeted turn_cancel");
-    console.log("- spinner stops immediately; late events and refresh cannot revive it");
+    console.log("- stale reconnect snapshots and post-finish late events cannot revive spinner");
     console.log("- rapid post-Stop inputs persist and release strictly FIFO");
     console.log("- duplicate completion cannot release an extra queued input");
   } finally {

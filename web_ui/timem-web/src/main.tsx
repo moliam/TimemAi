@@ -171,6 +171,7 @@ import {
   resolveActiveSessionId,
   runtimeConnectionLabel,
   sessionCacheHitPercent,
+  sessionCancellationApplies,
   sessionContextUsage,
   sessionCreateDecision,
   sessionInteractionLockReason as sessionInteractionLockReasonForState,
@@ -180,7 +181,6 @@ import {
   sessionWorkerTreeRows,
   setSessionDraft,
   tailPath,
-  targetedCancelStillApplies,
   toolActivityDisplayName,
   toolDisplayName,
   turnLiveUsage,
@@ -2032,6 +2032,7 @@ function TimemApp() {
               upsertTurn(session, event.turn),
               event.worker_id,
               "working",
+              event.turn.turn_id,
             );
           }),
         );
@@ -2341,6 +2342,7 @@ function TimemApp() {
                   withEvent,
                   event.worker_id,
                   workerState,
+                  event.turn_id,
                 )
               : withEvent;
           }),
@@ -2415,6 +2417,7 @@ function TimemApp() {
           }),
           topic,
           (text) => makeMessage("assistant", text),
+          event.turn_id,
         );
         if (nextSession === session) return current;
         const next = [...current];
@@ -3703,6 +3706,9 @@ function TimemApp() {
                               const visuallyWorking = sessionVisuallyWorking(
                                 session,
                                 cancellingSessionIdSet,
+                                persistedCancelTargetCommandIds[
+                                  session.session_id
+                                ],
                               );
                               const sessionEndpointName =
                                 endpointNameForProfile(
@@ -4467,15 +4473,13 @@ function TimemApp() {
             sessionInteractionLockReason={sessionInteractionLockReason}
             decisions={sessionDecisions}
             fileInput={fileInput}
-            isCancelling={
-              !!activeSession &&
-              (cancellingSessionIdSet.has(activeSession.session_id) ||
-                !!activeSession.cancelling_turn_id ||
-                targetedCancelStillApplies(
-                  activeSession,
-                  persistedCancelTargetCommandIds[activeSession.session_id],
-                ))
-            }
+            isCancelling={sessionCancellationApplies(
+              activeSession,
+              cancellingSessionIdSet,
+              activeSession
+                ? persistedCancelTargetCommandIds[activeSession.session_id]
+                : undefined,
+            )}
             pendingAttachmentRemoveIds={pendingAttachmentRemoveIds}
             pendingDecisionKeys={pendingDecisionKeys}
             uploadingAttachment={
