@@ -25,6 +25,7 @@ import { classifyEventSequence } from "./event_cursor";
 import { enablesSemanticDelivery, shouldReduceTopLevelWireEvent } from "./wire_delivery";
 import { clipboardImageFiles } from "./clipboard_images";
 import { humanizeToolStatus, isToolActivityRunning, TOOL_STATUS_RUNNING } from "./tool_status";
+import { newestInterimAnswersFirst } from "./interim_answers";
 import { MarkdownContent } from "./markdown_render";
 import { BrowserPerformanceTrace } from "./performance_trace";
 import { createFrameTask, FrameTask } from "./frame_task";
@@ -4227,6 +4228,9 @@ function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, favorite, fa
   const availableKeys = [...(showFinalTab ? ["final"] : []), ...(hasInterim ? ["interim"] : [])];
   const newestKey = hasFinal ? "final" : "interim";
   const [selectedKey, setSelectedKey] = useState(newestKey);
+  const [interimCollapsed, setInterimCollapsed] = useState(false);
+  const interimItems = newestInterimAnswersFirst(turn.sub_answers);
+  const interimPanelId = `turn-interim-${turn.turn_id}`;
   const previousFinal = useRef<string | null | undefined>(turn.final_answer);
   const previousSubCount = useRef(turn.sub_answers.length);
   const manualSelection = useRef(false);
@@ -4234,6 +4238,7 @@ function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, favorite, fa
   const markInteracting = () => { interactingUntil.current = Date.now() + 1_500; };
   const selectPanel = (key: string) => {
     manualSelection.current = true;
+    if (key === "interim") setInterimCollapsed(false);
     setSelectedKey(key);
   };
 
@@ -4253,11 +4258,16 @@ function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, favorite, fa
     return <FinalAnswerDelivery text={turn.final_answer} completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} favorite={favorite} favoritePending={favoritePending} onToggleFavorite={onToggleFavorite} onToolGen={onToolGen} onDelete={onDelete}/>;
   }
   return <section className="turn-answer-delivery" onPointerDown={markInteracting} onFocus={markInteracting} onCopy={markInteracting}>
-    {hasInterim && <div className="turn-answer-tabs" role="tablist" aria-label="Turn answers">
-      {showFinalTab && <button type="button" role="tab" aria-selected={selected === "final"} className={selected === "final" ? "selected" : ""} onClick={() => selectPanel("final")}>Final Answer</button>}
-      {hasInterim && <button type="button" role="tab" aria-selected={selected === "interim"} className={selected === "interim" ? "selected" : ""} onClick={() => selectPanel("interim")}>Interim</button>}
+    {hasInterim && <div className="turn-answer-tabs">
+      <div className="turn-answer-tablist" role="tablist" aria-label="Turn answers">
+        {showFinalTab && <button type="button" role="tab" aria-selected={selected === "final"} className={selected === "final" ? "selected" : ""} onClick={() => selectPanel("final")}>Final Answer</button>}
+        {hasInterim && <button type="button" role="tab" aria-selected={selected === "interim"} aria-controls={interimPanelId} className={selected === "interim" ? "selected" : ""} onClick={() => selectPanel("interim")}>Interim</button>}
+      </div>
+      <button type="button" className="turn-interim-collapse" aria-expanded={!interimCollapsed} aria-controls={interimPanelId} aria-label={interimCollapsed ? "Expand interim answers" : "Collapse interim answers"} title={interimCollapsed ? "Expand interim answers" : "Collapse interim answers"} onClick={() => setInterimCollapsed((collapsed) => !collapsed)}>
+        {interimCollapsed ? <ChevronRight size={12} aria-hidden="true"/> : <ChevronDown size={12} aria-hidden="true"/>}
+      </button>
     </div>}
-    <div className="turn-answer-panel" role="tabpanel">
+    <div className={`turn-answer-panel${selected === "interim" && interimCollapsed ? " interim-collapsed" : ""}`} role="tabpanel">
       {showFinalTab && <div className={`turn-answer-view ${selected === "final" ? "selected" : "inactive"}`} aria-hidden={selected !== "final"}>
         {hasFinal && turn.final_answer ? <>
           <FinalAnswerContent text={turn.final_answer}/>
@@ -4265,11 +4275,11 @@ function TurnAnswerDelivery({ turn, toolGenPending, toolGenBlocked, favorite, fa
           {turn.completion ? <CompletionCard completion={turn.completion} toolGenPending={toolGenPending} toolGenBlocked={toolGenBlocked} onToolGen={onToolGen}/> : null}
         </> : <div className="turn-final-placeholder" role="status" aria-live="polite">{turn.state === "working" ? "Still working ..." : turn.state === "interrupted" ? "Interrupted by runtime restart." : "No final answer was produced."}</div>}
       </div>}
-      {hasInterim && <div className={`turn-answer-view ${selected === "interim" ? "selected" : "inactive"}`} aria-hidden={selected !== "interim"}>
-        <div className="turn-interim-list">{turn.sub_answers.map((item, index) => <section className="turn-interim-item" key={item.sub_answer_id}>
-          <h3><span>{index + 1}.</span> {item.task}</h3>
+      {hasInterim && <div id={interimPanelId} className={`turn-answer-view ${selected === "interim" ? "selected" : "inactive"}${interimCollapsed ? " collapsed" : ""}`} aria-hidden={selected !== "interim" || interimCollapsed}>
+        {!interimCollapsed && <div className="turn-interim-list">{interimItems.map(({ item, ordinal }) => <section className="turn-interim-item" key={item.sub_answer_id}>
+          <h3><span>{ordinal}.</span> {item.task}</h3>
           <div className="message-content"><MarkdownContent text={item.answer}/></div>
-        </section>)}</div>
+        </section>)}</div>}
       </div>}
     </div>
   </section>;
