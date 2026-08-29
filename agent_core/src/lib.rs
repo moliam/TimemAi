@@ -84,6 +84,7 @@ mod tool_result_gate;
 mod tool_schema_renderer;
 #[path = "../../resources/capabilities/tools/toolgen.rs"]
 pub mod toolgen;
+pub mod turn_state;
 pub mod work_instructions;
 pub mod workspace;
 pub use audit::{
@@ -212,6 +213,10 @@ use tool_jobs::FileToolJobStore;
 pub use tool_repo::{
     SessionToolRepo, ToolDetail, ToolFileEntry, ToolManifest, ToolPublishResult, ToolSelfTest,
     ToolSummary,
+};
+pub use turn_state::{
+    ActiveTurnProjection, FinishedTurnProjection, TurnActivity, TurnInputAdmission, TurnProjection,
+    TurnProjectionOutcome, TurnToken,
 };
 pub use work_instructions::{
     combine_additional_contexts, discover_work_instruction_files, load_work_instruction_context,

@@ -1,8 +1,8 @@
 use super::*;
 use crate::{
     ApprovalRequest, BashApprovalMode, CapabilityRegistry, CoreActionKind, CoreProfile,
-    CoreTopicEvent, HostDecision, NoopTurnUi, OutputExpansionRequest, TurnStopDetail,
-    TurnStopReason, CORE_TOPIC_CONTEXT_COMPACT,
+    CoreTopicEvent, FinishedTurnProjection, HostDecision, NoopTurnUi, OutputExpansionRequest,
+    TurnInputAdmission, TurnStopDetail, TurnStopReason, CORE_TOPIC_CONTEXT_COMPACT,
 };
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -3380,6 +3380,137 @@ impl TurnUi for CancelImmediately {
     fn take_cancel_request(&mut self) -> bool {
         true
     }
+}
+
+#[derive(Default)]
+struct ProjectionRecordingUi {
+    projections: Vec<TurnProjection>,
+    cancel_immediately: bool,
+}
+
+impl TurnUi for ProjectionRecordingUi {
+    fn on_turn_projection(&mut self, projection: &TurnProjection) {
+        self.projections.push(projection.clone());
+    }
+
+    fn take_cancel_request(&mut self) -> bool {
+        std::mem::take(&mut self.cancel_immediately)
+    }
+}
+
+#[test]
+fn cancelled_turn_projection_has_one_token_and_authoritative_terminal_order() {
+    let dir = tmp_dir("cancel_projection");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    let mut ui = ProjectionRecordingUi {
+        cancel_immediately: true,
+        ..ProjectionRecordingUi::default()
+    };
+
+    let outcome = run_session_turn(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "cancel me",
+            session: "projection_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+    );
+
+    assert_eq!(outcome.stop_reason, Some(TurnStopReason::CancelledByUser));
+    assert_eq!(ui.projections.len(), 4, "{:?}", ui.projections);
+    let token = match &ui.projections[0] {
+        TurnProjection::Active(active) => {
+            assert!(!active.stop_requested);
+            assert_eq!(active.input_admission, TurnInputAdmission::Open);
+            active.token.clone()
+        }
+        projection => panic!("expected active projection, got {projection:?}"),
+    };
+    match &ui.projections[1] {
+        TurnProjection::Active(active) => {
+            assert_eq!(active.token, token);
+            assert!(active.stop_requested);
+            assert_eq!(active.input_admission, TurnInputAdmission::Open);
+        }
+        projection => panic!("expected stopping projection, got {projection:?}"),
+    }
+    match &ui.projections[2] {
+        TurnProjection::Active(active) => {
+            assert_eq!(active.token, token);
+            assert!(active.stop_requested);
+            assert_eq!(active.input_admission, TurnInputAdmission::Closed);
+        }
+        projection => panic!("expected closed projection, got {projection:?}"),
+    }
+    match &ui.projections[3] {
+        TurnProjection::Finished(finished) => {
+            assert_eq!(finished.token, token);
+            assert_eq!(finished.outcome, TurnProjectionOutcome::Cancelled);
+        }
+        projection => panic!("expected finished projection, got {projection:?}"),
+    }
+    assert_eq!(token.session_id, "projection_session");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn completed_turn_projection_finishes_completed_without_stop_inference() {
+    let dir = tmp_dir("completed_projection");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    let mut model = ReplayModel::new([Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"done"}"#,
+        1_000,
+        false,
+    ))]);
+    let mut ui = ProjectionRecordingUi::default();
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "complete me",
+            session: "projection_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.stop_reason, None);
+    let finished = ui.projections.last().expect("terminal projection");
+    assert!(matches!(
+        finished,
+        TurnProjection::Finished(FinishedTurnProjection {
+            outcome: TurnProjectionOutcome::Completed,
+            ..
+        })
+    ));
+    assert!(ui.projections.iter().all(|projection| match projection {
+        TurnProjection::Active(active) => !active.stop_requested,
+        TurnProjection::Finished(_) => true,
+    }));
+    assert_eq!(
+        ui.projections
+            .iter()
+            .filter(|projection| matches!(projection, TurnProjection::Finished(_)))
+            .count(),
+        1
+    );
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
