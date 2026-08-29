@@ -1,23 +1,23 @@
-# Turn 状态与 Pod 投影架构
+# Turn 状态与 Host 投影架构
 
 状态：**Proposed，待确认后实施**
-范围：`agent_core`、`timem_web`（Pod/Host）、`web_ui`
-目标：用一个极小、权威的 Turn 状态模型替代 Core、Pod、WebUI 三处并存的生命周期判断。
+范围：`agent_core`、所有 Host Adapter 与 UI shell；`timem_web`/`web_ui` 是首个迁移实现
+目标：由 Core 提供极小、UI-neutral、权威的 Turn 语义，使 Shell、Web、iOS、桌面或未来任意 UI 壳只需适配命令、投影与表现层，不再各自实现 Agent 生命周期。
 
 ## 1. 决策摘要
 
 Timem 的业务状态只有一个权威来源：**Agent Core 的 Turn 聚合器**。
 
 ```text
-Browser command
+UI command
     ↓
-Pod / Host command adapter
+Host Adapter（同步直连或异步/远程）
     ↓
-Agent Core: Turn Gate → Turn Reducer
+Agent Core: Turn Gate → Turn Reducer → authoritative Core projection
     ↓
-Pod: authoritative projection + revision
+optional Host Projection Adapter（snapshot/revision/reliable delivery）
     ↓
-WebUI: render only
+UI shell: render and interact only
 ```
 
 具体决策：
@@ -25,17 +25,54 @@ WebUI: render only
 1. Agent Core 内部拆成两个很小的逻辑层：
    - **Turn Gate**：管理 Turn 身份、epoch 和消息归属；拒绝旧 Turn、旧 epoch、重复终结和迟到消息。
    - **Turn Reducer**：管理当前 Turn 的最小生命周期事实。
-2. Pod 是唯一 UI 投影入口。所有会影响 Session、Turn、Worker 显示状态的事实，必须先经过 Core，再由 Pod 生成权威 projection。
-3. WebUI 不拥有 Agent 生命周期状态机。它只拥有：
-   - Pod 投影的只读副本；
+2. Core Turn projection 是所有 Host/UI 的共同权威生命周期输入。同步 Shell 可以直接消费；异步、可重连或远程 UI 可通过 Host Projection Adapter 增加 snapshot、revision 和可靠投递，但不能改变 Core 语义。
+3. 任何 UI shell 都不拥有 Agent 生命周期状态机。它只拥有：
+   - Core projection 或 Host projection 的只读副本；
    - 输入框、弹窗、选中项、滚动位置等纯 UI 状态；
    - 命令发送/重试等传输状态。传输状态不能改变业务状态。
-4. Worker、Tool、Topic activity 是 Active Turn 下的事实，不能创建 Turn、恢复 Turn 或覆盖终态。
-5. Session 不再维护独立生命周期状态机。`working` 等显示值由 Core Turn 投影直接给出。
+4. `timem_web` Pod 是 Host Projection Adapter 的首个实现，不是 Core 的必经层。`timem_shell` 等同步/in-process Host 不需要为了接入权威 Turn 语义而引入 WebSocket、event sequence 或 reconnect outbox。
+5. Worker、Tool、Topic activity 是 Active Turn 下的事实，不能创建 Turn、恢复 Turn 或覆盖终态。
+6. Session/Host/UI 不再维护独立生命周期状态机。`working` 等显示值由 Core Turn 投影直接给出。
 
-## 2. 为什么必须重构
+## 2. UI 壳可移植性与当前适配状态
 
-### 2.1 当前存在三套状态判断
+### 2.1 三层通用边界
+
+```text
+Core semantic contract
+  TurnToken / input admission / PromptCut / activity / outcome / request-reply
+
+Host Adapter contract
+  command mapping / host policy / optional projection + reliable delivery
+
+UI shell contract
+  render / local interaction / accessibility / transport feedback
+```
+
+Core semantic contract 对所有 UI 完全一致。Host 可以有不同部署形态：
+
+- 同步、单 Session 的 Shell 可直接调用 Core 并渲染 Core projection；
+- 多 Session、异步、可重连的 Web/iOS/桌面 Host 通常增加 Host Projection Adapter；
+- 跨进程或跨语言 binding 只改变编码和传输，不改变 Turn 身份、输入接纳、终态与 request/reply 语义。
+
+接入一个新 UI 壳时，允许新增 binding、Host policy、projection transport 和视觉组件；不允许复制一套 `working/cancelling/finished` reducer 或根据事件顺序猜测 Turn 状态。
+
+### 2.2 当前实现状态
+
+本文是 Proposed 架构，不代表现有 UI 代码已经完成适配：
+
+| 模块/壳 | 当前状态 | 目标适配 |
+|---|---|---|
+| `timem_shell` | 已是 Core 的直接 Host Adapter，但仍基于既有 topic/控制流展示生命周期 | 直接消费权威 Core Turn projection；删除 terminal-local 生命周期推断，不引入 Pod/WebSocket 复杂度 |
+| `timem_web` Pod/Host | 仍有 `active_turn_id`、`pending_turn_id`、`cancelling_turn_id` 和 worker/topic 聚合等旧逻辑 | 成为通用 Host Projection Adapter 的首个实现，只增加 revision、snapshot、可靠命令投递、FIFO 与 MEM barrier |
+| `web_ui` | 仍有既有 lifecycle reducer、cancel guard 和事件驱动推断 | 只消费 Host projection；topic/activity 仅追加 timeline |
+| iOS/桌面/其他 UI | 尚无本架构适配实现 | 直接使用相同 Core semantic contract；根据部署需要选择直连或 Host Projection Adapter |
+
+因此完成标准必须包含现有 Shell、Web Host 和 WebUI 的实际代码迁移与测试，不能只更新边界文档。
+
+## 3. 为什么必须重构
+
+### 3.1 当前存在三套状态判断
 
 当前实现中，同一业务事实分散在三层：
 
@@ -55,7 +92,7 @@ WebUI: render only
 
 这不是简单的数据复制，而是多个可写状态机。每层都可能根据不同到达顺序得出不同结论。
 
-### 2.2 已出现的 Stop 竞态
+### 3.2 已出现的 Stop 竞态
 
 已验证的故障路径：
 
@@ -73,7 +110,7 @@ Session spinner 复活
 
 重连时也可能收到取消前生成的 working snapshot。若浏览器仍需结合本地 cancel target 才能纠正显示，说明 snapshot 本身不是完整权威投影。
 
-### 2.3 该根因还能预测的故障
+### 3.3 该根因还能预测的故障
 
 如果不收敛状态所有权，后续会重复出现：
 
@@ -88,9 +125,9 @@ Session spinner 复活
 
 因此修复不能只增加 WebUI 条件判断；必须收敛业务状态的写入点。
 
-## 3. 设计原则
+## 4. 设计原则
 
-### 3.1 大道至简
+### 4.1 大道至简
 
 运行时生命周期只保留两个槽位状态：
 
@@ -100,7 +137,7 @@ TurnSlot = Empty | Active
 
 终态是不可变 Turn 记录，不是继续运行的状态槽位。`starting`、`working`、`waiting_model`、`waiting_user`、`cancelling` 等不应成为互相竞争的顶层生命周期状态。
 
-### 3.2 单一写入者
+### 4.2 单一写入者
 
 只有 Core Turn Reducer 可以：
 
@@ -109,26 +146,26 @@ TurnSlot = Empty | Active
 - 结束 Active Turn；
 - 写入终态 outcome。
 
-Pod 和 WebUI 都不能执行这些状态转换。
+Host Adapter、Host Projection Adapter 和 UI shell 都不能执行这些状态转换。
 
-### 3.3 身份先于内容
+### 4.3 身份先于内容
 
 所有可能影响当前 Turn 的内部消息都必须携带一个 `TurnToken`。先由 Turn Gate 校验身份，再允许 reducer 或 activity store 接收内容。
 
-### 3.4 业务状态与传输状态分离
+### 4.4 业务状态与传输状态分离
 
 - `command accepted / retrying / awaiting ack` 是传输状态；
 - `active / stop_requested / finished outcome` 是业务状态；
 - `waiting_model / waiting_user / running_tool` 是 Active Turn 的活动描述；
 - 三者不能混成一个枚举。
 
-### 3.5 Snapshot 必须自足
+### 4.5 Snapshot 必须自足
 
-WebUI 仅凭最新 Pod snapshot/projection 就能正确渲染。重连后不得依赖浏览器旧 reducer 状态或本地取消目标纠正业务状态。
+任意 UI shell 仅凭最新 Core projection 或 Host projection 就能正确渲染。可重连 UI 不得依赖旧 reducer 状态或本地取消目标纠正业务状态。
 
-## 4. 核心概念
+## 5. 核心概念
 
-### 4.1 TurnId
+### 5.1 TurnId
 
 `TurnId` 是持久、可审计、跨 snapshot 可引用的业务 ID。
 
@@ -140,7 +177,7 @@ WebUI 仅凭最新 Pod snapshot/projection 就能正确渲染。重连后不得�
 
 TurnId 必须由 Core 接受新 Turn 时生成或最终确认。Pod 可以在提交前持有 `command_id`，但不得自行创建一个被视为 Active 的业务 Turn。
 
-### 4.2 TurnEpoch
+### 5.2 TurnEpoch
 
 `TurnEpoch` 是每个 Session 内单调递增的运行代次：
 
@@ -164,7 +201,7 @@ struct TurnToken {
 
 TurnEpoch 应由 Core 管理。其持久化要求只需保证恢复后不会接受旧进程消息；实现可采用持久高水位，或在 runtime incarnation 中加入随机/单调 generation。对外协议只承诺 token 不会在仍可能存在旧生产者时重用。
 
-### 4.3 ProjectionRevision
+### 5.3 ProjectionRevision
 
 `ProjectionRevision` 是 Pod 投影版本：
 
@@ -173,7 +210,7 @@ TurnEpoch 应由 Core 管理。其持久化要求只需保证恢复后不会接�
 - event sequence 仍负责 WebSocket 传输顺序，projection revision 负责投影新旧判断；
 - revision 不参与 Core 生命周期决策。
 
-### 4.4 MemEpoch
+### 5.4 MemEpoch
 
 现有 `mem_epoch` 继续作为 Host command barrier：防止旧 MEM 接受的命令在新 MEM 执行。
 
@@ -187,11 +224,11 @@ TurnEpoch 应由 Core 管理。其持久化要求只需保证恢复后不会接�
 | `event_seq` | Pod delivery | WebSocket baseline | 传输线性顺序与 gap 检测 |
 | `mem_epoch` | Pod command barrier | MEM | 拒绝跨 MEM 的旧命令 |
 
-## 5. Agent Core 内部两小层
+## 6. Agent Core 内部两小层
 
 这“两层”是逻辑边界，可以先在一个模块实现，不要求为了形式拆成复杂框架。
 
-### 5.1 Turn Gate
+### 6.1 Turn Gate
 
 职责：
 
@@ -231,7 +268,7 @@ enum GateDecision {
 
 Gate 不解析模型语义，不渲染 UI，不聚合 CSS 所需字符串。
 
-### 5.2 Turn Reducer
+### 6.2 Turn Reducer
 
 最小业务状态：
 
@@ -282,9 +319,9 @@ Active(input_closed) --finish--> Empty + immutable TurnOutcome record
 - worker working 恢复已结束 Turn；
 - finish 后再 start 同一个 token；
 - 旧 epoch 修改当前 activity；
-- Pod 或 WebUI 直接写 reducer。
+- Host Adapter、Projection Adapter 或 UI shell 直接写 reducer。
 
-### 5.3 Activity 不是第二套生命周期
+### 6.3 Activity 不是第二套生命周期
 
 `waiting_model`、`waiting_user`、`running_tool`、`compacting` 等保留为 Active Turn 的展示事实：
 
@@ -300,7 +337,7 @@ enum TurnActivity {
 
 Activity 可以改变文案和控件，但不能决定 Turn 是否存在。`stop_requested` 也只是 Active Turn 上的事实，不需要增加 `Cancelling` 顶层状态。
 
-### 5.4 用户输入接纳边界与 PromptCut
+### 6.4 用户输入接纳边界与 PromptCut
 
 一个 Turn 不能仅用“浏览器是否已经看到 final answer”或“输入是否比 final answer 先到”判断输入归属。Core 必须同时维护：
 
@@ -330,7 +367,7 @@ PromptCut = 本次 model request 实际消费到的输入序列高水位
 
 这给竞态一个可审计答案：输入归属由稳定 command identity 与 PromptCut 消费关系决定，而不是由观察到的事件先后猜测。
 
-### 5.5 Worker 状态从属于 Turn
+### 6.5 Worker 状态从属于 Turn
 
 Worker projection 必须带 `TurnToken`。Worker activity 只允许更新匹配 Active Turn 的 worker 明细。
 
@@ -350,11 +387,11 @@ working = core_projection.active_turn != null
 
 不是“是否存在 working worker”，也不是“最后一个 topic 的 state 是 Running”。
 
-## 6. Pod：唯一投影入口
+## 7. Host Projection Adapter：可选的权威投影出口
 
-本文中的 Pod 指 Host 内连接 Agent Core 与 WebUI 的状态投影层。当前实现位置主要在 `timem_web`，后续可提取成独立模块，但无需先引入新的进程或服务。
+Host Projection Adapter 指连接 Agent Core 与异步/可重连 UI 的投影与可靠投递层。它是可选部署层：同步 Shell 可以直接消费 Core projection；当前首个实现位于 `timem_web`，称为 Pod。未来 iOS、桌面或远程 Host 可复用相同模式，但不要求复用 Web 进程或协议。
 
-### 6.1 Pod 输入
+### 7.1 Adapter 输入
 
 - Core authoritative Turn projection；
 - Core timeline facts：topic、worker activity、sub-answer、final outcome；
@@ -362,9 +399,9 @@ working = core_projection.active_turn != null
 - Session metadata、history、attachments、settings；
 - MEM barrier 和 semantic delivery sequence。
 
-### 6.2 Pod 输出
+### 7.2 Adapter 输出
 
-Pod 输出完整、可直接渲染的 Session projection：
+Host Projection Adapter 输出完整、可直接渲染的 Session projection；当前 Web 实现由 Pod 输出：
 
 ```rust
 struct SessionProjection {
@@ -388,9 +425,9 @@ struct ActiveTurnProjection {
 
 兼容期可继续输出 `state: "working" | "ready"`，但该字段必须由 `active_turn.is_some()` 单向派生，不能再由 worker/topic/WebUI 写入。
 
-### 6.3 Pod 不拥有第二套状态机
+### 7.3 Adapter 不拥有第二套状态机
 
-Pod 可以：
+Host Projection Adapter 可以：
 
 - 校验 projection revision；
 - 合并 history 与实时 timeline 数据；
@@ -398,7 +435,7 @@ Pod 可以：
 - 管理 command ack、MEM barrier 和 WebSocket sequence；
 - 将 Core outcome 映射成稳定 wire enum。
 
-Pod 不可以：
+Host Projection Adapter 不可以：
 
 - 根据 worker 数量决定 Turn 是否结束；
 - 根据 topic 的 `CoreSessionState` 恢复 working；
@@ -406,18 +443,18 @@ Pod 不可以：
 - 将迟到 event 归到“当前看起来最像”的 Turn；
 - 修改 Core outcome。
 
-### 6.4 Timeline 与生命周期分离
+### 7.4 Timeline 与生命周期分离
 
 Core topic、worker activity 仍可作为 timeline 数据展示，但必须满足：
 
 - 每条 live timeline fact 带 `TurnToken`；
-- Pod 只把它追加到对应 Turn；
+- Adapter 只把它追加到对应 Turn；
 - 对已结束 Turn 的迟到 fact：默认丢弃并记录诊断；若未来需要审计，可进入独立 late-event diagnostics，不能进入普通 UI projection；
-- WebUI 收到 timeline event 时不能据此改变 Session/Turn lifecycle。
+- 任意 UI shell 收到 timeline event 时不能据此改变 Session/Turn lifecycle。
 
-## 7. WebUI 边界
+## 8. UI shell 通用边界
 
-### 7.1 WebUI 可以拥有的状态
+### 8.1 UI shell 可以拥有的状态
 
 - theme、layout、sidebar、modal；
 - composer draft、file picker、selection；
@@ -425,7 +462,7 @@ Core topic、worker activity 仍可作为 timeline 数据展示，但必须满�
 - command outbox、sending/retrying/ack status；
 - projection cache，按 `revision` 替换。
 
-### 7.2 WebUI 禁止拥有的状态
+### 8.2 UI shell 禁止拥有的状态
 
 - 从事件推断 `active_turn_id`；
 - 从 worker/core topic 推断 `session.state`；
@@ -433,7 +470,7 @@ Core topic、worker activity 仍可作为 timeline 数据展示，但必须满�
 - 用 local cancel target 修正服务端 snapshot；
 - 把 `turn_started`、`turn_finished`、`worker_activity` 当作独立业务状态机输入。
 
-### 7.3 Stop 的 UI 规则
+### 8.3 Stop 的 UI 规则
 
 用户点击 Stop：
 
@@ -445,11 +482,11 @@ Core topic、worker activity 仍可作为 timeline 数据展示，但必须满�
 
 `Sending…` 是命令传输状态，不等于 Turn 已进入 cancelling。
 
-## 8. 快速 Stop / Start 用户体验
+## 9. 快速 Stop / Start 用户体验
 
 该架构不仅减少竞态，也允许比当前实现更流畅的交互。设计必须区分“用户意图已接收”“Core 已请求停止”和“旧 Turn 已终结”。
 
-### 8.1 三种状态分层
+### 9.1 三种状态分层
 
 ```text
 WebUI transport state:
@@ -466,7 +503,7 @@ Core business state:
 
 WebUI 可以立即显示 `Sending…` 或 `Waiting…`，但这些文案只说明命令/意图状态，不能冒充 Core 业务状态。
 
-### 8.2 Stop 的即时反馈
+### 9.2 Stop 的即时反馈
 
 点击 Stop 后：
 
@@ -479,7 +516,7 @@ WebUI 可以立即显示 `Sending…` 或 `Waiting…`，但这些文案只说�
 
 “立即停止”必须尽可能真实：Core 在模型等待、工具 join、后台进程和 host decision 等取消点持续检查同一个 Turn token。对可终止的子进程，Stop 应触发安全的进程组终止；对无法强制中断的外部调用，UI 显示 `Stopping…`，而不是谎报 `Cancelled`。
 
-### 8.3 Stop 期间立即开始下一轮
+### 9.3 Stop 期间立即开始下一轮
 
 同一 Context 仍保持最多一个 Active Turn。用户在旧 Turn stopping 时发送新消息，Pod 将它保存为**下一 Turn 意图**：
 
@@ -508,7 +545,7 @@ Turn A Active
 
 这不是第二个 Active Turn，也不是 WebUI 自行开始 B。WebUI 只显示 Pod 返回的 queued intent。
 
-### 8.4 连续 Stop / Start
+### 9.4 连续 Stop / Start
 
 该模型天然支持：
 
@@ -532,7 +569,7 @@ C active
 - queued intent 可以被用户显式编辑、重排或取消，但这些都是 Pod command-intent 操作，不能修改当前 Core Turn；
 - 每次最多只允许队首进入 Core；权威 terminal outcome 只解除生命周期 barrier，是否自动派发仍由显式自动发送偏好与该 outcome 的 continuation grant 决定。
 
-### 8.5 推荐产品策略：有界 Next Intent FIFO
+### 9.5 推荐产品策略：有界 Next Intent FIFO
 
 每个 Session 保持：
 
@@ -547,7 +584,7 @@ C active
 
 用户可在 intent 尚未 dispatch 时编辑、重排或取消；操作必须引用稳定 `command_id` 并产生新的队列 revision。已经 dispatch/owned 的项不可被旧编辑或旧 ACK 复活。
 
-### 8.6 与其他操作的耦合规则
+### 9.6 与其他操作的耦合规则
 
 所有操作先回答两个问题：它是否修改当前 Turn 的 prompt/timeline；它是否必须等到下一 Turn 边界。不得让每种操作各自发明 final-answer race 处理。
 
@@ -569,7 +606,7 @@ C active
 
 特别地，decision reply 不是用户 task 输入；ToolGen guidance 也不能借用 supplement 通道。二者必须保留自己的命令类型和目标身份，避免“任何晚到文字都转下一 Turn”这种错误泛化。
 
-### 8.7 UX 文案与控件建议
+### 9.7 UX 文案与控件建议
 
 | 阶段 | 权威来源 | 建议显示 | 输入行为 |
 |---|---|---|---|
@@ -580,9 +617,9 @@ C active
 | 新 Turn Active | Core projection | 正常 working/activity | Stop 精确绑定新 token |
 | command 失败/断线 | Pod delivery | `Retrying…` 或可恢复错误 | 保留用户输入，不伪造业务终态 |
 
-### 8.8 额外不变量
+### 9.8 额外不变量
 
-除第 10 节通用不变量外，快速交互还必须满足：
+除第 11 节通用不变量外，快速交互还必须满足：
 
 1. 同一 Context 永远不同时运行两个 Active Turn。
 2. queued intent 不是 Active Turn，不分配业务 epoch。
@@ -594,9 +631,9 @@ C active
 8. 队列达到上限时必须在 command acceptance 前明确拒绝，不得静默覆盖。
 9. 同一 `command_id` 在 pending input、PromptCut、队列和 Active Turn 间始终只有一个 owner。
 
-## 9. 建议协议
+## 10. 建议协议
 
-### 9.1 Core → Pod
+### 10.1 Core → Host Adapter
 
 优先输出权威 projection change，而不是让 Host 根据细粒度事件重建生命周期：
 
@@ -629,7 +666,7 @@ turn:
 
 不再使用无 Turn 身份的 activity 改变生命周期。
 
-### 9.2 Pod → WebUI
+### 10.2 Host Projection Adapter → UI shell
 
 过渡期新增：
 
@@ -648,7 +685,7 @@ session_projection_updated {
 - `turn_started`、`turn_finished` 可在兼容期双发，WebUI 新路径不再消费它们来改变生命周期；
 - `core_topic`、`worker_activity` 仅追加 timeline。
 
-### 9.3 Command
+### 10.3 Command
 
 ```text
 turn_submit {
@@ -684,7 +721,7 @@ ConvertedToNextTurnIntent { enqueue_seq } | Duplicate | Rejected
 
 若 target 已结束，Stop 应幂等返回 committed/current projection，而不是作用于后来的 Turn。
 
-## 10. 必须满足的不变量
+## 11. 必须满足的不变量
 
 1. 每个 Session 最多一个 Active Turn。
 2. 只有 Core 可以创建或结束 Active Turn。
@@ -707,7 +744,7 @@ ConvertedToNextTurnIntent { enqueue_seq } | Duplicate | Rejected
 19. decision、ToolGen guidance、设置变更不能被泛化成 late supplement。
 20. final answer、outcome、completion stats 永远绑定原 Turn，不因后续输入迁移。
 
-## 11. 迁移计划
+## 12. 迁移计划
 
 禁止一次性删除旧协议。采用可验证的分阶段迁移。
 
@@ -776,7 +813,7 @@ ConvertedToNextTurnIntent { enqueue_seq } | Duplicate | Rejected
 - 进程异常退出时最后 Active Turn 投影为 `Interrupted`；
 - Snapshot 由 Core/Pod 当前投影重新生成。
 
-## 12. Shadow comparison 与可观测性
+## 13. Shadow comparison 与可观测性
 
 迁移期同时计算旧、新投影，但只有一个对外生效：
 
@@ -792,11 +829,11 @@ old_state != new_projection.derived_state
 
 禁止用静默 fallback 掩盖差异。差异应成为测试失败或 debug diagnostic，以便删除旧路径前证明覆盖完整。
 
-## 13. 并发压测与用户体验验收
+## 14. 并发压测与用户体验验收
 
 本架构不能依靠几个同步 reducer case 宣称竞态已解决。测试策略采用**少而重**：保留必要的纯不变量单元测试，但发布门槛集中在以下 4 个真实并发压测。每个压测都必须运行真实 `CoreSessionWorker`、Turn Gate/Reducer、Pod command/projection 路径和持久 command ownership；只允许用可控 fake model 替代外部模型服务。
 
-### 13.1 统一压测 harness
+### 14.1 统一压测 harness
 
 压测 harness 至少有两个独立执行方：
 
@@ -829,7 +866,7 @@ Core projection publication      projection/browser observation
 
 通过 `TIMEM_TURN_STRESS_ITERATIONS`、`TIMEM_TURN_STRESS_SEED` 和 `TIMEM_TURN_STRESS_DURATION_SECS` 控制；默认值不能低于上表对应 gate。测试输出总轮数和实际运行时长，防止配置错误导致“零轮压测”。
 
-### 13.2 压测一：PromptCut / terminal ownership race
+### 14.2 压测一：PromptCut / terminal ownership race
 
 一个真实 Core worker 线程执行 fake model；另一个独立用户线程持续提交显式 supplement。每轮由 barrier 将输入分别放在：
 
@@ -849,7 +886,7 @@ Core projection publication      projection/browser observation
 - 无输入/附件丢失、重复消费或错误倒算；
 - 无 deadlock、panic、未回收线程和持续增长的 pending ownership。
 
-### 13.3 压测二：Stop / Start 生命周期风暴
+### 14.3 压测二：Stop / Start 生命周期风暴
 
 Core/model 线程持续执行可取消的短模型等待与工具等待；用户线程连续执行：
 
@@ -868,7 +905,7 @@ Stop(A) → ordinary Send(B) → Stop(B) → Send(C) → ...
 - 每个 cycle 最终收敛为 terminal 或明确 queued/rejected，不留下幽灵 pending 状态；
 - worker、线程、channel、队列和持久记录在压测结束后回到有界基线。
 
-### 13.4 压测三：真实 WebSocket 恢复与 FIFO ownership
+### 14.4 压测三：真实 WebSocket 恢复与 FIFO ownership
 
 启动真实 `timem_web` Host、真实 Core worker 和 fake model endpoint；至少两个独立 WebSocket client 并发操作同一 Session。在 accepted、Core handoff、terminal commit、projection publish 和 ACK 前后主动断线/重连，并注入重复 command、普通 Send 与未消费 supplement、附件、队列编辑/重排/取消、MEM switch barrier。
 
@@ -882,7 +919,7 @@ Stop(A) → ordinary Send(B) → Stop(B) → Send(C) → ...
 - 旧 `mem_epoch` command 不进入新 MEM；
 - 断线风暴后 outbox、Host ownership ledger、FIFO 和 Core projection 一致。
 
-### 13.5 压测四：真实 Chrome 用户体验时延
+### 14.5 压测四：真实 Chrome 用户体验时延
 
 使用 release Web binary、真实 WebSocket、真实 Host/Core worker 和 fake model，在 headless/可见 Chrome 中循环执行 Stop、立即输入下一任务、显式 supplement、断线重连和 Session A/B 切换。前端 reducer fixture 不能代替该测试。
 
@@ -909,7 +946,7 @@ browser_projection_applied → browser_painted
 
 这些是产品预算，不是通过把测试 sleep 调短就能满足的数字。普通共享 CI 若机器噪声导致绝对时延不稳定，仍必须执行完整正确性压测，并使用同机空载基线后的附加时延与宽松上限防止数量级回退；Linux/macOS release stress runner 必须执行上表绝对预算。任何单样本超过 2 秒且不能由故意断线、重试 backoff 或 fake-model delay 解释，都作为 stall 失败并打印完整阶段链。
 
-### 13.6 失败证据与 CI 落点
+### 14.6 失败证据与 CI 落点
 
 实施 Phase 0 时必须新增一个集中入口：
 
@@ -929,7 +966,7 @@ scripts/turn_concurrency_stress.sh
 
 测试不得通过提高 timeout、减少迭代、关闭 jitter 或只断言最终 `ready` 来“修复”。任何 flaky 失败都先保留 seed 并形成可复现 regression。
 
-## 14. 非目标
+## 15. 非目标
 
 本次重构不负责：
 
@@ -942,7 +979,7 @@ scripts/turn_concurrency_stress.sh
 
 目标只是收敛 Turn 真相和 UI 投影，不创造新的基础设施复杂度。
 
-## 15. 代码落点建议
+## 16. 代码落点建议
 
 确认设计后，优先采用小模块：
 
@@ -969,13 +1006,15 @@ web_ui/timem-web/src/projection.ts
 
 避免创建大型“状态框架”。每个模块应能在一次屏幕内看清核心状态转换。
 
-## 16. 完成定义
+## 17. 完成定义
 
 只有同时满足以下条件才算重构完成：
 
 - Core 是 Active Turn、input admission、PromptCut 和 outcome 的唯一写入者；
-- Pod 是 WebUI 业务状态的唯一投影入口，并只按明确 continuation policy 派发有界队列；
-- WebUI 删除生命周期推断；
+- Core projection 是所有 Host/UI 的共同生命周期真相；
+- Host Projection Adapter 只增加交付语义；`timem_web` Pod 只按明确 continuation policy 派发有界队列；
+- `timem_shell` 直接消费 Core projection，不维护 terminal lifecycle；
+- `web_ui` 删除生命周期推断；
 - Host 删除 worker-count/topic-driven lifecycle 聚合；
 - 20 条不变量均有自动化测试；
 - 4 个真实并发压测在 PR、macOS/Linux release 和 soak profile 达到规定轮数，正确性、资源收敛和体验时延预算通过；
