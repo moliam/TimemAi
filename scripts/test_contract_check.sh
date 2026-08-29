@@ -87,6 +87,11 @@ required_patterns=(
   "shell_resume_prefers_non_empty_launch_env_then_cli_over_stored_session_env"
   "shell_can_resume_web_style_session_history"
   "formatted_response_trailer_parser_preserves_assistant_heading"
+  "append_result_reports_only_real_segment_rollovers"
+  "audit_maintenance_hint_is_written_only_for_a_segment_rollover"
+  "temporary_maintenance_runtime_accumulates_across_restarts_without_counting_stopped_time"
+  "busy_temporary_maintenance_does_not_reset_due_runtime_or_hint"
+  "successful_temporary_maintenance_completion_resets_runtime_and_clears_hint"
 )
 
 for pattern in "${required_patterns[@]}"; do
@@ -115,6 +120,7 @@ ci_required=(
   "scripts/edge_regression.sh"
   "scripts/real_tty_smoke.expect"
   "scripts/real_tty_supplement_smoke.expect"
+  "python3 scripts/runtime_io_guard.py"
   "scripts/sensitive_scan.sh --current"
   "python3 scripts/web_ui_matrix_check.py"
   "scripts/update_static_prompt_snapshot.sh --check"
@@ -128,6 +134,27 @@ ci_required=(
 for pattern in "${ci_required[@]}"; do
   if ! search_fixed "$pattern" scripts/ci.sh; then
     echo "missing required CI gate: $pattern" >&2
+    exit 1
+  fi
+done
+
+
+runtime_io_guard_required=(
+  "DEFAULT_LIMIT_BPS = 500_000"
+  '"workload": "real_tty_stress"'
+  "TIMEM_RUNTIME_IO_START_FILE"
+  "TIMEM_RUNTIME_IO_END_FILE"
+  "TEMPORARY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60)"
+  "TEMPORARY_MAINTENANCE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15 * 60)"
+  "temporary_maintenance_state.json"
+  "api_audit_maintenance_hint_path"
+  "spawn_idle_temporary_maintenance_loop"
+  "has_live_mem_work"
+  "mem_temporary_items_list"
+)
+for pattern in "${runtime_io_guard_required[@]}"; do
+  if ! search_fixed "$pattern" scripts/runtime_io_guard.py scripts/real_tty_stress.expect timem_web/src/server.rs web_ui/timem-web/src/main.tsx; then
+    echo "missing Timem runtime I/O guard contract: $pattern" >&2
     exit 1
   fi
 done
@@ -545,6 +572,8 @@ workflow_required=(
   "ubuntu-latest"
   "macos-latest"
   "expect"
+  "Upload Timem runtime I/O report"
+  "target/runtime-io-guard/report.json"
 )
 
 for pattern in "${workflow_required[@]}"; do

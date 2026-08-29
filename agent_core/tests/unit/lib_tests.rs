@@ -1834,7 +1834,7 @@ fn action_audit_capacity_summarizes_one_oversized_turn_without_changing_schema()
 }
 
 #[test]
-fn legacy_multi_turn_action_audit_migrates_before_new_turn_without_losing_history() {
+fn legacy_multi_turn_action_audit_migrates_to_slices_before_new_turn() {
     let root = std::env::temp_dir().join(format!(
         "timem_action_audit_migration_{}_{}",
         std::process::id(),
@@ -1859,25 +1859,31 @@ fn legacy_multi_turn_action_audit_migrates_before_new_turn_without_losing_histor
             },
         ],
     };
-    fs::write(
-        audit_dir.join("action_audit.json"),
-        serde_json::to_vec_pretty(&legacy).unwrap(),
-    )
-    .unwrap();
+    let action_audit = audit_dir.join("action_audit.json");
+    fs::write(&action_audit, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
 
     let store = FileActionAuditStore::new(&root);
     store.begin_turn("new_turn", 3, "third");
+    store.finish_turn("new_turn");
 
-    let turns_dir = audit_dir.join("action_audit.json.turns");
-    let migrated = fs::read_dir(&turns_dir)
+    assert!(!audit_dir.join("action_audit.json.turns").exists());
+    let segments = rolling_file_store::rolling_segments(&action_audit).unwrap();
+    assert_eq!(
+        segments.len(),
+        1,
+        "small Turns must share one physical slice"
+    );
+    let archived = rolling_file_store::read_segmented_records(&action_audit)
         .unwrap()
-        .filter_map(Result::ok)
-        .filter_map(|entry| fs::read(entry.path()).ok())
-        .filter_map(|bytes| serde_json::from_slice::<ActionAuditTurn>(&bytes).ok())
-        .map(|turn| turn.turn_id)
+        .into_iter()
+        .map(|record| {
+            serde_json::from_slice::<ActionAuditTurn>(&record)
+                .unwrap()
+                .turn_id
+        })
         .collect::<BTreeSet<_>>();
     assert_eq!(
-        migrated,
+        archived,
         BTreeSet::from([
             "legacy_one".to_string(),
             "legacy_two".to_string(),
@@ -1885,8 +1891,249 @@ fn legacy_multi_turn_action_audit_migrates_before_new_turn_without_losing_histor
         ])
     );
     let latest: ActionAuditDocument =
-        serde_json::from_slice(&fs::read(audit_dir.join("action_audit.json")).unwrap()).unwrap();
+        serde_json::from_slice(&fs::read(&action_audit).unwrap()).unwrap();
     assert_eq!(latest.turns.len(), 1);
     assert_eq!(latest.turns[0].turn_id, "new_turn");
+    assert!(fs::read_dir(audit_dir.join("action_audit.active"))
+        .unwrap()
+        .next()
+        .is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completed_action_turns_share_segment_files_instead_of_creating_turn_files() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_action_audit_slices_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let store = FileActionAuditStore::new(&root);
+    for index in 0..100 {
+        let turn_id = format!("turn_{index}");
+        store.begin_turn(&turn_id, index, "small question");
+        store.record_action(
+            ActionAuditEntry {
+                time_ms: index,
+                round: 1,
+                action: "readfile".to_string(),
+                status: "completed".to_string(),
+                input: json!({"path": "small.txt"}),
+                result_summary: Some("ok".to_string()),
+            },
+            &turn_id,
+            "small question",
+        );
+        store.finish_turn(&turn_id);
+    }
+
+    let action_audit = root.join("audit/action_audit.json");
+    assert_eq!(
+        rolling_file_store::read_segmented_records(&action_audit)
+            .unwrap()
+            .len(),
+        100
+    );
+    assert_eq!(
+        rolling_file_store::rolling_segments(&action_audit)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(!root.join("audit/action_audit.json.turns").exists());
+    assert!(fs::read_dir(root.join("audit/action_audit.active"))
+        .unwrap()
+        .next()
+        .is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+fn audit_test_turn(turn_id: &str, started_at_ms: i64) -> ActionAuditTurn {
+    ActionAuditTurn {
+        turn_id: turn_id.to_string(),
+        started_at_ms,
+        user_question: format!("question {turn_id}"),
+        interactions: Vec::new(),
+    }
+}
+
+#[test]
+fn action_audit_upgrade_merges_overlapping_legacy_and_segmented_sources_idempotently() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_action_audit_overlap_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let audit_dir = root.join("audit");
+    fs::create_dir_all(&audit_dir).unwrap();
+    let action_audit = audit_dir.join("action_audit.json");
+    let capacity = FileActionAuditStore::archive_capacity().unwrap();
+    let archived = audit_test_turn("already_archived", 1);
+    rolling_file_store::append_rolling_record(
+        &action_audit,
+        &FileActionAuditStore::turn_record(&archived).unwrap(),
+        capacity,
+        rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+    )
+    .unwrap();
+    let compatibility = ActionAuditDocument {
+        version: 1,
+        turns: vec![archived, audit_test_turn("legacy_only", 2)],
+    };
+    fs::write(
+        &action_audit,
+        serde_json::to_vec_pretty(&compatibility).unwrap(),
+    )
+    .unwrap();
+
+    let store = FileActionAuditStore::new(&root);
+    store.begin_turn("current", 3, "current question");
+    store.finish_turn("current");
+    // A second startup-style pass must not append any of those Turns again.
+    store.begin_turn("next", 4, "next question");
+    store.finish_turn("next");
+
+    let ids = rolling_file_store::read_segmented_records(&action_audit)
+        .unwrap()
+        .into_iter()
+        .map(|record| {
+            serde_json::from_slice::<ActionAuditTurn>(&record)
+                .unwrap()
+                .turn_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids.len(),
+        4,
+        "archive must contain one record per Turn: {ids:?}"
+    );
+    assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), 4);
+    assert!(ids.contains(&"already_archived".to_string()));
+    assert!(ids.contains(&"legacy_only".to_string()));
+    assert!(ids.contains(&"current".to_string()));
+    assert!(ids.contains(&"next".to_string()));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn action_audit_upgrade_removes_only_confirmed_legacy_turn_files() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_action_audit_partial_legacy_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let audit_dir = root.join("audit");
+    let legacy_dir = audit_dir.join("action_audit.json.turns");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    let valid_path = legacy_dir.join("turn-valid.json");
+    let damaged_path = legacy_dir.join("turn-damaged.json");
+    fs::write(
+        &valid_path,
+        serde_json::to_vec(&audit_test_turn("valid_legacy", 1)).unwrap(),
+    )
+    .unwrap();
+    fs::write(&damaged_path, b"{not valid json").unwrap();
+
+    let store = FileActionAuditStore::new(&root);
+    store.begin_turn("new_turn", 2, "new question");
+    store.finish_turn("new_turn");
+
+    assert!(
+        !valid_path.exists(),
+        "confirmed migrated file should be removed"
+    );
+    assert!(
+        damaged_path.exists(),
+        "unreadable legacy data must be preserved"
+    );
+    let action_audit = audit_dir.join("action_audit.json");
+    let ids = rolling_file_store::read_segmented_records(&action_audit)
+        .unwrap()
+        .into_iter()
+        .map(|record| {
+            serde_json::from_slice::<ActionAuditTurn>(&record)
+                .unwrap()
+                .turn_id
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        ids,
+        BTreeSet::from(["valid_legacy".to_string(), "new_turn".to_string()])
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn action_audit_upgrade_deduplicates_stale_active_checkpoint() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_action_audit_stale_active_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let store = FileActionAuditStore::new(&root);
+    let turn = audit_test_turn("completed_before_crash", 1);
+    let action_audit = root.join("audit/action_audit.json");
+    rolling_file_store::append_rolling_record(
+        &action_audit,
+        &FileActionAuditStore::turn_record(&turn).unwrap(),
+        FileActionAuditStore::archive_capacity().unwrap(),
+        rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+    )
+    .unwrap();
+    fs::create_dir_all(&store.active_dir).unwrap();
+    let stale = store.active_dir.join("active-99999999-stale.json");
+    fs::write(&stale, FileActionAuditStore::turn_record(&turn).unwrap()).unwrap();
+
+    store.begin_turn("new_turn", 2, "new question");
+    store.finish_turn("new_turn");
+
+    assert!(!stale.exists());
+    let ids = rolling_file_store::read_segmented_records(&action_audit)
+        .unwrap()
+        .into_iter()
+        .map(|record| {
+            serde_json::from_slice::<ActionAuditTurn>(&record)
+                .unwrap()
+                .turn_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids.iter()
+            .filter(|id| id.as_str() == "completed_before_crash")
+            .count(),
+        1
+    );
+    assert_eq!(ids.len(), 2);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn action_audit_finish_retry_does_not_duplicate_an_already_committed_turn() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_action_audit_finish_retry_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let store = FileActionAuditStore::new(&root);
+    let turn_id = "retry_after_checkpoint_delete_failure";
+    store.begin_turn(turn_id, 1, "question");
+    let checkpoint = store.active_turn_path(turn_id);
+    let turn = store.read_turn_unlocked(&checkpoint).unwrap();
+    assert!(store.archive_turn_unlocked(&turn));
+    assert!(
+        checkpoint.exists(),
+        "simulate deletion failure/crash window"
+    );
+
+    store.finish_turn(turn_id);
+
+    assert!(!checkpoint.exists());
+    let records = rolling_file_store::read_segmented_records(&store.file).unwrap();
+    let matching = records
+        .into_iter()
+        .filter_map(|record| serde_json::from_slice::<ActionAuditTurn>(&record).ok())
+        .filter(|turn| turn.turn_id == turn_id)
+        .count();
+    assert_eq!(matching, 1);
     let _ = fs::remove_dir_all(root);
 }

@@ -33,6 +33,7 @@ fn test_config() -> ModelServiceConfig {
         model: "test-model".to_string(),
         api_key: "dummy".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         base_url: "http://127.0.0.1:9/v1".to_string(),
         api_protocol: crate::ApiProtocol::OpenAiCompatible,
         timeout_secs: 1,
@@ -2612,12 +2613,29 @@ fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently(
     let mut ui = ApproveAllUi {
         approval_requests: 0,
     };
+    let marker_a = dir.join("approved-a.ready");
+    let marker_b = dir.join("approved-b.ready");
+    let command_a = format!(
+        "touch {}; for _ in 1 2 3 4 5 6 7 8 9 10; do test -f {} && printf approved_a && exit 0; sleep 0.1; done; exit 1",
+        shell_quote(&marker_a),
+        shell_quote(&marker_b)
+    );
+    let command_b = format!(
+        "touch {}; for _ in 1 2 3 4 5 6 7 8 9 10; do test -f {} && printf approved_b && exit 0; sleep 0.1; done; exit 1",
+        shell_quote(&marker_b),
+        shell_quote(&marker_a)
+    );
+    let first_response = serde_json::json!({
+        "free_talk": "先审批两个 Bash，然后并发执行。",
+        "working_still_action": [[
+            {"run_bash": {"cmd": command_a, "timeout_ms": 3000}},
+            {"memmgr": {"type": "durable", "op": "sql", "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1", "params": ["%project%"], "limit": 1}},
+            {"run_bash": {"cmd": command_b, "timeout_ms": 3000}}
+        ]]
+    })
+    .to_string();
     let mut model = ReplayModel::new([
-        Ok(llm(
-            r#"{"free_talk":"先审批两个 Bash，然后并发执行。","working_still_action":[[{"run_bash":{"cmd":"sleep 1; printf approved_a","timeout_ms":3000}},{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},{"run_bash":{"cmd":"sleep 1; printf approved_b","timeout_ms":3000}}]]}"#,
-            1_000,
-            false,
-        )),
+        Ok(llm(&first_response, 1_000, false)),
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"审批后的并行动作完成。"}"#,
             1_200,
@@ -2625,7 +2643,6 @@ fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently(
         )),
     ]);
 
-    let started = std::time::Instant::now();
     let outcome = run_session_turn_with_model_client(
         &mut core,
         &mut config,
@@ -2641,14 +2658,12 @@ fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently(
         None,
         &mut model,
     );
-    let elapsed = started.elapsed();
-
     assert_eq!(outcome.text, "审批后的并行动作完成。");
     assert_eq!(ui.approval_requests, 2);
     assert!(
-            elapsed < std::time::Duration::from_millis(1800),
-            "approved parallel bash actions should run concurrently after approval; elapsed={elapsed:?}"
-        );
+        marker_a.exists() && marker_b.exists(),
+        "both approved Bash actions must start before either can complete"
+    );
     let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
     let results_start = second_parts
         .new_delta

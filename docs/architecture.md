@@ -910,7 +910,7 @@ Guarded operations include:
 - chat history query/delete over audit-backed records
 - read-only SQL snapshots over durable memory and chat history
 - `api_audit.json` event-document updates
-- `action_audit.json` grouped action audit updates
+- `action_audit.json` latest-Turn compatibility view plus complete-Turn rolling archive updates; upgrades merge legacy multi-Turn documents, legacy `.turns`, stale active checkpoints, and existing segments by `turn_id`, retaining unreadable legacy files instead of deleting the user’s only recoverable copy
 
 Session-local state stays outside shared memory ownership:
 
@@ -1189,7 +1189,9 @@ only a short fallback cache, while verified capabilities are process-cached.
 The resolved mode and parallel capability are published to hosts and written to
 the auto-refreshing web debug `statistics.html`. The report groups request
 outcomes and detailed latency/CPU/repair metrics by model, gateway, and resolved
-tool-call protocol. `TIMEM_PARALLEL_TOOL_CALLS` controls whether the
+tool-call protocol. Model request latency uses fixed upper-bound buckets at
+500 ms, 1 s, 3 s, 5 s, 10 s, 15 s, 20 s, and 30 s, plus a bucket above 30 s.
+`TIMEM_PARALLEL_TOOL_CALLS` controls whether the
 resolved parallel flag is enabled; provider adapters always send it explicitly.
 
 Web debug diagnostics retain the latest request as `llm_prompt.html` and the

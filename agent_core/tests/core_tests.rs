@@ -1362,6 +1362,7 @@ fn output_expansion_resolution_is_core_owned() {
         base_url: "https://example.test/v1".to_string(),
         api_key: "test-key".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         timeout_secs: 30,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
@@ -1405,6 +1406,7 @@ fn output_expansion_decline_returns_core_stop_summary() {
         base_url: "https://example.test/v1".to_string(),
         api_key: "test-key".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         timeout_secs: 30,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
@@ -1452,6 +1454,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         base_url: "https://example.test/v1".to_string(),
         api_key: "test-key".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         timeout_secs: 30,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
@@ -1530,6 +1533,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
         base_url: "https://example.test/v1".to_string(),
         api_key: "test-key".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         timeout_secs: 30,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 3_000,
@@ -5891,6 +5895,7 @@ fn action_audit_groups_actions_by_user_turn_and_round() {
         CoreStep::NeedModel { .. } => {}
         other => panic!("unexpected step: {other:?}"),
     }
+    core.finish_action_audit_turn();
 
     let audit_path = dir.join("audit").join("action_audit.json");
     let audit_text = fs::read_to_string(audit_path).unwrap();
@@ -6484,11 +6489,15 @@ fn run_bash_requires_approval_for_mutating_commands() {
     assert_eq!(events[0]["approval_id"], request.approval_id);
     assert_eq!(events[0]["approved"], false);
 
-    let audit_text = fs::read_to_string(dir.join("audit").join("action_audit.json")).unwrap();
-    let audit: serde_json::Value = serde_json::from_str(&audit_text).unwrap();
-    let actions = audit["turns"][0]["interactions"][0]["actions"]
-        .as_array()
+    let active_dir = dir.join("audit").join("action_audit.active");
+    let active_files = fs::read_dir(&active_dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
+    assert_eq!(active_files.len(), 1, "expected one active Turn checkpoint");
+    let audit: serde_json::Value =
+        serde_json::from_slice(&fs::read(active_files[0].path()).unwrap()).unwrap();
+    let actions = audit["interactions"][0]["actions"].as_array().unwrap();
     assert_eq!(actions.len(), 2);
     assert_eq!(actions[0]["action"], "run_bash");
     assert!(actions[0].get("intent").is_none());

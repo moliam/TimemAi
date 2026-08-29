@@ -1,8 +1,8 @@
 use crate::{
     default_api_protocol, default_base_url, default_model, parse_api_protocol,
     parse_openai_compatible_cache_mode, parse_token_count, validate_model_http_headers,
-    ApiProtocol, ModelServiceConfig, OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
-    ParallelToolCalls, ToolCallMode,
+    validate_model_request_fields, ApiProtocol, ModelServiceConfig, OpenAiCompatibleCacheMode,
+    OpenAiCompatibleOptions, ParallelToolCalls, ToolCallMode,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -14,6 +14,7 @@ pub struct ModelServiceConfigSource {
     pub api_protocol: Option<String>,
     pub api_key: Option<String>,
     pub http_headers: Option<std::collections::BTreeMap<String, String>>,
+    pub request_fields: Option<std::collections::BTreeMap<String, serde_json::Value>>,
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub timeout_secs: Option<u64>,
@@ -93,6 +94,7 @@ impl LocalLLMKeyFile {
             base_url: default_base_url(&ApiProtocol::OpenAiCompatible).to_string(),
             api_key: self.api_key.clone(),
             http_headers: Default::default(),
+            request_fields: Default::default(),
             timeout_secs: 120,
             max_llm_output_tokens: 512,
             max_llm_input_tokens: 100_000,
@@ -173,6 +175,18 @@ fn model_service_config_from_sources_with_key_policy(
             .unwrap_or_default(),
     };
     validate_model_http_headers(&http_headers)?;
+    let request_fields = match source.request_fields.clone() {
+        Some(fields) => fields,
+        None => env
+            .get("TIMEM_REQUEST_FIELDS")
+            .map(|value| {
+                serde_json::from_str(value)
+                    .map_err(|error| format!("invalid_TIMEM_REQUEST_FIELDS:{error}"))
+            })
+            .transpose()?
+            .unwrap_or_default(),
+    };
+    validate_model_request_fields(&request_fields)?;
     let timeout_secs = source
         .timeout_secs
         .or_else(|| env.get("TIMEM_TIMEOUT").and_then(|v| v.parse().ok()))
@@ -239,6 +253,7 @@ fn model_service_config_from_sources_with_key_policy(
         base_url,
         api_key,
         http_headers,
+        request_fields,
         timeout_secs,
         max_llm_output_tokens,
         max_llm_input_tokens,
