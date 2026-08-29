@@ -173,4 +173,214 @@ mod tests {
         );
         assert_eq!(cache.current().unwrap().projection, active("b", 2, false));
     }
+
+    #[test]
+    fn next_turn_intents_are_bounded_fifo_deduplicated_and_revisioned() {
+        let mut queue = NextTurnIntentQueue::new(2);
+        assert_eq!(
+            queue.enqueue("command-a".to_string(), "A".to_string()),
+            NextTurnEnqueueResult::Enqueued {
+                enqueue_seq: 1,
+                revision: 1
+            }
+        );
+        assert_eq!(
+            queue.enqueue("command-a".to_string(), "duplicate".to_string()),
+            NextTurnEnqueueResult::Duplicate {
+                enqueue_seq: 1,
+                revision: 1
+            }
+        );
+        assert_eq!(
+            queue.enqueue("command-b".to_string(), "B".to_string()),
+            NextTurnEnqueueResult::Enqueued {
+                enqueue_seq: 2,
+                revision: 2
+            }
+        );
+        assert_eq!(
+            queue.enqueue("command-c".to_string(), "C".to_string()),
+            NextTurnEnqueueResult::Full {
+                capacity: 2,
+                revision: 2
+            }
+        );
+        let (first, revision) = queue.pop_front().unwrap();
+        assert_eq!(
+            (first.command_id.as_str(), first.payload.as_str()),
+            ("command-a", "A")
+        );
+        assert_eq!(revision, 3);
+        assert_eq!(queue.front().unwrap().command_id, "command-b");
+    }
+
+    #[test]
+    fn next_turn_queue_round_trip_preserves_order_and_monotonic_sequence() {
+        let mut queue = NextTurnIntentQueue::new(3);
+        queue.enqueue("command-a".to_string(), 10u32);
+        queue.enqueue("command-b".to_string(), 20u32);
+        let encoded = serde_json::to_vec(&queue).unwrap();
+        let mut restored: NextTurnIntentQueue<u32> = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored.snapshot(), queue.snapshot());
+        restored.pop_front();
+        assert_eq!(
+            restored.enqueue("command-c".to_string(), 30),
+            NextTurnEnqueueResult::Enqueued {
+                enqueue_seq: 3,
+                revision: 4
+            }
+        );
+    }
+
+    #[test]
+    fn removing_a_queued_intent_advances_revision_and_is_idempotent() {
+        let mut queue = NextTurnIntentQueue::new(2);
+        queue.enqueue("command-a".to_string(), "A".to_string());
+        assert!(matches!(
+            queue.remove("command-a"),
+            NextTurnRemoveResult::Removed { revision: 2, .. }
+        ));
+        assert!(matches!(
+            queue.remove("command-a"),
+            NextTurnRemoveResult::Missing { revision: 2 }
+        ));
+    }
+}
+
+/// Host-owned input accepted for a future Core Turn. This is delivery state,
+/// not a Turn lifecycle state, and therefore carries no Turn token or epoch.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NextTurnIntent<T> {
+    pub command_id: String,
+    pub enqueue_seq: u64,
+    pub payload: T,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VersionedNextTurnIntents<T> {
+    pub revision: u64,
+    pub items: Vec<NextTurnIntent<T>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NextTurnEnqueueResult {
+    Enqueued { enqueue_seq: u64, revision: u64 },
+    Duplicate { enqueue_seq: u64, revision: u64 },
+    Full { capacity: usize, revision: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NextTurnRemoveResult<T> {
+    Removed {
+        intent: NextTurnIntent<T>,
+        revision: u64,
+    },
+    Missing {
+        revision: u64,
+    },
+}
+
+/// Bounded FIFO Host delivery storage for future-turn commands.
+/// It never dispatches by itself and cannot change Core lifecycle state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NextTurnIntentQueue<T> {
+    capacity: usize,
+    revision: u64,
+    next_enqueue_seq: u64,
+    items: Vec<NextTurnIntent<T>>,
+}
+
+impl<T> NextTurnIntentQueue<T> {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            revision: 0,
+            next_enqueue_seq: 1,
+            items: Vec::new(),
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+    pub fn front(&self) -> Option<&NextTurnIntent<T>> {
+        self.items.first()
+    }
+
+    pub fn snapshot(&self) -> VersionedNextTurnIntents<T>
+    where
+        T: Clone,
+    {
+        VersionedNextTurnIntents {
+            revision: self.revision,
+            items: self.items.clone(),
+        }
+    }
+
+    pub fn enqueue(&mut self, command_id: String, payload: T) -> NextTurnEnqueueResult {
+        if let Some(existing) = self
+            .items
+            .iter()
+            .find(|intent| intent.command_id == command_id)
+        {
+            return NextTurnEnqueueResult::Duplicate {
+                enqueue_seq: existing.enqueue_seq,
+                revision: self.revision,
+            };
+        }
+        if self.items.len() >= self.capacity {
+            return NextTurnEnqueueResult::Full {
+                capacity: self.capacity,
+                revision: self.revision,
+            };
+        }
+        let enqueue_seq = self.next_enqueue_seq;
+        self.next_enqueue_seq = self.next_enqueue_seq.saturating_add(1);
+        self.revision = self.revision.saturating_add(1);
+        self.items.push(NextTurnIntent {
+            command_id,
+            enqueue_seq,
+            payload,
+        });
+        NextTurnEnqueueResult::Enqueued {
+            enqueue_seq,
+            revision: self.revision,
+        }
+    }
+
+    pub fn pop_front(&mut self) -> Option<(NextTurnIntent<T>, u64)> {
+        if self.items.is_empty() {
+            return None;
+        }
+        let intent = self.items.remove(0);
+        self.revision = self.revision.saturating_add(1);
+        Some((intent, self.revision))
+    }
+
+    pub fn remove(&mut self, command_id: &str) -> NextTurnRemoveResult<T> {
+        let Some(index) = self
+            .items
+            .iter()
+            .position(|intent| intent.command_id == command_id)
+        else {
+            return NextTurnRemoveResult::Missing {
+                revision: self.revision,
+            };
+        };
+        let intent = self.items.remove(index);
+        self.revision = self.revision.saturating_add(1);
+        NextTurnRemoveResult::Removed {
+            intent,
+            revision: self.revision,
+        }
+    }
 }
