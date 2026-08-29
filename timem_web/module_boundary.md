@@ -136,11 +136,16 @@ that the current Turn consumed it. On terminal commit, the Pod atomically takes
 over every accepted-but-unconsumed task command, including its attachments, as
 a next-turn intent under the same command ownership rather than dropping it,
 asking the browser to issue a second command, or appending it after the final
-answer. Per Session, these intents form a bounded, persistent FIFO ordered by
-Host `enqueue_seq` and deduplicated by `command_id`; only its head may enter
-Core. Each dispatched intent receives a fresh token and starts at model round
-one. Decision replies, ToolGen guidance, and settings mutations retain their own
-typed commands and must never be silently converted as late supplements.
+answer. Per Session, these intents form a bounded FIFO ordered by Host `enqueue_seq`
+and deduplicated by `command_id`; only its head may enter Core. The Host may
+atomically persist the FIFO for same-process delivery integrity and restart
+reconciliation, but a Host/Core process restart is a hard Stop boundary: queued
+execution ownership is discarded, unfinished queued Turns restore only as
+`interrupted`, and redelivery of an old `command_id` must not call Core. Continuing
+after restart requires a new command ID and a new Turn. Each online-dispatched
+intent receives a fresh token and starts at model round one. Decision replies,
+ToolGen guidance, and settings mutations retain their own typed commands and
+must never be silently converted as late supplements.
 
 It must not contain:
 
