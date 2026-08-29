@@ -857,7 +857,11 @@ Host as distinct next-turn intent under the same command ownership. The
 follow-up receives a fresh `TurnToken`, starts at its first model round, and
 cannot inherit the prior Turn's round count, stop state, pending decision, or
 attachment-consumption state. The first final answer remains attached to its
-original bubble. Repeated
+original bubble. Browser reconnect within the same Host process preserves this
+queued-delivery ownership, but a Host/Core process restart is a hard Stop
+boundary: unfinished queued Turns restore as `interrupted`, queued execution
+ownership is cleared, an old `command_id` may only replay its visible historical
+Turn, and continuing requires a new command ID. Repeated
 attachment removal for the same session is treated as success, and stale
 decision replies after a turn has finished are ignored before they reach a
 worker rather than being reinterpreted as new task input.

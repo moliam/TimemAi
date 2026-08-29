@@ -580,9 +580,23 @@ C active
 
 必须允许多于一个 intent，因为 terminal commit 时可能同时存在普通 Send 和一个“已接受但未被当前 PromptCut 消费”的 supplement。单个可替换槽会迫使系统覆盖、丢失或错误合并用户输入。
 
-有界 FIFO 只是 Pod 持久化的命令数据结构，不是第二套 Turn 生命周期状态机：它没有 Active/Stopping/Finished 转换，不分配 `TurnEpoch`，也不能让两项并发进入 Core。达到上限时必须在接纳前明确拒绝并保留浏览器草稿，不能先 ACK 后丢弃。
+有界 FIFO 只是 Pod 的命令数据结构，不是第二套 Turn 生命周期状态机：它没有 Active/Stopping/Finished 转换，不分配 `TurnEpoch`，也不能让两项并发进入 Core。队列可以原子写盘，以便同一进程异常期间避免半写并在启动时识别哪些可见历史曾处于 waiting；但**持久化不代表跨进程恢复执行权**。达到上限时必须在接纳前明确拒绝并保留浏览器草稿，不能先 ACK 后丢弃。
 
 用户可在 intent 尚未 dispatch 时编辑、重排或取消；操作必须引用稳定 `command_id` 并产生新的队列 revision。已经 dispatch/owned 的项不可被旧编辑或旧 ACK 复活。
+
+#### Runtime 重启是硬 Stop 边界
+
+浏览器刷新、WebSocket 断线和重连不改变 Host/Core 进程，因此同一 runtime incarnation 内仍可从 Pod snapshot 恢复有序 queued intents 并继续等待 terminal barrier。
+
+Host/Core 进程重启则完全不同：旧 runtime incarnation 的 Active Turn 与所有未派发 NextTurnIntent 都失去执行权。启动恢复必须：
+
+1. 读取残留队列只用于识别对应的可见历史 Turn；
+2. 将尚无 final outcome/completion 的对应 Turn 标记为 `interrupted`；
+3. 清空内存队列，并尽力原子写回空队列；即使写回失败，本次新进程也不得装载执行权；
+4. 旧 `command_id` 重投只能幂等返回该 interrupted Turn，不调用 Core；
+5. 用户要继续必须提交新的 `command_id`，由 Core 创建全新的 Turn。
+
+因此，“可以重连继续等待”只适用于同一进程；“进程重启后一律 Stop”不依赖旧队列是否完整、是否已有 `CoreAccepted` 记录或某个 terminal event 先后到达。
 
 ### 9.6 与其他操作的耦合规则
 
@@ -600,7 +614,8 @@ C active
 | ToolGen | 仅绑定已完成 source turn，作为独立受控 Turn | 不追加 source turn | source final answer 不变 |
 | Role/MCP/runtime 设置 | 记录 desired revision | 在下一新 Turn 边界应用 | 不改变已封口 prompt |
 | child worker/tool callback | 只更新匹配 token 的当前 activity/timeline | Gate 丢弃迟到回调 | 不得触发 Next intent |
-| reconnect/retry | 从 Pod 恢复 Active + admission + intent | 重放同一 command | 不能依据浏览器旧状态重新判归属 |
+| 浏览器 reconnect/retry（同一进程） | 从 Pod 恢复 Active + admission + intent | 重放同一 command | 不能依据浏览器旧状态重新判归属 |
+| Host/Core 进程重启 | 所有 live ownership 失效 | 队列历史标记 interrupted 后清空；旧 ID 只回显 | 必须以新 command ID 创建新 Turn，绝不 redrive |
 | MEM switch | 受 `mem_epoch` barrier 阻断 | 旧 MEM intent 不进入新 MEM | 输入、附件、ACK 同 epoch 隔离 |
 | Session delete/shutdown | 拒绝新 intent并取消当前 Turn | 丢弃/显式失败未启动 intent | 不在后台偷偷启动下一 Turn |
 
@@ -626,10 +641,11 @@ C active
 3. queued intent 只有在 Core 确认旧 Turn terminal 后才具备派发资格；自动派发还必须满足用户偏好与 outcome continuation grant。
 4. Stop command 必须绑定精确 token；无目标 Stop 不得影响未来 Turn。
 5. start command 的重复投递只产生一个 queued intent 或一个 Turn。
-6. UI 断线重连后，Pod snapshot 必须同时包含 Active Turn projection 与有序 queued intents projection。
-7. 用户取消 queued intent 后，它不能因重试或旧 ack 再次启动。
-8. 队列达到上限时必须在 command acceptance 前明确拒绝，不得静默覆盖。
-9. 同一 `command_id` 在 pending input、PromptCut、队列和 Active Turn 间始终只有一个 owner。
+6. 同一 Host 进程内 UI 断线重连后，Pod snapshot 必须同时包含 Active Turn projection 与有序 queued intents projection。
+7. Host/Core 进程重启后，所有 queued intent 执行权必须清空；其旧 `command_id` 只能回显 interrupted 历史，不能 redrive。
+8. 用户取消 queued intent 后，它不能因重试或旧 ack 再次启动。
+9. 队列达到上限时必须在 command acceptance 前明确拒绝，不得静默覆盖。
+10. 同一 `command_id` 在 pending input、PromptCut、队列和 Active Turn 间始终只有一个 owner。
 
 ## 10. 建议协议
 
@@ -740,9 +756,10 @@ ConvertedToNextTurnIntent { enqueue_seq } | Duplicate | Rejected
 15. `input_admission` 只能从 Open 变为 Closed，不能重新打开。
 16. terminal commit 时，未被任何已发送 PromptCut 消费的 task 输入只能进入 Next intent，不能追加到旧 Turn。
 17. supplement 与 Next intent 的转换必须保留 command ownership、顺序，并且输入与附件恰好消费一次。
-18. Next intent FIFO 必须有界、持久、去重，且一次只派发队首；Session 变为 Empty 本身不构成自动派发授权。
-19. decision、ToolGen guidance、设置变更不能被泛化成 late supplement。
-20. final answer、outcome、completion stats 永远绑定原 Turn，不因后续输入迁移。
+18. Next intent FIFO 必须有界、去重，且一次只派发队首；Session 变为 Empty 本身不构成自动派发授权。队列写盘只用于同进程可靠性与重启后的历史中断识别，绝不授予跨进程 redrive。
+19. Host/Core 进程重启是硬 Stop 边界：Active 与 queued ownership 全部失效，旧 command ID 不得再次调用 Core。
+20. decision、ToolGen guidance、设置变更不能被泛化成 late supplement。
+21. final answer、outcome、completion stats 永远绑定原 Turn，不因后续输入迁移。
 
 ## 12. 迁移计划
 
@@ -754,7 +771,7 @@ ConvertedToNextTurnIntent { enqueue_seq } | Duplicate | Rejected
 - 先实现第 13 节统一 stress harness：独立执行方、关键 barrier/test hook、seeded jitter、deadline、ownership ledger、阶段时延与资源收敛检查；
 - 新增聚焦入口 `scripts/turn_concurrency_stress.sh`，明确 PR/release/soak profile；在脚本和 CI 真正接入前不得把它记录为已有测试证据；
 - 用当前实现跑出 Stop、reconnect、late event、FIFO、MEM epoch 的可复现基线，保留失败 seed 和延迟分布；
-- 为上述 20 条不变量建立必要的纯逻辑单元测试，但不得用它们替代 4 个真实并发压测。
+- 为上述 21 条不变量建立必要的纯逻辑单元测试，但不得用它们替代 4 个真实并发压测。
 
 验收：压力入口实际执行非零轮数，失败可按 seed 重放；基线报告包含轮数、运行时长、p50/p95/p99/max、最慢样本和资源前后差异。
 
@@ -994,7 +1011,7 @@ agent_core/src/turn_state.rs
 timem_web/src/turn_projection.rs
   SessionProjection
   ProjectionRevision
-  bounded persistent NextTurnIntent FIFO
+  bounded NextTurnIntent FIFO (restart discards execution ownership)
   Core projection → Web projection
   compatibility/shadow comparison
 
@@ -1016,6 +1033,6 @@ web_ui/timem-web/src/projection.ts
 - `timem_shell` 直接消费 Core projection，不维护 terminal lifecycle；
 - `web_ui` 删除生命周期推断；
 - Host 删除 worker-count/topic-driven lifecycle 聚合；
-- 20 条不变量均有自动化测试；
+- 21 条不变量均有自动化测试；
 - 4 个真实并发压测在 PR、macOS/Linux release 和 soak profile 达到规定轮数，正确性、资源收敛和体验时延预算通过；
 - 旧兼容协议和迁移 guard 已删除，而不是永久保留两套路径。
