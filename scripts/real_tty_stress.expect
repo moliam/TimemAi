@@ -87,6 +87,11 @@ spawn env \
     TIMEM_MODEL=fake-stress-model \
     TIMEM_BASH_APPROVAL=approve \
     $binary --space $memory_dir
+if {[info exists env(TIMEM_RUNTIME_IO_PID_FILE)] && $env(TIMEM_RUNTIME_IO_PID_FILE) ne ""} {
+    set marker [open $env(TIMEM_RUNTIME_IO_PID_FILE) "w"]
+    puts $marker [exp_pid]
+    close $marker
+}
 expect {
     -re "\033\\\[\\?2004h" {}
     timeout {
@@ -97,11 +102,6 @@ expect {
     }
 }
 wait_prompt
-if {[info exists env(TIMEM_RUNTIME_IO_PID_FILE)] && $env(TIMEM_RUNTIME_IO_PID_FILE) ne ""} {
-    set marker [open $env(TIMEM_RUNTIME_IO_PID_FILE) "w"]
-    puts $marker [exp_pid]
-    close $marker
-}
 if {[info exists env(TIMEM_RUNTIME_IO_START_FILE)] && $env(TIMEM_RUNTIME_IO_START_FILE) ne ""} {
     close [open $env(TIMEM_RUNTIME_IO_START_FILE) "w"]
     # Observe a fully started but idle Timem before the real model/action turn.
