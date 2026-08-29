@@ -6,7 +6,7 @@ use crate::{
     TurnStopSummary, TurnUi, UsageStats,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -73,40 +73,51 @@ impl CoreSessionWorkerConfig {
     }
 }
 
+#[derive(Debug, Default)]
+struct WorkingWorkerCounts {
+    total: usize,
+    by_session: BTreeMap<String, usize>,
+}
+
 #[derive(Clone, Debug)]
 pub struct CoreSessionWorkerRuntime {
-    working_workers: Arc<AtomicUsize>,
-    working_workers_by_session: Arc<Mutex<BTreeMap<String, usize>>>,
+    working_workers: Arc<Mutex<WorkingWorkerCounts>>,
 }
 
 impl CoreSessionWorkerRuntime {
     pub fn new() -> Self {
         Self {
-            working_workers: Arc::new(AtomicUsize::new(0)),
-            working_workers_by_session: Arc::new(Mutex::new(BTreeMap::new())),
+            working_workers: Arc::new(Mutex::new(WorkingWorkerCounts::default())),
         }
     }
 
     pub fn working_worker_count(&self) -> usize {
-        self.working_workers.load(Ordering::SeqCst)
+        self.working_workers
+            .lock()
+            .map(|counts| counts.total)
+            .unwrap_or(0)
     }
 
-    fn session_working_worker_count(&self, session_id: &str) -> usize {
-        self.working_workers_by_session
+    fn worker_count_snapshot(&self, session_id: &str) -> (usize, usize) {
+        self.working_workers
             .lock()
-            .map(|counts| counts.get(session_id).copied().unwrap_or(0))
-            .unwrap_or(0)
+            .map(|counts| {
+                (
+                    counts.total,
+                    counts.by_session.get(session_id).copied().unwrap_or(0),
+                )
+            })
+            .unwrap_or((0, 0))
     }
 
     fn begin_worker_turn(&self, session_id: &str) -> WorkingWorkerGuard {
         let active = Arc::new(AtomicBool::new(true));
-        self.working_workers.fetch_add(1, Ordering::SeqCst);
-        if let Ok(mut counts) = self.working_workers_by_session.lock() {
-            *counts.entry(session_id.to_string()).or_insert(0) += 1;
+        if let Ok(mut counts) = self.working_workers.lock() {
+            counts.total = counts.total.saturating_add(1);
+            *counts.by_session.entry(session_id.to_string()).or_insert(0) += 1;
         }
         WorkingWorkerGuard {
             working_workers: Arc::clone(&self.working_workers),
-            working_workers_by_session: Arc::clone(&self.working_workers_by_session),
             session_id: session_id.to_string(),
             active,
         }
@@ -118,18 +129,9 @@ impl CoreSessionWorkerRuntime {
         active: &Arc<AtomicBool>,
     ) -> (usize, usize) {
         if active.swap(false, Ordering::SeqCst) {
-            let global_count = self
-                .working_workers
-                .fetch_sub(1, Ordering::SeqCst)
-                .saturating_sub(1);
-            let session_count =
-                decrement_session_working_count(&self.working_workers_by_session, session_id);
-            (global_count, session_count)
+            decrement_working_count(&self.working_workers, session_id)
         } else {
-            (
-                self.working_worker_count(),
-                self.session_working_worker_count(session_id),
-            )
+            self.worker_count_snapshot(session_id)
         }
     }
 
@@ -140,17 +142,11 @@ impl CoreSessionWorkerRuntime {
         active: Option<&Arc<AtomicBool>>,
     ) -> CoreGlobalWorkerStatus {
         let (global_count, session_count) = if continue_work {
-            (
-                self.working_worker_count(),
-                self.session_working_worker_count(session_id),
-            )
+            self.worker_count_snapshot(session_id)
         } else if let Some(active) = active {
             self.finish_worker_turn_if_active(session_id, active)
         } else {
-            (
-                self.working_worker_count(),
-                self.session_working_worker_count(session_id),
-            )
+            self.worker_count_snapshot(session_id)
         };
         CoreGlobalWorkerStatus::with_session_working_worker_count(global_count, session_count)
     }
@@ -184,28 +180,31 @@ impl Default for CoreSessionWorkerRuntime {
 }
 
 struct WorkingWorkerGuard {
-    working_workers: Arc<AtomicUsize>,
-    working_workers_by_session: Arc<Mutex<BTreeMap<String, usize>>>,
+    working_workers: Arc<Mutex<WorkingWorkerCounts>>,
     session_id: String,
     active: Arc<AtomicBool>,
 }
 
-fn decrement_session_working_count(
-    counts: &Arc<Mutex<BTreeMap<String, usize>>>,
+fn decrement_working_count(
+    counts: &Arc<Mutex<WorkingWorkerCounts>>,
     session_id: &str,
-) -> usize {
+) -> (usize, usize) {
     let Ok(mut counts) = counts.lock() else {
-        return 0;
+        return (0, 0);
     };
-    let Some(count) = counts.get_mut(session_id) else {
-        return 0;
-    };
-    *count = count.saturating_sub(1);
-    let remaining = *count;
+    counts.total = counts.total.saturating_sub(1);
+    let remaining = counts
+        .by_session
+        .get_mut(session_id)
+        .map(|count| {
+            *count = count.saturating_sub(1);
+            *count
+        })
+        .unwrap_or(0);
     if remaining == 0 {
-        counts.remove(session_id);
+        counts.by_session.remove(session_id);
     }
-    remaining
+    (counts.total, remaining)
 }
 
 impl WorkingWorkerGuard {
@@ -217,8 +216,7 @@ impl WorkingWorkerGuard {
 impl Drop for WorkingWorkerGuard {
     fn drop(&mut self) {
         if self.active.swap(false, Ordering::SeqCst) {
-            self.working_workers.fetch_sub(1, Ordering::SeqCst);
-            decrement_session_working_count(&self.working_workers_by_session, &self.session_id);
+            decrement_working_count(&self.working_workers, &self.session_id);
         }
     }
 }
