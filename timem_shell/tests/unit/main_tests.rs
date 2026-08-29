@@ -45,11 +45,12 @@ use agent_core::{
         ChatHistoryEventKind, ChatHistoryRecord, ChatHistoryRole, SessionStore, StoredSession,
         StoredSessionProfile, StoredSessionState,
     },
-    stale_context_prompt_needed, AgentCore, ApprovalRequest, BashApprovalMode, CoreProfile,
-    OutputExpansionRequest, ResponseProtocolKind, RoundLimitDecisionRequest,
-    StaleContextDecisionRequest, WorkInstructionLoadMode, WorkInstructionLoadReport,
-    WorkInstructionLoadRequest, WorkInstructionLoadStatus, WorkspaceChange,
-    WorkspaceCommandOutcome, WorkspaceCommandReport,
+    stale_context_prompt_needed, ActiveTurnProjection, AgentCore, ApprovalRequest,
+    BashApprovalMode, CoreProfile, FinishedTurnProjection, OutputExpansionRequest,
+    ResponseProtocolKind, RoundLimitDecisionRequest, StaleContextDecisionRequest, TurnActivity,
+    TurnInputAdmission, TurnProjection, TurnProjectionOutcome, TurnToken, WorkInstructionLoadMode,
+    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkInstructionLoadStatus,
+    WorkspaceChange, WorkspaceCommandOutcome, WorkspaceCommandReport,
     DEFAULT_STALE_CONTEXT_IDLE as STALE_CONTEXT_IDLE,
     DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD as STALE_CONTEXT_TOKEN_THRESHOLD,
 };
@@ -137,10 +138,129 @@ fn busy_shell_input_is_queued_for_a_separate_turn_not_sent_as_a_supplement() {
         interactive_approval: false,
         queued_input: None,
         queued_questions: vec!["Q2".to_string()],
+        active_turn: None,
+        terminal_outcome: None,
     };
 
     assert!(ui.drain_user_supplements().is_empty());
     assert_eq!(ui.take_queued_questions(), vec!["Q2"]);
+}
+
+fn projection_token(turn_id: &str, epoch: u64) -> TurnToken {
+    TurnToken {
+        session_id: "shell-session".to_string(),
+        turn_id: turn_id.to_string(),
+        epoch,
+    }
+}
+
+fn active_projection(token: TurnToken, stop_requested: bool) -> TurnProjection {
+    TurnProjection::Active(ActiveTurnProjection {
+        token,
+        stop_requested,
+        input_admission: TurnInputAdmission::Open,
+        activity: TurnActivity::Running,
+    })
+}
+
+fn finished_projection(token: TurnToken, outcome: TurnProjectionOutcome) -> TurnProjection {
+    TurnProjection::Finished(FinishedTurnProjection { token, outcome })
+}
+
+#[test]
+fn shell_accepts_only_matching_authoritative_terminal_projection() {
+    let token = projection_token("turn-1", 1);
+    let stale = projection_token("turn-stale", 0);
+    let mut ui = CliTurnUi {
+        status: None,
+        interactive_approval: false,
+        queued_input: None,
+        queued_questions: Vec::new(),
+        active_turn: None,
+        terminal_outcome: None,
+    };
+
+    ui.on_turn_projection(&active_projection(token.clone(), false));
+    ui.on_turn_projection(&finished_projection(
+        stale,
+        TurnProjectionOutcome::Cancelled,
+    ));
+    assert_eq!(ui.terminal_outcome(), None);
+
+    ui.on_turn_projection(&finished_projection(
+        token,
+        TurnProjectionOutcome::Completed,
+    ));
+    assert_eq!(
+        ui.terminal_outcome(),
+        Some(&TurnProjectionOutcome::Completed)
+    );
+}
+
+#[test]
+fn shell_ignores_activity_and_new_active_projection_after_terminal() {
+    let token = projection_token("turn-1", 1);
+    let mut status = ThinkingStatus::start("qwen-plus", 100_000);
+    let mut ui = CliTurnUi {
+        status: Some(&mut status),
+        interactive_approval: false,
+        queued_input: None,
+        queued_questions: Vec::new(),
+        active_turn: None,
+        terminal_outcome: None,
+    };
+
+    ui.on_turn_projection(&active_projection(token.clone(), false));
+    ui.on_model_response(1, &super::UsageStats::zero(), "before terminal");
+    ui.on_turn_projection(&finished_projection(
+        token.clone(),
+        TurnProjectionOutcome::Cancelled,
+    ));
+    ui.on_model_response(
+        2,
+        &super::UsageStats {
+            llm_calls: 1,
+            prompt_tokens: 999,
+            completion_tokens: 999,
+            total_tokens: 1_998,
+            ..super::UsageStats::zero()
+        },
+        "late response",
+    );
+    ui.on_turn_projection(&active_projection(projection_token("turn-2", 2), false));
+
+    assert_eq!(
+        ui.terminal_outcome(),
+        Some(&TurnProjectionOutcome::Cancelled)
+    );
+    assert_eq!(ui.active_turn.as_ref(), Some(&token));
+    drop(ui);
+    let snapshot = status.state.lock().unwrap();
+    assert_eq!(snapshot.status.intent, "已取消");
+    assert_eq!(snapshot.status.usage.prompt_tokens, 0);
+    assert_eq!(snapshot.status.usage.completion_tokens, 0);
+}
+
+#[test]
+fn shell_stop_requested_display_comes_from_active_projection() {
+    let token = projection_token("turn-1", 1);
+    let mut status = ThinkingStatus::start("qwen-plus", 100_000);
+    let mut ui = CliTurnUi {
+        status: Some(&mut status),
+        interactive_approval: false,
+        queued_input: None,
+        queued_questions: Vec::new(),
+        active_turn: None,
+        terminal_outcome: None,
+    };
+
+    ui.on_turn_projection(&active_projection(token.clone(), false));
+    ui.on_turn_projection(&active_projection(token, true));
+
+    drop(ui);
+    let snapshot = status.state.lock().unwrap().clone();
+    assert_eq!(snapshot.status.intent, "正在停止");
+    status.finish();
 }
 
 #[test]
