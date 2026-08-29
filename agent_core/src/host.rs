@@ -1790,6 +1790,10 @@ fn host_decision_request_from_payload(kind: &str, payload: &Value) -> Option<Hos
 }
 
 pub trait TurnUi {
+    /// Receives the complete Core-owned lifecycle projection for the accepted turn.
+    /// Activity/topic callbacks are subordinate and must never override this projection.
+    fn on_turn_projection(&mut self, _projection: &crate::TurnProjection) {}
+
     fn is_cancel_requested(&mut self) -> bool {
         false
     }

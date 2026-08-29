@@ -1,11 +1,13 @@
+use crate::turn_state::TurnProjectionState;
 use crate::{
     append_audit_event, is_model_input_too_large_error, model_input_overflow_recovery_audit_event,
     model_retry_audit_event, model_retry_decision, normalize_user_supplements_with_context,
     ActionRuntime, AgentCore, CoreStep, CoreTopicEvent, HostDecisionRequest, HttpModelClient,
     LlmResponse, LongRunningCommandDecision, LongRunningCommandStatus, ModelCallOutcome,
     ModelInteractionRequest, ModelServiceConfig, ModelSystemRetryPolicy, PromptComponentRole,
-    RoundLimitDecisionRequest, RoundLimitResolution, RuntimeProfiler, StoppedTurn, TurnInput,
-    TurnOutcome, TurnStopReason, TurnStopSummary, TurnUi, UsageStats, UserSupplement,
+    RoundLimitDecisionRequest, RoundLimitResolution, RuntimeProfiler, StoppedTurn, TurnActivity,
+    TurnInput, TurnOutcome, TurnProjection, TurnProjectionOutcome, TurnStopReason, TurnStopSummary,
+    TurnToken, TurnUi, UsageStats, UserSupplement,
 };
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -247,7 +249,10 @@ fn run_session_turn_with_model_client_and_reminder_override(
     focus_reminder_interval: Option<Duration>,
 ) -> TurnOutcome {
     core.set_response_protocol(config.response_protocol);
-    let turn_id = format!("turn_{}", epoch_millis());
+    let turn_token = TurnToken::allocate(request.session, epoch_millis());
+    let turn_id = turn_token.turn_id.clone();
+    let (mut turn_projection, started_projection) = TurnProjectionState::start(turn_token);
+    ui.on_turn_projection(&started_projection);
     let mut reminders = TurnReminderSchedules::new(&turn_id, core.reminder_tips_config());
     let mut progress_reminder = TurnProgressReminder::default();
     if let Some(interval) = focus_reminder_interval {
@@ -272,7 +277,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
     let mut latest_usage: Option<UsageStats> = None;
 
     let (text, stopped, final_parts) = loop {
-        if ui.take_cancel_request() {
+        if take_cancel_request(ui, &mut turn_projection) {
             break cancelled_turn_parts();
         }
         match step {
@@ -367,6 +372,10 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     crate::prepare_model_interaction_http_request(config, &interaction_request)
                         .model_request
                         .body;
+                publish_turn_projection(
+                    ui,
+                    turn_projection.set_activity(TurnActivity::WaitingModel { round: rounds }),
+                );
                 ui.on_model_api_request(rounds, &interaction_request, &api_payload);
                 match call_model_with_system_retries(
                     model_client,
@@ -379,10 +388,14 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     &turn_id,
                 ) {
                     Ok(response) => {
+                        publish_turn_projection(
+                            ui,
+                            turn_projection.set_activity(TurnActivity::Running),
+                        );
                         model_wait_this_turn = model_wait_this_turn.saturating_add(
                             response.model_wait.saturating_add(response.retry_wait),
                         );
-                        if ui.take_cancel_request() {
+                        if take_cancel_request(ui, &mut turn_projection) {
                             break cancelled_turn_parts();
                         }
                         latest_usage = Some(response.response.usage.clone());
@@ -433,7 +446,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
                         }
                     }
                     Err(err) => {
-                        if ui.take_cancel_request() {
+                        publish_turn_projection(
+                            ui,
+                            turn_projection.set_activity(TurnActivity::Running),
+                        );
+                        if take_cancel_request(ui, &mut turn_projection) {
                             break cancelled_turn_parts();
                         }
                         if is_model_input_too_large_error(&err) {
@@ -464,6 +481,10 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 }
             }
             CoreStep::NeedsUserApproval { request: approval } => {
+                publish_turn_projection(
+                    ui,
+                    turn_projection.set_activity(TurnActivity::WaitingUser),
+                );
                 ui.pause_for_user_decision();
                 let user_wait_start = Instant::now();
                 let approved = ui
@@ -473,7 +494,8 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     )
                     .as_bool();
                 user_wait_this_turn = user_wait_this_turn.saturating_add(user_wait_start.elapsed());
-                if ui.take_cancel_request() {
+                publish_turn_projection(ui, turn_projection.set_activity(TurnActivity::Running));
+                if take_cancel_request(ui, &mut turn_projection) {
                     step = core.resolve_user_approval_with_audit_and_cancel(
                         &approval,
                         false,
@@ -522,6 +544,10 @@ fn run_session_turn_with_model_client_and_reminder_override(
             }
             CoreStep::RoundLimitReached { max_rounds } => {
                 let decision_request = RoundLimitDecisionRequest::new(max_rounds);
+                publish_turn_projection(
+                    ui,
+                    turn_projection.set_activity(TurnActivity::WaitingUser),
+                );
                 ui.pause_for_user_decision();
                 let user_wait_start = Instant::now();
                 let should_continue = ui
@@ -531,6 +557,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     )
                     .as_bool();
                 user_wait_this_turn = user_wait_this_turn.saturating_add(user_wait_start.elapsed());
+                publish_turn_projection(ui, turn_projection.set_activity(TurnActivity::Running));
                 match core.resolve_round_limit_with_audit(
                     decision_request,
                     should_continue,
@@ -607,7 +634,43 @@ fn run_session_turn_with_model_client_and_reminder_override(
         profiler.record_turn(elapsed, model_wait_this_turn);
     }
     core.record_turn_final_audit(request.audit_file, request.session, &turn_id, &outcome);
+    publish_turn_projection(ui, turn_projection.close_input());
+    let projection_outcome = projection_outcome_from_turn_outcome(&outcome);
+    publish_turn_projection(ui, turn_projection.finish(projection_outcome));
     outcome
+}
+
+fn publish_turn_projection(ui: &mut dyn TurnUi, projection: Option<TurnProjection>) {
+    if let Some(projection) = projection {
+        ui.on_turn_projection(&projection);
+    }
+}
+
+fn take_cancel_request(ui: &mut dyn TurnUi, turn_projection: &mut TurnProjectionState) -> bool {
+    if !ui.take_cancel_request() {
+        return false;
+    }
+    publish_turn_projection(ui, turn_projection.request_stop());
+    true
+}
+
+fn projection_outcome_from_turn_outcome(outcome: &TurnOutcome) -> TurnProjectionOutcome {
+    match outcome.stop_reason {
+        None => TurnProjectionOutcome::Completed,
+        Some(TurnStopReason::CancelledByUser) => TurnProjectionOutcome::Cancelled,
+        Some(TurnStopReason::ModelError) => TurnProjectionOutcome::Failed {
+            code: "model_error".to_string(),
+        },
+        Some(TurnStopReason::ProtocolRepairFailed) => TurnProjectionOutcome::Failed {
+            code: "protocol_repair_failed".to_string(),
+        },
+        Some(TurnStopReason::OutputLimitStoppedByUser) => TurnProjectionOutcome::Interrupted {
+            code: "output_limit_stopped_by_user".to_string(),
+        },
+        Some(TurnStopReason::RoundLimitReached) => TurnProjectionOutcome::Interrupted {
+            code: "round_limit_reached".to_string(),
+        },
+    }
 }
 
 fn is_terminal_stop(step: &CoreStep) -> bool {
