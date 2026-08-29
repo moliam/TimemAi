@@ -187,14 +187,39 @@ async function startHost() {
   };
 }
 
+async function waitForProcessExit(child, timeoutMs) {
+  if (child.exitCode !== null) return true;
+  return Promise.race([
+    new Promise((resolve) => child.once("exit", () => resolve(true))),
+    sleep(timeoutMs).then(() => false),
+  ]);
+}
+
+async function removeBrowserProfile(profile) {
+  const deadline = Date.now() + 5000;
+  while (true) {
+    try {
+      await rm(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+      return;
+    } catch (error) {
+      if (
+        Date.now() >= deadline ||
+        !["EBUSY", "ENOTEMPTY", "EPERM"].includes(error?.code)
+      ) {
+        throw error;
+      }
+      await sleep(100);
+    }
+  }
+}
+
 async function stopBrowserProcess(child, profile) {
   if (child.exitCode === null) child.kill("SIGTERM");
-  await Promise.race([
-    new Promise((resolve) => child.once("exit", resolve)),
-    sleep(2500),
-  ]);
-  if (child.exitCode === null) child.kill("SIGKILL");
-  await rm(profile, { recursive: true, force: true });
+  if (!(await waitForProcessExit(child, 2500)) && child.exitCode === null) {
+    child.kill("SIGKILL");
+    await waitForProcessExit(child, 2500);
+  }
+  await removeBrowserProfile(profile);
 }
 
 async function readDevToolsPort(profile) {

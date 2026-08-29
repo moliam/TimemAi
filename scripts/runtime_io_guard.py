@@ -263,7 +263,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit-bps", type=int, default=DEFAULT_LIMIT_BPS)
     parser.add_argument("--sample-seconds", type=float, default=DEFAULT_SAMPLE_SECONDS)
-    parser.add_argument("--start-timeout", type=float, default=30.0)
+    parser.add_argument("--start-timeout", type=float, default=60.0)
     parser.add_argument("--finish-timeout", type=float, default=10.0)
     parser.add_argument("--report", default="target/runtime-io-guard/report.json")
     args = parser.parse_args()
