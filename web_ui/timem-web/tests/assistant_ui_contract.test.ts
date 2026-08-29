@@ -48,8 +48,8 @@ describe("Agent Core live-state delivery", () => {
   it("uses the explicit Core turn_started event for turn and worker working state", () => {
     expect(protocolSource).toContain('type: "turn_started"');
     expect(source).toContain('if (event.type === "turn_started")');
-    expect(source).toContain(
-      'updateSessionWorkerState(upsertTurn(session, event.turn), event.worker_id, "working")',
+    expect(source).toMatch(
+      /updateSessionWorkerState\([\s\S]*?upsertTurn\(session, event\.turn\),[\s\S]*?event\.worker_id,[\s\S]*?"working",[\s\S]*?event\.turn\.turn_id/,
     );
   });
 
@@ -844,8 +844,10 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain("activeSession.cancelling_turn_id");
     expect(protocolSource).toContain('type: "turn_cancelling"');
     expect(source).toContain('if (event.type === "turn_cancelling")');
-    expect(source).toContain("targetedCancelStillApplies(");
+    expect(source).toContain("sessionCancellationApplies(");
+    expect(viewModelSource).toContain("targetedCancelStillApplies(");
     expect(source).toContain("persistedCancelTargetCommandIds");
+    expect(viewModelSource).toContain("previousIsTerminal");
   });
 
   it("queues working-turn input while keeping an explicit supplement escape hatch", () => {
@@ -3039,8 +3041,8 @@ describe("assistant-ui thread integration", () => {
     expect(source).toContain(
       "setActiveSessionId(session.session_id); closeMobileSidebar();",
     );
-    expect(source).toContain(
-      "onDoubleClick={() => { if (!runtimeLocked && !sessionDeleteMode && renamingSessionId !== session.session_id) beginRename(session); }}",
+    expect(source).toMatch(
+      /onDoubleClick=\{\(\) => \{[\s\S]*?!runtimeLocked[\s\S]*?!sessionDeleteMode[\s\S]*?renamingSessionId !==[\s\S]*?session\.session_id[\s\S]*?beginRename\(session\);/,
     );
     expect(source).toContain("sessionRenameDecision(");
     expect(styles).toContain(".session:disabled, .session-expand:disabled");
@@ -3253,33 +3255,35 @@ describe("assistant-ui thread integration", () => {
     );
     expect(source).toContain("session-working-icon");
     expect(source).toContain("const visuallyWorking = sessionVisuallyWorking(");
-    expect(viewModelSource).toContain("!session.cancelling_turn_id");
+    expect(viewModelSource).toContain("sessionCancellationApplies(");
     expect(viewModelSource).toContain(
-      "!locallyCancellingSessionIds.has(session.session_id)",
+      "locallyCancellingSessionIds.has(session.session_id)",
     );
+    expect(source).toContain("persistedCancelTargetCommandIds[");
     expect(source).toContain('aria-label="Session working"');
     expect(source).toContain('aria-hidden="true"');
-    expect(source).toContain(
-      'className="sr-only">Session state: {session.state}</span>',
+    expect(source).toMatch(
+      /className="sr-only">\s*Session state: \{session\.state\}\s*<\/span>/,
     );
     expect(source).not.toContain("Agent working");
     expect(source).toContain("session-rename-input");
-    expect(source).toContain(
-      'if (event.key === "Enter" && !event.nativeEvent.isComposing) { event.preventDefault(); finishRename(session.session_id); }',
+    expect(source).toMatch(
+      /event\.key === "Enter" &&\s*!event\.nativeEvent\.isComposing/,
     );
-    expect(source).toContain(
-      'if (event.key === "Escape") { event.preventDefault(); setRenamingSessionId(""); setRenameDraft(""); }',
+    expect(source).toMatch(/finishRename\(\s*session\.session_id\s*\)/);
+    expect(source).toMatch(
+      /event\.key === "Escape"[\s\S]*?setRenamingSessionId\(""\);[\s\S]*?setRenameDraft\(""\);/,
     );
-    expect(source).toContain(
-      "const renamingSession = pendingRenameSessionIds.has(session.session_id);",
+    expect(source).toMatch(
+      /const renamingSession =\s*pendingRenameSessionIds\.has\(session\.session_id\);/,
     );
     expect(source).toContain('renamingSession ? "renaming-session" : ""');
-    expect(source).toContain(
-      "aria-busy={renamingSession || deletingSession || undefined}",
+    expect(source).toMatch(
+      /aria-busy=\{\s*renamingSession \|\|\s*deletingSession \|\|\s*undefined\s*\}/,
     );
     expect(source).toContain("Saving name...");
-    expect(source).toContain(
-      "onDoubleClick={() => { if (!runtimeLocked && !sessionDeleteMode && renamingSessionId !== session.session_id) beginRename(session); }}",
+    expect(source).toMatch(
+      /onDoubleClick=\{\(\) => \{[\s\S]*?!runtimeLocked[\s\S]*?!sessionDeleteMode[\s\S]*?renamingSessionId !==[\s\S]*?session\.session_id[\s\S]*?beginRename\(session\);/,
     );
     expect(styles).toContain("@keyframes session-working-glow");
     expect(styles).toContain(".session-row.renaming-session");

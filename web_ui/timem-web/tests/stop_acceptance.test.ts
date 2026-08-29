@@ -3,6 +3,7 @@ import type { Session, WebTurn } from "../src/protocol";
 import {
   finishTurn,
   markSessionCancelling,
+  sessionCancellationApplies,
   sessionVisuallyWorking,
   updateSessionWorkerState,
   upsertTurn,
@@ -108,6 +109,53 @@ describe("Stop feature acceptance", () => {
     // Then Turn correlation remains, but the Session stays visibly stopped.
     expect(afterLateWorker.active_turn_id).toBe("turn-1");
     expect(afterLateWorker.cancelling_turn_id).toBe("turn-1");
+    expect(afterLateWorker.state).toBe("ready");
+    expect(afterLateWorker.workers[0].state).toBe("ready");
+    expect(sessionVisuallyWorking(afterLateWorker)).toBe(false);
+  });
+
+
+  it("keeps a stale reconnect snapshot visually stopped while a durable targeted cancel applies", () => {
+    // Given a reload has discarded memory-only cancellation state while Host
+    // still reports the pre-cancel working snapshot.
+    const staleSnapshot = runningSession();
+
+    // Then the durable targeted cancel is the shared cancellation truth for
+    // both the chat and the Session row.
+    expect(
+      sessionCancellationApplies(
+        staleSnapshot,
+        new Set(),
+        "submit-original",
+      ),
+    ).toBe(true);
+    expect(
+      sessionVisuallyWorking(staleSnapshot, new Set(), "submit-original"),
+    ).toBe(false);
+  });
+
+  it("does not revive a cancelled Session after terminal completion", () => {
+    // Given the cancelled Turn has already reached its authoritative terminal state.
+    const finished = finishTurn(runningSession(), "turn-1", {
+      stop_reason: "CancelledByUser",
+    });
+
+    // When delayed started and worker-working projections for that same Turn arrive.
+    const afterLateTurn = upsertTurn(finished, workingTurn());
+    const afterLateWorker = updateSessionWorkerState(
+      afterLateTurn,
+      "worker-1",
+      "working",
+      "turn-1",
+    );
+
+    // Then terminal state remains monotonic: chat stays Cancelled and the
+    // Session row cannot return to working.
+    expect(afterLateWorker.turns[0]).toMatchObject({
+      turn_id: "turn-1",
+      state: "finished",
+      completion: { stop_reason: "CancelledByUser" },
+    });
     expect(afterLateWorker.state).toBe("ready");
     expect(afterLateWorker.workers[0].state).toBe("ready");
     expect(sessionVisuallyWorking(afterLateWorker)).toBe(false);

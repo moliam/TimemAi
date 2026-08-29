@@ -454,6 +454,19 @@ export function targetedCancelStillApplies(
   );
 }
 
+export function sessionCancellationApplies(
+  session: Session | undefined,
+  locallyCancellingSessionIds: ReadonlySet<string> = new Set(),
+  targetCommandId?: string,
+): boolean {
+  return !!(
+    session &&
+    (locallyCancellingSessionIds.has(session.session_id) ||
+      session.cancelling_turn_id ||
+      targetedCancelStillApplies(session, targetCommandId))
+  );
+}
+
 export function turnInteractionPhase(
   session: Session | undefined,
   localSubmitCommandId: string | undefined,
@@ -776,15 +789,25 @@ export function removePendingAttachment(
 }
 
 export function upsertTurn(session: Session, incoming: WebTurn): Session {
-  const boundedIncoming = incoming;
+  const previous = session.turns.find(
+    (turn) => turn.turn_id === incoming.turn_id,
+  );
+  const previousIsTerminal = !!(
+    previous &&
+    (previous.state === "finished" || previous.completion)
+  );
+  // Turn state is monotonic. A delayed started/updated event from a cancelled
+  // execution must not overwrite the terminal projection already shown by UI.
+  const boundedIncoming =
+    previousIsTerminal && incoming.state !== "finished" ? previous : incoming;
   const turns = trimTurns(
-    session.turns.some((turn) => turn.turn_id === incoming.turn_id)
+    previous
       ? session.turns.map((turn) =>
           turn.turn_id === incoming.turn_id ? boundedIncoming : turn,
         )
       : [...session.turns, boundedIncoming],
   );
-  const started = incoming.state === "working";
+  const started = boundedIncoming.state === "working" && !previousIsTerminal;
   const visuallyWorking = started && !session.cancelling_turn_id;
   const pending = incoming.state === "pending";
   return {
@@ -1131,13 +1154,17 @@ function finalAnswerFromTurnEvent(session: Session, event: WebTurnEvent) {
 }
 
 export function sessionVisuallyWorking(
-  session: Pick<Session, "session_id" | "state" | "cancelling_turn_id">,
+  session: Session,
   locallyCancellingSessionIds: ReadonlySet<string> = new Set(),
+  targetCancelCommandId?: string,
 ): boolean {
   return (
     session.state === "working" &&
-    !session.cancelling_turn_id &&
-    !locallyCancellingSessionIds.has(session.session_id)
+    !sessionCancellationApplies(
+      session,
+      locallyCancellingSessionIds,
+      targetCancelCommandId,
+    )
   );
 }
 
@@ -1188,8 +1215,19 @@ export function updateSessionWorkerState(
   session: Session,
   workerId: string,
   state: string,
+  turnId?: string | null,
 ): Session {
   if (state === "working" && session.cancelling_turn_id) return session;
+  if (
+    state === "working" &&
+    turnId &&
+    session.turns.some(
+      (turn) =>
+        turn.turn_id === turnId &&
+        (turn.state === "finished" || !!turn.completion),
+    )
+  )
+    return session;
   let found = false;
   let changed = false;
   const workers = session.workers.map((worker) => {
@@ -1434,6 +1472,7 @@ export function applyCoreTopicToSession(
   session: Session,
   event: CoreTopicEvent,
   makeAssistantMessage: (text: string, id?: string) => ChatMessage,
+  turnId?: string | null,
 ): Session {
   if (session.session_id !== event.session_id) return session;
   const isLifecycle = event.topic.name === "core.lifecycle";
@@ -1493,10 +1532,22 @@ export function applyCoreTopicToSession(
           session,
           event.worker_id,
           event.payload.continue_work === true ? "working" : "ready",
+          turnId,
         )
       : {
           ...session,
-          state: event.payload.continue_work === true ? "working" : "ready",
+          state:
+            event.payload.continue_work === true &&
+            !(
+              turnId &&
+              session.turns.some(
+                (turn) =>
+                  turn.turn_id === turnId &&
+                  (turn.state === "finished" || !!turn.completion),
+              )
+            )
+              ? "working"
+              : "ready",
         };
     return {
       ...updated,
