@@ -81,6 +81,34 @@ fn segmented_read_recovers_an_interrupted_directory_swap() {
 }
 
 #[test]
+fn append_uses_a_soft_slice_threshold_without_splitting_records() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_rolling_soft_threshold_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("audit.jsonl");
+    let capacity = RollingCapacity::with_slice_bytes(32, 8).unwrap();
+
+    append_rolling_record(&path, b"123456\n", capacity, 8).unwrap();
+    append_rolling_record(&path, b"abc\n", capacity, 8).unwrap();
+    let over_target = rolling_segments(&path).unwrap();
+    assert_eq!(over_target.len(), 1);
+    assert_eq!(over_target[0].bytes, 11);
+
+    append_rolling_record(&path, b"next\n", capacity, 8).unwrap();
+    let rolled = rolling_segments(&path).unwrap();
+    assert_eq!(rolled.len(), 2);
+    assert_eq!(std::fs::read(&rolled[0].path).unwrap(), b"123456\nabc\n");
+    assert_eq!(std::fs::read(&rolled[1].path).unwrap(), b"next\n");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn incremental_append_keeps_closed_segments_unchanged() {
     let root = std::env::temp_dir().join(format!(
         "timem_rolling_incremental_{}_{}",
@@ -92,17 +120,18 @@ fn incremental_append_keeps_closed_segments_unchanged() {
     ));
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("audit.jsonl");
-    let capacity = RollingCapacity::with_slice_bytes(32, 8).unwrap();
+    let capacity = RollingCapacity::with_slice_bytes(40, 8).unwrap();
 
     append_rolling_record(&path, b"first\n", capacity, 8).unwrap();
     append_rolling_record(&path, b"second\n", capacity, 8).unwrap();
+    append_rolling_record(&path, b"third\n", capacity, 8).unwrap();
     let before = rolling_segments(&path).unwrap();
     assert_eq!(before.len(), 2);
     let closed_path = before[0].path.clone();
     let closed_bytes = std::fs::read(&closed_path).unwrap();
     let closed_modified = std::fs::metadata(&closed_path).unwrap().modified().unwrap();
 
-    append_rolling_record(&path, b"third\n", capacity, 8).unwrap();
+    append_rolling_record(&path, b"fourth\n", capacity, 8).unwrap();
 
     assert_eq!(std::fs::read(&closed_path).unwrap(), closed_bytes);
     assert_eq!(
@@ -114,7 +143,8 @@ fn incremental_append_keeps_closed_segments_unchanged() {
         vec![
             b"first\n".to_vec(),
             b"second\n".to_vec(),
-            b"third\n".to_vec()
+            b"third\n".to_vec(),
+            b"fourth\n".to_vec()
         ]
     );
     let _ = std::fs::remove_dir_all(root);
@@ -132,7 +162,7 @@ fn incremental_capacity_evicts_only_complete_oldest_segments() {
     ));
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("audit.jsonl");
-    let capacity = RollingCapacity::with_slice_bytes(24, 8).unwrap();
+    let capacity = RollingCapacity::with_slice_bytes(32, 8).unwrap();
 
     for record in [b"one---\n", b"two---\n", b"three-\n"] {
         append_rolling_record(&path, record, capacity, 8).unwrap();
@@ -241,6 +271,33 @@ fn append_rebuilds_a_corrupt_manifest_without_losing_segments() {
     let repaired: RollingManifest =
         serde_json::from_slice(&std::fs::read(rolling_manifest_path(&path)).unwrap()).unwrap();
     assert_eq!(repaired.version, 1);
-    assert_eq!(repaired.segments.len(), 3);
+    assert_eq!(repaired.segments.len(), 2);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn append_result_reports_only_real_segment_rollovers() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_rolling_outcome_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("audit.jsonl");
+    let capacity = RollingCapacity::with_slice_bytes(32, 8).unwrap();
+
+    let first = append_rolling_record_with_result(&path, b"one\n", capacity, 8).unwrap();
+    assert!(
+        !first.rolled_segment,
+        "creating the initial segment is not a rollover"
+    );
+    let same_segment = append_rolling_record_with_result(&path, b"two\n", capacity, 8).unwrap();
+    assert!(!same_segment.rolled_segment);
+    let rollover = append_rolling_record_with_result(&path, b"three\n", capacity, 8).unwrap();
+    assert!(rollover.rolled_segment);
+
     let _ = std::fs::remove_dir_all(root);
 }

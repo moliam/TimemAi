@@ -306,6 +306,9 @@ enum CoreSessionWorkerCommand {
     UpdateHttpHeaders {
         http_headers: BTreeMap<String, String>,
     },
+    UpdateRequestFields {
+        request_fields: BTreeMap<String, serde_json::Value>,
+    },
     UpdateMcp {
         base_capabilities: crate::capability::CapabilityRegistry,
         runtime: crate::mcp::McpRuntime,
@@ -754,6 +757,18 @@ impl CoreSessionWorkerHandle {
         }
         self.command_tx
             .send(CoreSessionWorkerCommand::UpdateHttpHeaders { http_headers })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn update_request_fields(
+        &self,
+        request_fields: BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.command_tx
+            .send(CoreSessionWorkerCommand::UpdateRequestFields { request_fields })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
@@ -1392,6 +1407,7 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::MaxRoundsUpdated
                     | CoreSessionWorkerCommand::UpdateApiKey { .. }
                     | CoreSessionWorkerCommand::UpdateHttpHeaders { .. }
+                    | CoreSessionWorkerCommand::UpdateRequestFields { .. }
                     | CoreSessionWorkerCommand::UpdateMcp { .. }
                         if shutdown_requested.load(Ordering::SeqCst) =>
                     {
@@ -1623,6 +1639,10 @@ impl CoreSessionWorker {
                     }
                     CoreSessionWorkerCommand::UpdateHttpHeaders { http_headers } => {
                         config.http_headers = http_headers;
+                        core.notify_runtime_config_changed();
+                    }
+                    CoreSessionWorkerCommand::UpdateRequestFields { request_fields } => {
+                        config.request_fields = request_fields;
                         core.notify_runtime_config_changed();
                     }
                     CoreSessionWorkerCommand::UpdateMcp {

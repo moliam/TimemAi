@@ -537,3 +537,31 @@ fn audit_capacity_uses_16_mib_slices_and_reserves_one_for_writes() {
     assert_eq!(ACTION_AUDIT_MAX_BYTES, UNIT);
     assert_eq!(REPAIR_OUTPUT_MAX_BYTES, UNIT);
 }
+
+#[test]
+fn audit_maintenance_hint_is_written_only_for_a_segment_rollover() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_audit_hint_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("api_audit.jsonl");
+    let hint = api_audit_maintenance_hint_path(&path);
+
+    write_audit_maintenance_hint_if_rolled(&path, false).unwrap();
+    assert!(
+        !hint.exists(),
+        "ordinary audit appends must not add hint I/O"
+    );
+    write_audit_maintenance_hint_if_rolled(&path, true).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&hint).unwrap(),
+        "audit_segment_rolled\n"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}

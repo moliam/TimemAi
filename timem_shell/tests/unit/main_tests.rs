@@ -603,6 +603,7 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
     let mut config = ModelServiceConfig {
         interaction: Default::default(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -690,6 +691,7 @@ fn config_response_protocol_update_is_supported_by_terminal_host() {
     let mut config = ModelServiceConfig {
         interaction: Default::default(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -735,6 +737,7 @@ fn config_protocol_update_keeps_endpoint_defaults_consistent() {
     let mut config = ModelServiceConfig {
         interaction: Default::default(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -795,6 +798,7 @@ fn config_protocol_update_preserves_explicit_endpoint() {
     let mut config = ModelServiceConfig {
         interaction: Default::default(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
@@ -860,6 +864,7 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
     let config = ModelServiceConfig {
         interaction: Default::default(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -999,6 +1004,7 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
     let default_config = ModelServiceConfig {
         interaction: Default::default(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -1022,6 +1028,7 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
     let override_config = ModelServiceConfig {
         interaction: Default::default(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
@@ -1058,6 +1065,7 @@ fn startup_banner_highlights_custom_model_and_base_url() {
     let config = ModelServiceConfig {
         interaction: Default::default(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         api_protocol: ApiProtocol::Anthropic,
         api_key: "secret".to_string(),
         model: "aws-claude-sonnet-4-6".to_string(),
@@ -2179,6 +2187,7 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
     let config = ModelServiceConfig {
         interaction: Default::default(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2252,6 +2261,7 @@ fn shell_start_recovers_valid_session_from_partially_corrupt_index() {
     let config = ModelServiceConfig {
         interaction: Default::default(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2317,6 +2327,7 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
     let config = ModelServiceConfig {
         interaction: Default::default(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),
@@ -2504,6 +2515,7 @@ fn shell_resume_selects_the_most_recent_valid_session() {
     let config = ModelServiceConfig {
         interaction: Default::default(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "launch-secret".to_string(),
         model: "launch-model".to_string(),
@@ -2559,6 +2571,7 @@ fn shell_runtime_config_changes_are_cached_before_another_turn_runs() {
     let mut config = ModelServiceConfig {
         interaction: Default::default(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "cached-secret".to_string(),
         model: "old-model".to_string(),
@@ -2609,6 +2622,7 @@ fn shell_can_resume_web_style_session_history() {
     let config = ModelServiceConfig {
         interaction: Default::default(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         api_protocol: ApiProtocol::OpenAiCompatible,
         api_key: "secret".to_string(),
         model: "qwen-plus".to_string(),

@@ -12,8 +12,11 @@ use std::{
 
 const ACTION_BUCKET_MS: u64 = 20;
 const ACTION_LAST_BUCKET_MS: u64 = 1_000;
-const LLM_BUCKET_MS: u64 = 200;
-const LLM_LAST_BUCKET_MS: u64 = 30_000;
+const LLM_LATENCY_BOUNDARIES_MS: [u64; 8] =
+    [500, 1_000, 3_000, 5_000, 10_000, 15_000, 20_000, 30_000];
+const LLM_LATENCY_LABELS: [&str; 9] = [
+    "500 ms", "1 s", "3 s", "5 s", "10 s", "15 s", "20 s", "30 s", "30 s+",
+];
 const MAX_LLM_RESPONSE_DUMP_ENTRIES: usize = 10;
 const STATISTICS_REFRESH_MS: u64 = 2_000;
 static NEXT_DEBUG_STORE_ID: AtomicU64 = AtomicU64::new(0);
@@ -948,8 +951,7 @@ fn render_endpoint_panel(
         .map(|value| value / 1_000_000)
         .collect::<Vec<_>>();
     let action_counts = fixed_histogram(&action_ms, ACTION_BUCKET_MS, ACTION_LAST_BUCKET_MS);
-    let latency_counts =
-        fixed_histogram(&endpoint.llm_latency_ms, LLM_BUCKET_MS, LLM_LAST_BUCKET_MS);
+    let latency_counts = latency_histogram(&endpoint.llm_latency_ms);
     out.push_str("<div class=\"metric-pair\"><article class=\"panel metric-panel\"><div class=\"section-head compact\"><div><p class=\"eyebrow\">LOCAL EXECUTION</p><h3>Action on-CPU time</h3></div></div><div class=\"mini-kpis\">");
     mini_kpi(out, "Total", &format_duration_ns(action_total_ns));
     mini_kpi(
@@ -1006,15 +1008,7 @@ fn render_endpoint_panel(
     mini_kpi(out, "Samples", &endpoint.llm_latency_ms.len().to_string());
     out.push_str("</div>");
     render_horizontal_histogram(out, &latency_counts, |bucket| {
-        if bucket + 1 == latency_counts.len() {
-            "30s+".to_string()
-        } else {
-            format!(
-                "{}–{} ms",
-                bucket as u64 * LLM_BUCKET_MS,
-                (bucket as u64 + 1) * LLM_BUCKET_MS
-            )
-        }
+        LLM_LATENCY_LABELS[bucket].to_string()
     });
     out.push_str("</article></div><div class=\"metric-pair lower\"><article class=\"panel metric-panel\"><div class=\"section-head compact\"><div><p class=\"eyebrow\">PROTOCOL QUALITY</p><h3>Repair error categories</h3></div></div>");
     render_named_bars(out, &endpoint.repairs);
@@ -1078,6 +1072,15 @@ fn fixed_histogram(values: &[u64], width: u64, last_start: u64) -> Vec<u64> {
         } else {
             (*value / width) as usize
         };
+        counts[index] = counts[index].saturating_add(1);
+    }
+    counts
+}
+
+fn latency_histogram(values: &[u64]) -> Vec<u64> {
+    let mut counts = vec![0_u64; LLM_LATENCY_LABELS.len()];
+    for value in values {
+        let index = LLM_LATENCY_BOUNDARIES_MS.partition_point(|boundary| value > boundary);
         counts[index] = counts[index].saturating_add(1);
     }
     counts
@@ -1522,9 +1525,19 @@ mod tests {
     #[test]
     fn histograms_keep_fixed_last_bucket() {
         assert_eq!(fixed_histogram(&[19, 20, 999, 1_000], 20, 1_000)[50], 1);
+    }
+
+    #[test]
+    fn llm_latency_histogram_uses_only_the_configured_boundaries() {
+        let values = [
+            0, 500, 501, 1_000, 1_001, 3_000, 3_001, 5_000, 5_001, 10_000, 10_001, 15_000, 15_001,
+            20_000, 20_001, 30_000, 30_001, 45_000,
+        ];
+
+        assert_eq!(latency_histogram(&values), vec![2; 9]);
         assert_eq!(
-            fixed_histogram(&[199, 200, 29_999, 30_000], 200, 30_000)[150],
-            1
+            LLM_LATENCY_LABELS,
+            ["500 ms", "1 s", "3 s", "5 s", "10 s", "15 s", "20 s", "30 s", "30 s+",]
         );
     }
 

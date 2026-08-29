@@ -97,6 +97,16 @@ expect {
     }
 }
 wait_prompt
+if {[info exists env(TIMEM_RUNTIME_IO_PID_FILE)] && $env(TIMEM_RUNTIME_IO_PID_FILE) ne ""} {
+    set marker [open $env(TIMEM_RUNTIME_IO_PID_FILE) "w"]
+    puts $marker [exp_pid]
+    close $marker
+}
+if {[info exists env(TIMEM_RUNTIME_IO_START_FILE)] && $env(TIMEM_RUNTIME_IO_START_FILE) ne ""} {
+    close [open $env(TIMEM_RUNTIME_IO_START_FILE) "w"]
+    # Observe a fully started but idle Timem before the real model/action turn.
+    after 2000
+}
 send "TTY_STRESS：请执行一次终端渲染压力测试，最后只回答 STRESS_OK。\r"
 wait_for_thinking_panel
 after 400
@@ -127,6 +137,9 @@ expect {
         if {!$saw_action_render && [string first "STRESS_ACTION_DONE" $output] < 0} {
             error "stress scenario did not render command action"
         }
+        if {[info exists env(TIMEM_RUNTIME_IO_END_FILE)] && $env(TIMEM_RUNTIME_IO_END_FILE) ne ""} {
+            close [open $env(TIMEM_RUNTIME_IO_END_FILE) "w"]
+        }
         send "/exit\r"
         expect {
             -re "\033\\\[6n" {
@@ -152,6 +165,9 @@ expect {
             wait_prompt
             if {!$saw_action_render && [string first "STRESS_ACTION_DONE" $output] < 0} {
                 error "stress scenario did not render command action"
+            }
+            if {[info exists env(TIMEM_RUNTIME_IO_END_FILE)] && $env(TIMEM_RUNTIME_IO_END_FILE) ne ""} {
+                close [open $env(TIMEM_RUNTIME_IO_END_FILE) "w"]
             }
             send "/exit
 "
