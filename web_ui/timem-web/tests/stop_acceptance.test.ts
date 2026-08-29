@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { Session, WebTurn } from "../src/protocol";
 import {
   finishTurn,
-  markSessionCancelling,
   sessionCancellationApplies,
   sessionVisuallyWorking,
   updateSessionWorkerState,
@@ -59,6 +58,12 @@ const workingTurn = (): WebTurn => ({
   completion: null,
 });
 
+const cancelledTurn = (): WebTurn => ({
+  ...workingTurn(),
+  state: "finished",
+  completion: { stop_reason: "CancelledByUser" },
+});
+
 function runningSession(): Session {
   return updateSessionWorkerState(
     upsertTurn(session(), workingTurn()),
@@ -67,38 +72,43 @@ function runningSession(): Session {
   );
 }
 
+function hostCancelledSession(): Session {
+  const running = runningSession();
+  return {
+    ...running,
+    state: "ready",
+    workers: running.workers.map((item) => ({ ...item, state: "ready" })),
+    cancelling_turn_id: "turn-1",
+    turns: [cancelledTurn()],
+  };
+}
+
 describe("Stop feature acceptance", () => {
-  it("stops showing work immediately when the user presses Stop", () => {
-    // Given a Turn visibly working in the Session list.
+  it("keeps rendering the last Host state until the Stop response arrives", () => {
     const running = runningSession();
+
+    // A click is only a transport action. Before Host responds, business UI
+    // remains a rendering of the last authoritative Session.
     expect(sessionVisuallyWorking(running)).toBe(true);
-
-    // When the browser records the user's Stop action, before Host round-trip.
-    const locallyStopping = new Set([running.session_id]);
-
-    // Then the user no longer sees the Session as working.
-    expect(sessionVisuallyWorking(running, locallyStopping)).toBe(false);
+    expect(running.turns[0]).toMatchObject({ state: "working", completion: null });
   });
 
-  it("keeps the Session non-working after Host acknowledgement and reconnect snapshot", () => {
-    // Given Host has accepted Stop for the current Turn.
-    const acknowledged = markSessionCancelling(runningSession(), "turn-1");
+  it("renders the complete authoritative Session returned by Host", () => {
+    const acknowledged = hostCancelledSession();
 
-    // Then observable identity is preserved while all visible working state is gone.
     expect(acknowledged.active_turn_id).toBe("turn-1");
     expect(acknowledged.cancelling_turn_id).toBe("turn-1");
+    expect(acknowledged.turns[0]).toMatchObject({
+      state: "finished",
+      completion: { stop_reason: "CancelledByUser" },
+    });
     expect(acknowledged.state).toBe("ready");
-    expect(
-      acknowledged.workers.every((worker) => worker.state !== "working"),
-    ).toBe(true);
+    expect(acknowledged.workers.every((worker) => worker.state !== "working")).toBe(true);
     expect(sessionVisuallyWorking(acknowledged)).toBe(false);
   });
 
-  it("does not revive the spinner when late Core working events arrive", () => {
-    // Given Stop has already been accepted.
-    const acknowledged = markSessionCancelling(runningSession(), "turn-1");
-
-    // When delayed TurnStarted/worker-working projections arrive.
+  it("does not revive the Host-confirmed terminal state with late Core events", () => {
+    const acknowledged = hostCancelledSession();
     const afterLateTurn = upsertTurn(acknowledged, workingTurn());
     const afterLateWorker = updateSessionWorkerState(
       afterLateTurn,
@@ -106,41 +116,26 @@ describe("Stop feature acceptance", () => {
       "working",
     );
 
-    // Then Turn correlation remains, but the Session stays visibly stopped.
     expect(afterLateWorker.active_turn_id).toBe("turn-1");
     expect(afterLateWorker.cancelling_turn_id).toBe("turn-1");
+    expect(afterLateWorker.turns[0]).toMatchObject({
+      state: "finished",
+      completion: { stop_reason: "CancelledByUser" },
+    });
     expect(afterLateWorker.state).toBe("ready");
     expect(afterLateWorker.workers[0].state).toBe("ready");
-    expect(sessionVisuallyWorking(afterLateWorker)).toBe(false);
   });
 
-
-  it("keeps a stale reconnect snapshot visually stopped while a durable targeted cancel applies", () => {
-    // Given a reload has discarded memory-only cancellation state while Host
-    // still reports the pre-cancel working snapshot.
+  it("does not let a browser outbox override a stale Host snapshot", () => {
     const staleSnapshot = runningSession();
-
-    // Then the durable targeted cancel is the shared cancellation truth for
-    // both the chat and the Session row.
-    expect(
-      sessionCancellationApplies(
-        staleSnapshot,
-        new Set(),
-        "submit-original",
-      ),
-    ).toBe(true);
-    expect(
-      sessionVisuallyWorking(staleSnapshot, new Set(), "submit-original"),
-    ).toBe(false);
+    expect(sessionCancellationApplies(staleSnapshot)).toBe(false);
+    expect(sessionVisuallyWorking(staleSnapshot)).toBe(true);
   });
 
   it("does not revive a cancelled Session after terminal completion", () => {
-    // Given the cancelled Turn has already reached its authoritative terminal state.
     const finished = finishTurn(runningSession(), "turn-1", {
       stop_reason: "CancelledByUser",
     });
-
-    // When delayed started and worker-working projections for that same Turn arrive.
     const afterLateTurn = upsertTurn(finished, workingTurn());
     const afterLateWorker = updateSessionWorkerState(
       afterLateTurn,
@@ -149,8 +144,6 @@ describe("Stop feature acceptance", () => {
       "turn-1",
     );
 
-    // Then terminal state remains monotonic: chat stays Cancelled and the
-    // Session row cannot return to working.
     expect(afterLateWorker.turns[0]).toMatchObject({
       turn_id: "turn-1",
       state: "finished",
@@ -158,17 +151,11 @@ describe("Stop feature acceptance", () => {
     });
     expect(afterLateWorker.state).toBe("ready");
     expect(afterLateWorker.workers[0].state).toBe("ready");
-    expect(sessionVisuallyWorking(afterLateWorker)).toBe(false);
   });
 
-  it("durably queues new input and holds it until cancellation is authoritatively finished", () => {
-    // Given Stop is acknowledged, while the old Turn is still cleaning up.
-    const acknowledged = markSessionCancelling(runningSession(), "turn-1");
-    const queued = {
-      "session-1": [{ id: "message-2", text: "Next task", createdAtMs: 2 }],
-    };
+  it("submits new input directly after Host confirms the cancelled UI state", () => {
+    const acknowledged = hostCancelledSession();
 
-    // Then Enter cannot bypass the queue, even though visual state is ready.
     expect(
       shouldDirectManualMessage(
         acknowledged.state,
@@ -176,36 +163,19 @@ describe("Stop feature acceptance", () => {
         false,
         !!acknowledged.cancelling_turn_id,
       ),
-    ).toBe(false);
+    ).toBe(true);
 
-    // And even an auto-continue permit cannot dispatch before terminal completion.
+    // Browser queue dispatch is not the cancellation ordering mechanism. A
+    // direct turn_submit goes to Host, whose private FIFO waits for Core.
     expect(
       selectQueuedDispatches(
         [acknowledged],
-        queued,
+        {},
         new Set(),
         undefined,
         new Set(),
         new Set(["session-1"]),
       ),
     ).toEqual([]);
-
-    // When Core authoritatively reports the cancelled Turn finished.
-    const finished = finishTurn(acknowledged, "turn-1", {
-      stop_reason: "CancelledByUser",
-    });
-
-    // Then exactly the FIFO head becomes eligible for the next Turn.
-    expect(finished.cancelling_turn_id).toBeNull();
-    expect(
-      selectQueuedDispatches(
-        [finished],
-        queued,
-        new Set(),
-        undefined,
-        new Set(),
-        new Set(["session-1"]),
-      ),
-    ).toEqual([{ sessionId: "session-1", message: queued["session-1"][0] }]);
   });
 });

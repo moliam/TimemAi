@@ -160,7 +160,6 @@ import {
   finishTurn,
   groupDecisionsBySessionTurn,
   manualToolGenCommand,
-  markSessionCancelling,
   normalizeCopiedUserMessageText,
   prependHistoryRecords,
   pruneSessionDrafts,
@@ -692,9 +691,6 @@ function TimemApp() {
   const cancellingSessionIds = useRef<Set<string>>(new Set());
   const cancellingSessionCommandIds = useRef<Map<string, string>>(new Map());
   const cancellingSessionTimeouts = useRef<Map<string, number>>(new Map());
-  const [cancellingSessionIdSet, setCancellingSessionIdSet] = useState<
-    Set<string>
-  >(() => new Set());
   const [creatingSession, setCreatingSession] = useState(false);
   const [pendingAttachmentRemoveIds, setPendingAttachmentRemoveIds] = useState<
     Set<string>
@@ -1292,7 +1288,6 @@ function TimemApp() {
     pendingUploadSessionIdsRef.current.clear();
     pendingToolgenRequestsRef.current.clear();
     setCreatingSession(false);
-    setCancellingSessionIdSet(new Set());
     setPendingAttachmentRemoveIds(new Set());
     setPendingDecisionKeys(new Set());
     setPendingRenameSessionIds(new Set());
@@ -1319,7 +1314,6 @@ function TimemApp() {
     const liveSessionIds = new Set(
       sessions.map((session) => session.session_id),
     );
-    let changed = false;
     for (const sessionId of Array.from(cancellingSessionIds.current)) {
       if (!liveSessionIds.has(sessionId)) {
         cancellingSessionIds.current.delete(sessionId);
@@ -1327,11 +1321,8 @@ function TimemApp() {
         const timeoutId = cancellingSessionTimeouts.current.get(sessionId);
         if (timeoutId !== undefined) window.clearTimeout(timeoutId);
         cancellingSessionTimeouts.current.delete(sessionId);
-        changed = true;
       }
     }
-    if (changed)
-      setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
   }, [sessions]);
 
   useEffect(() => {
@@ -1594,7 +1585,6 @@ function TimemApp() {
                 cancellingSessionTimeouts.current.get(sessionId);
               if (timeoutId !== undefined) window.clearTimeout(timeoutId);
               cancellingSessionTimeouts.current.delete(sessionId);
-              setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
             }
             if (completed?.command.type === "mem_temporary_retention_update") {
               setPendingMemRetention(false);
@@ -2028,8 +2018,8 @@ function TimemApp() {
       if (event.type === "turn_cancelling") {
         setSessions((current) =>
           current.map((session) =>
-            session.session_id === event.session_id
-              ? markSessionCancelling(session, event.turn_id)
+            session.session_id === event.session.session_id
+              ? event.session
               : session,
           ),
         );
@@ -2379,7 +2369,6 @@ function TimemApp() {
         if (cancellationTimeoutId !== undefined)
           window.clearTimeout(cancellationTimeoutId);
         cancellingSessionTimeouts.current.delete(event.session_id);
-        setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
         setSessions((current) =>
           current.map((session) =>
             session.session_id === event.session_id
@@ -2683,9 +2672,7 @@ function TimemApp() {
       const decision = composerSendDecision(
         targetSession,
         text,
-        targetSession
-          ? cancellingSessionIds.current.has(targetSession.session_id)
-          : false,
+        false,
         pendingMemSwitch,
         attachmentIds,
         forceSupplement,
@@ -2922,14 +2909,6 @@ function TimemApp() {
       const commandId = clientId("turn-cancel");
       cancellingSessionIds.current.add(sessionId);
       cancellingSessionCommandIds.current.set(sessionId, commandId);
-      setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
-      setSessions((current) =>
-        current.map((session) =>
-          session.session_id === sessionId
-            ? markSessionCancelling(session, authoritativeTurnId)
-            : session,
-        ),
-      );
       const previousTimeoutId =
         cancellingSessionTimeouts.current.get(sessionId);
       if (previousTimeoutId !== undefined)
@@ -2938,14 +2917,8 @@ function TimemApp() {
         if (cancellingSessionCommandIds.current.get(sessionId) !== commandId)
           return;
         cancellingSessionTimeouts.current.delete(sessionId);
-        // This timer is diagnostic only. Keep the ordering barrier until the
-        // authoritative TurnFinished event so a new task cannot overlap the
-        // turn that is still being cancelled in the runtime.
-        reportUiError(
-          "Background cleanup is taking longer than expected",
-          "Your work is stopped in the interface. Timem is still releasing the previous task before it starts any message queued after Stop.",
-          sessionId,
-        );
+        // This timer is transport bookkeeping only. It must not change the
+        // Session or Turn presentation; only a Host projection may do that.
       }, TURN_CANCEL_UI_TIMEOUT_MS);
       cancellingSessionTimeouts.current.set(sessionId, timeoutId);
       if (
@@ -2964,7 +2937,6 @@ function TimemApp() {
         cancellingSessionTimeouts.current.delete(sessionId);
         cancellingSessionCommandIds.current.delete(sessionId);
         cancellingSessionIds.current.delete(sessionId);
-        setCancellingSessionIdSet(new Set(cancellingSessionIds.current));
         const activity: Activity = {
           id: clientId(),
           sessionId,
@@ -2982,9 +2954,7 @@ function TimemApp() {
     messages: auiMessages,
     setMessages: setAuiMessages,
     convertMessage: (message) => message,
-    isRunning:
-      activeSession?.state === "working" &&
-      !cancellingSessionIdSet.has(activeSession.session_id),
+    isRunning: activeSession?.state === "working",
     onNew: async (message) => {
       const first = message.content[0];
       if (first?.type === "text") await sendText(first.text);
@@ -3710,13 +3680,8 @@ function TimemApp() {
                                 pendingRenameSessionIds.has(session.session_id);
                               const deletingSession =
                                 pendingDeleteSessionIds.has(session.session_id);
-                              const visuallyWorking = sessionVisuallyWorking(
-                                session,
-                                cancellingSessionIdSet,
-                                persistedCancelTargetCommandIds[
-                                  session.session_id
-                                ],
-                              );
+                              const visuallyWorking =
+                                sessionVisuallyWorking(session);
                               const sessionEndpointName =
                                 endpointNameForProfile(
                                   server?.model_endpoints ?? [],
@@ -4480,13 +4445,7 @@ function TimemApp() {
             sessionInteractionLockReason={sessionInteractionLockReason}
             decisions={sessionDecisions}
             fileInput={fileInput}
-            isCancelling={sessionCancellationApplies(
-              activeSession,
-              cancellingSessionIdSet,
-              activeSession
-                ? persistedCancelTargetCommandIds[activeSession.session_id]
-                : undefined,
-            )}
+            isCancelling={sessionCancellationApplies(activeSession)}
             pendingAttachmentRemoveIds={pendingAttachmentRemoveIds}
             pendingDecisionKeys={pendingDecisionKeys}
             uploadingAttachment={
@@ -7547,11 +7506,9 @@ function TimemThread({
   const hasDraftText = !!draft.trim();
   const showStopAction =
     composerPrimaryAction(interactionPhase, draft) === "stop";
-  const sendLabel = isCancelling
-    ? "Send after stop"
-    : activeSession?.state === "working"
-      ? "Queue message"
-      : "Send message";
+  const sendLabel = activeSession?.state === "working"
+    ? "Queue message"
+    : "Send message";
   const lockedControlHint = sessionInteractionLocked
     ? sessionInteractionLockReason
     : "";
@@ -7566,11 +7523,9 @@ function TimemThread({
     lockedControlHint ||
     (uploadingAttachment
       ? `${uploadingAttachmentText} · send is paused until it finishes`
-      : isCancelling
-        ? "Stopped · Enter to send the next task"
-        : activeSession?.state === "working"
-          ? "Enter to queue · use 立即 to send during this turn"
-          : "Enter to send · Shift+Enter for newline");
+      : activeSession?.state === "working"
+        ? "Enter to queue · use 立即 to send during this turn"
+        : "Enter to send · Shift+Enter for newline");
   const attachTitle =
     missingSessionHint ||
     lockedControlHint ||
@@ -9838,10 +9793,10 @@ const TurnInteraction = memo(function TurnInteraction({
   const hasVisibleProcess =
     scrollItems.some((item) => item.activity !== null) || decisions.length > 0;
   const isWorking = turn.state === "working" && !isCancelling;
-  const interrupted =
+  const cancelled =
     isCancelling ||
-    turn.state === "interrupted" ||
     turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
+  const interrupted = cancelled || turn.state === "interrupted";
   const [showWorkStream, setShowWorkStream] = useState(() => isWorking);
   const isToolGenTurn =
     turn.turn_id.startsWith("web_toolgen_turn_") ||
@@ -10050,7 +10005,9 @@ const TurnInteraction = memo(function TurnInteraction({
                   <WorkingElapsed createdAtMs={turn.created_at_ms} />
                 )}
                 {interrupted && (
-                  <span className="work-title-status">(Interrupted)</span>
+                  <span className="work-title-status">
+                    ({cancelled ? "Cancelled" : "Interrupted"})
+                  </span>
                 )}
               </button>
               {isWorking && modelRetryStatus && (
@@ -10181,9 +10138,13 @@ const TurnInteraction = memo(function TurnInteraction({
       )}
       {!turn.final_answer &&
         turn.sub_answers.length === 0 &&
-        turn.completion && (
+        (turn.completion || cancelled) && (
           <section className="turn-completion-only">
-            <CompletionCard completion={turn.completion} />
+            <CompletionCard
+              completion={
+                turn.completion ?? { stop_reason: "CancelledByUser" }
+              }
+            />
           </section>
         )}
     </article>
@@ -13432,9 +13393,11 @@ function CompletionCard({
     ["Memory", formatMemoryOps(stats.mem_reads, stats.mem_writes)],
     ["Compact", formatOptionalTokens(stats.shrunk_tokens)],
   ].filter(
-    ([, value]) =>
-      value !== undefined && value !== null && value !== "" && value !== 0,
-  ) as Array<[string, string | number]>;
+    ([label, value]) =>
+      label === "Completed" ||
+      label === "Cancelled" ||
+      (value !== undefined && value !== null && value !== "" && value !== 0),
+  ) as Array<[string, string | number | undefined]>;
   return (
     <div className="completion-card" aria-label="Turn completion statistics">
       {facts.map(([label, value]) => (
@@ -13442,7 +13405,7 @@ function CompletionCard({
           key={label}
           title={
             completionFactTitle(label, completion, stats) ??
-            `${label}: ${value}`
+            (value === undefined || value === "" ? label : `${label}: ${value}`)
           }
         >
           <b>{label}</b> {value}

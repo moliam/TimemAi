@@ -474,13 +474,13 @@ Core topic、worker activity 仍可作为 timeline 数据展示，但必须满�
 
 用户点击 Stop：
 
-1. WebUI 发送带 `command_id` 和目标 Turn token 的 command；
-2. WebUI 可显示按钮级 `Sending…`；
-3. Pod/Core projection 返回 `stop_requested=true` 后，显示 stopping；
-4. Core finish outcome 返回 `Cancelled` 后，显示 cancelled；
-5. 任意旧 worker/topic 消息都不能改变该结果。
+1. WebUI 只发送带 `command_id` 和精确目标 Turn token 的 Stop command；点击本身不修改 Session/Turn 业务状态；
+2. Host 校验命令后原子记录并持久化完整 Session projection，其中目标 Turn 为 `finished + CancelledByUser`、worker/Session 不再显示 working，同时保留私有执行屏障；
+3. Host 返回或广播完整权威 Session；WebUI 收到后替换 projection，移除 spinner 和 Stop 控件并呈现 `Cancelled`；
+4. Pod/Core 的 `stop_requested`、worker join 与 terminal barrier 继续作为后台执行事实，但不映射成 `Stopping…`；
+5. Core finish outcome 到达后只补全权威统计和 continuation grant，不把 Turn 从 `Cancelled` 改回其他可见运行态；任意旧 worker/topic 消息也不能改变该结果。
 
-`Sending…` 是命令传输状态，不等于 Turn 已进入 cancelling。
+用户感知到的快速反馈来自 WebUI 与同进程 Host 之间的低延迟通信，而不是浏览器乐观推进生命周期。`Cancelled` 表示 Host 已确认用户与该 Turn 的交互终结，不代表外部调用或子进程已经物理退出；该清理由 runtime 在后台完成。若 Stop command 无法可靠保存或被 Host 拒绝，WebUI 继续呈现上一份 Host projection 并显示明确错误。
 
 ## 9. 快速 Stop / Start 用户体验
 
@@ -507,14 +507,14 @@ WebUI 可以立即显示 `Sending…` 或 `Waiting…`，但这些文案只说�
 
 点击 Stop 后：
 
-1. WebUI 立即禁用重复点击或将按钮显示为 `Sending…`；
-2. command 携带精确 `{ turn_id, epoch }`；
-3. Pod 接收后返回 `accepted`，但不自行把 Turn 判为 cancelled；
-4. Core 将匹配 Active Turn 的 `stop_requested` 设为 true；
-5. Pod projection 返回后，UI 显示 `Stopping…`；
-6. Core 写入 `Cancelled` outcome 后，UI 显示终态。
+1. WebUI 发送 Stop command，并在 Host 回复前继续渲染上一份权威 projection；
+2. command 携带精确 `{ turn_id, epoch }`，重复点击由本地传输 guard 和 Host 幂等处理；
+3. Host 接受后持久化完整取消后 Session projection，并立即返回给 WebUI；WebUI 仅据此停止可见 running 动画并显示 `Cancelled`；
+4. Core 将匹配 Active Turn 的 `stop_requested` 设为 true，并在模型等待、工具 join、后台进程和 host decision 等取消点持续检查同一个 token；
+5. 对可终止的子进程触发安全终止；无法强制中断的外部调用继续在后台收敛；
+6. UI 不显示 `Stopping…`、清理超时或 worker join 进度，也不因迟到事件恢复 working；Core 写入权威 outcome 后只补全 elapsed/stats 等事实。
 
-“立即停止”必须尽可能真实：Core 在模型等待、工具 join、后台进程和 host decision 等取消点持续检查同一个 Turn token。对可终止的子进程，Stop 应触发安全的进程组终止；对无法强制中断的外部调用，UI 显示 `Stopping…`，而不是谎报 `Cancelled`。
+这里的 `Cancelled` 表示用户与该 Turn 的交互已经终结，不是对底层资源瞬时释放的虚假声明。产品必须隐藏不影响用户决策的清理延迟，同时保留真实错误：如果取消命令没有可靠提交，必须明确回滚或报错。
 
 ### 9.3 Stop 期间立即开始下一轮
 
@@ -535,15 +535,16 @@ struct QueuedTurnIntent {
 
 ```text
 Turn A Active
-  → Stop(A token) accepted
-  → Start intent B accepted and shown as Waiting…
-  → Core finishes A as Cancelled
+  → user clicks Stop; WebUI sends the targeted command without changing business state
+  → Host records and returns A Cancelled; WebUI renders that projection
+  → ordinary Start(B) is accepted and immediately shown as a new task
+  → Pod privately retains B behind A's terminal barrier
+  → Core finishes A cleanup
   → Pod submits B to Core
-  → Core allocates Turn B token
-  → projection shows B Active
+  → Core allocates Turn B token and publishes activity
 ```
 
-这不是第二个 Active Turn，也不是 WebUI 自行开始 B。WebUI 只显示 Pod 返回的 queued intent。
+这不是第二个 Core Active Turn，也不是 WebUI 自行执行 B。B 已经是用户可见、可关联、可重放的独立 Turn；`queued intent` 只是 Pod 内部的执行所有权与串行屏障实现，不能渲染成“待发送队列”“等待旧任务停止”，也不能出现仅对 active supplement 有意义的“立即”控件。
 
 ### 9.4 连续 Stop / Start
 
@@ -623,14 +624,15 @@ Host/Core 进程重启则完全不同：旧 runtime incarnation 的 Active Turn 
 
 ### 9.7 UX 文案与控件建议
 
-| 阶段 | 权威来源 | 建议显示 | 输入行为 |
+| 阶段 | 权威来源 | 用户可见呈现 | 输入行为 |
 |---|---|---|---|
-| Stop command 尚未 accepted | WebUI transport | `Sending stop…` | 允许编辑下一轮 |
-| Core `stop_requested=true` | Pod projection | `Stopping…` | 允许提交 Next intent |
-| Next intent(s) 已 accepted | Pod intent projection | `Waiting for current turn to stop…` | 允许编辑/重排/取消未派发项 |
-| 旧 Turn terminal | Core outcome | `Cancelled`/其他终态 | 若自动发送开启且 outcome 授予 continuation，则 Pod 派发队首；否则保留等待 |
+| 用户点击 Stop、Host 尚未回复 | WebUI transport | 继续呈现上一份 Host projection；不本地改写生命周期 | 只发送精确 Stop command；本地 guard 仅防重复传输 |
+| Host 接受 Stop | Host Session projection | 旧 Turn 显示 `Cancelled`，working/spinner/Stop 消失 | 可立即输入并提交普通新 Turn |
+| Core 后台清理 | Core execution + Host private barrier | 不显示 `Stopping…` 或清理进度 | 新输入按普通 `turn_submit` 可靠发送 |
+| 新 Turn 已被 Host 接受、尚在 terminal barrier 后 | Pod intent ownership | 立即显示独立的新用户任务，不显示“待发送”或“等待停止” | 可继续编辑 composer；不可把新任务补充进旧 Turn |
+| 旧 Turn 权威 terminal | Core outcome | 旧 Turn 保持 `Cancelled`，可补全统计 | Pod 自动越过内部屏障派发新 Turn |
 | 新 Turn Active | Core projection | 正常 working/activity | Stop 精确绑定新 token |
-| command 失败/断线 | Pod delivery | `Retrying…` 或可恢复错误 | 保留用户输入，不伪造业务终态 |
+| command 失败/断线 | Pod delivery | 明确可恢复错误；必要时恢复草稿 | 不伪造已接受或已执行 |
 
 ### 9.8 额外不变量
 

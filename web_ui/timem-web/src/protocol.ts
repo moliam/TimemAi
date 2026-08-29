@@ -490,8 +490,7 @@ export type WireEvent =
     }
   | {
       type: "turn_cancelling";
-      session_id: string;
-      turn_id: string;
+      session: Session;
       target_command_id?: string | null;
     }
   | {

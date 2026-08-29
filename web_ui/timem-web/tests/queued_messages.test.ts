@@ -15,6 +15,7 @@ describe("queued messages", () => {
     expect(shouldDirectManualMessage("stopped", 0, false)).toBe(true);
     expect(shouldDirectManualMessage("ready", 1, false)).toBe(false);
     expect(shouldDirectManualMessage("ready", 0, true)).toBe(false);
+    expect(shouldDirectManualMessage("ready", 0, false, true)).toBe(true);
   });
 
   it("requires a new ready-state decision after a direct submission is occupied", () => {
