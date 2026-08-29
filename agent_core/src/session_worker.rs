@@ -235,6 +235,9 @@ pub enum CoreSessionWorkerEvent {
     TurnStarted {
         command_id: Option<String>,
     },
+    /// Complete Core-owned lifecycle projection. Hosts may cache and deliver it,
+    /// but must not rewrite it from worker/topic arrival order.
+    TurnProjection(crate::TurnProjection),
     Topics(Vec<CoreTopicEvent>),
     ModelRequest {
         round: u32,
@@ -1944,6 +1947,12 @@ fn apply_worker_runtime_update(
 }
 
 impl TurnUi for WorkerTurnUi {
+    fn on_turn_projection(&mut self, projection: &crate::TurnProjection) {
+        let _ = self
+            .event_tx
+            .send(CoreSessionWorkerEvent::TurnProjection(projection.clone()));
+    }
+
     fn apply_pending_runtime_updates(
         &mut self,
         core: &mut AgentCore,

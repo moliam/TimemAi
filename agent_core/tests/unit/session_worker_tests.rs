@@ -566,6 +566,7 @@ fn initial_supplement_batch_is_visible_before_an_immediate_final_can_close_the_m
 
     let mut accepted = Vec::new();
     let mut turn_started = Vec::new();
+    let mut projections = Vec::new();
     let mut primary_accepted_before_start = false;
     let outcome = loop {
         match worker
@@ -583,6 +584,7 @@ fn initial_supplement_batch_is_visible_before_an_immediate_final_can_close_the_m
                 turn_started.push(command_id);
             }
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
+            CoreSessionWorkerEvent::TurnProjection(projection) => projections.push(projection),
             CoreSessionWorkerEvent::Topics(_)
             | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. }
@@ -610,6 +612,27 @@ fn initial_supplement_batch_is_visible_before_an_immediate_final_can_close_the_m
         vec![Some("primary-command".to_string())],
         "one Core turn should emit exactly one lifecycle start"
     );
+    assert!(projections.len() >= 2, "{projections:?}");
+    let first_token = match projections.first().unwrap() {
+        crate::TurnProjection::Active(active) => active.token.clone(),
+        projection => panic!("first projection must be active: {projection:?}"),
+    };
+    let last_token = match projections.last().unwrap() {
+        crate::TurnProjection::Finished(finished) => finished.token.clone(),
+        projection => panic!("last projection must be finished: {projection:?}"),
+    };
+    assert_eq!(first_token, last_token);
+    assert!(projections.iter().all(|projection| match projection {
+        crate::TurnProjection::Active(active) => active.token == first_token,
+        crate::TurnProjection::Finished(finished) => finished.token == first_token,
+    }));
+    assert_eq!(
+        projections
+            .iter()
+            .filter(|projection| matches!(projection, crate::TurnProjection::Finished(_)))
+            .count(),
+        1
+    );
     let prompts = prompts.lock().unwrap();
     assert_eq!(
         prompts.len(),
@@ -628,7 +651,7 @@ fn initial_supplement_batch_is_visible_before_an_immediate_final_can_close_the_m
             .expect("worker should stop")
         {
             CoreSessionWorkerEvent::WorkerStopped => break,
-            CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::TurnProjection(_) | CoreSessionWorkerEvent::Topics(_) => {}
             CoreSessionWorkerEvent::ModelRequestCompleted { .. }
             | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
             other => panic!("unexpected event while stopping worker: {other:?}"),
@@ -749,7 +772,9 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
                 handle.add_user_supplement("补充：最终答案必须使用 SUPPLEMENT_WORKER_OK。");
                 break;
             }
-            CoreSessionWorkerEvent::TurnStarted { .. } | CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::TurnProjection(_)
+            | CoreSessionWorkerEvent::Topics(_) => {}
             CoreSessionWorkerEvent::ModelRequestCompleted { .. }
             | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
             other => panic!("unexpected event before first model request: {other:?}"),
@@ -764,6 +789,7 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
         {
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
             CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::TurnProjection(_)
             | CoreSessionWorkerEvent::Topics(_)
             | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. }
@@ -785,7 +811,7 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
             .expect("worker should stop")
         {
             CoreSessionWorkerEvent::WorkerStopped => break,
-            CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::TurnProjection(_) | CoreSessionWorkerEvent::Topics(_) => {}
             CoreSessionWorkerEvent::ModelRequestCompleted { .. }
             | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
             other => panic!("unexpected event while stopping worker: {other:?}"),
@@ -831,7 +857,9 @@ fn worker_option_returns_late_supplement_after_preserving_the_first_final_answer
                 handle.add_user_supplement("Q2 SUPPLEMENT");
                 break;
             }
-            CoreSessionWorkerEvent::TurnStarted { .. } | CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::TurnProjection(_)
+            | CoreSessionWorkerEvent::Topics(_) => {}
             CoreSessionWorkerEvent::ModelRequestCompleted { .. }
             | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
             other => panic!("unexpected event before request: {other:?}"),
@@ -849,7 +877,8 @@ fn worker_option_returns_late_supplement_after_preserving_the_first_final_answer
                 returned.extend(supplements);
             }
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
-            CoreSessionWorkerEvent::Topics(_)
+            CoreSessionWorkerEvent::TurnProjection(_)
+            | CoreSessionWorkerEvent::Topics(_)
             | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. }
             | CoreSessionWorkerEvent::ModelRequestCompleted { .. }
@@ -914,6 +943,7 @@ fn session_worker_does_not_revive_terminal_repair_failure_with_late_supplement()
             }
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
             CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::TurnProjection(_)
             | CoreSessionWorkerEvent::Topics(_)
             | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelRequestCompleted { .. }
@@ -979,7 +1009,7 @@ fn session_worker_lifecycle_uses_model_service_config_response_protocol_over_cor
             .expect("worker should stop")
         {
             CoreSessionWorkerEvent::WorkerStopped => break,
-            CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::TurnProjection(_) | CoreSessionWorkerEvent::Topics(_) => {}
             CoreSessionWorkerEvent::ModelRequestCompleted { .. }
             | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
             other => panic!("unexpected event while stopping worker: {other:?}"),
@@ -1556,7 +1586,8 @@ fn failed_manual_toolgen_has_bounded_protocol_repair_and_does_not_replace_source
                 }
             }
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
-            CoreSessionWorkerEvent::TurnStarted { .. }
+            CoreSessionWorkerEvent::TurnProjection(_)
+            | CoreSessionWorkerEvent::TurnStarted { .. }
             | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. }
             | CoreSessionWorkerEvent::ModelRequestCompleted { .. }
@@ -1635,7 +1666,8 @@ fn toolgen_runs_beyond_ten_model_calls_with_the_normal_round_budget() {
                 }
             }
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
-            CoreSessionWorkerEvent::TurnStarted { .. }
+            CoreSessionWorkerEvent::TurnProjection(_)
+            | CoreSessionWorkerEvent::TurnStarted { .. }
             | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. }
             | CoreSessionWorkerEvent::ModelRequestCompleted { .. }
@@ -1806,6 +1838,7 @@ fn session_worker_manager_allocates_id0_default_and_tracks_lifecycle() {
         match wait_for_manager_event(&mut manager, &session_id, "manager turn") {
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
             CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::TurnProjection(_)
             | CoreSessionWorkerEvent::Topics(_)
             | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. }
@@ -1826,7 +1859,7 @@ fn session_worker_manager_allocates_id0_default_and_tracks_lifecycle() {
     loop {
         match wait_for_manager_event(&mut manager, &session_id, "manager shutdown") {
             CoreSessionWorkerEvent::WorkerStopped => break,
-            CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::TurnProjection(_) | CoreSessionWorkerEvent::Topics(_) => {}
             CoreSessionWorkerEvent::ModelRequestCompleted { .. }
             | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
             other => panic!("unexpected manager shutdown event: {other:?}"),
@@ -2078,7 +2111,9 @@ fn session_worker_manager_tracks_global_working_count() {
         loop {
             match wait_for_manager_event(&mut manager, session_id, "manager count request") {
                 CoreSessionWorkerEvent::ModelRequest { .. } => break,
-                CoreSessionWorkerEvent::TurnStarted { .. } | CoreSessionWorkerEvent::Topics(_) => {}
+                CoreSessionWorkerEvent::TurnStarted { .. }
+                | CoreSessionWorkerEvent::TurnProjection(_)
+                | CoreSessionWorkerEvent::Topics(_) => {}
                 CoreSessionWorkerEvent::ModelRequestCompleted { .. }
                 | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
                 other => panic!("unexpected manager count pre-release event: {other:?}"),
@@ -2095,7 +2130,8 @@ fn session_worker_manager_tracks_global_working_count() {
                     assert_eq!(outcome.text, "COUNT_OK");
                     break;
                 }
-                CoreSessionWorkerEvent::Topics(_)
+                CoreSessionWorkerEvent::TurnProjection(_)
+                | CoreSessionWorkerEvent::Topics(_)
                 | CoreSessionWorkerEvent::ModelResponse { .. }
                 | CoreSessionWorkerEvent::ModelRequestCompleted { .. }
                 | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
@@ -2346,7 +2382,8 @@ fn session_worker_shutdown_cancels_pending_host_decision() {
                     break;
                 }
             }
-            CoreSessionWorkerEvent::TurnStarted { .. }
+            CoreSessionWorkerEvent::TurnProjection(_)
+            | CoreSessionWorkerEvent::TurnStarted { .. }
             | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. }
             | CoreSessionWorkerEvent::ModelRequestCompleted { .. }
@@ -2440,7 +2477,9 @@ fn session_worker_stop_discards_queued_turns_but_allows_new_work() {
             .expect("first model request should arrive")
         {
             CoreSessionWorkerEvent::ModelRequest { .. } => break,
-            CoreSessionWorkerEvent::TurnStarted { .. } | CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::TurnProjection(_)
+            | CoreSessionWorkerEvent::Topics(_) => {}
             CoreSessionWorkerEvent::ModelRequestCompleted { .. }
             | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
             other => panic!("unexpected event before first model request: {other:?}"),
@@ -2460,6 +2499,7 @@ fn session_worker_stop_discards_queued_turns_but_allows_new_work() {
         {
             CoreSessionWorkerEvent::TurnFinished { .. } => break,
             CoreSessionWorkerEvent::ModelError { .. }
+            | CoreSessionWorkerEvent::TurnProjection(_)
             | CoreSessionWorkerEvent::Topics(_)
             | CoreSessionWorkerEvent::UnconsumedSupplements { .. } => {}
             CoreSessionWorkerEvent::ModelRequest { .. } => {
@@ -2483,7 +2523,8 @@ fn session_worker_stop_discards_queued_turns_but_allows_new_work() {
                 skipped_turn_started = true;
             }
             CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
-            CoreSessionWorkerEvent::Topics(_)
+            CoreSessionWorkerEvent::TurnProjection(_)
+            | CoreSessionWorkerEvent::Topics(_)
             | CoreSessionWorkerEvent::ModelRequestCompleted { .. }
             | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
             CoreSessionWorkerEvent::ModelRequest { .. } => {
@@ -2517,7 +2558,9 @@ fn session_worker_stop_discards_queued_turns_but_allows_new_work() {
             .expect("third model request should arrive")
         {
             CoreSessionWorkerEvent::ModelRequest { .. } => break,
-            CoreSessionWorkerEvent::TurnStarted { .. } | CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::TurnProjection(_)
+            | CoreSessionWorkerEvent::Topics(_) => {}
             CoreSessionWorkerEvent::ModelRequestCompleted { .. }
             | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
             other => panic!("unexpected event before third model request: {other:?}"),
@@ -2531,7 +2574,9 @@ fn session_worker_stop_discards_queued_turns_but_allows_new_work() {
             .expect("third turn should finish")
         {
             CoreSessionWorkerEvent::TurnFinished { .. } => break,
-            CoreSessionWorkerEvent::ModelResponse { .. } | CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::ModelResponse { .. }
+            | CoreSessionWorkerEvent::TurnProjection(_)
+            | CoreSessionWorkerEvent::Topics(_) => {}
             CoreSessionWorkerEvent::ModelRequestCompleted { .. }
             | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
             other => panic!("unexpected event while finishing third turn: {other:?}"),
@@ -2596,7 +2641,7 @@ fn session_worker_shutdown_skips_queued_turns() {
                 );
                 break;
             }
-            CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::TurnProjection(_) | CoreSessionWorkerEvent::Topics(_) => {}
             other => panic!("unexpected event before first model request: {other:?}"),
         }
     }
@@ -2617,6 +2662,7 @@ fn session_worker_shutdown_skips_queued_turns() {
             CoreSessionWorkerEvent::WorkerStopped => break,
             CoreSessionWorkerEvent::TurnFinished { .. }
             | CoreSessionWorkerEvent::ModelError { .. }
+            | CoreSessionWorkerEvent::TurnProjection(_)
             | CoreSessionWorkerEvent::Topics(_) => {}
             CoreSessionWorkerEvent::ModelRequestCompleted { .. }
             | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
@@ -2869,6 +2915,7 @@ fn drain_worker_count_event(
             *finished = true;
         }
         Ok(CoreSessionWorkerEvent::TurnStarted { .. })
+        | Ok(CoreSessionWorkerEvent::TurnProjection(_))
         | Ok(CoreSessionWorkerEvent::ModelRequest { .. })
         | Ok(CoreSessionWorkerEvent::ModelResponse { .. })
         | Ok(CoreSessionWorkerEvent::ModelRequestCompleted { .. })
@@ -3119,7 +3166,9 @@ fn wait_for_model_request(events: &Receiver<CoreSessionWorkerEvent>, label: &str
                 assert_eq!(round, 1, "{label} first request should be round 1");
                 return;
             }
-            CoreSessionWorkerEvent::TurnStarted { .. } | CoreSessionWorkerEvent::Topics(_) => {}
+            CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::TurnProjection(_)
+            | CoreSessionWorkerEvent::Topics(_) => {}
             CoreSessionWorkerEvent::ModelRequestCompleted { .. }
             | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
             other => panic!("{label} unexpected event before model request: {other:?}"),
@@ -3135,6 +3184,7 @@ fn wait_for_turn_finished(events: &Receiver<CoreSessionWorkerEvent>, label: &str
         {
             CoreSessionWorkerEvent::TurnFinished { outcome } => return outcome,
             CoreSessionWorkerEvent::TurnStarted { .. }
+            | CoreSessionWorkerEvent::TurnProjection(_)
             | CoreSessionWorkerEvent::Topics(_)
             | CoreSessionWorkerEvent::ModelRequest { .. }
             | CoreSessionWorkerEvent::ModelResponse { .. }
@@ -3578,7 +3628,8 @@ fn session_workers_stress_ui_threads_supplements_and_renames() {
                     .expect("stress worker should stop")
                 {
                     CoreSessionWorkerEvent::WorkerStopped => break,
-                    CoreSessionWorkerEvent::Topics(_) => {}
+                    CoreSessionWorkerEvent::TurnProjection(_)
+                    | CoreSessionWorkerEvent::Topics(_) => {}
                     other => {
                         panic!("stress worker {worker_idx} unexpected stop event: {other:?}")
                     }
@@ -3743,7 +3794,8 @@ fn session_workers_protocol_payload_stress_exceeds_1000_turns() {
                     .expect("protocol stress worker should stop")
                 {
                     CoreSessionWorkerEvent::WorkerStopped => break,
-                    CoreSessionWorkerEvent::Topics(_)
+                    CoreSessionWorkerEvent::TurnProjection(_)
+                    | CoreSessionWorkerEvent::Topics(_)
                     | CoreSessionWorkerEvent::ModelRequest { .. }
                     | CoreSessionWorkerEvent::ModelResponse { .. }
                     | CoreSessionWorkerEvent::ModelRequestCompleted { .. }
@@ -3897,7 +3949,8 @@ fn wait_for_stress_turn_finished(
                 }
                 return outcome;
             }
-            CoreSessionWorkerEvent::ModelRequestCompleted { .. }
+            CoreSessionWorkerEvent::TurnProjection(_)
+            | CoreSessionWorkerEvent::ModelRequestCompleted { .. }
             | CoreSessionWorkerEvent::ModelResponseParsed { .. } => {}
             other => panic!("{label} unexpected worker event: {other:?}"),
         }
@@ -3975,7 +4028,7 @@ fn update_runtime_config_applies_before_next_model_request_of_active_turn() {
     let handle = worker.handle();
 
     match worker.events().recv_timeout(Duration::from_secs(2)) {
-        Ok(CoreSessionWorkerEvent::Topics(_)) => {}
+        Ok(CoreSessionWorkerEvent::TurnProjection(_) | CoreSessionWorkerEvent::Topics(_)) => {}
         Ok(CoreSessionWorkerEvent::ModelRequestCompleted { .. })
         | Ok(CoreSessionWorkerEvent::ModelResponseParsed { .. }) => {}
         other => panic!("expected lifecycle topics, got: {other:?}"),
@@ -4093,7 +4146,7 @@ fn update_runtime_config_changes_worker_model_service_config() {
 
     // Wait for lifecycle event
     match worker.events().recv_timeout(Duration::from_secs(2)) {
-        Ok(CoreSessionWorkerEvent::Topics(_)) => {}
+        Ok(CoreSessionWorkerEvent::TurnProjection(_) | CoreSessionWorkerEvent::Topics(_)) => {}
         Ok(CoreSessionWorkerEvent::ModelRequestCompleted { .. })
         | Ok(CoreSessionWorkerEvent::ModelResponseParsed { .. }) => {}
         other => panic!("expected lifecycle topics, got: {other:?}"),
@@ -4202,7 +4255,7 @@ fn update_runtime_config_max_input_also_updates_core() {
 
     // Wait for lifecycle event
     match worker.events().recv_timeout(Duration::from_secs(2)) {
-        Ok(CoreSessionWorkerEvent::Topics(_)) => {}
+        Ok(CoreSessionWorkerEvent::TurnProjection(_) | CoreSessionWorkerEvent::Topics(_)) => {}
         Ok(CoreSessionWorkerEvent::ModelRequestCompleted { .. })
         | Ok(CoreSessionWorkerEvent::ModelResponseParsed { .. }) => {}
         other => panic!("expected lifecycle topics, got: {other:?}"),

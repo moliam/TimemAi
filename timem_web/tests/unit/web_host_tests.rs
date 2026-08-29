@@ -6163,7 +6163,8 @@ fn mem_temporary_items_ignore_legacy_shell_job_directories() {
     let items = list_mem_temporary_items_at(&memory_dir).unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].id, "file:visible.tmp");
-    assert!(!items.iter().any(|item| item.path.contains("shell_jobs")));    let _ = std::fs::remove_dir_all(memory_dir);
+    assert!(!items.iter().any(|item| item.path.contains("shell_jobs")));
+    let _ = std::fs::remove_dir_all(memory_dir);
 }
 
 #[test]
@@ -6697,7 +6698,8 @@ fn mem_temporary_commands_return_correlated_results_without_background_broadcast
     };
     assert!(error.is_none());
     assert!(!items.iter().any(|item| item.id == "file:listed.tmp"));
-    assert!(!memory_dir.join("listed.tmp").exists());}
+    assert!(!memory_dir.join("listed.tmp").exists());
+}
 
 fn set_test_mem(state: &AppState, data_dir: PathBuf, space: &str) {
     *state.mem.lock().unwrap() = WebMemState::new(data_dir, space.to_string()).unwrap();
@@ -6747,6 +6749,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         active_turn_id: None,
         cancelling_turn_id: None,
         pending_turn_id: None,
+        turn_projection: TurnProjectionCache::default(),
         pending_completion_message_id: None,
         pending_unconsumed_supplements: Vec::new(),
         reported_session_working_worker_count: None,
@@ -6907,6 +6910,97 @@ fn drain_wire_events(receiver: &mut broadcast::Receiver<WireEvent>) -> Vec<WireE
             }
         }
     }
+}
+
+#[test]
+fn primary_core_projection_is_cached_revisioned_and_not_rewritten_by_stale_or_subworker_events() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let token = agent_core::TurnToken {
+        session_id: session_id.to_string(),
+        turn_id: "turn_projection_test".to_string(),
+        epoch: 7,
+    };
+    let active = agent_core::TurnProjection::Active(agent_core::ActiveTurnProjection {
+        token: token.clone(),
+        stop_requested: false,
+        input_admission: agent_core::TurnInputAdmission::Open,
+        activity: agent_core::TurnActivity::Running,
+    });
+    let finished = agent_core::TurnProjection::Finished(agent_core::FinishedTurnProjection {
+        token: token.clone(),
+        outcome: agent_core::TurnProjectionOutcome::Completed,
+    });
+    let mut events = state.events.subscribe();
+
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(active.clone()),
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(active.clone()),
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &test_context_id(session_id),
+        "subworker",
+        CoreSessionWorkerEvent::TurnProjection(finished.clone()),
+    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = sessions.get(session_id).unwrap();
+        let current = session.turn_projection.current().unwrap();
+        assert_eq!(current.revision, 1);
+        assert_eq!(current.projection, active);
+        assert_eq!(session.state, "working");
+    }
+
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(finished.clone()),
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+            agent_core::ActiveTurnProjection {
+                token,
+                stop_requested: true,
+                input_admission: agent_core::TurnInputAdmission::Closed,
+                activity: agent_core::TurnActivity::WaitingUser,
+            },
+        )),
+    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = sessions.get(session_id).unwrap();
+        let current = session.turn_projection.current().unwrap();
+        assert_eq!(current.revision, 2);
+        assert_eq!(current.projection, finished);
+        assert_eq!(session.state, "ready");
+    }
+
+    let projected = drain_wire_events(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            WireEvent::TurnProjection { projection, .. } => Some(projection),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        projected
+            .iter()
+            .map(|item| item.revision)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
 }
 
 fn wait_for_web_worker_event(

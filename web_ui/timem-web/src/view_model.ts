@@ -9,6 +9,7 @@ import {
   Session,
   SessionWorker,
   TurnCompletion,
+  VersionedTurnProjection,
   WebTurn,
   WebTurnEvent,
 } from "./protocol";
@@ -45,6 +46,15 @@ export function trimMessages<T>(messages: T[]) {
 
 export function normalizeCopiedUserMessageText(text: string): string {
   return text.replace(/(?:\r?\n)+$/, "");
+}
+
+export function applyTurnProjection(
+  session: Session,
+  incoming: VersionedTurnProjection,
+): Session {
+  const currentRevision = session.turn_projection?.revision ?? 0;
+  if (incoming.revision <= currentRevision) return session;
+  return { ...session, turn_projection: incoming };
 }
 
 export function applySessionRuntimeProfile(

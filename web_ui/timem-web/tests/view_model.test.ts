@@ -4,6 +4,7 @@ import {
   ChatMessage,
   CoreTopicEvent,
   Session,
+  VersionedTurnProjection,
   WebTurn,
   WebTurnEvent,
 } from "../src/protocol";
@@ -11,6 +12,7 @@ import {
   activeModelRetryStatus,
   activityFromTopic,
   applySessionRuntimeProfile,
+  applyTurnProjection,
   appendActivityToCurrentTurn,
   appendTurnEvent,
   applyChatMessageDeleted,
@@ -69,6 +71,25 @@ import {
   upsertTurn,
   workspacePathLabel,
 } from "../src/view_model";
+
+const activeProjection = (
+  revision: number,
+  epoch: number,
+  stopRequested = false,
+): VersionedTurnProjection => ({
+  revision,
+  projection: {
+    state: "active",
+    token: {
+      session_id: "session_1",
+      turn_id: `turn_${epoch}`,
+      epoch,
+    },
+    stop_requested: stopRequested,
+    input_admission: "open",
+    activity: { kind: "running" },
+  },
+});
 
 const topic = (
   name: string,
@@ -162,6 +183,33 @@ const actionEvent = (
       ...(actionId ? { action_id: actionId } : {}),
     },
   },
+});
+
+describe("authoritative turn projection", () => {
+  it("copies only a newer Host revision without deriving other session state", () => {
+    const current = {
+      ...session("session_1"),
+      state: "ready",
+      turn_projection: activeProjection(2, 1, false),
+    };
+    const newer = activeProjection(3, 1, true);
+    const updated = applyTurnProjection(current, newer);
+
+    expect(updated.turn_projection).toEqual(newer);
+    expect(updated.state).toBe("ready");
+    expect(updated.workers).toBe(current.workers);
+    expect(updated.turns).toBe(current.turns);
+  });
+
+  it("returns the same session for duplicate and stale revisions", () => {
+    const current = {
+      ...session("session_1"),
+      turn_projection: activeProjection(3, 2, true),
+    };
+
+    expect(applyTurnProjection(current, activeProjection(3, 2, false))).toBe(current);
+    expect(applyTurnProjection(current, activeProjection(2, 1, false))).toBe(current);
+  });
 });
 
 describe("interrupted session state", () => {
