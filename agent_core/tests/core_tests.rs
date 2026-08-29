@@ -6389,6 +6389,34 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: run_bash"));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while core
+        .refresh_running_shell_jobs_for_session("default")
+        .iter()
+        .any(|job| job.pid.to_string() == pid)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for killed timeout job {pid} to exit"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"working_still_action":[{"run_bash":{"cmd":"printf after-kill","timeout_ms":1000}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("after-kill"), "{prompt}");
     assert!(prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
     assert!(prompt.contains("old timeout job"), "{prompt}");
     assert!(prompt.contains("now exits"), "{prompt}");

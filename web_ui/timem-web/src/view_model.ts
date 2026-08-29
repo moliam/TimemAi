@@ -457,6 +457,22 @@ export function sessionCancellationApplies(
   return !!session?.cancelling_turn_id;
 }
 
+export function shouldRenderTurnWorkFrame(
+  turnState: WebTurn["state"],
+  isCancelling: boolean,
+  hasVisibleProcess: boolean,
+): boolean {
+  return (turnState === "working" && !isCancelling) || hasVisibleProcess;
+}
+
+export function turnElapsedMs(
+  createdAtMs: number,
+  nowMs: number,
+  endedAtMs?: number | null,
+): number {
+  return Math.max(0, (endedAtMs ?? nowMs) - createdAtMs);
+}
+
 export function turnInteractionPhase(
   session: Session | undefined,
   localSubmitCommandId: string | undefined,

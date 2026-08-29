@@ -209,6 +209,7 @@ export type WebTurn = {
   turn_id: string;
   state: string;
   created_at_ms: number;
+  interrupted_at_ms?: number | null;
   user_entries: WebTurnUserEntry[];
   events: WebTurnEvent[];
   sub_answers: WebSubAnswer[];
