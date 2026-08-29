@@ -51,7 +51,10 @@ use axum::{
     Json, Router,
 };
 use futures_util::{sink::SinkExt, stream::StreamExt};
-use host_projection::{ProjectionApplyResult, TurnProjectionCache, VersionedTurnProjection};
+use host_projection::{
+    NextTurnEnqueueResult, NextTurnIntentQueue, ProjectionApplyResult, TurnProjectionCache,
+    VersionedTurnProjection,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -75,6 +78,9 @@ use tokio::{
 };
 
 include!(concat!(env!("OUT_DIR"), "/embedded_web_assets.rs"));
+
+const MAX_NEXT_TURN_INTENTS: usize = 8;
+const MAX_NEXT_TURN_INTENT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 const STATIC_PROMPT: &str = include_str!("../../resources/system_prompt/system_prompt.md");
 const PORT_START: u16 = 12_345;
@@ -1246,6 +1252,8 @@ struct WebSession {
     /// this value but never reconstructs it from worker or topic events.
     turn_projection: TurnProjectionCache,
     #[serde(skip)]
+    next_turn_intents: NextTurnIntentQueue<WebNextTurnPayload>,
+    #[serde(skip)]
     pending_completion_message_id: Option<String>,
     #[serde(skip)]
     pending_unconsumed_supplements: Vec<String>,
@@ -1332,6 +1340,15 @@ struct WebSubAnswer {
     created_at_ms: u128,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WebNextTurnPayload {
+    turn_id: String,
+    created_at_ms: u128,
+    text: String,
+    attachments: Vec<WebAttachment>,
+    worker_roles: Vec<WorkerRole>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct WebTurnUserEntry {
     kind: String,
@@ -1363,7 +1380,7 @@ struct PendingWorkInstructionTurn {
     worker_roles: Vec<WorkerRole>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct WebAttachment {
     id: String,
     name: String,
@@ -4340,6 +4357,10 @@ fn handle_command_with_id(
             role_ids,
         } => {
             if let Some(command_id) = command_id {
+                if let Some(turn) = queued_turn_for_command_id(state, &session_id, command_id)? {
+                    dispatch_next_turn_intent_if_ready(state, &session_id);
+                    return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
+                }
                 if let Some(turn) = turn_for_command_id(state, &session_id, command_id)? {
                     redeliver_recorded_turn(
                         state,
@@ -4375,14 +4396,37 @@ fn handle_command_with_id(
                 let text = nonempty_text(text, "turn text")?;
                 let worker_roles =
                     resolve_worker_roles(state, &session_id, &role_ids, role_id.as_deref())?;
-                submit_turn_with_selected_attachments(
-                    state,
-                    &session_id,
-                    text,
-                    attachment_ids.as_deref(),
-                    command_id,
-                    worker_roles,
-                )?
+                let stopping = {
+                    let sessions = state
+                        .sessions
+                        .lock()
+                        .map_err(|_| "session_store_poisoned".to_string())?;
+                    let session = sessions
+                        .get(&session_id)
+                        .ok_or_else(|| "session_not_found".to_string())?;
+                    session.cancelling_turn_id.is_some() && current_turn_id(session).is_some()
+                };
+                if stopping {
+                    let command_id = command_id
+                        .ok_or_else(|| "next_turn_intent_command_id_required".to_string())?;
+                    enqueue_next_turn_intent(
+                        state,
+                        &session_id,
+                        command_id,
+                        text,
+                        attachment_ids.as_deref(),
+                        worker_roles,
+                    )?
+                } else {
+                    submit_turn_with_selected_attachments(
+                        state,
+                        &session_id,
+                        text,
+                        attachment_ids.as_deref(),
+                        command_id,
+                        worker_roles,
+                    )?
+                }
             };
             return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
         }
@@ -5750,6 +5794,7 @@ fn create_session(
                 cancelling_turn_id: None,
                 pending_turn_id: None,
                 turn_projection: TurnProjectionCache::default(),
+                next_turn_intents: NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS),
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
                 reported_session_working_worker_count: None,
@@ -6024,6 +6069,22 @@ fn restore_stored_session(
         .map(|path| path.display().to_string());
     let (mcp_config_revision, applied_mcp_config_revision) =
         initial_mcp_revisions(&stored.mcp_server_ids);
+    let persisted_next_turn_intents = load_next_turn_intents_resilient(state, &stored.session_id);
+    let queued_turn_ids = persisted_next_turn_intents
+        .snapshot()
+        .items
+        .into_iter()
+        .map(|intent| intent.payload.turn_id)
+        .collect::<BTreeSet<_>>();
+    for turn in &mut turns {
+        if queued_turn_ids.contains(&turn.turn_id)
+            && turn.final_answer.is_none()
+            && turn.completion.is_none()
+        {
+            turn.state = "interrupted".to_string();
+        }
+    }
+    let next_turn_intents = NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS);
     {
         let mut sessions = state
             .sessions
@@ -6075,6 +6136,7 @@ fn restore_stored_session(
                 cancelling_turn_id: None,
                 pending_turn_id: None,
                 turn_projection: TurnProjectionCache::default(),
+                next_turn_intents,
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
                 reported_session_working_worker_count: None,
@@ -6083,6 +6145,12 @@ fn restore_stored_session(
                 pending_work_instruction_turn: None,
                 runtime,
             },
+        );
+    }
+    if let Err(error) = persist_next_turn_intents(state, &stored.session_id) {
+        eprintln!(
+            "[timem_web_warning] next_turn_intents_restart_discard_persist_failed session_id={:?} reason={error}",
+            stored.session_id
         );
     }
     create_context_with_worker(
@@ -6439,6 +6507,362 @@ fn rollback_stored_sessions(
     }
 }
 
+fn next_turn_intents_path(state: &AppState, session_id: &str) -> Result<PathBuf, String> {
+    let store = current_session_store(state)?;
+    let metadata = store.metadata_path_for_session(session_id);
+    metadata
+        .parent()
+        .map(|parent| parent.join("next_turn_intents.json"))
+        .ok_or_else(|| "next_turn_intents_path_invalid".to_string())
+}
+
+fn load_next_turn_intents(
+    state: &AppState,
+    session_id: &str,
+) -> Result<NextTurnIntentQueue<WebNextTurnPayload>, String> {
+    let path = next_turn_intents_path(state, session_id)?;
+    if !path.exists() {
+        return Ok(NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS));
+    }
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| format!("next_turn_intents_metadata_failed:{error}"))?;
+    if metadata.len() > MAX_NEXT_TURN_INTENT_FILE_BYTES {
+        return Err("next_turn_intents_file_too_large".to_string());
+    }
+    let raw =
+        std::fs::read(&path).map_err(|error| format!("next_turn_intents_read_failed:{error}"))?;
+    let queue: NextTurnIntentQueue<WebNextTurnPayload> = serde_json::from_slice(&raw)
+        .map_err(|error| format!("next_turn_intents_parse_failed:{error}"))?;
+    if queue.capacity() != MAX_NEXT_TURN_INTENTS || queue.len() > MAX_NEXT_TURN_INTENTS {
+        return Err("next_turn_intents_shape_invalid".to_string());
+    }
+    Ok(queue)
+}
+
+fn load_next_turn_intents_resilient(
+    state: &AppState,
+    session_id: &str,
+) -> NextTurnIntentQueue<WebNextTurnPayload> {
+    match load_next_turn_intents(state, session_id) {
+        Ok(queue) => queue,
+        Err(error) => {
+            if let Ok(path) = next_turn_intents_path(state, session_id) {
+                if path.exists() {
+                    let backup = path
+                        .with_extension(format!("corrupt-{}", unique_web_id("next-turn-intents")));
+                    let _ = std::fs::rename(&path, &backup);
+                }
+            }
+            eprintln!(
+                "[timem_web_warning] next_turn_intents_restore_failed session_id={session_id:?} reason={error}"
+            );
+            NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS)
+        }
+    }
+}
+
+fn persist_next_turn_intents(state: &AppState, session_id: &str) -> Result<(), String> {
+    let queue = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .get(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?
+        .next_turn_intents
+        .clone();
+    let payload = serde_json::to_vec_pretty(&queue)
+        .map_err(|error| format!("next_turn_intents_serialize_failed:{error}"))?;
+    if payload.len() as u64 > MAX_NEXT_TURN_INTENT_FILE_BYTES {
+        return Err("next_turn_intents_file_too_large".to_string());
+    }
+    let path = next_turn_intents_path(state, session_id)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("next_turn_intents_dir_failed:{error}"))?;
+    }
+    agent_core::atomic_write_file(&path, &payload)
+        .map_err(|error| format!("next_turn_intents_write_failed:{error}"))
+}
+
+fn queued_turn_for_command_id(
+    state: &AppState,
+    session_id: &str,
+    command_id: &str,
+) -> Result<Option<WebTurn>, String> {
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?;
+    let session = sessions
+        .get(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?;
+    let queued = session
+        .next_turn_intents
+        .snapshot()
+        .items
+        .iter()
+        .any(|intent| intent.command_id == command_id);
+    Ok(queued
+        .then(|| {
+            session
+                .turns
+                .iter()
+                .find(|turn| {
+                    turn.user_entries
+                        .iter()
+                        .any(|entry| entry.command_id.as_deref() == Some(command_id))
+                })
+                .cloned()
+        })
+        .flatten())
+}
+
+fn enqueue_next_turn_intent(
+    state: &AppState,
+    session_id: &str,
+    command_id: &str,
+    text: String,
+    attachment_ids: Option<&[String]>,
+    worker_roles: Vec<WorkerRole>,
+) -> Result<WebTurn, String> {
+    if let Some(turn) = queued_turn_for_command_id(state, session_id, command_id)? {
+        return Ok(turn);
+    }
+    let previous_session;
+    let turn;
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        if session.cancelling_turn_id.is_none() || current_turn_id(session).is_none() {
+            return Err("next_turn_intent_requires_stopping_turn".to_string());
+        }
+        previous_session = session.clone();
+        let attachments = take_pending_attachments_for_ids(session, attachment_ids)?;
+        let created_at_ms = now_ms();
+        let turn_id = unique_web_id("web_turn");
+        let payload = WebNextTurnPayload {
+            turn_id: turn_id.clone(),
+            created_at_ms,
+            text: text.clone(),
+            attachments: attachments.clone(),
+            worker_roles: worker_roles.clone(),
+        };
+        match session
+            .next_turn_intents
+            .enqueue(command_id.to_string(), payload)
+        {
+            NextTurnEnqueueResult::Enqueued { .. } => {}
+            NextTurnEnqueueResult::Duplicate { .. } => {
+                return session
+                    .turns
+                    .iter()
+                    .find(|turn| {
+                        turn.user_entries
+                            .iter()
+                            .any(|entry| entry.command_id.as_deref() == Some(command_id))
+                    })
+                    .cloned()
+                    .ok_or_else(|| "next_turn_intent_turn_missing".to_string());
+            }
+            NextTurnEnqueueResult::Full { .. } => {
+                *session = previous_session;
+                return Err("next_turn_intent_queue_full".to_string());
+            }
+        }
+        turn = WebTurn {
+            turn_id,
+            state: "pending".to_string(),
+            created_at_ms,
+            user_entries: vec![WebTurnUserEntry {
+                kind: "task".to_string(),
+                text: text.clone(),
+                attachments,
+                created_at_ms,
+                command_id: Some(command_id.to_string()),
+                delivery_state: Some(ChatCommandDeliveryState::Recorded),
+                worker_roles,
+            }],
+            events: Vec::new(),
+            sub_answers: Vec::new(),
+            final_answer: None,
+            completion: None,
+        };
+        session.turns.push(turn.clone());
+        if session.turns.len() > MAX_SESSION_TURNS {
+            let excess = session.turns.len() - MAX_SESSION_TURNS;
+            session.turns.drain(..excess);
+        }
+        session.messages.push(WebChatMessage {
+            id: unique_web_id("msg_user"),
+            role: "user".to_string(),
+            text: text.clone(),
+            created_at_ms,
+            kind: None,
+            completion: None,
+        });
+        if session.messages.len() > MAX_SESSION_MESSAGES {
+            let excess = session.messages.len() - MAX_SESSION_MESSAGES;
+            session.messages.drain(..excess);
+        }
+    }
+    let persist_result = persist_next_turn_intents(state, session_id)
+        .and_then(|()| {
+            append_chat_history_message(
+                state,
+                session_id,
+                &turn.turn_id,
+                "user",
+                Some("task"),
+                Some(command_id),
+                turn.created_at_ms as i64,
+                text,
+            )
+        })
+        .and_then(|()| {
+            append_worker_roles_history(
+                state,
+                session_id,
+                &turn.turn_id,
+                turn.created_at_ms as i64,
+                &turn.user_entries[0].worker_roles,
+            )
+        })
+        .and_then(|()| persist_web_session(state, session_id));
+    if let Err(error) = persist_result {
+        if let Ok(mut sessions) = state.sessions.lock() {
+            sessions.insert(session_id.to_string(), previous_session);
+        }
+        if let Err(rollback_error) = persist_next_turn_intents(state, session_id) {
+            return Err(format!(
+                "{error};next_turn_intent_rollback_failed:{rollback_error}"
+            ));
+        }
+        return Err(error);
+    }
+    publish_semantic(
+        state,
+        WireEvent::TurnUpdated {
+            session_id: session_id.to_string(),
+            turn: turn.clone(),
+        },
+    );
+    Ok(turn)
+}
+
+fn remove_dispatched_next_turn_intent(
+    state: &AppState,
+    session_id: &str,
+    command_id: &str,
+) -> Result<(), String> {
+    let queued = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .get(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?
+        .next_turn_intents
+        .snapshot()
+        .items
+        .iter()
+        .any(|intent| intent.command_id == command_id);
+    if !queued {
+        return Ok(());
+    }
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        let _ = session.next_turn_intents.remove(command_id);
+    }
+    persist_next_turn_intents(state, session_id)
+}
+
+fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
+    let intent = state.sessions.lock().ok().and_then(|sessions| {
+        let session = sessions.get(session_id)?;
+        let projection = session
+            .turn_projection
+            .current()
+            .map(|item| item.projection);
+        let core_finished = matches!(projection, Some(TurnProjection::Finished(_)));
+        (core_finished && current_turn_id(session).is_none())
+            .then(|| session.next_turn_intents.front().cloned())
+            .flatten()
+    });
+    let Some(intent) = intent else {
+        return;
+    };
+    let payload = intent.payload.clone();
+    {
+        let mut sessions = match state.sessions.lock() {
+            Ok(sessions) => sessions,
+            Err(_) => return,
+        };
+        let Some(session) = sessions.get_mut(session_id) else {
+            return;
+        };
+        let Some(turn) = session
+            .turns
+            .iter_mut()
+            .find(|turn| turn.turn_id == payload.turn_id)
+        else {
+            return;
+        };
+        session.pending_turn_id = Some(payload.turn_id.clone());
+        turn.state = "pending".to_string();
+    }
+    let context = match session_context_with_roles(
+        state,
+        session_id,
+        &payload.attachments,
+        &payload.worker_roles,
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            clear_pending_dispatched_turn(state, session_id, &payload.turn_id);
+            publish_core_semantic(
+                state,
+                session_id,
+                WireEvent::HostError {
+                    message: format!("next_turn_intent_context_failed:{error}"),
+                },
+            );
+            return;
+        }
+    };
+    if let Err(error) = primary_worker_handle(state, session_id).and_then(|worker| {
+        worker.run_turn_with_command_id(payload.text, context, Some(intent.command_id.clone()))
+    }) {
+        clear_pending_dispatched_turn(state, session_id, &payload.turn_id);
+        publish_core_semantic(
+            state,
+            session_id,
+            WireEvent::HostError {
+                message: format!("next_turn_intent_core_send_failed:{error}"),
+            },
+        );
+    }
+}
+
+fn clear_pending_dispatched_turn(state: &AppState, session_id: &str, turn_id: &str) {
+    if let Ok(mut sessions) = state.sessions.lock() {
+        if let Some(session) = sessions.get_mut(session_id) {
+            if session.pending_turn_id.as_deref() == Some(turn_id) {
+                session.pending_turn_id = None;
+            }
+        }
+    }
+}
+
 fn persist_web_session(state: &AppState, session_id: &str) -> Result<(), String> {
     let stored = {
         let sessions = state
@@ -6578,8 +7002,11 @@ fn redeliver_recorded_turn(
     else {
         return Ok(());
     };
-    // CoreAccepted is process-local dequeue, not durable completion. An
-    // unfinished turn is therefore re-driven after restart with the same ID.
+    // A process restart is a hard stop boundary. Restored interrupted turns
+    // may be re-delivered for display, but never regain Core execution ownership.
+    if turn.state == "interrupted" {
+        return Ok(());
+    }
     let worker = primary_worker_handle(state, session_id)?;
     if input_kind == Some("toolgen") {
         let instruction = (!text.trim().is_empty()).then(|| text.trim().to_string());
@@ -9348,7 +9775,8 @@ fn mark_core_command_accepted(state: &AppState, session_id: &str, command_id: &s
             extra,
         },
     )
-    .and_then(|()| persist_web_session(state, session_id));
+    .and_then(|()| persist_web_session(state, session_id))
+    .and_then(|()| remove_dispatched_next_turn_intent(state, session_id, command_id));
     if let Err(error) = persist_result {
         let _ = state.events.send(command_ack(
             command_id,
@@ -9492,6 +9920,7 @@ fn handle_scoped_worker_event(
                 }
             });
             if let Some(projection) = applied {
+                let finished = matches!(projection.projection, TurnProjection::Finished(_));
                 publish_core_semantic(
                     state,
                     session_id,
@@ -9500,6 +9929,9 @@ fn handle_scoped_worker_event(
                         projection,
                     },
                 );
+                if finished {
+                    dispatch_next_turn_intent_if_ready(state, session_id);
+                }
             }
         }
         CoreSessionWorkerEvent::Topics(events) => {
@@ -10000,8 +10432,21 @@ fn handle_scoped_worker_event(
                     outcome: json!({ "text": outcome.text, "message_id": message_id, "completion": completion }),
                 },
             );
+            dispatch_next_turn_intent_if_ready(state, session_id);
             if should_resubmit_unconsumed_supplements {
-                resubmit_unconsumed_supplements(state, session_id, context_id, worker_id);
+                let has_queued_intent = state
+                    .sessions
+                    .lock()
+                    .ok()
+                    .and_then(|sessions| {
+                        sessions
+                            .get(session_id)
+                            .map(|session| !session.next_turn_intents.is_empty())
+                    })
+                    .unwrap_or(false);
+                if !has_queued_intent {
+                    resubmit_unconsumed_supplements(state, session_id, context_id, worker_id);
+                }
             }
         }
         CoreSessionWorkerEvent::WorkerStopped => {

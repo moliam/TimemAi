@@ -6750,6 +6750,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         cancelling_turn_id: None,
         pending_turn_id: None,
         turn_projection: TurnProjectionCache::default(),
+        next_turn_intents: NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS),
         pending_completion_message_id: None,
         pending_unconsumed_supplements: Vec::new(),
         reported_session_working_worker_count: None,
@@ -8170,6 +8171,241 @@ impl ModelClient for CancelThenFinishModel {
             truncated: false,
         })
     }
+}
+
+#[test]
+fn stop_then_immediate_submit_is_visible_once_and_runs_after_the_cancelled_turn() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(AtomicUsize::new(0));
+    let context_id = "immediate_next_context".to_string();
+    let worker_dir = std::env::temp_dir().join(unique_web_id("immediate_next_worker"));
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &worker_dir,
+    );
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            state.template.settings.lock().unwrap().config.clone(),
+            CoreSessionWorkerWorkspace::new(
+                &worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id,
+            context_id.clone(),
+            Some("Primary".to_string()),
+            None,
+            CancelThenFinishModel {
+                calls: Arc::clone(&calls),
+                entered: Arc::clone(&entered),
+                final_text: "NEXT_TURN_FINISHED",
+            },
+        )
+        .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.contexts = vec![WebContext {
+            context_id: context_id.clone(),
+            current_dir: worker_dir.display().to_string(),
+            worker_ids: vec![worker_id.clone()],
+        }];
+        session.workers = vec![WebWorker {
+            worker_id: worker_id.clone(),
+            context_id: context_id.clone(),
+            display_name: "Primary".to_string(),
+            ordinal: 0,
+            state: "ready".to_string(),
+            parent_worker_id: None,
+        }];
+        session.active_context_id = context_id;
+        session.primary_worker_id = worker_id.clone();
+        session.current_dir = worker_dir.display().to_string();
+    }
+
+    handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("first-command"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.to_string(),
+            text: "first turn blocks until Stop".to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+    let started = Instant::now();
+    while entered.load(Ordering::SeqCst) == 0 {
+        for (event_session_id, event_context_id, event_worker_id, event) in
+            drain_worker_events(&state)
+        {
+            handle_scoped_worker_event(
+                &state,
+                &event_session_id,
+                &event_context_id,
+                &event_worker_id,
+                event,
+            );
+        }
+        assert!(started.elapsed() < Duration::from_secs(3));
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnCancel {
+            session_id: session_id.to_string(),
+            target_command_id: Some("first-command".to_string()),
+        },
+    )
+    .unwrap();
+    let first_reply = handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("next-command"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.to_string(),
+            text: "second turn must appear immediately".to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap()
+    .expect("second command must be visible before cancellation settles");
+    let WireEvent::TurnUpdated {
+        turn: visible_next, ..
+    } = first_reply
+    else {
+        panic!("second command must return a turn update")
+    };
+    assert_eq!(visible_next.state, "pending");
+    assert_eq!(
+        visible_next.user_entries[0].text,
+        "second turn must appear immediately"
+    );
+    assert_eq!(load_next_turn_intents(&state, session_id).unwrap().len(), 1);
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions
+            .get_mut(session_id)
+            .unwrap()
+            .attachments
+            .push(WebAttachment {
+                id: "duplicate-must-not-consume".to_string(),
+                name: "duplicate.txt".to_string(),
+                path: "/tmp/duplicate.txt".to_string(),
+                bytes: 9,
+            });
+    }
+
+    let duplicate_reply = handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("next-command"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.to_string(),
+            text: "second turn must appear immediately".to_string(),
+            attachment_ids: Some(vec!["duplicate-must-not-consume".to_string()]),
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap()
+    .expect("duplicate delivery must return the original visible turn");
+    let WireEvent::TurnUpdated {
+        turn: duplicate_turn,
+        ..
+    } = duplicate_reply
+    else {
+        panic!("duplicate delivery must remain a turn update")
+    };
+    assert_eq!(duplicate_turn.turn_id, visible_next.turn_id);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = sessions.get(session_id).unwrap();
+        assert_eq!(session.next_turn_intents.len(), 1);
+        assert!(session
+            .attachments
+            .iter()
+            .any(|file| file.id == "duplicate-must-not-consume"));
+        assert_eq!(
+            session
+                .turns
+                .iter()
+                .filter(|turn| {
+                    turn.user_entries
+                        .iter()
+                        .any(|entry| entry.command_id.as_deref() == Some("next-command"))
+                })
+                .count(),
+            1
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    let finished = Instant::now();
+    loop {
+        for (event_session_id, event_context_id, event_worker_id, event) in
+            drain_worker_events(&state)
+        {
+            handle_scoped_worker_event(
+                &state,
+                &event_session_id,
+                &event_context_id,
+                &event_worker_id,
+                event,
+            );
+        }
+        let done = {
+            let sessions = state.sessions.lock().unwrap();
+            let session = sessions.get(session_id).unwrap();
+            calls.load(Ordering::SeqCst) == 2
+                && session.next_turn_intents.is_empty()
+                && session
+                    .turns
+                    .iter()
+                    .find(|turn| turn.turn_id == visible_next.turn_id)
+                    .is_some_and(|turn| turn.state == "finished")
+        };
+        if done {
+            break;
+        }
+        assert!(finished.elapsed() < Duration::from_secs(5));
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(load_next_turn_intents(&state, session_id)
+        .unwrap()
+        .is_empty());
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(worker_dir);
 }
 
 #[test]
@@ -9871,6 +10107,418 @@ fn repeated_user_sends_during_an_active_turn_are_ordered_supplements() {
             ),
         ]
     );
+}
+
+fn cancelled_test_outcome() -> TurnOutcome {
+    let mut outcome =
+        TurnOutcome::final_response("cancelled", UsageStats::zero(), None, None, Duration::ZERO);
+    outcome.stop_reason = Some(agent_core::TurnStopReason::CancelledByUser);
+    outcome
+}
+
+fn finished_projection_for(session_id: &str, turn_id: &str, epoch: u64) -> CoreSessionWorkerEvent {
+    CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Finished(
+        agent_core::FinishedTurnProjection {
+            token: agent_core::TurnToken {
+                session_id: session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                epoch,
+            },
+            outcome: agent_core::TurnProjectionOutcome::Cancelled,
+        },
+    ))
+}
+
+fn queue_turn_while_stopping(
+    state: &AppState,
+    session_id: &str,
+    command_id: &str,
+    text: &str,
+) -> WebTurn {
+    let event = handle_command_with_id(
+        state,
+        TEST_PORT,
+        Some(command_id),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.to_string(),
+            text: text.to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap()
+    .expect("queued user command must be visible immediately");
+    let WireEvent::TurnUpdated { turn, .. } = event else {
+        panic!("queued user command must return a turn update")
+    };
+    turn
+}
+
+#[test]
+fn runtime_restart_interrupts_and_discards_persisted_next_turn_without_redrive() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("restart_discards_next_turn"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "restart_discards_next_turn_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    state.sessions.lock().unwrap().clear();
+
+    let session_id = create_session(
+        &state,
+        Some("Discard queued next turn on restart".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let old_turn = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "old turn interrupted by restart",
+        Some("old-command"),
+    )
+    .unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut(&session_id)
+        .unwrap()
+        .cancelling_turn_id = Some(old_turn.turn_id);
+    let queued = queue_turn_while_stopping(
+        &state,
+        &session_id,
+        "discarded-command",
+        "queued turn must stop at restart",
+    );
+    assert_eq!(
+        load_next_turn_intents(&state, &session_id).unwrap().len(),
+        1
+    );
+
+    let original_manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    original_manager.shutdown_all().unwrap();
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+    assert_eq!(
+        restore_stored_sessions_after_runtime_restart(&restarted).unwrap(),
+        1
+    );
+
+    thread::sleep(Duration::from_millis(30));
+    let startup_events = drain_worker_events(&restarted);
+    assert!(startup_events.iter().all(|(_, _, _, event)| {
+        !matches!(
+            event,
+            CoreSessionWorkerEvent::CommandAccepted { command_id }
+                if command_id == "discarded-command"
+        ) && !matches!(
+            event,
+            CoreSessionWorkerEvent::TurnStarted { command_id: Some(command_id) }
+                if command_id == "discarded-command"
+        )
+    }));
+    for (event_session_id, event_context_id, event_worker_id, event) in startup_events {
+        handle_scoped_worker_event(
+            &restarted,
+            &event_session_id,
+            &event_context_id,
+            &event_worker_id,
+            event,
+        );
+    }
+    {
+        let sessions = restarted.sessions.lock().unwrap();
+        let restored = &sessions[&session_id];
+        assert_eq!(restored.turn_projection.current(), None);
+        assert_eq!(restored.active_turn_id, None);
+        assert_eq!(restored.pending_turn_id, None);
+        assert!(restored.next_turn_intents.is_empty());
+        assert_eq!(
+            restored
+                .turns
+                .iter()
+                .find(|turn| turn.turn_id == queued.turn_id)
+                .unwrap()
+                .state,
+            "interrupted"
+        );
+    }
+    assert!(load_next_turn_intents(&restarted, &session_id)
+        .unwrap()
+        .is_empty());
+
+    restarted
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut(&session_id)
+        .unwrap()
+        .attachments
+        .push(WebAttachment {
+            id: "old-redelivery-must-not-consume".to_string(),
+            name: "old.txt".to_string(),
+            path: "/tmp/old.txt".to_string(),
+            bytes: 3,
+        });
+    let old_redelivery = handle_command_with_id(
+        &restarted,
+        TEST_PORT,
+        Some("discarded-command"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "queued turn must stop at restart".to_string(),
+            attachment_ids: Some(vec!["old-redelivery-must-not-consume".to_string()]),
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap()
+    .expect("old command ID may only return its interrupted turn");
+    let WireEvent::TurnUpdated { turn, .. } = old_redelivery else {
+        panic!("old command ID must return a turn update")
+    };
+    assert_eq!(turn.turn_id, queued.turn_id);
+    assert_eq!(turn.state, "interrupted");
+    assert!(restarted.sessions.lock().unwrap()[&session_id]
+        .attachments
+        .iter()
+        .any(|file| file.id == "old-redelivery-must-not-consume"));
+    thread::sleep(Duration::from_millis(30));
+    assert!(drain_worker_events(&restarted)
+        .iter()
+        .all(|(_, _, _, event)| {
+            !matches!(
+                event,
+                CoreSessionWorkerEvent::CommandAccepted { command_id }
+                    if command_id == "discarded-command"
+            )
+        }));
+
+    let new_turn = handle_command_with_id(
+        &restarted,
+        TEST_PORT,
+        Some("new-command-after-restart"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "new work after restart".to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap()
+    .expect("a new command ID may create a new turn after restart");
+    let WireEvent::TurnUpdated { turn: new_turn, .. } = new_turn else {
+        panic!("new command must return a turn update")
+    };
+    assert_ne!(new_turn.turn_id, queued.turn_id);
+
+    let started = Instant::now();
+    let mut accepted = 0usize;
+    while accepted == 0 {
+        for (event_session_id, event_context_id, event_worker_id, event) in
+            drain_worker_events(&restarted)
+        {
+            if matches!(
+                &event,
+                CoreSessionWorkerEvent::CommandAccepted { command_id }
+                    if command_id == "new-command-after-restart"
+            ) {
+                accepted += 1;
+            }
+            assert!(!matches!(
+                &event,
+                CoreSessionWorkerEvent::CommandAccepted { command_id }
+                    if command_id == "discarded-command"
+            ));
+            handle_scoped_worker_event(
+                &restarted,
+                &event_session_id,
+                &event_context_id,
+                &event_worker_id,
+                event,
+            );
+        }
+        assert!(started.elapsed() < Duration::from_secs(3));
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(accepted, 1);
+
+    let manager = {
+        let mut guard = restarted.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn next_turn_dispatch_waits_for_both_core_and_host_terminal_facts_in_either_order() {
+    for projection_first in [true, false] {
+        let state = routing_test_state();
+        let session_id = "session_a";
+        let current = start_web_turn(&state, session_id, "old turn").unwrap();
+        {
+            let mut sessions = state.sessions.lock().unwrap();
+            sessions.get_mut(session_id).unwrap().cancelling_turn_id =
+                Some(current.turn_id.clone());
+        }
+        let queued = queue_turn_while_stopping(
+            &state,
+            session_id,
+            if projection_first {
+                "projection-first"
+            } else {
+                "turn-finished-first"
+            },
+            "new turn",
+        );
+        let mut events = state.events.subscribe();
+
+        if projection_first {
+            handle_worker_event(
+                &state,
+                session_id,
+                finished_projection_for(session_id, &current.turn_id, 1),
+            );
+        } else {
+            handle_worker_event(
+                &state,
+                session_id,
+                CoreSessionWorkerEvent::TurnFinished {
+                    outcome: cancelled_test_outcome(),
+                },
+            );
+        }
+
+        assert!(
+            drain_wire_events(&mut events)
+                .iter()
+                .all(|event| !matches!(event, WireEvent::HostError { message } if message.starts_with("next_turn_intent_"))),
+            "one terminal fact must not be enough to dispatch"
+        );
+        {
+            let sessions = state.sessions.lock().unwrap();
+            let session = sessions.get(session_id).unwrap();
+            assert_eq!(session.next_turn_intents.len(), 1);
+            assert_ne!(
+                session.pending_turn_id.as_deref(),
+                Some(queued.turn_id.as_str())
+            );
+        }
+
+        if projection_first {
+            handle_worker_event(
+                &state,
+                session_id,
+                CoreSessionWorkerEvent::TurnFinished {
+                    outcome: cancelled_test_outcome(),
+                },
+            );
+        } else {
+            handle_worker_event(
+                &state,
+                session_id,
+                finished_projection_for(session_id, &current.turn_id, 1),
+            );
+        }
+
+        let dispatch_errors = drain_wire_events(&mut events)
+            .into_iter()
+            .filter(|event| {
+                matches!(event, WireEvent::HostError { message } if message.starts_with("next_turn_intent_core_send_failed:"))
+            })
+            .count();
+        assert_eq!(
+            dispatch_errors, 1,
+            "the second independent terminal fact must unlock exactly one dispatch attempt"
+        );
+        let sessions = state.sessions.lock().unwrap();
+        let session = sessions.get(session_id).unwrap();
+        assert_eq!(session.next_turn_intents.len(), 1);
+        assert_eq!(session.pending_turn_id, None);
+    }
+}
+
+#[test]
+fn full_next_turn_queue_rejects_without_consuming_attachment_or_creating_turn() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let current = start_web_turn(&state, session_id, "old turn").unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut(session_id).unwrap().cancelling_turn_id = Some(current.turn_id);
+    }
+    for index in 0..MAX_NEXT_TURN_INTENTS {
+        queue_turn_while_stopping(
+            &state,
+            session_id,
+            &format!("queued-{index}"),
+            &format!("queued text {index}"),
+        );
+    }
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions
+            .get_mut(session_id)
+            .unwrap()
+            .attachments
+            .push(WebAttachment {
+                id: "keep-me".to_string(),
+                name: "evidence.txt".to_string(),
+                path: "/tmp/evidence.txt".to_string(),
+                bytes: 8,
+            });
+    }
+    let turns_before = state.sessions.lock().unwrap()[session_id].turns.len();
+
+    let error = handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("queue-overflow"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.to_string(),
+            text: "must be rejected".to_string(),
+            attachment_ids: Some(vec!["keep-me".to_string()]),
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, "next_turn_intent_queue_full");
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.next_turn_intents.len(), MAX_NEXT_TURN_INTENTS);
+    assert_eq!(session.turns.len(), turns_before);
+    assert!(session.attachments.iter().any(|file| file.id == "keep-me"));
+    assert!(session.turns.iter().all(|turn| {
+        turn.user_entries
+            .iter()
+            .all(|entry| entry.command_id.as_deref() != Some("queue-overflow"))
+    }));
 }
 
 #[test]
