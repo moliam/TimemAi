@@ -8,9 +8,9 @@
 
 ### Changed
 
-- Show Web Interim answers newest-first, add a compact collapse control beside the Interim tab, and strengthen each Interim section heading so it is easier to distinguish from answer content.
+- Render Web Chat sub-answers newest-first inside an independent compact disclosure matching Thought/Action, with a restrained green-tinted answer surface. When the final answer arrives, Chat and Thought/Action automatically collapse once and remain under explicit user control afterward.
 
-- Add a subtle theme-aware shadow around the Web Thought/Action process panel, including a restrained upper-edge shadow, and progressively fade text at scrollable top/bottom edges instead of clipping it abruptly.
+- Replace the Web Thought/Action process panel shadow with a fine theme-aware border while retaining progressive top/bottom scroll-edge fades.
 
 - Reworked Web Session switching around a two-entry LRU of presentation-only
   timeline panes. Warm A/B switching now reuses parsed Markdown and mounted Turn
