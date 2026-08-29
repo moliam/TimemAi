@@ -1,9 +1,9 @@
 use crate::{
     atomic_write_file, bash_approval_mode_label,
     rolling_file_store::{
-        append_rolling_record, migrate_legacy_file, read_segmented_records, rolling_segments,
-        segment_metadata_path, segmented_directory, trim_rolling_segments, RollingCapacity,
-        AUDIT_ROLLING_SLICE_BYTES,
+        append_rolling_record_with_result, migrate_legacy_file, read_segmented_records,
+        rolling_segments, segment_metadata_path, segmented_directory, trim_rolling_segments,
+        RollingCapacity, AUDIT_ROLLING_SLICE_BYTES,
     },
     ApiProtocol, ApprovalRequest, BashApprovalMode, MemGuard, TurnStopSummary, UsageStats,
 };
@@ -231,6 +231,7 @@ fn rolling_path_bytes(path: &Path) -> std::io::Result<u64> {
         .file_name()
         .is_some_and(|name| name == "action_audit.json")
     {
+        directories.push(path.with_file_name("action_audit.active"));
         directories.push(path.with_file_name("action_audit.json.turns"));
     }
     for directory in directories {
@@ -667,12 +668,30 @@ fn append_audit_jsonl(path: &Path, event: &Value) -> std::io::Result<()> {
         AUDIT_ROLLING_SLICE_BYTES,
     )
     .map_err(std::io::Error::other)?;
-    append_rolling_record(path, &record, capacity, AUDIT_ROLLING_SLICE_BYTES)?;
+    let append =
+        append_rolling_record_with_result(path, &record, capacity, AUDIT_ROLLING_SLICE_BYTES)?;
+    write_audit_maintenance_hint_if_rolled(path, append.rolled_segment)?;
     let event_time_ms = event
         .get("time_ms")
         .and_then(Value::as_i64)
         .ok_or_else(|| std::io::Error::other("audit_event_time_missing"))?;
     update_active_audit_segment_summary(path, event_time_ms, record.len() as u64)
+}
+
+fn write_audit_maintenance_hint_if_rolled(path: &Path, rolled: bool) -> std::io::Result<()> {
+    if rolled {
+        atomic_write_file(
+            &api_audit_maintenance_hint_path(path),
+            b"audit_segment_rolled\n",
+        )?;
+    }
+    Ok(())
+}
+
+pub fn api_audit_maintenance_hint_path(path: &Path) -> std::path::PathBuf {
+    path.parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".storage-maintenance-hint")
 }
 
 fn audit_sidecar_path(path: &Path) -> std::path::PathBuf {

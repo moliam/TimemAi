@@ -68,6 +68,7 @@ pub struct ModelServiceConfig {
     pub base_url: String,
     pub api_key: String,
     pub http_headers: BTreeMap<String, String>,
+    pub request_fields: BTreeMap<String, Value>,
     pub timeout_secs: u64,
     pub max_llm_output_tokens: u32,
     pub max_llm_input_tokens: u32,
@@ -205,13 +206,17 @@ pub fn build_model_request(
     blocks: &[ModelPromptBlock],
     structured_output: StructuredOutputHint,
 ) -> Value {
-    match config.api_protocol {
+    let mut body = match config.api_protocol {
         ApiProtocol::OpenAiCompatible => {
             build_openai_compatible_request(config, blocks, structured_output)
         }
         ApiProtocol::OpenAiResponses => build_openai_responses_request(config, blocks),
         ApiProtocol::Anthropic => build_anthropic_request(config, blocks),
+    };
+    if let Some(object) = body.as_object_mut() {
+        object.extend(config.request_fields.clone());
     }
+    body
 }
 
 pub fn prepare_model_request(
@@ -594,6 +599,45 @@ pub fn validate_model_http_headers(headers: &BTreeMap<String, String>) -> Result
         if !valid_name || !valid_value || !normalized_names.insert(name.to_ascii_lowercase()) {
             return Err("invalid_model_http_header".to_string());
         }
+    }
+    Ok(())
+}
+
+pub fn validate_model_request_fields(fields: &BTreeMap<String, Value>) -> Result<(), String> {
+    const RESERVED: &[&str] = &[
+        "model",
+        "messages",
+        "max_tokens",
+        "max_output_tokens",
+        "instructions",
+        "input",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "stream",
+        "stream_options",
+        "response_format",
+        "enable_thinking",
+        "reasoning_effort",
+        "system",
+    ];
+    if fields.len() > 32 {
+        return Err("too_many_model_request_fields".to_string());
+    }
+    for name in fields.keys() {
+        let valid =
+            !name.trim().is_empty() && name.len() <= 128 && !name.chars().any(|ch| ch.is_control());
+        if !valid
+            || RESERVED
+                .iter()
+                .any(|reserved| name.eq_ignore_ascii_case(reserved))
+        {
+            return Err("invalid_or_reserved_model_request_field".to_string());
+        }
+    }
+    let encoded = serde_json::to_vec(fields).map_err(|error| error.to_string())?;
+    if encoded.len() > 64 * 1024 {
+        return Err("model_request_fields_too_large".to_string());
     }
     Ok(())
 }

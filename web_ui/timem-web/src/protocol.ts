@@ -556,6 +556,7 @@ export type WireEvent =
       endpoint_id: string;
       api_key: string;
       http_headers: Record<string, string>;
+      request_fields: Record<string, unknown>;
     };
 
 export type ClientCommand =
@@ -675,6 +676,7 @@ export type ClientCommand =
         stream: boolean;
         api_key?: string;
         http_headers: Record<string, string>;
+        request_fields: Record<string, unknown>;
       };
     }
   | { type: "model_endpoint_delete"; endpoint_id: string }

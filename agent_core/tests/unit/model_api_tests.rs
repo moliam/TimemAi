@@ -8,6 +8,7 @@ fn config(api_protocol: ApiProtocol) -> ModelServiceConfig {
         base_url: "https://example.invalid/v1".to_string(),
         api_key: "dummy".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         timeout_secs: 1,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
@@ -108,6 +109,42 @@ fn openai_compatible_request_uses_messages_and_structured_output() {
     assert_eq!(body["messages"][0]["role"], "system");
     assert_eq!(body["messages"][0]["cache_control"]["type"], "ephemeral");
     assert_eq!(body["response_format"]["type"], "json_object");
+}
+
+#[test]
+fn custom_request_fields_are_merged_as_typed_top_level_json() {
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.request_fields = BTreeMap::from([
+        ("service_tier".to_string(), json!("fast")),
+        (
+            "vendor_options".to_string(),
+            json!({"priority": 2, "enabled": true}),
+        ),
+    ]);
+    let body = build_model_request(&config, &[], StructuredOutputHint::None);
+    assert_eq!(body["service_tier"], "fast");
+    assert_eq!(body["vendor_options"]["priority"], 2);
+    assert_eq!(body["vendor_options"]["enabled"], true);
+}
+
+#[test]
+fn custom_request_fields_reject_reserved_request_keys() {
+    assert!(validate_model_request_fields(&BTreeMap::from([(
+        "model".to_string(),
+        json!("override"),
+    )]))
+    .is_err());
+    assert!(
+        validate_model_request_fields(&BTreeMap::from([("messages".to_string(), json!([]),)]))
+            .is_err()
+    );
+    assert_eq!(
+        validate_model_request_fields(&BTreeMap::from([(
+            "service_tier".to_string(),
+            json!("fast"),
+        )])),
+        Ok(())
+    );
 }
 
 #[test]

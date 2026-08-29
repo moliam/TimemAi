@@ -10,6 +10,7 @@ export type ModelEndpoint = {
   stream: boolean;
   api_key_configured: boolean;
   http_headers: Record<string, string>;
+  request_fields: Record<string, unknown>;
 };
 
 export type ModelEndpointDraft = {
@@ -24,6 +25,7 @@ export type ModelEndpointDraft = {
   stream: boolean;
   api_key?: string;
   http_headers: Record<string, string>;
+  request_fields: Record<string, unknown>;
 };
 
 type ModelEndpointProfile = {
@@ -66,6 +68,7 @@ export function endpointDraftValid(draft: ModelEndpointDraft): boolean {
     && !!draft.response_protocol.trim()
     && !!draft.base_url.trim()
     && Object.keys(draft.http_headers ?? {}).every((name) => !!name.trim())
+    && Object.keys(draft.request_fields ?? {}).every((name) => !!name.trim())
     && MODEL_CONTEXT_WINDOW_OPTIONS.includes(draft.max_llm_input_tokens as typeof MODEL_CONTEXT_WINDOW_OPTIONS[number])
     && MODEL_OUTPUT_TOKEN_OPTIONS.includes(draft.max_llm_output_tokens as typeof MODEL_OUTPUT_TOKEN_OPTIONS[number]);
 }

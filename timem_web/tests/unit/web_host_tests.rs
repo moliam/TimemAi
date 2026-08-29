@@ -706,6 +706,7 @@ fn command_dedup_terminal_result_survives_restart_without_persisting_secrets() {
             endpoint_id: "endpoint_a".to_string(),
             api_key: "secret".to_string(),
             http_headers: Default::default(),
+            request_fields: Default::default(),
         })
         .is_none()
     );
@@ -3678,6 +3679,7 @@ fn workspace_snapshot_deduplicates_registered_current_directory() {
                 base_url: "http://127.0.0.1".to_string(),
                 api_key: "test".to_string(),
                 http_headers: Default::default(),
+                request_fields: Default::default(),
                 timeout_secs: 1,
                 max_llm_output_tokens: 1_024,
                 max_llm_input_tokens: 10_000,
@@ -5949,8 +5951,8 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
     );
 }
 
-#[tokio::test]
-async fn ordinary_history_append_does_not_wake_global_temporary_retention() {
+#[test]
+fn ordinary_history_append_does_not_require_or_run_temporary_maintenance() {
     let state = routing_test_state();
     let session = state.sessions.lock().unwrap()["session_a"].clone();
     let store = current_session_store(&state).unwrap();
@@ -5975,12 +5977,186 @@ async fn ordinary_history_append_does_not_wake_global_temporary_retention() {
     )
     .unwrap();
 
-    assert!(tokio::time::timeout(
-        Duration::from_millis(20),
-        state.temporary_retention_wakeup.notified()
-    )
-    .await
-    .is_err());
+    let records = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert!(records.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Message { content, .. } if content == "hi"
+    )));
+}
+
+#[test]
+fn idle_temporary_maintenance_is_skipped_while_any_session_has_live_work() {
+    let state = routing_test_state();
+    assert!(!has_live_mem_work(&state).unwrap());
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.state = "working".to_string();
+        session.active_turn_id = Some("turn_live".to_string());
+    }
+
+    assert!(has_live_mem_work(&state).unwrap());
+}
+
+#[test]
+fn idle_temporary_maintenance_is_allowed_only_after_work_is_clear() {
+    let state = routing_test_state();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.pending_turn_id = Some("turn_pending".to_string());
+    }
+    assert!(has_live_mem_work(&state).unwrap());
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.pending_turn_id = None;
+        session.active_turn_id = None;
+        session.state = "ready".to_string();
+    }
+    assert!(!has_live_mem_work(&state).unwrap());
+}
+
+#[test]
+fn temporary_maintenance_runtime_accumulates_across_restarts_without_counting_stopped_time() {
+    let state = routing_test_state();
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    let first_now = tokio::time::Instant::now();
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.temporary_maintenance.checkpoint_started_at =
+            first_now - Duration::from_secs(3 * 60 * 60);
+        assert_eq!(
+            checkpoint_temporary_maintenance_runtime(&mut mem, first_now).unwrap(),
+            Duration::from_secs(3 * 60 * 60)
+        );
+    }
+
+    // Reopening reads only the persisted accumulated duration. Wall-clock time
+    // while no Timem process is running is not represented in this state.
+    let mut reopened = load_temporary_maintenance_runtime_state(&memory_dir).unwrap();
+    assert_eq!(
+        reopened.accumulated_runtime,
+        Duration::from_secs(3 * 60 * 60)
+    );
+    let second_now = tokio::time::Instant::now();
+    reopened.checkpoint_started_at = second_now - Duration::from_secs(3 * 60 * 60);
+    reopened.checkpoint(second_now);
+    assert_eq!(reopened.accumulated_runtime, TEMPORARY_MAINTENANCE_INTERVAL);
+}
+
+#[test]
+fn temporary_maintenance_trigger_persists_due_runtime_and_accepts_segment_hint() {
+    let state = routing_test_state();
+    let now = tokio::time::Instant::now();
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.temporary_maintenance.accumulated_runtime =
+            TEMPORARY_MAINTENANCE_INTERVAL - Duration::from_secs(1);
+        mem.temporary_maintenance.checkpoint_started_at = now - Duration::from_secs(1);
+    }
+    assert!(checkpoint_and_get_temporary_maintenance_trigger(&state, now).unwrap());
+
+    let other = routing_test_state();
+    let hint = {
+        let mem = other.mem.lock().unwrap();
+        agent_core::api_audit_maintenance_hint_path(&mem.layout.api_audit_file())
+    };
+    std::fs::create_dir_all(hint.parent().unwrap()).unwrap();
+    std::fs::write(&hint, b"audit_segment_rolled\n").unwrap();
+    assert!(
+        checkpoint_and_get_temporary_maintenance_trigger(&other, tokio::time::Instant::now())
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn busy_temporary_maintenance_does_not_reset_due_runtime_or_hint() {
+    let state = routing_test_state();
+    let (memory_dir, hint) = {
+        let mut mem = state.mem.lock().unwrap();
+        mem.temporary_maintenance.accumulated_runtime = TEMPORARY_MAINTENANCE_INTERVAL;
+        let memory_dir = mem.layout.memory_dir();
+        save_temporary_maintenance_runtime_state(&memory_dir, &mem.temporary_maintenance).unwrap();
+        (
+            memory_dir,
+            agent_core::api_audit_maintenance_hint_path(&mem.layout.api_audit_file()),
+        )
+    };
+    std::fs::create_dir_all(hint.parent().unwrap()).unwrap();
+    std::fs::write(&hint, b"audit_segment_rolled\n").unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .state = "working".to_string();
+
+    assert_eq!(
+        run_idle_temporary_maintenance(state).await.unwrap(),
+        TemporaryMaintenanceAttempt::Busy
+    );
+    assert!(hint.exists());
+    assert_eq!(
+        load_temporary_maintenance_runtime_state(&memory_dir)
+            .unwrap()
+            .accumulated_runtime,
+        TEMPORARY_MAINTENANCE_INTERVAL
+    );
+}
+
+#[test]
+fn successful_temporary_maintenance_completion_resets_runtime_and_clears_hint() {
+    let state = routing_test_state();
+    let (memory_dir, hint) = {
+        let mut mem = state.mem.lock().unwrap();
+        mem.temporary_maintenance.accumulated_runtime = TEMPORARY_MAINTENANCE_INTERVAL;
+        let memory_dir = mem.layout.memory_dir();
+        save_temporary_maintenance_runtime_state(&memory_dir, &mem.temporary_maintenance).unwrap();
+        (
+            memory_dir,
+            agent_core::api_audit_maintenance_hint_path(&mem.layout.api_audit_file()),
+        )
+    };
+    std::fs::create_dir_all(hint.parent().unwrap()).unwrap();
+    std::fs::write(&hint, b"audit_segment_rolled\n").unwrap();
+
+    complete_temporary_maintenance(&state, tokio::time::Instant::now()).unwrap();
+    assert!(!hint.exists());
+    assert_eq!(
+        load_temporary_maintenance_runtime_state(&memory_dir)
+            .unwrap()
+            .accumulated_runtime,
+        Duration::ZERO
+    );
+}
+
+#[tokio::test]
+async fn idle_temporary_maintenance_waits_for_the_global_command_barrier() {
+    let state = routing_test_state();
+    let barrier = state.command_global_barrier.clone();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _read_guard = barrier.read().unwrap();
+        locked_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    locked_rx.recv().unwrap();
+
+    let maintenance = tokio::spawn(run_idle_temporary_maintenance(state));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(
+        !maintenance.is_finished(),
+        "maintenance must not overlap an accepted browser mutation"
+    );
+
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    maintenance.await.unwrap().unwrap();
 }
 
 #[test]
@@ -6607,6 +6783,7 @@ fn routing_test_state() -> AppState {
         base_url: "http://127.0.0.1".to_string(),
         api_key: "test".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         timeout_secs: 1,
         max_llm_output_tokens: 1_024,
         max_llm_input_tokens: 10_000,
@@ -6660,7 +6837,6 @@ fn routing_test_state() -> AppState {
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
-        temporary_retention_wakeup: Arc::new(Notify::new()),
         debug: None,
         runtime_log: RuntimeLog::default(),
     }
@@ -6827,6 +7003,7 @@ fn test_runtime_settings() -> RuntimeSettings {
             base_url: "http://127.0.0.1:9".to_string(),
             api_key: "test".to_string(),
             http_headers: Default::default(),
+            request_fields: Default::default(),
             timeout_secs: 1,
             max_llm_output_tokens: 1_024,
             max_llm_input_tokens: 10_000,
@@ -10814,17 +10991,11 @@ fn polling_action_progress_reaches_web_event_stream_before_loop_finishes() {
     let mut wire_events = state.events.subscribe();
     submit_turn(&state, &session_id, "wait for marker".to_string()).unwrap();
 
-    let marker_writer = marker.clone();
-    let writer = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(500));
-        std::fs::write(marker_writer, b"ready").unwrap();
-    });
-
     let deadline = Instant::now() + Duration::from_secs(2);
-    let mut saw_thought_before_finish = false;
-    let mut saw_action_start_before_finish = false;
+    let mut saw_thought_while_polling = false;
+    let mut saw_action_start_while_polling = false;
     while Instant::now() < deadline
-        && !(saw_thought_before_finish && saw_action_start_before_finish)
+        && !(saw_thought_while_polling && saw_action_start_while_polling)
     {
         for (event_session_id, context_id, worker_id, event) in drain_worker_events(&state) {
             handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
@@ -10836,28 +11007,30 @@ fn polling_action_progress_reaches_web_event_stream_before_loop_finishes() {
                     && event["payload"]["free_talk"] == "Waiting for the polling marker."
                     && !loop_finished
                 {
-                    saw_thought_before_finish = true;
+                    saw_thought_while_polling = true;
                 }
                 if event["topic"]["name"] == CORE_TOPIC_ACTION
                     && event["payload"]["event"] == "start"
                     && event["payload"]["kind"]["mode"] == "poll"
                     && !loop_finished
                 {
-                    saw_action_start_before_finish = true;
+                    saw_action_start_while_polling = true;
                 }
             }
         }
         thread::sleep(Duration::from_millis(5));
     }
-    writer.join().unwrap();
     assert!(
-        saw_thought_before_finish,
-        "free-talk should reach Web before polling completes"
+        saw_thought_while_polling,
+        "free-talk should reach Web while the polling action is still blocked"
     );
     assert!(
-        saw_action_start_before_finish,
-        "poll action start should reach Web before polling completes"
+        saw_action_start_while_polling,
+        "poll action start should reach Web while polling is still blocked"
     );
+    // Release the polling action only after both progress events were observed.
+    // This makes the ordering deterministic instead of racing a fixed-delay writer.
+    std::fs::write(&marker, b"ready").unwrap();
 }
 
 #[test]
@@ -12453,6 +12626,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
             stream: false,
             api_key: format!("secret-{index:05}"),
             http_headers: Default::default(),
+            request_fields: Default::default(),
         }
     }
 
@@ -12487,7 +12661,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                 assert_eq!(
                     model_endpoint_secrets(&state, &format!("endpoint-{:05}", count - 1))
                         .unwrap()
-                        .0,
+                        .api_key,
                     format!("secret-{:05}", count - 1)
                 );
                 started.elapsed()
@@ -12512,6 +12686,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                     ("Authorization".to_string(), "****".to_string()),
                     ("X-Tenant".to_string(), "****".to_string()),
                 ]),
+                request_fields: Default::default(),
             },
         )
         .unwrap();
@@ -12563,6 +12738,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                         stream: false,
                         api_key: None,
                         http_headers: Default::default(),
+                        request_fields: Default::default(),
                     },
                 )
                 .unwrap();
@@ -12641,6 +12817,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         stream: false,
         api_key: None,
         http_headers: Default::default(),
+        request_fields: Default::default(),
     };
     assert_eq!(
         normalize_model_endpoint_input(None, invalid_input).unwrap_err(),
@@ -12659,6 +12836,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         stream: false,
         api_key: None,
         http_headers: Default::default(),
+        request_fields: Default::default(),
     };
     assert_eq!(
         normalize_model_endpoint_input(None, invalid_output).unwrap_err(),
@@ -12680,6 +12858,7 @@ fn model_endpoint_stream_requires_openai_compatible_protocol() {
         stream: true,
         api_key: None,
         http_headers: Default::default(),
+        request_fields: Default::default(),
     };
     assert_eq!(
         normalize_model_endpoint_input(None, input).unwrap_err(),
@@ -12713,6 +12892,13 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                     ("X-Tenant".to_string(), "tenant\"one\\东京".to_string()),
                     ("Authorization".to_string(), "Basic special==".to_string()),
                 ]),
+                request_fields: BTreeMap::from([
+                    ("service_tier".to_string(), json!("fast")),
+                    (
+                        "vendor_options".to_string(),
+                        json!({"priority": 2, "enabled": true}),
+                    ),
+                ]),
             },
         },
     )
@@ -12724,8 +12910,13 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     assert!(!serialized.contains("secret-endpoint-key"));
     assert!(!serialized.contains("tenant\"one"));
     assert!(serialized.contains("\"X-Tenant\":\"****\""));
+    assert!(serialized.contains("\"service_tier\":\"****\""));
+    assert!(serialized.contains("\"vendor_options\":\"****\""));
+    assert!(!serialized.contains("priority"));
     assert_eq!(
-        model_endpoint_secrets(&state, "endpoint-one").unwrap().0,
+        model_endpoint_secrets(&state, "endpoint-one")
+            .unwrap()
+            .api_key,
         "secret-endpoint-key"
     );
     let applied = apply_model_endpoint(&state, &session_id, "endpoint-one").unwrap();
@@ -12756,6 +12947,18 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
             session.runtime.env.get("TIMEM_STREAM").map(String::as_str),
             Some("false")
         );
+        assert_eq!(
+            session
+                .runtime
+                .settings
+                .config
+                .request_fields
+                .get("service_tier"),
+            Some(&json!("fast"))
+        );
+        let request_fields: Value =
+            serde_json::from_str(session.runtime.env.get("TIMEM_REQUEST_FIELDS").unwrap()).unwrap();
+        assert_eq!(request_fields["vendor_options"]["priority"], 2);
     }
     let reveal = execute_browser_command(
         &state,
@@ -12777,8 +12980,10 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
             ref endpoint_id,
             ref api_key,
             ref http_headers,
+            ref request_fields,
         }) if endpoint_id == "endpoint-one" && api_key == "secret-endpoint-key"
             && http_headers.get("X-Tenant").map(String::as_str) == Some("tenant\"one\\东京")
+            && request_fields.get("service_tier") == Some(&json!("fast"))
     ));
 
     let mut endpoint_events = state.events.subscribe();
@@ -12798,6 +13003,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 stream: true,
                 api_key: None,
                 http_headers: Default::default(),
+                request_fields: Default::default(),
             },
         },
     )
@@ -12843,12 +13049,15 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 stream: false,
                 api_key: None,
                 http_headers: Default::default(),
+                request_fields: Default::default(),
             },
         },
     )
     .unwrap();
     assert_eq!(
-        model_endpoint_secrets(&state, "endpoint-one").unwrap().0,
+        model_endpoint_secrets(&state, "endpoint-one")
+            .unwrap()
+            .api_key,
         "secret-endpoint-key"
     );
     let memory_dir = state.mem.lock().unwrap().layout.memory_dir();

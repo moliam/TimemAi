@@ -634,6 +634,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
         profiler.record_turn(elapsed, model_wait_this_turn);
     }
     core.record_turn_final_audit(request.audit_file, request.session, &turn_id, &outcome);
+    core.finish_action_audit_turn();
     publish_turn_projection(ui, turn_projection.close_input());
     let projection_outcome = projection_outcome_from_turn_outcome(&outcome);
     publish_turn_projection(ui, turn_projection.finish(projection_outcome));

@@ -41,6 +41,14 @@ impl RollingCapacity {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RollingAppendResult {
+    pub removed_segments: usize,
+    /// True only when an append rolls from an existing segment into a new one.
+    /// The first segment created for an empty store is not a rollover.
+    pub rolled_segment: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RollingRewriteResult {
     pub original_records: usize,
     pub retained_records: usize,
@@ -281,7 +289,11 @@ pub fn migrate_legacy_file(path: &Path, slice_bytes: u64) -> std::io::Result<()>
             if record.len() as u64 > slice_bytes {
                 return Err(std::io::Error::other("rolling_record_exceeds_slice"));
             }
-            if output.is_none() || current_bytes.saturating_add(record.len() as u64) > slice_bytes {
+            // `slice_bytes` is a soft rollover threshold. Keep each logical
+            // record whole in one physical slice, even when that record makes
+            // the slice slightly exceed the target. Roll only before the next
+            // record once the current slice has already reached the threshold.
+            if output.is_none() || current_bytes >= slice_bytes {
                 output = Some(
                     OpenOptions::new()
                         .create_new(true)
@@ -338,6 +350,16 @@ pub fn append_rolling_record(
     capacity: RollingCapacity,
     slice_bytes: u64,
 ) -> std::io::Result<usize> {
+    Ok(append_rolling_record_with_result(path, record, capacity, slice_bytes)?.removed_segments)
+}
+
+/// Appends one complete record and reports the infrequent segment-roll boundary.
+pub fn append_rolling_record_with_result(
+    path: &Path,
+    record: &[u8],
+    capacity: RollingCapacity,
+    slice_bytes: u64,
+) -> std::io::Result<RollingAppendResult> {
     if record.is_empty()
         || record.len() as u64 > slice_bytes
         || capacity.reserved_bytes != slice_bytes
@@ -354,11 +376,10 @@ pub fn append_rolling_record(
             .unwrap_or(0);
         last.bytes = actual_bytes;
     }
+    let had_segment = !manifest.segments.is_empty();
     let mut created_segment = false;
     let target_index = match manifest.segments.last() {
-        Some(last) if last.bytes.saturating_add(record.len() as u64) <= slice_bytes => {
-            manifest.segments.len().saturating_sub(1)
-        }
+        Some(last) if last.bytes < slice_bytes => manifest.segments.len().saturating_sub(1),
         _ => {
             let file_name = format!("segment-{:016}.jsonl", manifest.next_index.max(1));
             manifest.next_index = manifest.next_index.max(1).saturating_add(1);
@@ -393,7 +414,10 @@ pub fn append_rolling_record(
         removed = removed.saturating_add(1);
     }
     write_rolling_manifest(path, &manifest)?;
-    Ok(removed)
+    Ok(RollingAppendResult {
+        removed_segments: removed,
+        rolled_segment: had_segment && created_segment,
+    })
 }
 
 /// Removes complete oldest slices until at most `max_bytes` remain.
@@ -463,8 +487,9 @@ pub fn read_segmented_records(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
     Ok(records)
 }
 
-/// Rewrites complete records into real physical segment files. Each segment is
-/// bounded by `slice_bytes`; one capacity slice remains reserved. Installation
+/// Rewrites complete records into real physical segment files. `slice_bytes`
+/// is a soft rollover threshold: a complete record may make a segment exceed
+/// it, and the following record starts a new segment. One capacity slice remains reserved. Installation
 /// uses a sibling temporary directory and rename, and legacy single-file data
 /// is removed only after the segmented representation is committed.
 pub fn rewrite_segmented_records(
@@ -516,7 +541,7 @@ pub fn rewrite_segmented_records(
             Ok(())
         };
         for record in &records[start..] {
-            if !segment.is_empty() && segment.len() as u64 + record.len() as u64 > slice_bytes {
+            if !segment.is_empty() && segment.len() as u64 >= slice_bytes {
                 flush(&mut segment, segment_index)?;
                 segment_index += 1;
             }
