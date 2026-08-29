@@ -1,15 +1,29 @@
 # timem_web Module Boundary
 
-`timem_web` is a local-first host adapter. It binds a loopback HTTP/WebSocket
+`timem_web` is a local-first Host Adapter and the first implementation of the
+generic Host Projection Adapter pattern. It binds a loopback HTTP/WebSocket
 server by default, allows an explicit authenticated `--public` bind, owns
-browser authentication, maps browser commands to `agent_core` session worker
-handles, and forwards the canonical core topic wire payload unchanged.
+browser authentication and reliable delivery, maps browser commands to
+`agent_core` session worker handles, and projects the UI-neutral authoritative
+Core Turn contract for a reconnectable browser. Its Pod/projection layer is not
+a second agent runtime and is not required by synchronous or in-process hosts.
+
+Before changing this module, read `docs/turn-state-projection-architecture.md` for the shared Core, Host Adapter, Host Projection Adapter, and UI-shell lifecycle boundary.
 
 It may contain:
 
 - HTTP/WebSocket lifecycle, local port selection, explicit public-bind policy,
   and per-process access tokens.
 - Session worker orchestration and browser-facing snapshots.
+- A Host Projection Adapter that converts Core projection changes into
+  revisioned, self-sufficient browser snapshots/updates while preserving Core
+  Turn identity, input admission, activity, and immutable outcome exactly. The
+  adapter may add transport metadata but may not reinterpret lifecycle.
+- Web-specific reliable command delivery, bounded NextTurnIntent FIFO,
+  projection revision, event sequence, reconnect baseline, and MEM barrier.
+  These are reusable adapter patterns for future asynchronous hosts, but they
+  are not Core business state and must not be required by a direct Shell/native
+  binding.
 - Per-session runtime-profile collection and safe projection. The host copies
   global defaults when a Session is created, keeps secrets server-side, and
   gives every context/worker belonging to that Session the same profile. The
@@ -133,6 +147,10 @@ It must not contain:
 - A second Turn lifecycle state machine. The Host/Pod may manage command delivery,
   MEM barriers, projection revisions, snapshots, and timeline assembly, but only
   Core may create/stop/finish the authoritative Active Turn.
+- Web-only lifecycle semantics that another host would have to duplicate. If a
+  rule decides whether a Turn exists, accepts input, stops, finishes, or owns an
+  outcome, it belongs in Core. This module only adapts that rule to reliable Web
+  delivery and browser-facing projection.
 - Model API wire formatting, curl calls, prompt assembly, memory semantics,
   tool argument parsing, MCP protocol execution, or other tool execution.
 - React layout, CSS, browser state reducers, or user-facing visual policy. Those

@@ -88,7 +88,7 @@ For a new contributor, read these in order:
 4. [`core-ui-topic-protocol.md`](core-ui-topic-protocol.md): cross-language
    topic contract between core and hosts.
 5. [`turn-state-projection-architecture.md`](turn-state-projection-architecture.md):
-   authoritative Turn state, epoch fencing, Pod projection, and WebUI rendering boundary.
+   authoritative UI-neutral Turn state, optional Host Projection Adapters, and reusable UI-shell boundaries.
 6. [`capability-system.md`](capability-system.md): tool manifests and executor
    registration.
 7. [`test-strategy.md`](test-strategy.md) and
@@ -104,7 +104,7 @@ For module-local work, also read:
 
 ## Goals
 
-- Keep agent behavior in Rust and independent from iOS or any cloud service.
+- Keep authoritative agent/Turn behavior in UI-neutral Rust so Shell, Web, iOS, desktop, and future UI shells adapt one semantic contract instead of forking lifecycle logic.
 - Let the model choose concrete structured actions when runtime work is needed.
 - Keep runtime responsibilities mechanical: protocol validation, persistence,
   model service IO, local command execution, and safety boundaries.
@@ -294,6 +294,23 @@ adapter ergonomics. If a feature must be visible to the model, callable by the
 model, shared by iOS/Web/CLI, or reflected in prompt/capability contracts, it
 belongs in `agent_core` or `resources` instead of being implemented as a
 shell-only shortcut.
+
+### Host Projection Adapters and UI shells
+
+All hosts consume one authoritative, UI-neutral Core Turn semantic contract:
+`TurnToken`, input admission, `PromptCut`, activity, immutable outcome, and
+structured request/reply correlation. A synchronous in-process host such as the
+current terminal Shell may consume Core projection directly. An asynchronous,
+reconnectable, multi-client, cross-process, or remote UI may add a Host
+Projection Adapter that supplies snapshot/revision, reliable command ownership,
+transport sequencing, and bounded queues.
+
+That adapter is a delivery boundary, not an agent runtime. It cannot decide
+whether a Turn exists, accept input into a closed Turn, infer completion from
+workers/topics, or rewrite an outcome. `timem_web` Pod is the first such adapter,
+not a mandatory dependency for every UI. UI shells own rendering and local
+interaction only. This split is what makes adding Swift/iOS, desktop, another
+Web toolkit, or accessibility-first UI primarily an adapter/presentation task.
 
 ### `timem_web/`
 
@@ -711,10 +728,14 @@ continue. Rust panic recovery cannot safely recover a native SIGSEGV in the
 same process, so future untrusted native/FFI capabilities must run behind a
 process boundary.
 
-The terminal app is one host adapter. iOS should be another host adapter, not a
-fork of the agent loop. The iOS path should reuse `agent_core` through the
-existing JSON-in/JSON-out C ABI or a thin generated binding, then implement only
-iOS-specific pieces outside the core:
+The terminal app is one direct host adapter. `timem_web` is a host plus a
+reconnectable Host Projection Adapter. iOS, desktop, or another UI should be
+another adapter, not a fork of the agent loop. New hosts must consume the same
+Core Turn projection and may add delivery metadata without redefining lifecycle.
+The iOS path should reuse `agent_core` through the existing JSON-in/JSON-out C
+ABI or a thin generated binding, then implement only platform-specific pieces.
+
+Platform-specific pieces outside Core include:
 
 - native UI rendering and input
 - user approval prompts
