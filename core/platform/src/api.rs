@@ -86,7 +86,7 @@ pub fn local_time(secs: libc::time_t) -> Option<libc::tm> {
 }
 
 pub fn local_command_execution_available() -> bool {
-    bash_execution_available()
+    cfg!(any(unix, windows))
 }
 
 pub fn bash_execution_available() -> bool {

@@ -91,24 +91,35 @@ pub struct CapabilityRegistry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapabilityHostProfile {
     pub local_command_execution: bool,
+    pub bash_execution: bool,
 }
 
 impl CapabilityHostProfile {
     pub fn detect() -> Self {
         Self {
             local_command_execution: local_command_execution_available(),
+            bash_execution: bash_execution_available(),
         }
     }
 
     pub fn with_local_command_execution() -> Self {
         Self {
             local_command_execution: true,
+            bash_execution: true,
+        }
+    }
+
+    pub fn with_local_command_execution_without_bash() -> Self {
+        Self {
+            local_command_execution: true,
+            bash_execution: false,
         }
     }
 
     pub fn without_local_command_execution() -> Self {
         Self {
             local_command_execution: false,
+            bash_execution: false,
         }
     }
 
@@ -116,6 +127,7 @@ impl CapabilityHostProfile {
         match requirement.map(str::trim).filter(|value| !value.is_empty()) {
             None => true,
             Some("local_command_execution") => self.local_command_execution,
+            Some("bash_execution") => self.bash_execution,
             Some(_) => false,
         }
     }
@@ -124,10 +136,11 @@ impl CapabilityHostProfile {
         if !self.supports(manifest.requires_host.as_deref()) {
             return false;
         }
-        if manifest.binding.binding_type == "command"
-            || (manifest.binding.binding_type == "builtin" && manifest.binding.name == "run_bash")
-        {
+        if manifest.binding.binding_type == "command" {
             return self.local_command_execution;
+        }
+        if manifest.binding.binding_type == "builtin" && manifest.binding.name == "run_bash" {
+            return self.bash_execution;
         }
         true
     }
@@ -135,6 +148,10 @@ impl CapabilityHostProfile {
 
 fn local_command_execution_available() -> bool {
     crate::os::local_command_execution_available()
+}
+
+fn bash_execution_available() -> bool {
+    crate::os::bash_execution_available()
 }
 
 const RUN_BASH_HOST_ENVIRONMENT_PLACEHOLDER: &str = "{{RUN_BASH_HOST_ENVIRONMENT}}";
@@ -2202,7 +2219,7 @@ fn input_property_declared(properties: &BTreeMap<String, Value>, key: &str) -> b
 
 fn validate_host_requirement(manifest: &ToolManifest) -> Result<(), String> {
     match manifest.requires_host.as_deref() {
-        None | Some("local_command_execution") => Ok(()),
+        None | Some("local_command_execution") | Some("bash_execution") => Ok(()),
         Some(requirement) => Err(format!(
             "{}:unsupported_requires_host:{requirement}",
             manifest.id

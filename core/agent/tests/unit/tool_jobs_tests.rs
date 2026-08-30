@@ -1,15 +1,44 @@
 use super::*;
 use serde_json::json;
 
+fn write_echo_script(dir: &Path) -> PathBuf {
+    #[cfg(unix)]
+    {
+        let script = dir.join("echo_payload.sh");
+        fs::write(&script, "#!/bin/sh\npython3 -c 'import sys,json; data=json.load(sys.stdin); print(data[\"args\"][\"message\"])'\n").unwrap();
+        script
+    }
+    #[cfg(windows)]
+    {
+        let script = dir.join("echo_payload.ps1");
+        fs::write(&script, "$data = [Console]::In.ReadToEnd() | ConvertFrom-Json\n[Console]::Out.WriteLine($data.args.message)\n").unwrap();
+        script
+    }
+}
+
+fn write_sleep_script(dir: &Path, seconds: u64) -> PathBuf {
+    #[cfg(unix)]
+    {
+        let script = dir.join("sleep_payload.sh");
+        fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf started\\n\nsleep {seconds}\nprintf done\\n\n"),
+        )
+        .unwrap();
+        script
+    }
+    #[cfg(windows)]
+    {
+        let script = dir.join("sleep_payload.ps1");
+        fs::write(&script, format!("[Console]::Out.WriteLine('started')\nStart-Sleep -Seconds {seconds}\n[Console]::Out.WriteLine('done')\n")).unwrap();
+        script
+    }
+}
+
 #[test]
 fn command_tool_background_job_can_be_polled_until_finished() {
     let dir = temp_case_dir("command_tool_background");
-    let script = dir.join("echo_payload.sh");
-    fs::write(
-            &script,
-            "#!/bin/sh\npython3 -c 'import sys,json; data=json.load(sys.stdin); print(data[\"args\"][\"message\"])'\n",
-        )
-        .unwrap();
+    let script = write_echo_script(&dir);
     let store = FileToolJobStore::new(&dir);
 
     let started = store.spawn(
@@ -47,12 +76,7 @@ fn background_job_ids_are_unique_even_when_created_quickly() {
 #[test]
 fn command_tool_background_job_can_be_cancelled() {
     let dir = temp_case_dir("command_tool_cancel");
-    let script = dir.join("sleep_payload.sh");
-    fs::write(
-            &script,
-            "#!/bin/sh\npython3 -c 'import time; print(\"started\", flush=True); time.sleep(10); print(\"done\")'\n",
-        )
-        .unwrap();
+    let script = write_sleep_script(&dir, 10);
     let store = FileToolJobStore::new(&dir);
 
     let started = store.spawn("local_sleep", &script, &json!({"args":{}}));
@@ -75,12 +99,7 @@ fn command_tool_background_job_can_be_cancelled() {
 #[test]
 fn session_cancel_is_idempotent_and_does_not_touch_other_sessions() {
     let dir = temp_case_dir("command_tool_session_cancel");
-    let script = dir.join("sleep_payload.sh");
-    fs::write(
-        &script,
-        "#!/bin/sh\npython3 -c 'import time; print(\"started\", flush=True); time.sleep(30)'\n",
-    )
-    .unwrap();
+    let script = write_sleep_script(&dir, 30);
     let store = FileToolJobStore::new(&dir);
 
     let started_a = store.spawn_outcome("session-a", "local_sleep", &script, &json!({"args":{}}));
@@ -117,12 +136,7 @@ fn session_cancel_is_idempotent_and_does_not_touch_other_sessions() {
 #[test]
 fn shutdown_terminates_only_background_jobs_owned_by_this_process() {
     let dir = temp_case_dir("command_tool_shutdown");
-    let script = dir.join("sleep_payload.sh");
-    fs::write(
-        &script,
-        "#!/bin/sh\npython3 -c 'import time; print(\"started\", flush=True); time.sleep(30)'\n",
-    )
-    .unwrap();
+    let script = write_sleep_script(&dir, 30);
     let store = FileToolJobStore::new(&dir);
 
     let started = store.spawn("local_sleep", &script, &json!({"args":{}}));
@@ -196,4 +210,34 @@ fn output_tail_is_bounded_and_starts_at_a_utf8_boundary() {
     assert!(!tail.contains('�'), "{tail:?}");
     assert!(tail.len() < 128, "{}", tail.len());
     let _ = fs::remove_dir_all(dir);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_powershell_background_tool_can_be_polled_until_finished() {
+    let dir = temp_case_dir("windows_powershell_background");
+    let script = dir.join("echo_payload.ps1");
+    fs::write(
+        &script,
+        "$payload = [Console]::In.ReadToEnd()\n$data = $payload | ConvertFrom-Json\nWrite-Output $data.args.message\n",
+    )
+    .unwrap();
+    let store = FileToolJobStore::new(&dir);
+
+    let started = store.spawn(
+        "local_echo",
+        &script,
+        &json!({"args":{"message":"windows background ok"}}),
+    );
+    assert!(started.contains("status: background_started"), "{started}");
+    let job_id = started
+        .lines()
+        .find_map(|line| line.strip_prefix("job_id: "))
+        .expect("job id");
+    let status = store.status(job_id, 10000);
+
+    assert!(status.contains("state: finished"), "{status}");
+    assert!(status.contains("exit_code: 0"), "{status}");
+    assert!(status.contains("windows background ok"), "{status}");
+    let _ = fs::remove_dir_all(&dir);
 }

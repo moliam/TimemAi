@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::thread;
@@ -424,28 +424,11 @@ fn run_self_test(root: &Path, manifest: &ToolManifest) -> Result<String, String>
         &manifest.self_test.entrypoint
     };
     let entrypoint = root.join(self_test_entrypoint);
-    let mut command = match manifest.language.trim().to_ascii_lowercase().as_str() {
-        "python" | "python3" => {
-            let mut command = Command::new("python3");
-            command.arg(&entrypoint);
-            command
-        }
-        "bash" | "shell" | "sh" => {
-            let mut command = Command::new(crate::os::BASH_EXECUTABLE);
-            command.arg(&entrypoint);
-            command
-        }
-        _ => Command::new(&entrypoint),
-    };
+    let mut command = crate::os::command_for_tool_language(&manifest.language, &entrypoint)
+        .map_err(|error| format!("tool_self_test_interpreter_unavailable:{error}"))?;
+    command.args(&manifest.self_test.args).current_dir(root);
+    crate::os::configure_sanitized_child_environment(&mut command);
     command
-        .args(&manifest.self_test.args)
-        .current_dir(root)
-        .env_clear()
-        .env(
-            "PATH",
-            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string()),
-        )
-        .env("TMPDIR", std::env::temp_dir())
         .env("TIMEM_TOOLGEN_SELF_TEST", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
