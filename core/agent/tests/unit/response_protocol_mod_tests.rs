@@ -1,7 +1,9 @@
 use super::*;
 
 fn caps() -> CapabilityRegistry {
-    CapabilityRegistry::builtin()
+    CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    )
 }
 
 fn parse_json(raw: &str) -> ParsedEnvelope {

@@ -21,6 +21,18 @@ fn tmp_dir(name: &str) -> std::path::PathBuf {
     dir
 }
 
+fn test_core(
+    static_prompt: impl Into<String>,
+    profile: CoreProfile,
+    memory_dir: impl AsRef<std::path::Path>,
+) -> AgentCore {
+    let mut core = AgentCore::new(static_prompt, profile, memory_dir);
+    core.set_capability_registry(CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    ));
+    core
+}
+
 fn test_profile() -> CoreProfile {
     CoreProfile {
         model: "test-model".to_string(),
@@ -58,7 +70,9 @@ fn llm(content: impl Into<String>, prompt_tokens: u32, truncated: bool) -> LlmRe
     let mut content = content.into();
     let xml_issue = crate::response_protocol::xml_suite::parse_xml_envelope(
         &content,
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
     )
     .repair_issue;
     if matches!(
@@ -115,6 +129,7 @@ fn read_audit_events(path: &Path) -> Vec<Value> {
     doc["events"].as_array().unwrap().clone()
 }
 
+#[cfg(unix)]
 fn shell_quote(path: &Path) -> String {
     let raw = path.to_string_lossy();
     format!("'{}'", raw.replace('\'', "'\\''"))
@@ -408,11 +423,12 @@ impl TurnUi for SupplementAndExpansionUi {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_id() {
     let dir = tmp_dir("still_running_model_prompt");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut core = test_core("STATIC", test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
     let mut model = ReplayModel::new([
@@ -485,7 +501,7 @@ fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_
 fn session_turn_uses_model_service_config_response_protocol_over_core_state() {
     let dir = tmp_dir("runtime_config_protocol_wins");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut core = test_core("STATIC", test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Xml;
@@ -653,7 +669,7 @@ fn progress_reminder_tracks_only_consecutive_tool_only_rounds() {
 fn session_turn_injects_progress_reminder_after_six_tool_only_rounds() {
     let dir = tmp_dir("turn_progress_reminder");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut core = test_core("STATIC", test_profile(), &dir);
     core.set_max_rounds(PROGRESS_UPDATE_REMINDER_ROUNDS.saturating_add(4));
     core.set_reminder_tips_config(crate::ReminderTipsConfig { schedules: vec![] });
     let mut config = test_config();
@@ -718,7 +734,7 @@ fn session_turn_injects_progress_reminder_after_six_tool_only_rounds() {
 fn free_talk_resets_progress_reminder_streak() {
     let dir = tmp_dir("turn_progress_reminder_reset");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut core = test_core("STATIC", test_profile(), &dir);
     core.set_max_rounds(PROGRESS_UPDATE_REMINDER_ROUNDS.saturating_mul(2));
     core.set_reminder_tips_config(crate::ReminderTipsConfig { schedules: vec![] });
     let mut config = test_config();
@@ -765,7 +781,7 @@ fn free_talk_resets_progress_reminder_streak() {
 fn progress_reminder_streak_does_not_carry_across_turns() {
     let dir = tmp_dir("turn_progress_reminder_cross_turn_reset");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut core = test_core("STATIC", test_profile(), &dir);
     core.set_max_rounds(PROGRESS_UPDATE_REMINDER_ROUNDS.saturating_add(2));
     core.set_reminder_tips_config(crate::ReminderTipsConfig { schedules: vec![] });
     let mut config = test_config();
@@ -832,7 +848,7 @@ fn progress_reminder_streak_does_not_carry_across_turns() {
 fn session_turn_injects_reasoning_reminder_after_configured_rounds() {
     let dir = tmp_dir("turn_reasoning_reminder");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut core = test_core("STATIC", test_profile(), &dir);
     let reminder_config = crate::ReminderTipsConfig::default();
     let reasoning_schedule = &reminder_config.schedules[1];
     let interval = reasoning_schedule
@@ -892,7 +908,7 @@ fn session_turn_injects_reasoning_reminder_after_configured_rounds() {
 fn session_turn_does_not_inject_focus_reminder_before_first_model_request() {
     let dir = tmp_dir("turn_focus_reminder_skips_initial_request");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut core = test_core("STATIC", test_profile(), &dir);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut model = ReplayModel::new([Ok(llm(
@@ -936,7 +952,7 @@ fn session_turn_does_not_inject_focus_reminder_before_first_model_request() {
 fn session_turn_injects_due_focus_reminder_before_the_next_model_request() {
     let dir = tmp_dir("turn_focus_reminder");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut core = test_core("STATIC", test_profile(), &dir);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut model = DelayedFirstReplayModel::new(
@@ -987,7 +1003,7 @@ fn session_turn_injects_due_focus_reminder_before_the_next_model_request() {
 fn session_turn_retries_transient_model_api_errors_and_reports_status() {
     let dir = tmp_dir("retry_transient_model_api_error");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
     let mut ui = RetryRecordingUi::default();
@@ -1032,7 +1048,7 @@ fn session_turn_retries_transient_model_api_errors_and_reports_status() {
 fn session_turn_resets_system_retry_attempts_for_each_model_request() {
     let dir = tmp_dir("retry_attempts_reset_per_model_request");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
     let mut ui = RetryRecordingUi::default();
@@ -1087,7 +1103,7 @@ fn session_turn_resets_system_retry_attempts_for_each_model_request() {
 fn session_turn_repairs_empty_model_content() {
     let dir = tmp_dir("repair_empty_model_content");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = RetryRecordingUi::default();
@@ -1143,7 +1159,7 @@ fn session_turn_repairs_empty_model_content() {
 fn session_turn_repairs_any_non_protocol_model_content() {
     let dir = tmp_dir("repair_non_protocol_model_content");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
@@ -1193,11 +1209,12 @@ fn session_turn_repairs_any_non_protocol_model_content() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
     let dir = tmp_dir("sudden_large_action_delta_e2e");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     core.set_max_llm_input_tokens(3_000);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
@@ -1262,7 +1279,7 @@ fn session_turn_recovers_from_model_input_overflow_variants() {
     ] {
         let dir = tmp_dir(&format!("model_input_overflow_{case}"));
         let audit = dir.join("audit.json");
-        let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+        let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
         core.set_response_protocol(crate::ResponseProtocolKind::Json);
         core.set_bash_approval_mode(BashApprovalMode::Approve);
         let mut config = test_config();
@@ -1332,7 +1349,7 @@ fn session_turn_recovers_from_model_input_overflow_variants() {
 fn repeated_model_input_overflow_stops_after_single_delta_recovery() {
     let dir = tmp_dir("model_input_overflow_does_not_loop");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
@@ -1383,7 +1400,7 @@ fn repeated_model_input_overflow_stops_after_single_delta_recovery() {
 fn session_turn_xml_final_answer_with_protocol_examples_does_not_repair_or_execute() {
     let dir = tmp_dir("xml_final_answer_protocol_examples");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Xml);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Xml;
@@ -1437,7 +1454,7 @@ This is an answer, not an executable action:
 fn session_turn_counts_successful_xml_root_synthesis_without_a_repair_call() {
     let dir = tmp_dir("xml_root_synthesis_diagnostic_count");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Xml);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Xml;
@@ -1490,7 +1507,7 @@ fn session_turn_counts_successful_xml_root_synthesis_without_a_repair_call() {
 fn session_turn_failed_xml_root_synthesis_counts_only_one_repair() {
     let dir = tmp_dir("xml_root_synthesis_failure_count");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Xml);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Xml;
@@ -1543,7 +1560,7 @@ fn session_turn_failed_xml_root_synthesis_counts_only_one_repair() {
 fn session_turn_xml_replays_only_the_extracted_response_root() {
     let dir = tmp_dir("xml_root_repair_exact_structure");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Xml);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Xml;
@@ -1608,7 +1625,7 @@ discard-after"#,
 fn session_turn_retries_an_extracted_final_answer_before_finishing() {
     let dir = tmp_dir("xml_recovered_final_retry");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Xml);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Xml;
@@ -1659,7 +1676,7 @@ fn session_turn_retries_an_extracted_final_answer_before_finishing() {
 fn session_turn_never_accepts_a_recovered_final_answer_after_retry_exhaustion() {
     let dir = tmp_dir("xml_recovered_final_retry_exhausted");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Xml);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Xml;
@@ -1723,7 +1740,7 @@ fn session_turn_never_accepts_a_recovered_final_answer_after_retry_exhaustion() 
 fn session_turn_xml_raw_string_tags_do_not_repair_or_execute() {
     let dir = tmp_dir("xml_raw_string_tags");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Xml);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Xml;
@@ -1788,7 +1805,7 @@ This is all answer text.
 fn session_turn_xml_invalid_native_action_still_repairs() {
     let dir = tmp_dir("xml_invalid_native_action_repairs");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Xml);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Xml;
@@ -1849,7 +1866,7 @@ fn session_turn_xml_invalid_native_action_still_repairs() {
 fn session_turn_json_final_answer_with_protocol_examples_does_not_repair_or_execute() {
     let dir = tmp_dir("json_final_answer_protocol_examples");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
@@ -1899,7 +1916,7 @@ fn session_turn_json_final_answer_with_protocol_examples_does_not_repair_or_exec
 fn session_turn_emits_repair_topic_for_each_protocol_repair_attempt() {
     let dir = tmp_dir("repair_topics_multiple_attempts");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
@@ -1960,7 +1977,7 @@ fn session_turn_emits_repair_topic_for_each_protocol_repair_attempt() {
 fn session_turn_does_not_retry_non_transient_model_api_errors() {
     let dir = tmp_dir("no_retry_model_api_400");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([Err("model_http_400: model name is invalid".to_string())]);
@@ -1993,6 +2010,7 @@ fn session_turn_does_not_retry_non_transient_model_api_errors() {
     assert!(ui.retries.is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn session_turn_run_bash_poll_mode_waits_until_check_succeeds() {
     let dir = tmp_dir("run_bash_poll_session");
@@ -2004,7 +2022,7 @@ fn session_turn_run_bash_poll_mode_waits_until_check_succeeds() {
         shell_quote(&flag)
     );
     let check_command = format!("test -f {}", shell_quote(&flag));
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
     struct PollTopicTimingUi {
@@ -2089,11 +2107,12 @@ fn session_turn_run_bash_poll_mode_waits_until_check_succeeds() {
     assert!(model.prompts[1].contains("Polling state: finished"));
 }
 
+#[cfg(unix)]
 #[test]
 fn session_turn_long_running_command_hands_status_to_next_model_round() {
     let dir = tmp_dir("long_command_model_follow_up");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     core.shell_jobs
         .set_long_running_prompt_after_for_tests(Duration::from_millis(50));
@@ -2158,11 +2177,12 @@ fn session_turn_long_running_command_hands_status_to_next_model_round() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn sequential_group_with_long_timeout_command_hands_status_to_model() {
     let dir = tmp_dir("sequential_long_timeout_model_follow_up");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     core.shell_jobs
         .set_long_running_prompt_after_for_tests(Duration::from_millis(50));
@@ -2226,7 +2246,7 @@ fn sequential_group_with_long_timeout_command_hands_status_to_model() {
 fn session_turn_executes_parallel_action_group_before_next_group() {
     let dir = tmp_dir("parallel_action_groups_session");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
@@ -2280,7 +2300,7 @@ fn session_turn_cancels_parallel_long_running_bash_actions() {
     let audit = dir.join("audit.json");
     let pid_a = dir.join("child_a.pid");
     let pid_b = dir.join("child_b.pid");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
@@ -2352,7 +2372,7 @@ fn session_turn_stop_after_one_parallel_action_completed_cancels_the_running_act
     let audit = dir.join("audit.json");
     let completed_marker = dir.join("completed.txt");
     let running_pid = dir.join("running.pid");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
@@ -2416,7 +2436,7 @@ fn session_turn_stop_cancels_parallel_bash_after_approval() {
     let audit = dir.join("audit.json");
     let pid_a = dir.join("approved_a.pid");
     let pid_b = dir.join("approved_b.pid");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
@@ -2474,11 +2494,12 @@ fn session_turn_stop_cancels_parallel_bash_after_approval() {
     let _ = fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn session_turn_parallel_group_spawns_bash_while_running_builtin_actions_in_order() {
     let dir = tmp_dir("mixed_parallel_action_group_session");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
@@ -2553,7 +2574,7 @@ fn session_turn_parallel_group_runs_readfiles_concurrently_and_keeps_declared_or
     let probe =
         crate::readfile::install_test_parallel_read_probe(dir.clone(), Duration::from_millis(150));
 
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.change_prompt_cwd(dir.to_string_lossy()).unwrap();
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
@@ -2606,11 +2627,12 @@ fn session_turn_parallel_group_runs_readfiles_concurrently_and_keeps_declared_or
     let _ = fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently() {
     let dir = tmp_dir("parallel_approval_group_session");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
@@ -2701,7 +2723,7 @@ fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently(
 fn session_turn_user_supplement_during_model_wait_continues_after_current_response() {
     let dir = tmp_dir("user_supplement_during_wait");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     let mut ui = SupplementDuringModelUi::default();
     let mut model = PollingReplayModel::new([
@@ -2756,7 +2778,7 @@ fn session_turn_user_supplement_during_model_wait_continues_after_current_respon
 fn session_turn_user_supplement_waits_for_truncated_output_retry_then_continues() {
     let dir = tmp_dir("user_supplement_preempts_truncated_expand");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     let mut ui = SupplementAndExpansionUi::default();
     let mut model = PollingReplayModel::new([
@@ -2812,7 +2834,7 @@ fn session_turn_user_supplement_waits_for_truncated_output_retry_then_continues(
 fn session_turn_user_supplement_at_final_boundary_continues_same_turn() {
     let dir = tmp_dir("user_supplement_at_final_boundary");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     let mut ui = SupplementAtFinalBoundaryUi {
         inject_at_drain: 3,
@@ -2862,7 +2884,7 @@ fn session_turn_user_supplement_at_final_boundary_continues_same_turn() {
 fn session_turn_user_supplement_after_model_response_continues_same_turn() {
     let dir = tmp_dir("user_supplement_after_model_response");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     let mut ui = SupplementAtFinalBoundaryUi {
         inject_at_drain: 2,
@@ -2908,7 +2930,7 @@ fn session_turn_user_supplement_after_model_response_continues_same_turn() {
 fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
     let dir = tmp_dir("session_cache_plan");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Xml);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Xml;
@@ -2980,7 +3002,7 @@ fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
 fn session_turn_preserves_cache_plan_with_json_response_protocol() {
     let dir = tmp_dir("session_cache_plan_json_protocol");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../../../resources/system_prompt/system_prompt.md"),
         test_profile(),
         &dir,
@@ -3041,7 +3063,7 @@ fn session_turn_preserves_cache_plan_with_json_response_protocol() {
 fn session_turn_preserves_cache_plan_with_xml_response_protocol() {
     let dir = tmp_dir("session_cache_plan_xml_protocol");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../../../resources/system_prompt/system_prompt.md"),
         test_profile(),
         &dir,
@@ -3109,7 +3131,7 @@ fn session_turn_preserves_cache_plan_with_xml_response_protocol() {
 fn session_turn_replays_previous_assistant_components_before_next_user_input() {
     let dir = tmp_dir("session_prompt_component_replay");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     core.set_assistant_speaker_name("Ai4");
     let mut config = test_config();
@@ -3177,7 +3199,7 @@ fn session_turn_replays_previous_assistant_components_before_next_user_input() {
 fn session_turn_defaults_to_raw_assistant_output_replay() {
     let dir = tmp_dir("session_raw_assistant_replay");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Xml);
     core.set_assistant_speaker_name("Ai4");
     let mut config = test_config();
@@ -3244,7 +3266,7 @@ fn session_turn_defaults_to_raw_assistant_output_replay() {
 fn session_turn_does_not_inject_host_runtime_metadata() {
     let dir = tmp_dir("host_runtime_context");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
     let mut ui = NoopTurnUi;
@@ -3283,7 +3305,7 @@ fn session_turn_does_not_inject_host_runtime_metadata() {
 fn session_turn_records_cached_tokens_in_profiler_and_latest_usage() {
     let dir = tmp_dir("session_profiler_cache");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     let mut ui = NoopTurnUi;
     let mut profiler = RuntimeProfiler::default();
@@ -3420,7 +3442,7 @@ impl TurnUi for ProjectionRecordingUi {
 fn cancelled_turn_projection_has_one_token_and_authoritative_terminal_order() {
     let dir = tmp_dir("cancel_projection");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut core = test_core("STATIC", test_profile(), &dir);
     let mut config = test_config();
     let mut ui = ProjectionRecordingUi {
         cancel_immediately: true,
@@ -3483,7 +3505,7 @@ fn cancelled_turn_projection_has_one_token_and_authoritative_terminal_order() {
 fn completed_turn_projection_finishes_completed_without_stop_inference() {
     let dir = tmp_dir("completed_projection");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut core = test_core("STATIC", test_profile(), &dir);
     let mut config = test_config();
     let mut model = ReplayModel::new([Ok(llm(
         r#"{"status":"ALL_FINISHED","final_answer":"done"}"#,
@@ -3535,7 +3557,7 @@ fn completed_turn_projection_finishes_completed_without_stop_inference() {
 fn session_turn_can_cancel_before_model_call_without_network() {
     let dir = tmp_dir("cancel");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let mut config = test_config();
     let mut ui = CancelImmediately;
@@ -3573,7 +3595,7 @@ fn session_turn_can_cancel_before_model_call_without_network() {
 fn cancelled_turn_injects_one_runtime_note_before_next_user_and_runtime_context() {
     let dir = tmp_dir("cancel_next_prompt_note");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../../../resources/system_prompt/system_prompt.md"),
         test_profile(),
         &dir,
@@ -3680,7 +3702,7 @@ fn cancelled_turn_injects_one_runtime_note_before_next_user_and_runtime_context(
 fn cancelled_turn_json_prompt_renders_interruption_as_runtime_note_not_action_result() {
     let dir = tmp_dir("cancel_next_json_runtime_note");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../../../resources/system_prompt/system_prompt.md"),
         test_profile(),
         &dir,
@@ -3761,7 +3783,7 @@ fn cancelled_turn_json_prompt_renders_interruption_as_runtime_note_not_action_re
 fn model_error_does_not_inject_user_interruption_note_on_next_turn() {
     let dir = tmp_dir("model_error_no_interruption_note");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../../../resources/system_prompt/system_prompt.md"),
         test_profile(),
         &dir,
@@ -3822,7 +3844,7 @@ fn model_error_does_not_inject_user_interruption_note_on_next_turn() {
 fn session_turn_accepts_a_protocol_compliant_repair() {
     let dir = tmp_dir("plain_text_repair_fallback");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     let mut ui = NoopTurnUi;
     let mut model = ReplayModel::new([
@@ -3879,7 +3901,7 @@ fn session_turn_accepts_a_protocol_compliant_repair() {
 fn session_turn_protocol_repair_failure_is_structured() {
     let dir = tmp_dir("protocol_repair_failure_stop");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
     let mut ui = NoopTurnUi;
@@ -3948,7 +3970,7 @@ fn session_turn_protocol_repair_failure_is_structured() {
 fn session_turn_terminal_protocol_failure_does_not_consume_or_revive_late_supplement() {
     let dir = tmp_dir("terminal_repair_late_supplement");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_response_protocol(crate::ResponseProtocolKind::Json);
     let mut config = test_config();
     let mut ui = SupplementAtTerminalRepairUi::default();
@@ -3995,7 +4017,7 @@ fn session_turn_terminal_protocol_failure_does_not_consume_or_revive_late_supple
 fn session_turn_forced_shrink_runs_to_final_without_repeated_shrink() {
     let dir = tmp_dir("forced_shrink_e2e");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_max_llm_input_tokens(10_000);
     let mut config = test_config();
     config.max_llm_input_tokens = 10_000;
@@ -4082,7 +4104,7 @@ impl TurnUi for ObserveTruncatedRepairUi {
 fn session_turn_truncated_output_replays_partial_response_and_requests_small_iteration() {
     let dir = tmp_dir("truncated_small_iteration_e2e");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     config.max_llm_output_tokens = 8192;
     let mut ui = ObserveTruncatedRepairUi::default();
@@ -4151,7 +4173,7 @@ impl TurnUi for ContinueRoundLimitUi {
 fn session_turn_round_limit_continue_recharges_and_finishes_same_task() {
     let dir = tmp_dir("round_limit_continue_e2e");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_max_rounds(1);
     let mut config = test_config();
     let mut ui = ContinueRoundLimitUi {
@@ -4210,7 +4232,7 @@ fn session_turn_round_limit_continue_recharges_and_finishes_same_task() {
 fn session_turn_noop_ui_uses_default_round_limit_continue() {
     let dir = tmp_dir("round_limit_noop_continue_e2e");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_max_rounds(1);
     let mut config = test_config();
     let mut ui = NoopTurnUi;
@@ -4274,7 +4296,7 @@ impl TurnUi for DeclineRoundLimitUi {
 fn session_turn_round_limit_stop_sets_structured_stop_reason() {
     let dir = tmp_dir("round_limit_stop_e2e");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_max_rounds(1);
     let mut config = test_config();
     let mut ui = DeclineRoundLimitUi {
@@ -4317,10 +4339,12 @@ fn session_turn_round_limit_stop_sets_structured_stop_reason() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
 struct ApproveAllUi {
     approval_requests: u32,
 }
 
+#[cfg(unix)]
 impl TurnUi for ApproveAllUi {
     fn request_host_decision(&mut self, request: HostDecisionRequest) -> HostDecision {
         match request {
@@ -4333,6 +4357,7 @@ impl TurnUi for ApproveAllUi {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn session_turn_bash_approval_executes_action_then_finishes_with_audit() {
     let dir = tmp_dir("bash_approval_e2e");
@@ -4344,7 +4369,7 @@ fn session_turn_bash_approval_executes_action_then_finishes_with_audit() {
         serde_json::to_string(&command).unwrap()
     );
 
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let mut config = test_config();
     let mut ui = ApproveAllUi {
@@ -4433,7 +4458,7 @@ fn session_turn_cancelled_user_approval_resumes_ui_before_continuing() {
         serde_json::to_string(&command).unwrap()
     );
 
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let mut config = test_config();
     let mut ui = CancelApprovalUi {
@@ -4481,6 +4506,7 @@ fn session_turn_cancelled_user_approval_resumes_ui_before_continuing() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn session_turn_noop_ui_uses_default_user_approval() {
     let dir = tmp_dir("bash_approval_noop_e2e");
@@ -4492,7 +4518,7 @@ fn session_turn_noop_ui_uses_default_user_approval() {
         serde_json::to_string(&command).unwrap()
     );
 
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_bash_approval_mode(BashApprovalMode::Ask);
     let mut config = test_config();
     let mut ui = NoopTurnUi;
@@ -4539,8 +4565,10 @@ fn session_turn_finished_with_actions_repairs_then_accepts_plain_final() {
     let dir = tmp_dir("finished_actions_session_repair");
     let audit = dir.join("audit.json");
 
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
-    core.set_capability_registry(CapabilityRegistry::builtin());
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_capability_registry(CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    ));
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let mut config = test_config();
     let mut ui = NoopTurnUi;
@@ -4626,7 +4654,7 @@ impl ModelClient for ScratchOffloadReplayModel {
 fn session_turn_scratch_context_offload_records_id_and_continues() {
     let dir = tmp_dir("scratch_offload_e2e");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = NoopTurnUi;
@@ -4714,7 +4742,7 @@ impl ModelClient for CompactThenFinishModel {
 fn session_turn_context_compact_emits_structured_topic() {
     let dir = tmp_dir("context_compact_topic");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     let mut config = test_config();
     config.response_protocol = crate::ResponseProtocolKind::Json;
     let mut ui = RecordingTopicUi::default();
@@ -4867,7 +4895,7 @@ impl ModelClient for StoryReplayModel {
 fn session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rendering() {
     let dir = tmp_dir("story_replay_e2e");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
     core.set_max_llm_input_tokens(8_000);
     let mut config = test_config();
     config.max_llm_input_tokens = 8_000;
@@ -4984,12 +5012,14 @@ fn noop_turn_ui_uses_core_default_host_decisions() {
     assert!(ui.request_expand_output_tokens(OutputExpansionRequest::new(10_000)));
 }
 
+#[cfg(unix)]
 struct TruncatedNativeRecoveryModel {
     business_calls: usize,
     saw_repair_context: bool,
     saw_tool_result: bool,
 }
 
+#[cfg(unix)]
 impl ModelClient for TruncatedNativeRecoveryModel {
     fn call_model(
         &mut self,
@@ -5101,11 +5131,12 @@ impl ModelClient for TruncatedNativeRecoveryModel {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn truncated_native_sse_recovery_guides_small_tool_iteration_to_correct_answer() {
     let dir = tmp_dir("truncated_native_guided_recovery");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../../../resources/system_prompt/system_prompt.md"),
         test_profile(),
         &dir,
@@ -5150,6 +5181,7 @@ fn truncated_native_sse_recovery_guides_small_tool_iteration_to_correct_answer()
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
 struct NativeRoundTripModel {
     business_calls: usize,
     observed_structured_result: bool,
@@ -5157,6 +5189,7 @@ struct NativeRoundTripModel {
     observed_previous_turn_tool_history: bool,
 }
 
+#[cfg(unix)]
 impl ModelClient for NativeRoundTripModel {
     fn call_model(
         &mut self,
@@ -5260,11 +5293,12 @@ impl ModelClient for NativeRoundTripModel {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn native_mode_round_trips_structured_calls_and_results_before_final_text() {
     let dir = tmp_dir("native_round_trip");
     let audit = dir.join("audit.json");
-    let mut core = AgentCore::new(
+    let mut core = test_core(
         include_str!("../../../../resources/system_prompt/system_prompt.md"),
         test_profile(),
         &dir,

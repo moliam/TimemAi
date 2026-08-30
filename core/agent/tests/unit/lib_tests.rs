@@ -817,6 +817,7 @@ fn mem_guard_reclaims_a_fresh_lock_owned_by_a_dead_process() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn completed_background_bash_emits_terminal_topic_for_original_action() {
     #[derive(Default)]
@@ -961,13 +962,17 @@ fn test_core(name: &str) -> AgentCore {
         name,
         super::unique_id("tmp")
     ));
-    AgentCore::new(
+    let mut core = AgentCore::new(
         "static prompt\n{{RESPONSE_PROTOCOL_SECTION}}\n{{TOOL_CATALOG}}\n",
         CoreProfile {
             model: "test".to_string(),
         },
         dir,
-    )
+    );
+    core.set_capability_registry(CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    ));
+    core
 }
 
 #[test]

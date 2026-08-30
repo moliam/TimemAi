@@ -1071,7 +1071,9 @@ fn native_tool_wires_are_provider_specific_and_parallel_is_explicit() {
 
 #[test]
 fn builtin_tool_schemas_render_per_protocol_without_weakening_registry_validation() {
-    let registry = crate::capability::CapabilityRegistry::builtin();
+    let registry = crate::capability::CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    );
     let original_tools = registry.native_builtin_tool_definitions();
     let original_run_bash = original_tools
         .iter()
