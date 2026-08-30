@@ -27,8 +27,8 @@ fn cache_planner_does_not_treat_dynamic_tool_output_as_static_prompt() {
     let prompt = r#"<prompt_delta id="pd_31" time_ms="1">
 
 ## RUNTIME
-agent_core/tests/unit/prompt_render_tests.rs:86: assert!(rendered.starts_with("<Timem System Prompt>\n"));
-agent_core/tests/unit/prompt_render_tests.rs:89: assert!(rendered.ends_with("\n</Timem System Prompt>"));
+core/agent/tests/unit/prompt_render_tests.rs:86: assert!(rendered.starts_with("<Timem System Prompt>\n"));
+core/agent/tests/unit/prompt_render_tests.rs:89: assert!(rendered.ends_with("\n</Timem System Prompt>"));
 
 </prompt_delta>"#;
 
@@ -40,7 +40,7 @@ agent_core/tests/unit/prompt_render_tests.rs:89: assert!(rendered.ends_with("\n<
     assert_eq!(parts.static_prompt, prompt);
     assert_ne!(
         parts.static_prompt,
-        "\"));\nagent_core/tests/unit/prompt_render_tests.rs:89: assert!(rendered.ends_with(\"\n"
+        "\"));\ncore/agent/tests/unit/prompt_render_tests.rs:89: assert!(rendered.ends_with(\"\n"
     );
 }
 

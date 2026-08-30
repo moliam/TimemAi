@@ -1,6 +1,6 @@
 use agent_core::{AgentCore, CoreProfile, ResponseProtocolKind};
 
-const STATIC_PROMPT: &str = include_str!("../../resources/system_prompt/system_prompt.md");
+const STATIC_PROMPT: &str = include_str!("../../../resources/system_prompt/system_prompt.md");
 
 fn main() {
     let mut memory_dir = std::env::temp_dir();

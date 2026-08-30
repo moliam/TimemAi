@@ -169,7 +169,7 @@ fi
 
 legacy_action_input_hits="$(
   search_lines_regex 'next_actions.*"input"[[:space:]]*:' \
-    agent_core/tests agent_core/src/session_runtime.rs interfaces/shell/src/observation.rs interfaces/shell/src/lib.rs \
+    core/agent/tests core/agent/src/session_runtime.rs interfaces/shell/src/observation.rs interfaces/shell/src/lib.rs \
     | grep -v 'allow_legacy_input_negative_test' || true
 )"
 if [ -n "$legacy_action_input_hits" ]; then
@@ -177,13 +177,13 @@ if [ -n "$legacy_action_input_hits" ]; then
   echo "$legacy_action_input_hits" >&2
   exit 1
 fi
-if ! search_fixed "allow_legacy_input_negative_test" agent_core/tests/core_tests.rs; then
+if ! search_fixed "allow_legacy_input_negative_test" core/agent/tests/core_tests.rs; then
   echo "missing explicit negative test marker for legacy input rejection" >&2
   exit 1
 fi
 string_args_hits="$(
   search_lines_regex '"args"[[:space:]]*:[[:space:]]*"' \
-    agent_core/tests agent_core/src/session_runtime.rs interfaces/shell/src/observation.rs interfaces/shell/src/lib.rs resources docs README.md CHANGELOG.md scripts \
+    core/agent/tests core/agent/src/session_runtime.rs interfaces/shell/src/observation.rs interfaces/shell/src/lib.rs resources docs README.md CHANGELOG.md scripts \
     | grep -v 'allow_string_args_negative_test' \
     | grep -v 'response_schema_summary.json' \
     || true
@@ -193,14 +193,14 @@ if [ -n "$string_args_hits" ]; then
   echo "$string_args_hits" >&2
   exit 1
 fi
-if ! search_fixed "allow_string_args_negative_test" agent_core/tests/core_tests.rs; then
+if ! search_fixed "allow_string_args_negative_test" core/agent/tests/core_tests.rs; then
   echo "missing explicit negative test marker for string args rejection" >&2
   exit 1
 fi
 
 private_fixture_hits="$(
   search_lines_regex '默默|李默|儿子|son birthday|6月12|蓝色雨伞|绿色雨衣|fangchang|/Users/limo3|/Users/fangchang|v0\.6 发布检查|AURORA' \
-    agent_core/tests interfaces/shell/src resources docs README.md CHANGELOG.md scripts \
+    core/agent/tests interfaces/shell/src resources docs README.md CHANGELOG.md scripts \
     | grep -v 'scripts/test_contract_check.sh' \
     || true
 )"

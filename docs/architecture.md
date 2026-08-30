@@ -97,7 +97,7 @@ For a new contributor, read these in order:
 
 For module-local work, also read:
 
-- [`agent_core/module_boundary.md`](../agent_core/module_boundary.md)
+- [`core/agent/module_boundary.md`](../core/agent/module_boundary.md)
 - [`interfaces/shell/module_boundary.md`](../interfaces/shell/module_boundary.md)
 - [`timem_web/module_boundary.md`](../timem_web/module_boundary.md)
 - [`interfaces/web/module_boundary.md`](../interfaces/web/module_boundary.md)
@@ -132,7 +132,7 @@ flowchart LR
     Guard --> Audit["audit/api_audit.json\naudit/action_audit.json"]
 ```
 
-### `agent_core/`
+### `core/agent/`
 
 `agent_core` owns the agent loop and is platform independent.
 
@@ -504,7 +504,7 @@ ergonomics when they do not become shared model-visible capability.
 ### `resources/`
 
 `resources/` owns model-facing prompt materials and capability manifests.
-`agent_core/src` owns runtime structures, executable response parsers, model service
+`core/agent/src` owns runtime structures, executable response parsers, model service
 wire-format adapters, and executors. It should not contain system prompt text or
 protocol prompt prose.
 
@@ -598,14 +598,14 @@ Timem separates model-facing protocol instructions from runtime parsing:
 resources/protocol/<suite>/
 └─ response_protocol.md          model-facing instructions injected into prompt_0
 
-agent_core/src/response_protocol/
+core/agent/src/response_protocol/
 ├─ mod.rs                        protocol-independent ParsedEnvelope/ParsedAction
 ├─ json_suite.rs                 JSON response parser and repair policy
 └─ xml_suite.rs                  XML response parser and repair policy
 ```
 
 The `resources/protocol/<suite>` files are model-facing prompt resources and
-review snapshots. The Rust modules under `agent_core/src/response_protocol/`
+review snapshots. The Rust modules under `core/agent/src/response_protocol/`
 are executable parser suites. They intentionally live in code because they
 define runtime behavior, repair boundaries, and tests; they must stay aligned
 with the resource text and generated expanded prompt output from
@@ -654,7 +654,7 @@ capability semantics must not.
 sequenceDiagram
     participant U as User
     participant UI as UI adapter
-    participant C as agent_core/session_runtime
+    participant C as core/agent/session_runtime
     participant P as agent_core model service
     participant T as Local tools/data
 

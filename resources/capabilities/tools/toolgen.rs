@@ -88,5 +88,5 @@ fn publish_outcome(
 }
 
 #[cfg(test)]
-#[path = "../../../agent_core/tests/unit/capability_tool_toolgen_tests.rs"]
+#[path = "../../../core/agent/tests/unit/capability_tool_toolgen_tests.rs"]
 mod tests;

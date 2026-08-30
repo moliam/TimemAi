@@ -380,6 +380,6 @@ session state is waiting.
 
 ## Test Layout
 
-Test functions and fixture corpora live under `agent_core/tests`. Production
+Test functions and fixture corpora live under `core/agent/tests`. Production
 modules may keep only a minimal `#[cfg(test)]` external-module declaration or
 an explicitly test-only hook needed for private white-box access.

@@ -1,6 +1,6 @@
 use super::*;
 const TEST_JSON_RESPONSE_SCHEMA: &str =
-    include_str!("../../../resources/protocol/json/response_schema_summary.json");
+    include_str!("../../../../resources/protocol/json/response_schema_summary.json");
 
 #[test]
 fn json_response_v1_summary_resource_is_valid() {

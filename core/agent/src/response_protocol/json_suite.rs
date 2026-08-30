@@ -10,9 +10,9 @@ use crate::capability::CapabilityRegistry;
 pub struct JsonSuiteV1;
 
 const JSON_RESPONSE_PROTOCOL_SECTION: &str =
-    include_str!("../../../resources/protocol/json/response_protocol.md");
+    include_str!("../../../../resources/protocol/json/response_protocol.md");
 const JSON_RESPONSE_SCHEMA_SUMMARY: &str =
-    include_str!("../../../resources/protocol/json/response_schema_summary.json");
+    include_str!("../../../../resources/protocol/json/response_schema_summary.json");
 
 impl ResponseProtocolSuite for JsonSuiteV1 {
     fn name(&self) -> &str {

@@ -305,5 +305,5 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
 }
 
 #[cfg(test)]
-#[path = "../../../agent_core/tests/unit/capability_tool_memmgr_tests.rs"]
+#[path = "../../../core/agent/tests/unit/capability_tool_memmgr_tests.rs"]
 mod tests;

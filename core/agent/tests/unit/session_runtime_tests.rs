@@ -2977,7 +2977,7 @@ fn session_turn_preserves_cache_plan_with_json_response_protocol() {
     let dir = tmp_dir("session_cache_plan_json_protocol");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(
-        include_str!("../../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
         test_profile(),
         &dir,
     );
@@ -3038,7 +3038,7 @@ fn session_turn_preserves_cache_plan_with_xml_response_protocol() {
     let dir = tmp_dir("session_cache_plan_xml_protocol");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(
-        include_str!("../../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
         test_profile(),
         &dir,
     );
@@ -3570,7 +3570,7 @@ fn cancelled_turn_injects_one_runtime_note_before_next_user_and_runtime_context(
     let dir = tmp_dir("cancel_next_prompt_note");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(
-        include_str!("../../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
         test_profile(),
         &dir,
     );
@@ -3677,7 +3677,7 @@ fn cancelled_turn_json_prompt_renders_interruption_as_runtime_note_not_action_re
     let dir = tmp_dir("cancel_next_json_runtime_note");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(
-        include_str!("../../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
         test_profile(),
         &dir,
     );
@@ -3758,7 +3758,7 @@ fn model_error_does_not_inject_user_interruption_note_on_next_turn() {
     let dir = tmp_dir("model_error_no_interruption_note");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(
-        include_str!("../../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
         test_profile(),
         &dir,
     );
@@ -5102,7 +5102,7 @@ fn truncated_native_sse_recovery_guides_small_tool_iteration_to_correct_answer()
     let dir = tmp_dir("truncated_native_guided_recovery");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(
-        include_str!("../../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
         test_profile(),
         &dir,
     );
@@ -5261,7 +5261,7 @@ fn native_mode_round_trips_structured_calls_and_results_before_final_text() {
     let dir = tmp_dir("native_round_trip");
     let audit = dir.join("audit.json");
     let mut core = AgentCore::new(
-        include_str!("../../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
         test_profile(),
         &dir,
     );

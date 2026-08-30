@@ -10,8 +10,8 @@ from pathlib import Path
 REQUIRED = (
     "Cargo.toml",
     "docs/semantic-project-layout.md",
-    "agent_core/Cargo.toml",
-    "agent_core/src/lib.rs",
+    "core/agent/Cargo.toml",
+    "core/agent/src/lib.rs",
     "core/platform/Cargo.toml",
     "core/platform/module_boundary.md",
     "core/platform/src/lib.rs",
@@ -30,7 +30,7 @@ REQUIRED = (
     "interfaces/web/package.json",
     "interfaces/web/module_boundary.md",
 )
-FORBIDDEN_DIRS = ("timem_shell", "web_ui", "agent_core/src/os", "core/platform/src/windows")
+FORBIDDEN_DIRS = ("agent_core", "timem_shell", "web_ui", "core/agent/src/os", "core/platform/src/windows")
 PROCESS_PRIMITIVES = ("libc::getpgid", "libc::getpgrp", "libc::waitpid", ".process_group(0)")
 TARGET_DIRECTORIES = (
     "core/agent",
@@ -56,7 +56,7 @@ ARCHITECTURE_CONTRACT_MARKERS = (
     "interfaces/",
     "  shell/",
     "  web/",
-    "`agent_core/` | `core/agent/`, `core/application/`, `core/ui_contract/`",
+    "`core/agent/` | `core/application/` (remaining orchestration only)",
     "`host_projection/` | `bridges/http_websocket/`",
     "`timem_web/` | `bridges/http_websocket/`",
 )
@@ -94,12 +94,12 @@ def violations(root: Path) -> list[str]:
         if legacy in workspace:
             errors.append(f"workspace uses legacy member {legacy}")
 
-    agent_manifest = text(root, "agent_core/Cargo.toml")
-    if 'timem_platform = { path = "../core/platform" }' not in agent_manifest:
+    agent_manifest = text(root, "core/agent/Cargo.toml")
+    if 'timem_platform = { path = "../platform" }' not in agent_manifest:
         errors.append("agent_core must depend on core/platform through timem_platform")
-    if 'timem_ui_contract = { path = "../core/ui_contract" }' not in agent_manifest:
+    if 'timem_ui_contract = { path = "../ui_contract" }' not in agent_manifest:
         errors.append("agent_core must depend inward on core/ui_contract")
-    agent_lib = text(root, "agent_core/src/lib.rs")
+    agent_lib = text(root, "core/agent/src/lib.rs")
     if "pub use timem_platform as os;" not in agent_lib:
         errors.append("agent_core must preserve its public os facade through timem_platform")
     if "pub mod os;" in agent_lib:
@@ -108,7 +108,7 @@ def violations(root: Path) -> list[str]:
     shell_manifest = text(root, "interfaces/shell/Cargo.toml")
     if 'name = "timem_shell"' not in shell_manifest:
         errors.append("interfaces/shell must preserve the timem_shell package name")
-    if 'agent_core = { path = "../../agent_core" }' not in shell_manifest:
+    if 'agent_core = { path = "../../core/agent" }' not in shell_manifest:
         errors.append("interfaces/shell must depend inward on agent_core")
 
     platform_manifest = text(root, "core/platform/Cargo.toml")
@@ -144,7 +144,7 @@ def violations(root: Path) -> list[str]:
         if declaration not in platform_lib:
             errors.append(f"platform target selection missing: {declaration.splitlines()[-1]}")
 
-    for path in (root / "agent_core/src").rglob("*.rs") if (root / "agent_core/src").is_dir() else ():
+    for path in (root / "core/agent/src").rglob("*.rs") if (root / "core/agent/src").is_dir() else ():
         source = path.read_text(errors="replace")
         for primitive in PROCESS_PRIMITIVES:
             if primitive in source:
@@ -158,10 +158,10 @@ def violations(root: Path) -> list[str]:
 
 def write_fixture(root: Path) -> None:
     files = {
-        "Cargo.toml": '[workspace]\nmembers = ["agent_core", "core/platform", "core/ui_contract", "interfaces/shell"]\n',
+        "Cargo.toml": '[workspace]\nmembers = ["core/agent", "core/platform", "core/ui_contract", "interfaces/shell"]\n',
         "docs/semantic-project-layout.md": "\n".join(ARCHITECTURE_CONTRACT_MARKERS),
-        "agent_core/Cargo.toml": '[dependencies]\ntimem_platform = { path = "../core/platform" }\ntimem_ui_contract = { path = "../core/ui_contract" }\n',
-        "agent_core/src/lib.rs": "pub use timem_platform as os;\n",
+        "core/agent/Cargo.toml": '[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\n',
+        "core/agent/src/lib.rs": "pub use timem_platform as os;\n",
         "core/platform/Cargo.toml": '[package]\nname = "timem_platform"\n',
         "core/platform/module_boundary.md": "platform boundary\n",
         "core/platform/src/lib.rs": 'mod api;\n#[cfg(target_os = "linux")]\nmod linux;\n#[cfg(target_os = "macos")]\nmod macos;\n#[cfg(unix)]\nmod shared;\n',
@@ -175,7 +175,7 @@ def write_fixture(root: Path) -> None:
         "core/ui_contract/src/lib.rs": "pub mod projections;\n",
         "core/ui_contract/src/projections/mod.rs": "pub struct TurnProjection;\n",
         "core/ui_contract/tests/projection_contract_tests.rs": "#[test] fn projection() {}\n",
-        "interfaces/shell/Cargo.toml": '[package]\nname = "timem_shell"\n[dependencies]\nagent_core = { path = "../../agent_core" }\n',
+        "interfaces/shell/Cargo.toml": '[package]\nname = "timem_shell"\n[dependencies]\nagent_core = { path = "../../core/agent" }\n',
         "interfaces/shell/module_boundary.md": "shell boundary\n",
         "interfaces/web/package.json": "{}\n",
         "interfaces/web/module_boundary.md": "web boundary\n",
@@ -190,8 +190,8 @@ def self_test() -> None:
     cases = (
         ("legacy directory", lambda root: (root / "timem_shell").mkdir()),
         ("reverse dependency", lambda root: (root / "core/platform/Cargo.toml").write_text('[package]\nname = "timem_platform"\n[dependencies]\ntimem_shell = { path = "../../interfaces/shell" }\n')),
-        ("UI contract reverse dependency", lambda root: (root / "core/ui_contract/Cargo.toml").write_text('[package]\nname = "timem_ui_contract"\n[dependencies]\nagent_core = { path = "../../agent_core" }\n')),
-        ("escaped process primitive", lambda root: (root / "agent_core/src/leak.rs").write_text("fn leak() { libc::waitpid(0, std::ptr::null_mut(), 0); }\n")),
+        ("UI contract reverse dependency", lambda root: (root / "core/ui_contract/Cargo.toml").write_text('[package]\nname = "timem_ui_contract"\n[dependencies]\nagent_core = { path = "../agent" }\n')),
+        ("escaped process primitive", lambda root: (root / "core/agent/src/leak.rs").write_text("fn leak() { libc::waitpid(0, std::ptr::null_mut(), 0); }\n")),
         ("empty target placeholder", lambda root: (root / "bridges/ipc").mkdir(parents=True)),
         ("target contract drift", lambda root: (root / "docs/semantic-project-layout.md").write_text("incomplete target\n")),
     )

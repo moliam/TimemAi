@@ -8,16 +8,17 @@ use crate::prompt_spec::replace_markdown_placeholder_with_text;
 use crate::schema_optimizer::optimize_provider_schema;
 use crate::ToolDefinition;
 
-const MEMMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/memmgr.yaml");
-const CAPMGR_MANIFEST: &str = include_str!("../../resources/capabilities/tools/capmgr.yaml");
+const MEMMGR_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/memmgr.yaml");
+const CAPMGR_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/capmgr.yaml");
 const CONTEXT_COMPACT_MANIFEST: &str =
-    include_str!("../../resources/capabilities/tools/context_compact.yaml");
-const READFILE_MANIFEST: &str = include_str!("../../resources/capabilities/tools/readfile.yaml");
-const RUN_BASH_MANIFEST: &str = include_str!("../../resources/capabilities/tools/run_bash.yaml");
-const SELF_TOOL_MANIFEST: &str = include_str!("../../resources/capabilities/tools/self_tool.yaml");
+    include_str!("../../../resources/capabilities/tools/context_compact.yaml");
+const READFILE_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/readfile.yaml");
+const RUN_BASH_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/run_bash.yaml");
+const SELF_TOOL_MANIFEST: &str =
+    include_str!("../../../resources/capabilities/tools/self_tool.yaml");
 const SUB_ANSWER_MANIFEST: &str =
-    include_str!("../../resources/capabilities/tools/sub_answer.yaml");
-const TOOLGEN_MANIFEST: &str = include_str!("../../resources/capabilities/tools/toolgen.yaml");
+    include_str!("../../../resources/capabilities/tools/sub_answer.yaml");
+const TOOLGEN_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/toolgen.yaml");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityBinding {

@@ -27,7 +27,7 @@ type ApprovedParallelBashHandle = thread::JoinHandle<ApprovedParallelBashResult>
 
 pub mod audit;
 pub mod capability;
-#[path = "../../resources/capabilities/tools/capmgr.rs"]
+#[path = "../../../resources/capabilities/tools/capmgr.rs"]
 pub mod capmgr;
 pub mod chat_library;
 pub mod mcp;
@@ -36,14 +36,14 @@ use capability::CapabilityRegistry;
 pub mod config_edit;
 pub mod config_report;
 pub mod context;
-#[path = "../../resources/capabilities/tools/context_compact.rs"]
+#[path = "../../../resources/capabilities/tools/context_compact.rs"]
 pub mod context_compact;
 pub mod context_policy;
 pub mod data_layout;
 pub mod executor;
 pub mod host;
 pub mod interaction;
-#[path = "../../resources/capabilities/tools/memmgr.rs"]
+#[path = "../../../resources/capabilities/tools/memmgr.rs"]
 pub mod memmgr;
 pub mod model_api;
 pub mod model_service_config;
@@ -56,7 +56,7 @@ pub mod prompt_cache;
 pub mod prompt_components;
 pub mod prompt_render;
 pub mod prompt_spec;
-#[path = "../../resources/capabilities/tools/readfile.rs"]
+#[path = "../../../resources/capabilities/tools/readfile.rs"]
 pub mod readfile;
 pub mod redaction;
 pub mod reminder_config;
@@ -65,24 +65,24 @@ pub mod retry_policy;
 pub mod rolling_file_store;
 pub mod runtime_context;
 mod schema_optimizer;
-#[path = "../../resources/capabilities/tools/self_tool.rs"]
+#[path = "../../../resources/capabilities/tools/self_tool.rs"]
 pub mod self_tool;
 pub mod session_runtime;
 pub mod session_store;
 pub mod session_worker;
-#[path = "../../resources/capabilities/tools/run_bash.rs"]
+#[path = "../../../resources/capabilities/tools/run_bash.rs"]
 pub mod shell_exec;
 pub mod status_summary;
 pub mod status_view;
-#[path = "../../resources/capabilities/tools/sub_answer.rs"]
+#[path = "../../../resources/capabilities/tools/sub_answer.rs"]
 pub mod sub_answer;
 pub mod tool_jobs;
-#[path = "../../resources/capabilities/tools/registry.rs"]
+#[path = "../../../resources/capabilities/tools/registry.rs"]
 pub(crate) mod tool_registry;
 pub mod tool_repo;
 mod tool_result_gate;
 mod tool_schema_renderer;
-#[path = "../../resources/capabilities/tools/toolgen.rs"]
+#[path = "../../../resources/capabilities/tools/toolgen.rs"]
 pub mod toolgen;
 pub mod turn_state;
 pub mod work_instructions;

@@ -273,5 +273,5 @@ fn round_budget_label(rounds: u32) -> String {
 }
 
 #[cfg(test)]
-#[path = "../../../agent_core/tests/unit/capability_tool_self_tool_tests.rs"]
+#[path = "../../../core/agent/tests/unit/capability_tool_self_tool_tests.rs"]
 mod tests;

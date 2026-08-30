@@ -1,7 +1,7 @@
-diff --git a/agent_core/src/lib.rs b/agent_core/src/lib.rs
+diff --git a/core/agent/src/lib.rs b/core/agent/src/lib.rs
 index d2b8baa..f011182 100644
---- a/agent_core/src/lib.rs
-+++ b/agent_core/src/lib.rs
+--- a/core/agent/src/lib.rs
++++ b/core/agent/src/lib.rs
 @@ -497,11 +497,39 @@ impl PendingApprovedAction {
  
  const PROMPT_SLICE_TEXT_LIMIT: usize = 12_000;

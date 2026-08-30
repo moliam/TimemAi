@@ -5,7 +5,7 @@ version.workspace = true
 license.workspace = true
 
 [dependencies]
-agent_core = { path = "../agent_core" }
+agent_core = { path = "../core/agent" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

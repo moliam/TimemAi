@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Instant;
 
 fn local_llm_key_file_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../key")
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../key")
 }
 
 #[test]

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 pub struct XmlSuiteV1;
 
 const XML_RESPONSE_PROTOCOL_SECTION: &str =
-    include_str!("../../../resources/protocol/xml/response_protocol.md");
+    include_str!("../../../../resources/protocol/xml/response_protocol.md");
 
 pub const FINISH_CONFIRM_PREFIX: &str = "Now let me think seriously twice before I announce stop. Review user's task list. Is my delivery consistent with user's demand?";
 impl ResponseProtocolSuite for XmlSuiteV1 {

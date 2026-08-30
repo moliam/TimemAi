@@ -1003,7 +1003,7 @@ scripts/turn_concurrency_stress.sh
 确认设计后，优先采用小模块：
 
 ```text
-agent_core/src/turn_state.rs
+core/agent/src/turn_state.rs
   TurnId / TurnEpoch / TurnToken
   TurnGate
   TurnSlot / TurnOutcome / TurnActivity
