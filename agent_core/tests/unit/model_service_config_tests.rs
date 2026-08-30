@@ -360,3 +360,37 @@ fn dynamic_openai_cache_mode_application_is_validated() {
             .contains("invalid_TIMEM_OPENAI_CACHE_MODE")
     );
 }
+
+#[test]
+fn request_fields_load_from_json_environment_with_types_preserved() {
+    let config = model_service_config_from_sources(
+        &ModelServiceConfigSource::default(),
+        &env(&[
+            ("TIMEM_API_KEY", "k"),
+            (
+                "TIMEM_REQUEST_FIELDS",
+                r#"{"service_tier":"fast","priority":2,"enabled":true}"#,
+            ),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(
+        config.request_fields["service_tier"],
+        serde_json::json!("fast")
+    );
+    assert_eq!(config.request_fields["priority"], serde_json::json!(2));
+    assert_eq!(config.request_fields["enabled"], serde_json::json!(true));
+}
+
+#[test]
+fn request_fields_environment_rejects_reserved_keys() {
+    let error = model_service_config_from_sources(
+        &ModelServiceConfigSource::default(),
+        &env(&[
+            ("TIMEM_API_KEY", "k"),
+            ("TIMEM_REQUEST_FIELDS", r#"{"model":"override"}"#),
+        ]),
+    )
+    .unwrap_err();
+    assert_eq!(error, "invalid_or_reserved_model_request_field");
+}

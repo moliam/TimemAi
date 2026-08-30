@@ -25,7 +25,11 @@ fn cancellable_command_returns_without_waiting_for_process_timeout() {
     .unwrap_err();
 
     assert_eq!(err, "cancelled_by_user");
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(
+        started.elapsed() < Duration::from_millis(250),
+        "model transport cancellation took {:?}",
+        started.elapsed()
+    );
 }
 
 #[test]

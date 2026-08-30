@@ -1311,6 +1311,12 @@ fn native_prompt_contains_builtin_descriptions_without_schemas_or_dynamic_tools(
     );
     assert!(rendered.contains("### `run_bash`"), "{rendered}");
     assert!(
+        rendered.contains(
+            "One response can reasonably contain multiple tool calls for better performance."
+        ),
+        "{rendered}"
+    );
+    assert!(
         !rendered.to_ascii_lowercase().contains("native"),
         "{rendered}"
     );

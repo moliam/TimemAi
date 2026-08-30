@@ -32,6 +32,20 @@ fn reliable_command_wire_is_legacy_compatible_and_ack_is_correlated() {
     }))
     .unwrap();
     assert!(legacy.command_id.is_none());
+    let targeted: BrowserCommand = serde_json::from_value(json!({
+        "type": "turn_cancel",
+        "session_id": "session_a",
+        "target_command_id": "submit_1",
+        "command_id": "cancel_2"
+    }))
+    .unwrap();
+    assert!(matches!(
+        targeted.command,
+        ClientCommand::TurnCancel {
+            ref session_id,
+            target_command_id: Some(ref target_command_id),
+        } if session_id == "session_a" && target_command_id == "submit_1"
+    ));
     let ack = serde_json::to_value(command_ack(
         "cancel_1",
         CommandAckStatus::Rejected,
@@ -692,6 +706,7 @@ fn command_dedup_terminal_result_survives_restart_without_persisting_secrets() {
             endpoint_id: "endpoint_a".to_string(),
             api_key: "secret".to_string(),
             http_headers: Default::default(),
+            request_fields: Default::default(),
         })
         .is_none()
     );
@@ -915,6 +930,7 @@ fn command_lanes_serialize_one_session_without_globally_serializing_other_sessio
     let state = routing_test_state();
     let command = |session_id: &str| ClientCommand::TurnCancel {
         session_id: session_id.to_string(),
+        target_command_id: None,
     };
     let (_, session_a_first) = command_lane(&state, &command("session_a")).unwrap();
     let (_, session_a_second) = command_lane(&state, &command("session_a")).unwrap();
@@ -940,6 +956,7 @@ fn completed_command_lanes_are_reclaimed_without_removing_a_lane_with_pending_ti
     for ordinal in 0..256 {
         let command = ClientCommand::TurnCancel {
             session_id: format!("ephemeral-session-{ordinal}"),
+            target_command_id: None,
         };
         let (key, lane) = command_lane(&state, &command).unwrap();
         let accepted = AcceptedCommandLane {
@@ -960,6 +977,7 @@ fn completed_command_lanes_are_reclaimed_without_removing_a_lane_with_pending_ti
 
     let command = ClientCommand::TurnCancel {
         session_id: "shared-pending-session".to_string(),
+        target_command_id: None,
     };
     let (first_key, lane) = command_lane(&state, &command).unwrap();
     let first = AcceptedCommandLane {
@@ -1256,6 +1274,226 @@ fn persisted_turn_command_id_prevents_reexecution_after_terminal_ack_loss() {
 }
 
 #[test]
+fn pending_turn_identity_is_serialized_for_refresh_recovery() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "PENDING_SNAPSHOT");
+    let pending = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "recover this pending intent",
+        Some("submit-refresh"),
+    )
+    .unwrap();
+
+    let snapshot = serde_json::to_value(snapshot_for(&state, TEST_PORT)).unwrap();
+    let serialized = snapshot["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["session_id"] == session_id)
+        .unwrap();
+    assert_eq!(serialized["pending_turn_id"], pending.turn_id);
+    assert!(serialized["active_turn_id"].is_null());
+    assert_eq!(
+        serialized["turns"][0]["user_entries"][0]["command_id"],
+        "submit-refresh"
+    );
+}
+
+#[test]
+fn accepted_targeted_cancel_is_serialized_until_the_target_turn_finishes() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "CANCELLING_SNAPSHOT");
+    let pending = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "cancel and refresh",
+        Some("submit-cancelling"),
+    )
+    .unwrap();
+
+    let (context_id, worker_id) = primary_worker_scope(&state, &session_id).unwrap();
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnStarted {
+            command_id: Some("submit-cancelling".to_string()),
+        },
+    );
+
+    let mut events = state.events.subscribe();
+    assert!(handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnCancel {
+            session_id: session_id.clone(),
+            target_command_id: Some("submit-cancelling".to_string()),
+        },
+    )
+    .unwrap()
+    .is_none());
+    assert!(drain_wire_events(&mut events).iter().any(|event| matches!(
+        event,
+        WireEvent::TurnCancelling {
+            session,
+            target_command_id: Some(target_command_id),
+        } if session.session_id == session_id
+            && session.cancelling_turn_id.as_deref() == Some(pending.turn_id.as_str())
+            && session.turns.iter().any(|turn| turn.turn_id == pending.turn_id
+                && turn.state == "finished"
+                && turn.completion.as_ref().and_then(|value| value["stop_reason"].as_str())
+                    == Some("CancelledByUser"))
+            && target_command_id == "submit-cancelling"
+    )));
+
+    let snapshot = serde_json::to_value(snapshot_for(&state, TEST_PORT)).unwrap();
+    let serialized = snapshot["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["session_id"] == session_id)
+        .unwrap();
+    assert!(serialized["pending_turn_id"].is_null());
+    assert_eq!(serialized["cancelling_turn_id"], pending.turn_id);
+    assert_eq!(serialized["active_turn_id"], pending.turn_id);
+    assert_eq!(serialized["turns"][0]["state"], "finished");
+    assert_eq!(
+        serialized["turns"][0]["completion"]["stop_reason"],
+        "CancelledByUser"
+    );
+    assert_eq!(serialized["state"], "ready");
+    assert!(serialized["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|worker| worker["state"] != "working"));
+}
+
+#[test]
+fn late_core_working_events_cannot_revive_an_accepted_cancellation() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "CANCELLING_LATE_EVENTS");
+    let command_id = "submit-cancelling-late";
+    let pending = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "cancel before late Core events",
+        Some(command_id),
+    )
+    .unwrap();
+    let (context_id, worker_id) = primary_worker_scope(&state, &session_id).unwrap();
+
+    assert!(handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnCancel {
+            session_id: session_id.clone(),
+            target_command_id: Some(command_id.to_string()),
+        },
+    )
+    .unwrap()
+    .is_none());
+
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::TurnStarted {
+            command_id: Some(command_id.to_string()),
+        },
+    );
+    handle_scoped_worker_event(
+        &state,
+        &session_id,
+        &context_id,
+        &worker_id,
+        CoreSessionWorkerEvent::ModelRequest {
+            round: 1,
+            prompt: String::new(),
+            interaction_profile: None,
+            interaction_request: None,
+            api_payload: None,
+        },
+    );
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(
+        session.cancelling_turn_id.as_deref(),
+        Some(pending.turn_id.as_str())
+    );
+    assert_eq!(
+        session.active_turn_id.as_deref(),
+        Some(pending.turn_id.as_str())
+    );
+    assert_eq!(session.pending_turn_id, None);
+    assert_eq!(session.turns.last().unwrap().state, "finished");
+    assert_eq!(
+        session.turns.last().unwrap().completion.as_ref().unwrap()["stop_reason"],
+        "CancelledByUser"
+    );
+    assert_eq!(session.state, "ready");
+    assert!(session
+        .workers
+        .iter()
+        .all(|worker| worker.state != "working"));
+    drop(sessions);
+
+    let snapshot = serde_json::to_value(snapshot_for(&state, TEST_PORT)).unwrap();
+    let serialized = snapshot["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|session| session["session_id"] == session_id)
+        .unwrap();
+    assert_eq!(serialized["cancelling_turn_id"], pending.turn_id);
+    assert_eq!(serialized["active_turn_id"], pending.turn_id);
+    assert_eq!(serialized["state"], "ready");
+    assert!(serialized["workers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|worker| worker["state"] != "working"));
+}
+
+#[test]
+fn targeted_cancel_rejects_a_different_current_turn_without_mutation() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "CANCEL_TARGET_MISMATCH");
+    let pending = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "do not cancel the wrong turn",
+        Some("submit-current"),
+    )
+    .unwrap();
+
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnCancel {
+            session_id: session_id.clone(),
+            target_command_id: Some("submit-other".to_string()),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, "turn_cancel_target_mismatch");
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(
+        session.pending_turn_id.as_deref(),
+        Some(pending.turn_id.as_str())
+    );
+    assert_eq!(session.state, "ready");
+    assert_eq!(session.turns.last().unwrap().state, "pending");
+    assert!(session.turns.last().unwrap().completion.is_none());
+}
+
+#[test]
 fn core_turn_started_immediately_publishes_authoritative_live_state() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "CORE_STARTED_WIRE");
@@ -1400,6 +1638,7 @@ fn restored_interrupted_marker_targets_only_the_persisted_last_turn() {
             turn_id: "older_unfinished".to_string(),
             state: "restored".to_string(),
             created_at_ms: 1,
+            interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
             sub_answers: Vec::new(),
@@ -1410,6 +1649,7 @@ fn restored_interrupted_marker_targets_only_the_persisted_last_turn() {
             turn_id: "persisted_last".to_string(),
             state: "restored".to_string(),
             created_at_ms: 2,
+            interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
             sub_answers: Vec::new(),
@@ -1422,10 +1662,12 @@ fn restored_interrupted_marker_targets_only_the_persisted_last_turn() {
         &mut turns,
         StoredSessionState::Interrupted,
         Some("persisted_last"),
+        99,
     );
 
     assert_eq!(turns[0].state, "restored");
     assert_eq!(turns[1].state, "interrupted");
+    assert_eq!(turns[1].interrupted_at_ms, Some(99));
 }
 
 #[test]
@@ -1434,6 +1676,7 @@ fn restored_interrupted_marker_never_relabels_terminal_or_unrelated_turns() {
         turn_id: "terminal_last".to_string(),
         state: "completed".to_string(),
         created_at_ms: 2,
+        interrupted_at_ms: None,
         user_entries: Vec::new(),
         events: Vec::new(),
         sub_answers: Vec::new(),
@@ -1444,6 +1687,7 @@ fn restored_interrupted_marker_never_relabels_terminal_or_unrelated_turns() {
         turn_id: "older_unfinished".to_string(),
         state: "restored".to_string(),
         created_at_ms: 1,
+        interrupted_at_ms: None,
         user_entries: Vec::new(),
         events: Vec::new(),
         sub_answers: Vec::new(),
@@ -1456,6 +1700,7 @@ fn restored_interrupted_marker_never_relabels_terminal_or_unrelated_turns() {
         &mut turns,
         StoredSessionState::Interrupted,
         Some("terminal_last"),
+        99,
     );
     assert_eq!(turns[0].state, "restored");
     assert_eq!(turns[1].state, "completed");
@@ -1464,12 +1709,14 @@ fn restored_interrupted_marker_never_relabels_terminal_or_unrelated_turns() {
         &mut turns,
         StoredSessionState::Ready,
         Some("older_unfinished"),
+        99,
     );
-    mark_restored_interrupted_turn(&mut turns, StoredSessionState::Interrupted, None);
+    mark_restored_interrupted_turn(&mut turns, StoredSessionState::Interrupted, None, 99);
     mark_restored_interrupted_turn(
         &mut turns,
         StoredSessionState::Interrupted,
         Some("missing_turn"),
+        99,
     );
     assert_eq!(turns[0].state, "restored");
     assert_eq!(turns[1].state, "completed");
@@ -1521,6 +1768,93 @@ fn aggregate_session_state_preserves_interrupted_until_real_activity_changes_it(
 }
 
 #[test]
+fn interrupted_session_persists_without_an_active_or_pending_turn() {
+    let state = routing_test_state();
+    let sessions = state.sessions.lock().unwrap();
+    let mut session = sessions["session_a"].clone();
+    drop(sessions);
+    session.state = "interrupted".to_string();
+    session.active_turn_id = None;
+    session.pending_turn_id = None;
+    session.turns.push(WebTurn {
+        turn_id: "interrupted_turn".to_string(),
+        state: "interrupted".to_string(),
+        created_at_ms: 1,
+        interrupted_at_ms: None,
+        user_entries: Vec::new(),
+        events: Vec::new(),
+        sub_answers: Vec::new(),
+        final_answer: None,
+        completion: None,
+    });
+
+    let stored = stored_session_from_web_session(&state, &session);
+    assert_eq!(stored.state, StoredSessionState::Interrupted);
+    assert_eq!(stored.last_turn_id.as_deref(), Some("interrupted_turn"));
+}
+
+#[test]
+fn stale_turn_started_without_command_id_cannot_revive_an_interrupted_session() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let worker_id = state.sessions.lock().unwrap()[session_id]
+        .primary_worker_id
+        .clone();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.state = "interrupted".to_string();
+        session.active_turn_id = None;
+        session.pending_turn_id = None;
+        session.turns.push(WebTurn {
+            turn_id: "old_interrupted_turn".to_string(),
+            state: "interrupted".to_string(),
+            created_at_ms: 1,
+            interrupted_at_ms: None,
+            user_entries: Vec::new(),
+            events: Vec::new(),
+            sub_answers: Vec::new(),
+            final_answer: None,
+            completion: None,
+        });
+    }
+
+    assert!(activate_core_started_turn(&state, session_id, &worker_id, None).is_none());
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(sessions[session_id].state, "interrupted");
+    assert_eq!(
+        sessions[session_id].turns.last().unwrap().state,
+        "interrupted"
+    );
+}
+
+#[test]
+fn stale_started_event_is_isolated_to_its_session() {
+    let state = routing_test_state();
+    let worker_a = state.sessions.lock().unwrap()["session_a"]
+        .primary_worker_id
+        .clone();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut("session_a").unwrap().state = "interrupted".to_string();
+        sessions.get_mut("session_b").unwrap().state = "ready".to_string();
+    }
+
+    assert!(activate_core_started_turn(
+        &state,
+        "session_a",
+        &worker_a,
+        Some("stale_before_restart"),
+    )
+    .is_none());
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(sessions["session_a"].state, "interrupted");
+    assert_eq!(sessions["session_b"].state, "ready");
+    assert_eq!(sessions["session_b"].active_turn_id, None);
+    assert_eq!(sessions["session_b"].pending_turn_id, None);
+}
+
+#[test]
 fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can_start() {
     let state = routing_test_state();
     let session_id = "session_a";
@@ -1536,6 +1870,7 @@ fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can
             turn_id: "interrupted_turn".to_string(),
             state: "interrupted".to_string(),
             created_at_ms: 1,
+            interrupted_at_ms: None,
             user_entries: vec![WebTurnUserEntry {
                 kind: "task".to_string(),
                 text: "old work".to_string(),
@@ -1583,7 +1918,8 @@ fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can
 }
 
 #[test]
-fn restart_marks_running_session_and_latest_unfinished_turn_interrupted_without_redrive() {
+fn core_runtime_process_restart_marks_running_session_and_latest_unfinished_turn_interrupted_without_redrive(
+) {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("restart_interrupted_session"));
     std::fs::create_dir_all(&root).unwrap();
@@ -2860,14 +3196,22 @@ fn browser_commands_are_strictly_tagged_and_do_not_accept_unknown_variants() {
             .unwrap();
     assert!(matches!(
         mem_switch,
-        ClientCommand::MemSwitch { ref path } if path == "/tmp/.test_mem"
+        ClientCommand::MemSwitch { ref path, stop_running: false } if path == "/tmp/.test_mem"
+    ));
+    let confirmed_mem_switch = serde_json::from_str::<ClientCommand>(
+        r#"{"type":"mem_switch","path":"/tmp/.test_mem","stop_running":true}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        confirmed_mem_switch,
+        ClientCommand::MemSwitch { ref path, stop_running: true } if path == "/tmp/.test_mem"
     ));
     let legacy_mem_switch =
         serde_json::from_str::<ClientCommand>(r#"{"type":"mem_switch","space":".test_mem"}"#)
             .unwrap();
     assert!(matches!(
         legacy_mem_switch,
-        ClientCommand::MemSwitch { ref path } if path == ".test_mem"
+        ClientCommand::MemSwitch { ref path, stop_running: false } if path == ".test_mem"
     ));
 
     assert!(serde_json::from_str::<ClientCommand>(r#"{"type":"shell_exec"}"#).is_err());
@@ -3347,6 +3691,7 @@ fn workspace_snapshot_deduplicates_registered_current_directory() {
                 base_url: "http://127.0.0.1".to_string(),
                 api_key: "test".to_string(),
                 http_headers: Default::default(),
+                request_fields: Default::default(),
                 timeout_secs: 1,
                 max_llm_output_tokens: 1_024,
                 max_llm_input_tokens: 10_000,
@@ -3419,6 +3764,49 @@ fn session_create_returns_the_complete_session_to_the_requesting_browser() {
         .lock()
         .unwrap()
         .contains_key(&session.session_id));
+}
+
+#[test]
+fn unnamed_sessions_use_the_next_available_untitled_number() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_untitled_sessions"));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = root.join("data");
+    state.template = Arc::new(template);
+    set_test_mem(&state, root.join("data"), "untitled_sessions_mem");
+    state.sessions.lock().unwrap().clear();
+
+    let reserved = create_session(
+        &state,
+        Some("Untitled 2".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let first = create_session(
+        &state,
+        None,
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let third = create_session(
+        &state,
+        Some("   ".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(sessions[&reserved].display_name, "Untitled 2");
+    assert_eq!(sessions[&first].display_name, "Untitled 1");
+    assert_eq!(sessions[&third].display_name, "Untitled 3");
+    drop(sessions);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -3620,7 +4008,7 @@ fn assistant_speaker_name_is_fixed() {
 }
 
 #[test]
-fn unnamed_web_session_uses_session_name_while_worker_keeps_core_identity() {
+fn unnamed_web_session_uses_untitled_name_while_worker_keeps_core_identity() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(format!("timem_web_default_session_name_{}", now_ms()));
     std::fs::create_dir_all(&root).unwrap();
@@ -3640,7 +4028,7 @@ fn unnamed_web_session_uses_session_name_while_worker_keeps_core_identity() {
     .unwrap();
     let sessions = state.sessions.lock().unwrap();
     let session = &sessions[&session_id];
-    assert_eq!(session.display_name, format!("Session{}", session.ordinal));
+    assert_eq!(session.display_name, "Untitled 1");
     assert_eq!(session.workers.len(), 1);
     assert_eq!(session.workers[0].display_name, "ID0");
     drop(sessions);
@@ -3798,6 +4186,7 @@ fn session_runtime_update_is_allowed_during_an_active_turn() {
             turn_id: "turn_active".to_string(),
             state: "working".to_string(),
             created_at_ms: now_ms(),
+            interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
             sub_answers: Vec::new(),
@@ -3861,6 +4250,7 @@ fn session_api_key_update_is_rejected_during_an_active_turn() {
         turn_id: "turn_active".to_string(),
         state: "working".to_string(),
         created_at_ms: now_ms(),
+        interrupted_at_ms: None,
         user_entries: Vec::new(),
         events: Vec::new(),
         sub_answers: Vec::new(),
@@ -5334,6 +5724,70 @@ fn snapshot_reports_the_active_mem_space_and_paths() {
     assert!(snapshot.server.mem.space_dir.ends_with(".test_mem"));
     assert!(snapshot.server.mem.memory_dir.ends_with(".test_mem/memory"));
     assert_eq!(snapshot.server.mem.temporary_retention_days, Some(5));
+    assert_eq!(
+        snapshot.server.mem.temporary_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+    assert_eq!(
+        snapshot.server.mem.conversation_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+}
+
+#[test]
+fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values() {
+    let root = std::env::temp_dir().join(unique_web_id("mem_capacity_defaults"));
+    std::fs::create_dir_all(&root).unwrap();
+
+    let normal = load_web_mem_settings(&root, false).unwrap();
+    assert_eq!(normal.temporary_retention_days, Some(5));
+    assert_eq!(normal.temporary_capacity_bytes, Some(MEM_CAPACITY_128_MB));
+    assert_eq!(
+        normal.conversation_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+
+    let debug = load_web_mem_settings(&root, true).unwrap();
+    assert_eq!(debug.temporary_retention_days, Some(5));
+    assert_eq!(debug.temporary_capacity_bytes, Some(MEM_CAPACITY_512_MB));
+    assert_eq!(debug.conversation_capacity_bytes, Some(MEM_CAPACITY_128_MB));
+
+    std::fs::write(
+        web_mem_settings_path(&root),
+        br#"{"temporary_retention_days":null,"temporary_capacity_bytes":null,"conversation_capacity_bytes":536870912}"#,
+    )
+    .unwrap();
+    let saved = load_web_mem_settings(&root, true).unwrap();
+    assert_eq!(saved.temporary_retention_days, None);
+    assert_eq!(saved.temporary_capacity_bytes, None);
+    assert_eq!(saved.conversation_capacity_bytes, Some(MEM_CAPACITY_512_MB));
+
+    std::fs::write(
+        web_mem_settings_path(&root),
+        br#"{"temporary_retention_days":10}"#,
+    )
+    .unwrap();
+    let migrated_normal = load_web_mem_settings(&root, false).unwrap();
+    assert_eq!(migrated_normal.temporary_retention_days, Some(10));
+    assert_eq!(
+        migrated_normal.temporary_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+    assert_eq!(
+        migrated_normal.conversation_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+    let migrated_debug = load_web_mem_settings(&root, true).unwrap();
+    assert_eq!(
+        migrated_debug.temporary_capacity_bytes,
+        Some(MEM_CAPACITY_512_MB)
+    );
+    assert_eq!(
+        migrated_debug.conversation_capacity_bytes,
+        Some(MEM_CAPACITY_128_MB)
+    );
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -5423,41 +5877,6 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
         store.append_history_record("session_a", &record).unwrap();
     }
 
-    let shell_dir = layout.memory_dir().join("shell_jobs");
-    std::fs::create_dir_all(&shell_dir).unwrap();
-    let old_output = shell_dir.join("old.out");
-    let old_stderr = shell_dir.join("old.err");
-    let old_status = shell_dir.join("old.status");
-    for (path, text) in [
-        (&old_output, "expired stdout"),
-        (&old_stderr, "expired stderr"),
-        (&old_status, "exit:0"),
-    ] {
-        std::fs::write(path, text).unwrap();
-    }
-    let old_job = agent_core::ShellJobRecord {
-        id: "old-job".to_string(),
-        created_at_ms: old_ms,
-        kind: "background".to_string(),
-        session_id: "session_a".to_string(),
-        turn_id: "old-action".to_string(),
-        pid: std::process::id(),
-        process_identity: None,
-        tool_call_id: "old-call".to_string(),
-        owner_id: Some("old-owner".to_string()),
-        command: "printf expired".to_string(),
-        cwd: layout.memory_dir().display().to_string(),
-        output_file: old_output.display().to_string(),
-        stderr_file: old_stderr.display().to_string(),
-        status_file: old_status.display().to_string(),
-        tail_out: false,
-    };
-    std::fs::write(
-        shell_dir.join("jobs.jsonl"),
-        format!("{}\n", serde_json::to_string(&old_job).unwrap()),
-    )
-    .unwrap();
-
     std::fs::create_dir_all(layout.api_audit_file().parent().unwrap()).unwrap();
     std::fs::write(
         layout.api_audit_file(),
@@ -5482,17 +5901,24 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
     let event = handle_command(
         &state,
         TEST_PORT,
-        ClientCommand::MemTemporaryRetentionUpdate { days: Some(5) },
+        ClientCommand::MemTemporaryRetentionUpdate {
+            days: Some(5),
+            max_bytes: None,
+        },
     )
     .unwrap()
     .unwrap();
     let WireEvent::MemSettingsUpdated {
         temporary_retention_days,
+        temporary_capacity_bytes,
+        conversation_capacity_bytes,
     } = event
     else {
         panic!("expected authoritative MEM settings event")
     };
     assert_eq!(temporary_retention_days, Some(5));
+    assert_eq!(temporary_capacity_bytes, None);
+    assert_eq!(conversation_capacity_bytes, Some(MEM_CAPACITY_128_MB));
 
     let retained = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
     assert!(retained.iter().any(|record| matches!(
@@ -5507,18 +5933,11 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
         record,
         ChatHistoryRecord::Event { content, .. } if content == "recent temporary action result"
     )));
-    assert!(!old_output.exists());
-    assert!(!old_stderr.exists());
-    assert!(!old_status.exists());
-    assert!(std::fs::read_to_string(shell_dir.join("jobs.jsonl"))
-        .unwrap()
-        .trim()
-        .is_empty());
     let audit = agent_core::read_audit_doc(&layout.api_audit_file()).unwrap();
     assert_eq!(audit["events"].as_array().unwrap().len(), 1);
     assert_eq!(audit["events"][0]["type"], "recent");
     assert_eq!(
-        load_web_mem_settings(store.root())
+        load_web_mem_settings(store.root(), false)
             .unwrap()
             .temporary_retention_days,
         Some(5)
@@ -5527,7 +5946,10 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
     handle_command(
         &state,
         TEST_PORT,
-        ClientCommand::MemTemporaryRetentionUpdate { days: None },
+        ClientCommand::MemTemporaryRetentionUpdate {
+            days: None,
+            max_bytes: None,
+        },
     )
     .unwrap();
     assert_eq!(
@@ -5540,6 +5962,302 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
         .temporary_retention_days,
         None,
         "unlimited retention must survive reopening the same MEM"
+    );
+}
+
+#[test]
+fn ordinary_history_append_does_not_require_or_run_temporary_maintenance() {
+    let state = routing_test_state();
+    let session = state.sessions.lock().unwrap()["session_a"].clone();
+    let store = current_session_store(&state).unwrap();
+    store
+        .upsert_session(&stored_session_from_web_session_with_store(
+            &store, &session,
+        ))
+        .unwrap();
+
+    append_history_record(
+        &state,
+        "session_a",
+        &ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "ordinary_append".to_string(),
+            created_at_ms: 1,
+            kind: None,
+            command_id: None,
+            delivery_state: None,
+            content: "hi".to_string(),
+        },
+    )
+    .unwrap();
+
+    let records = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert!(records.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Message { content, .. } if content == "hi"
+    )));
+}
+
+#[test]
+fn idle_temporary_maintenance_is_skipped_while_any_session_has_live_work() {
+    let state = routing_test_state();
+    assert!(!has_live_mem_work(&state).unwrap());
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.state = "working".to_string();
+        session.active_turn_id = Some("turn_live".to_string());
+    }
+
+    assert!(has_live_mem_work(&state).unwrap());
+}
+
+#[test]
+fn idle_temporary_maintenance_is_allowed_only_after_work_is_clear() {
+    let state = routing_test_state();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.pending_turn_id = Some("turn_pending".to_string());
+    }
+    assert!(has_live_mem_work(&state).unwrap());
+
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.pending_turn_id = None;
+        session.active_turn_id = None;
+        session.state = "ready".to_string();
+    }
+    assert!(!has_live_mem_work(&state).unwrap());
+}
+
+#[test]
+fn temporary_maintenance_runtime_accumulates_across_restarts_without_counting_stopped_time() {
+    let state = routing_test_state();
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    let first_now = tokio::time::Instant::now();
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.temporary_maintenance.checkpoint_started_at =
+            first_now - Duration::from_secs(3 * 60 * 60);
+        assert_eq!(
+            checkpoint_temporary_maintenance_runtime(&mut mem, first_now).unwrap(),
+            Duration::from_secs(3 * 60 * 60)
+        );
+    }
+
+    // Reopening reads only the persisted accumulated duration. Wall-clock time
+    // while no Timem process is running is not represented in this state.
+    let mut reopened = load_temporary_maintenance_runtime_state(&memory_dir).unwrap();
+    assert_eq!(
+        reopened.accumulated_runtime,
+        Duration::from_secs(3 * 60 * 60)
+    );
+    let second_now = tokio::time::Instant::now();
+    reopened.checkpoint_started_at = second_now - Duration::from_secs(3 * 60 * 60);
+    reopened.checkpoint(second_now);
+    assert_eq!(reopened.accumulated_runtime, TEMPORARY_MAINTENANCE_INTERVAL);
+}
+
+#[test]
+fn temporary_maintenance_trigger_persists_due_runtime_and_accepts_segment_hint() {
+    let state = routing_test_state();
+    let now = tokio::time::Instant::now();
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.temporary_maintenance.accumulated_runtime =
+            TEMPORARY_MAINTENANCE_INTERVAL - Duration::from_secs(1);
+        mem.temporary_maintenance.checkpoint_started_at = now - Duration::from_secs(1);
+    }
+    assert!(checkpoint_and_get_temporary_maintenance_trigger(&state, now).unwrap());
+
+    let other = routing_test_state();
+    let hint = {
+        let mem = other.mem.lock().unwrap();
+        agent_core::api_audit_maintenance_hint_path(&mem.layout.api_audit_file())
+    };
+    std::fs::create_dir_all(hint.parent().unwrap()).unwrap();
+    std::fs::write(&hint, b"audit_segment_rolled\n").unwrap();
+    assert!(
+        checkpoint_and_get_temporary_maintenance_trigger(&other, tokio::time::Instant::now())
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn busy_temporary_maintenance_does_not_reset_due_runtime_or_hint() {
+    let state = routing_test_state();
+    let (memory_dir, hint) = {
+        let mut mem = state.mem.lock().unwrap();
+        mem.temporary_maintenance.accumulated_runtime = TEMPORARY_MAINTENANCE_INTERVAL;
+        let memory_dir = mem.layout.memory_dir();
+        save_temporary_maintenance_runtime_state(&memory_dir, &mem.temporary_maintenance).unwrap();
+        (
+            memory_dir,
+            agent_core::api_audit_maintenance_hint_path(&mem.layout.api_audit_file()),
+        )
+    };
+    std::fs::create_dir_all(hint.parent().unwrap()).unwrap();
+    std::fs::write(&hint, b"audit_segment_rolled\n").unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .state = "working".to_string();
+
+    assert_eq!(
+        run_idle_temporary_maintenance(state).await.unwrap(),
+        TemporaryMaintenanceAttempt::Busy
+    );
+    assert!(hint.exists());
+    assert_eq!(
+        load_temporary_maintenance_runtime_state(&memory_dir)
+            .unwrap()
+            .accumulated_runtime,
+        TEMPORARY_MAINTENANCE_INTERVAL
+    );
+}
+
+#[test]
+fn successful_temporary_maintenance_completion_resets_runtime_and_clears_hint() {
+    let state = routing_test_state();
+    let (memory_dir, hint) = {
+        let mut mem = state.mem.lock().unwrap();
+        mem.temporary_maintenance.accumulated_runtime = TEMPORARY_MAINTENANCE_INTERVAL;
+        let memory_dir = mem.layout.memory_dir();
+        save_temporary_maintenance_runtime_state(&memory_dir, &mem.temporary_maintenance).unwrap();
+        (
+            memory_dir,
+            agent_core::api_audit_maintenance_hint_path(&mem.layout.api_audit_file()),
+        )
+    };
+    std::fs::create_dir_all(hint.parent().unwrap()).unwrap();
+    std::fs::write(&hint, b"audit_segment_rolled\n").unwrap();
+
+    complete_temporary_maintenance(&state, tokio::time::Instant::now()).unwrap();
+    assert!(!hint.exists());
+    assert_eq!(
+        load_temporary_maintenance_runtime_state(&memory_dir)
+            .unwrap()
+            .accumulated_runtime,
+        Duration::ZERO
+    );
+}
+
+#[tokio::test]
+async fn idle_temporary_maintenance_waits_for_the_global_command_barrier() {
+    let state = routing_test_state();
+    let barrier = state.command_global_barrier.clone();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _read_guard = barrier.read().unwrap();
+        locked_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    locked_rx.recv().unwrap();
+
+    let maintenance = tokio::spawn(run_idle_temporary_maintenance(state));
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(
+        !maintenance.is_finished(),
+        "maintenance must not overlap an accepted browser mutation"
+    );
+
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    maintenance.await.unwrap().unwrap();
+}
+
+#[test]
+fn conversation_capacity_skips_running_session_and_prunes_another_session() {
+    let state = routing_test_state();
+    let store = state.mem.lock().unwrap().session_store.clone();
+    let web_sessions = state.sessions.lock().unwrap().clone();
+    for session in web_sessions.values() {
+        store
+            .upsert_session(&stored_session_from_web_session_with_store(&store, session))
+            .unwrap();
+        for turn in 0..2 {
+            for role in [ChatHistoryRole::User, ChatHistoryRole::Assistant] {
+                store
+                    .append_history_record(
+                        &session.session_id,
+                        &ChatHistoryRecord::Message {
+                            role,
+                            turn_id: format!("{}_turn_{turn}", session.session_id),
+                            created_at_ms: turn,
+                            kind: None,
+                            command_id: None,
+                            delivery_state: None,
+                            content: "capacity payload ".repeat(64),
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+    }
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .active_turn_id = Some("session_a_turn_1".to_string());
+    let active_path = store.history_path_for_session("session_a");
+    let inactive_path = store.history_path_for_session("session_b");
+    let active_before = std::fs::read(&active_path).unwrap();
+    let inactive_before = std::fs::metadata(&inactive_path).unwrap().len();
+    let total = active_before.len() as u64 + inactive_before;
+
+    let removed = apply_conversation_stable_capacity(&state, &store, total - 1).unwrap();
+
+    assert!(
+        removed > 0,
+        "another Session must still be pruned when the oldest candidate is active"
+    );
+    assert_eq!(std::fs::read(active_path).unwrap(), active_before);
+    assert!(std::fs::metadata(inactive_path).unwrap().len() < inactive_before);
+}
+
+#[test]
+fn temporary_capacity_evicts_only_complete_oldest_items() {
+    let item = |id: &str, bytes: u64, modified_at_ms: i64| MemTemporaryItem {
+        id: id.to_string(),
+        path: format!("{id}.tmp"),
+        kind: "temporary_file".to_string(),
+        bytes,
+        modified_at_ms,
+        deletable: true,
+        delete_reason: None,
+    };
+    let evicted = oldest_temporary_items_to_evict(
+        vec![
+            item("new", 6, 30),
+            item("old", 7, 10),
+            item("middle", 5, 20),
+        ],
+        11,
+    );
+    assert_eq!(evicted, vec!["old"]);
+    assert_eq!(
+        oldest_temporary_items_to_evict(vec![item("old", 5, 1), item("new", 6, 2)], 11,),
+        Vec::<String>::new(),
+        "content exactly at the stable capacity must be retained",
+    );
+    assert_eq!(
+        oldest_temporary_items_to_evict(vec![item("old", 5, 1), item("new", 7, 2)], 11,),
+        vec!["old"],
+        "crossing capacity by one byte must evict the oldest complete item",
+    );
+    assert!(
+        oldest_temporary_items_to_evict(vec![item("only", 12, 1)], 11)
+            .iter()
+            .eq(["only"])
     );
 }
 
@@ -5560,6 +6278,11 @@ fn temporary_retention_rolls_forward_is_idempotent_and_unlimited_skips_cleanup()
     let base_now = 20 * day;
     for (created_at_ms, content) in [
         (base_now - 4 * day, "first expires on later tick"),
+        (base_now - 5 * day, "exact cutoff remains"),
+        (
+            base_now - 5 * day - 1,
+            "one millisecond before cutoff expires",
+        ),
         (base_now - day, "second remains"),
     ] {
         store
@@ -5578,25 +6301,36 @@ fn temporary_retention_rolls_forward_is_idempotent_and_unlimited_skips_cleanup()
     }
 
     assert_eq!(
-        apply_temporary_retention(&layout, &store, Some(5), base_now)
-            .unwrap()
-            .history_events,
-        0
-    );
-    assert_eq!(
-        apply_temporary_retention(&layout, &store, Some(5), base_now + 2 * day)
+        apply_temporary_retention(&layout, &store, Some(5), None, base_now)
             .unwrap()
             .history_events,
         1,
-        "the moving cutoff must expire data on a later periodic pass"
+        "age retention is strict: the exact cutoff remains and one millisecond older expires",
+    );
+    let after_boundary_pass =
+        read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert!(after_boundary_pass.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Event { content, .. } if content == "exact cutoff remains"
+    )));
+    assert!(!after_boundary_pass.iter().any(|record| matches!(
+        record,
+        ChatHistoryRecord::Event { content, .. } if content == "one millisecond before cutoff expires"
+    )));
+    assert_eq!(
+        apply_temporary_retention(&layout, &store, Some(5), None, base_now + 2 * day)
+            .unwrap()
+            .history_events,
+        2,
+        "the moving cutoff must expire both records that became old on a later periodic pass"
     );
     assert_eq!(
-        apply_temporary_retention(&layout, &store, Some(5), base_now + 2 * day).unwrap(),
+        apply_temporary_retention(&layout, &store, Some(5), None, base_now + 2 * day).unwrap(),
         TemporaryRetentionResult::default(),
         "repeating a periodic pass at the same cutoff must be idempotent"
     );
     assert_eq!(
-        apply_temporary_retention(&layout, &store, None, i64::MAX).unwrap(),
+        apply_temporary_retention(&layout, &store, None, None, i64::MAX).unwrap(),
         TemporaryRetentionResult::default()
     );
     let retained = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
@@ -5650,62 +6384,22 @@ fn mem_temporary_items_are_bounded_sorted_safe_and_deletable() {
     );
     let _ = std::fs::remove_dir_all(memory_dir);
 }
-
 #[test]
-fn mem_temporary_items_include_only_finished_shell_job_bundles() {
-    let memory_dir = std::env::temp_dir().join(unique_web_id("mem_temporary_shell_jobs"));
+fn mem_temporary_items_ignore_legacy_shell_job_directories() {
+    let memory_dir = std::env::temp_dir().join(unique_web_id("ignore_legacy_shell_jobs"));
     let shell_dir = memory_dir.join("shell_jobs");
+    let nested_shell_dir = memory_dir.join("memory/shell_jobs");
     std::fs::create_dir_all(&shell_dir).unwrap();
-    let make_record = |id: &str, finished: bool| {
-        let output = shell_dir.join(format!("{id}.out"));
-        let stderr = shell_dir.join(format!("{id}.err"));
-        let status = shell_dir.join(format!("{id}.status"));
-        std::fs::write(&output, "12345").unwrap();
-        std::fs::write(&stderr, "678").unwrap();
-        std::fs::write(&status, if finished { "0" } else { "" }).unwrap();
-        agent_core::ShellJobRecord {
-            id: id.to_string(),
-            created_at_ms: 7,
-            kind: "test".to_string(),
-            session_id: "session_a".to_string(),
-            turn_id: "turn_a".to_string(),
-            pid: std::process::id(),
-            process_identity: None,
-            tool_call_id: format!("call-{id}"),
-            owner_id: None,
-            command: "true".to_string(),
-            cwd: memory_dir.display().to_string(),
-            output_file: output.display().to_string(),
-            stderr_file: stderr.display().to_string(),
-            status_file: status.display().to_string(),
-            tail_out: false,
-        }
-    };
-    let finished = make_record("finished", true);
-    let active = make_record("active", false);
-    std::fs::write(
-        shell_dir.join("jobs.jsonl"),
-        format!(
-            "{}\n{}\n",
-            serde_json::to_string(&finished).unwrap(),
-            serde_json::to_string(&active).unwrap()
-        ),
-    )
-    .unwrap();
+    std::fs::create_dir_all(&nested_shell_dir).unwrap();
+    std::fs::write(shell_dir.join("old.out"), "legacy").unwrap();
+    std::fs::write(shell_dir.join("jobs.jsonl"), "legacy index").unwrap();
+    std::fs::write(nested_shell_dir.join("old.err"), "legacy").unwrap();
+    std::fs::write(memory_dir.join("visible.tmp"), "temporary").unwrap();
 
     let items = list_mem_temporary_items_at(&memory_dir).unwrap();
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0].id, "shell_job:finished");
-    assert_eq!(items[0].bytes, 9);
-    assert_eq!(
-        delete_mem_temporary_items_at(&memory_dir, &[items[0].id.clone()]).unwrap(),
-        1
-    );
-    assert!(!Path::new(&finished.output_file).exists());
-    assert!(Path::new(&active.output_file).exists());
-    assert!(std::fs::read_to_string(shell_dir.join("jobs.jsonl"))
-        .unwrap()
-        .contains("active"));
+    assert_eq!(items[0].id, "file:visible.tmp");
+    assert!(!items.iter().any(|item| item.path.contains("shell_jobs")));
     let _ = std::fs::remove_dir_all(memory_dir);
 }
 
@@ -5716,7 +6410,10 @@ fn mem_temporary_retention_rejects_invalid_values() {
         handle_command(
             &state,
             TEST_PORT,
-            ClientCommand::MemTemporaryRetentionUpdate { days: Some(2) },
+            ClientCommand::MemTemporaryRetentionUpdate {
+                days: Some(2),
+                max_bytes: None
+            },
         )
         .unwrap_err(),
         "mem_temporary_retention_days_invalid"
@@ -5777,6 +6474,7 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
         TEST_PORT,
         ClientCommand::MemSwitch {
             path: data_dir.join("beta").display().to_string(),
+            stop_running: false,
         },
     )
     .unwrap()
@@ -5826,6 +6524,102 @@ fn mem_switch_swaps_out_sessions_and_loads_the_selected_space() {
 }
 
 #[test]
+fn same_mem_switch_is_a_noop_even_when_work_is_live() {
+    let state = routing_test_state();
+    let current_path = current_mem_state(&state)
+        .unwrap()
+        .layout
+        .space_dir()
+        .display()
+        .to_string();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .active_turn_id = Some("active_turn".to_string());
+
+    let snapshot = switch_mem_space(&state, TEST_PORT, &current_path, false).unwrap();
+    assert_eq!(snapshot.server.mem.space_dir, current_path);
+    assert_eq!(
+        state.sessions.lock().unwrap()["session_a"]
+            .active_turn_id
+            .as_deref(),
+        Some("active_turn")
+    );
+}
+
+#[test]
+fn confirmed_mem_switch_stops_real_worker_persists_interruption_and_never_redrives() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("confirmed_mem_switch"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let alpha = data_dir.join("alpha");
+    let beta = data_dir.join("beta");
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = alpha.display().to_string();
+    state.template = Arc::new(template);
+    set_test_mem(&state, data_dir.clone(), &alpha.display().to_string());
+    state.sessions.lock().unwrap().clear();
+
+    let entered = Arc::new(AtomicUsize::new(0));
+    let session_id = register_cancellable_mem_switch_worker(&state, Arc::clone(&entered), &root);
+    let turn = submit_turn(&state, &session_id, "keep running".to_string()).unwrap();
+    let started = Instant::now();
+    while entered.load(Ordering::SeqCst) == 0 {
+        assert!(started.elapsed() < Duration::from_secs(3));
+        thread::sleep(Duration::from_millis(5));
+    }
+    let old_store = current_session_store(&state).unwrap();
+    assert_eq!(
+        switch_mem_space(&state, TEST_PORT, &beta.display().to_string(), false).unwrap_err(),
+        "mem_switch_active_sessions_confirmation_required"
+    );
+    assert_eq!(state.manager.lock().unwrap().worker_count(), 1);
+    assert_eq!(current_mem_state(&state).unwrap().layout.space_dir(), alpha);
+
+    switch_mem_space(&state, TEST_PORT, &beta.display().to_string(), true).unwrap();
+    assert!(state
+        .manager
+        .lock()
+        .unwrap()
+        .statuses()
+        .iter()
+        .all(|status| status.identity.session_id != session_id));
+    let stored = old_store.load_session(&session_id).unwrap().unwrap();
+    assert_eq!(stored.state, StoredSessionState::Interrupted);
+    assert_eq!(stored.last_turn_id.as_deref(), Some(turn.turn_id.as_str()));
+
+    let mut events = state.events.subscribe();
+    switch_mem_space(&state, TEST_PORT, &alpha.display().to_string(), false).unwrap();
+    let restored = state.sessions.lock().unwrap()[&session_id].clone();
+    assert_eq!(restored.state, "interrupted");
+    assert!(restored
+        .workers
+        .iter()
+        .all(|worker| worker.state == "ready"));
+    assert_eq!(
+        restored
+            .turns
+            .iter()
+            .find(|candidate| candidate.turn_id == turn.turn_id)
+            .unwrap()
+            .state,
+        "interrupted"
+    );
+    thread::sleep(Duration::from_millis(30));
+    while let Ok(event) = events.try_recv() {
+        assert!(!matches!(event, WireEvent::TurnStarted { .. }));
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn mem_switch_requires_a_safe_absolute_directory_path() {
     let state = routing_test_state();
     let too_long = format!("/tmp/{}", "a".repeat(4097));
@@ -5843,6 +6637,7 @@ fn mem_switch_requires_a_safe_absolute_directory_path() {
             TEST_PORT,
             ClientCommand::MemSwitch {
                 path: path.to_string(),
+                stop_running: false,
             },
         )
         .is_err());
@@ -5863,8 +6658,8 @@ fn mem_switch_rejects_active_sessions_before_touching_mem_scoped_instance_leases
         .active_turn_id = Some("active_turn".to_string());
 
     assert_eq!(
-        switch_mem_space(&state, TEST_PORT, ".next_mem").unwrap_err(),
-        "mem_switch_active_sessions"
+        switch_mem_space(&state, TEST_PORT, ".next_mem", false).unwrap_err(),
+        "mem_switch_active_sessions_confirmation_required"
     );
     assert_eq!(current_mem_state(&state).unwrap().space, original_mem);
     assert_eq!(
@@ -6002,6 +6797,7 @@ fn routing_test_state() -> AppState {
         base_url: "http://127.0.0.1".to_string(),
         api_key: "test".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         timeout_secs: 1,
         max_llm_output_tokens: 1_024,
         max_llm_input_tokens: 10_000,
@@ -6055,11 +6851,90 @@ fn routing_test_state() -> AppState {
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
-        temporary_retention_wakeup: Arc::new(Notify::new()),
-        mem_temporary_task_running: Arc::new(AtomicBool::new(false)),
         debug: None,
         runtime_log: RuntimeLog::default(),
     }
+}
+
+#[test]
+fn mem_temporary_commands_return_correlated_results_without_background_broadcast() {
+    assert!(ClientCommand::MemTemporaryItemsList.result_is_direct());
+    assert!(!ClientCommand::MemTemporaryItemsList.result_is_sensitive());
+    assert!(ClientCommand::MemTemporaryItemsDelete { ids: Vec::new() }.result_is_direct());
+    assert!(!ClientCommand::MemTemporaryItemsDelete { ids: Vec::new() }.result_is_sensitive());
+
+    let state = routing_test_state();
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    std::fs::create_dir_all(&memory_dir).unwrap();
+    std::fs::write(memory_dir.join("listed.tmp"), b"temporary payload").unwrap();
+
+    let list_command_id = "mem_temporary_list_direct";
+    assert!(reserve_command_dedup(&state, list_command_id)
+        .unwrap()
+        .is_none());
+    let list = execute_browser_command(
+        &state,
+        TEST_PORT,
+        BrowserCommand {
+            command_id: Some(list_command_id.to_string()),
+            accepted_mem_epoch: 1,
+            accepted_lane: None,
+            accepted_at_ms: now_ms(),
+            performance_sent_at_ms: None,
+            command: ClientCommand::MemTemporaryItemsList,
+        },
+    );
+    assert!(matches!(
+        list.ack,
+        Some(WireEvent::CommandAck {
+            status: CommandAckStatus::Committed,
+            ..
+        })
+    ));
+    let Some(WireEvent::MemTemporaryItems { items, error }) = list.event else {
+        panic!("list command must return its result directly")
+    };
+    assert!(error.is_none());
+    assert!(items.iter().any(|item| item.id == "file:listed.tmp"));
+    assert!(matches!(
+        reserve_command_dedup(&state, list_command_id).unwrap(),
+        Some(CommandDedupState::Committed {
+            serialized_event: Some(_),
+            ..
+        })
+    ));
+
+    let delete_command_id = "mem_temporary_delete_direct";
+    assert!(reserve_command_dedup(&state, delete_command_id)
+        .unwrap()
+        .is_none());
+    let delete = execute_browser_command(
+        &state,
+        TEST_PORT,
+        BrowserCommand {
+            command_id: Some(delete_command_id.to_string()),
+            accepted_mem_epoch: 1,
+            accepted_lane: None,
+            accepted_at_ms: now_ms(),
+            performance_sent_at_ms: None,
+            command: ClientCommand::MemTemporaryItemsDelete {
+                ids: vec!["file:listed.tmp".to_string()],
+            },
+        },
+    );
+    assert!(matches!(
+        delete.ack,
+        Some(WireEvent::CommandAck {
+            status: CommandAckStatus::Committed,
+            ..
+        })
+    ));
+    let Some(WireEvent::MemTemporaryItems { items, error }) = delete.event else {
+        panic!("delete command must return the refreshed list directly")
+    };
+    assert!(error.is_none());
+    assert!(!items.iter().any(|item| item.id == "file:listed.tmp"));
+    assert!(!memory_dir.join("listed.tmp").exists());
 }
 
 fn set_test_mem(state: &AppState, data_dir: PathBuf, space: &str) {
@@ -6108,7 +6983,10 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         history_has_more: false,
         resume_notice_pending: false,
         active_turn_id: None,
+        cancelling_turn_id: None,
         pending_turn_id: None,
+        turn_projection: TurnProjectionCache::default(),
+        next_turn_intents: NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS),
         pending_completion_message_id: None,
         pending_unconsumed_supplements: Vec::new(),
         reported_session_working_worker_count: None,
@@ -6139,6 +7017,7 @@ fn test_runtime_settings() -> RuntimeSettings {
             base_url: "http://127.0.0.1:9".to_string(),
             api_key: "test".to_string(),
             http_headers: Default::default(),
+            request_fields: Default::default(),
             timeout_secs: 1,
             max_llm_output_tokens: 1_024,
             max_llm_input_tokens: 10_000,
@@ -6269,6 +7148,97 @@ fn drain_wire_events(receiver: &mut broadcast::Receiver<WireEvent>) -> Vec<WireE
             }
         }
     }
+}
+
+#[test]
+fn primary_core_projection_is_cached_revisioned_and_not_rewritten_by_stale_or_subworker_events() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let token = agent_core::TurnToken {
+        session_id: session_id.to_string(),
+        turn_id: "turn_projection_test".to_string(),
+        epoch: 7,
+    };
+    let active = agent_core::TurnProjection::Active(agent_core::ActiveTurnProjection {
+        token: token.clone(),
+        stop_requested: false,
+        input_admission: agent_core::TurnInputAdmission::Open,
+        activity: agent_core::TurnActivity::Running,
+    });
+    let finished = agent_core::TurnProjection::Finished(agent_core::FinishedTurnProjection {
+        token: token.clone(),
+        outcome: agent_core::TurnProjectionOutcome::Completed,
+    });
+    let mut events = state.events.subscribe();
+
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(active.clone()),
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(active.clone()),
+    );
+    handle_scoped_worker_event(
+        &state,
+        session_id,
+        &test_context_id(session_id),
+        "subworker",
+        CoreSessionWorkerEvent::TurnProjection(finished.clone()),
+    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = sessions.get(session_id).unwrap();
+        let current = session.turn_projection.current().unwrap();
+        assert_eq!(current.revision, 1);
+        assert_eq!(current.projection, active);
+        assert_eq!(session.state, "working");
+    }
+
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(finished.clone()),
+    );
+    handle_worker_event(
+        &state,
+        session_id,
+        CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+            agent_core::ActiveTurnProjection {
+                token,
+                stop_requested: true,
+                input_admission: agent_core::TurnInputAdmission::Closed,
+                activity: agent_core::TurnActivity::WaitingUser,
+            },
+        )),
+    );
+
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = sessions.get(session_id).unwrap();
+        let current = session.turn_projection.current().unwrap();
+        assert_eq!(current.revision, 2);
+        assert_eq!(current.projection, finished);
+        assert_eq!(session.state, "ready");
+    }
+
+    let projected = drain_wire_events(&mut events)
+        .into_iter()
+        .filter_map(|event| match event {
+            WireEvent::TurnProjection { projection, .. } => Some(projection),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        projected
+            .iter()
+            .map(|item| item.revision)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
 }
 
 fn wait_for_web_worker_event(
@@ -7227,31 +8197,98 @@ fn web_runtime_shutdown_stops_all_session_workers() {
         .lines()
         .find_map(|line| line.strip_prefix("job_id: "))
         .unwrap();
-    let shell_jobs = FileShellJobStore::new(&memory_dir);
-    shell_jobs.spawn_background("sleep 30", &tool_dir, "shutdown-session", "shutdown-turn");
-
     assert_eq!(state.manager.lock().unwrap().worker_count(), 2);
     shutdown_web_runtime(&state).unwrap();
     assert_eq!(state.manager.lock().unwrap().worker_count(), 0);
     assert!(tool_jobs.status(job_id, 0).contains("state: cancelled"));
-    assert!(shell_jobs
-        .running_for_session("shutdown-session")
-        .is_empty());
 }
 
 #[test]
 fn web_runtime_cleanup_guard_runs_cleanup_once_on_scope_exit() {
     let state = routing_test_state();
-    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
-    let shell_jobs = FileShellJobStore::new(&memory_dir);
-    shell_jobs.spawn_background("sleep 30", &memory_dir, "guard-session", "guard-turn");
-
     {
         let _guard = WebRuntimeCleanupGuard::new(&state);
     }
 
-    assert!(shell_jobs.running_for_session("guard-session").is_empty());
     assert_eq!(state.manager.lock().unwrap().worker_count(), 0);
+}
+
+struct CancellableMemSwitchModel {
+    entered: Arc<AtomicUsize>,
+}
+
+impl ModelClient for CancellableMemSwitchModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        _prompt: &str,
+        _audit_file: &Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        let started = Instant::now();
+        while !should_cancel() {
+            if started.elapsed() > Duration::from_secs(5) {
+                return Err("mem_switch_test_timeout".to_string());
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        Err("cancelled_for_mem_switch".to_string())
+    }
+}
+
+fn register_cancellable_mem_switch_worker(
+    state: &AppState,
+    entered: Arc<AtomicUsize>,
+    worker_dir: &Path,
+) -> String {
+    let session_id = unique_web_id("mem_switch_session");
+    let context_id = test_context_id(&session_id);
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        worker_dir,
+    );
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            state.template.settings.lock().unwrap().config.clone(),
+            CoreSessionWorkerWorkspace::new(
+                worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some("MEM switch worker".to_string()),
+            None,
+            CancellableMemSwitchModel { entered },
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, 0, "MEM switch worker".to_string());
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id.clone();
+    session.active_context_id = context_id;
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    persist_web_session(state, &session_id).unwrap();
+    session_id
 }
 
 struct BlockingShutdownModel {
@@ -7374,6 +8411,241 @@ impl ModelClient for CancelThenFinishModel {
 }
 
 #[test]
+fn stop_then_immediate_submit_is_visible_once_and_runs_after_the_cancelled_turn() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(AtomicUsize::new(0));
+    let context_id = "immediate_next_context".to_string();
+    let worker_dir = std::env::temp_dir().join(unique_web_id("immediate_next_worker"));
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &worker_dir,
+    );
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            state.template.settings.lock().unwrap().config.clone(),
+            CoreSessionWorkerWorkspace::new(
+                &worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id,
+            context_id.clone(),
+            Some("Primary".to_string()),
+            None,
+            CancelThenFinishModel {
+                calls: Arc::clone(&calls),
+                entered: Arc::clone(&entered),
+                final_text: "NEXT_TURN_FINISHED",
+            },
+        )
+        .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.contexts = vec![WebContext {
+            context_id: context_id.clone(),
+            current_dir: worker_dir.display().to_string(),
+            worker_ids: vec![worker_id.clone()],
+        }];
+        session.workers = vec![WebWorker {
+            worker_id: worker_id.clone(),
+            context_id: context_id.clone(),
+            display_name: "Primary".to_string(),
+            ordinal: 0,
+            state: "ready".to_string(),
+            parent_worker_id: None,
+        }];
+        session.active_context_id = context_id;
+        session.primary_worker_id = worker_id.clone();
+        session.current_dir = worker_dir.display().to_string();
+    }
+
+    handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("first-command"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.to_string(),
+            text: "first turn blocks until Stop".to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+    let started = Instant::now();
+    while entered.load(Ordering::SeqCst) == 0 {
+        for (event_session_id, event_context_id, event_worker_id, event) in
+            drain_worker_events(&state)
+        {
+            handle_scoped_worker_event(
+                &state,
+                &event_session_id,
+                &event_context_id,
+                &event_worker_id,
+                event,
+            );
+        }
+        assert!(started.elapsed() < Duration::from_secs(3));
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnCancel {
+            session_id: session_id.to_string(),
+            target_command_id: Some("first-command".to_string()),
+        },
+    )
+    .unwrap();
+    let first_reply = handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("next-command"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.to_string(),
+            text: "second turn must appear immediately".to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap()
+    .expect("second command must be visible before cancellation settles");
+    let WireEvent::TurnUpdated {
+        turn: visible_next, ..
+    } = first_reply
+    else {
+        panic!("second command must return a turn update")
+    };
+    assert_eq!(visible_next.state, "pending");
+    assert_eq!(
+        visible_next.user_entries[0].text,
+        "second turn must appear immediately"
+    );
+    assert_eq!(load_next_turn_intents(&state, session_id).unwrap().len(), 1);
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions
+            .get_mut(session_id)
+            .unwrap()
+            .attachments
+            .push(WebAttachment {
+                id: "duplicate-must-not-consume".to_string(),
+                name: "duplicate.txt".to_string(),
+                path: "/tmp/duplicate.txt".to_string(),
+                bytes: 9,
+            });
+    }
+
+    let duplicate_reply = handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("next-command"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.to_string(),
+            text: "second turn must appear immediately".to_string(),
+            attachment_ids: Some(vec!["duplicate-must-not-consume".to_string()]),
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap()
+    .expect("duplicate delivery must return the original visible turn");
+    let WireEvent::TurnUpdated {
+        turn: duplicate_turn,
+        ..
+    } = duplicate_reply
+    else {
+        panic!("duplicate delivery must remain a turn update")
+    };
+    assert_eq!(duplicate_turn.turn_id, visible_next.turn_id);
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = sessions.get(session_id).unwrap();
+        assert_eq!(session.next_turn_intents.len(), 1);
+        assert!(session
+            .attachments
+            .iter()
+            .any(|file| file.id == "duplicate-must-not-consume"));
+        assert_eq!(
+            session
+                .turns
+                .iter()
+                .filter(|turn| {
+                    turn.user_entries
+                        .iter()
+                        .any(|entry| entry.command_id.as_deref() == Some("next-command"))
+                })
+                .count(),
+            1
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    let finished = Instant::now();
+    loop {
+        for (event_session_id, event_context_id, event_worker_id, event) in
+            drain_worker_events(&state)
+        {
+            handle_scoped_worker_event(
+                &state,
+                &event_session_id,
+                &event_context_id,
+                &event_worker_id,
+                event,
+            );
+        }
+        let done = {
+            let sessions = state.sessions.lock().unwrap();
+            let session = sessions.get(session_id).unwrap();
+            calls.load(Ordering::SeqCst) == 2
+                && session.next_turn_intents.is_empty()
+                && session
+                    .turns
+                    .iter()
+                    .find(|turn| turn.turn_id == visible_next.turn_id)
+                    .is_some_and(|turn| turn.state == "finished")
+        };
+        if done {
+            break;
+        }
+        assert!(finished.elapsed() < Duration::from_secs(5));
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(load_next_turn_intents(&state, session_id)
+        .unwrap()
+        .is_empty());
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(worker_dir);
+}
+
+#[test]
 fn cancel_stops_all_session_workers_and_next_turn_runs_only_primary() {
     let state = routing_test_state();
     let session_id = "session_a";
@@ -7485,6 +8757,7 @@ fn cancel_stops_all_session_workers_and_next_turn_runs_only_primary() {
         TEST_PORT,
         ClientCommand::TurnCancel {
             session_id: session_id.to_string(),
+            target_command_id: None,
         },
     )
     .unwrap();
@@ -7597,7 +8870,15 @@ fn concurrent_cancel_supplement_and_final_are_isolated_by_session() {
         let session_id = cancel_session.clone();
         thread::spawn(move || {
             barrier.wait();
-            handle_command(&state, TEST_PORT, ClientCommand::TurnCancel { session_id }).unwrap();
+            handle_command(
+                &state,
+                TEST_PORT,
+                ClientCommand::TurnCancel {
+                    session_id,
+                    target_command_id: None,
+                },
+            )
+            .unwrap();
         })
     };
     let supplement_thread = {
@@ -7735,8 +9016,15 @@ fn eight_working_sessions_keep_mixed_cancel_supplement_final_and_request_scoped(
                 barrier.wait();
                 match ordinal % 4 {
                     0 => {
-                        handle_command(&state, TEST_PORT, ClientCommand::TurnCancel { session_id })
-                            .unwrap();
+                        handle_command(
+                            &state,
+                            TEST_PORT,
+                            ClientCommand::TurnCancel {
+                                session_id,
+                                target_command_id: None,
+                            },
+                        )
+                        .unwrap();
                     }
                     1 => {
                         append_turn_supplement_with_pending_attachments(
@@ -8227,6 +9515,68 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
                 .and_then(Value::as_str)
                 == Some(CORE_TOPIC_MODEL_REPAIR)
     )));
+}
+
+#[test]
+fn browser_reconnect_snapshot_preserves_live_core_working_state() {
+    let state = routing_test_state();
+    let turn = start_web_turn(
+        &state,
+        "session_a",
+        "keep running while the browser reconnects",
+    )
+    .unwrap();
+
+    let first_snapshot = snapshot_for(&state, TEST_PORT);
+    let first = first_snapshot
+        .sessions
+        .iter()
+        .find(|session| session.session_id == "session_a")
+        .unwrap();
+    assert_eq!(first.state, "working");
+    assert_eq!(first.active_turn_id.as_deref(), Some(turn.turn_id.as_str()));
+    assert_eq!(
+        first
+            .turns
+            .iter()
+            .find(|candidate| candidate.turn_id == turn.turn_id)
+            .unwrap()
+            .state,
+        "working"
+    );
+    assert!(first.workers.iter().any(|worker| worker.state == "working"));
+
+    // A new WebSocket connection receives another snapshot from the same live
+    // Core-owned in-memory state. Snapshot construction must not run persisted
+    // restart recovery or manufacture an interrupted state.
+    let reconnect_snapshot = snapshot_for(&state, TEST_PORT);
+    let reconnected = reconnect_snapshot
+        .sessions
+        .iter()
+        .find(|session| session.session_id == "session_a")
+        .unwrap();
+    assert_eq!(reconnected.state, "working");
+    assert_eq!(
+        reconnected.active_turn_id.as_deref(),
+        Some(turn.turn_id.as_str())
+    );
+    assert_eq!(
+        reconnected
+            .turns
+            .iter()
+            .find(|candidate| candidate.turn_id == turn.turn_id)
+            .unwrap()
+            .state,
+        "working"
+    );
+    assert!(reconnected
+        .workers
+        .iter()
+        .any(|worker| worker.state == "working"));
+    assert!(reconnect_snapshot
+        .sessions
+        .iter()
+        .all(|session| session.state != "interrupted"));
 }
 
 #[test]
@@ -8870,6 +10220,7 @@ fn duplicate_cancel_commands_are_idempotent_for_one_active_turn() {
             TEST_PORT,
             ClientCommand::TurnCancel {
                 session_id: session_id.clone(),
+                target_command_id: None,
             },
         )
         .unwrap()
@@ -8887,6 +10238,7 @@ fn duplicate_cancel_commands_are_idempotent_for_one_active_turn() {
         TEST_PORT,
         ClientCommand::TurnCancel {
             session_id: session_id.clone(),
+            target_command_id: None,
         },
     )
     .unwrap()
@@ -8994,6 +10346,418 @@ fn repeated_user_sends_during_an_active_turn_are_ordered_supplements() {
     );
 }
 
+fn cancelled_test_outcome() -> TurnOutcome {
+    let mut outcome =
+        TurnOutcome::final_response("cancelled", UsageStats::zero(), None, None, Duration::ZERO);
+    outcome.stop_reason = Some(agent_core::TurnStopReason::CancelledByUser);
+    outcome
+}
+
+fn finished_projection_for(session_id: &str, turn_id: &str, epoch: u64) -> CoreSessionWorkerEvent {
+    CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Finished(
+        agent_core::FinishedTurnProjection {
+            token: agent_core::TurnToken {
+                session_id: session_id.to_string(),
+                turn_id: turn_id.to_string(),
+                epoch,
+            },
+            outcome: agent_core::TurnProjectionOutcome::Cancelled,
+        },
+    ))
+}
+
+fn queue_turn_while_stopping(
+    state: &AppState,
+    session_id: &str,
+    command_id: &str,
+    text: &str,
+) -> WebTurn {
+    let event = handle_command_with_id(
+        state,
+        TEST_PORT,
+        Some(command_id),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.to_string(),
+            text: text.to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap()
+    .expect("queued user command must be visible immediately");
+    let WireEvent::TurnUpdated { turn, .. } = event else {
+        panic!("queued user command must return a turn update")
+    };
+    turn
+}
+
+#[test]
+fn runtime_restart_interrupts_and_discards_persisted_next_turn_without_redrive() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("restart_discards_next_turn"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "restart_discards_next_turn_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    state.sessions.lock().unwrap().clear();
+
+    let session_id = create_session(
+        &state,
+        Some("Discard queued next turn on restart".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let old_turn = start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "old turn interrupted by restart",
+        Some("old-command"),
+    )
+    .unwrap();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut(&session_id)
+        .unwrap()
+        .cancelling_turn_id = Some(old_turn.turn_id);
+    let queued = queue_turn_while_stopping(
+        &state,
+        &session_id,
+        "discarded-command",
+        "queued turn must stop at restart",
+    );
+    assert_eq!(
+        load_next_turn_intents(&state, &session_id).unwrap().len(),
+        1
+    );
+
+    let original_manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    original_manager.shutdown_all().unwrap();
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+    assert_eq!(
+        restore_stored_sessions_after_runtime_restart(&restarted).unwrap(),
+        1
+    );
+
+    thread::sleep(Duration::from_millis(30));
+    let startup_events = drain_worker_events(&restarted);
+    assert!(startup_events.iter().all(|(_, _, _, event)| {
+        !matches!(
+            event,
+            CoreSessionWorkerEvent::CommandAccepted { command_id }
+                if command_id == "discarded-command"
+        ) && !matches!(
+            event,
+            CoreSessionWorkerEvent::TurnStarted { command_id: Some(command_id) }
+                if command_id == "discarded-command"
+        )
+    }));
+    for (event_session_id, event_context_id, event_worker_id, event) in startup_events {
+        handle_scoped_worker_event(
+            &restarted,
+            &event_session_id,
+            &event_context_id,
+            &event_worker_id,
+            event,
+        );
+    }
+    {
+        let sessions = restarted.sessions.lock().unwrap();
+        let restored = &sessions[&session_id];
+        assert_eq!(restored.turn_projection.current(), None);
+        assert_eq!(restored.active_turn_id, None);
+        assert_eq!(restored.pending_turn_id, None);
+        assert!(restored.next_turn_intents.is_empty());
+        assert_eq!(
+            restored
+                .turns
+                .iter()
+                .find(|turn| turn.turn_id == queued.turn_id)
+                .unwrap()
+                .state,
+            "interrupted"
+        );
+    }
+    assert!(load_next_turn_intents(&restarted, &session_id)
+        .unwrap()
+        .is_empty());
+
+    restarted
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut(&session_id)
+        .unwrap()
+        .attachments
+        .push(WebAttachment {
+            id: "old-redelivery-must-not-consume".to_string(),
+            name: "old.txt".to_string(),
+            path: "/tmp/old.txt".to_string(),
+            bytes: 3,
+        });
+    let old_redelivery = handle_command_with_id(
+        &restarted,
+        TEST_PORT,
+        Some("discarded-command"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "queued turn must stop at restart".to_string(),
+            attachment_ids: Some(vec!["old-redelivery-must-not-consume".to_string()]),
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap()
+    .expect("old command ID may only return its interrupted turn");
+    let WireEvent::TurnUpdated { turn, .. } = old_redelivery else {
+        panic!("old command ID must return a turn update")
+    };
+    assert_eq!(turn.turn_id, queued.turn_id);
+    assert_eq!(turn.state, "interrupted");
+    assert!(restarted.sessions.lock().unwrap()[&session_id]
+        .attachments
+        .iter()
+        .any(|file| file.id == "old-redelivery-must-not-consume"));
+    thread::sleep(Duration::from_millis(30));
+    assert!(drain_worker_events(&restarted)
+        .iter()
+        .all(|(_, _, _, event)| {
+            !matches!(
+                event,
+                CoreSessionWorkerEvent::CommandAccepted { command_id }
+                    if command_id == "discarded-command"
+            )
+        }));
+
+    let new_turn = handle_command_with_id(
+        &restarted,
+        TEST_PORT,
+        Some("new-command-after-restart"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "new work after restart".to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap()
+    .expect("a new command ID may create a new turn after restart");
+    let WireEvent::TurnUpdated { turn: new_turn, .. } = new_turn else {
+        panic!("new command must return a turn update")
+    };
+    assert_ne!(new_turn.turn_id, queued.turn_id);
+
+    let started = Instant::now();
+    let mut accepted = 0usize;
+    while accepted == 0 {
+        for (event_session_id, event_context_id, event_worker_id, event) in
+            drain_worker_events(&restarted)
+        {
+            if matches!(
+                &event,
+                CoreSessionWorkerEvent::CommandAccepted { command_id }
+                    if command_id == "new-command-after-restart"
+            ) {
+                accepted += 1;
+            }
+            assert!(!matches!(
+                &event,
+                CoreSessionWorkerEvent::CommandAccepted { command_id }
+                    if command_id == "discarded-command"
+            ));
+            handle_scoped_worker_event(
+                &restarted,
+                &event_session_id,
+                &event_context_id,
+                &event_worker_id,
+                event,
+            );
+        }
+        assert!(started.elapsed() < Duration::from_secs(3));
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(accepted, 1);
+
+    let manager = {
+        let mut guard = restarted.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn next_turn_dispatch_waits_for_both_core_and_host_terminal_facts_in_either_order() {
+    for projection_first in [true, false] {
+        let state = routing_test_state();
+        let session_id = "session_a";
+        let current = start_web_turn(&state, session_id, "old turn").unwrap();
+        {
+            let mut sessions = state.sessions.lock().unwrap();
+            sessions.get_mut(session_id).unwrap().cancelling_turn_id =
+                Some(current.turn_id.clone());
+        }
+        let queued = queue_turn_while_stopping(
+            &state,
+            session_id,
+            if projection_first {
+                "projection-first"
+            } else {
+                "turn-finished-first"
+            },
+            "new turn",
+        );
+        let mut events = state.events.subscribe();
+
+        if projection_first {
+            handle_worker_event(
+                &state,
+                session_id,
+                finished_projection_for(session_id, &current.turn_id, 1),
+            );
+        } else {
+            handle_worker_event(
+                &state,
+                session_id,
+                CoreSessionWorkerEvent::TurnFinished {
+                    outcome: cancelled_test_outcome(),
+                },
+            );
+        }
+
+        assert!(
+            drain_wire_events(&mut events)
+                .iter()
+                .all(|event| !matches!(event, WireEvent::HostError { message } if message.starts_with("next_turn_intent_"))),
+            "one terminal fact must not be enough to dispatch"
+        );
+        {
+            let sessions = state.sessions.lock().unwrap();
+            let session = sessions.get(session_id).unwrap();
+            assert_eq!(session.next_turn_intents.len(), 1);
+            assert_ne!(
+                session.pending_turn_id.as_deref(),
+                Some(queued.turn_id.as_str())
+            );
+        }
+
+        if projection_first {
+            handle_worker_event(
+                &state,
+                session_id,
+                CoreSessionWorkerEvent::TurnFinished {
+                    outcome: cancelled_test_outcome(),
+                },
+            );
+        } else {
+            handle_worker_event(
+                &state,
+                session_id,
+                finished_projection_for(session_id, &current.turn_id, 1),
+            );
+        }
+
+        let dispatch_errors = drain_wire_events(&mut events)
+            .into_iter()
+            .filter(|event| {
+                matches!(event, WireEvent::HostError { message } if message.starts_with("next_turn_intent_core_send_failed:"))
+            })
+            .count();
+        assert_eq!(
+            dispatch_errors, 1,
+            "the second independent terminal fact must unlock exactly one dispatch attempt"
+        );
+        let sessions = state.sessions.lock().unwrap();
+        let session = sessions.get(session_id).unwrap();
+        assert_eq!(session.next_turn_intents.len(), 1);
+        assert_eq!(session.pending_turn_id, None);
+    }
+}
+
+#[test]
+fn full_next_turn_queue_rejects_without_consuming_attachment_or_creating_turn() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let current = start_web_turn(&state, session_id, "old turn").unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions.get_mut(session_id).unwrap().cancelling_turn_id = Some(current.turn_id);
+    }
+    for index in 0..MAX_NEXT_TURN_INTENTS {
+        queue_turn_while_stopping(
+            &state,
+            session_id,
+            &format!("queued-{index}"),
+            &format!("queued text {index}"),
+        );
+    }
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        sessions
+            .get_mut(session_id)
+            .unwrap()
+            .attachments
+            .push(WebAttachment {
+                id: "keep-me".to_string(),
+                name: "evidence.txt".to_string(),
+                path: "/tmp/evidence.txt".to_string(),
+                bytes: 8,
+            });
+    }
+    let turns_before = state.sessions.lock().unwrap()[session_id].turns.len();
+
+    let error = handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("queue-overflow"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.to_string(),
+            text: "must be rejected".to_string(),
+            attachment_ids: Some(vec!["keep-me".to_string()]),
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, "next_turn_intent_queue_full");
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = sessions.get(session_id).unwrap();
+    assert_eq!(session.next_turn_intents.len(), MAX_NEXT_TURN_INTENTS);
+    assert_eq!(session.turns.len(), turns_before);
+    assert!(session.attachments.iter().any(|file| file.id == "keep-me"));
+    assert!(session.turns.iter().all(|turn| {
+        turn.user_entries
+            .iter()
+            .all(|entry| entry.command_id.as_deref() != Some("queue-overflow"))
+    }));
+}
+
 #[test]
 fn rapid_stop_and_send_clicks_during_active_turn_do_not_break_the_session() {
     let state = routing_test_state();
@@ -9015,6 +10779,7 @@ fn rapid_stop_and_send_clicks_during_active_turn_do_not_break_the_session() {
             TEST_PORT,
             ClientCommand::TurnCancel {
                 session_id: session_id.clone(),
+                target_command_id: None,
             },
         )
         .unwrap()
@@ -9169,6 +10934,7 @@ fn background_exit_event_is_appended_to_its_original_turn() {
             turn_id: "turn_newer".to_string(),
             state: "working".to_string(),
             created_at_ms: now_ms(),
+            interrupted_at_ms: None,
             user_entries: Vec::new(),
             events: Vec::new(),
             sub_answers: Vec::new(),
@@ -9240,17 +11006,11 @@ fn polling_action_progress_reaches_web_event_stream_before_loop_finishes() {
     let mut wire_events = state.events.subscribe();
     submit_turn(&state, &session_id, "wait for marker".to_string()).unwrap();
 
-    let marker_writer = marker.clone();
-    let writer = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(500));
-        std::fs::write(marker_writer, b"ready").unwrap();
-    });
-
     let deadline = Instant::now() + Duration::from_secs(2);
-    let mut saw_thought_before_finish = false;
-    let mut saw_action_start_before_finish = false;
+    let mut saw_thought_while_polling = false;
+    let mut saw_action_start_while_polling = false;
     while Instant::now() < deadline
-        && !(saw_thought_before_finish && saw_action_start_before_finish)
+        && !(saw_thought_while_polling && saw_action_start_while_polling)
     {
         for (event_session_id, context_id, worker_id, event) in drain_worker_events(&state) {
             handle_scoped_worker_event(&state, &event_session_id, &context_id, &worker_id, event);
@@ -9262,28 +11022,30 @@ fn polling_action_progress_reaches_web_event_stream_before_loop_finishes() {
                     && event["payload"]["free_talk"] == "Waiting for the polling marker."
                     && !loop_finished
                 {
-                    saw_thought_before_finish = true;
+                    saw_thought_while_polling = true;
                 }
                 if event["topic"]["name"] == CORE_TOPIC_ACTION
                     && event["payload"]["event"] == "start"
                     && event["payload"]["kind"]["mode"] == "poll"
                     && !loop_finished
                 {
-                    saw_action_start_before_finish = true;
+                    saw_action_start_while_polling = true;
                 }
             }
         }
         thread::sleep(Duration::from_millis(5));
     }
-    writer.join().unwrap();
     assert!(
-        saw_thought_before_finish,
-        "free-talk should reach Web before polling completes"
+        saw_thought_while_polling,
+        "free-talk should reach Web while the polling action is still blocked"
     );
     assert!(
-        saw_action_start_before_finish,
-        "poll action start should reach Web before polling completes"
+        saw_action_start_while_polling,
+        "poll action start should reach Web while polling is still blocked"
     );
+    // Release the polling action only after both progress events were observed.
+    // This makes the ordering deterministic instead of racing a fixed-delay writer.
+    std::fs::write(&marker, b"ready").unwrap();
 }
 
 #[test]
@@ -10222,6 +11984,85 @@ fn real_worker_self_tool_path_call_is_read_only_for_web_session_cwd() {
 }
 
 #[tokio::test]
+async fn targeted_cancel_finishes_a_turn_waiting_for_work_instruction_permission() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "CANCEL_PENDING_GUIDE");
+    let current_dir = {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.work_instruction_mode = WorkInstructionLoadMode::Ask;
+        PathBuf::from(&session.current_dir)
+    };
+    std::fs::write(
+        current_dir.join("AGENTS.md"),
+        "Never reaches Core after Stop.",
+    )
+    .unwrap();
+    let mut wire_events = state.events.subscribe();
+
+    handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("submit-guide"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "wait for permission".to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+    let pending_turn_id = state.sessions.lock().unwrap()[&session_id]
+        .pending_turn_id
+        .clone()
+        .unwrap();
+
+    assert!(handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnCancel {
+            session_id: session_id.clone(),
+            target_command_id: Some("submit-guide".to_string()),
+        },
+    )
+    .unwrap()
+    .is_none());
+
+    let published = drain_wire_events(&mut wire_events);
+    let finished = published.iter().find_map(|event| match event {
+        WireEvent::TurnFinished {
+            session_id: event_session_id,
+            turn_id,
+            outcome,
+        } if event_session_id == &session_id => Some((turn_id, outcome)),
+        _ => None,
+    });
+    let (turn_id, outcome) = finished.expect("Host-only pending cancel must publish TurnFinished");
+    assert_eq!(turn_id.as_deref(), Some(pending_turn_id.as_str()));
+    assert_eq!(outcome["completion"]["stop_reason"], "CancelledByUser");
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(session.pending_turn_id, None);
+    assert_eq!(session.active_turn_id, None);
+    assert_eq!(session.state, "ready");
+    assert!(session.pending_work_instruction_turn.is_none());
+    let turn = session
+        .turns
+        .iter()
+        .find(|turn| turn.turn_id == pending_turn_id)
+        .unwrap();
+    assert_eq!(turn.state, "finished");
+    assert_eq!(
+        turn.completion.as_ref().unwrap()["stop_reason"],
+        "CancelledByUser"
+    );
+}
+
+#[tokio::test]
 async fn ask_mode_queues_the_first_turn_then_loads_work_instructions_after_matching_reply() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "WORK_GUIDE_DONE");
@@ -10800,6 +12641,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
             stream: false,
             api_key: format!("secret-{index:05}"),
             http_headers: Default::default(),
+            request_fields: Default::default(),
         }
     }
 
@@ -10834,7 +12676,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                 assert_eq!(
                     model_endpoint_secrets(&state, &format!("endpoint-{:05}", count - 1))
                         .unwrap()
-                        .0,
+                        .api_key,
                     format!("secret-{:05}", count - 1)
                 );
                 started.elapsed()
@@ -10859,6 +12701,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                     ("Authorization".to_string(), "****".to_string()),
                     ("X-Tenant".to_string(), "****".to_string()),
                 ]),
+                request_fields: Default::default(),
             },
         )
         .unwrap();
@@ -10910,6 +12753,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                         stream: false,
                         api_key: None,
                         http_headers: Default::default(),
+                        request_fields: Default::default(),
                     },
                 )
                 .unwrap();
@@ -10988,6 +12832,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         stream: false,
         api_key: None,
         http_headers: Default::default(),
+        request_fields: Default::default(),
     };
     assert_eq!(
         normalize_model_endpoint_input(None, invalid_input).unwrap_err(),
@@ -11006,6 +12851,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         stream: false,
         api_key: None,
         http_headers: Default::default(),
+        request_fields: Default::default(),
     };
     assert_eq!(
         normalize_model_endpoint_input(None, invalid_output).unwrap_err(),
@@ -11027,6 +12873,7 @@ fn model_endpoint_stream_requires_openai_compatible_protocol() {
         stream: true,
         api_key: None,
         http_headers: Default::default(),
+        request_fields: Default::default(),
     };
     assert_eq!(
         normalize_model_endpoint_input(None, input).unwrap_err(),
@@ -11060,6 +12907,13 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                     ("X-Tenant".to_string(), "tenant\"one\\东京".to_string()),
                     ("Authorization".to_string(), "Basic special==".to_string()),
                 ]),
+                request_fields: BTreeMap::from([
+                    ("service_tier".to_string(), json!("fast")),
+                    (
+                        "vendor_options".to_string(),
+                        json!({"priority": 2, "enabled": true}),
+                    ),
+                ]),
             },
         },
     )
@@ -11071,8 +12925,13 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     assert!(!serialized.contains("secret-endpoint-key"));
     assert!(!serialized.contains("tenant\"one"));
     assert!(serialized.contains("\"X-Tenant\":\"****\""));
+    assert!(serialized.contains("\"service_tier\":\"****\""));
+    assert!(serialized.contains("\"vendor_options\":\"****\""));
+    assert!(!serialized.contains("priority"));
     assert_eq!(
-        model_endpoint_secrets(&state, "endpoint-one").unwrap().0,
+        model_endpoint_secrets(&state, "endpoint-one")
+            .unwrap()
+            .api_key,
         "secret-endpoint-key"
     );
     let applied = apply_model_endpoint(&state, &session_id, "endpoint-one").unwrap();
@@ -11103,6 +12962,18 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
             session.runtime.env.get("TIMEM_STREAM").map(String::as_str),
             Some("false")
         );
+        assert_eq!(
+            session
+                .runtime
+                .settings
+                .config
+                .request_fields
+                .get("service_tier"),
+            Some(&json!("fast"))
+        );
+        let request_fields: Value =
+            serde_json::from_str(session.runtime.env.get("TIMEM_REQUEST_FIELDS").unwrap()).unwrap();
+        assert_eq!(request_fields["vendor_options"]["priority"], 2);
     }
     let reveal = execute_browser_command(
         &state,
@@ -11124,8 +12995,10 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
             ref endpoint_id,
             ref api_key,
             ref http_headers,
+            ref request_fields,
         }) if endpoint_id == "endpoint-one" && api_key == "secret-endpoint-key"
             && http_headers.get("X-Tenant").map(String::as_str) == Some("tenant\"one\\东京")
+            && request_fields.get("service_tier") == Some(&json!("fast"))
     ));
 
     let mut endpoint_events = state.events.subscribe();
@@ -11145,6 +13018,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 stream: true,
                 api_key: None,
                 http_headers: Default::default(),
+                request_fields: Default::default(),
             },
         },
     )
@@ -11190,12 +13064,15 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 stream: false,
                 api_key: None,
                 http_headers: Default::default(),
+                request_fields: Default::default(),
             },
         },
     )
     .unwrap();
     assert_eq!(
-        model_endpoint_secrets(&state, "endpoint-one").unwrap().0,
+        model_endpoint_secrets(&state, "endpoint-one")
+            .unwrap()
+            .api_key,
         "secret-endpoint-key"
     );
     let memory_dir = state.mem.lock().unwrap().layout.memory_dir();

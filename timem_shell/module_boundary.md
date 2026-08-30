@@ -1,15 +1,27 @@
 # timem_shell module boundary
 
-`timem_shell` is the terminal host for Timem. It owns CLI parsing, environment
-collection, terminal input, menus, rendering, and shell-only convenience
-commands. It delegates reusable runtime behavior and model transport
-to `agent_core`.
+`timem_shell` is Timem's terminal Host Adapter and UI shell. It owns CLI
+parsing, environment collection, terminal input, menus, rendering, and
+shell-only convenience commands. It consumes the same UI-neutral Core Turn
+semantics intended for Web, iOS, desktop, and future shells, and delegates all
+reusable lifecycle/runtime behavior and model transport to `agent_core`.
 
 Before changing this module, also read the repository-level `AGENTS.md`.
+Also read `docs/turn-state-projection-architecture.md` for the shared Core, Host Adapter, Host Projection Adapter, and UI-shell lifecycle boundary.
 
 ## Belongs here
 
 - Terminal UI rendering, ANSI styling, prompt lines, status panels, and menus.
+- Direct consumption of the authoritative Core Turn projection for the current
+  synchronous Session. Shell may render Active, stopping, waiting activity, and
+  immutable outcomes as terminal text, but must not infer lifecycle from the
+  last topic, worker counts, local Ctrl+C state, or whether final-answer text has
+  already painted.
+- A thin synchronous Host Adapter around Core functions, structured requests,
+  projection changes, and topic events. Shell does not need Web-style revision,
+  snapshot, outbox, or reconnect machinery merely to satisfy the shared
+  contract; if it later becomes reconnectable or multi-client, that delivery
+  adapter remains separate from terminal presentation.
 - Final-answer Markdown rendering behind `final_answer_renderer`, with a
   replaceable renderer interface and a community renderer backend by default.
 - Reedline/input handling, paste recovery, Ctrl+C/Esc behavior, and TTY quirks.
@@ -161,16 +173,25 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   assistant blocks. The per-session pending component buffer and
   `build_next_prompt()` belong to `agent_core`.
 - Long-lived runtime state that another UI would need to reproduce.
+- A terminal-specific Turn lifecycle state machine, terminal-owned `TurnId` or
+  epoch, or rules that revive/finish a Turn from display events. Those semantics
+  belong to Core and must remain identical for every UI shell.
+- A dependency on `timem_web` or its Pod just to consume Core lifecycle truth.
+  The Shell may use Core directly; Pod is one asynchronous Host Projection
+  Adapter implementation, not a mandatory layer in front of Core.
 - User-facing stopped-turn copy inside the reusable turn loop. A stopped turn
   should be represented structurally so non-terminal hosts can render it in
   their own language and UI style.
 
 ## Interface rule
 
-Shell code may choose how to render and interact, but it should ask core for
-structured data and call core functions for reusable behavior. If a feature
-would also be needed by a future web UI or another host, put the data model and
-business logic in `agent_core`, then render it here.
+Shell code may choose how to render and interact, but it asks Core for
+structured data, authoritative Turn projection, and reusable operations. If a
+feature would also be needed by Web, iOS, desktop, or another host, put its
+semantic data model and business logic in `agent_core`, then implement only the
+terminal adapter and presentation here. The portability test is practical: a
+new UI shell must not need to copy Shell lifecycle branches to behave
+correctly.
 
 Threading rule: the terminal host may keep using the synchronous
 `run_session_turn` path for its single active session. If shell or a future host

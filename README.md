@@ -233,6 +233,7 @@ for the files to inspect.
 - [Feature and test management](docs/feature-test-management.md)
 - [Release management](docs/release-management.md)
 - [Release smoke checklist](docs/manual-release-smoke.md)
+- [TimemAi 1.3.0 release notes](docs/release-notes-v1.3.0.md)
 - [TimemAi 1.2.0 release notes](docs/release-notes-v1.2.0.md)
 - [TimemAi 1.1.3 release notes](docs/release-notes-v1.1.3.md)
 - [TimemAi 1.1.2 release notes](docs/release-notes-v1.1.2.md)

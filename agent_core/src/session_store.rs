@@ -1,3 +1,4 @@
+use crate::atomic_write_file;
 use crate::MemGuard;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -119,6 +120,21 @@ pub enum ChatHistoryEventKind {
     Attachment,
 }
 
+fn temporary_event_time(record: &ChatHistoryRecord) -> Option<i64> {
+    match record {
+        ChatHistoryRecord::Event {
+            created_at_ms,
+            kind:
+                ChatHistoryEventKind::Action
+                | ChatHistoryEventKind::ActionResult
+                | ChatHistoryEventKind::ContextCompact
+                | ChatHistoryEventKind::Repair,
+            ..
+        } => Some(*created_at_ms),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChatHistoryPage {
     pub records: Vec<ChatHistoryRecord>,
@@ -162,6 +178,7 @@ impl SessionResumeNotice {
 pub struct SessionStore {
     root: PathBuf,
     history_indexes: Arc<Mutex<BTreeMap<PathBuf, HistoryIndex>>>,
+    temporary_event_summaries: Arc<Mutex<BTreeMap<PathBuf, TemporaryEventSummary>>>,
     index_lock: Arc<Mutex<()>>,
     guard: MemGuard,
 }
@@ -180,6 +197,12 @@ struct HistoryIndexEntry {
     turn_id: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+struct TemporaryEventSummary {
+    file_len: u64,
+    min_created_at_ms: Option<i64>,
+}
+
 impl SessionStore {
     pub fn new(root: impl AsRef<Path>) -> Self {
         let root = root.as_ref().to_path_buf();
@@ -187,6 +210,7 @@ impl SessionStore {
             guard: MemGuard::for_memory_domain(&root, "session-index"),
             root,
             history_indexes: Arc::new(Mutex::new(BTreeMap::new())),
+            temporary_event_summaries: Arc::new(Mutex::new(BTreeMap::new())),
             index_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -672,6 +696,10 @@ impl SessionStore {
         record: &ChatHistoryRecord,
     ) -> Result<(), String> {
         let path = self.history_path_for_session(session_id);
+        let summary_path = temporary_event_summary_path(&path);
+        let mut bytes = serde_json::to_vec(record)
+            .map_err(|_| "chat_history_record_serialize_failed".to_string())?;
+        bytes.push(b'\n');
         MemGuard::for_memory_domain(
             &self.root,
             format!(
@@ -683,6 +711,9 @@ impl SessionStore {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(|_| "chat_history_dir_create_failed")?;
             }
+            let before_len = fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
             let mut options = OpenOptions::new();
             options.create(true).append(true);
             #[cfg(unix)]
@@ -693,14 +724,74 @@ impl SessionStore {
             let mut file = options
                 .open(&path)
                 .map_err(|_| "chat_history_open_failed")?;
-            let line = serde_json::to_string(record)
-                .map_err(|_| "chat_history_record_serialize_failed")?;
-            writeln!(file, "{line}").map_err(|_| "chat_history_write_failed".to_string())
-        })??;
-        self.history_indexes
-            .lock()
-            .map_err(|_| "chat_history_index_poisoned")?
-            .remove(&path);
+            file.write_all(&bytes)
+                .map_err(|_| "chat_history_write_failed".to_string())?;
+            let metadata = file
+                .metadata()
+                .map_err(|_| "chat_history_open_failed".to_string())?;
+            let file_len = metadata.len();
+            let modified_at_ms = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map(|value| value.as_millis());
+            let mut indexes = self
+                .history_indexes
+                .lock()
+                .map_err(|_| "chat_history_index_poisoned".to_string())?;
+            if let Some(index) = indexes
+                .get_mut(&path)
+                .filter(|index| index.file_len == before_len)
+            {
+                index.entries.push(HistoryIndexEntry {
+                    byte_offset: before_len,
+                    byte_len: bytes.len() as u64,
+                    turn_id: record.turn_id().to_string(),
+                });
+                index.file_len = file_len;
+                index.modified_at_ms = modified_at_ms;
+            } else {
+                indexes.remove(&path);
+            }
+            drop(indexes);
+
+            let temporary_time = temporary_event_time(record);
+            let mut summaries = self
+                .temporary_event_summaries
+                .lock()
+                .map_err(|_| "chat_history_summary_poisoned".to_string())?;
+            let existing = summaries
+                .get(&path)
+                .copied()
+                .or_else(|| read_temporary_event_summary(&summary_path));
+            let summary =
+                if let Some(mut summary) = existing.filter(|value| value.file_len == before_len) {
+                    summary.file_len = file_len;
+                    if let Some(created_at_ms) = temporary_time {
+                        summary.min_created_at_ms = Some(
+                            summary
+                                .min_created_at_ms
+                                .map_or(created_at_ms, |current| current.min(created_at_ms)),
+                        );
+                    }
+                    summary
+                } else if before_len == 0 {
+                    TemporaryEventSummary {
+                        file_len,
+                        min_created_at_ms: temporary_time,
+                    }
+                } else {
+                    // Unknown pre-existing history is repaired by the low-frequency
+                    // retention pass; do not scan it on the append path.
+                    summaries.remove(&path);
+                    let _ = fs::remove_file(&summary_path);
+                    return Ok::<(), String>(());
+                };
+            write_temporary_event_summary(&summary_path, summary)?;
+            summaries.insert(path.clone(), summary);
+            Ok(())
+        })
+        .map_err(|error| error.to_string())??;
         Ok(())
     }
 
@@ -795,6 +886,11 @@ impl SessionStore {
             .lock()
             .map_err(|_| "chat_history_index_poisoned")?
             .remove(&path);
+        self.temporary_event_summaries
+            .lock()
+            .map_err(|_| "chat_history_summary_poisoned")?
+            .remove(&path);
+        let _ = fs::remove_file(temporary_event_summary_path(&path));
         Ok(deleted)
     }
 
@@ -808,7 +904,8 @@ impl SessionStore {
     ) -> Result<usize, String> {
         validate_session_id(session_id)?;
         let path = self.history_path_for_session(session_id);
-        let removed = MemGuard::for_memory_domain(
+        let summary_path = temporary_event_summary_path(&path);
+        MemGuard::for_memory_domain(
             &self.root,
             format!(
                 "session-data-{}",
@@ -816,7 +913,38 @@ impl SessionStore {
             ),
         )
         .with_write(|| {
+            let file_len = fs::metadata(&path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let cached_summary = self
+                .temporary_event_summaries
+                .lock()
+                .map_err(|_| "chat_history_summary_poisoned".to_string())?
+                .get(&path)
+                .copied();
+            let summary = cached_summary.or_else(|| read_temporary_event_summary(&summary_path));
+            if let Some(summary) = summary.filter(|summary| {
+                summary.file_len == file_len
+                    && summary
+                        .min_created_at_ms
+                        .is_none_or(|created_at_ms| created_at_ms >= cutoff_ms)
+            }) {
+                self.temporary_event_summaries
+                    .lock()
+                    .map_err(|_| "chat_history_summary_poisoned".to_string())?
+                    .insert(path.clone(), summary);
+                return Ok(0);
+            }
             if !path.exists() {
+                let summary = TemporaryEventSummary {
+                    file_len: 0,
+                    min_created_at_ms: None,
+                };
+                write_temporary_event_summary(&summary_path, summary)?;
+                self.temporary_event_summaries
+                    .lock()
+                    .map_err(|_| "chat_history_summary_poisoned".to_string())?
+                    .insert(path.clone(), summary);
                 return Ok(0);
             }
             let parent = path
@@ -841,28 +969,32 @@ impl SessionStore {
             let mut target = options
                 .open(&temporary)
                 .map_err(|_| "chat_history_open_failed")?;
-            let result: Result<usize, String> = (|| {
+            let result: Result<(usize, Option<i64>, u64), String> = (|| {
                 let mut removed = 0usize;
+                let mut min_created_at_ms = None;
                 for line in BufReader::new(source).lines() {
                     let line = line.map_err(|_| "chat_history_read_failed".to_string())?;
-                    if parse_chat_history_record_line(&line).is_some_and(|record| {
-                        matches!(
-                            record,
-                            ChatHistoryRecord::Event {
-                                created_at_ms,
-                                kind: ChatHistoryEventKind::Action
-                                    | ChatHistoryEventKind::ActionResult
-                                    | ChatHistoryEventKind::ContextCompact
-                                    | ChatHistoryEventKind::Repair,
-                                ..
-                            } if created_at_ms < cutoff_ms
-                        )
-                    }) {
-                        removed = removed.saturating_add(1);
-                        continue;
+                    if let Some(created_at_ms) = parse_chat_history_record_line(&line)
+                        .as_ref()
+                        .and_then(temporary_event_time)
+                    {
+                        if created_at_ms < cutoff_ms {
+                            removed = removed.saturating_add(1);
+                            continue;
+                        }
+                        min_created_at_ms = Some(
+                            min_created_at_ms
+                                .map_or(created_at_ms, |current: i64| current.min(created_at_ms)),
+                        );
                     }
                     writeln!(target, "{line}")
                         .map_err(|_| "chat_history_write_failed".to_string())?;
+                }
+                if removed == 0 {
+                    drop(target);
+                    fs::remove_file(&temporary)
+                        .map_err(|_| "chat_history_temp_remove_failed".to_string())?;
+                    return Ok((0, min_created_at_ms, file_len));
                 }
                 target
                     .sync_all()
@@ -874,17 +1006,130 @@ impl SessionStore {
                 fs::File::open(parent)
                     .and_then(|directory| directory.sync_all())
                     .map_err(|_| "chat_history_dir_sync_failed".to_string())?;
-                Ok(removed)
+                let retained_len = fs::metadata(&path)
+                    .map(|metadata| metadata.len())
+                    .map_err(|_| "chat_history_open_failed".to_string())?;
+                Ok((removed, min_created_at_ms, retained_len))
             })();
             if result.is_err() {
                 let _ = fs::remove_file(&temporary);
             }
-            result
+            let (removed, min_created_at_ms, retained_len) = result?;
+            let summary = TemporaryEventSummary {
+                file_len: retained_len,
+                min_created_at_ms,
+            };
+            write_temporary_event_summary(&summary_path, summary)?;
+            self.temporary_event_summaries
+                .lock()
+                .map_err(|_| "chat_history_summary_poisoned".to_string())?
+                .insert(path.clone(), summary);
+            if removed > 0 {
+                self.history_indexes
+                    .lock()
+                    .map_err(|_| "chat_history_index_poisoned".to_string())?
+                    .remove(&path);
+            }
+            Ok(removed)
+        })
+        .map_err(|error| error.to_string())?
+    }
+
+    /// Removes oldest complete contiguous Turn groups until at least
+    /// `bytes_to_remove` bytes have been reclaimed. Malformed lines are retained.
+    pub fn prune_oldest_history_turns(
+        &self,
+        session_id: &str,
+        bytes_to_remove: u64,
+    ) -> Result<u64, String> {
+        validate_session_id(session_id)?;
+        if bytes_to_remove == 0 {
+            return Ok(0);
+        }
+        let path = self.history_path_for_session(session_id);
+        let removed = MemGuard::for_memory_domain(
+            &self.root,
+            format!(
+                "session-data-{}",
+                sanitize_session_path_component(session_id)
+            ),
+        )
+        .with_write(|| {
+            if !path.exists() {
+                return Ok::<u64, String>(0);
+            }
+            let bytes = fs::read(&path).map_err(|_| "chat_history_read_failed".to_string())?;
+            let mut records: Vec<(Vec<u8>, Option<String>)> = Vec::new();
+            let mut start = 0usize;
+            for (index, byte) in bytes.iter().enumerate() {
+                if *byte != b'\n' {
+                    continue;
+                }
+                let raw = bytes[start..=index].to_vec();
+                let text = std::str::from_utf8(&raw).ok().map(str::trim_end);
+                let turn = text
+                    .and_then(parse_chat_history_record_line)
+                    .map(|record| record.turn_id().to_string());
+                records.push((raw, turn));
+                start = index + 1;
+            }
+            if start < bytes.len() {
+                let raw = bytes[start..].to_vec();
+                let turn = std::str::from_utf8(&raw)
+                    .ok()
+                    .and_then(parse_chat_history_record_line)
+                    .map(|record| record.turn_id().to_string());
+                records.push((raw, turn));
+            }
+            let mut groups: Vec<(usize, usize, u64, bool)> = Vec::new();
+            let mut index = 0usize;
+            while index < records.len() {
+                let group_start = index;
+                let turn = records[index].1.clone();
+                index += 1;
+                while index < records.len() && turn.is_some() && records[index].1 == turn {
+                    index += 1;
+                }
+                let size = records[group_start..index]
+                    .iter()
+                    .map(|(raw, _)| raw.len() as u64)
+                    .sum();
+                groups.push((group_start, index, size, turn.is_some()));
+            }
+            let mut reclaimed = 0u64;
+            let mut remove = BTreeSet::new();
+            for (group_start, group_end, size, removable) in groups {
+                if reclaimed >= bytes_to_remove {
+                    break;
+                }
+                if !removable {
+                    continue;
+                }
+                reclaimed = reclaimed.saturating_add(size);
+                remove.extend(group_start..group_end);
+            }
+            if remove.is_empty() {
+                return Ok(0);
+            }
+            let retained = records
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, (raw, _))| (!remove.contains(&index)).then_some(raw))
+                .collect::<Vec<_>>();
+            let retained_bytes = retained.into_iter().flatten().collect::<Vec<_>>();
+            atomic_write_file(&path, &retained_bytes)
+                .map_err(|_| "chat_history_replace_failed".to_string())?;
+            Ok(reclaimed)
         })??;
         self.history_indexes
             .lock()
             .map_err(|_| "chat_history_index_poisoned".to_string())?
             .remove(&path);
+        self.temporary_event_summaries
+            .lock()
+            .map_err(|_| "chat_history_summary_poisoned".to_string())?
+            .remove(&path);
+        let _ = fs::remove_file(temporary_event_summary_path(&path));
         Ok(removed)
     }
 
@@ -932,6 +1177,25 @@ impl SessionStore {
             .insert(path.to_path_buf(), index.clone());
         Ok(index)
     }
+}
+
+fn temporary_event_summary_path(history_path: &Path) -> PathBuf {
+    history_path.with_file_name("raw_chat_history.retention.json")
+}
+
+fn read_temporary_event_summary(path: &Path) -> Option<TemporaryEventSummary> {
+    let bytes = fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_temporary_event_summary(
+    path: &Path,
+    summary: TemporaryEventSummary,
+) -> Result<(), String> {
+    let mut bytes = serde_json::to_vec(&summary)
+        .map_err(|_| "chat_history_summary_serialize_failed".to_string())?;
+    bytes.push(b'\n');
+    atomic_write_file(path, &bytes).map_err(|_| "chat_history_summary_write_failed".to_string())
 }
 
 struct BoundedJsonlRecord {

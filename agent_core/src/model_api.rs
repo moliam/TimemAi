@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 use crate::response_protocol::KNOWN_PROMPT_BOUNDARIES;
+use crate::tool_schema_renderer::{render_tool_input_schema, ToolSchemaDialect};
 use crate::{
     plan_prompt_cache, redact_value, stable_text_fingerprint, CacheControl, CoreProfile,
     LlmResponse, ModelInteractionRequest, NativeToolCall, PromptBlock, PromptBlockRole,
@@ -67,6 +68,7 @@ pub struct ModelServiceConfig {
     pub base_url: String,
     pub api_key: String,
     pub http_headers: BTreeMap<String, String>,
+    pub request_fields: BTreeMap<String, Value>,
     pub timeout_secs: u64,
     pub max_llm_output_tokens: u32,
     pub max_llm_input_tokens: u32,
@@ -204,13 +206,17 @@ pub fn build_model_request(
     blocks: &[ModelPromptBlock],
     structured_output: StructuredOutputHint,
 ) -> Value {
-    match config.api_protocol {
+    let mut body = match config.api_protocol {
         ApiProtocol::OpenAiCompatible => {
             build_openai_compatible_request(config, blocks, structured_output)
         }
         ApiProtocol::OpenAiResponses => build_openai_responses_request(config, blocks),
         ApiProtocol::Anthropic => build_anthropic_request(config, blocks),
+    };
+    if let Some(object) = body.as_object_mut() {
+        object.extend(config.request_fields.clone());
     }
+    body
 }
 
 pub fn prepare_model_request(
@@ -220,7 +226,10 @@ pub fn prepare_model_request(
     let prompt_blocks = plan_prompt_cache(rendered_prompt);
     let structured_output = plan_structured_output(config);
     let model_blocks = model_prompt_blocks(&prompt_blocks);
-    let body = build_model_request(config, &model_blocks, structured_output);
+    let mut body = build_model_request(config, &model_blocks, structured_output);
+    if config.api_protocol == ApiProtocol::Anthropic {
+        enforce_anthropic_cache_control_limit(&mut body);
+    }
     let cache_mark_count = count_cache_control_marks(&body);
     PreparedModelRequest {
         body,
@@ -250,6 +259,9 @@ pub fn prepare_model_interaction_http_request(
     let mut request = prepare_model_http_request(config, &interaction.rendered_prompt);
     if interaction.is_native() {
         apply_native_interaction(config, &mut request.model_request.body, interaction);
+        if config.api_protocol == ApiProtocol::Anthropic {
+            enforce_anthropic_cache_control_limit(&mut request.model_request.body);
+        }
         request.model_request.cache_mark_count =
             count_cache_control_marks(&request.model_request.body);
         request.model_request.structured_output = StructuredOutputHint::None;
@@ -351,7 +363,10 @@ fn anthropic_tool_choice_label(choice: crate::NativeToolChoice) -> &'static str 
 fn openai_chat_tool_definition(tool: &ToolDefinition, include_description: bool) -> Value {
     let mut function = serde_json::Map::from_iter([
         ("name".to_string(), json!(tool.name)),
-        ("parameters".to_string(), tool.input_schema.clone()),
+        (
+            "parameters".to_string(),
+            render_tool_input_schema(&tool.input_schema, ToolSchemaDialect::OpenAi),
+        ),
     ]);
     if include_description {
         function.insert("description".to_string(), json!(tool.description));
@@ -363,7 +378,10 @@ fn openai_responses_tool_definition(tool: &ToolDefinition, include_description: 
     let mut definition = serde_json::Map::from_iter([
         ("type".to_string(), json!("function")),
         ("name".to_string(), json!(tool.name)),
-        ("parameters".to_string(), tool.input_schema.clone()),
+        (
+            "parameters".to_string(),
+            render_tool_input_schema(&tool.input_schema, ToolSchemaDialect::OpenAi),
+        ),
     ]);
     if include_description {
         definition.insert("description".to_string(), json!(tool.description));
@@ -374,7 +392,10 @@ fn openai_responses_tool_definition(tool: &ToolDefinition, include_description: 
 fn anthropic_tool_definition(tool: &ToolDefinition, include_description: bool) -> Value {
     let mut definition = serde_json::Map::from_iter([
         ("name".to_string(), json!(tool.name)),
-        ("input_schema".to_string(), tool.input_schema.clone()),
+        (
+            "input_schema".to_string(),
+            render_tool_input_schema(&tool.input_schema, ToolSchemaDialect::AnthropicBedrock),
+        ),
     ]);
     if include_description {
         definition.insert("description".to_string(), json!(tool.description));
@@ -578,6 +599,45 @@ pub fn validate_model_http_headers(headers: &BTreeMap<String, String>) -> Result
         if !valid_name || !valid_value || !normalized_names.insert(name.to_ascii_lowercase()) {
             return Err("invalid_model_http_header".to_string());
         }
+    }
+    Ok(())
+}
+
+pub fn validate_model_request_fields(fields: &BTreeMap<String, Value>) -> Result<(), String> {
+    const RESERVED: &[&str] = &[
+        "model",
+        "messages",
+        "max_tokens",
+        "max_output_tokens",
+        "instructions",
+        "input",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "stream",
+        "stream_options",
+        "response_format",
+        "enable_thinking",
+        "reasoning_effort",
+        "system",
+    ];
+    if fields.len() > 32 {
+        return Err("too_many_model_request_fields".to_string());
+    }
+    for name in fields.keys() {
+        let valid =
+            !name.trim().is_empty() && name.len() <= 128 && !name.chars().any(|ch| ch.is_control());
+        if !valid
+            || RESERVED
+                .iter()
+                .any(|reserved| name.eq_ignore_ascii_case(reserved))
+        {
+            return Err("invalid_or_reserved_model_request_field".to_string());
+        }
+    }
+    let encoded = serde_json::to_vec(fields).map_err(|error| error.to_string())?;
+    if encoded.len() > 64 * 1024 {
+        return Err("model_request_fields_too_large".to_string());
     }
     Ok(())
 }
@@ -820,6 +880,46 @@ fn count_cache_control_marks(value: &Value) -> usize {
                     .sum::<usize>()
         }
         _ => 0,
+    }
+}
+
+const ANTHROPIC_MAX_CACHE_CONTROL_BLOCKS: usize = 4;
+
+fn remove_first_cache_control(value: &mut Value) -> bool {
+    match value {
+        Value::Array(values) => values.iter_mut().any(remove_first_cache_control),
+        Value::Object(values) => {
+            if values.remove("cache_control").is_some() {
+                return true;
+            }
+            values.values_mut().any(remove_first_cache_control)
+        }
+        _ => false,
+    }
+}
+
+fn enforce_anthropic_cache_control_limit(body: &mut Value) {
+    while count_cache_control_marks(body) > ANTHROPIC_MAX_CACHE_CONTROL_BLOCKS {
+        // Preserve the stable system and static-tool prefix whenever possible.
+        // The oldest conversation breakpoint has the least incremental-cache value.
+        let removed_from_messages = body
+            .get_mut("messages")
+            .is_some_and(remove_first_cache_control);
+        if removed_from_messages {
+            continue;
+        }
+        let removed_from_system = body
+            .get_mut("system")
+            .is_some_and(remove_first_cache_control);
+        if removed_from_system {
+            continue;
+        }
+        if !body
+            .get_mut("tools")
+            .is_some_and(remove_first_cache_control)
+        {
+            break;
+        }
     }
 }
 

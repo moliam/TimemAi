@@ -30,14 +30,20 @@ socket write from an accepted command and from a durable committed effect.
 | Broadcast lag | Overrun the live channel and reconnect from the last acknowledged sequence. | Every semantic event after that sequence is replayed exactly once. |
 | Pending decision reconnect | Disconnect while Core is waiting for a request reply. | The reconnect snapshot/replay recreates the same decision and `request_id`; Core remains answerable. |
 | Duplicate decision click | Send the same reply command twice and lose the first ack. | Core resolves the request once; retry reports the recorded terminal result. |
-| Cancel then supplement | Race cancellation with a new user message on separate sockets. | The message is either committed to the active turn and consumed, or committed as the next task; it is never silently cleared. |
-| Supplement then final | Accept a supplement while the model is finalizing. | Finalization consumes it in another model round or atomically hands it back as a queued next task. |
+| Cancel then supplement | Race cancellation with a new user message on separate sockets and independent Host/Core threads under seeded jitter. | The message is PromptCut-consumed by the active turn or committed as the next task; it is never inferred from arrival order and never silently cleared. |
+| Supplement then final | Seal the model request PromptCut, then accept a supplement while that independent model thread sleeps/finalizes. | The current response cannot claim the unconsumed supplement; terminal commit atomically hands it back as a queued next task with the same command ownership. |
 | Final then immediate | Click **immediate** after final state is committed but before UI receives it. | Host classifies by its authoritative turn generation, creating a new task rather than writing to a finished turn. |
 | Process crash | Crash after command persistence and before Core handoff. | Recovery replays the durable host outbox into Core without duplicating the user entry. |
 | Multi-Session restore | Restore four Sessions concurrently, each with one task and ordered supplements. | All four Sessions enter Core in parallel as isolated atomic batches; no prompt, command ID, completion, or delivery state crosses Session scope. |
 | Persistence failure | Fail history/session persistence after validation. | No `committed` ack is emitted and no irreversible Core effect is started. |
 | Two browser tabs | Issue mutations against one session from separate sockets. | Per-session revision/order is authoritative at the host; stale mutations are rejected or serialized. |
 | Memory-space switch | Accept work on another socket while switching memory spaces. | The switch is an epoch barrier: it rejects active work, prevents new acceptance, and no old-epoch command can execute against the new space. |
+
+### Pressure profile
+
+The cases above are requirements, but the high-risk Turn boundary is certified by four concentrated stress tests rather than one shallow test per row: PromptCut/final ownership, Stop/Start storm, reconnect/FIFO ownership, and release-Chrome latency. The first three use independent execution sides, barriers for exact windows, seeded jitter, and at least 300 PR / 1,000 release / 10,000 soak iterations. The Chrome scenario repeatedly drives the real WebSocket/Host/Core path and reports command-correlated p50/p95/p99/max latency.
+
+Every run asserts exact command/attachment ownership, bounded queues, immutable outcomes, no revived working state, and resource convergence. A failure must print its seed and named stage trace. Increasing sleeps or timeouts, lowering iterations, or checking only the final ready state is not acceptable remediation.
 
 ### Durable Core handoff
 

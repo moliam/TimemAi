@@ -1,15 +1,29 @@
 # timem_web Module Boundary
 
-`timem_web` is a local-first host adapter. It binds a loopback HTTP/WebSocket
+`timem_web` is a local-first Host Adapter and the first implementation of the
+generic Host Projection Adapter pattern. It binds a loopback HTTP/WebSocket
 server by default, allows an explicit authenticated `--public` bind, owns
-browser authentication, maps browser commands to `agent_core` session worker
-handles, and forwards the canonical core topic wire payload unchanged.
+browser authentication and reliable delivery, maps browser commands to
+`agent_core` session worker handles, and projects the UI-neutral authoritative
+Core Turn contract for a reconnectable browser. Its Pod/projection layer is not
+a second agent runtime and is not required by synchronous or in-process hosts.
+
+Before changing this module, read `docs/turn-state-projection-architecture.md` for the shared Core, Host Adapter, Host Projection Adapter, and UI-shell lifecycle boundary.
 
 It may contain:
 
 - HTTP/WebSocket lifecycle, local port selection, explicit public-bind policy,
   and per-process access tokens.
 - Session worker orchestration and browser-facing snapshots.
+- A Host Projection Adapter that converts Core projection changes into
+  revisioned, self-sufficient browser snapshots/updates while preserving Core
+  Turn identity, input admission, activity, and immutable outcome exactly. The
+  adapter may add transport metadata but may not reinterpret lifecycle.
+- Web-specific reliable command delivery, bounded NextTurnIntent FIFO,
+  projection revision, event sequence, reconnect baseline, and MEM barrier.
+  These are reusable adapter patterns for future asynchronous hosts, but they
+  are not Core business state and must not be required by a direct Shell/native
+  binding.
 - Per-session runtime-profile collection and safe projection. The host copies
   global defaults when a Session is created, keeps secrets server-side, and
   gives every context/worker belonging to that Session the same profile. The
@@ -94,10 +108,11 @@ history, activity, or audit. The browser must discard the reply after closing
 the editor, changing Session/mem, reconnecting, or saving.
 
 Core topic routing is keyed by the cross-language scope tuple
-`session_id/context_id/worker_id`. Session-level commands currently target the
-primary worker. A child worker finishing must not finish the primary chat turn,
-and Session state is derived from all worker states rather than whichever event
-arrived last.
+`session_id/context_id/worker_id` plus the authoritative Core `TurnToken`.
+Session-level commands currently target the primary worker. A child worker
+finishing must not finish the primary chat turn. Session lifecycle state comes
+from the Core Turn projection; the Host must not derive it from worker counts,
+topic arrival order, or whichever worker event arrived last.
 
 Only the primary worker has a user-facing chat channel. Child-worker free talk,
 actions, and requests are rendered inside the primary Session turn. For a
@@ -114,8 +129,33 @@ every current worker so internal subtasks cannot outlive the cancelled primary
 task. A later user turn is submitted only to the primary worker; old child
 workers are not resumed or broadcast the new input.
 
+Ordinary Send during an Active Turn is always a separate next-turn intent. Only
+an explicit supplement command may target the current `TurnToken`. Core may
+accept it into pending input, but only a sealed, already-sent `PromptCut` proves
+that the current Turn consumed it. On terminal commit, the Pod atomically takes
+over every accepted-but-unconsumed task command, including its attachments, as
+a next-turn intent under the same command ownership rather than dropping it,
+asking the browser to issue a second command, or appending it after the final
+answer. Per Session, these intents form a bounded FIFO ordered by Host `enqueue_seq`
+and deduplicated by `command_id`; only its head may enter Core. The Host may
+atomically persist the FIFO for same-process delivery integrity and restart
+reconciliation, but a Host/Core process restart is a hard Stop boundary: queued
+execution ownership is discarded, unfinished queued Turns restore only as
+`interrupted`, and redelivery of an old `command_id` must not call Core. Continuing
+after restart requires a new command ID and a new Turn. Each online-dispatched
+intent receives a fresh token and starts at model round one. Decision replies,
+ToolGen guidance, and settings mutations retain their own typed commands and
+must never be silently converted as late supplements.
+
 It must not contain:
 
+- A second Turn lifecycle state machine. The Host/Pod may manage command delivery,
+  MEM barriers, projection revisions, snapshots, and timeline assembly, but only
+  Core may create/stop/finish the authoritative Active Turn.
+- Web-only lifecycle semantics that another host would have to duplicate. If a
+  rule decides whether a Turn exists, accepts input, stops, finishes, or owns an
+  outcome, it belongs in Core. This module only adapts that rule to reliable Web
+  delivery and browser-facing projection.
 - Model API wire formatting, curl calls, prompt assembly, memory semantics,
   tool argument parsing, MCP protocol execution, or other tool execution.
 - React layout, CSS, browser state reducers, or user-facing visual policy. Those

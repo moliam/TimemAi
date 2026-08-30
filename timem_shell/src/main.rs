@@ -4,7 +4,10 @@ use agent_core::session_store::{
     ChatHistoryRecord, ChatHistoryRole, SessionResumeNotice, SessionStore, StoredSession,
     StoredSessionProfile, StoredSessionState,
 };
-use agent_core::{AgentCore, ApprovalRequest, BashApprovalMode, ResponseProtocolKind, UsageStats};
+use agent_core::{
+    AgentCore, ApprovalRequest, BashApprovalMode, ResponseProtocolKind, TurnProjection,
+    TurnProjectionOutcome, TurnToken, UsageStats,
+};
 use crossterm::event::Event;
 use reedline::{
     default_emacs_keybindings, EditCommand, EditMode, Emacs, FileBackedHistory, Highlighter,
@@ -463,6 +466,8 @@ fn main() {
             interactive_approval: true,
             queued_input: ThinkingQueuedInput::new(),
             queued_questions: Vec::new(),
+            active_turn: None,
+            terminal_outcome: None,
         };
         let prompt_cwd = core.current_prompt_cwd().to_path_buf();
         let turn_work_instruction_context = resolve_work_instruction_context_for_turn(
@@ -497,13 +502,14 @@ fn main() {
             Some(&mut profiler),
         );
         let newly_queued_questions = turn_ui.take_queued_questions();
+        let terminal_outcome = turn_ui
+            .terminal_outcome()
+            .cloned()
+            .expect("Core must publish one terminal turn projection");
         drop(turn_ui);
-        let is_cancelled =
-            outcome.stop_reason == Some(timem_shell::TurnStopReason::CancelledByUser);
-        if is_cancelled {
+        if terminal_outcome == TurnProjectionOutcome::Cancelled {
             let stats = status.accumulated_stats();
             let latest = status.accumulated_latest_usage();
-            status.finish_cancelled();
             println!();
             print_final_response(
                 &render_turn_outcome_text(&outcome),
@@ -514,7 +520,6 @@ fn main() {
                 config.max_llm_input_tokens,
             );
         } else {
-            status.finish();
             print_final_response(
                 &render_turn_outcome_text(&outcome),
                 &outcome.stats,
@@ -855,6 +860,8 @@ struct CliTurnUi<'a> {
     interactive_approval: bool,
     queued_input: Option<ThinkingQueuedInput>,
     queued_questions: Vec<String>,
+    active_turn: Option<TurnToken>,
+    terminal_outcome: Option<TurnProjectionOutcome>,
 }
 
 impl CliTurnUi<'_> {
@@ -873,9 +880,51 @@ impl CliTurnUi<'_> {
         self.collect_queued_questions();
         std::mem::take(&mut self.queued_questions)
     }
+
+    fn terminal_outcome(&self) -> Option<&TurnProjectionOutcome> {
+        self.terminal_outcome.as_ref()
+    }
+
+    fn accepts_subordinate_event(&self) -> bool {
+        self.active_turn.is_some() && self.terminal_outcome.is_none()
+    }
 }
 
 impl TurnUi for CliTurnUi<'_> {
+    fn on_turn_projection(&mut self, projection: &TurnProjection) {
+        match projection {
+            TurnProjection::Active(active) => {
+                if self.terminal_outcome.is_some() {
+                    return;
+                }
+                match self.active_turn.as_ref() {
+                    Some(token) if token != &active.token => return,
+                    Some(_) => {}
+                    None => self.active_turn = Some(active.token.clone()),
+                }
+                if active.stop_requested {
+                    if let Some(status) = self.status.as_deref_mut() {
+                        status.set_intent("正在停止", CoreMemoryActivity::None);
+                    }
+                }
+            }
+            TurnProjection::Finished(finished) => {
+                if self.terminal_outcome.is_some()
+                    || self.active_turn.as_ref() != Some(&finished.token)
+                {
+                    return;
+                }
+                self.terminal_outcome = Some(finished.outcome.clone());
+                if let Some(status) = self.status.as_deref_mut() {
+                    match &finished.outcome {
+                        TurnProjectionOutcome::Cancelled => status.finish_cancelled(),
+                        _ => status.finish(),
+                    }
+                }
+            }
+        }
+    }
+
     fn is_cancel_requested(&mut self) -> bool {
         if let Some(input) = self.queued_input.as_mut() {
             let _ = input.poll();
@@ -898,6 +947,9 @@ impl TurnUi for CliTurnUi<'_> {
     }
 
     fn on_model_request(&mut self, round: u32, prompt: &str) {
+        if !self.accepts_subordinate_event() {
+            return;
+        }
         if let Some(status) = self.status.as_deref_mut() {
             status.settle_active_observations();
             status.set_model_direction(round, ModelDirection::Upstream);
@@ -907,6 +959,9 @@ impl TurnUi for CliTurnUi<'_> {
     }
 
     fn on_model_response(&mut self, round: u32, usage: &UsageStats, _content: &str) {
+        if !self.accepts_subordinate_event() {
+            return;
+        }
         if let Some(status) = self.status.as_deref_mut() {
             status.clear_transient_observation();
             status.set_usage(usage.clone());
@@ -915,6 +970,9 @@ impl TurnUi for CliTurnUi<'_> {
     }
 
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+        if !self.accepts_subordinate_event() {
+            return;
+        }
         if let Some(status) = self.status.as_deref_mut() {
             for event in events {
                 if event.topic.name == agent_core::CORE_TOPIC_SUB_ANSWER {
@@ -933,12 +991,18 @@ impl TurnUi for CliTurnUi<'_> {
     }
 
     fn on_model_error(&mut self, _error: &str) {
+        if !self.accepts_subordinate_event() {
+            return;
+        }
         if let Some(status) = self.status.as_deref_mut() {
             status.clear_transient_observation();
         }
     }
 
     fn on_model_retry(&mut self, attempt: u32, max_attempts: u32, delay: Duration, error: &str) {
+        if !self.accepts_subordinate_event() {
+            return;
+        }
         if let Some(status) = self.status.as_deref_mut() {
             status.set_network_retry(attempt, max_attempts, delay, error);
         }
@@ -953,6 +1017,9 @@ impl TurnUi for CliTurnUi<'_> {
     }
 
     fn resume_after_user_decision(&mut self) {
+        if !self.accepts_subordinate_event() {
+            return;
+        }
         if self.queued_input.is_none() {
             self.queued_input = ThinkingQueuedInput::new();
         }

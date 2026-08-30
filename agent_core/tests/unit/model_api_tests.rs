@@ -8,6 +8,7 @@ fn config(api_protocol: ApiProtocol) -> ModelServiceConfig {
         base_url: "https://example.invalid/v1".to_string(),
         api_key: "dummy".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         timeout_secs: 1,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
@@ -108,6 +109,42 @@ fn openai_compatible_request_uses_messages_and_structured_output() {
     assert_eq!(body["messages"][0]["role"], "system");
     assert_eq!(body["messages"][0]["cache_control"]["type"], "ephemeral");
     assert_eq!(body["response_format"]["type"], "json_object");
+}
+
+#[test]
+fn custom_request_fields_are_merged_as_typed_top_level_json() {
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.request_fields = BTreeMap::from([
+        ("service_tier".to_string(), json!("fast")),
+        (
+            "vendor_options".to_string(),
+            json!({"priority": 2, "enabled": true}),
+        ),
+    ]);
+    let body = build_model_request(&config, &[], StructuredOutputHint::None);
+    assert_eq!(body["service_tier"], "fast");
+    assert_eq!(body["vendor_options"]["priority"], 2);
+    assert_eq!(body["vendor_options"]["enabled"], true);
+}
+
+#[test]
+fn custom_request_fields_reject_reserved_request_keys() {
+    assert!(validate_model_request_fields(&BTreeMap::from([(
+        "model".to_string(),
+        json!("override"),
+    )]))
+    .is_err());
+    assert!(
+        validate_model_request_fields(&BTreeMap::from([("messages".to_string(), json!([]),)]))
+            .is_err()
+    );
+    assert_eq!(
+        validate_model_request_fields(&BTreeMap::from([(
+            "service_tier".to_string(),
+            json!("fast"),
+        )])),
+        Ok(())
+    );
 }
 
 #[test]
@@ -1033,6 +1070,128 @@ fn native_tool_wires_are_provider_specific_and_parallel_is_explicit() {
 }
 
 #[test]
+fn builtin_tool_schemas_render_per_protocol_without_weakening_registry_validation() {
+    let registry = crate::capability::CapabilityRegistry::builtin();
+    let original_tools = registry.native_builtin_tool_definitions();
+    let original_run_bash = original_tools
+        .iter()
+        .find(|tool| tool.name == "run_bash")
+        .expect("run_bash builtin");
+    assert!(original_run_bash.input_schema.get("oneOf").is_some());
+    assert!(original_run_bash.input_schema.get("allOf").is_some());
+
+    let request = ModelInteractionRequest {
+        rendered_prompt: "SYSTEM PROMPT\n\n---USER---\nuse tools".to_string(),
+        static_tool_count: original_tools.len(),
+        tools: original_tools.clone(),
+        native_exchanges: Vec::new(),
+        resolved_mode: ToolCallMode::Native,
+        parallel_tool_calls: true,
+        tool_choice: NativeToolChoice::Auto,
+    };
+
+    let anthropic =
+        prepare_model_interaction_http_request(&config(ApiProtocol::Anthropic), &request);
+    let anthropic_tools = anthropic.model_request.body["tools"].as_array().unwrap();
+    assert_eq!(anthropic_tools.len(), original_tools.len());
+    for tool in anthropic_tools {
+        let schema = tool["input_schema"].as_object().unwrap();
+        for unsupported in ["oneOf", "allOf", "anyOf"] {
+            assert!(
+                !schema.contains_key(unsupported),
+                "{} retained unsupported root {unsupported}",
+                tool["name"]
+            );
+        }
+        assert_eq!(schema.get("type"), Some(&json!("object")));
+        assert!(schema.get("properties").is_some());
+    }
+    let cache_marks = anthropic_tools
+        .iter()
+        .filter(|tool| tool.get("cache_control").is_some())
+        .count();
+    assert_eq!(cache_marks, 1);
+    assert_eq!(
+        anthropic_tools.last().unwrap()["cache_control"],
+        json!({"type": "ephemeral"})
+    );
+
+    // Both OpenAI wire protocols must preserve every tool schema byte-for-value,
+    // independently of the enabled assistant response protocol. Before the
+    // provider renderer refactor these fields were direct input_schema clones.
+    for api_protocol in [ApiProtocol::OpenAiCompatible, ApiProtocol::OpenAiResponses] {
+        for response_protocol in [ResponseProtocolKind::Json, ResponseProtocolKind::Xml] {
+            let mut openai_config = config(api_protocol);
+            openai_config.response_protocol = response_protocol;
+            let openai = prepare_model_interaction_http_request(&openai_config, &request);
+            let rendered_tools = openai.model_request.body["tools"].as_array().unwrap();
+            assert_eq!(rendered_tools.len(), original_tools.len());
+            for (rendered, original) in rendered_tools.iter().zip(&original_tools) {
+                let (name, parameters) = match api_protocol {
+                    ApiProtocol::OpenAiCompatible => (
+                        &rendered["function"]["name"],
+                        &rendered["function"]["parameters"],
+                    ),
+                    ApiProtocol::OpenAiResponses => (&rendered["name"], &rendered["parameters"]),
+                    ApiProtocol::Anthropic => unreachable!(),
+                };
+                assert_eq!(name, &json!(original.name));
+                assert_eq!(parameters, &original.input_schema);
+            }
+        }
+    }
+
+    // Request rendering operates on copies. Executor-facing definitions retain
+    // every original constraint after both provider adapters run.
+    assert_eq!(registry.native_builtin_tool_definitions(), original_tools);
+}
+
+#[test]
+fn anthropic_native_cache_marks_never_exceed_bedrock_limit() {
+    let mut request = native_request();
+    request.rendered_prompt = "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n".to_string();
+    for idx in 1..=5 {
+        request.rendered_prompt.push_str(&format!(
+            "[BEGIN DELTA]\ndelta_id: pd_{idx}\n\n## TIMEM_ASSISTANT\ndelta {idx}\n[END DELTA]\n"
+        ));
+    }
+
+    let prepared =
+        prepare_model_interaction_http_request(&config(ApiProtocol::Anthropic), &request);
+    let body = &prepared.model_request.body;
+
+    assert_eq!(
+        prepared.model_request.cache_mark_count,
+        ANTHROPIC_MAX_CACHE_CONTROL_BLOCKS
+    );
+    assert_eq!(
+        count_cache_control_marks(body),
+        ANTHROPIC_MAX_CACHE_CONTROL_BLOCKS
+    );
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
+
+    let marked_message_text = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["content"].as_array().unwrap())
+        .filter(|block| block.get("cache_control").is_some())
+        .filter_map(|block| block["text"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(marked_message_text.len(), 2);
+    assert!(marked_message_text
+        .iter()
+        .any(|text| text.contains("delta 4")));
+    assert!(marked_message_text
+        .iter()
+        .any(|text| text.contains("delta 5")));
+    assert!(!marked_message_text
+        .iter()
+        .any(|text| text.contains("delta 3")));
+}
+
+#[test]
 fn anthropic_native_cache_breakpoint_ends_at_static_builtin_tool_prefix() {
     let mut request = native_request();
     request.tools.push(ToolDefinition {
@@ -1178,7 +1337,7 @@ fn native_exchanges_follow_owning_delta_order_for_all_providers() {
         "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n",
         "[BEGIN DELTA delta_id: pd_1, time_ms: 1]\n\n## USER\nQ1\n",
         "[BEGIN DELTA delta_id: pd_2, time_ms: 2]\n\n## USER\nQ2\n\n",
-        "Continue the work in the user's language. Call API tools when more evidence or actions are needed; otherwise give the final user-facing answer:"
+        "Continue the work and express thought in the user's language. Call API tools when more evidence or actions are needed; otherwise give the final user-facing answer:"
     ).to_string();
     let exchange = |delta_id: &str, call_id: &str, result: &str| NativeExchange {
         delta_id: delta_id.to_string(),

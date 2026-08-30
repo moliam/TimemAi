@@ -1141,3 +1141,84 @@ fn resilient_metadata_load_quarantines_id_mismatch_without_hiding_other_sessions
         .to_string_lossy()
         .contains("session-metadata-corrupt-backup"));
 }
+
+#[test]
+fn conversation_capacity_prunes_complete_oldest_turns() {
+    let root = tmp_dir("conversation_capacity_complete_turns");
+    let store = SessionStore::new(&root);
+    for (turn_id, role, content) in [
+        ("turn_old", ChatHistoryRole::User, "old user"),
+        ("turn_old", ChatHistoryRole::Assistant, "old assistant"),
+        ("turn_new", ChatHistoryRole::User, "new user"),
+        ("turn_new", ChatHistoryRole::Assistant, "new assistant"),
+    ] {
+        store
+            .append_history_record(
+                "session_a",
+                &ChatHistoryRecord::Message {
+                    role,
+                    turn_id: turn_id.to_string(),
+                    created_at_ms: 1,
+                    kind: None,
+                    command_id: None,
+                    delivery_state: None,
+                    content: content.to_string(),
+                },
+            )
+            .unwrap();
+    }
+
+    assert!(store.prune_oldest_history_turns("session_a", 1).unwrap() > 1);
+    let retained = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
+    assert_eq!(retained.len(), 2);
+    assert!(retained.iter().all(|record| record.turn_id() == "turn_new"));
+}
+
+#[test]
+fn temporary_retention_summary_survives_store_restart_and_tracks_appends() {
+    let root = tmp_dir("temporary_retention_persisted_summary");
+    let store = SessionStore::new(&root);
+    store
+        .append_history_record("session_a", &message(1))
+        .unwrap();
+    let history = store.history_path_for_session("session_a");
+    let summary = history.with_file_name("raw_chat_history.retention.json");
+    assert!(summary.exists());
+
+    assert_eq!(
+        store
+            .prune_temporary_history_events_before("session_a", 100)
+            .unwrap(),
+        0
+    );
+    let before = fs::read(&history).unwrap();
+    let restarted = SessionStore::new(&root);
+    assert_eq!(
+        restarted
+            .prune_temporary_history_events_before("session_a", 100)
+            .unwrap(),
+        0
+    );
+    assert_eq!(fs::read(&history).unwrap(), before);
+
+    restarted
+        .append_history_record(
+            "session_a",
+            &ChatHistoryRecord::Event {
+                role: ChatHistoryRole::System,
+                turn_id: "expired".to_string(),
+                created_at_ms: 1,
+                kind: ChatHistoryEventKind::Action,
+                content: "expired".to_string(),
+                extra: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        restarted
+            .prune_temporary_history_events_before("session_a", 100)
+            .unwrap(),
+        1
+    );
+    assert!(!fs::read_to_string(history).unwrap().contains("expired"));
+}

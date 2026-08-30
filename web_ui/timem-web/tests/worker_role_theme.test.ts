@@ -16,7 +16,7 @@ function rule(selector: string): string {
 describe("worker role action theme", () => {
   it("applies the themed edit and delete action classes to group controls", () => {
     const groupHeader = source.match(
-      /<div><button type="button" className="worker-role-action worker-role-edit"[^>]*title=\{`Rename \$\{group\.name\}`\}[\s\S]*?<button type="button" className="worker-role-action worker-role-delete"[^>]*title=\{`Delete \$\{group\.name\}`\}/,
+      /<div>\s*<button[\s\S]*?className="worker-role-action worker-role-edit"[\s\S]*?title=\{`Rename \${group\.name}`\}[\s\S]*?<button[\s\S]*?className="worker-role-action worker-role-delete"[\s\S]*?title=\{`Delete \${group\.name}`\}/,
     );
 
     expect(groupHeader).not.toBeNull();

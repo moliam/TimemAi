@@ -1,8 +1,8 @@
 use super::*;
 use crate::{
     ApprovalRequest, BashApprovalMode, CapabilityRegistry, CoreActionKind, CoreProfile,
-    CoreTopicEvent, HostDecision, NoopTurnUi, OutputExpansionRequest, TurnStopDetail,
-    TurnStopReason, CORE_TOPIC_CONTEXT_COMPACT,
+    CoreTopicEvent, FinishedTurnProjection, HostDecision, NoopTurnUi, OutputExpansionRequest,
+    TurnInputAdmission, TurnStopDetail, TurnStopReason, CORE_TOPIC_CONTEXT_COMPACT,
 };
 use serde_json::Value;
 use std::collections::VecDeque;
@@ -33,6 +33,7 @@ fn test_config() -> ModelServiceConfig {
         model: "test-model".to_string(),
         api_key: "dummy".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         base_url: "http://127.0.0.1:9/v1".to_string(),
         api_protocol: crate::ApiProtocol::OpenAiCompatible,
         timeout_secs: 1,
@@ -110,8 +111,7 @@ fn prompt_field_values(prompt: &str, field: &str) -> Vec<String> {
 }
 
 fn read_audit_events(path: &Path) -> Vec<Value> {
-    let text = std::fs::read_to_string(path).unwrap();
-    let doc: Value = serde_json::from_str(&text).unwrap();
+    let doc = crate::audit::read_audit_doc(path).unwrap();
     doc["events"].as_array().unwrap().clone()
 }
 
@@ -1238,7 +1238,8 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
     assert_eq!(outcome.text, "已根据上下文预算停止回填大输出。");
     assert_eq!(model.prompts.len(), 3);
     assert!(model.prompts[1].contains("Your action's output is too large:"));
-    assert!(model.prompts[1].ends_with("Context too long, please compress first:"));
+    assert!(model.prompts[1]
+        .ends_with("Context is too long. Your tool calls must start with context_compact:"));
     assert!(model.prompts[2].contains("context compacted successfully."));
     assert!(model.prompts[1].contains("optimize your action or compact context"));
     assert!(!model.prompts[1].contains(&"0".repeat(1_000)));
@@ -2612,12 +2613,29 @@ fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently(
     let mut ui = ApproveAllUi {
         approval_requests: 0,
     };
+    let marker_a = dir.join("approved-a.ready");
+    let marker_b = dir.join("approved-b.ready");
+    let command_a = format!(
+        "touch {}; for _ in 1 2 3 4 5 6 7 8 9 10; do test -f {} && printf approved_a && exit 0; sleep 0.1; done; exit 1",
+        shell_quote(&marker_a),
+        shell_quote(&marker_b)
+    );
+    let command_b = format!(
+        "touch {}; for _ in 1 2 3 4 5 6 7 8 9 10; do test -f {} && printf approved_b && exit 0; sleep 0.1; done; exit 1",
+        shell_quote(&marker_b),
+        shell_quote(&marker_a)
+    );
+    let first_response = serde_json::json!({
+        "free_talk": "先审批两个 Bash，然后并发执行。",
+        "working_still_action": [[
+            {"run_bash": {"cmd": command_a, "timeout_ms": 3000}},
+            {"memmgr": {"type": "durable", "op": "sql", "sql": "SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1", "params": ["%project%"], "limit": 1}},
+            {"run_bash": {"cmd": command_b, "timeout_ms": 3000}}
+        ]]
+    })
+    .to_string();
     let mut model = ReplayModel::new([
-        Ok(llm(
-            r#"{"free_talk":"先审批两个 Bash，然后并发执行。","working_still_action":[[{"run_bash":{"cmd":"sleep 1; printf approved_a","timeout_ms":3000}},{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 1","params":["%project%"],"limit":1}},{"run_bash":{"cmd":"sleep 1; printf approved_b","timeout_ms":3000}}]]}"#,
-            1_000,
-            false,
-        )),
+        Ok(llm(&first_response, 1_000, false)),
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"审批后的并行动作完成。"}"#,
             1_200,
@@ -2625,7 +2643,6 @@ fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently(
         )),
     ]);
 
-    let started = std::time::Instant::now();
     let outcome = run_session_turn_with_model_client(
         &mut core,
         &mut config,
@@ -2641,14 +2658,12 @@ fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently(
         None,
         &mut model,
     );
-    let elapsed = started.elapsed();
-
     assert_eq!(outcome.text, "审批后的并行动作完成。");
     assert_eq!(ui.approval_requests, 2);
     assert!(
-            elapsed < std::time::Duration::from_millis(1800),
-            "approved parallel bash actions should run concurrently after approval; elapsed={elapsed:?}"
-        );
+        marker_a.exists() && marker_b.exists(),
+        "both approved Bash actions must start before either can complete"
+    );
     let second_parts = crate::prompt_parts_from_rendered_prompt(&model.prompts[1]);
     let results_start = second_parts
         .new_delta
@@ -3379,6 +3394,137 @@ impl TurnUi for CancelImmediately {
     fn take_cancel_request(&mut self) -> bool {
         true
     }
+}
+
+#[derive(Default)]
+struct ProjectionRecordingUi {
+    projections: Vec<TurnProjection>,
+    cancel_immediately: bool,
+}
+
+impl TurnUi for ProjectionRecordingUi {
+    fn on_turn_projection(&mut self, projection: &TurnProjection) {
+        self.projections.push(projection.clone());
+    }
+
+    fn take_cancel_request(&mut self) -> bool {
+        std::mem::take(&mut self.cancel_immediately)
+    }
+}
+
+#[test]
+fn cancelled_turn_projection_has_one_token_and_authoritative_terminal_order() {
+    let dir = tmp_dir("cancel_projection");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    let mut ui = ProjectionRecordingUi {
+        cancel_immediately: true,
+        ..ProjectionRecordingUi::default()
+    };
+
+    let outcome = run_session_turn(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "cancel me",
+            session: "projection_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+    );
+
+    assert_eq!(outcome.stop_reason, Some(TurnStopReason::CancelledByUser));
+    assert_eq!(ui.projections.len(), 4, "{:?}", ui.projections);
+    let token = match &ui.projections[0] {
+        TurnProjection::Active(active) => {
+            assert!(!active.stop_requested);
+            assert_eq!(active.input_admission, TurnInputAdmission::Open);
+            active.token.clone()
+        }
+        projection => panic!("expected active projection, got {projection:?}"),
+    };
+    match &ui.projections[1] {
+        TurnProjection::Active(active) => {
+            assert_eq!(active.token, token);
+            assert!(active.stop_requested);
+            assert_eq!(active.input_admission, TurnInputAdmission::Open);
+        }
+        projection => panic!("expected stopping projection, got {projection:?}"),
+    }
+    match &ui.projections[2] {
+        TurnProjection::Active(active) => {
+            assert_eq!(active.token, token);
+            assert!(active.stop_requested);
+            assert_eq!(active.input_admission, TurnInputAdmission::Closed);
+        }
+        projection => panic!("expected closed projection, got {projection:?}"),
+    }
+    match &ui.projections[3] {
+        TurnProjection::Finished(finished) => {
+            assert_eq!(finished.token, token);
+            assert_eq!(finished.outcome, TurnProjectionOutcome::Cancelled);
+        }
+        projection => panic!("expected finished projection, got {projection:?}"),
+    }
+    assert_eq!(token.session_id, "projection_session");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn completed_turn_projection_finishes_completed_without_stop_inference() {
+    let dir = tmp_dir("completed_projection");
+    let audit = dir.join("audit.json");
+    let mut core = AgentCore::new("STATIC", test_profile(), &dir);
+    let mut config = test_config();
+    let mut model = ReplayModel::new([Ok(llm(
+        r#"{"status":"ALL_FINISHED","final_answer":"done"}"#,
+        1_000,
+        false,
+    ))]);
+    let mut ui = ProjectionRecordingUi::default();
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "complete me",
+            session: "projection_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.stop_reason, None);
+    let finished = ui.projections.last().expect("terminal projection");
+    assert!(matches!(
+        finished,
+        TurnProjection::Finished(FinishedTurnProjection {
+            outcome: TurnProjectionOutcome::Completed,
+            ..
+        })
+    ));
+    assert!(ui.projections.iter().all(|projection| match projection {
+        TurnProjection::Active(active) => !active.stop_requested,
+        TurnProjection::Finished(_) => true,
+    }));
+    assert_eq!(
+        ui.projections
+            .iter()
+            .filter(|projection| matches!(projection, TurnProjection::Finished(_)))
+            .count(),
+        1
+    );
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
