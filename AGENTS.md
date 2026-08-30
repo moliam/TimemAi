@@ -51,29 +51,39 @@ Read `docs/semantic-project-layout.md` for the physical layout and migration
 scope. Run `python3 scripts/architecture_guard.py` after architecture or
 workspace changes.
 
-## 3. Current physical boundaries
+## 3. Physical boundaries and migration
 
-These locations are enforced for the current migration stage:
+The final physical ownership is:
 
-- `interfaces/shell`: terminal Interface. Preserve package name `timem_shell`
-  and binary/user command compatibility.
-- `interfaces/web`: React/assistant-ui browser Interface.
-- `timem_web`: current Web host and HTTP/WebSocket Bridge.
-- `agent_core`: current reusable Agent/application/UI-contract Core.
-- `core/platform`: shared OS policy crate, exposed as `timem_platform`.
-  - `api.rs`: public UI-neutral platform facade.
-  - `shared.rs`: Unix primitives shared by macOS and Linux.
-  - `macos.rs` / `linux.rs`: target-specific policy and implementation.
-- `host_projection`: asynchronous projection/delivery support; it is not a
-  required layer for a direct in-process Interface.
+- `core/{agent,application,ui_contract/{commands,events,projections},platform/{api,shared,macos,windows,linux}}`
+- `bridges/{in_process,http_websocket,ipc}`
+- `interfaces/{shell,web,macos,windows,linux}`
+- `resources`, `tests`, `docs`, and `scripts` for shared non-runtime assets and verification.
 
-Do not restore legacy roots `timem_shell`, `web_ui`, or `agent_core/src/os`.
-Windows is intentionally absent until it has an explicit design, implementation,
-CI target, and behavior matrix; do not add an empty placeholder.
+A Bridge is a logical communication boundary, not necessarily a process boundary. Shell and native
+Interfaces may use direct calls, callbacks, or channels through `bridges/in_process`; Web uses
+HTTP/WebSocket; a separate desktop companion uses IPC. Do not force serialization or network I/O
+onto an in-process path.
 
-Module-local rules in `*/module_boundary.md` remain mandatory. If a local rule
-conflicts with this file, this repository-level contract wins and both documents
-must be reconciled in the same change.
+The migration is incremental. `agent_core`, `host_projection`, and `timem_web` are the only current
+transitional runtime roots. Their exact destination, removal conditions, dependency graph, staged
+sequence, and non-regression gates are defined in `docs/semantic-project-layout.md`. Do not create a
+new transitional root or preserve duplicate ownership without updating that executable migration
+contract in the same reviewed change.
+
+`interfaces/shell`, `interfaces/web`, and `core/platform` are current semantic roots. Preserve the
+`timem_shell`, `timem_web`, `agent_core`, and `host_projection` package compatibility needed during
+the migration, as well as the `timem-native-rs` and `timem-web` binary/user command surfaces.
+Temporary re-exports are allowed only when they avoid dependency cycles and have an explicit
+removal stage.
+
+Do not restore legacy roots `timem_shell`, `web_ui`, or `agent_core/src/os`. Do not create empty
+target directories. Windows and native desktop paths are target architecture, not current support
+claims; add them only with an explicit behavior matrix and executable supported/unsupported
+contract.
+
+Module-local rules in `*/module_boundary.md` remain mandatory. If a local rule conflicts with this
+file, this repository-level contract wins and both documents must be reconciled in the same change.
 
 ## 4. Authoritative state and protocol rules
 

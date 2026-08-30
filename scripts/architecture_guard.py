@@ -9,6 +9,7 @@ from pathlib import Path
 
 REQUIRED = (
     "Cargo.toml",
+    "docs/semantic-project-layout.md",
     "agent_core/Cargo.toml",
     "agent_core/src/lib.rs",
     "core/platform/Cargo.toml",
@@ -26,6 +27,34 @@ REQUIRED = (
 )
 FORBIDDEN_DIRS = ("timem_shell", "web_ui", "agent_core/src/os", "core/platform/src/windows")
 PROCESS_PRIMITIVES = ("libc::getpgid", "libc::getpgrp", "libc::waitpid", ".process_group(0)")
+TARGET_DIRECTORIES = (
+    "core/agent",
+    "core/application",
+    "core/ui_contract",
+    "bridges/in_process",
+    "bridges/http_websocket",
+    "bridges/ipc",
+    "interfaces/macos",
+    "interfaces/windows",
+    "interfaces/linux",
+)
+ARCHITECTURE_CONTRACT_MARKERS = (
+    "## Target physical layout",
+    "core/",
+    "  agent/",
+    "  application/",
+    "  ui_contract/",
+    "bridges/",
+    "  in_process/",
+    "  http_websocket/",
+    "  ipc/",
+    "interfaces/",
+    "  shell/",
+    "  web/",
+    "`agent_core/` | `core/agent/`, `core/application/`, `core/ui_contract/`",
+    "`host_projection/` | `bridges/http_websocket/`",
+    "`timem_web/` | `bridges/http_websocket/`",
+)
 
 
 def text(root: Path, relative: str) -> str:
@@ -41,6 +70,16 @@ def violations(root: Path) -> list[str]:
     for relative in FORBIDDEN_DIRS:
         if (root / relative).exists():
             errors.append(f"legacy or unsupported architecture path exists: {relative}")
+
+    architecture_contract = text(root, "docs/semantic-project-layout.md")
+    for marker in ARCHITECTURE_CONTRACT_MARKERS:
+        if marker not in architecture_contract:
+            errors.append(f"architecture contract is missing target or migration marker: {marker}")
+
+    for relative in TARGET_DIRECTORIES:
+        directory = root / relative
+        if directory.is_dir() and not any(path.is_file() for path in directory.rglob("*")):
+            errors.append(f"target architecture directory must not be an empty placeholder: {relative}")
 
     workspace = text(root, "Cargo.toml")
     for member in ('"core/platform"', '"interfaces/shell"'):
@@ -97,6 +136,7 @@ def violations(root: Path) -> list[str]:
 def write_fixture(root: Path) -> None:
     files = {
         "Cargo.toml": '[workspace]\nmembers = ["agent_core", "core/platform", "interfaces/shell"]\n',
+        "docs/semantic-project-layout.md": "\n".join(ARCHITECTURE_CONTRACT_MARKERS),
         "agent_core/Cargo.toml": '[dependencies]\ntimem_platform = { path = "../core/platform" }\n',
         "agent_core/src/lib.rs": "pub use timem_platform as os;\n",
         "core/platform/Cargo.toml": '[package]\nname = "timem_platform"\n',
@@ -123,6 +163,8 @@ def self_test() -> None:
         ("legacy directory", lambda root: (root / "timem_shell").mkdir()),
         ("reverse dependency", lambda root: (root / "core/platform/Cargo.toml").write_text('[package]\nname = "timem_platform"\n[dependencies]\ntimem_shell = { path = "../../interfaces/shell" }\n')),
         ("escaped process primitive", lambda root: (root / "agent_core/src/leak.rs").write_text("fn leak() { libc::waitpid(0, std::ptr::null_mut(), 0); }\n")),
+        ("empty target placeholder", lambda root: (root / "bridges/ipc").mkdir(parents=True)),
+        ("target contract drift", lambda root: (root / "docs/semantic-project-layout.md").write_text("incomplete target\n")),
     )
     for label, mutate in cases:
         with tempfile.TemporaryDirectory(prefix="timem-architecture-guard-") as directory:
