@@ -2,59 +2,144 @@
 
 ## Runtime model
 
-Timem's architectural direction is:
+Timem uses one architectural direction:
 
 ```text
 Interface ↔ Bridge ↔ Core
 ```
 
 - **Interface** owns presentation and human interaction.
-- **Bridge** owns communication only: in-process calls, HTTP/WebSocket, or IPC.
-- **Core** owns reusable agent/application semantics, UI contracts, and platform policy.
+- **Bridge** owns communication: direct calls/callbacks/channels, HTTP/WebSocket, or IPC.
+- **Core** owns reusable agent semantics, application orchestration, UI-neutral contracts, and
+  platform policy.
 
-A Bridge may serialize, route, reconnect, sequence, or transport semantic data. It must not
-invent Agent, Session, Turn, cancellation, or approval behavior. An in-process host may use a
-zero-cost direct-call bridge; the architecture does not require network machinery where none is
-needed.
+A Bridge is a logical communication boundary, not a process boundary. Shell and native clients may
+use an in-process bridge without serialization or networking. Browser clients use HTTP/WebSocket.
+A separately running desktop companion uses IPC. No Bridge may invent Agent, Session, Turn,
+cancellation, approval, retry, or lifecycle semantics.
 
-## First-stage physical layout
+## Target physical layout
 
 ```text
-interfaces/
-  shell/                 # Rust terminal Interface; package remains timem_shell
-  web/                   # React/assistant-ui browser Interface
 core/
-  platform/              # OS policy crate: timem_platform
-    src/api.rs
-    src/shared.rs        # Unix primitives shared by macOS and Linux
-    src/macos.rs
-    src/linux.rs
-agent_core/              # Existing Core agent/application/UI-contract implementation
-host_projection/         # Existing asynchronous projection/transport support
-timem_web/               # Existing Web host and HTTP/WebSocket Bridge
+  agent/                    # model loop, capabilities, prompt/protocol and agent execution
+  application/              # Session/Context/Worker orchestration and application use-cases
+  ui_contract/
+    commands/               # UI-neutral requests entering the application
+    events/                 # semantic events emitted by Core
+    projections/            # authoritative UI-readable state
+  platform/
+    api/                     # target-neutral platform contract
+    shared/                  # implementation shared by multiple targets
+    macos/
+    windows/
+    linux/
+bridges/
+  in_process/               # direct functions, callbacks and channels
+  http_websocket/           # browser host, HTTP/WebSocket and reconnect delivery
+  ipc/                      # desktop companion process transport
+interfaces/
+  shell/
+  web/
+  macos/
+  windows/
+  linux/
+resources/
+tests/
+docs/
+scripts/
 ```
 
-This stage deliberately moves only axes with clear ownership. `agent_core`, `host_projection`,
-and `timem_web` are not mechanically renamed or split in the same change; doing so would mix
-semantic decomposition with transport and state-authority changes.
+The tree describes ownership, not a requirement that every leaf be a separate crate. A directory is
+created only with a real implementation, contract, test, or explicitly truthful unsupported-target
+behavior. Empty placeholders and directory-only claims of platform support are forbidden.
 
-Windows is intentionally absent from this stage. Adding it requires an explicit platform design,
-CI target, and behavior matrix rather than an empty placeholder directory.
+## Dependency direction
 
-## Dependency rules
+The intended compile-time direction is:
 
-1. Interfaces depend inward on Core contracts; Core never depends on an Interface.
-2. Bridges depend on Core contracts and expose them to Interfaces without redefining semantics.
-3. `agent_core` consumes `timem_platform`; platform code never depends on agent or UI crates.
-4. OS selection is centralized in `core/platform`; business modules do not duplicate process-group
-   primitives or macOS/Linux policy.
-5. Package and binary names remain stable during physical moves unless a separate compatibility
-   decision explicitly changes them.
-6. Tests move with the owned behavior and stay outside production `src` trees.
+```text
+core/platform ───────────────┐
+core/ui_contract ────────────┼──> core/agent ──> core/application
+                             │                         ▲
+                             └─────────────────────────┘
 
-## Enforced guard
+core/{application,ui_contract} <── bridges/* <── interfaces/*
+```
 
-`scripts/architecture_guard.py` checks the physical layout, dependency direction, compatibility
-names, target-gated platform modules, absence of legacy/Windows directories, and escaped Unix
-process primitives. Its `--self-test` mode creates valid temporary fixtures and injects each major
-violation to prove the guard rejects real regressions.
+More precisely:
+
+1. `core/platform` depends on no Agent, application, Bridge, or Interface crate.
+2. `core/ui_contract` contains data contracts and pure contract helpers. It depends on neither
+   application orchestration nor any Bridge/Interface.
+3. `core/agent` owns model/capability execution and may consume platform and UI-contract types. It
+   must not depend on application orchestration, Bridges, or Interfaces.
+4. `core/application` owns Session/Context/Worker use-cases and coordinates Agent behavior. It may
+   depend on agent, UI-contract, and platform crates.
+5. Bridges depend inward on Core. Bridges may add transport identity, ordering, serialization,
+   replay, reconnect, and backpressure metadata, but not domain lifecycle rules.
+6. Interfaces depend on the appropriate Bridge and shared UI contracts. Core never depends on an
+   Interface, and one Interface never depends on another.
+7. Package, binary, CLI, persisted-data, and wire-protocol compatibility stays stable during
+   physical moves unless a separately reviewed change documents and tests the exception.
+
+The arrows above are the target dependency graph. During extraction, temporary re-exports may
+preserve callers, but they must not introduce a cycle or become permanent duplicate ownership.
+
+## Migration inventory
+
+The repository is deliberately migrated in compiling, reviewable steps. These are the only current
+transitional roots:
+
+| Current owner | Target owner | Removal condition |
+| --- | --- | --- |
+| `agent_core/` | `core/agent/`, `core/application/`, `core/ui_contract/` | All source/tests are split by ownership; package/API compatibility is verified. |
+| `host_projection/` | `bridges/http_websocket/` | Projection delivery is integrated without creating a second Turn state machine. |
+| `timem_web/` | `bridges/http_websocket/` | The `timem-web` binary, HTTP/WebSocket behavior, assets, and lifecycle tests pass at the target path. |
+
+`interfaces/shell`, `interfaces/web`, and `core/platform` are already at their semantic roots, but
+some internal code still needs finer boundary cleanup. `benchmarks/` and `examples/` remain
+cross-cutting verification/support material until their final ownership is decided; they are not
+runtime layers.
+
+Windows and native desktop Interfaces are target architecture, not current support claims. They
+must gain an explicit behavior matrix and executable unsupported/supported contract before their
+paths are created.
+
+## Incremental sequence and exit gates
+
+Each step is committed separately and must leave the workspace buildable:
+
+1. **Architecture contract**: record this target, migration inventory, no-placeholder rule, and
+   executable guard checks.
+2. **UI contract extraction**: create `core/ui_contract` from genuinely UI-neutral commands,
+   events, and projections. Keep temporary `agent_core` re-exports where they do not reverse the
+   target dependency direction.
+3. **Agent relocation**: move the existing `agent_core` package to `core/agent`, update resource
+   paths, tests, scripts, docs, and workspace references without changing behavior.
+4. **Application extraction**: move Session/Context/Worker orchestration and application use-cases
+   to `core/application`; update callers to the new owner and remove temporary exports.
+5. **In-process Bridge**: move Shell/native direct-call and callback/channel adaptation to
+   `bridges/in_process`; presentation remains in `interfaces/shell`.
+6. **HTTP/WebSocket Bridge**: combine the Web host and asynchronous projection/delivery ownership
+   under `bridges/http_websocket`, preserving package/binary and wire behavior.
+7. **IPC and native Interfaces**: add the IPC contract and native clients only with real behavior,
+   tests, and explicit platform support status.
+8. **Final cleanup**: remove transitional roots and compatibility shims; update all docs, guards,
+   release paths, and full CI evidence.
+
+For every step, run the architecture guard, module/test contract checks, formatting, relevant crate
+and Interface tests, and `git diff --check`. Run the full `scripts/ci.sh` at behavior-sensitive
+milestones and before declaring the migration complete.
+
+## Non-regression invariants
+
+- Core remains authoritative for Session, Context, Worker, Turn, input admission, cancellation,
+  terminal outcomes, and structured host decisions.
+- Shell/native in-process paths do not acquire network, serialization, or reconnect overhead merely
+  to satisfy the Bridge abstraction.
+- Web keeps bounded command delivery, event ordering, reconnect baselines, authentication, and
+  backpressure behavior.
+- Public semantic types are not replaced with generic text envelopes.
+- Tests move with behavior and remain outside production `src` except minimal external test hooks.
+- No step claims macOS, Windows, or Linux support from names alone.
