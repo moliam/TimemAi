@@ -40,12 +40,19 @@ if violations:
     raise SystemExit("\n".join(violations))
 PY_BOUNDARY
 
+
+if grep -nE 'agent_core|timem_platform|timem_shell|timem_web|host_projection|bridges/|interfaces/' core/ui_contract/Cargo.toml >/tmp/timem_module_boundary_ui_contract_refs.txt; then
+  echo "error: core/ui_contract must remain a data-only inward contract" >&2
+  cat /tmp/timem_module_boundary_ui_contract_refs.txt >&2
+  exit 1
+fi
+
 if ! grep -nF 'agent_core = { path = "../agent_core" }' timem_web/Cargo.toml >/dev/null; then
   echo "error: timem_web must depend on agent_core through the crate boundary" >&2
   exit 1
 fi
 
-for boundary in agent_core/module_boundary.md core/platform/module_boundary.md interfaces/shell/module_boundary.md interfaces/web/module_boundary.md timem_web/module_boundary.md; do
+for boundary in agent_core/module_boundary.md core/platform/module_boundary.md core/ui_contract/module_boundary.md interfaces/shell/module_boundary.md interfaces/web/module_boundary.md timem_web/module_boundary.md; do
   test -f "$boundary" || { echo "error: missing module boundary: $boundary" >&2; exit 1; }
 done
 

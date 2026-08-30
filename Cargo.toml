@@ -1,5 +1,5 @@
 [workspace]
-members = ["agent_core", "core/platform", "host_projection", "interfaces/shell", "timem_web"]
+members = ["agent_core", "core/platform", "core/ui_contract", "host_projection", "interfaces/shell", "timem_web"]
 resolver = "2"
 
 [workspace.package]
