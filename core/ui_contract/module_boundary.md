@@ -5,8 +5,8 @@ It contains no presentation, transport, persistence, model execution, or applica
 
 ## Current layout
 
-- `src/projections`: authoritative UI-readable state shapes. The initial extraction owns the Turn
-  projection wire contract.
+- `src/projections`: authoritative UI-readable state shapes. It currently owns the Turn projection
+  wire contract plus Session/Context/Worker identity, workspace, and aggregate activity shapes.
 
 `commands` and `events` are added only when real types are extracted; empty architecture
 placeholders are forbidden.
