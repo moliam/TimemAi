@@ -1,3 +1,7 @@
+use crate::rolling_file_store::{
+    read_segmented_records, rewrite_segmented_records, segmented_directory, RollingCapacity,
+    DEFAULT_ROLLING_SLICE_BYTES,
+};
 use crate::session_store::{
     read_all_history_records, ChatHistoryRecord, ChatHistoryRole, SessionStore,
 };
@@ -111,8 +115,17 @@ impl ChatLibrary {
     ) -> Result<ChatLibraryCapacity, String> {
         validate_capacity_limit(max_bytes)?;
         self.guard.with_write(|| {
-            save_settings(&self.settings_path(), &ChatLibrarySettings { max_bytes })?;
-            capacity_for(&self.favorites_path(), &ChatLibrarySettings { max_bytes })
+            let settings = ChatLibrarySettings { max_bytes };
+            if max_bytes.is_some() {
+                let current = latest_favorites(&self.favorites_path())?;
+                rewrite_active_favorites(
+                    &self.favorites_path(),
+                    current.into_values().filter(|item| !item.deleted).collect(),
+                    &settings,
+                )?;
+            }
+            save_settings(&self.settings_path(), &settings)?;
+            capacity_for(&self.favorites_path(), &settings)
         })?
     }
 
@@ -187,18 +200,23 @@ impl ChatLibrary {
             };
             let record_bytes = serialized_favorite_bytes(&favorite)?.len() as u64;
             let current_capacity = capacity_for(&self.favorites_path(), &settings)?;
-            let projected_capacity = capacity_for_used(
-                current_capacity.used_bytes.saturating_add(record_bytes),
-                settings.max_bytes,
-            );
-            if capacity_exceeds_limit(projected_capacity) {
+            if settings.max_bytes.is_some_and(|total| {
+                RollingCapacity::from_total_bytes(total)
+                    .is_ok_and(|capacity| record_bytes > capacity.stable_bytes)
+            }) {
                 return Ok(CreateFavoriteOutcome::CapacityReached(current_capacity));
             }
-            append_favorite(&self.favorites_path(), &favorite)?;
+            let mut active = current
+                .into_values()
+                .filter(|item| !item.deleted)
+                .collect::<Vec<_>>();
+            active.push(favorite.clone());
+            rewrite_active_favorites(&self.favorites_path(), active, &settings)?;
+            let capacity = capacity_for(&self.favorites_path(), &settings)?;
             Ok(CreateFavoriteOutcome::Created {
                 favorite: Box::new(favorite),
-                capacity: projected_capacity,
-                nearing_limit: capacity_is_nearing_limit(projected_capacity),
+                capacity,
+                nearing_limit: capacity_is_nearing_limit(capacity),
             })
         })?
     }
@@ -318,13 +336,14 @@ pub fn source_key(
 }
 
 fn latest_favorites(path: &Path) -> Result<BTreeMap<String, ChatFavorite>, String> {
-    if !path.exists() {
-        return Ok(BTreeMap::new());
-    }
-    let raw = fs::read_to_string(path).map_err(|_| "favorite_store_read_failed".to_string())?;
+    let records =
+        read_segmented_records(path).map_err(|_| "favorite_store_read_failed".to_string())?;
     let mut latest = BTreeMap::new();
-    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
-        let Ok(item) = serde_json::from_str::<ChatFavorite>(line) else {
+    for record in records {
+        if record.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let Ok(item) = serde_json::from_slice::<ChatFavorite>(&record) else {
             continue;
         };
         if latest
@@ -335,20 +354,6 @@ fn latest_favorites(path: &Path) -> Result<BTreeMap<String, ChatFavorite>, Strin
         }
     }
     Ok(latest)
-}
-
-fn append_favorite(path: &Path, favorite: &ChatFavorite) -> Result<(), String> {
-    let mut records = if path.exists() {
-        fs::read(path).map_err(|_| "favorite_store_read_failed".to_string())?
-    } else {
-        Vec::new()
-    };
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|_| "favorite_store_dir_failed".to_string())?;
-    }
-    let line = serialized_favorite_bytes(favorite)?;
-    records.extend(line);
-    atomic_write_file(path, &records).map_err(|_| "favorite_store_write_failed".to_string())
 }
 
 fn serialized_favorite_bytes(favorite: &ChatFavorite) -> Result<Vec<u8>, String> {
@@ -362,7 +367,16 @@ fn capacity_for(
     path: &Path,
     settings: &ChatLibrarySettings,
 ) -> Result<ChatLibraryCapacity, String> {
-    let used_bytes = if path.exists() {
+    let directory = segmented_directory(path);
+    let used_bytes = if directory.exists() {
+        fs::read_dir(directory)
+            .map_err(|_| "favorite_store_read_failed".to_string())?
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.metadata().ok())
+            .filter(|metadata| metadata.is_file())
+            .map(|metadata| metadata.len())
+            .sum()
+    } else if path.exists() {
         fs::metadata(path)
             .map_err(|_| "favorite_store_read_failed".to_string())?
             .len()
@@ -391,6 +405,7 @@ fn capacity_is_nearing_limit(capacity: ChatLibraryCapacity) -> bool {
     })
 }
 
+#[cfg(test)]
 fn capacity_exceeds_limit(capacity: ChatLibraryCapacity) -> bool {
     capacity
         .limit_bytes
@@ -439,7 +454,42 @@ fn rewrite_favorites(path: &Path, favorites: &[ChatFavorite]) -> Result<(), Stri
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|_| "favorite_store_dir_failed".to_string())?;
     }
-    atomic_write_file(path, &payload).map_err(|_| "favorite_store_write_failed".to_string())
+    atomic_write_file(path, &payload).map_err(|_| "favorite_store_write_failed".to_string())?;
+    let segmented = segmented_directory(path);
+    if segmented.exists() {
+        fs::remove_dir_all(segmented).map_err(|_| "favorite_store_write_failed".to_string())?;
+    }
+    Ok(())
+}
+
+fn rewrite_active_favorites(
+    path: &Path,
+    mut favorites: Vec<ChatFavorite>,
+    settings: &ChatLibrarySettings,
+) -> Result<(), String> {
+    favorites.sort_by(|left, right| {
+        left.created_at_ms
+            .cmp(&right.created_at_ms)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    if let Some(total_bytes) = settings.max_bytes {
+        let capacity = RollingCapacity::from_total_bytes(total_bytes)
+            .map_err(|_| "favorite_capacity_limit_invalid".to_string())?;
+        let records = favorites
+            .iter()
+            .map(serialized_favorite_bytes)
+            .collect::<Result<Vec<_>, _>>()?;
+        rewrite_segmented_records(path, &records, capacity, DEFAULT_ROLLING_SLICE_BYTES).map_err(
+            |error| match error.to_string().as_str() {
+                "rolling_record_exceeds_capacity" | "rolling_record_exceeds_slice" => {
+                    "favorite_capacity_reached".to_string()
+                }
+                _ => "favorite_store_write_failed".to_string(),
+            },
+        )?;
+        return Ok(());
+    }
+    rewrite_favorites(path, &favorites)
 }
 
 fn default_title(content: &str, session_id: &str) -> String {

@@ -31,12 +31,12 @@ use agent_core::{
     CoreSessionWorkerEvent, CoreSessionWorkerManager, CoreSessionWorkerWorkspace, HostDecision,
     HostDecisionRequest, ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind,
     RuntimeDataLayout, SessionToolRepo, ToolDetail, ToolGenRequest, ToolSummary, TopicReply,
-    WorkInstructionLoadMode, CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE,
-    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_SUB_ANSWER, CORE_TOPIC_TOOLGEN,
-    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    TurnProjection, WorkInstructionLoadMode, CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_REPAIR,
+    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_SUB_ANSWER,
+    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
-    capability::CapabilityRegistry, self_tool::SelfToolPaths, shell_exec::FileShellJobStore,
+    capability::CapabilityRegistry, rolling_file_store::RollingCapacity, self_tool::SelfToolPaths,
     tool_jobs::FileToolJobStore,
 };
 use axum::{
@@ -51,6 +51,10 @@ use axum::{
     Json, Router,
 };
 use futures_util::{sink::SinkExt, stream::StreamExt};
+use host_projection::{
+    NextTurnEnqueueResult, NextTurnIntentQueue, ProjectionApplyResult, TurnProjectionCache,
+    VersionedTurnProjection,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -61,7 +65,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc, Mutex, RwLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -69,11 +73,14 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::{broadcast, mpsc as tokio_mpsc, oneshot, Notify},
+    sync::{broadcast, mpsc as tokio_mpsc, oneshot},
     time::{sleep, timeout, Instant},
 };
 
 include!(concat!(env!("OUT_DIR"), "/embedded_web_assets.rs"));
+
+const MAX_NEXT_TURN_INTENTS: usize = 8;
+const MAX_NEXT_TURN_INTENT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 const STATIC_PROMPT: &str = include_str!("../../resources/system_prompt/system_prompt.md");
 const PORT_START: u16 = 12_345;
@@ -81,9 +88,17 @@ const PORT_END: u16 = 23_456;
 const DEFAULT_MEM_PREFERRED_PORT: u16 = 13_764;
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(40);
 const EVENT_CHANNEL_CAPACITY: usize = 256;
-const TEMPORARY_RETENTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
+const TEMPORARY_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const TEMPORARY_MAINTENANCE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15 * 60);
+const TEMPORARY_MAINTENANCE_BUSY_RETRY_INTERVAL: Duration = Duration::from_secs(60);
 const SESSION_HISTORY_PAGE_LIMIT: usize = 200;
 const DEFAULT_MEM_TEMPORARY_RETENTION_DAYS: u16 = 5;
+const MEM_CAPACITY_128_MB: u64 = 128 * 1024 * 1024;
+const MEM_CAPACITY_256_MB: u64 = 256 * 1024 * 1024;
+const MEM_CAPACITY_512_MB: u64 = 512 * 1024 * 1024;
+const MEM_CAPACITY_1_GB: u64 = 1024 * 1024 * 1024;
+const MEM_CAPACITY_5_GB: u64 = 5 * 1024 * 1024 * 1024;
+const MEM_CAPACITY_20_GB: u64 = 20 * 1024 * 1024 * 1024;
 const MILLIS_PER_DAY: i64 = 24 * 60 * 60 * 1_000;
 const MAX_MEM_TEMPORARY_SCAN_ENTRIES: usize = 20_000;
 const MAX_MEM_TEMPORARY_SCAN_DEPTH: usize = 32;
@@ -122,8 +137,6 @@ struct AppState {
     command_lanes: Arc<Mutex<HashMap<String, Arc<TicketCommandLane>>>>,
     command_global_barrier: Arc<RwLock<()>>,
     mem_epoch: Arc<RwLock<u64>>,
-    temporary_retention_wakeup: Arc<Notify>,
-    mem_temporary_task_running: Arc<AtomicBool>,
     debug: Option<Arc<DebugStore>>,
     runtime_log: RuntimeLog,
 }
@@ -432,10 +445,20 @@ struct WebMemState {
     role_library: WorkerRoleLibrary,
     session_groups: Vec<SessionGroup>,
     settings: WebMemSettings,
+    temporary_maintenance: TemporaryMaintenanceRuntimeState,
 }
 
 impl WebMemState {
+    #[cfg(test)]
     fn new(data_dir: PathBuf, space: String) -> Result<Self, String> {
+        Self::new_with_debug_defaults(data_dir, space, false)
+    }
+
+    fn new_with_debug_defaults(
+        data_dir: PathBuf,
+        space: String,
+        debug: bool,
+    ) -> Result<Self, String> {
         let layout = if Path::new(&space).is_absolute() {
             let memory_dir = validate_web_mem_directory(Path::new(&space))?;
             create_memory_dir(&memory_dir)?;
@@ -449,7 +472,8 @@ impl WebMemState {
         let role_library = load_role_library_resilient(&role_library_path(&layout.memory_dir()))?;
         let model_endpoints = load_model_endpoints_resilient(&layout.memory_dir())?;
         let session_groups = load_session_groups(&layout.memory_dir())?;
-        let settings = load_web_mem_settings(&layout.memory_dir())?;
+        let settings = load_web_mem_settings(&layout.memory_dir(), debug)?;
+        let temporary_maintenance = load_temporary_maintenance_runtime_state(&layout.memory_dir())?;
         let session_store = SessionStore::new(layout.memory_dir());
         Ok(Self {
             space,
@@ -462,13 +486,17 @@ impl WebMemState {
             role_library,
             session_groups,
             settings,
+            temporary_maintenance,
             layout,
         })
     }
 
-    fn from_directory(path: impl AsRef<Path>) -> Result<Self, String> {
+    fn from_directory_with_debug_defaults(
+        path: impl AsRef<Path>,
+        debug: bool,
+    ) -> Result<Self, String> {
         let path = validate_web_mem_directory(path.as_ref())?;
-        Self::new(path.clone(), path.display().to_string())
+        Self::new_with_debug_defaults(path.clone(), path.display().to_string(), debug)
     }
 
     fn info(&self) -> WebMemInfo {
@@ -480,8 +508,88 @@ impl WebMemState {
                 .display()
                 .to_string(),
             temporary_retention_days: self.settings.temporary_retention_days,
+            temporary_capacity_bytes: self.settings.temporary_capacity_bytes,
+            conversation_capacity_bytes: self.settings.conversation_capacity_bytes,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+struct PersistedTemporaryMaintenanceState {
+    #[serde(default)]
+    accumulated_runtime_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct TemporaryMaintenanceRuntimeState {
+    accumulated_runtime: Duration,
+    checkpoint_started_at: Instant,
+}
+
+impl TemporaryMaintenanceRuntimeState {
+    fn from_persisted(state: PersistedTemporaryMaintenanceState) -> Self {
+        Self {
+            accumulated_runtime: Duration::from_millis(state.accumulated_runtime_ms),
+            checkpoint_started_at: Instant::now(),
+        }
+    }
+
+    fn checkpoint(&mut self, now: Instant) {
+        self.accumulated_runtime = self
+            .accumulated_runtime
+            .saturating_add(now.saturating_duration_since(self.checkpoint_started_at));
+        self.checkpoint_started_at = now;
+    }
+
+    fn persisted(&self) -> PersistedTemporaryMaintenanceState {
+        PersistedTemporaryMaintenanceState {
+            accumulated_runtime_ms: u64::try_from(self.accumulated_runtime.as_millis())
+                .unwrap_or(u64::MAX),
+        }
+    }
+}
+
+fn temporary_maintenance_state_path(memory_dir: &Path) -> PathBuf {
+    memory_dir.join("temporary_maintenance_state.json")
+}
+
+fn load_temporary_maintenance_runtime_state(
+    memory_dir: &Path,
+) -> Result<TemporaryMaintenanceRuntimeState, String> {
+    let path = temporary_maintenance_state_path(memory_dir);
+    let persisted = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|_| "temporary_maintenance_state_parse_failed".to_string())?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            PersistedTemporaryMaintenanceState::default()
+        }
+        Err(_) => return Err("temporary_maintenance_state_read_failed".to_string()),
+    };
+    Ok(TemporaryMaintenanceRuntimeState::from_persisted(persisted))
+}
+
+fn save_temporary_maintenance_runtime_state(
+    memory_dir: &Path,
+    state: &TemporaryMaintenanceRuntimeState,
+) -> Result<(), String> {
+    let mut payload = serde_json::to_vec_pretty(&state.persisted())
+        .map_err(|_| "temporary_maintenance_state_serialize_failed".to_string())?;
+    payload.push(b'\n');
+    agent_core::atomic_write_file(&temporary_maintenance_state_path(memory_dir), &payload)
+        .map_err(|_| "temporary_maintenance_state_write_failed".to_string())
+}
+
+fn checkpoint_temporary_maintenance_runtime(
+    mem: &mut WebMemState,
+    now: Instant,
+) -> Result<Duration, String> {
+    mem.temporary_maintenance.checkpoint(now);
+    save_temporary_maintenance_runtime_state(&mem.layout.memory_dir(), &mem.temporary_maintenance)?;
+    Ok(mem.temporary_maintenance.accumulated_runtime)
+}
+
+fn temporary_maintenance_hint_exists(mem: &WebMemState) -> bool {
+    agent_core::api_audit_maintenance_hint_path(&mem.layout.api_audit_file()).exists()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -491,12 +599,28 @@ struct WebMemSettings {
         alias = "history_retention_days"
     )]
     temporary_retention_days: Option<u16>,
+    #[serde(default)]
+    temporary_capacity_bytes: Option<u64>,
+    #[serde(default)]
+    conversation_capacity_bytes: Option<u64>,
 }
 
 impl Default for WebMemSettings {
     fn default() -> Self {
+        Self::for_debug(false)
+    }
+}
+
+impl WebMemSettings {
+    fn for_debug(debug: bool) -> Self {
         Self {
             temporary_retention_days: default_mem_temporary_retention_days(),
+            temporary_capacity_bytes: Some(if debug {
+                MEM_CAPACITY_512_MB
+            } else {
+                MEM_CAPACITY_128_MB
+            }),
+            conversation_capacity_bytes: Some(MEM_CAPACITY_128_MB),
         }
     }
 }
@@ -513,24 +637,86 @@ fn validate_mem_temporary_retention_days(days: Option<u16>) -> Result<(), String
     }
 }
 
+fn validate_mem_temporary_capacity_bytes(bytes: Option<u64>) -> Result<(), String> {
+    if matches!(
+        bytes,
+        None | Some(
+            MEM_CAPACITY_128_MB
+                | MEM_CAPACITY_256_MB
+                | MEM_CAPACITY_512_MB
+                | MEM_CAPACITY_1_GB
+                | MEM_CAPACITY_5_GB
+        )
+    ) {
+        Ok(())
+    } else {
+        Err("mem_temporary_capacity_bytes_invalid".to_string())
+    }
+}
+
+fn validate_mem_conversation_capacity_bytes(bytes: Option<u64>) -> Result<(), String> {
+    if matches!(
+        bytes,
+        None | Some(
+            MEM_CAPACITY_128_MB
+                | MEM_CAPACITY_512_MB
+                | MEM_CAPACITY_1_GB
+                | MEM_CAPACITY_5_GB
+                | MEM_CAPACITY_20_GB
+        )
+    ) {
+        Ok(())
+    } else {
+        Err("mem_conversation_capacity_bytes_invalid".to_string())
+    }
+}
+
+fn validate_web_mem_settings(settings: &WebMemSettings) -> Result<(), String> {
+    validate_mem_temporary_retention_days(settings.temporary_retention_days)?;
+    validate_mem_temporary_capacity_bytes(settings.temporary_capacity_bytes)?;
+    validate_mem_conversation_capacity_bytes(settings.conversation_capacity_bytes)
+}
+
 fn web_mem_settings_path(memory_dir: &Path) -> PathBuf {
     memory_dir.join("mem_settings.json")
 }
 
-fn load_web_mem_settings(memory_dir: &Path) -> Result<WebMemSettings, String> {
+fn load_web_mem_settings(memory_dir: &Path, debug: bool) -> Result<WebMemSettings, String> {
     let path = web_mem_settings_path(memory_dir);
     let settings = match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice::<WebMemSettings>(&bytes)
-            .map_err(|_| "mem_settings_parse_failed".to_string())?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => WebMemSettings::default(),
+        Ok(bytes) => {
+            let value = serde_json::from_slice::<Value>(&bytes)
+                .map_err(|_| "mem_settings_parse_failed".to_string())?;
+            let has_temporary_capacity = value
+                .as_object()
+                .ok_or_else(|| "mem_settings_parse_failed".to_string())?
+                .contains_key("temporary_capacity_bytes");
+            let has_conversation_capacity = value
+                .as_object()
+                .expect("object checked above")
+                .contains_key("conversation_capacity_bytes");
+            let mut settings = serde_json::from_value::<WebMemSettings>(value)
+                .map_err(|_| "mem_settings_parse_failed".to_string())?;
+            let defaults = WebMemSettings::for_debug(debug);
+            if !has_temporary_capacity {
+                settings.temporary_capacity_bytes = defaults.temporary_capacity_bytes;
+            }
+            if !has_conversation_capacity {
+                settings.conversation_capacity_bytes = defaults.conversation_capacity_bytes;
+            }
+            settings
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            WebMemSettings::for_debug(debug)
+        }
         Err(_) => return Err("mem_settings_read_failed".to_string()),
     };
-    validate_mem_temporary_retention_days(settings.temporary_retention_days)?;
+    validate_web_mem_settings(&settings)?;
     Ok(settings)
 }
 
 fn save_web_mem_settings(memory_dir: &Path, settings: &WebMemSettings) -> Result<(), String> {
-    validate_mem_temporary_retention_days(settings.temporary_retention_days)?;
+    validate_web_mem_settings(settings)?;
     let mut payload = serde_json::to_vec_pretty(settings)
         .map_err(|_| "mem_settings_serialize_failed".to_string())?;
     payload.push(b'\n');
@@ -541,7 +727,6 @@ fn save_web_mem_settings(memory_dir: &Path, settings: &WebMemSettings) -> Result
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct TemporaryRetentionResult {
     history_events: usize,
-    shell_jobs: usize,
     api_audit_events: usize,
 }
 
@@ -635,20 +820,19 @@ fn collect_named_temporary_files(root: &Path) -> Result<Vec<MemTemporaryItem>, S
                 .to_str()
                 .ok_or_else(|| "mem_temporary_item_path_invalid".to_string())?
                 .replace('\\', "/");
-            retain_top_mem_temporary_item(
-                out,
-                MemTemporaryItem {
-                    id: format!("file:{relative}"),
-                    path: relative,
-                    kind: "temporary_file".to_string(),
-                    bytes: metadata.len(),
-                    modified_at_ms: modified_at_ms(&metadata),
-                },
-            );
+            out.push(MemTemporaryItem {
+                id: format!("file:{relative}"),
+                path: relative,
+                kind: "temporary_file".to_string(),
+                bytes: metadata.len(),
+                modified_at_ms: modified_at_ms(&metadata),
+                deletable: true,
+                delete_reason: None,
+            });
         }
         Ok(())
     }
-    let mut items = Vec::with_capacity(MAX_MEM_TEMPORARY_ITEMS);
+    let mut items = Vec::new();
     let mut visited = 0usize;
     if root.exists() {
         visit(root, root, 0, &mut visited, &mut items)?;
@@ -656,23 +840,15 @@ fn collect_named_temporary_files(root: &Path) -> Result<Vec<MemTemporaryItem>, S
     Ok(items)
 }
 
+fn all_mem_temporary_items_at(memory_dir: &Path) -> Result<Vec<MemTemporaryItem>, String> {
+    collect_named_temporary_files(memory_dir)
+}
+
 fn list_mem_temporary_items_at(memory_dir: &Path) -> Result<Vec<MemTemporaryItem>, String> {
-    let mut items = collect_named_temporary_files(memory_dir)?;
-    let shell_store = FileShellJobStore::new(memory_dir);
-    for item in shell_store
-        .finished_temporary_items()
-        .map_err(|_| "mem_temporary_shell_jobs_read_failed".to_string())?
-    {
-        retain_top_mem_temporary_item(
-            &mut items,
-            MemTemporaryItem {
-                id: format!("shell_job:{}", item.id),
-                path: format!("shell_jobs/{}", item.id),
-                kind: "shell_job".to_string(),
-                bytes: item.bytes,
-                modified_at_ms: item.created_at_ms,
-            },
-        );
+    let mut all = all_mem_temporary_items_at(memory_dir)?;
+    let mut items = Vec::with_capacity(MAX_MEM_TEMPORARY_ITEMS);
+    for item in all.drain(..) {
+        retain_top_mem_temporary_item(&mut items, item);
     }
     items.sort_by(|left, right| {
         right
@@ -711,217 +887,327 @@ fn delete_mem_temporary_items_at(memory_dir: &Path, ids: &[String]) -> Result<us
     if selected.len() != ids.len() {
         return Err("mem_temporary_item_selection_invalid".to_string());
     }
-    let current = list_mem_temporary_items_at(memory_dir)?;
+    let current = all_mem_temporary_items_at(memory_dir)?;
     let available = current
         .iter()
-        .map(|item| item.id.as_str())
-        .collect::<BTreeSet<_>>();
-    if ids.iter().any(|id| !available.contains(id.as_str())) {
-        return Err("mem_temporary_item_not_found".to_string());
-    }
+        .map(|item| (item.id.as_str(), item))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let canonical_root = std::fs::canonicalize(memory_dir)
         .map_err(|_| "mem_temporary_item_path_invalid".to_string())?;
-    let mut shell_ids = Vec::new();
     let mut file_paths = Vec::new();
     for id in ids {
-        if let Some(shell_id) = id.strip_prefix("shell_job:") {
-            if shell_id.is_empty() {
-                return Err("mem_temporary_item_id_invalid".to_string());
-            }
-            shell_ids.push(shell_id.to_string());
-        } else if let Some(relative) = id.strip_prefix("file:") {
-            let relative = safe_temporary_relative_path(relative)?;
-            let path = memory_dir.join(relative);
-            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    "mem_temporary_item_not_found".to_string()
-                } else {
-                    "mem_temporary_item_metadata_failed".to_string()
-                }
-            })?;
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err("mem_temporary_item_not_deletable".to_string());
-            }
-            let canonical = std::fs::canonicalize(&path)
-                .map_err(|_| "mem_temporary_item_path_invalid".to_string())?;
-            if !canonical.starts_with(&canonical_root) {
-                return Err("mem_temporary_item_path_invalid".to_string());
-            }
-            file_paths.push(path);
-        } else {
-            return Err("mem_temporary_item_id_invalid".to_string());
+        let item = available
+            .get(id.as_str())
+            .ok_or_else(|| "mem_temporary_item_not_found".to_string())?;
+        if !item.deletable {
+            return Err("mem_temporary_item_not_deletable".to_string());
         }
+        let relative = id
+            .strip_prefix("file:")
+            .ok_or_else(|| "mem_temporary_item_id_invalid".to_string())?;
+        let path = memory_dir.join(safe_temporary_relative_path(relative)?);
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "mem_temporary_item_not_found".to_string()
+            } else {
+                "mem_temporary_item_metadata_failed".to_string()
+            }
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("mem_temporary_item_not_deletable".to_string());
+        }
+        let canonical = std::fs::canonicalize(&path)
+            .map_err(|_| "mem_temporary_item_path_invalid".to_string())?;
+        if !canonical.starts_with(&canonical_root) {
+            return Err("mem_temporary_item_path_invalid".to_string());
+        }
+        file_paths.push(path);
     }
-    let mut deleted = FileShellJobStore::new(memory_dir)
-        .delete_finished_temporary_items(&shell_ids)
-        .map_err(|_| "mem_temporary_shell_jobs_delete_failed".to_string())?;
-    for path in file_paths {
+    for path in &file_paths {
         std::fs::remove_file(path).map_err(|_| "mem_temporary_item_delete_failed".to_string())?;
-        deleted = deleted.saturating_add(1);
     }
-    Ok(deleted)
+    Ok(file_paths.len())
 }
 
-fn schedule_mem_temporary_task(
-    state: &AppState,
-    delete_ids: Option<Vec<String>>,
-) -> Result<(), String> {
-    if state
-        .mem_temporary_task_running
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return if delete_ids.is_none() {
-            Ok(())
-        } else {
-            Err("mem_temporary_task_busy".to_string())
-        };
-    }
-    let (memory_dir, accepted_epoch) = match state.mem.lock() {
-        Ok(mem) => (
-            mem.layout.memory_dir(),
-            state
-                .mem_epoch
-                .read()
-                .map(|epoch| *epoch)
-                .unwrap_or_default(),
-        ),
-        Err(_) => {
-            state
-                .mem_temporary_task_running
-                .store(false, Ordering::Release);
-            return Err("mem_state_poisoned".to_string());
+fn oldest_temporary_items_to_evict(
+    mut items: Vec<MemTemporaryItem>,
+    stable_bytes: u64,
+) -> Vec<String> {
+    let mut used = items.iter().map(|item| item.bytes).sum::<u64>();
+    items.retain(|item| item.deletable);
+    items.sort_by_key(|item| (item.modified_at_ms, item.path.clone()));
+    let mut delete = Vec::new();
+    for item in items {
+        if used <= stable_bytes {
+            break;
         }
-    };
-    let running = Arc::clone(&state.mem_temporary_task_running);
-    let running_on_error = Arc::clone(&running);
-    let state = state.clone();
-    std::thread::Builder::new()
-        .name(
-            if delete_ids.is_some() {
-                "timem-web-mem-temp-delete"
-            } else {
-                "timem-web-mem-temp-list"
-            }
-            .to_string(),
-        )
-        .spawn(move || {
-            let result = if let Some(ids) = delete_ids {
-                let _global_guard = state
-                    .command_global_barrier
-                    .write()
-                    .map_err(|_| "command_global_barrier_poisoned".to_string());
-                match _global_guard {
-                    Ok(_guard) => {
-                        let epoch_matches = state
-                            .mem_epoch
-                            .read()
-                            .ok()
-                            .is_some_and(|epoch| *epoch == accepted_epoch);
-                        if !epoch_matches {
-                            Err("command_mem_epoch_stale".to_string())
-                        } else {
-                            delete_mem_temporary_items_at(&memory_dir, &ids)
-                                .and_then(|_| list_mem_temporary_items_at(&memory_dir))
-                        }
-                    }
-                    Err(error) => Err(error),
-                }
-            } else {
-                list_mem_temporary_items_at(&memory_dir)
-            };
-            let epoch_current = state
-                .mem_epoch
-                .read()
-                .ok()
-                .is_some_and(|epoch| *epoch == accepted_epoch);
-            if epoch_current {
-                let (items, error) = match result {
-                    Ok(items) => (items, None),
-                    Err(error) => (Vec::new(), Some(error)),
-                };
-                let _ = state
-                    .events
-                    .send(WireEvent::MemTemporaryItems { items, error });
-            }
-            running.store(false, Ordering::Release);
-        })
-        .map_err(|error| {
-            running_on_error.store(false, Ordering::Release);
-            format!("mem_temporary_task_spawn_failed:{error}")
-        })?;
-    Ok(())
+        used = used.saturating_sub(item.bytes);
+        delete.push(item.id);
+    }
+    delete
 }
 
 fn apply_temporary_retention(
     layout: &RuntimeDataLayout,
     store: &SessionStore,
     days: Option<u16>,
+    max_bytes: Option<u64>,
     now_ms: i64,
 ) -> Result<TemporaryRetentionResult, String> {
-    let Some(days) = days else {
-        return Ok(TemporaryRetentionResult::default());
-    };
-    validate_mem_temporary_retention_days(Some(days))?;
-    let cutoff_ms = now_ms.saturating_sub(i64::from(days).saturating_mul(MILLIS_PER_DAY));
     let mut result = TemporaryRetentionResult::default();
-    for session in store.list_sessions_resilient()?.sessions {
-        result.history_events = result.history_events.saturating_add(
-            store.prune_temporary_history_events_before(&session.session_id, cutoff_ms)?,
-        );
+    if let Some(days) = days {
+        validate_mem_temporary_retention_days(Some(days))?;
+        let cutoff_ms = now_ms.saturating_sub(i64::from(days).saturating_mul(MILLIS_PER_DAY));
+        for session in store.list_sessions_resilient()?.sessions {
+            result.history_events = result.history_events.saturating_add(
+                store.prune_temporary_history_events_before(&session.session_id, cutoff_ms)?,
+            );
+        }
+        result.api_audit_events =
+            agent_core::prune_api_audit_before(&layout.api_audit_file(), cutoff_ms, now_ms)
+                .map_err(|_| "api_audit_retention_failed".to_string())?;
     }
-    result.shell_jobs = FileShellJobStore::new(&layout.memory_dir())
-        .prune_finished_before(cutoff_ms)
-        .map_err(|_| "shell_job_retention_failed".to_string())?;
-    result.api_audit_events =
-        agent_core::prune_api_audit_before(&layout.api_audit_file(), cutoff_ms, now_ms)
-            .map_err(|_| "api_audit_retention_failed".to_string())?;
+    if let Some(total_bytes) = max_bytes {
+        let capacity = RollingCapacity::from_total_bytes(total_bytes)
+            .map_err(|_| "mem_temporary_capacity_bytes_invalid".to_string())?;
+        let items = all_mem_temporary_items_at(&layout.memory_dir())?;
+        let delete = oldest_temporary_items_to_evict(items, capacity.stable_bytes);
+        for ids in delete.chunks(100) {
+            delete_mem_temporary_items_at(&layout.memory_dir(), ids)?;
+        }
+    }
     Ok(result)
 }
 
-fn apply_current_mem_temporary_retention(
+fn apply_conversation_capacity(
     state: &AppState,
-    now_ms: i64,
-) -> Result<TemporaryRetentionResult, String> {
-    let (layout, store, days) = {
-        let mem = state
+    store: &SessionStore,
+    max_bytes: Option<u64>,
+) -> Result<u64, String> {
+    let Some(total_bytes) = max_bytes else {
+        return Ok(0);
+    };
+    let capacity = RollingCapacity::from_total_bytes(total_bytes)
+        .map_err(|_| "mem_conversation_capacity_bytes_invalid".to_string())?;
+    apply_conversation_stable_capacity(state, store, capacity.stable_bytes)
+}
+
+fn apply_conversation_stable_capacity(
+    state: &AppState,
+    store: &SessionStore,
+    stable_bytes: u64,
+) -> Result<u64, String> {
+    let active = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_state_poisoned".to_string())?
+        .iter()
+        .filter_map(|(id, session)| {
+            (session.active_turn_id.is_some() || session.pending_turn_id.is_some())
+                .then_some(id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let mut sessions = store.list_sessions_resilient()?.sessions;
+    sessions.sort_by_key(|session| (session.updated_at_ms, session.session_id.clone()));
+    let mut used = sessions
+        .iter()
+        .map(|session| {
+            std::fs::metadata(store.history_path_for_session(&session.session_id))
+                .map(|meta| meta.len())
+                .unwrap_or(0)
+        })
+        .sum::<u64>();
+    let mut removed = 0u64;
+    for session in sessions {
+        if used <= stable_bytes {
+            break;
+        }
+        if active.contains(&session.session_id) {
+            continue;
+        }
+        let reclaimed = store
+            .prune_oldest_history_turns(&session.session_id, used.saturating_sub(stable_bytes))?;
+        used = used.saturating_sub(reclaimed);
+        removed = removed.saturating_add(reclaimed);
+    }
+    Ok(removed)
+}
+
+fn has_live_mem_work(state: &AppState) -> Result<bool, String> {
+    Ok(state
+        .sessions
+        .lock()
+        .map_err(|_| "session_state_poisoned".to_string())?
+        .values()
+        .any(session_has_live_work_for_mem_switch))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemporaryMaintenanceAttempt {
+    Completed,
+    Busy,
+}
+
+async fn run_idle_temporary_maintenance(
+    state: AppState,
+) -> Result<TemporaryMaintenanceAttempt, String> {
+    if has_live_mem_work(&state)? {
+        return Ok(TemporaryMaintenanceAttempt::Busy);
+    }
+    let (result_tx, result_rx) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("timem-web-idle-maintenance".to_string())
+        .spawn(move || {
+            // Serialize the maintenance pass against every browser mutation.
+            // Recheck idleness after acquiring the barrier so a newly queued or
+            // started task can never overlap the scan.
+            let result = state
+                .command_global_barrier
+                .write()
+                .map_err(|_| "command_global_barrier_poisoned".to_string())
+                .and_then(|_guard| {
+                    if has_live_mem_work(&state)? {
+                        return Ok(TemporaryMaintenanceAttempt::Busy);
+                    }
+                    let (layout, store, days, temporary_max_bytes, conversation_max_bytes) = {
+                        let mem = state
+                            .mem
+                            .lock()
+                            .map_err(|_| "mem_state_poisoned".to_string())?;
+                        (
+                            mem.layout.clone(),
+                            mem.session_store.clone(),
+                            mem.settings.temporary_retention_days,
+                            mem.settings.temporary_capacity_bytes,
+                            mem.settings.conversation_capacity_bytes,
+                        )
+                    };
+                    apply_temporary_retention(
+                        &layout,
+                        &store,
+                        days,
+                        temporary_max_bytes,
+                        now_ms_i64(),
+                    )?;
+                    apply_conversation_stable_capacity_if_configured(
+                        &store,
+                        conversation_max_bytes,
+                    )?;
+                    // Reset the same MEM while the global barrier is still held.
+                    // This prevents a concurrent MEM switch from redirecting the
+                    // completion state or hint removal to a different MEM.
+                    complete_temporary_maintenance(&state, Instant::now())?;
+                    Ok(TemporaryMaintenanceAttempt::Completed)
+                });
+            let _ = result_tx.send(result);
+        })
+        .map_err(|error| format!("temporary_maintenance_worker_spawn_failed:{error}"))?;
+    result_rx
+        .await
+        .map_err(|_| "temporary_maintenance_worker_stopped".to_string())?
+}
+
+fn apply_conversation_stable_capacity_if_configured(
+    store: &SessionStore,
+    max_bytes: Option<u64>,
+) -> Result<(), String> {
+    let Some(total_bytes) = max_bytes else {
+        return Ok(());
+    };
+    let capacity = RollingCapacity::from_total_bytes(total_bytes)
+        .map_err(|_| "mem_conversation_capacity_bytes_invalid".to_string())?;
+    // The periodic pass runs only when no Session is active, so no active-work
+    // exclusion is required after the idle check.
+    let mut sessions = store.list_sessions_resilient()?.sessions;
+    sessions.sort_by_key(|session| (session.updated_at_ms, session.session_id.clone()));
+    let mut used = sessions
+        .iter()
+        .map(|session| {
+            std::fs::metadata(store.history_path_for_session(&session.session_id))
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+        })
+        .sum::<u64>();
+    for session in sessions {
+        if used <= capacity.stable_bytes {
+            break;
+        }
+        let reclaimed = store.prune_oldest_history_turns(
+            &session.session_id,
+            used.saturating_sub(capacity.stable_bytes),
+        )?;
+        used = used.saturating_sub(reclaimed);
+    }
+    Ok(())
+}
+
+fn checkpoint_and_get_temporary_maintenance_trigger(
+    state: &AppState,
+    now: Instant,
+) -> Result<bool, String> {
+    let mut mem = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?;
+    let accumulated = checkpoint_temporary_maintenance_runtime(&mut mem, now)?;
+    Ok(accumulated >= TEMPORARY_MAINTENANCE_INTERVAL || temporary_maintenance_hint_exists(&mem))
+}
+
+fn complete_temporary_maintenance(state: &AppState, now: Instant) -> Result<(), String> {
+    let hint_path = {
+        let mut mem = state
             .mem
             .lock()
             .map_err(|_| "mem_state_poisoned".to_string())?;
-        (
-            mem.layout.clone(),
-            mem.session_store.clone(),
-            mem.settings.temporary_retention_days,
-        )
+        let completed = TemporaryMaintenanceRuntimeState {
+            accumulated_runtime: Duration::ZERO,
+            checkpoint_started_at: now,
+        };
+        // Persist first and only then update memory, so a failed tiny-state write
+        // cannot accidentally suppress a still-due maintenance request.
+        save_temporary_maintenance_runtime_state(&mem.layout.memory_dir(), &completed)?;
+        mem.temporary_maintenance = completed;
+        agent_core::api_audit_maintenance_hint_path(&mem.layout.api_audit_file())
     };
-    apply_temporary_retention(&layout, &store, days, now_ms)
+    match std::fs::remove_file(hint_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("temporary_maintenance_hint_clear_failed".to_string()),
+    }
 }
 
-async fn run_temporary_retention_in_file_thread(
-    state: AppState,
-) -> Result<TemporaryRetentionResult, String> {
-    let (result_tx, result_rx) = oneshot::channel();
-    std::thread::Builder::new()
-        .name("timem-web-retention".to_string())
-        .spawn(move || {
-            let result = apply_current_mem_temporary_retention(&state, now_ms_i64());
-            let _ = result_tx.send(result);
-        })
-        .map_err(|error| format!("temporary_retention_worker_spawn_failed:{error}"))?;
-    result_rx
-        .await
-        .map_err(|_| "temporary_retention_worker_stopped".to_string())?
-}
-
-fn spawn_temporary_retention_loop(state: AppState) {
+fn spawn_idle_temporary_maintenance_loop(state: AppState) {
     tokio::spawn(async move {
         loop {
-            if let Err(error) = run_temporary_retention_in_file_thread(state.clone()).await {
-                eprintln!("[timem_web_warning] temporary_retention_failed error={error}");
+            sleep(TEMPORARY_MAINTENANCE_CHECKPOINT_INTERVAL).await;
+            let triggered =
+                match checkpoint_and_get_temporary_maintenance_trigger(&state, Instant::now()) {
+                    Ok(triggered) => triggered,
+                    Err(error) => {
+                        eprintln!(
+                        "[timem_web_warning] temporary_maintenance_checkpoint_failed error={error}"
+                    );
+                        continue;
+                    }
+                };
+            if !triggered {
+                continue;
             }
-            tokio::select! {
-                () = sleep(TEMPORARY_RETENTION_INTERVAL) => {}
-                () = state.temporary_retention_wakeup.notified() => {}
+            loop {
+                match run_idle_temporary_maintenance(state.clone()).await {
+                    Ok(TemporaryMaintenanceAttempt::Completed) => break,
+                    Ok(TemporaryMaintenanceAttempt::Busy) => {
+                        // Retry only the cheap live-work check. No checkpoint write and no
+                        // full scan occurs while work is active.
+                        sleep(TEMPORARY_MAINTENANCE_BUSY_RETRY_INTERVAL).await;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "[timem_web_warning] idle_temporary_maintenance_failed error={error}"
+                        );
+                        break;
+                    }
+                }
             }
         }
     });
@@ -944,6 +1230,8 @@ struct ModelEndpointConfig {
     api_key: String,
     #[serde(default)]
     http_headers: BTreeMap<String, String>,
+    #[serde(default)]
+    request_fields: BTreeMap<String, Value>,
 }
 
 fn default_endpoint_max_input_tokens() -> u32 {
@@ -967,6 +1255,7 @@ struct ModelEndpointReport {
     stream: bool,
     api_key_configured: bool,
     http_headers: BTreeMap<String, String>,
+    request_fields: BTreeMap<String, Value>,
 }
 
 impl From<&ModelEndpointConfig> for ModelEndpointReport {
@@ -986,6 +1275,11 @@ impl From<&ModelEndpointConfig> for ModelEndpointReport {
                 .http_headers
                 .keys()
                 .map(|name| (name.clone(), "****".to_string()))
+                .collect(),
+            request_fields: endpoint
+                .request_fields
+                .keys()
+                .map(|name| (name.clone(), Value::String("****".to_string())))
                 .collect(),
         }
     }
@@ -1154,10 +1448,18 @@ struct WebSession {
     #[serde(skip)]
     resume_notice_pending: bool,
     active_turn_id: Option<String>,
+    /// The current pending/active Turn after a cancel command has been accepted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cancelling_turn_id: Option<String>,
     /// A durable Host intent that has not yet emitted Core TurnStarted.
     /// This is routing metadata, not live working state.
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pending_turn_id: Option<String>,
+    /// Latest complete Core-owned lifecycle projection. Pod caches and delivers
+    /// this value but never reconstructs it from worker or topic events.
+    turn_projection: TurnProjectionCache,
+    #[serde(skip)]
+    next_turn_intents: NextTurnIntentQueue<WebNextTurnPayload>,
     #[serde(skip)]
     pending_completion_message_id: Option<String>,
     #[serde(skip)]
@@ -1229,6 +1531,8 @@ struct WebTurn {
     turn_id: String,
     state: String,
     created_at_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    interrupted_at_ms: Option<u128>,
     user_entries: Vec<WebTurnUserEntry>,
     events: Vec<WebTurnEvent>,
     sub_answers: Vec<WebSubAnswer>,
@@ -1243,6 +1547,15 @@ struct WebSubAnswer {
     task: String,
     answer: String,
     created_at_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WebNextTurnPayload {
+    turn_id: String,
+    created_at_ms: u128,
+    text: String,
+    attachments: Vec<WebAttachment>,
+    worker_roles: Vec<WorkerRole>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1276,7 +1589,7 @@ struct PendingWorkInstructionTurn {
     worker_roles: Vec<WorkerRole>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct WebAttachment {
     id: String,
     name: String,
@@ -1303,6 +1616,9 @@ struct MemTemporaryItem {
     kind: String,
     bytes: u64,
     modified_at_ms: i64,
+    deletable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delete_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1399,6 +1715,14 @@ enum WireEvent {
         turn_id: Option<String>,
         outcome: Value,
     },
+    TurnProjection {
+        session_id: String,
+        projection: VersionedTurnProjection,
+    },
+    TurnCancelling {
+        session: Box<WebSession>,
+        target_command_id: Option<String>,
+    },
     TurnStarted {
         session_id: String,
         context_id: String,
@@ -1432,6 +1756,8 @@ enum WireEvent {
     },
     MemSettingsUpdated {
         temporary_retention_days: Option<u16>,
+        temporary_capacity_bytes: Option<u64>,
+        conversation_capacity_bytes: Option<u64>,
     },
     MemTemporaryItems {
         items: Vec<MemTemporaryItem>,
@@ -1481,6 +1807,7 @@ enum WireEvent {
         endpoint_id: String,
         api_key: String,
         http_headers: BTreeMap<String, String>,
+        request_fields: BTreeMap<String, Value>,
     },
 }
 
@@ -1524,6 +1851,8 @@ struct WebMemInfo {
     space_dir: String,
     memory_dir: String,
     temporary_retention_days: Option<u16>,
+    temporary_capacity_bytes: Option<u64>,
+    conversation_capacity_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1625,6 +1954,8 @@ struct ModelEndpointInput {
     api_key: Option<String>,
     #[serde(default)]
     http_headers: BTreeMap<String, String>,
+    #[serde(default)]
+    request_fields: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1752,6 +2083,8 @@ enum ClientCommand {
     },
     TurnCancel {
         session_id: String,
+        #[serde(default)]
+        target_command_id: Option<String>,
     },
     AttachmentRemove {
         session_id: String,
@@ -1833,9 +2166,16 @@ enum ClientCommand {
     MemSwitch {
         #[serde(alias = "space")]
         path: String,
+        #[serde(default)]
+        stop_running: bool,
     },
     MemTemporaryRetentionUpdate {
         days: Option<u16>,
+        #[serde(default)]
+        max_bytes: Option<u64>,
+    },
+    MemConversationCapacityUpdate {
+        max_bytes: Option<u64>,
     },
     MemTemporaryItemsList,
     MemTemporaryItemsDelete {
@@ -1858,6 +2198,7 @@ impl ClientCommand {
             Self::RuntimeUpdate { .. }
             | Self::MemSwitch { .. }
             | Self::MemTemporaryRetentionUpdate { .. }
+            | Self::MemConversationCapacityUpdate { .. }
             | Self::MemTemporaryItemsDelete { .. }
             | Self::McpServerDelete { .. }
             | Self::ModelEndpointUpsert { .. }
@@ -1886,7 +2227,7 @@ impl ClientCommand {
             | Self::ChatMessageDelete { session_id, .. }
             | Self::TurnSubmit { session_id, .. }
             | Self::TurnSupplement { session_id, .. }
-            | Self::TurnCancel { session_id }
+            | Self::TurnCancel { session_id, .. }
             | Self::AttachmentRemove { session_id, .. }
             | Self::ToolRepoRename { session_id, .. }
             | Self::ToolRepoOpenTerminal { session_id, .. }
@@ -1904,6 +2245,7 @@ impl ClientCommand {
             Self::RuntimeUpdate { .. }
                 | Self::MemSwitch { .. }
                 | Self::MemTemporaryRetentionUpdate { .. }
+                | Self::MemConversationCapacityUpdate { .. }
                 | Self::MemTemporaryItemsDelete { .. }
                 | Self::McpServerDelete { .. }
                 | Self::ModelEndpointUpsert { .. }
@@ -1941,6 +2283,8 @@ impl ClientCommand {
                 | Self::SessionApiKeyReveal { .. }
                 | Self::McpServerSecretsReveal { .. }
                 | Self::ModelEndpointSecretReveal { .. }
+                | Self::MemTemporaryItemsList
+                | Self::MemTemporaryItemsDelete { .. }
         )
     }
 
@@ -1980,6 +2324,7 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
     }
 
     let launch = WebLaunchOptions::parse(&args)?;
+    agent_core::configure_audit_storage(launch.debug);
     if std::env::var_os("TIMEM_DATA_DIR").is_some() {
         return Err("unsupported_env:TIMEM_DATA_DIR; MEM is the complete workspace".to_string());
     }
@@ -1992,7 +2337,11 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
     let manager = Arc::new(Mutex::new(CoreSessionWorkerManager::new()));
     let sessions = Arc::new(Mutex::new(BTreeMap::new()));
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-    let initial_mem = WebMemState::new(template.data_dir.clone(), template.initial_space.clone())?;
+    let initial_mem = WebMemState::new_with_debug_defaults(
+        template.data_dir.clone(),
+        template.initial_space.clone(),
+        launch.debug,
+    )?;
     let command_dedup = load_command_dedup_resilient(&command_dedup_path(&initial_mem))?;
     let instance_path = web_instance_path(&initial_mem);
     let web_instance = match open_web_instance_after_handoff(
@@ -2061,8 +2410,6 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
         command_global_barrier: Arc::new(RwLock::new(())),
         mem_epoch: Arc::new(RwLock::new(1)),
-        temporary_retention_wakeup: Arc::new(Notify::new()),
-        mem_temporary_task_running: Arc::new(AtomicBool::new(false)),
         debug,
         runtime_log,
     };
@@ -2143,11 +2490,10 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
         "{}",
         highlighted_browser_url(&browser_url, stdout_supports_color())
     );
-    // Retention can scan and atomically rewrite large history, shell-job, and
-    // audit files. Start it only after readiness is published and keep that
-    // blocking filesystem work off Tokio runtime threads. A dedicated file
-    // thread also keeps runtime shutdown from waiting for a large rewrite.
-    spawn_temporary_retention_loop(state.clone());
+    // Full MEM scans never run on startup or ordinary history writes. Settings
+    // commands may run them explicitly. The fallback checkpoints a tiny cumulative
+    // runtime counter every 15 minutes and scans only when due and fully idle.
+    spawn_idle_temporary_maintenance_loop(state.clone());
     let shutdown_reason = Arc::new(Mutex::new(None));
     let serve_result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(
@@ -2252,8 +2598,11 @@ fn shutdown_web_runtime(state: &AppState) -> Result<(), String> {
     let fallback_memory_dir =
         web_layout_for_space(&state.template.data_dir, &state.template.initial_space).memory_dir();
     let memory_dir = match state.mem.lock() {
-        Ok(mem) => {
+        Ok(mut mem) => {
             mem.mcp_runtime.disconnect_all();
+            if let Err(error) = checkpoint_temporary_maintenance_runtime(&mut mem, Instant::now()) {
+                first_error.get_or_insert(error);
+            }
             mem.layout.memory_dir()
         }
         Err(_) => {
@@ -2262,7 +2611,6 @@ fn shutdown_web_runtime(state: &AppState) -> Result<(), String> {
         }
     };
 
-    FileShellJobStore::new(&memory_dir).terminate_owned_running();
     FileToolJobStore::new(&memory_dir).terminate_owned_running();
 
     if let Some(debug) = state.debug.as_ref() {
@@ -2308,7 +2656,7 @@ fn client_command_trace_fields(command: &ClientCommand) -> (&'static str, Option
         ClientCommand::TurnSupplement { session_id, .. } => {
             ("turn_supplement", Some(session_id.clone()))
         }
-        ClientCommand::TurnCancel { session_id } => ("turn_cancel", Some(session_id.clone())),
+        ClientCommand::TurnCancel { session_id, .. } => ("turn_cancel", Some(session_id.clone())),
         _ => ("other", None),
     }
 }
@@ -4221,6 +4569,10 @@ fn handle_command_with_id(
             role_ids,
         } => {
             if let Some(command_id) = command_id {
+                if let Some(turn) = queued_turn_for_command_id(state, &session_id, command_id)? {
+                    dispatch_next_turn_intent_if_ready(state, &session_id);
+                    return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
+                }
                 if let Some(turn) = turn_for_command_id(state, &session_id, command_id)? {
                     redeliver_recorded_turn(
                         state,
@@ -4256,14 +4608,37 @@ fn handle_command_with_id(
                 let text = nonempty_text(text, "turn text")?;
                 let worker_roles =
                     resolve_worker_roles(state, &session_id, &role_ids, role_id.as_deref())?;
-                submit_turn_with_selected_attachments(
-                    state,
-                    &session_id,
-                    text,
-                    attachment_ids.as_deref(),
-                    command_id,
-                    worker_roles,
-                )?
+                let stopping = {
+                    let sessions = state
+                        .sessions
+                        .lock()
+                        .map_err(|_| "session_store_poisoned".to_string())?;
+                    let session = sessions
+                        .get(&session_id)
+                        .ok_or_else(|| "session_not_found".to_string())?;
+                    session.cancelling_turn_id.is_some() && current_turn_id(session).is_some()
+                };
+                if stopping {
+                    let command_id = command_id
+                        .ok_or_else(|| "next_turn_intent_command_id_required".to_string())?;
+                    enqueue_next_turn_intent(
+                        state,
+                        &session_id,
+                        command_id,
+                        text,
+                        attachment_ids.as_deref(),
+                        worker_roles,
+                    )?
+                } else {
+                    submit_turn_with_selected_attachments(
+                        state,
+                        &session_id,
+                        text,
+                        attachment_ids.as_deref(),
+                        command_id,
+                        worker_roles,
+                    )?
+                }
             };
             return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
         }
@@ -4322,15 +4697,104 @@ fn handle_command_with_id(
             );
             return Ok(Some(event));
         }
-        ClientCommand::TurnCancel { session_id } => {
-            for worker_id in session_worker_ids(state, &session_id)? {
-                state
-                    .manager
+        ClientCommand::TurnCancel {
+            session_id,
+            target_command_id,
+        } => {
+            if let Some(target_command_id) = target_command_id.as_deref() {
+                let sessions = state
+                    .sessions
                     .lock()
-                    .map_err(|_| "worker_manager_poisoned")?
-                    .handle(&worker_id)
-                    .ok_or_else(|| "session_worker_not_found".to_string())?
-                    .cancel_current_turn();
+                    .map_err(|_| "session_store_poisoned")?;
+                let session = sessions
+                    .get(&session_id)
+                    .ok_or_else(|| "session_not_found".to_string())?;
+                let target_matches_current_turn = current_turn_id(session)
+                    .and_then(|turn_id| session.turns.iter().find(|turn| turn.turn_id == turn_id))
+                    .is_some_and(|turn| {
+                        turn.user_entries
+                            .iter()
+                            .any(|entry| entry.command_id.as_deref() == Some(target_command_id))
+                    });
+                if !target_matches_current_turn {
+                    return Err("turn_cancel_target_mismatch".to_string());
+                }
+            }
+            if cancel_pending_work_instruction_turn(
+                state,
+                &session_id,
+                target_command_id.as_deref(),
+            )? {
+                return Ok(None);
+            }
+            // Host UI projection and Core execution are separate channels.
+            // Record and publish the authoritative user-visible state first;
+            // Core cancellation then proceeds without participating in rendering.
+            primary_worker_handle(state, &session_id)?;
+            let projection_update = {
+                let mut sessions = state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session_store_poisoned")?;
+                let session = sessions
+                    .get_mut(&session_id)
+                    .ok_or_else(|| "session_not_found".to_string())?;
+                let turn_id = current_turn_id(session).map(str::to_string);
+                let turn_index = turn_id.as_deref().and_then(|turn_id| {
+                    session
+                        .turns
+                        .iter()
+                        .position(|turn| turn.turn_id == turn_id)
+                });
+                match (turn_id, turn_index) {
+                    (Some(turn_id), Some(turn_index)) => {
+                        let previous_session = session.clone();
+                        session.cancelling_turn_id = Some(turn_id);
+                        for worker in &mut session.workers {
+                            if worker.state == "working" {
+                                worker.state = "ready".to_string();
+                            }
+                        }
+                        session.state = aggregate_web_session_state(&session.workers, "ready");
+                        let turn = &mut session.turns[turn_index];
+                        turn.state = "finished".to_string();
+                        turn.completion = Some(json!({ "stop_reason": "CancelledByUser" }));
+                        Some((previous_session, session.clone()))
+                    }
+                    // A Core worker can briefly exist without a Web Turn (for
+                    // example in legacy/restored paths). Cancellation remains
+                    // a successful idempotent Core operation, but there is no
+                    // user-visible Turn projection to manufacture.
+                    _ => None,
+                }
+            };
+            if let Some((previous_session, cancelled_session)) = projection_update {
+                if let Err(error) = persist_web_session(state, &session_id) {
+                    if let Ok(mut sessions) = state.sessions.lock() {
+                        sessions.insert(session_id.clone(), previous_session);
+                    }
+                    return Err(error);
+                }
+                publish_semantic(
+                    state,
+                    WireEvent::TurnCancelling {
+                        session: Box::new(cancelled_session),
+                        target_command_id,
+                    },
+                );
+            }
+            let cancelled_workers = state
+                .manager
+                .lock()
+                .map_err(|_| "worker_manager_poisoned")?
+                .cancel_session_turns(&session_id);
+            if cancelled_workers == 0 {
+                publish_semantic(
+                    state,
+                    WireEvent::HostError {
+                        message: format!("turn_cancel_core_signal_missing:{session_id}"),
+                    },
+                );
             }
         }
         ClientCommand::AttachmentRemove {
@@ -4644,11 +5108,12 @@ fn handle_command_with_id(
             );
         }
         ClientCommand::ModelEndpointSecretReveal { endpoint_id } => {
-            let (api_key, http_headers) = model_endpoint_secrets(state, &endpoint_id)?;
+            let secrets = model_endpoint_secrets(state, &endpoint_id)?;
             return Ok(Some(WireEvent::ModelEndpointSecretRevealed {
                 endpoint_id,
-                api_key,
-                http_headers,
+                api_key: secrets.api_key,
+                http_headers: secrets.http_headers,
+                request_fields: secrets.request_fields,
             }));
         }
         ClientCommand::McpServerUpsert { session_id, config } => {
@@ -4705,19 +5170,33 @@ fn handle_command_with_id(
             }));
         }
         ClientCommand::MemTemporaryItemsList => {
-            schedule_mem_temporary_task(state, None)?;
+            let memory_dir = state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .layout
+                .memory_dir();
+            return Ok(Some(WireEvent::MemTemporaryItems {
+                items: list_mem_temporary_items_at(&memory_dir)?,
+                error: None,
+            }));
         }
         ClientCommand::MemTemporaryItemsDelete { ids } => {
-            if ids.is_empty()
-                || ids.len() > 100
-                || ids.iter().collect::<BTreeSet<_>>().len() != ids.len()
-            {
-                return Err("mem_temporary_item_selection_invalid".to_string());
-            }
-            schedule_mem_temporary_task(state, Some(ids))?;
+            let memory_dir = state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .layout
+                .memory_dir();
+            delete_mem_temporary_items_at(&memory_dir, &ids)?;
+            return Ok(Some(WireEvent::MemTemporaryItems {
+                items: list_mem_temporary_items_at(&memory_dir)?,
+                error: None,
+            }));
         }
-        ClientCommand::MemTemporaryRetentionUpdate { days } => {
+        ClientCommand::MemTemporaryRetentionUpdate { days, max_bytes } => {
             validate_mem_temporary_retention_days(days)?;
+            validate_mem_temporary_capacity_bytes(max_bytes)?;
             let (memory_dir, layout, store, settings) = {
                 let mem = state
                     .mem
@@ -4725,6 +5204,7 @@ fn handle_command_with_id(
                     .map_err(|_| "mem_state_poisoned".to_string())?;
                 let mut settings = mem.settings.clone();
                 settings.temporary_retention_days = days;
+                settings.temporary_capacity_bytes = max_bytes;
                 (
                     mem.layout.memory_dir(),
                     mem.layout.clone(),
@@ -4734,27 +5214,54 @@ fn handle_command_with_id(
             };
             // Apply first: a failed cleanup must not persist a setting that the
             // running process did not successfully enforce.
-            apply_temporary_retention(&layout, &store, days, now_ms_i64())?;
+            apply_temporary_retention(&layout, &store, days, max_bytes, now_ms_i64())?;
             save_web_mem_settings(&memory_dir, &settings)?;
             state
                 .mem
                 .lock()
                 .map_err(|_| "mem_state_poisoned".to_string())?
-                .settings = settings;
+                .settings = settings.clone();
             let event = WireEvent::MemSettingsUpdated {
                 temporary_retention_days: days,
+                temporary_capacity_bytes: max_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
-        ClientCommand::MemSwitch { path } => {
+        ClientCommand::MemConversationCapacityUpdate { max_bytes } => {
+            validate_mem_conversation_capacity_bytes(max_bytes)?;
+            let (memory_dir, store, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.conversation_capacity_bytes = max_bytes;
+                (mem.layout.memory_dir(), mem.session_store.clone(), settings)
+            };
+            apply_conversation_capacity(state, &store, max_bytes)?;
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: max_bytes,
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::MemSwitch { path, stop_running } => {
             let mut epoch = state
                 .mem_epoch
                 .write()
                 .map_err(|_| "mem_epoch_poisoned".to_string())?;
-            switch_mem_space(state, port, &path)?;
+            switch_mem_space(state, port, &path, stop_running)?;
             *epoch = epoch.saturating_add(1);
-            state.temporary_retention_wakeup.notify_one();
             state
                 .semantic_delivery
                 .broadcast_baseline_with(|event_cursor| WireEvent::Hello {
@@ -4767,34 +5274,126 @@ fn handle_command_with_id(
     Ok(None)
 }
 
-fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapshot, String> {
-    if state
+fn session_has_live_work_for_mem_switch(session: &WebSession) -> bool {
+    session.active_turn_id.is_some()
+        || session.pending_turn_id.is_some()
+        || session.state == "working"
+        || session
+            .workers
+            .iter()
+            .any(|worker| worker.state == "working")
+        || !session.pending_unconsumed_supplements.is_empty()
+        || session.pending_work_instruction_turn.is_some()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MemSwitchLiveSession {
+    session_id: String,
+    turn_id: Option<String>,
+}
+
+fn live_sessions_for_mem_switch(state: &AppState) -> Result<Vec<MemSwitchLiveSession>, String> {
+    let sessions = state
         .sessions
         .lock()
-        .map_err(|_| "session_store_poisoned".to_string())?
+        .map_err(|_| "session_store_poisoned".to_string())?;
+    Ok(sessions
         .values()
-        .any(|session| {
-            session.active_turn_id.is_some()
-                || session.pending_turn_id.is_some()
-                || session.state == "working"
-                || !session.pending_unconsumed_supplements.is_empty()
-                || session.pending_work_instruction_turn.is_some()
+        .filter(|session| session_has_live_work_for_mem_switch(session))
+        .map(|session| MemSwitchLiveSession {
+            session_id: session.session_id.clone(),
+            turn_id: session
+                .active_turn_id
+                .as_ref()
+                .or(session.pending_turn_id.as_ref())
+                .cloned()
+                .or_else(|| {
+                    session
+                        .turns
+                        .iter()
+                        .rev()
+                        .find(|turn| turn.final_answer.is_none() && turn.completion.is_none())
+                        .map(|turn| turn.turn_id.clone())
+                }),
         })
+        .collect())
+}
+
+fn interrupt_old_mem_sessions_after_worker_shutdown(
+    state: &AppState,
+    live_sessions: &[MemSwitchLiveSession],
+) -> Result<(), String> {
     {
-        return Err("mem_switch_active_sessions".to_string());
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let interrupted_at_ms = now_ms();
+        for live in live_sessions {
+            let Some(session) = sessions.get_mut(&live.session_id) else {
+                continue;
+            };
+            for worker in &mut session.workers {
+                if worker.state == "working" {
+                    worker.state = "ready".to_string();
+                }
+            }
+            let target_finished = live.turn_id.as_ref().is_some_and(|turn_id| {
+                session.turns.iter().any(|turn| {
+                    turn.turn_id == *turn_id
+                        && (turn.final_answer.is_some() || turn.completion.is_some())
+                })
+            });
+            if !target_finished {
+                if let Some(turn_id) = &live.turn_id {
+                    if let Some(turn) = session.turns.iter_mut().find(|turn| {
+                        turn.turn_id == *turn_id
+                            && turn.final_answer.is_none()
+                            && turn.completion.is_none()
+                    }) {
+                        turn.state = "interrupted".to_string();
+                        turn.interrupted_at_ms.get_or_insert(interrupted_at_ms);
+                    }
+                }
+                session.state = "interrupted".to_string();
+            } else {
+                session.state = aggregate_web_session_state(&session.workers, "ready");
+            }
+            session.active_turn_id = None;
+            session.cancelling_turn_id = None;
+            session.pending_turn_id = None;
+            session.pending_unconsumed_supplements.clear();
+            session.pending_work_instruction_turn = None;
+        }
     }
+    for live in live_sessions {
+        persist_web_session(state, &live.session_id)?;
+    }
+    Ok(())
+}
+
+fn switch_mem_space(
+    state: &AppState,
+    port: u16,
+    path: &str,
+    stop_running: bool,
+) -> Result<WebSnapshot, String> {
     let requested_path = Path::new(path);
-    let next_mem = if requested_path.is_absolute() {
-        WebMemState::from_directory(requested_path)?
+    let mut next_mem = if requested_path.is_absolute() {
+        WebMemState::from_directory_with_debug_defaults(requested_path, state.debug.is_some())?
     } else {
         validate_web_space_name(path)?;
         let data_root = current_mem_state(state)?.layout.data_root().to_path_buf();
-        WebMemState::new(data_root, path.to_string())?
+        WebMemState::new_with_debug_defaults(data_root, path.to_string(), state.debug.is_some())?
     };
     let current_path = absolute_path(current_mem_state(state)?.layout.space_dir());
     let next_path = absolute_path(next_mem.layout.space_dir());
     if current_path == next_path {
         return Ok(snapshot_for(state, port));
+    }
+    let live_sessions = live_sessions_for_mem_switch(state)?;
+    if !live_sessions.is_empty() && !stop_running {
+        return Err("mem_switch_active_sessions_confirmation_required".to_string());
     }
     let next_command_dedup = load_command_dedup_resilient(&command_dedup_path(&next_mem))?;
     let running_instance_info = state
@@ -4823,7 +5422,9 @@ fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapsh
         }
         std::mem::take(&mut *manager)
     };
-    let _ = old_manager.shutdown_all();
+    let shutdown_result = old_manager.shutdown_all();
+    interrupt_old_mem_sessions_after_worker_shutdown(state, &live_sessions)?;
+    shutdown_result.map_err(|error| format!("mem_switch_worker_shutdown_failed:{error}"))?;
     {
         let mut sessions = state
             .sessions
@@ -4836,6 +5437,9 @@ fn switch_mem_space(state: &AppState, port: u16, path: &str) -> Result<WebSnapsh
             .mem
             .lock()
             .map_err(|_| "mem_state_poisoned".to_string())?;
+        let switched_at = Instant::now();
+        checkpoint_temporary_maintenance_runtime(&mut mem, switched_at)?;
+        next_mem.temporary_maintenance.checkpoint_started_at = switched_at;
         *mem = next_mem;
     }
     {
@@ -5328,6 +5932,19 @@ fn mcp_updated_event(state: &AppState, session_id: Option<String>) -> Result<Wir
     })
 }
 
+fn next_untitled_session_name<'a>(display_names: impl Iterator<Item = &'a str>) -> String {
+    let used = display_names
+        .filter_map(|name| name.strip_prefix("Untitled "))
+        .filter_map(|suffix| suffix.parse::<u64>().ok())
+        .filter(|number| *number > 0)
+        .collect::<BTreeSet<_>>();
+    let mut number = 1_u64;
+    while used.contains(&number) {
+        number = number.saturating_add(1);
+    }
+    format!("Untitled {number}")
+}
+
 fn create_session(
     state: &AppState,
     display_name: Option<String>,
@@ -5365,15 +5982,24 @@ fn create_session(
         let mcp_server_ids = Vec::new();
         let (mcp_config_revision, applied_mcp_config_revision) =
             initial_mcp_revisions(&mcp_server_ids);
+        let session_display_name = display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                next_untitled_session_name(
+                    sessions
+                        .values()
+                        .map(|session| session.display_name.as_str()),
+                )
+            });
         sessions.insert(
             session_id.clone(),
             WebSession {
                 session_id: session_id.clone(),
                 group_id: None,
-                display_name: display_name
-                    .clone()
-                    .filter(|name| !name.trim().is_empty())
-                    .unwrap_or_else(|| format!("Session{ordinal}")),
+                display_name: session_display_name,
                 ordinal,
                 state: "ready".to_string(),
                 current_dir: current_dir.display().to_string(),
@@ -5402,7 +6028,10 @@ fn create_session(
                 history_has_more: false,
                 resume_notice_pending: false,
                 active_turn_id: None,
+                cancelling_turn_id: None,
                 pending_turn_id: None,
+                turn_projection: TurnProjectionCache::default(),
+                next_turn_intents: NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS),
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
                 reported_session_working_worker_count: None,
@@ -5667,7 +6296,12 @@ fn restore_stored_session(
     let history_records = history_page.records;
     let messages = restored_messages_from_history_records(&history_records);
     let mut turns = restored_turns_from_history_records(&history_records);
-    mark_restored_interrupted_turn(&mut turns, stored.state, stored.last_turn_id.as_deref());
+    mark_restored_interrupted_turn(
+        &mut turns,
+        stored.state,
+        stored.last_turn_id.as_deref(),
+        stored.updated_at_ms.max(0) as u128,
+    );
     let tools = tool_repo.list()?;
     let debug_dir = state
         .debug
@@ -5677,6 +6311,24 @@ fn restore_stored_session(
         .map(|path| path.display().to_string());
     let (mcp_config_revision, applied_mcp_config_revision) =
         initial_mcp_revisions(&stored.mcp_server_ids);
+    let persisted_next_turn_intents = load_next_turn_intents_resilient(state, &stored.session_id);
+    let queued_turn_ids = persisted_next_turn_intents
+        .snapshot()
+        .items
+        .into_iter()
+        .map(|intent| intent.payload.turn_id)
+        .collect::<BTreeSet<_>>();
+    for turn in &mut turns {
+        if queued_turn_ids.contains(&turn.turn_id)
+            && turn.final_answer.is_none()
+            && turn.completion.is_none()
+        {
+            turn.state = "interrupted".to_string();
+            turn.interrupted_at_ms
+                .get_or_insert(stored.updated_at_ms.max(0) as u128);
+        }
+    }
+    let next_turn_intents = NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS);
     {
         let mut sessions = state
             .sessions
@@ -5725,7 +6377,10 @@ fn restore_stored_session(
                 history_has_more: history_page.has_more,
                 resume_notice_pending: true,
                 active_turn_id: None,
+                cancelling_turn_id: None,
                 pending_turn_id: None,
+                turn_projection: TurnProjectionCache::default(),
+                next_turn_intents,
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
                 reported_session_working_worker_count: None,
@@ -5734,6 +6389,12 @@ fn restore_stored_session(
                 pending_work_instruction_turn: None,
                 runtime,
             },
+        );
+    }
+    if let Err(error) = persist_next_turn_intents(state, &stored.session_id) {
+        eprintln!(
+            "[timem_web_warning] next_turn_intents_restart_discard_persist_failed session_id={:?} reason={error}",
+            stored.session_id
         );
     }
     create_context_with_worker(
@@ -5751,9 +6412,21 @@ fn restore_stored_session(
 const RUNTIME_RESTART_HISTORY_KIND: &str = "runtime_restart";
 const RUNTIME_RESTART_HISTORY_CONTENT: &str = "Timem Web 已重新启动，以下内容来自新的运行实例";
 
+fn append_history_record(
+    state: &AppState,
+    session_id: &str,
+    record: &ChatHistoryRecord,
+) -> Result<(), String> {
+    // History appends are the hot path. They never trigger repository/MEM-wide
+    // scans; retention and capacity work runs only from explicit Settings
+    // commands.
+    current_session_store(state)?.append_history_record(session_id, record)
+}
+
 fn append_runtime_restart_history_marker(state: &AppState, session_id: &str) -> Result<(), String> {
     let created_at_ms = now_ms_i64();
-    current_session_store(state)?.append_history_record(
+    append_history_record(
+        state,
         session_id,
         &ChatHistoryRecord::Message {
             role: ChatHistoryRole::System,
@@ -5771,6 +6444,7 @@ fn mark_restored_interrupted_turn(
     turns: &mut [WebTurn],
     state: StoredSessionState,
     last_turn_id: Option<&str>,
+    interrupted_at_ms: u128,
 ) {
     if state != StoredSessionState::Interrupted {
         return;
@@ -5781,6 +6455,7 @@ fn mark_restored_interrupted_turn(
     if let Some(turn) = turns.iter_mut().find(|turn| turn.turn_id == last_turn_id) {
         if turn.final_answer.is_none() && turn.completion.is_none() {
             turn.state = "interrupted".to_string();
+            turn.interrupted_at_ms.get_or_insert(interrupted_at_ms);
         }
     }
 }
@@ -5820,7 +6495,12 @@ fn persist_restored_session_runtime_cache(
                 .runtime
                 .env_overrides
                 .iter()
-                .filter(|(key, _)| !matches!(key.as_str(), "TIMEM_API_KEY" | "TIMEM_HTTP_HEADERS"))
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "TIMEM_API_KEY" | "TIMEM_HTTP_HEADERS" | "TIMEM_REQUEST_FIELDS"
+                    )
+                })
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
         )
@@ -5871,6 +6551,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     turn_id: turn_id.clone(),
                     state: "restored".to_string(),
                     created_at_ms: created_at_ms as u128,
+                    interrupted_at_ms: None,
                     user_entries: Vec::new(),
                     events: Vec::new(),
                     sub_answers: Vec::new(),
@@ -5971,6 +6652,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     turn_id: turn_id.clone(),
                     state: "restored".to_string(),
                     created_at_ms: created_at_ms as u128,
+                    interrupted_at_ms: None,
                     user_entries: Vec::new(),
                     events: Vec::new(),
                     sub_answers: Vec::new(),
@@ -6079,6 +6761,363 @@ fn rollback_stored_sessions(
     }
 }
 
+fn next_turn_intents_path(state: &AppState, session_id: &str) -> Result<PathBuf, String> {
+    let store = current_session_store(state)?;
+    let metadata = store.metadata_path_for_session(session_id);
+    metadata
+        .parent()
+        .map(|parent| parent.join("next_turn_intents.json"))
+        .ok_or_else(|| "next_turn_intents_path_invalid".to_string())
+}
+
+fn load_next_turn_intents(
+    state: &AppState,
+    session_id: &str,
+) -> Result<NextTurnIntentQueue<WebNextTurnPayload>, String> {
+    let path = next_turn_intents_path(state, session_id)?;
+    if !path.exists() {
+        return Ok(NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS));
+    }
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| format!("next_turn_intents_metadata_failed:{error}"))?;
+    if metadata.len() > MAX_NEXT_TURN_INTENT_FILE_BYTES {
+        return Err("next_turn_intents_file_too_large".to_string());
+    }
+    let raw =
+        std::fs::read(&path).map_err(|error| format!("next_turn_intents_read_failed:{error}"))?;
+    let queue: NextTurnIntentQueue<WebNextTurnPayload> = serde_json::from_slice(&raw)
+        .map_err(|error| format!("next_turn_intents_parse_failed:{error}"))?;
+    if queue.capacity() != MAX_NEXT_TURN_INTENTS || queue.len() > MAX_NEXT_TURN_INTENTS {
+        return Err("next_turn_intents_shape_invalid".to_string());
+    }
+    Ok(queue)
+}
+
+fn load_next_turn_intents_resilient(
+    state: &AppState,
+    session_id: &str,
+) -> NextTurnIntentQueue<WebNextTurnPayload> {
+    match load_next_turn_intents(state, session_id) {
+        Ok(queue) => queue,
+        Err(error) => {
+            if let Ok(path) = next_turn_intents_path(state, session_id) {
+                if path.exists() {
+                    let backup = path
+                        .with_extension(format!("corrupt-{}", unique_web_id("next-turn-intents")));
+                    let _ = std::fs::rename(&path, &backup);
+                }
+            }
+            eprintln!(
+                "[timem_web_warning] next_turn_intents_restore_failed session_id={session_id:?} reason={error}"
+            );
+            NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS)
+        }
+    }
+}
+
+fn persist_next_turn_intents(state: &AppState, session_id: &str) -> Result<(), String> {
+    let queue = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .get(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?
+        .next_turn_intents
+        .clone();
+    let payload = serde_json::to_vec_pretty(&queue)
+        .map_err(|error| format!("next_turn_intents_serialize_failed:{error}"))?;
+    if payload.len() as u64 > MAX_NEXT_TURN_INTENT_FILE_BYTES {
+        return Err("next_turn_intents_file_too_large".to_string());
+    }
+    let path = next_turn_intents_path(state, session_id)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("next_turn_intents_dir_failed:{error}"))?;
+    }
+    agent_core::atomic_write_file(&path, &payload)
+        .map_err(|error| format!("next_turn_intents_write_failed:{error}"))
+}
+
+fn queued_turn_for_command_id(
+    state: &AppState,
+    session_id: &str,
+    command_id: &str,
+) -> Result<Option<WebTurn>, String> {
+    let sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?;
+    let session = sessions
+        .get(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?;
+    let queued = session
+        .next_turn_intents
+        .snapshot()
+        .items
+        .iter()
+        .any(|intent| intent.command_id == command_id);
+    Ok(queued
+        .then(|| {
+            session
+                .turns
+                .iter()
+                .find(|turn| {
+                    turn.user_entries
+                        .iter()
+                        .any(|entry| entry.command_id.as_deref() == Some(command_id))
+                })
+                .cloned()
+        })
+        .flatten())
+}
+
+fn enqueue_next_turn_intent(
+    state: &AppState,
+    session_id: &str,
+    command_id: &str,
+    text: String,
+    attachment_ids: Option<&[String]>,
+    worker_roles: Vec<WorkerRole>,
+) -> Result<WebTurn, String> {
+    if let Some(turn) = queued_turn_for_command_id(state, session_id, command_id)? {
+        return Ok(turn);
+    }
+    let previous_session;
+    let turn;
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        if session.cancelling_turn_id.is_none() || current_turn_id(session).is_none() {
+            return Err("next_turn_intent_requires_stopping_turn".to_string());
+        }
+        previous_session = session.clone();
+        let attachments = take_pending_attachments_for_ids(session, attachment_ids)?;
+        let created_at_ms = now_ms();
+        let turn_id = unique_web_id("web_turn");
+        let payload = WebNextTurnPayload {
+            turn_id: turn_id.clone(),
+            created_at_ms,
+            text: text.clone(),
+            attachments: attachments.clone(),
+            worker_roles: worker_roles.clone(),
+        };
+        match session
+            .next_turn_intents
+            .enqueue(command_id.to_string(), payload)
+        {
+            NextTurnEnqueueResult::Enqueued { .. } => {}
+            NextTurnEnqueueResult::Duplicate { .. } => {
+                return session
+                    .turns
+                    .iter()
+                    .find(|turn| {
+                        turn.user_entries
+                            .iter()
+                            .any(|entry| entry.command_id.as_deref() == Some(command_id))
+                    })
+                    .cloned()
+                    .ok_or_else(|| "next_turn_intent_turn_missing".to_string());
+            }
+            NextTurnEnqueueResult::Full { .. } => {
+                *session = previous_session;
+                return Err("next_turn_intent_queue_full".to_string());
+            }
+        }
+        turn = WebTurn {
+            turn_id,
+            state: "pending".to_string(),
+            created_at_ms,
+            interrupted_at_ms: None,
+            user_entries: vec![WebTurnUserEntry {
+                kind: "task".to_string(),
+                text: text.clone(),
+                attachments,
+                created_at_ms,
+                command_id: Some(command_id.to_string()),
+                delivery_state: Some(ChatCommandDeliveryState::Recorded),
+                worker_roles,
+            }],
+            events: Vec::new(),
+            sub_answers: Vec::new(),
+            final_answer: None,
+            completion: None,
+        };
+        session.turns.push(turn.clone());
+        if session.turns.len() > MAX_SESSION_TURNS {
+            let excess = session.turns.len() - MAX_SESSION_TURNS;
+            session.turns.drain(..excess);
+        }
+        session.messages.push(WebChatMessage {
+            id: unique_web_id("msg_user"),
+            role: "user".to_string(),
+            text: text.clone(),
+            created_at_ms,
+            kind: None,
+            completion: None,
+        });
+        if session.messages.len() > MAX_SESSION_MESSAGES {
+            let excess = session.messages.len() - MAX_SESSION_MESSAGES;
+            session.messages.drain(..excess);
+        }
+    }
+    let persist_result = persist_next_turn_intents(state, session_id)
+        .and_then(|()| {
+            append_chat_history_message(
+                state,
+                session_id,
+                &turn.turn_id,
+                "user",
+                Some("task"),
+                Some(command_id),
+                turn.created_at_ms as i64,
+                text,
+            )
+        })
+        .and_then(|()| {
+            append_worker_roles_history(
+                state,
+                session_id,
+                &turn.turn_id,
+                turn.created_at_ms as i64,
+                &turn.user_entries[0].worker_roles,
+            )
+        })
+        .and_then(|()| persist_web_session(state, session_id));
+    if let Err(error) = persist_result {
+        if let Ok(mut sessions) = state.sessions.lock() {
+            sessions.insert(session_id.to_string(), previous_session);
+        }
+        if let Err(rollback_error) = persist_next_turn_intents(state, session_id) {
+            return Err(format!(
+                "{error};next_turn_intent_rollback_failed:{rollback_error}"
+            ));
+        }
+        return Err(error);
+    }
+    publish_semantic(
+        state,
+        WireEvent::TurnUpdated {
+            session_id: session_id.to_string(),
+            turn: turn.clone(),
+        },
+    );
+    Ok(turn)
+}
+
+fn remove_dispatched_next_turn_intent(
+    state: &AppState,
+    session_id: &str,
+    command_id: &str,
+) -> Result<(), String> {
+    let queued = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .get(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?
+        .next_turn_intents
+        .snapshot()
+        .items
+        .iter()
+        .any(|intent| intent.command_id == command_id);
+    if !queued {
+        return Ok(());
+    }
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        let _ = session.next_turn_intents.remove(command_id);
+    }
+    persist_next_turn_intents(state, session_id)
+}
+
+fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
+    let intent = state.sessions.lock().ok().and_then(|sessions| {
+        let session = sessions.get(session_id)?;
+        let projection = session
+            .turn_projection
+            .current()
+            .map(|item| item.projection);
+        let core_finished = matches!(projection, Some(TurnProjection::Finished(_)));
+        (core_finished && current_turn_id(session).is_none())
+            .then(|| session.next_turn_intents.front().cloned())
+            .flatten()
+    });
+    let Some(intent) = intent else {
+        return;
+    };
+    let payload = intent.payload.clone();
+    {
+        let mut sessions = match state.sessions.lock() {
+            Ok(sessions) => sessions,
+            Err(_) => return,
+        };
+        let Some(session) = sessions.get_mut(session_id) else {
+            return;
+        };
+        let Some(turn) = session
+            .turns
+            .iter_mut()
+            .find(|turn| turn.turn_id == payload.turn_id)
+        else {
+            return;
+        };
+        session.pending_turn_id = Some(payload.turn_id.clone());
+        turn.state = "pending".to_string();
+    }
+    let context = match session_context_with_roles(
+        state,
+        session_id,
+        &payload.attachments,
+        &payload.worker_roles,
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            clear_pending_dispatched_turn(state, session_id, &payload.turn_id);
+            publish_core_semantic(
+                state,
+                session_id,
+                WireEvent::HostError {
+                    message: format!("next_turn_intent_context_failed:{error}"),
+                },
+            );
+            return;
+        }
+    };
+    if let Err(error) = primary_worker_handle(state, session_id).and_then(|worker| {
+        worker.run_turn_with_command_id(payload.text, context, Some(intent.command_id.clone()))
+    }) {
+        clear_pending_dispatched_turn(state, session_id, &payload.turn_id);
+        publish_core_semantic(
+            state,
+            session_id,
+            WireEvent::HostError {
+                message: format!("next_turn_intent_core_send_failed:{error}"),
+            },
+        );
+    }
+}
+
+fn clear_pending_dispatched_turn(state: &AppState, session_id: &str, turn_id: &str) {
+    if let Ok(mut sessions) = state.sessions.lock() {
+        if let Some(session) = sessions.get_mut(session_id) {
+            if session.pending_turn_id.as_deref() == Some(turn_id) {
+                session.pending_turn_id = None;
+            }
+        }
+    }
+}
+
 fn persist_web_session(state: &AppState, session_id: &str) -> Result<(), String> {
     let stored = {
         let sessions = state
@@ -6139,7 +7178,12 @@ fn stored_session_from_web_session_with_store(
                 .runtime
                 .env_overrides
                 .iter()
-                .filter(|(key, _)| !matches!(key.as_str(), "TIMEM_API_KEY" | "TIMEM_HTTP_HEADERS"))
+                .filter(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "TIMEM_API_KEY" | "TIMEM_HTTP_HEADERS" | "TIMEM_REQUEST_FIELDS"
+                    )
+                })
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect(),
         ),
@@ -6218,8 +7262,11 @@ fn redeliver_recorded_turn(
     else {
         return Ok(());
     };
-    // CoreAccepted is process-local dequeue, not durable completion. An
-    // unfinished turn is therefore re-driven after restart with the same ID.
+    // A process restart is a hard stop boundary. Restored interrupted turns
+    // may be re-delivered for display, but never regain Core execution ownership.
+    if turn.state == "interrupted" {
+        return Ok(());
+    }
     let worker = primary_worker_handle(state, session_id)?;
     if input_kind == Some("toolgen") {
         let instruction = (!text.trim().is_empty()).then(|| text.trim().to_string());
@@ -6745,6 +7792,90 @@ fn submit_turn_with_selected_attachments(
     Ok(turn)
 }
 
+fn cancel_pending_work_instruction_turn(
+    state: &AppState,
+    session_id: &str,
+    target_command_id: Option<&str>,
+) -> Result<bool, String> {
+    let completion = json!({
+        "stats": {
+            "llm_calls": 0,
+            "repair_calls": 0,
+            "tool_calls": 0,
+            "mem_reads": 0,
+            "mem_writes": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "cache_created_tokens": 0,
+            "shrunk_tokens": 0,
+        },
+        "latest_usage": Value::Null,
+        "elapsed_ms": 0,
+        "repair_issue": Value::Null,
+        "stop_reason": "CancelledByUser",
+        "toolgen_retrospect": Value::Null,
+    });
+    let turn_id = {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned")?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        let Some(pending) = session.pending_work_instruction_turn.as_ref() else {
+            return Ok(false);
+        };
+        if target_command_id.is_some() && pending.command_id.as_deref() != target_command_id {
+            return Err("turn_cancel_target_mismatch".to_string());
+        }
+        let turn_id = session
+            .pending_turn_id
+            .clone()
+            .ok_or_else(|| "pending_turn_missing".to_string())?;
+        let turn = session
+            .turns
+            .iter_mut()
+            .find(|turn| turn.turn_id == turn_id)
+            .ok_or_else(|| "pending_turn_not_found".to_string())?;
+        turn.state = "finished".to_string();
+        turn.completion = Some(completion.clone());
+        session.pending_work_instruction_turn = None;
+        session.pending_turn_id = None;
+        session.active_turn_id = None;
+        session.cancelling_turn_id = None;
+        session.state = aggregate_web_session_state(&session.workers, "ready");
+        turn_id
+    };
+    let mut extra = BTreeMap::new();
+    extra.insert("completion".to_string(), completion.clone());
+    append_history_record(
+        state,
+        session_id,
+        &ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: turn_id.clone(),
+            created_at_ms: now_ms_i64(),
+            kind: ChatHistoryEventKind::Stats,
+            content: "Turn completed.".to_string(),
+            extra,
+        },
+    )?;
+    persist_web_session(state, session_id)?;
+    publish_core_semantic(
+        state,
+        session_id,
+        WireEvent::TurnFinished {
+            session_id: session_id.to_string(),
+            turn_id: Some(turn_id),
+            outcome: json!({ "text": "", "message_id": Value::Null, "completion": completion }),
+        },
+    );
+    Ok(true)
+}
+
 fn resolve_work_instruction_decision(
     state: &AppState,
     session_id: &str,
@@ -6895,6 +8026,18 @@ fn normalize_model_endpoint_input(
     }
     agent_core::validate_model_http_headers(&http_headers)
         .map_err(|error| format!("invalid_model_endpoint_headers:{error}"))?;
+    let mut request_fields = input.request_fields;
+    if let Some(existing) = existing {
+        for (name, value) in &mut request_fields {
+            if value == &Value::String("****".to_string()) {
+                if let Some(previous) = existing.request_fields.get(name) {
+                    *value = previous.clone();
+                }
+            }
+        }
+    }
+    agent_core::validate_model_request_fields(&request_fields)
+        .map_err(|error| format!("invalid_model_endpoint_request_fields:{error}"))?;
     if input.stream && api_protocol != "openai-compatible" {
         return Err("model_endpoint_stream_requires_openai_compatible".to_string());
     }
@@ -6943,6 +8086,7 @@ fn normalize_model_endpoint_input(
         stream: input.stream,
         api_key,
         http_headers,
+        request_fields,
     })
 }
 
@@ -6954,6 +8098,7 @@ fn testable_endpoint_validation_settings() -> RuntimeSettings {
             base_url: "http://127.0.0.1".to_string(),
             api_key: String::new(),
             http_headers: Default::default(),
+            request_fields: Default::default(),
             timeout_secs: 60,
             max_llm_output_tokens: 4_096,
             max_llm_input_tokens: 32_000,
@@ -7052,6 +8197,7 @@ fn session_uses_model_endpoint(session: &WebSession, endpoint: &ModelEndpointCon
         && config.openai_compatible.stream == endpoint.stream
         && config.api_key == endpoint.api_key
         && config.http_headers == endpoint.http_headers
+        && config.request_fields == endpoint.request_fields
 }
 
 fn sync_endpoint_runtime_fields(
@@ -7062,6 +8208,7 @@ fn sync_endpoint_runtime_fields(
     if previous.max_llm_input_tokens == updated.max_llm_input_tokens
         && previous.max_llm_output_tokens == updated.max_llm_output_tokens
         && previous.stream == updated.stream
+        && previous.request_fields == updated.request_fields
     {
         return Ok(Vec::new());
     }
@@ -7112,6 +8259,13 @@ fn sync_endpoint_runtime_fields(
                 .1,
             );
         }
+        if previous.request_fields != updated.request_fields {
+            runtime_profile = Some(update_session_request_fields(
+                state,
+                &session_id,
+                updated.request_fields.clone(),
+            )?);
+        }
         if let Some(runtime_profile) = runtime_profile {
             updates.push((session_id, runtime_profile));
         }
@@ -7132,10 +8286,16 @@ fn delete_model_endpoint(state: &AppState, endpoint_id: &str) -> Result<(), Stri
     save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints)
 }
 
+struct ModelEndpointSecrets {
+    api_key: String,
+    http_headers: BTreeMap<String, String>,
+    request_fields: BTreeMap<String, Value>,
+}
+
 fn model_endpoint_secrets(
     state: &AppState,
     endpoint_id: &str,
-) -> Result<(String, BTreeMap<String, String>), String> {
+) -> Result<ModelEndpointSecrets, String> {
     state
         .mem
         .lock()
@@ -7143,7 +8303,11 @@ fn model_endpoint_secrets(
         .model_endpoints
         .iter()
         .find(|item| item.id == endpoint_id)
-        .map(|item| (item.api_key.clone(), item.http_headers.clone()))
+        .map(|item| ModelEndpointSecrets {
+            api_key: item.api_key.clone(),
+            http_headers: item.http_headers.clone(),
+            request_fields: item.request_fields.clone(),
+        })
         .ok_or_else(|| "model_endpoint_not_found".to_string())
 }
 
@@ -7183,6 +8347,7 @@ fn apply_model_endpoint(
         update_session_runtime_setting(state, session_id, key, &value)?;
     }
     update_session_http_headers(state, session_id, endpoint.http_headers)?;
+    update_session_request_fields(state, session_id, endpoint.request_fields)?;
     update_session_api_key(state, session_id, endpoint.api_key)
 }
 
@@ -7221,6 +8386,50 @@ fn update_session_http_headers(
         session.runtime.env.insert(
             "TIMEM_HTTP_HEADERS".to_string(),
             serde_json::to_string(&http_headers).map_err(|e| e.to_string())?,
+        );
+        session.runtime_profile =
+            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile.clone()
+    };
+    persist_web_session(state, session_id)?;
+    Ok(runtime_profile)
+}
+
+fn update_session_request_fields(
+    state: &AppState,
+    session_id: &str,
+    request_fields: BTreeMap<String, Value>,
+) -> Result<WebSessionRuntimeProfile, String> {
+    agent_core::validate_model_request_fields(&request_fields)
+        .map_err(|error| format!("invalid_model_endpoint_request_fields:{error}"))?;
+    if session_has_active_turn(state, session_id)? {
+        return Err("session_request_fields_update_while_working".to_string());
+    }
+    let worker_ids = session_worker_ids(state, session_id)?;
+    {
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        for worker_id in &worker_ids {
+            manager
+                .handle(worker_id)
+                .ok_or_else(|| "session_worker_not_found".to_string())?
+                .update_request_fields(request_fields.clone())?;
+        }
+    }
+    let runtime_profile = {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        session.runtime.settings.config.request_fields = request_fields.clone();
+        session.runtime.env.insert(
+            "TIMEM_REQUEST_FIELDS".to_string(),
+            serde_json::to_string(&request_fields).map_err(|e| e.to_string())?,
         );
         session.runtime_profile =
             WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
@@ -7809,6 +9018,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
         turn_id: unique_web_id("web_turn"),
         state: "pending".to_string(),
         created_at_ms: now_ms(),
+        interrupted_at_ms: None,
         user_entries: vec![WebTurnUserEntry {
             kind: "task".to_string(),
             text: text.to_string(),
@@ -7984,6 +9194,7 @@ fn start_web_toolgen_turn(
         turn_id: unique_web_id("web_toolgen_turn"),
         state: "pending".to_string(),
         created_at_ms,
+        interrupted_at_ms: None,
         user_entries,
         events: Vec::new(),
         sub_answers: Vec::new(),
@@ -8016,7 +9227,8 @@ fn start_web_toolgen_turn(
         "source_turn_id".to_string(),
         Value::String(source_turn_id.to_string()),
     );
-    current_session_store(state)?.append_history_record(
+    append_history_record(
+        state,
         session_id,
         &ChatHistoryRecord::Event {
             role: ChatHistoryRole::System,
@@ -8216,6 +9428,9 @@ fn rollback_web_turn(
             if session.pending_turn_id.as_deref() == Some(turn_id) {
                 session.pending_turn_id = None;
             }
+            if session.cancelling_turn_id.as_deref() == Some(turn_id) {
+                session.cancelling_turn_id = None;
+            }
             session.state = aggregate_web_session_state(&session.workers, &session.state);
             session.attachments.splice(0..0, attachments);
         }
@@ -8330,7 +9545,8 @@ fn append_chat_history_message(
         "system" => ChatHistoryRole::System,
         _ => ChatHistoryRole::System,
     };
-    current_session_store(state)?.append_history_record(
+    append_history_record(
+        state,
         session_id,
         &ChatHistoryRecord::Message {
             role,
@@ -8357,19 +9573,18 @@ fn append_chat_history_event(
     let mut extra = BTreeMap::new();
     extra.insert("source".to_string(), Value::String(source.to_string()));
     extra.insert("payload".to_string(), payload);
-    if let Ok(store) = current_session_store(state) {
-        let _ = store.append_history_record(
-            session_id,
-            &ChatHistoryRecord::Event {
-                role: ChatHistoryRole::System,
-                turn_id: turn_id.to_string(),
-                created_at_ms,
-                kind,
-                content,
-                extra,
-            },
-        );
-    }
+    let _ = append_history_record(
+        state,
+        session_id,
+        &ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id: turn_id.to_string(),
+            created_at_ms,
+            kind,
+            content,
+            extra,
+        },
+    );
 }
 
 fn append_worker_roles_history(
@@ -8396,7 +9611,8 @@ fn append_worker_roles_history(
         "user_entry_created_at_ms".to_string(),
         Value::from(created_at_ms),
     );
-    current_session_store(state)?.append_history_record(
+    append_history_record(
+        state,
         session_id,
         &ChatHistoryRecord::Event {
             role: ChatHistoryRole::System,
@@ -8887,20 +10103,20 @@ fn mark_core_command_accepted(state: &AppState, session_id: &str, command_id: &s
     extra.insert("kind".to_string(), json!("command_delivery"));
     extra.insert("command_id".to_string(), json!(command_id));
     extra.insert("delivery_state".to_string(), json!("core_accepted"));
-    let persist_result = current_session_store(state).and_then(|store| {
-        store.append_history_record(
-            session_id,
-            &ChatHistoryRecord::Event {
-                role: ChatHistoryRole::System,
-                turn_id,
-                created_at_ms: now_ms_i64(),
-                kind: ChatHistoryEventKind::RuntimeNotice,
-                content: "Core accepted command.".to_string(),
-                extra,
-            },
-        )?;
-        persist_web_session(state, session_id)
-    });
+    let persist_result = append_history_record(
+        state,
+        session_id,
+        &ChatHistoryRecord::Event {
+            role: ChatHistoryRole::System,
+            turn_id,
+            created_at_ms: now_ms_i64(),
+            kind: ChatHistoryEventKind::RuntimeNotice,
+            content: "Core accepted command.".to_string(),
+            extra,
+        },
+    )
+    .and_then(|()| persist_web_session(state, session_id))
+    .and_then(|()| remove_dispatched_next_turn_intent(state, session_id, command_id));
     if let Err(error) = persist_result {
         let _ = state.events.send(command_ack(
             command_id,
@@ -8950,9 +10166,10 @@ fn activate_core_started_turn(
             .user_entries
             .iter()
             .any(|entry| entry.command_id.as_deref() == Some(command_id));
+        let host_cancelled = session.cancelling_turn_id.as_deref() == Some(pending_turn_id);
         (matches_command
-            && pending_turn.final_answer.is_none()
-            && pending_turn.completion.is_none())
+            && (host_cancelled
+                || (pending_turn.final_answer.is_none() && pending_turn.completion.is_none())))
         .then(|| pending_turn.turn_id.clone())?
     } else {
         session
@@ -8969,17 +10186,26 @@ fn activate_core_started_turn(
     if session.pending_turn_id.as_deref() == Some(turn_id.as_str()) {
         session.pending_turn_id = None;
     }
-    session.active_turn_id = Some(turn_id);
-    session.state = "working".to_string();
+    session.active_turn_id = Some(turn_id.clone());
+    let cancelling = session.cancelling_turn_id.as_deref() == Some(turn_id.as_str());
+    let terminal = session.turns[turn_index].state == "finished"
+        || session.turns[turn_index].completion.is_some();
+    if !cancelling && !terminal {
+        session.state = "working".to_string();
+    }
     session.reported_session_working_worker_count = None;
-    session.turns[turn_index].state = "working".to_string();
+    if !terminal {
+        session.turns[turn_index].state = "working".to_string();
+    }
 
     if let Some(worker) = session
         .workers
         .iter_mut()
         .find(|worker| worker.worker_id == worker_id)
     {
-        worker.state = "working".to_string();
+        if !cancelling && !terminal {
+            worker.state = "working".to_string();
+        }
     }
 
     Some(session.turns[turn_index].clone())
@@ -9009,6 +10235,48 @@ fn handle_scoped_worker_event(
                         turn,
                     },
                 );
+            }
+        }
+        CoreSessionWorkerEvent::TurnProjection(projection) => {
+            if !is_primary_worker(state, session_id, worker_id) {
+                emit_worker_activity(
+                    state,
+                    session_id,
+                    context_id,
+                    worker_id,
+                    json!({ "kind": "subworker_turn_projection", "projection": projection }),
+                );
+                return;
+            }
+            let applied = state.sessions.lock().ok().and_then(|mut sessions| {
+                let session = sessions.get_mut(session_id)?;
+                match session.turn_projection.apply(projection) {
+                    ProjectionApplyResult::Applied { .. } => {
+                        let versioned = session.turn_projection.current()?;
+                        session.state = match &versioned.projection {
+                            TurnProjection::Active(_) => "working",
+                            TurnProjection::Finished(_) => "ready",
+                        }
+                        .to_string();
+                        Some(versioned)
+                    }
+                    ProjectionApplyResult::Duplicate { .. }
+                    | ProjectionApplyResult::IgnoredStale { .. } => None,
+                }
+            });
+            if let Some(projection) = applied {
+                let finished = matches!(projection.projection, TurnProjection::Finished(_));
+                publish_core_semantic(
+                    state,
+                    session_id,
+                    WireEvent::TurnProjection {
+                        session_id: session_id.to_string(),
+                        projection,
+                    },
+                );
+                if finished {
+                    dispatch_next_turn_intent_if_ready(state, session_id);
+                }
             }
         }
         CoreSessionWorkerEvent::Topics(events) => {
@@ -9419,6 +10687,7 @@ fn handle_scoped_worker_event(
                     .map(|session| {
                         let turn_id = session.active_turn_id.take();
                         session.pending_turn_id = None;
+                        session.cancelling_turn_id = None;
                         if let Some(active_turn_id) = turn_id.as_deref() {
                             if let Some(turn) = session
                                 .turns
@@ -9485,19 +10754,18 @@ fn handle_scoped_worker_event(
             if let Some(turn_id) = turn_id.as_deref() {
                 let mut extra = BTreeMap::new();
                 extra.insert("completion".to_string(), completion.clone());
-                if let Ok(store) = current_session_store(state) {
-                    let _ = store.append_history_record(
-                        session_id,
-                        &ChatHistoryRecord::Event {
-                            role: ChatHistoryRole::System,
-                            turn_id: turn_id.to_string(),
-                            created_at_ms: now_ms_i64(),
-                            kind: ChatHistoryEventKind::Stats,
-                            content: "Turn completed.".to_string(),
-                            extra,
-                        },
-                    );
-                }
+                let _ = append_history_record(
+                    state,
+                    session_id,
+                    &ChatHistoryRecord::Event {
+                        role: ChatHistoryRole::System,
+                        turn_id: turn_id.to_string(),
+                        created_at_ms: now_ms_i64(),
+                        kind: ChatHistoryEventKind::Stats,
+                        content: "Turn completed.".to_string(),
+                        extra,
+                    },
+                );
             }
             let _ = persist_web_session(state, session_id);
             publish_core_semantic(
@@ -9509,8 +10777,21 @@ fn handle_scoped_worker_event(
                     outcome: json!({ "text": outcome.text, "message_id": message_id, "completion": completion }),
                 },
             );
+            dispatch_next_turn_intent_if_ready(state, session_id);
             if should_resubmit_unconsumed_supplements {
-                resubmit_unconsumed_supplements(state, session_id, context_id, worker_id);
+                let has_queued_intent = state
+                    .sessions
+                    .lock()
+                    .ok()
+                    .and_then(|sessions| {
+                        sessions
+                            .get(session_id)
+                            .map(|session| !session.next_turn_intents.is_empty())
+                    })
+                    .unwrap_or(false);
+                if !has_queued_intent {
+                    resubmit_unconsumed_supplements(state, session_id, context_id, worker_id);
+                }
             }
         }
         CoreSessionWorkerEvent::WorkerStopped => {
@@ -9611,6 +10892,9 @@ fn aggregate_web_session_state(workers: &[WebWorker], fallback: &str) -> String 
 fn set_worker_state(state: &AppState, session_id: &str, worker_id: &str, worker_state: &str) {
     if let Ok(mut sessions) = state.sessions.lock() {
         if let Some(session) = sessions.get_mut(session_id) {
+            if worker_state == "working" && session.cancelling_turn_id.is_some() {
+                return;
+            }
             if let Some(worker) = session
                 .workers
                 .iter_mut()
@@ -9669,6 +10953,12 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
             space_dir: String::new(),
             memory_dir: String::new(),
             temporary_retention_days: default_mem_temporary_retention_days(),
+            temporary_capacity_bytes: Some(if state.debug.is_some() {
+                MEM_CAPACITY_512_MB
+            } else {
+                MEM_CAPACITY_128_MB
+            }),
+            conversation_capacity_bytes: Some(MEM_CAPACITY_128_MB),
         });
     let (role_library, session_groups) = current_mem_state(state)
         .map(|mem| (mem.role_library, mem.session_groups))
@@ -10144,6 +11434,7 @@ const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_BASE_URL",
     "TIMEM_API_KEY",
     "TIMEM_HTTP_HEADERS",
+    "TIMEM_REQUEST_FIELDS",
     "TIMEM_TIMEOUT",
     "TIMEM_MAX_LLM_INPUT",
     "TIMEM_MAX_LLM_OUTPUT",
@@ -10327,6 +11618,10 @@ fn session_cached_env_values(settings: &RuntimeSettings) -> BTreeMap<String, Str
         "TIMEM_HTTP_HEADERS".to_string(),
         serde_json::to_string(&settings.config.http_headers).unwrap_or_else(|_| "{}".to_string()),
     );
+    env.insert(
+        "TIMEM_REQUEST_FIELDS".to_string(),
+        serde_json::to_string(&settings.config.request_fields).unwrap_or_else(|_| "{}".to_string()),
+    );
     env
 }
 
@@ -10481,6 +11776,7 @@ impl WebLaunchOptions {
             api_protocol: self.api_protocol.clone(),
             api_key: self.api_key.clone(),
             http_headers: None,
+            request_fields: None,
             model: self.model.clone(),
             base_url: self.base_url.clone(),
             timeout_secs: self.timeout_secs,

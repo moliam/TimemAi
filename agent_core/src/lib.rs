@@ -62,6 +62,7 @@ pub mod redaction;
 pub mod reminder_config;
 pub mod response_protocol;
 pub mod retry_policy;
+pub mod rolling_file_store;
 pub mod runtime_context;
 mod schema_optimizer;
 #[path = "../../resources/capabilities/tools/self_tool.rs"]
@@ -80,17 +81,20 @@ pub mod tool_jobs;
 pub(crate) mod tool_registry;
 pub mod tool_repo;
 mod tool_result_gate;
+mod tool_schema_renderer;
 #[path = "../../resources/capabilities/tools/toolgen.rs"]
 pub mod toolgen;
+pub mod turn_state;
 pub mod work_instructions;
 pub mod workspace;
 pub use audit::{
-    append_audit_event, append_repair_output_event, host_start_audit_event,
-    max_llm_output_increased_audit_event, model_input_overflow_recovery_audit_event,
-    model_repair_output_event, model_repair_request_audit_event, model_retry_audit_event,
-    prune_api_audit_before, read_audit_doc, round_limit_audit_event,
-    stale_context_choice_audit_event, turn_error_audit_event, turn_final_audit_event,
-    turn_start_audit_event, user_approval_audit_event, user_supplement_audit_event,
+    api_audit_maintenance_hint_path, append_audit_event, append_repair_output_event,
+    configure_audit_storage, host_start_audit_event, max_llm_output_increased_audit_event,
+    model_input_overflow_recovery_audit_event, model_repair_output_event,
+    model_repair_request_audit_event, model_retry_audit_event, prune_api_audit_before,
+    read_audit_doc, round_limit_audit_event, stale_context_choice_audit_event,
+    turn_error_audit_event, turn_final_audit_event, turn_start_audit_event,
+    user_approval_audit_event, user_supplement_audit_event,
 };
 pub use config_edit::{
     apply_runtime_config_value, bash_approval_mode_from_sources, capabilities_dir_from_sources,
@@ -146,10 +150,11 @@ pub use model_api::{
     model_prompt_blocks, model_request_audit_event, model_response_audit_event, parse_api_protocol,
     parse_model_response, parse_openai_compatible_cache_mode, plan_structured_output,
     prepare_model_http_request, prepare_model_interaction_http_request, prepare_model_request,
-    prompt_cache_plan_audit, validate_model_http_headers, without_openai_compatible_cache_control,
-    ApiProtocol, ModelCacheControl, ModelHttpResponseInterpretation, ModelPromptBlock,
-    ModelPromptRole, ModelServiceConfig, OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
-    PreparedModelHttpRequest, PreparedModelRequest, StructuredOutputHint,
+    prompt_cache_plan_audit, validate_model_http_headers, validate_model_request_fields,
+    without_openai_compatible_cache_control, ApiProtocol, ModelCacheControl,
+    ModelHttpResponseInterpretation, ModelPromptBlock, ModelPromptRole, ModelServiceConfig,
+    OpenAiCompatibleCacheMode, OpenAiCompatibleOptions, PreparedModelHttpRequest,
+    PreparedModelRequest, StructuredOutputHint,
 };
 pub use model_service_config::{
     apply_openai_compatible_env_value, model_service_config_from_sources,
@@ -194,8 +199,7 @@ pub use session_worker::{
     CoreSessionWorkerLifecycleState, CoreSessionWorkerManager, CoreSessionWorkerRuntime,
     CoreSessionWorkerStatus, ToolGenRequest,
 };
-use shell_exec::FileShellJobStore;
-pub use shell_exec::ShellJobRecord;
+use shell_exec::ShellJobManager;
 pub use shell_exec::{RunningShellJob, ShellJobExitUpdate};
 pub use status_summary::{
     context_bar_filled, context_percent, meaningful_latest_usage, runtime_token_status_view,
@@ -210,6 +214,10 @@ use tool_jobs::FileToolJobStore;
 pub use tool_repo::{
     SessionToolRepo, ToolDetail, ToolFileEntry, ToolManifest, ToolPublishResult, ToolSelfTest,
     ToolSummary,
+};
+pub use turn_state::{
+    ActiveTurnProjection, FinishedTurnProjection, TurnActivity, TurnInputAdmission, TurnProjection,
+    TurnProjectionOutcome, TurnToken,
 };
 pub use work_instructions::{
     combine_additional_contexts, discover_work_instruction_files, load_work_instruction_context,
@@ -811,15 +819,7 @@ impl MemGuard {
                 }
             })
             .unwrap_or_else(|| Path::new("."));
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("audit");
-        let logical_file_name = file_name
-            .strip_suffix(".jsonl")
-            .map(|stem| format!("{stem}.json"))
-            .unwrap_or_else(|| file_name.to_string());
-        Self::for_space_domain(space_dir, format!("audit-{logical_file_name}"))
+        Self::for_space_domain(space_dir, "audit-storage")
     }
 
     /// Reads do not acquire a cross-process lock. Writers publish complete
@@ -1202,9 +1202,13 @@ struct ActionAuditEntry {
     result_summary: Option<String>,
 }
 
+const ACTION_AUDIT_ACTIVE_TURN_MAX_BYTES: u64 = 512 * 1024;
+
 #[derive(Debug, Clone)]
 struct FileActionAuditStore {
     file: PathBuf,
+    active_dir: PathBuf,
+    legacy_turns_dir: PathBuf,
     guard: MemGuard,
 }
 
@@ -1212,58 +1216,303 @@ impl FileActionAuditStore {
     fn new(memory_dir: &Path) -> Self {
         let space_dir = space_dir_for_memory_dir(memory_dir);
         let file = space_dir.join("audit").join("action_audit.json");
-        let guard = MemGuard::for_audit_file(&file);
-        Self { file, guard }
+        Self {
+            active_dir: file.with_file_name("action_audit.active"),
+            legacy_turns_dir: file.with_file_name("action_audit.json.turns"),
+            guard: MemGuard::for_audit_file(&file),
+            file,
+        }
     }
 
     fn begin_turn(&self, turn_id: &str, started_at_ms: i64, user_question: &str) {
         let _ = self.guard.with_write(|| {
-            let mut doc = self.read_doc_unlocked();
-            if doc.turns.iter().any(|turn| turn.turn_id == turn_id) {
-                return;
+            if !self.ensure_archive_unlocked() {
+                return false;
             }
-            doc.turns.push(ActionAuditTurn {
-                turn_id: turn_id.to_string(),
-                started_at_ms,
-                user_question: user_question.to_string(),
-                interactions: Vec::new(),
-            });
-            self.write_doc_unlocked(&doc);
+            self.recover_stale_active_turns_unlocked();
+            let path = self.active_turn_path(turn_id);
+            if path.exists() {
+                return self
+                    .read_turn_unlocked(&path)
+                    .is_some_and(|turn| turn.turn_id == turn_id);
+            }
+            self.write_turn_unlocked(
+                &path,
+                &ActionAuditTurn {
+                    turn_id: turn_id.to_string(),
+                    started_at_ms,
+                    user_question: user_question.to_string(),
+                    interactions: Vec::new(),
+                },
+            )
         });
     }
 
     fn record_action(&self, entry: ActionAuditEntry, turn_id: &str, user_question: &str) {
         let _ = self.guard.with_write(|| {
-            let mut doc = self.read_doc_unlocked();
-            let turn_index =
-                if let Some(index) = doc.turns.iter().position(|turn| turn.turn_id == turn_id) {
-                    index
-                } else {
-                    doc.turns.push(ActionAuditTurn {
-                        turn_id: turn_id.to_string(),
-                        started_at_ms: now_ms(),
-                        user_question: user_question.to_string(),
-                        interactions: Vec::new(),
-                    });
-                    doc.turns.len().saturating_sub(1)
-                };
-            let turn = &mut doc.turns[turn_index];
-            let interaction_index = if let Some(index) = turn
+            if !self.ensure_archive_unlocked() {
+                return false;
+            }
+            let path = self.active_turn_path(turn_id);
+            let existing = self.read_turn_unlocked(&path);
+            if existing
+                .as_ref()
+                .is_some_and(|turn| turn.turn_id != turn_id)
+            {
+                return false;
+            }
+            let mut turn = existing.unwrap_or_else(|| ActionAuditTurn {
+                turn_id: turn_id.to_string(),
+                started_at_ms: now_ms(),
+                user_question: user_question.to_string(),
+                interactions: Vec::new(),
+            });
+            let interaction_index = turn
                 .interactions
                 .iter()
                 .position(|interaction| interaction.round == entry.round)
-            {
-                index
-            } else {
-                turn.interactions.push(ActionAuditInteraction {
-                    round: entry.round,
-                    actions: Vec::new(),
+                .unwrap_or_else(|| {
+                    turn.interactions.push(ActionAuditInteraction {
+                        round: entry.round,
+                        actions: Vec::new(),
+                    });
+                    turn.interactions.len() - 1
                 });
-                turn.interactions.len().saturating_sub(1)
-            };
             turn.interactions[interaction_index].actions.push(entry);
-            self.write_doc_unlocked(&doc);
+            self.write_turn_unlocked(&path, &turn)
         });
+    }
+
+    fn finish_turn(&self, turn_id: &str) {
+        let _ = self.guard.with_write(|| {
+            if !self.ensure_archive_unlocked() {
+                return false;
+            }
+            let path = self.active_turn_path(turn_id);
+            let Some(turn) = self.read_turn_unlocked(&path) else {
+                return true;
+            };
+            if turn.turn_id != turn_id {
+                return false;
+            }
+            // The compatibility view is written only after the canonical
+            // segmented append. If checkpoint deletion failed after that
+            // commit, a same-process retry must remove the checkpoint rather
+            // than append the completed Turn a second time.
+            let already_committed = self
+                .read_doc_unlocked()
+                .turns
+                .last()
+                .is_some_and(|archived| archived.turn_id == turn_id)
+                && rolling_file_store::segmented_directory(&self.file).exists();
+            if !already_committed && !self.archive_turn_unlocked(&turn) {
+                return false;
+            }
+            fs::remove_file(path).is_ok()
+        });
+    }
+
+    fn active_turn_path(&self, turn_id: &str) -> PathBuf {
+        let mut hasher = DefaultHasher::new();
+        turn_id.hash(&mut hasher);
+        self.active_dir.join(format!(
+            "active-{}-{:016x}.json",
+            std::process::id(),
+            hasher.finish()
+        ))
+    }
+
+    fn archive_capacity() -> Option<rolling_file_store::RollingCapacity> {
+        rolling_file_store::RollingCapacity::with_slice_bytes(
+            audit::ACTION_AUDIT_MAX_BYTES
+                .saturating_add(rolling_file_store::AUDIT_ROLLING_SLICE_BYTES),
+            rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+        )
+        .ok()
+    }
+
+    fn ensure_archive_unlocked(&self) -> bool {
+        if fs::create_dir_all(&self.active_dir).is_err() {
+            return false;
+        }
+        let segmented = rolling_file_store::segmented_directory(&self.file);
+        if segmented.exists() {
+            return self.migrate_legacy_sources_unlocked();
+        }
+        let mut turns = self.read_doc_unlocked().turns;
+        let mut seen = turns
+            .iter()
+            .map(|turn| turn.turn_id.clone())
+            .collect::<BTreeSet<_>>();
+        if let Ok(entries) = fs::read_dir(&self.legacy_turns_dir) {
+            let mut entries = entries.flatten().collect::<Vec<_>>();
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                if let Some(turn) = self.read_turn_unlocked(&entry.path()) {
+                    if seen.insert(turn.turn_id.clone()) {
+                        turns.push(turn);
+                    }
+                }
+            }
+        }
+        let records = turns
+            .iter()
+            .filter_map(Self::turn_record)
+            .collect::<Vec<_>>();
+        let Some(capacity) = Self::archive_capacity() else {
+            return false;
+        };
+        if rolling_file_store::rewrite_segmented_records(
+            &self.file,
+            &records,
+            capacity,
+            rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        // Clean up only legacy files that are valid and now confirmed in the
+        // canonical archive. Unreadable files are deliberately retained so an
+        // upgrade never destroys the user’s only recoverable copy.
+        if !self.migrate_legacy_sources_unlocked() {
+            return false;
+        }
+        turns.last().map_or_else(
+            || self.write_empty_view_unlocked(),
+            |turn| self.write_latest_view_unlocked(turn),
+        )
+    }
+
+    fn migrate_legacy_sources_unlocked(&self) -> bool {
+        let mut archived = rolling_file_store::read_segmented_records(&self.file)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|record| serde_json::from_slice::<ActionAuditTurn>(&record).ok())
+            .map(|turn| turn.turn_id)
+            .collect::<BTreeSet<_>>();
+
+        // A previous new-version run, a downgrade, or an interrupted upgrade
+        // can leave the compatibility JSON document beside the segmented
+        // archive. Treat every Turn in it as a legacy candidate; turn_id makes
+        // this safe and idempotent when the document is merely our latest-Turn
+        // compatibility view.
+        if let Ok(bytes) = fs::read(&self.file) {
+            if let Ok(doc) = serde_json::from_slice::<ActionAuditDocument>(&bytes) {
+                for turn in doc.turns {
+                    if archived.insert(turn.turn_id.clone()) && !self.archive_turn_unlocked(&turn) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        if !self.legacy_turns_dir.exists() {
+            return true;
+        }
+        let Ok(entries) = fs::read_dir(&self.legacy_turns_dir) else {
+            return false;
+        };
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let Some(turn) = self.read_turn_unlocked(&path) else {
+                // Preserve malformed or unknown legacy files. They may be the
+                // user’s only recoverable copy and must not be erased merely
+                // because a newer version cannot parse them.
+                continue;
+            };
+            if archived.insert(turn.turn_id.clone()) && !self.archive_turn_unlocked(&turn) {
+                return false;
+            }
+            if fs::remove_file(path).is_err() {
+                return false;
+            }
+        }
+        match fs::remove_dir(&self.legacy_turns_dir) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(_) => false,
+        }
+    }
+
+    fn recover_stale_active_turns_unlocked(&self) {
+        let Ok(entries) = fs::read_dir(&self.active_dir) else {
+            return;
+        };
+        let mut archived_turn_ids: Option<BTreeSet<String>> = None;
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(pid) = name
+                .strip_prefix("active-")
+                .and_then(|rest| rest.split('-').next())
+                .and_then(|pid| pid.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            if process_is_alive(pid) != Some(false) {
+                continue;
+            }
+            let path = entry.path();
+            let Some(turn) = self.read_turn_unlocked(&path) else {
+                continue;
+            };
+            let archived = archived_turn_ids.get_or_insert_with(|| {
+                rolling_file_store::read_segmented_records(&self.file)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|record| serde_json::from_slice::<ActionAuditTurn>(&record).ok())
+                    .map(|turn| turn.turn_id)
+                    .collect()
+            });
+            if archived.contains(&turn.turn_id) || self.archive_turn_unlocked(&turn) {
+                archived.insert(turn.turn_id.clone());
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+
+    fn turn_record(turn: &ActionAuditTurn) -> Option<Vec<u8>> {
+        let text = bounded_action_audit_text(
+            &ActionAuditDocument {
+                version: 1,
+                turns: vec![turn.clone()],
+            },
+            ACTION_AUDIT_ACTIVE_TURN_MAX_BYTES,
+        )
+        .ok()?;
+        let bounded = serde_json::from_str::<ActionAuditDocument>(&text)
+            .ok()?
+            .turns
+            .into_iter()
+            .next()?;
+        let mut bytes = serde_json::to_vec(&bounded).ok()?;
+        bytes.push(b'\n');
+        Some(bytes)
+    }
+
+    fn archive_turn_unlocked(&self, turn: &ActionAuditTurn) -> bool {
+        let (Some(record), Some(capacity)) = (Self::turn_record(turn), Self::archive_capacity())
+        else {
+            return false;
+        };
+        if rolling_file_store::append_rolling_record(
+            &self.file,
+            &record,
+            capacity,
+            rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        // The segmented archive is canonical. A compatibility-view write
+        // failure must not retain the active checkpoint and duplicate the Turn
+        // on retry; a later successful Turn will refresh the view.
+        let _ = self.write_latest_view_unlocked(turn);
+        true
     }
 
     fn read_doc_unlocked(&self) -> ActionAuditDocument {
@@ -1273,14 +1522,36 @@ impl FileActionAuditStore {
         serde_json::from_str(&text).unwrap_or_else(|_| Self::empty_doc())
     }
 
-    fn write_doc_unlocked(&self, doc: &ActionAuditDocument) {
+    fn read_turn_unlocked(&self, path: &Path) -> Option<ActionAuditTurn> {
+        serde_json::from_slice(&fs::read(path).ok()?).ok()
+    }
+
+    fn write_turn_unlocked(&self, path: &Path, turn: &ActionAuditTurn) -> bool {
+        if fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new("."))).is_err() {
+            return false;
+        }
+        Self::turn_record(turn).is_some_and(|bytes| atomic_write_file(path, &bytes).is_ok())
+    }
+
+    fn write_latest_view_unlocked(&self, turn: &ActionAuditTurn) -> bool {
+        self.write_doc_unlocked(&ActionAuditDocument {
+            version: 1,
+            turns: vec![turn.clone()],
+        })
+    }
+
+    fn write_empty_view_unlocked(&self) -> bool {
+        self.write_doc_unlocked(&Self::empty_doc())
+    }
+
+    fn write_doc_unlocked(&self, doc: &ActionAuditDocument) -> bool {
         if let Some(parent) = self.file.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let Ok(text) = serde_json::to_string_pretty(doc) else {
-            return;
+        let Ok(text) = bounded_action_audit_text(doc, ACTION_AUDIT_ACTIVE_TURN_MAX_BYTES) else {
+            return false;
         };
-        let _ = atomic_write_file(&self.file, format!("{text}\n").as_bytes());
+        atomic_write_file(&self.file, format!("{text}\n").as_bytes()).is_ok()
     }
 
     fn empty_doc() -> ActionAuditDocument {
@@ -1289,6 +1560,86 @@ impl FileActionAuditStore {
             turns: Vec::new(),
         }
     }
+}
+
+fn bounded_action_audit_text(
+    doc: &ActionAuditDocument,
+    max_bytes: u64,
+) -> Result<String, serde_json::Error> {
+    let mut retained = doc.clone();
+    loop {
+        let text = serde_json::to_string_pretty(&retained)?;
+        if text.len() as u64 <= max_bytes {
+            return Ok(text);
+        }
+        if retained.turns.len() > 1 {
+            retained.turns.remove(0);
+            continue;
+        }
+        let Some(turn) = retained.turns.first_mut() else {
+            return Ok(text);
+        };
+        if remove_oldest_action_from_turn(turn) {
+            continue;
+        }
+        summarize_oversized_action_turn(turn);
+        return serde_json::to_string_pretty(&retained);
+    }
+}
+
+fn remove_oldest_action_from_turn(turn: &mut ActionAuditTurn) -> bool {
+    let action_count = turn
+        .interactions
+        .iter()
+        .map(|interaction| interaction.actions.len())
+        .sum::<usize>();
+    if action_count <= 1 {
+        return false;
+    }
+    if let Some(interaction) = turn
+        .interactions
+        .iter_mut()
+        .find(|interaction| !interaction.actions.is_empty())
+    {
+        interaction.actions.remove(0);
+    }
+    turn.interactions
+        .retain(|interaction| !interaction.actions.is_empty());
+    true
+}
+
+fn summarize_oversized_action_turn(turn: &mut ActionAuditTurn) {
+    truncate_string_with_marker(&mut turn.turn_id, 512);
+    truncate_string_with_marker(&mut turn.user_question, 4_096);
+    for interaction in &mut turn.interactions {
+        for action in &mut interaction.actions {
+            truncate_string_with_marker(&mut action.action, 512);
+            truncate_string_with_marker(&mut action.status, 512);
+            if let Some(summary) = &mut action.result_summary {
+                truncate_string_with_marker(summary, 4_096);
+            }
+            let input_bytes = serde_json::to_vec(&action.input)
+                .map(|encoded| encoded.len())
+                .unwrap_or_default();
+            if input_bytes > 1024 * 1024 {
+                action.input = json!({
+                    "payload_omitted": true,
+                    "payload_bytes": input_bytes,
+                    "payload_limit_bytes": 1024 * 1024,
+                });
+            }
+        }
+    }
+}
+
+fn truncate_string_with_marker(value: &mut String, max_chars: usize) {
+    if value.chars().count() <= max_chars {
+        return;
+    }
+    let original_chars = value.chars().count();
+    let mut truncated = value.chars().take(max_chars).collect::<String>();
+    truncated.push_str(&format!("…[truncated; original_chars={original_chars}]"));
+    *value = truncated;
 }
 
 fn space_dir_for_memory_dir(memory_dir: &Path) -> &Path {
@@ -1347,7 +1698,7 @@ pub struct AgentCore {
     pub(crate) memory: FileMemoryStore,
     pub(crate) scratch: FileScratchStore,
     pub(crate) chat_history: FileChatHistoryStore,
-    pub(crate) shell_jobs: FileShellJobStore,
+    pub(crate) shell_jobs: ShellJobManager,
     pub(crate) tool_jobs: FileToolJobStore,
     action_audit: FileActionAuditStore,
     pub(crate) self_tool: SelfToolState,
@@ -1431,7 +1782,7 @@ impl AgentCore {
             memory: FileMemoryStore::new(memory_dir),
             scratch: FileScratchStore::new(memory_dir),
             chat_history: FileChatHistoryStore::new(memory_dir),
-            shell_jobs: FileShellJobStore::new(memory_dir),
+            shell_jobs: ShellJobManager::new(memory_dir),
             tool_jobs: FileToolJobStore::new(memory_dir),
             action_audit: FileActionAuditStore::new(memory_dir),
             self_tool,
@@ -1497,14 +1848,10 @@ impl AgentCore {
             return ModelInteractionRequest::inline(rendered_prompt);
         }
         let mut tools = self.capabilities.native_builtin_tool_definitions();
-        let mut static_tool_count = tools.len();
+        let static_tool_count = tools.len();
         let mut dynamic_tools = self.capabilities.native_dynamic_tool_definitions();
         self.attach_mcp_instructions_to_native_tools(&mut dynamic_tools);
         tools.extend(dynamic_tools);
-        if self.context_compact_required {
-            tools.retain(|tool| tool.name == "context_compact");
-            static_tool_count = tools.len();
-        }
         ModelInteractionRequest {
             rendered_prompt: rendered_prompt.into(),
             static_tool_count,
@@ -1666,6 +2013,24 @@ impl AgentCore {
         self.current_action_turn_id
             .clone()
             .unwrap_or_else(|| "unknown_turn".to_string())
+    }
+
+    pub fn finish_action_audit_turn(&mut self) {
+        if let Some(turn_id) = self.current_action_turn_id.take() {
+            self.action_audit.finish_turn(&turn_id);
+        }
+    }
+
+    /// Cancels detached background resources belonging to one Session.
+    /// Foreground work is interrupted by the worker cancellation token.
+    pub fn cancel_background_resources_for_session(&self, session_id: &str) -> usize {
+        self.shell_jobs
+            .cancel_unfinished_for_session(session_id)
+            .len()
+            + self
+                .tool_jobs
+                .cancel_unfinished_for_session(session_id)
+                .len()
     }
 
     pub fn running_shell_jobs_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
@@ -2727,7 +3092,7 @@ impl AgentCore {
             .max(response.usage.prompt_tokens);
         let raw_model_output = response.content.clone();
         let protocol_suite = self.response_protocol.suite();
-        let native_calls = response.tool_calls.clone();
+        let mut native_calls = response.tool_calls.clone();
         let mut parsed = if self.resolved_tool_call_mode == ToolCallMode::Native {
             self.parse_native_response(&response)
         } else {
@@ -2986,6 +3351,28 @@ impl AgentCore {
             if let Some(catalog) = self.current_mcp_catalog_text() {
                 slices.push(("mcp_capability_catalog".to_string(), catalog));
             }
+        }
+        if !parsed.context_compacts.is_empty() && !compacted_successfully {
+            // context_compact is a barrier: later actions were authored against the
+            // pre-compaction response but must not run unless the state rewrite succeeds.
+            self.submit_running_job_updates_for_session(&self.current_session_id(), runtime);
+            self.append_delta_with_action_output_budget(slices);
+            self.append_in_turn_shrink_review_if_needed();
+            if self.remaining_rounds() == 0 {
+                return CoreStep::RoundLimitReached {
+                    max_rounds: self.round_budget,
+                };
+            }
+            return CoreStep::NeedModel {
+                prompt: self.render_prompt(),
+                rounds_remaining: self.remaining_rounds(),
+            };
+        }
+        if compacted_successfully && !native_calls.is_empty() {
+            // The compact call rewrites its own context and is represented by the
+            // independently persisted summary. Keep only later native calls for
+            // provider replay and tool-result correlation.
+            native_calls.retain(|call| call.name != "context_compact");
         }
         if !parsed.continue_work {
             for candidate in &parsed.memory_candidates {
@@ -3266,39 +3653,39 @@ impl AgentCore {
         if parsed.repair_issue.is_some() {
             return;
         }
-        let total_actions = parsed
+        let compact_positions = parsed
             .action_groups
             .iter()
-            .map(|group| group.actions.len())
-            .sum::<usize>();
-        let compact_count = parsed
-            .action_groups
-            .iter()
-            .flat_map(|group| group.actions.iter())
-            .filter(|action| action.action == "context_compact")
-            .count();
-        if compact_count == 0 {
+            .enumerate()
+            .flat_map(|(group_index, group)| {
+                group
+                    .actions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, action)| action.action == "context_compact")
+                    .map(move |(action_index, _)| (group_index, action_index))
+            })
+            .collect::<Vec<_>>();
+        if compact_positions.is_empty() {
             return;
         }
-        if compact_count != 1 || total_actions != 1 || !parsed.context_compacts.is_empty() {
-            parsed.repair_issue = Some("context_compact_must_be_exclusive".to_string());
+        if compact_positions.len() != 1 || !parsed.context_compacts.is_empty() {
+            parsed.repair_issue = Some("context_compact_only_once".to_string());
             return;
         }
-        let action = parsed
-            .action_groups
-            .iter()
-            .flat_map(|group| group.actions.iter())
-            .find(|action| action.action == "context_compact")
-            .expect("counted intrinsic action")
-            .clone();
+        let (group_index, action_index) = compact_positions[0];
+        if group_index != 0 || action_index != 0 {
+            parsed.repair_issue = Some("context_compact_must_be_first".to_string());
+            return;
+        }
+        let action = parsed.action_groups[0].actions.remove(0);
+        if parsed.action_groups[0].actions.is_empty() {
+            parsed.action_groups.remove(0);
+        }
         match context_compact::from_action(&action) {
             Ok(compact) => {
-                parsed.action_groups.clear();
                 parsed.context_compacts.push(compact);
                 parsed.continue_work = true;
-            }
-            Err(issue) if self.resolved_tool_call_mode == ToolCallMode::Native => {
-                parsed.runtime_note = Some(issue);
             }
             Err(issue) => parsed.repair_issue = Some(issue),
         }
@@ -4528,7 +4915,7 @@ Runtime tool_call ids:",
             .collect::<Vec<_>>()
             .join("\n");
         let tip = "TIPS: You can update your job list plan, steer and optimize your work based on the above work.";
-        let instruction = "Context is above 90% of the configured input window. You must compact before continuing: summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0. Until compaction succeeds, every response except one exclusive context_compact call is ignored without being shown or executed.";
+        let instruction = "Context is above 90% of the configured input window. Your tool calls must start with context_compact. Summarize all dynamic prompt deltas into about 10%-20% of their current token footprint, discard useless/stale details, and preserve only active work-relevant state. The compact summary should keep: task description, working environment facts, current progress, todo/next steps, and a few high-level work principles when they still guide the task. Use the response protocol's context_compact block: discard stale delta ids, offload important but lengthy delta ids, and provide the summary. Do not target prompt_0. You may include later tool calls in the same response; they run only after context_compact succeeds. Until compaction succeeds, responses that do not start with context_compact are ignored without being shown or executed.";
         Some(format!(
             "mode=force_shrink_required\nestimated_prompt_tokens={estimated_prompt_tokens}\nmax_llm_input_tokens={}\nforce_shrink_threshold_tokens={force_threshold}\ntarget_dynamic_context_ratio=10%-20%\ndynamic_context_tokens={dynamic_tokens}\nprompt_delta_count={current_count}\nrecent_prompt_delta_refs:\n{delta_refs}\n{tip}\n{instruction}",
             self.max_llm_input_tokens
@@ -5274,7 +5661,12 @@ Runtime tool_call ids:",
             "args": action.raw_input,
         });
         if action.background() {
-            return self.tool_jobs.spawn_outcome(&action.action, path, &payload);
+            return self.tool_jobs.spawn_outcome(
+                &self.current_session_id(),
+                &action.action,
+                path,
+                &payload,
+            );
         }
         executor::execute_command_action_outcome(
             &action.action,
@@ -6301,7 +6693,9 @@ impl FileChatHistoryStore {
         MemGuard::for_audit_file(&self.audit_file).with_write(|| {
             let mut deleted_turn_ids = HashSet::new();
             for audit_file in self.audit_files() {
-                if !audit_file.exists() {
+                if !audit_file.exists()
+                    && !rolling_file_store::segmented_directory(&audit_file).exists()
+                {
                     continue;
                 }
                 let events = read_audit_events_unlocked(&audit_file)
@@ -6410,6 +6804,12 @@ impl FileChatHistoryStore {
 }
 
 fn read_audit_events_unlocked(path: &Path) -> std::io::Result<Vec<Value>> {
+    if rolling_file_store::segmented_directory(path).exists() {
+        return Ok(rolling_file_store::read_segmented_records(path)?
+            .into_iter()
+            .filter_map(|record| serde_json::from_slice::<Value>(&record).ok())
+            .collect());
+    }
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -6432,12 +6832,37 @@ fn read_audit_events_unlocked(path: &Path) -> std::io::Result<Vec<Value>> {
 fn write_audit_events_unlocked(path: &Path, events: &[Value]) -> std::io::Result<()> {
     let mut bytes = Vec::new();
     if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+        let mut records = Vec::with_capacity(events.len());
         for event in events {
-            writeln!(
-                &mut bytes,
-                "{}",
-                serde_json::to_string(event).unwrap_or_default()
+            let mut record = serde_json::to_vec(event).map_err(std::io::Error::other)?;
+            record.push(b'\n');
+            records.push(record);
+        }
+        if rolling_file_store::segmented_directory(path).exists() {
+            let stable_bytes = records
+                .iter()
+                .map(|record| record.len() as u64)
+                .sum::<u64>();
+            let slices = stable_bytes
+                .div_ceil(rolling_file_store::AUDIT_ROLLING_SLICE_BYTES)
+                .max(1);
+            let capacity = rolling_file_store::RollingCapacity::with_slice_bytes(
+                slices
+                    .saturating_add(1)
+                    .saturating_mul(rolling_file_store::AUDIT_ROLLING_SLICE_BYTES),
+                rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+            )
+            .map_err(std::io::Error::other)?;
+            rolling_file_store::rewrite_segmented_records(
+                path,
+                &records,
+                capacity,
+                rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
             )?;
+            return Ok(());
+        }
+        for record in records {
+            bytes.extend_from_slice(&record);
         }
     } else {
         let doc = json!({"version": 1, "events": events});

@@ -87,9 +87,11 @@ For a new contributor, read these in order:
 3. This file: runtime architecture and module ownership.
 4. [`core-ui-topic-protocol.md`](core-ui-topic-protocol.md): cross-language
    topic contract between core and hosts.
-5. [`capability-system.md`](capability-system.md): tool manifests and executor
+5. [`turn-state-projection-architecture.md`](turn-state-projection-architecture.md):
+   authoritative UI-neutral Turn state, optional Host Projection Adapters, and reusable UI-shell boundaries.
+6. [`capability-system.md`](capability-system.md): tool manifests and executor
    registration.
-6. [`test-strategy.md`](test-strategy.md) and
+7. [`test-strategy.md`](test-strategy.md) and
    [`feature-test-management.md`](feature-test-management.md): quality gates and
    feature coverage ledger.
 
@@ -102,7 +104,7 @@ For module-local work, also read:
 
 ## Goals
 
-- Keep agent behavior in Rust and independent from iOS or any cloud service.
+- Keep authoritative agent/Turn behavior in UI-neutral Rust so Shell, Web, iOS, desktop, and future UI shells adapt one semantic contract instead of forking lifecycle logic.
 - Let the model choose concrete structured actions when runtime work is needed.
 - Keep runtime responsibilities mechanical: protocol validation, persistence,
   model service IO, local command execution, and safety boundaries.
@@ -177,8 +179,13 @@ process runs with no TTY or graphical display.
   guidance and may inspect the malformed raw response to provide a concrete,
   protocol-native correction skeleton; the turn loop only assembles the shared
   temporary repair delta and audit record.
-- Loads capability manifests and renders the model-facing tool catalog from the
-  same JSON Schema style IDL used to validate canonical tool actions.
+- Loads capability manifests and derives protocol-specific model-facing tool
+  schemas from the same JSON Schema style IDL used to validate canonical tool
+  actions. `agent_core::tool_schema_renderer` is the provider-dialect boundary:
+  OpenAI adapters preserve the full schema, while Anthropic/Bedrock rendering
+  removes root-level composition keywords rejected by Bedrock. The capability
+  registry and executor retain the original schema and remain authoritative for
+  strict argument validation; wire compatibility never weakens execution safety.
 - Renders `prompt_0` and dynamic prompt delta blocks through
   `agent_core::prompt_render`, so prompt generation is a module boundary rather
   than ad hoc string assembly in the turn loop.
@@ -190,7 +197,8 @@ process runs with no TTY or graphical display.
   Anthropic messages, structured-output hints, endpoint joining, usage parsing,
   truncation detection, model HTTP error normalization/redaction, model service
   default protocol/base URL/model rules, model service cache-control block
-  translation, and model request/response audit event data.
+  translation, protocol-specific tool-definition assembly through
+  `agent_core::tool_schema_renderer`, and model request/response audit event data.
 - Owns model service-agnostic prompt cache planning in `agent_core::prompt_cache`.
   The algorithm splits rendered prompt into static prompt and dynamic
   delta blocks, marks stable cache boundaries, and returns shell/UI-neutral
@@ -220,9 +228,14 @@ process runs with no TTY or graphical display.
   as evidence, but hosts should render from the structured kind instead of
   parsing protocol-specific action JSON. Host adapters render these topic events
   as terminal panels, native app status, web events, or other UI-specific forms.
-- Owns API audit document append/migration mechanics and UI-neutral runtime
-  event builders in `agent_core::audit`. Host adapters choose audit file paths
-  and decide when to append events.
+- Owns API audit document append/migration mechanics, capacity enforcement, and
+  UI-neutral runtime event builders in `agent_core::audit`. Audit snapshots and
+  turn-grouped action/repair documents keep their existing schemas while evicting
+  oldest complete records in 16 MiB allocation units. API JSONL retains the newest
+  complete lines through lock-held in-place compaction, supports the legacy MEM-root
+  sidecar, removes stale retention temporaries, and reserves one 16 MiB slice for safe
+  replacement. Normal launch uses a 64 MiB audit bound; Web `--debug` uses 512 MiB.
+  Host adapters choose audit file paths and decide when to append events.
 - Executes structured actions through the capability registry. Built-in tool
   packages live under `resources/capabilities/tools/{tool}.yaml` plus a paired
   `{tool}.rs` callback; overlay command tools are loaded from the capability
@@ -281,6 +294,23 @@ adapter ergonomics. If a feature must be visible to the model, callable by the
 model, shared by iOS/Web/CLI, or reflected in prompt/capability contracts, it
 belongs in `agent_core` or `resources` instead of being implemented as a
 shell-only shortcut.
+
+### Host Projection Adapters and UI shells
+
+All hosts consume one authoritative, UI-neutral Core Turn semantic contract:
+`TurnToken`, input admission, `PromptCut`, activity, immutable outcome, and
+structured request/reply correlation. A synchronous in-process host such as the
+current terminal Shell may consume Core projection directly. An asynchronous,
+reconnectable, multi-client, cross-process, or remote UI may add a Host
+Projection Adapter that supplies snapshot/revision, reliable command ownership,
+transport sequencing, and bounded queues.
+
+That adapter is a delivery boundary, not an agent runtime. It cannot decide
+whether a Turn exists, accept input into a closed Turn, infer completion from
+workers/topics, or rewrite an outcome. `timem_web` Pod is the first such adapter,
+not a mandatory dependency for every UI. UI shells own rendering and local
+interaction only. This split is what makes adding Swift/iOS, desktop, another
+Web toolkit, or accessibility-first UI primarily an adapter/presentation task.
 
 ### `timem_web/`
 
@@ -590,8 +620,9 @@ examples inside user-visible text from being re-parsed as runtime actions.
 For non-terminal action rounds, the XML parser can recover accidental prose
 outside the root and emits a model-visible `SYSTEM TIPS` correction for the next
 round. Recovered terminal answers are never accepted. XML state branches are
-strict: `actions`, `final_answer`, and `context_compact` are mutually exclusive
-in one response; `<status>` is rejected. A terminal `<final_answer>` is accepted
+strict: `actions` and `final_answer` are mutually exclusive; `context_compact`
+may be the first capability inside `actions`, followed by later capabilities
+that run only after compaction succeeds. `<status>` is rejected. A terminal `<final_answer>` is accepted
 only when preceded by one `<finish_confirm>` whose content starts with the
 protocol's exact confirmation prefix.
 
@@ -697,10 +728,14 @@ continue. Rust panic recovery cannot safely recover a native SIGSEGV in the
 same process, so future untrusted native/FFI capabilities must run behind a
 process boundary.
 
-The terminal app is one host adapter. iOS should be another host adapter, not a
-fork of the agent loop. The iOS path should reuse `agent_core` through the
-existing JSON-in/JSON-out C ABI or a thin generated binding, then implement only
-iOS-specific pieces outside the core:
+The terminal app is one direct host adapter. `timem_web` is a host plus a
+reconnectable Host Projection Adapter. iOS, desktop, or another UI should be
+another adapter, not a fork of the agent loop. New hosts must consume the same
+Core Turn projection and may add delivery metadata without redefining lifecycle.
+The iOS path should reuse `agent_core` through the existing JSON-in/JSON-out C
+ABI or a thin generated binding, then implement only platform-specific pieces.
+
+Platform-specific pieces outside Core include:
 
 - native UI rendering and input
 - user approval prompts
@@ -812,14 +847,24 @@ Session, attachment removal, inline decisions, rename, and runtime config
 updates so repeated clicks show immediate feedback instead of issuing duplicate
 commands. The server remains authoritative: repeated Stop is harmless; ordinary
 Send during an active turn is durably queued as the next task; only an explicit
-supplement command joins the active turn. For Web workers, a final answer is a
-host-visible turn boundary: any explicit supplement still pending when that
-answer arrives is handed back to the Host and starts a distinct follow-up turn,
-so the first answer remains attached to its original bubble; stale supplements
-can also start a new turn
-after cancellation/completion; repeated attachment removal for the same
-session is treated as success, and stale decision replies after a turn has
-finished are ignored before they reach a worker.
+supplement command may request to join the active turn. Before every model
+request, Core seals a `PromptCut` identifying the exact input sequence consumed
+by that request. Command arrival or acceptance alone does not establish that an
+input affected the response. On terminal/final-response commit, Core closes the
+input gate: input covered by an already-sent PromptCut remains in the current
+Turn, while accepted-but-unconsumed task input is atomically retained by the
+Host as distinct next-turn intent under the same command ownership. The
+follow-up receives a fresh `TurnToken`, starts at its first model round, and
+cannot inherit the prior Turn's round count, stop state, pending decision, or
+attachment-consumption state. The first final answer remains attached to its
+original bubble. Browser reconnect within the same Host process preserves this
+queued-delivery ownership, but a Host/Core process restart is a hard Stop
+boundary: unfinished queued Turns restore as `interrupted`, queued execution
+ownership is cleared, an old `command_id` may only replay its visible historical
+Turn, and continuing requires a new command ID. Repeated
+attachment removal for the same session is treated as success, and stale
+decision replies after a turn has finished are ignored before they reach a
+worker rather than being reinterpreted as new task input.
 
 Stopped-turn outcomes are returned as `TurnStopSummary`/`TurnStopDetail`
 structure. The terminal host renders those structures into Chinese shell text;
@@ -845,9 +890,10 @@ identity = realpath(resolved MEM path)
 ```
 
 Within one identity, durable memory, scratch memory, chat history, SQL snapshots,
-memory git snapshots, shell job indexes, and audit files are different layers of
-the same mem space. They must not be split into per-session stores merely
-because the UI has multiple sessions.
+memory git snapshots, and audit files are different layers of the same mem
+space. They must not be split into per-session stores merely because the UI has
+multiple sessions. Live `run_bash` jobs are intentionally outside this storage
+identity: they belong to the current process and are never recovered from MEM.
 
 Current CLI implementation uses an in-process `MemGuard` object plus a
 cross-process lock directory under the selected space:
@@ -859,7 +905,6 @@ cross-process lock directory under the selected space:
 │  └─ mem.lock.d/
 ├─ memory.jsonl
 ├─ scratch_notes.jsonl
-├─ shell_jobs/jobs.jsonl
 └─ audit/
       ├─ api_audit.json
       └─ action_audit.json
@@ -898,8 +943,7 @@ Guarded operations include:
 - chat history query/delete over audit-backed records
 - read-only SQL snapshots over durable memory and chat history
 - `api_audit.json` event-document updates
-- `action_audit.json` grouped action audit updates
-- shell job index append/query
+- `action_audit.json` latest-Turn compatibility view plus complete-Turn rolling archive updates; upgrades merge legacy multi-Turn documents, legacy `.turns`, stale active checkpoints, and existing segments by `turn_id`, retaining unreadable legacy files instead of deleting the user’s only recoverable copy
 
 Session-local state stays outside shared memory ownership:
 
@@ -907,6 +951,26 @@ Session-local state stays outside shared memory ownership:
 - current observation UI state
 - current turn rounds remaining
 - transient cancellation and approval state
+
+
+## High-Frequency Persistence Performance Invariants
+
+Persistence code on a request, message, action, status-poll, or ordinary pagination path must have work bounded by the new record and a fixed-size state window. These paths must not read or rewrite an entire growing JSON, JSONL, or history file, and must not enumerate a directory whose entry count grows with retained history.
+
+Scanning existing records or enumerating segment files is permitted only for explicitly low-frequency work:
+
+- one-time migration from a legacy layout;
+- recovery when a manifest, capacity counter, index, or retention summary is missing, malformed, or fails validation against file length or active-segment metadata;
+- explicit maintenance, diagnostics, export, or user-requested full-history work;
+- retention or capacity reclamation after a hard threshold is actually crossed.
+
+Normal append paths must incrementally maintain their index, capacity manifest, and retention summary. A persisted summary is evidence only after validation against the corresponding file length; an active rolling-segment length is similarly checked against that segment's metadata before append. Failed validation must fall back to the low-frequency recovery path rather than trusting stale state. Capacity reclamation should recover to a lower watermark so a store near its limit does not rescan on every append.
+
+Polling a running or completed job must read a bounded output tail with UTF-8-safe boundary handling; it must never load an unbounded output file merely to compact the result afterward. Compatibility snapshots must also have a fixed byte bound and may not reintroduce whole-history rewrites.
+
+Regression tests for these stores must cover legacy migration, missing or corrupt state recovery, preservation of closed segments or inactive turns during normal append, and fixed-size output-tail behavior. Code review must treat an unbounded `read`, `read_to_string`, read-modify-write, or `read_dir` added to a high-frequency path as an architecture violation unless the call is guarded by one of the low-frequency cases above.
+
+On-disk compatibility is forward-migration oriented: a new binary must ingest supported legacy layouts under the same lock and commit a recoverable migration before removing legacy data. It is not required to keep new layouts writable by older binaries, because continuously mirroring a growing legacy document would violate the bounded-work invariant. Downgrade requires backup or export, and mixed-version concurrent writers for one MEM are unsupported.
 
 ## Prompt Concepts
 
@@ -1059,6 +1123,12 @@ Important invariants:
   descriptions, and schemas there. Inline-only MCP catalog and enable/disable
   slices remain persistent for lossless mode switching but are filtered out of
   native messages.
+- Anthropic-protocol requests render tool schemas deterministically before
+  attaching cache markers. The static built-in tool order is stable, dynamic MCP
+  tools follow that prefix, and exactly the last built-in API tool carries the
+  tool-prefix cache breakpoint. Bedrock-incompatible root `oneOf`, `allOf`, and
+  `anyOf` clauses are removed only from the model-facing copy; nested property
+  schemas and executor-side original validation remain intact.
 - Anthropic-protocol requests attach `cache_control: {"type": "ephemeral"}` to
   the static system block, the last built-in API tool, and the latest three
   dynamic prompt deltas. The
@@ -1152,7 +1222,9 @@ only a short fallback cache, while verified capabilities are process-cached.
 The resolved mode and parallel capability are published to hosts and written to
 the auto-refreshing web debug `statistics.html`. The report groups request
 outcomes and detailed latency/CPU/repair metrics by model, gateway, and resolved
-tool-call protocol. `TIMEM_PARALLEL_TOOL_CALLS` controls whether the
+tool-call protocol. Model request latency uses fixed upper-bound buckets at
+500 ms, 1 s, 3 s, 5 s, 10 s, 15 s, 20 s, and 30 s, plus a bucket above 30 s.
+`TIMEM_PARALLEL_TOOL_CALLS` controls whether the
 resolved parallel flag is enabled; provider adapters always send it explicitly.
 
 Web debug diagnostics retain the latest request as `llm_prompt.html` and the
@@ -1180,8 +1252,10 @@ payload shape.
 
 Each inline response parses into the same runtime envelope: optional `status`,
 optional `free_talk`, optional `working_still_action`, and optional
-`final_answer`. `context_compact` is an intrinsic action capability and must be
-exclusive with other actions. Protocols may express completion differently:
+`final_answer`. `context_compact` is an intrinsic action capability. When a
+response also contains other actions, compaction must be first and acts as a
+barrier: later actions run only after it succeeds. Protocols may express
+completion differently:
 JSON uses its status field, while XML uses a validated
 `<finish_confirm>` followed by `<final_answer>` as the completion branch.
 `free_talk` is the visible working note for the Thought/Action panel while
@@ -1243,7 +1317,7 @@ in the Thought/Action panel. With `status:"finished"`, `final_answer` is
 required and shown as the closing answer before runtime stops this task's
 action/model loop. In XML, `<final_answer>` is the completion branch, requires a
 valid preceding `<finish_confirm>`, and must not appear together with `<actions>`
-or `<context_compact>`. If the
+or a top-level `<context_compact>`. If the
 model still needs evidence, it must stay working, run actions, and answer after
 the action result is visible. The parser also tolerates common model service drift
 such as a valid JSON envelope embedded in Markdown text, but it never shows raw
@@ -1276,7 +1350,10 @@ model response:
 ```
 
 Runtime validates `discard` and `offload` delta ids against currently visible
-dynamic prompt refs. If all refs exist, it writes offloaded deltas into scratch,
+dynamic prompt refs. The same response may include later capability calls, but
+`context_compact` must be first. Runtime applies it as an execution barrier: if
+compaction fails, later calls are not executed; if it succeeds, they execute in
+their declared order. On success, runtime writes offloaded deltas into scratch,
 hides discarded/offloaded refs, and appends the summary as a new assistant
 checkpoint slice in a fresh dynamic delta. Markdown prompt rendering marks it as
 `## ASSISTANT_ID (context compaction summary)`; XML prompt rendering uses
@@ -1372,19 +1449,19 @@ attributes; Runtime does not encode process or business success as the
 lifecycle status.
 
 A model-visible Bash PID must belong to a child launched and tracked by the
-current Runtime owner. Unix jobs are placed in independent child process
+current Runtime process. Unix jobs are placed in independent child process
 groups, and the process-group leader PID is distinct from Timem's process and
-process group. Session cancellation, running-job refresh, and model context
-filter out historical or foreign-owner records before inspecting or
-terminating a PID. Bounded truncation occurs inside
-stream boundaries and preserves all closing
-markers and XML result tags. Background and timeout job records write stdout
-and stderr to separate files; historical merged records are treated as stdout
-without guessing old stderr boundaries. JSON, audit, and host-facing output
-retain the existing readable text rendering. Later prompt re-rendering
-preserves the committed evidence boundary. That runtime evidence is the only
-action-result evidence the model may claim it has
-seen.
+process group. Live job metadata, `Child` handles, notification state, and
+stdout/stderr buffers are process-local. Each stream is continuously drained
+into a bounded 1 MiB buffer that retains either its head or tail according to
+`tail_out`, preventing pipe deadlock and unbounded growth. A job is complete
+only after its launcher has exited, its process group is empty, and both output
+readers reached EOF. Runtime restart drops all tracking state; startup may
+remove the known legacy `shell_jobs` directories but never reads their indexes,
+adopts their PIDs, or signals historical processes. JSON, audit, and
+host-facing output retain the existing readable text rendering. Later prompt
+re-rendering preserves the committed evidence boundary. That runtime evidence
+is the only action-result evidence the model may claim it has seen.
 
 Example:
 
@@ -1600,11 +1677,16 @@ preserves the model/runtime boundary: the model defines the command, while core
 owns the fixed success condition, approval, wait bounds, audit, bounded output,
 and cancellation.
 
-Background and timed-out shell jobs are owned by the session that created them.
-Core tracks their pid lifecycle and injects status changes as prompt evidence.
-It does not automatically terminate them on normal timeout, final answer, or
-context compact; the model/user must explicitly inspect or stop a still-running
-pid when cleanup is desired.
+Background and timed-out shell jobs are owned by the process-local manager and
+associated with the session that created them. Core tracks their pid lifecycle
+and injects status changes as prompt evidence. It does not automatically
+terminate them on normal timeout, final answer, or context compact; the
+model/user must explicitly inspect or stop a still-running pid when cleanup is
+desired. Dropping the last manager owner (including worker/runtime shutdown)
+terminates and reaps unfinished child process groups. Restart does not restore
+or adopt jobs from the previous process. The detailed ownership, state-machine,
+cancellation, output, and test contracts are documented in
+[`run-bash-job-supervision.md`](run-bash-job-supervision.md).
 
 ### Context Compact Execution
 

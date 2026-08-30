@@ -75,6 +75,22 @@ describe("model service issue presentation", () => {
     expect(modelServiceIssue(error).title).toBe(title);
   });
 
+  it("shows the provider cache_control rejection instead of hiding it behind an HTTP status", () => {
+    expect(modelServiceIssue(
+      "model_http_404: A maximum of 4 blocks with cache_control may be provided. Found 5.",
+    )).toEqual({
+      title: "Model request rejected",
+      detail: "Model service response: A maximum of 4 blocks with cache_control may be provided. Found 5.\nThe endpoint rejected the request cache layout. Retry after reducing the number of cache_control blocks or updating Timem.",
+    });
+  });
+
+  it("keeps a useful provider reason when applying HTTP status guidance", () => {
+    const issue = modelServiceIssue("model_http_404: deployment blue is temporarily unavailable");
+    expect(issue.title).toBe("Model unavailable");
+    expect(issue.detail).toContain("Model service response: deployment blue is temporarily unavailable");
+    expect(issue.detail).toContain("verify the model name and Base URL");
+  });
+
   it("preserves an unknown useful reason while redacting credentials", () => {
     const issue = modelServiceIssue(
       "provider rejected request; Authorization: Bearer secret-token; api_key=sk-supersecret123",

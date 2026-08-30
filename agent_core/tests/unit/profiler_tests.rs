@@ -83,11 +83,24 @@ fn storage_profile_counts_entries_and_sizes() {
     fs::write(&api_audit, "{\n  \"version\": 1,\n  \"events\": []\n}\n").unwrap();
     fs::write(&action_audit, "{\n  \"turns\": []\n}\n").unwrap();
 
+    let api_sidecar = dir.join("api_audit.jsonl");
+    fs::write(&api_sidecar, "legacy\n").unwrap();
+    let api_segments = dir.join("api_audit.jsonl.segments");
+    fs::create_dir_all(&api_segments).unwrap();
+    fs::write(api_segments.join("segment-0001.jsonl"), "segment\n").unwrap();
+
     let profile = collect_storage_profile(&memory_dir, &api_audit, &action_audit);
     assert_eq!(profile.durable_entries, 2);
     assert_eq!(profile.scratch_entries, 1);
     assert!(profile.durable_bytes > 0);
-    assert!(profile.api_audit_bytes > 0);
+    assert_eq!(
+        profile.api_audit_bytes,
+        fs::metadata(&api_audit).unwrap().len()
+            + fs::metadata(&api_sidecar).unwrap().len()
+            + fs::metadata(api_segments.join("segment-0001.jsonl"))
+                .unwrap()
+                .len()
+    );
     assert!(profile.action_audit_bytes > 0);
 
     let _ = fs::remove_dir_all(dir);

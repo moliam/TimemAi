@@ -361,7 +361,7 @@ fn run_command_with_optional_input_cancel_and_inactivity_timeout(
             Some(status) => {
                 return join_io_threads(stdin_writer, stdout_reader, stderr_reader, status);
             }
-            None => thread::sleep(Duration::from_millis(50)),
+            None => thread::sleep(Duration::from_millis(10)),
         }
     }
 }

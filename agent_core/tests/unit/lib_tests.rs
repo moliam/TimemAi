@@ -98,11 +98,15 @@ fn forced_compaction_preserves_native_history_and_restricts_model_request() {
     assert!(!prompt.contains("old tool work"));
     assert!(prompt.contains("mode=force_shrink_required"));
     let request_prompt = core.build_model_request_prompt(&prompt);
-    assert!(request_prompt.ends_with("Context too long, please compress first:"));
+    assert!(request_prompt
+        .ends_with("Context is too long. Your tool calls must start with context_compact:"));
     let request = core.model_interaction_request(request_prompt);
     assert_eq!(request.tool_choice, NativeToolChoice::Required);
-    assert_eq!(request.tools.len(), 1);
-    assert_eq!(request.tools[0].name, "context_compact");
+    assert!(request
+        .tools
+        .iter()
+        .any(|tool| tool.name == "context_compact"));
+    assert!(request.tools.iter().any(|tool| tool.name == "readfile"));
 }
 
 #[test]
@@ -458,6 +462,163 @@ fn native_context_compact_summary_does_not_depend_on_discarded_owning_delta() {
     let request = core.model_interaction_request(next_prompt);
     assert_eq!(request.rendered_prompt.matches(summary).count(), 1);
     assert!(request.native_exchanges.is_empty());
+}
+
+fn native_test_profile() -> InteractionProfile {
+    InteractionProfile {
+        api_protocol: "openai_compatible".to_string(),
+        model: "test".to_string(),
+        gateway: "test".to_string(),
+        requested_mode: ToolCallMode::Native,
+        resolved_mode: ToolCallMode::Native,
+        active_prompt_protocol: "json".to_string(),
+        parallel_supported: true,
+        parallel_enabled: true,
+        source: CapabilityProbeSource::Explicit,
+        reason: "test".to_string(),
+        probe_latency_ms: None,
+        observed_tool_calls: 2,
+    }
+}
+
+#[test]
+fn native_context_compact_first_then_executes_later_call_with_correct_id() {
+    let mut core = test_core("native_compact_then_call");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "OLD CONTEXT TO DISCARD".to_string(),
+    )]);
+    let old_delta_id = core.deltas[0].delta_id.clone();
+    let compact_arguments = serde_json::json!({
+        "discard": [old_delta_id],
+        "summary": "KEEP ACTIVE STATE",
+    });
+    let cwd_arguments = serde_json::json!({"type": "cwd"});
+
+    let step = core.apply_model_response(LlmResponse {
+        content: "compacting before continuing".to_string(),
+        tool_calls: vec![
+            NativeToolCall {
+                id: "call_compact_first".to_string(),
+                name: "context_compact".to_string(),
+                raw_arguments: compact_arguments.to_string(),
+                arguments: compact_arguments,
+            },
+            NativeToolCall {
+                id: "call_after_compact".to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: cwd_arguments.to_string(),
+                arguments: cwd_arguments,
+            },
+        ],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("compact followed by a tool call should continue")
+    };
+
+    assert!(!prompt.contains("OLD CONTEXT TO DISCARD"));
+    assert!(prompt.contains("KEEP ACTIVE STATE"));
+    assert_eq!(core.native_exchanges.len(), 1);
+    let exchange = &core.native_exchanges[0];
+    assert_eq!(exchange.calls.len(), 1);
+    assert_eq!(exchange.calls[0].id, "call_after_compact");
+    assert_eq!(exchange.results.len(), 1);
+    assert_eq!(exchange.results[0].call_id, "call_after_compact");
+    assert_eq!(exchange.results[0].name, "self_tool");
+    assert!(exchange.results[0].content.contains("CWD:"));
+}
+
+#[test]
+fn native_context_compact_after_another_call_is_rejected() {
+    let mut core = test_core("native_compact_not_first");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "KEEP OLD STATE".to_string(),
+    )]);
+    let old_delta_id = core.deltas[0].delta_id.clone();
+    let cwd_arguments = serde_json::json!({"type": "cwd"});
+    let compact_arguments = serde_json::json!({
+        "discard": [old_delta_id],
+        "summary": "SHOULD NOT APPLY",
+    });
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![
+            NativeToolCall {
+                id: "call_before_compact".to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: cwd_arguments.to_string(),
+                arguments: cwd_arguments,
+            },
+            NativeToolCall {
+                id: "call_compact_second".to_string(),
+                name: "context_compact".to_string(),
+                raw_arguments: compact_arguments.to_string(),
+                arguments: compact_arguments,
+            },
+        ],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("non-first context_compact should request protocol repair")
+    };
+
+    assert!(prompt.contains("context_compact_must_be_first"));
+    assert!(prompt.contains("KEEP OLD STATE"));
+    assert!(!prompt.contains("SHOULD NOT APPLY"));
+    assert!(core.native_exchanges.is_empty());
+}
+
+#[test]
+fn failed_context_compact_blocks_later_native_calls() {
+    let mut core = test_core("native_compact_failure_barrier");
+    core.set_interaction_profile(&native_test_profile());
+    core.append_delta(vec![(
+        "user_question".to_string(),
+        "ACTIVE STATE".to_string(),
+    )]);
+    let compact_arguments = serde_json::json!({
+        "discard": ["pd_missing"],
+        "summary": "INVALID COMPACT",
+    });
+    let cwd_arguments = serde_json::json!({"type": "cwd"});
+
+    let step = core.apply_model_response(LlmResponse {
+        content: String::new(),
+        tool_calls: vec![
+            NativeToolCall {
+                id: "call_bad_compact".to_string(),
+                name: "context_compact".to_string(),
+                raw_arguments: compact_arguments.to_string(),
+                arguments: compact_arguments,
+            },
+            NativeToolCall {
+                id: "call_must_not_run".to_string(),
+                name: "self_tool".to_string(),
+                raw_arguments: cwd_arguments.to_string(),
+                arguments: cwd_arguments,
+            },
+        ],
+        model_name: "test".to_string(),
+        usage: UsageStats::zero(),
+        truncated: false,
+    });
+    let CoreStep::NeedModel { prompt, .. } = step else {
+        panic!("failed context_compact should continue without executing later calls")
+    };
+
+    assert!(prompt.contains("error: invalid_prompt_refs"));
+    assert!(!prompt.contains("Action result: self_tool"));
+    assert!(prompt.contains("ACTIVE STATE"));
+    assert!(core.native_exchanges.is_empty());
 }
 
 #[test]
@@ -1585,4 +1746,394 @@ fn prompt_marks_logical_turns_independently_from_deltas() {
     let second_question = second.rfind("second question").expect("second question");
     assert!(deferred < second_marker, "{second}");
     assert!(second_marker < second_question, "{second}");
+}
+
+#[test]
+fn action_audit_capacity_removes_oldest_turns_without_changing_schema() {
+    let turns = (0..6)
+        .map(|index| ActionAuditTurn {
+            turn_id: format!("turn_{index}"),
+            started_at_ms: index,
+            user_question: format!("question {index} {}", "x".repeat(120)),
+            interactions: vec![ActionAuditInteraction {
+                round: 1,
+                actions: vec![ActionAuditEntry {
+                    time_ms: index,
+                    round: 1,
+                    action: "readfile".to_string(),
+                    status: "completed".to_string(),
+                    input: json!({"path": format!("file_{index}")}),
+                    result_summary: Some("ok".to_string()),
+                }],
+            }],
+        })
+        .collect::<Vec<_>>();
+    let doc = ActionAuditDocument { version: 1, turns };
+
+    let text = bounded_action_audit_text(&doc, 1_400).unwrap();
+    let retained: ActionAuditDocument = serde_json::from_str(&text).unwrap();
+
+    assert_eq!(retained.version, 1);
+    assert!(!retained.turns.is_empty());
+    assert_eq!(retained.turns.last().unwrap().turn_id, "turn_5");
+    assert_ne!(retained.turns.first().unwrap().turn_id, "turn_0");
+    assert!(text.len() <= 1_400 || retained.turns.len() == 1);
+    assert_eq!(retained.turns.last().unwrap().interactions[0].round, 1);
+}
+
+#[test]
+fn action_audit_capacity_summarizes_one_oversized_turn_without_changing_schema() {
+    let doc = ActionAuditDocument {
+        version: 1,
+        turns: vec![ActionAuditTurn {
+            turn_id: "turn_large".to_string(),
+            started_at_ms: 1,
+            user_question: "q".repeat(20_000),
+            interactions: vec![ActionAuditInteraction {
+                round: 1,
+                actions: vec![
+                    ActionAuditEntry {
+                        time_ms: 1,
+                        round: 1,
+                        action: "old_action".to_string(),
+                        status: "completed".to_string(),
+                        input: json!({"payload": "x".repeat(2_000_000)}),
+                        result_summary: Some("old".repeat(10_000)),
+                    },
+                    ActionAuditEntry {
+                        time_ms: 2,
+                        round: 1,
+                        action: "latest_action".to_string(),
+                        status: "completed".to_string(),
+                        input: json!({"payload": "y".repeat(2_000_000)}),
+                        result_summary: Some("latest".repeat(10_000)),
+                    },
+                ],
+            }],
+        }],
+    };
+
+    let text = bounded_action_audit_text(&doc, 32 * 1024).unwrap();
+    let retained: ActionAuditDocument = serde_json::from_str(&text).unwrap();
+
+    assert!(text.len() <= 32 * 1024, "{}", text.len());
+    assert_eq!(retained.version, 1);
+    assert_eq!(retained.turns.len(), 1);
+    assert_eq!(retained.turns[0].interactions.len(), 1);
+    assert_eq!(retained.turns[0].interactions[0].actions.len(), 1);
+    let latest = &retained.turns[0].interactions[0].actions[0];
+    assert_eq!(latest.action, "latest_action");
+    assert_eq!(latest.input["payload_omitted"], true);
+    assert!(latest.input["payload_bytes"].as_u64().unwrap() > 1_000_000);
+    assert!(retained.turns[0].user_question.contains("original_chars="));
+    assert!(latest
+        .result_summary
+        .as_deref()
+        .unwrap()
+        .contains("original_chars="));
+}
+
+#[test]
+fn legacy_multi_turn_action_audit_migrates_to_slices_before_new_turn() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_action_audit_migration_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let audit_dir = root.join("audit");
+    fs::create_dir_all(&audit_dir).unwrap();
+    let legacy = ActionAuditDocument {
+        version: 1,
+        turns: vec![
+            ActionAuditTurn {
+                turn_id: "legacy_one".to_string(),
+                started_at_ms: 1,
+                user_question: "first".to_string(),
+                interactions: Vec::new(),
+            },
+            ActionAuditTurn {
+                turn_id: "legacy_two".to_string(),
+                started_at_ms: 2,
+                user_question: "second".to_string(),
+                interactions: Vec::new(),
+            },
+        ],
+    };
+    let action_audit = audit_dir.join("action_audit.json");
+    fs::write(&action_audit, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+    let store = FileActionAuditStore::new(&root);
+    store.begin_turn("new_turn", 3, "third");
+    store.finish_turn("new_turn");
+
+    assert!(!audit_dir.join("action_audit.json.turns").exists());
+    let segments = rolling_file_store::rolling_segments(&action_audit).unwrap();
+    assert_eq!(
+        segments.len(),
+        1,
+        "small Turns must share one physical slice"
+    );
+    let archived = rolling_file_store::read_segmented_records(&action_audit)
+        .unwrap()
+        .into_iter()
+        .map(|record| {
+            serde_json::from_slice::<ActionAuditTurn>(&record)
+                .unwrap()
+                .turn_id
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        archived,
+        BTreeSet::from([
+            "legacy_one".to_string(),
+            "legacy_two".to_string(),
+            "new_turn".to_string(),
+        ])
+    );
+    let latest: ActionAuditDocument =
+        serde_json::from_slice(&fs::read(&action_audit).unwrap()).unwrap();
+    assert_eq!(latest.turns.len(), 1);
+    assert_eq!(latest.turns[0].turn_id, "new_turn");
+    assert!(fs::read_dir(audit_dir.join("action_audit.active"))
+        .unwrap()
+        .next()
+        .is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completed_action_turns_share_segment_files_instead_of_creating_turn_files() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_action_audit_slices_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let store = FileActionAuditStore::new(&root);
+    for index in 0..100 {
+        let turn_id = format!("turn_{index}");
+        store.begin_turn(&turn_id, index, "small question");
+        store.record_action(
+            ActionAuditEntry {
+                time_ms: index,
+                round: 1,
+                action: "readfile".to_string(),
+                status: "completed".to_string(),
+                input: json!({"path": "small.txt"}),
+                result_summary: Some("ok".to_string()),
+            },
+            &turn_id,
+            "small question",
+        );
+        store.finish_turn(&turn_id);
+    }
+
+    let action_audit = root.join("audit/action_audit.json");
+    assert_eq!(
+        rolling_file_store::read_segmented_records(&action_audit)
+            .unwrap()
+            .len(),
+        100
+    );
+    assert_eq!(
+        rolling_file_store::rolling_segments(&action_audit)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(!root.join("audit/action_audit.json.turns").exists());
+    assert!(fs::read_dir(root.join("audit/action_audit.active"))
+        .unwrap()
+        .next()
+        .is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+fn audit_test_turn(turn_id: &str, started_at_ms: i64) -> ActionAuditTurn {
+    ActionAuditTurn {
+        turn_id: turn_id.to_string(),
+        started_at_ms,
+        user_question: format!("question {turn_id}"),
+        interactions: Vec::new(),
+    }
+}
+
+#[test]
+fn action_audit_upgrade_merges_overlapping_legacy_and_segmented_sources_idempotently() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_action_audit_overlap_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let audit_dir = root.join("audit");
+    fs::create_dir_all(&audit_dir).unwrap();
+    let action_audit = audit_dir.join("action_audit.json");
+    let capacity = FileActionAuditStore::archive_capacity().unwrap();
+    let archived = audit_test_turn("already_archived", 1);
+    rolling_file_store::append_rolling_record(
+        &action_audit,
+        &FileActionAuditStore::turn_record(&archived).unwrap(),
+        capacity,
+        rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+    )
+    .unwrap();
+    let compatibility = ActionAuditDocument {
+        version: 1,
+        turns: vec![archived, audit_test_turn("legacy_only", 2)],
+    };
+    fs::write(
+        &action_audit,
+        serde_json::to_vec_pretty(&compatibility).unwrap(),
+    )
+    .unwrap();
+
+    let store = FileActionAuditStore::new(&root);
+    store.begin_turn("current", 3, "current question");
+    store.finish_turn("current");
+    // A second startup-style pass must not append any of those Turns again.
+    store.begin_turn("next", 4, "next question");
+    store.finish_turn("next");
+
+    let ids = rolling_file_store::read_segmented_records(&action_audit)
+        .unwrap()
+        .into_iter()
+        .map(|record| {
+            serde_json::from_slice::<ActionAuditTurn>(&record)
+                .unwrap()
+                .turn_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids.len(),
+        4,
+        "archive must contain one record per Turn: {ids:?}"
+    );
+    assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), 4);
+    assert!(ids.contains(&"already_archived".to_string()));
+    assert!(ids.contains(&"legacy_only".to_string()));
+    assert!(ids.contains(&"current".to_string()));
+    assert!(ids.contains(&"next".to_string()));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn action_audit_upgrade_removes_only_confirmed_legacy_turn_files() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_action_audit_partial_legacy_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let audit_dir = root.join("audit");
+    let legacy_dir = audit_dir.join("action_audit.json.turns");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    let valid_path = legacy_dir.join("turn-valid.json");
+    let damaged_path = legacy_dir.join("turn-damaged.json");
+    fs::write(
+        &valid_path,
+        serde_json::to_vec(&audit_test_turn("valid_legacy", 1)).unwrap(),
+    )
+    .unwrap();
+    fs::write(&damaged_path, b"{not valid json").unwrap();
+
+    let store = FileActionAuditStore::new(&root);
+    store.begin_turn("new_turn", 2, "new question");
+    store.finish_turn("new_turn");
+
+    assert!(
+        !valid_path.exists(),
+        "confirmed migrated file should be removed"
+    );
+    assert!(
+        damaged_path.exists(),
+        "unreadable legacy data must be preserved"
+    );
+    let action_audit = audit_dir.join("action_audit.json");
+    let ids = rolling_file_store::read_segmented_records(&action_audit)
+        .unwrap()
+        .into_iter()
+        .map(|record| {
+            serde_json::from_slice::<ActionAuditTurn>(&record)
+                .unwrap()
+                .turn_id
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        ids,
+        BTreeSet::from(["valid_legacy".to_string(), "new_turn".to_string()])
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn action_audit_upgrade_deduplicates_stale_active_checkpoint() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_action_audit_stale_active_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let store = FileActionAuditStore::new(&root);
+    let turn = audit_test_turn("completed_before_crash", 1);
+    let action_audit = root.join("audit/action_audit.json");
+    rolling_file_store::append_rolling_record(
+        &action_audit,
+        &FileActionAuditStore::turn_record(&turn).unwrap(),
+        FileActionAuditStore::archive_capacity().unwrap(),
+        rolling_file_store::AUDIT_ROLLING_SLICE_BYTES,
+    )
+    .unwrap();
+    fs::create_dir_all(&store.active_dir).unwrap();
+    let stale = store.active_dir.join("active-99999999-stale.json");
+    fs::write(&stale, FileActionAuditStore::turn_record(&turn).unwrap()).unwrap();
+
+    store.begin_turn("new_turn", 2, "new question");
+    store.finish_turn("new_turn");
+
+    assert!(!stale.exists());
+    let ids = rolling_file_store::read_segmented_records(&action_audit)
+        .unwrap()
+        .into_iter()
+        .map(|record| {
+            serde_json::from_slice::<ActionAuditTurn>(&record)
+                .unwrap()
+                .turn_id
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids.iter()
+            .filter(|id| id.as_str() == "completed_before_crash")
+            .count(),
+        1
+    );
+    assert_eq!(ids.len(), 2);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn action_audit_finish_retry_does_not_duplicate_an_already_committed_turn() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_action_audit_finish_retry_{}_{}",
+        std::process::id(),
+        now_ms()
+    ));
+    let store = FileActionAuditStore::new(&root);
+    let turn_id = "retry_after_checkpoint_delete_failure";
+    store.begin_turn(turn_id, 1, "question");
+    let checkpoint = store.active_turn_path(turn_id);
+    let turn = store.read_turn_unlocked(&checkpoint).unwrap();
+    assert!(store.archive_turn_unlocked(&turn));
+    assert!(
+        checkpoint.exists(),
+        "simulate deletion failure/crash window"
+    );
+
+    store.finish_turn(turn_id);
+
+    assert!(!checkpoint.exists());
+    let records = rolling_file_store::read_segmented_records(&store.file).unwrap();
+    let matching = records
+        .into_iter()
+        .filter_map(|record| serde_json::from_slice::<ActionAuditTurn>(&record).ok())
+        .filter(|turn| turn.turn_id == turn_id)
+        .count();
+    assert_eq!(matching, 1);
+    let _ = fs::remove_dir_all(root);
 }

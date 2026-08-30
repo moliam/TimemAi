@@ -16,6 +16,17 @@ export function isNearScrollBottom(metrics: ScrollMetrics & { clientHeight: numb
   return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= threshold;
 }
 
+export function scrollEdgeFades(metrics: ScrollMetrics & { clientHeight: number }, epsilon = 1) {
+  const threshold = Math.max(0, epsilon);
+  const maxScrollTop = Math.max(0, metrics.scrollHeight - metrics.clientHeight);
+  if (maxScrollTop <= threshold) return { top: false, bottom: false };
+  const scrollTop = Math.max(0, Math.min(metrics.scrollTop, maxScrollTop));
+  return {
+    top: scrollTop > threshold,
+    bottom: scrollTop < maxScrollTop - threshold,
+  };
+}
+
 export function restoreSessionScrollTop(position: SessionScrollPosition | undefined, scrollHeight: number) {
   if (!position || position.followLatest) return scrollHeight;
   return Math.max(0, Math.min(position.scrollTop, scrollHeight));

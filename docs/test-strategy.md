@@ -87,9 +87,9 @@ checks. If a dimension is not applicable, record that residual decision in
   Same-Session tests also create separate Context/Worker identities, verify the
   child inherits the owning Session profile/environment, reject scope mismatch,
   and prove a child finishing cannot mark a still-running primary worker ready.
-- Web frontend: Vitest protects session-aware reducers and rendering contracts;
+- Web frontend: Vitest protects session-aware reducers and behavior-level rendering decisions;
   Vite production build is regenerated in CI and must match the tracked bundle.
-  Release review also includes a real browser smoke for scrolling, composer
+  Linux CI runs real Chrome against that built bundle, and release review also includes broader browser smoke for scrolling, composer
   docking, session creation/rename, persistent theme/font/text-size choices,
   GFM tables/task lists, syntax-highlighted copyable code blocks, responsive
   overflow, working-turn input, and concurrent activity. Turn-flow
@@ -113,6 +113,10 @@ checks. If a dimension is not applicable, record that residual decision in
   restored task/supplement batches, and four Sessions restoring concurrently
   without cross-talk. The normative case list is
   `docs/web_reliability_test_matrix.md`.
+- Turn concurrency stress: a focused stress entry runs the four real concurrent
+  Turn scenarios with seeded replay, resource convergence checks, and latency
+  percentiles. It uses hundreds/thousands of iterations per scenario rather than
+  the two-iteration generic edge loop.
 - Performance guard: `scripts/performance_guard.sh` runs bounded hot-path
   checks for large prompt rendering, topic fan-out, observation panel
   rendering with long rows, Web action-lifecycle coalescing, browser event
@@ -122,6 +126,39 @@ checks. If a dimension is not applicable, record that residual decision in
   re-expansion, quadratic row trimming, or topic fan-out regressions.
 - Repeated edge regression: high-risk state machines run multiple times in CI
   through `scripts/edge_regression.sh`.
+- Runtime I/O guard: `scripts/runtime_io_guard.py` instruments the release
+  Shell's existing real-TTY stress story after startup. It observes only the
+  Timem process tree during a two-second idle interval and a real model/action
+  turn, and fails when average physical reads plus writes exceed 500,000 B/s.
+  Linux reads `/proc/<pid>/io`; macOS uses `proc_pid_rusage`. The JSON report is
+  uploaded by CI. Compilation, the test harness, and the fake model server are
+  deliberately outside the measurement.
+- Storage maintenance trigger guard: ordinary history/audit work does not scan
+  the MEM. Segmented stores enforce capacity through small manifests at write
+  boundaries. Full temporary-data reconciliation becomes due after six hours
+  of cumulative Timem runtime across restarts; stopped time does not count. A
+  tiny per-MEM counter is checkpointed every 15 minutes, while audit appends add
+  a maintenance hint only when an existing 16 MiB segment rolls. Due work runs
+  only while all Sessions are idle and is serialized against browser mutations;
+  Settings policy saves and the user-visible Top-files list remain explicit
+  maintenance triggers.
+
+## Turn Concurrency Stress Standard
+
+Turn lifecycle/final-answer/input-admission changes require a small number of heavy stress scenarios, not a large list of shallow synchronous cases. The normative design and budgets are in `docs/turn-state-projection-architecture.md` section 13.
+
+Required properties:
+
+- real independent Core/model and user/Host threads or tasks;
+- real `CoreSessionWorker`, Pod command/projection, persistence, WebSocket, and release-browser paths where applicable;
+- a controllable fake model may sleep briefly, but sleeps never establish ordering or causality; barriers/test hooks hit exact race windows;
+- seeded jitter and hundreds to thousands of iterations inside each test binary;
+- command/attachment ownership, final projection, resource cleanup, and user-visible latency percentiles are all asserted;
+- failures print a replayable seed and named stage trace.
+
+The implementation gate must add and run four heavy scenarios: PromptCut/terminal ownership, Stop/Start lifecycle storm, WebSocket reconnect/FIFO ownership, and real-Chrome interaction latency. PR CI runs at least 300 iterations per core scenario, Linux/macOS release certification at least 1,000, and scheduled/manual soak runs 10,000 or ten minutes. Do not replace these with repeated pure reducers or by running the entire workspace thousands of times.
+
+Latency evidence follows the same rule as Web performance tracing: use monotonic elapsed durations within one clock domain and command-correlated named stages. Timestamp order is not causality, and browser/server wall clocks must not be subtracted. Fake-model delay and intentional reconnect backoff are reported separately from Timem-added latency.
 
 ## Feature Coverage Matrix
 
@@ -147,7 +184,7 @@ checks. If a dimension is not applicable, record that residual decision in
 | Interactive input | CJK width, paste placeholder, Shift+Enter, control stripping, true multiline submitted-line redraw row counts, thinking-time next-question queue capture | real TTY multiline/paste/config/workspace smokes plus local fake-model-server supplement smoke and stress smoke | real TTY smoke/stress in CI |
 | Observation panel | observation event/rendering tests | thinking view tests including retry, repair-count status, model-response topics, and global working-worker count | full CI |
 | Profiling | profiler aggregation and storage tests | `session_turn_records_cached_tokens_in_profiler_and_latest_usage`, `/prof` real TTY smoke | real TTY smoke |
-| Runtime performance | `performance_guard_large_context_prompt_render_is_bounded`, `performance_guard_many_overlay_capabilities_render_is_bounded`, `performance_guard_topic_generation_for_many_actions_is_bounded`, `performance_guard_many_observation_events_render_bounded` | real TTY stress covers redraw under fake-model-server delay and mid-turn supplement | `scripts/performance_guard.sh` in full CI |
+| Runtime performance and disk I/O | `performance_guard_large_context_prompt_render_is_bounded`, `performance_guard_many_overlay_capabilities_render_is_bounded`, `performance_guard_topic_generation_for_many_actions_is_bounded`, `performance_guard_many_observation_events_render_bounded`, idle-maintenance trigger tests | `scripts/runtime_io_guard.py` measures a fully started idle interval plus real TTY model/action work at ≤500,000 B/s average; Settings-only Top scan, cumulative-runtime checkpoints, audit-roll hints, and idle reconciliation are separately protected | `scripts/performance_guard.sh` plus runtime I/O report in full CI |
 | Audit and secrets | append audit, action grouping, redaction tests, sensitive scan | session tests assert turn/action/retry/repair audit records | sensitive scan + full CI |
 | Install/update scripts | install logic tests, install run-hint contract | CI script syntax and install logic | full CI |
 | Local Web host and UI | host auth/path/config/session tests, frontend session reducers and rendering contracts | real concurrent core workers, work-instruction decision flow, structured cwd updates, production Vite build, real browser smoke | Linux/macOS full CI plus release browser review |
@@ -165,12 +202,12 @@ checks. If a dimension is not applicable, record that residual decision in
 7. `cargo fmt --check`
 8. clippy warning gate via `scripts/clippy_check.sh`
 9. `cargo test --workspace`
-10. Web dependency license scan, frontend tests, and reproducible production build
-11. performance guard via `scripts/performance_guard.sh`
+10. Web dependency license scan, frontend functional tests, reproducible production build, and Linux real-Chrome acceptance
+11. dedicated performance guard via `scripts/performance_guard.sh`
 12. repeated edge regression via `scripts/edge_regression.sh`
 13. CLI and Web release builds
 14. cross-host resume smoke
-15. real TTY smoke through `expect`
+15. real TTY smoke through `expect`, including the 500,000 B/s average runtime I/O gate
 16. whitespace check
 
 `scripts/edge_regression.sh` defaults to two iterations. Increase pressure with:

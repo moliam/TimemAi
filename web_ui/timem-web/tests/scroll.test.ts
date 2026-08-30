@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { adjacentUserMessageIndex, canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, wheelDeltaPixels } from "../src/scroll";
+import { adjacentUserMessageIndex, canScrollInDirection, isNearScrollBottom, preservePrependScrollTop, restoreSessionScrollTop, scrollEdgeFades, wheelDeltaPixels } from "../src/scroll";
 
 describe("progressive history scroll anchoring", () => {
   it("keeps the same content under the viewport after older content is prepended", () => {
@@ -30,6 +30,46 @@ describe("progressive history scroll anchoring", () => {
   });
 });
 
+
+describe("scroll edge fades", () => {
+  it("does not fade short content that has no hidden edge", () => {
+    expect(scrollEdgeFades({ scrollTop: 0, scrollHeight: 300, clientHeight: 420 })).toEqual({ top: false, bottom: false });
+  });
+
+  it("fades only the edge that still has hidden content at each boundary", () => {
+    expect(scrollEdgeFades({ scrollTop: 0, scrollHeight: 900, clientHeight: 420 })).toEqual({ top: false, bottom: true });
+    expect(scrollEdgeFades({ scrollTop: 240, scrollHeight: 900, clientHeight: 420 })).toEqual({ top: true, bottom: true });
+    expect(scrollEdgeFades({ scrollTop: 480, scrollHeight: 900, clientHeight: 420 })).toEqual({ top: true, bottom: false });
+  });
+
+  it("absorbs fractional browser scroll offsets at the top and bottom", () => {
+    expect(scrollEdgeFades({ scrollTop: 0.5, scrollHeight: 900, clientHeight: 420 })).toEqual({ top: false, bottom: true });
+    expect(scrollEdgeFades({ scrollTop: 479.5, scrollHeight: 900, clientHeight: 420 })).toEqual({ top: true, bottom: false });
+  });
+
+  it("treats content exactly fitting the viewport as having no hidden edge", () => {
+    expect(scrollEdgeFades({ scrollTop: 0, scrollHeight: 420, clientHeight: 420 })).toEqual({ top: false, bottom: false });
+  });
+
+  it("does not expose false fades during browser rubber-band overscroll", () => {
+    expect(scrollEdgeFades({ scrollTop: -24, scrollHeight: 900, clientHeight: 420 })).toEqual({ top: false, bottom: true });
+    expect(scrollEdgeFades({ scrollTop: 520, scrollHeight: 900, clientHeight: 420 })).toEqual({ top: true, bottom: false });
+    expect(scrollEdgeFades({ scrollTop: 18, scrollHeight: 300, clientHeight: 420 })).toEqual({ top: false, bottom: false });
+  });
+
+  it("lets callers choose the boundary tolerance without accepting a negative tolerance", () => {
+    expect(scrollEdgeFades({ scrollTop: 3, scrollHeight: 900, clientHeight: 420 }, 4)).toEqual({ top: false, bottom: true });
+    expect(scrollEdgeFades({ scrollTop: 477, scrollHeight: 900, clientHeight: 420 }, 4)).toEqual({ top: true, bottom: false });
+    expect(scrollEdgeFades({ scrollTop: 0, scrollHeight: 421, clientHeight: 420 }, 2)).toEqual({ top: false, bottom: false });
+    expect(scrollEdgeFades({ scrollTop: 0.1, scrollHeight: 900, clientHeight: 420 }, -4)).toEqual({ top: true, bottom: true });
+  });
+
+  it("recomputes cleanly when content changes size", () => {
+    expect(scrollEdgeFades({ scrollTop: 0, scrollHeight: 900, clientHeight: 420 })).toEqual({ top: false, bottom: true });
+    expect(scrollEdgeFades({ scrollTop: 0, scrollHeight: 300, clientHeight: 420 })).toEqual({ top: false, bottom: false });
+    expect(scrollEdgeFades({ scrollTop: 0, scrollHeight: 1200, clientHeight: 420 })).toEqual({ top: false, bottom: true });
+  });
+});
 
 describe("composer wheel ownership", () => {
   it("keeps wheel input inside a multiline composer while that direction can still scroll", () => {

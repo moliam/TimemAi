@@ -1,5 +1,6 @@
 use super::*;
 use crate::LongRunningCommandDecision;
+use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 struct NeverCancelRuntime;
@@ -26,7 +27,10 @@ struct CancelAfterFileRuntime {
 
 impl ActionRuntime for CancelAfterFileRuntime {
     fn should_cancel(&mut self) -> bool {
-        self.path.exists()
+        self.path
+            .metadata()
+            .map(|metadata| metadata.len() > 0)
+            .unwrap_or(false)
     }
 }
 
@@ -61,6 +65,240 @@ fn tmp_memory_dir(name: &str) -> PathBuf {
 
 fn tmp_cwd(name: &str) -> PathBuf {
     tmp_memory_dir(&format!("cwd_{name}"))
+}
+
+#[test]
+fn shell_job_manager_creates_no_live_job_disk_artifacts_and_cleans_legacy_directory() {
+    let dir = tmp_memory_dir("no_disk_artifacts");
+    let legacy = dir.join("shell_jobs");
+    fs::create_dir_all(&legacy).unwrap();
+    fs::write(legacy.join("jobs.jsonl"), "historical pid must not be read").unwrap();
+    let store = ShellJobManager::new(&dir);
+    assert!(
+        !legacy.exists(),
+        "known legacy directory should be removed safely"
+    );
+    let _ = store.spawn_background("printf clean", &dir, "diskless", "turn");
+    assert!(!dir.join("shell_jobs").exists());
+    let _ = store.terminate_owned_running();
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn separately_constructed_manager_does_not_adopt_or_cancel_existing_jobs() {
+    let dir = tmp_memory_dir("manager_isolation");
+    let owner = ShellJobManager::new(&dir);
+    let started = owner.spawn_background("sleep 30", &dir, "owner", "turn");
+    let pid = started
+        .lines()
+        .find_map(|line| line.strip_prefix("pid="))
+        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap();
+    let isolated = ShellJobManager::new(&dir);
+    assert!(isolated.running_for_session("owner").is_empty());
+    assert_eq!(isolated.terminate_owned_running(), 0);
+    assert!(crate::os::process_group_running(pid));
+    assert_eq!(owner.terminate_owned_running(), 1);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn foreground_large_stdout_and_stderr_are_drained_without_deadlock_and_bounded() {
+    let mut runtime = NeverCancelRuntime;
+    let command = format!(
+        "head -c {0} /dev/zero | tr '\\0' o; head -c {0} /dev/zero | tr '\\0' e >&2",
+        SHELL_OUTPUT_LIMIT_BYTES + 65536
+    );
+    let result = execute_one_bash_structured(&command, Path::new("."), 10_000, &mut runtime);
+    assert_eq!(result.status, Some(0));
+    assert!(result.stdout.contains("retained first"));
+    assert!(result.stderr.contains("retained first"));
+    assert!(result.stdout.len() <= SHELL_OUTPUT_LIMIT_BYTES + 100);
+    assert!(result.stderr.len() <= SHELL_OUTPUT_LIMIT_BYTES + 100);
+}
+
+#[test]
+fn manager_drop_terminates_unfinished_process_group() {
+    let dir = tmp_memory_dir("drop_cleanup");
+    let pid = {
+        let store = ShellJobManager::new(&dir);
+        let started = store.spawn_background("sleep 30", &dir, "drop", "turn");
+        started
+            .lines()
+            .find_map(|line| line.strip_prefix("pid="))
+            .and_then(|value| value.split(',').next())
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap()
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while crate::os::process_group_running(pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!crate::os::process_group_running(pid));
+    let _ = fs::remove_dir_all(dir);
+}
+
+fn synthetic_managed_job(delivery: ShellJobDelivery) -> ManagedShellJob {
+    ManagedShellJob {
+        pid: u32::MAX,
+        tool_call_id: "synthetic-call".to_string(),
+        kind: "timeout".to_string(),
+        command: "synthetic".to_string(),
+        cwd: ".".to_string(),
+        session_id: "synthetic-session".to_string(),
+        turn_id: "synthetic-turn".to_string(),
+        created_at_ms: now_ms(),
+        stdout: Arc::new(Mutex::new(BoundedShellOutput::new(false))),
+        stderr: Arc::new(Mutex::new(BoundedShellOutput::new(false))),
+        state: Mutex::new(ShellJobState {
+            delivery,
+            lifecycle: ShellJobLifecycle::Running,
+        }),
+        changed: Condvar::new(),
+        supervisor: Mutex::new(None),
+    }
+}
+
+#[test]
+fn completion_and_timeout_handoff_have_one_state_lock_winner() {
+    let promoted = synthetic_managed_job(ShellJobDelivery::Direct);
+    assert!(matches!(
+        promote_or_take_direct_result(&promoted),
+        DirectJobDecision::Promoted
+    ));
+    assert_eq!(
+        promoted.state.lock().unwrap().delivery,
+        ShellJobDelivery::Background
+    );
+
+    let finished = synthetic_managed_job(ShellJobDelivery::Direct);
+    finished.state.lock().unwrap().lifecycle = ShellJobLifecycle::Finished(FinishedShellJob {
+        status: "0".to_string(),
+        stdout: "done".to_string(),
+        stderr: String::new(),
+        output: "done".to_string(),
+    });
+    let DirectJobDecision::Finished(result) = promote_or_take_direct_result(&finished) else {
+        panic!("a published result must win over timeout handoff");
+    };
+    assert_eq!(result.status, "0");
+    assert_eq!(result.output, "done");
+    assert_eq!(
+        finished.state.lock().unwrap().delivery,
+        ShellJobDelivery::Direct
+    );
+}
+
+#[test]
+fn cancellation_claim_prevents_a_second_cancellation_selection() {
+    let job = synthetic_managed_job(ShellJobDelivery::Direct);
+    assert!(matches!(
+        cancel_or_take_direct_result(&job),
+        CancelJobDecision::Cancel
+    ));
+    assert_eq!(
+        job.state.lock().unwrap().delivery,
+        ShellJobDelivery::Delivered
+    );
+    assert!(!job_is_cancellable(&job));
+}
+
+#[test]
+fn direct_completion_is_removed_from_the_manager_index() {
+    let dir = tmp_memory_dir("direct_result_removed");
+    let store = ShellJobManager::new(&dir);
+    let result = store.run_with_timeout_structured(
+        "printf direct_done",
+        &dir,
+        5000,
+        "direct-session",
+        "direct-turn",
+        "direct-call",
+        false,
+        &mut NeverCancelRuntime,
+    );
+
+    assert_eq!(result.status, Some(0));
+    assert_eq!(result.stdout, "direct_done");
+    assert_eq!(store.tracked_job_count_for_tests(), 0);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn consumed_background_completion_is_removed_from_the_manager_index() {
+    let dir = tmp_memory_dir("background_result_removed");
+    let store = ShellJobManager::new(&dir);
+    let _ = store.spawn_background("printf background_done", &dir, "bg-session", "bg-turn");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let update = loop {
+        let (_, updates) = store.refresh_for_session("bg-session");
+        if let Some(update) = updates.into_iter().next() {
+            break update;
+        }
+        assert!(Instant::now() < deadline, "background job did not finish");
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    assert_eq!(update.stdout, "background_done");
+    assert_eq!(store.tracked_job_count_for_tests(), 0);
+    assert!(store.refresh_for_session("bg-session").1.is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn many_consumed_background_jobs_leave_no_index_growth() {
+    let dir = tmp_memory_dir("many_background_results_removed");
+    let store = ShellJobManager::new(&dir);
+    let job_count = 32;
+    for index in 0..job_count {
+        let _ = store.spawn_background(
+            &format!("printf job-{index}"),
+            &dir,
+            "many-session",
+            "many-turn",
+        );
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut completed = 0;
+    while completed < job_count {
+        let (_, updates) = store.refresh_for_session("many-session");
+        completed += updates.len();
+        assert!(
+            Instant::now() < deadline,
+            "short background jobs did not drain"
+        );
+        if completed < job_count {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    assert_eq!(store.tracked_job_count_for_tests(), 0);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repeated_session_cancellation_selects_a_running_job_only_once() {
+    let dir = tmp_memory_dir("cancel_idempotent");
+    let store = ShellJobManager::new(&dir);
+    let _ = store.spawn_background("sleep 30", &dir, "cancel-session", "cancel-turn");
+
+    assert_eq!(
+        store.cancel_unfinished_for_session("cancel-session").len(),
+        1
+    );
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !store.running_for_session("cancel-session").is_empty() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(store
+        .cancel_unfinished_for_session("cancel-session")
+        .is_empty());
+    let _ = store.refresh_for_session("cancel-session");
+    assert_eq!(store.tracked_job_count_for_tests(), 0);
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -259,52 +497,6 @@ fn polling_bash_preserves_last_stdout_and_stderr_evidence() {
 }
 
 #[test]
-fn historical_shell_job_record_without_stderr_file_is_treated_as_stdout_only() {
-    let dir = tmp_memory_dir("legacy_merged_output");
-    let output_file = dir.join("legacy.out");
-    fs::write(&output_file, "legacy merged bytes").unwrap();
-
-    let record = ShellJobRecord {
-        id: "legacy-job".to_string(),
-        created_at_ms: now_ms(),
-        kind: "background".to_string(),
-        session_id: "legacy-session".to_string(),
-        turn_id: "legacy-turn".to_string(),
-        pid: 1,
-        process_identity: None,
-        tool_call_id: "test_call".to_string(),
-        owner_id: None,
-        command: "legacy".to_string(),
-        cwd: dir.display().to_string(),
-        output_file: output_file.display().to_string(),
-        stderr_file: String::new(),
-        status_file: dir.join("legacy.status").display().to_string(),
-        tail_out: false,
-    };
-
-    let (stdout, stderr) = read_shell_job_streams(&record);
-    assert_eq!(stdout, "legacy merged bytes");
-    assert_eq!(stderr, "");
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn shell_job_record_deserializes_without_legacy_stderr_file_field() {
-    let record: ShellJobRecord = serde_json::from_value(serde_json::json!({
-        "id": "legacy-json",
-        "created_at_ms": 1,
-        "pid": 2,
-        "command": "printf legacy",
-        "output_file": "legacy.out",
-        "status_file": "legacy.status"
-    }))
-    .unwrap();
-
-    assert_eq!(record.stderr_file, "");
-    assert_eq!(record.kind, "background");
-}
-
-#[test]
 fn run_bash_action_results_do_not_repeat_command_text() {
     let command = "printf unique_command_marker";
     let completed = BashCommandOutput {
@@ -475,7 +667,7 @@ fn normal_bash_cancel_terminates_the_entire_process_group() {
 
 #[test]
 fn successful_run_bash_status_is_independent_of_output_words() {
-    let store = FileShellJobStore::new(&tmp_memory_dir("status_words"));
+    let store = ShellJobManager::new(&tmp_memory_dir("status_words"));
     let cwd = tmp_cwd("status_words");
     let result = execute_run_bash(
         "printf 'timeout documentation\\nerror: example\\ncancelled text\\n'",
@@ -507,7 +699,7 @@ fn successful_run_bash_status_is_independent_of_output_words() {
 
 #[test]
 fn normal_run_bash_rejects_long_sleep_commands() {
-    let store = FileShellJobStore::new(&tmp_memory_dir("long_sleep_guard"));
+    let store = ShellJobManager::new(&tmp_memory_dir("long_sleep_guard"));
     let cwd = tmp_cwd("long_sleep_guard");
     let result = execute_run_bash(
         "sleep 90 && printf done",
@@ -548,7 +740,7 @@ fn normal_run_bash_rejects_long_sleep_commands() {
 
 #[test]
 fn normal_run_bash_allows_short_sleep_commands() {
-    let store = FileShellJobStore::new(&tmp_memory_dir("short_sleep_guard"));
+    let store = ShellJobManager::new(&tmp_memory_dir("short_sleep_guard"));
     let cwd = tmp_cwd("short_sleep_guard");
     let result = execute_run_bash(
         "sleep 1; printf done",
@@ -660,7 +852,7 @@ fn run_bash_poll_mode_can_be_cancelled_during_wait() {
 
 #[test]
 fn run_bash_poll_mode_requests_user_approval_in_ask_mode() {
-    let store = FileShellJobStore::new(&tmp_memory_dir("poll_approval"));
+    let store = ShellJobManager::new(&tmp_memory_dir("poll_approval"));
     let cwd = tmp_cwd("poll_approval");
     let result = execute_run_bash(
         "test -f /tmp/timem_poll_marker",
@@ -687,7 +879,7 @@ fn run_bash_poll_mode_requests_user_approval_in_ask_mode() {
 
 #[test]
 fn run_bash_polling_requires_loop_cmd_and_interval_pair() {
-    let store = FileShellJobStore::new(&tmp_memory_dir("poll_pairing"));
+    let store = ShellJobManager::new(&tmp_memory_dir("poll_pairing"));
     let cwd = tmp_cwd("poll_pairing");
     let cmd_with_interval = execute_run_bash(
         "test -f /tmp/timem_poll_marker",
@@ -794,44 +986,10 @@ fn polling_bash_waits_until_async_file_appears() {
     );
     let _ = child.wait();
 }
-
-#[test]
-fn refresh_rejects_a_live_pid_when_the_recorded_process_identity_does_not_match() {
-    let dir = tmp_memory_dir("pid_identity_mismatch");
-    let store = FileShellJobStore::new(&dir);
-    let started = store.spawn_background("sleep 30", &dir, "identity_session", "identity_turn");
-    let pid = started
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|rest| rest.split(',').next())
-        .and_then(|pid| pid.parse::<u32>().ok())
-        .expect("pid");
-    store.forget_watched_job_for_tests(pid);
-
-    let index = dir.join("shell_jobs/jobs.jsonl");
-    let text = fs::read_to_string(&index).unwrap();
-    let mut record: ShellJobRecord = serde_json::from_str(text.lines().last().unwrap()).unwrap();
-    record.process_identity = Some("definitely-not-this-process".to_string());
-    fs::write(
-        &index,
-        format!("{}\n", serde_json::to_string(&record).unwrap()),
-    )
-    .unwrap();
-
-    let (running, updates) = store.refresh_for_session("identity_session");
-    assert!(running.is_empty());
-    assert_eq!(updates.len(), 1);
-    assert_eq!(updates[0].pid, pid);
-    assert_eq!(updates[0].status, "pid_identity_changed");
-
-    crate::os::terminate_process(pid);
-    let _ = fs::remove_dir_all(dir);
-}
-
 #[test]
 fn background_job_reports_pid_and_running_list_until_exit() {
     let dir = tmp_memory_dir("background_job");
-    let store = FileShellJobStore::new(&dir);
+    let store = ShellJobManager::new(&dir);
     let started = store.spawn_background(
         "sleep 1; printf background_ok; printf background_err >&2",
         &dir,
@@ -877,7 +1035,7 @@ fn background_job_reports_pid_and_running_list_until_exit() {
 #[test]
 fn timeout_job_reports_pid_and_later_exit_update() {
     let dir = tmp_memory_dir("timeout_job");
-    let store = FileShellJobStore::new(&dir);
+    let store = ShellJobManager::new(&dir);
     let mut runtime = NeverCancelRuntime;
     let result = store.run_with_timeout(
         "printf started; sleep 1; printf done",
@@ -927,7 +1085,7 @@ fn timeout_job_reports_pid_and_later_exit_update() {
 #[test]
 fn timed_out_job_remains_cancellable_after_launcher_exits() {
     let dir = tmp_memory_dir("timeout_group_cancel_after_launcher");
-    let store = FileShellJobStore::new(&dir);
+    let store = ShellJobManager::new(&dir);
     let descendant_pid_file = dir.join("descendant.pid");
     let command = format!(
         r#"tail -f /dev/null & child=$!; printf '%s' "$child" > {}; exit 0"#,
@@ -982,10 +1140,10 @@ fn timed_out_job_remains_cancellable_after_launcher_exits() {
 #[test]
 fn timeout_job_supports_heredoc_with_backticks() {
     let dir = tmp_memory_dir("timeout_heredoc_backticks");
-    let store = FileShellJobStore::new(&dir);
+    let store = ShellJobManager::new(&dir);
     let mut runtime = NeverCancelRuntime;
     let result = store.run_with_timeout(
-        "cat <<'EOF'\nline with `ShellJobWatcher` backticks\nEOF",
+        "cat <<'EOF'\nline with `shell supervisor` backticks\nEOF",
         &dir,
         5000,
         "session_a",
@@ -994,7 +1152,7 @@ fn timeout_job_supports_heredoc_with_backticks() {
     );
     assert!(result.contains("Exit code: 0"), "{result}");
     assert!(
-        result.contains("line with `ShellJobWatcher` backticks"),
+        result.contains("line with `shell supervisor` backticks"),
         "{result}"
     );
     let _ = fs::remove_dir_all(&dir);
@@ -1003,9 +1161,9 @@ fn timeout_job_supports_heredoc_with_backticks() {
 #[test]
 fn background_job_supports_heredoc_with_backticks() {
     let dir = tmp_memory_dir("background_heredoc_backticks");
-    let store = FileShellJobStore::new(&dir);
+    let store = ShellJobManager::new(&dir);
     let started = store.spawn_background(
-        "cat <<'EOF'\nbackground `ShellJobWatcher` output\nEOF",
+        "cat <<'EOF'\nbackground `shell supervisor` output\nEOF",
         &dir,
         "session_a",
         "turn_a",
@@ -1027,15 +1185,15 @@ fn background_job_supports_heredoc_with_backticks() {
     }
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].status, "0");
-    assert_eq!(updates[0].output, "background `ShellJobWatcher` output");
+    assert_eq!(updates[0].output, "background `shell supervisor` output");
     let _ = fs::remove_dir_all(&dir);
 }
 
 #[cfg(unix)]
 #[test]
-fn watcher_reaps_sigsegv_background_job_and_reports_signal_transition() {
+fn supervisor_reaps_sigsegv_background_job_and_reports_signal_transition() {
     let dir = tmp_memory_dir("background_sigsegv");
-    let store = FileShellJobStore::new(&dir);
+    let store = ShellJobManager::new(&dir);
     let started = store.spawn_background("kill -SEGV $$", &dir, "session_signal", "turn_signal");
     assert!(
         started.contains("now keeps running in background"),
@@ -1061,7 +1219,7 @@ fn watcher_reaps_sigsegv_background_job_and_reports_signal_transition() {
 #[test]
 fn tracked_job_preserves_complex_shell_syntax_without_runtime_wrapper() {
     let dir = tmp_memory_dir("tracked_complex_shell_syntax");
-    let store = FileShellJobStore::new(&dir);
+    let store = ShellJobManager::new(&dir);
     let mut runtime = NeverCancelRuntime;
     let result = store.run_with_timeout(
             "x='brace ok'; (printf '%s\\n' \"$x\"); { printf '%s\\n' group; }; cat <<'EOF'\nliteral `backticks` and $(not expanded)\nEOF",
@@ -1084,7 +1242,7 @@ fn tracked_job_preserves_complex_shell_syntax_without_runtime_wrapper() {
 #[test]
 fn tracked_job_runs_real_bash_syntax() {
     let dir = tmp_memory_dir("tracked_real_bash_syntax");
-    let store = FileShellJobStore::new(&dir);
+    let store = ShellJobManager::new(&dir);
     let mut runtime = NeverCancelRuntime;
     let result = store.run_with_timeout(
         "arr=(alpha beta); [[ ${arr[1]} == beta ]] && printf '%s\\n' \"${arr[1]}\"",
@@ -1102,7 +1260,7 @@ fn tracked_job_runs_real_bash_syntax() {
 #[test]
 fn background_bash_sets_noninteractive_pager_environment() {
     let dir = tmp_memory_dir("background_pager_environment");
-    let store = FileShellJobStore::new(&dir);
+    let store = ShellJobManager::new(&dir);
     let started = store.spawn_background(
         "printf 'GIT_PAGER=%s\\nPAGER=%s\\nTERM=%s\\n' \"$GIT_PAGER\" \"$PAGER\" \"$TERM\"",
         &dir,
@@ -1133,44 +1291,6 @@ fn background_bash_sets_noninteractive_pager_environment() {
     assert!(update.output.contains("TERM=dumb"), "{}", update.output);
     let _ = fs::remove_dir_all(dir);
 }
-
-#[test]
-fn watcher_reaps_background_job_without_refresh_polling() {
-    let dir = tmp_memory_dir("watcher_reaps_background");
-    let store = FileShellJobStore::new(&dir);
-    let started =
-        store.spawn_background("printf watcher_reaped", &dir, "session_watch", "turn_watch");
-    assert!(
-        started.contains("now keeps running in background"),
-        "{started}"
-    );
-    let record = store
-        .guard
-        .with_read(|| store.records_unlocked().into_iter().next())
-        .unwrap()
-        .expect("job record");
-
-    let started_wait = Instant::now();
-    while started_wait.elapsed() < Duration::from_secs(3) && !store.record_finished(&record) {
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(
-        store.record_finished(&record),
-        "shared watcher should write the status file without refresh polling"
-    );
-
-    let (running, updates) = store.refresh_for_session("session_watch");
-    assert!(running.is_empty());
-    assert_eq!(updates.len(), 1);
-    assert_eq!(updates[0].status, "0");
-    assert_eq!(updates[0].output, "watcher_reaped");
-    assert!(
-        !process_running(record.pid),
-        "reaped child should not be reported as running"
-    );
-    let _ = fs::remove_dir_all(&dir);
-}
-
 #[test]
 fn process_running_treats_zombie_as_not_running() {
     let mut child = Command::new(crate::os::BASH_EXECUTABLE)
@@ -1192,226 +1312,18 @@ fn process_running_treats_zombie_as_not_running() {
     );
     let _ = child.wait();
 }
-
 #[test]
-fn shell_job_retention_removes_only_old_finished_jobs_and_artifacts() {
-    let dir = tmp_memory_dir("rolling_retention");
-    let store = FileShellJobStore::new(&dir);
-    let shell_dir = dir.join("shell_jobs");
-    let cutoff_ms = now_ms();
-    let make_record = |id: &str, created_at_ms: i64| ShellJobRecord {
-        id: id.to_string(),
-        created_at_ms,
-        kind: "background".to_string(),
-        session_id: "retention-session".to_string(),
-        turn_id: id.to_string(),
-        pid: std::process::id(),
-        process_identity: None,
-        tool_call_id: format!("call-{id}"),
-        owner_id: Some("retention-owner".to_string()),
-        command: format!("command-{id}"),
-        cwd: dir.display().to_string(),
-        output_file: shell_dir.join(format!("{id}.out")).display().to_string(),
-        stderr_file: shell_dir.join(format!("{id}.err")).display().to_string(),
-        status_file: shell_dir.join(format!("{id}.status")).display().to_string(),
-        tail_out: false,
-    };
-    let old_finished = make_record("old-finished", cutoff_ms - 1);
-    let boundary_finished = make_record("boundary-finished", cutoff_ms);
-    let old_running = make_record("old-running", cutoff_ms - 1);
-    for record in [&old_finished, &boundary_finished, &old_running] {
-        fs::write(&record.output_file, format!("stdout-{}", record.id)).unwrap();
-        fs::write(&record.stderr_file, format!("stderr-{}", record.id)).unwrap();
-        store.append(record).unwrap();
-    }
-    fs::write(&old_finished.status_file, "exit:0").unwrap();
-    fs::write(format!("{}.notified", old_finished.status_file), "1").unwrap();
-    fs::write(&boundary_finished.status_file, "exit:0").unwrap();
-
-    assert_eq!(store.prune_finished_before(cutoff_ms).unwrap(), 1);
-    assert_eq!(store.prune_finished_before(cutoff_ms).unwrap(), 0);
-    for path in [
-        old_finished.output_file.as_str(),
-        old_finished.stderr_file.as_str(),
-        old_finished.status_file.as_str(),
-    ] {
-        assert!(!Path::new(path).exists());
-    }
-    assert!(!Path::new(&format!("{}.notified", old_finished.status_file)).exists());
-    for record in [&boundary_finished, &old_running] {
-        assert!(Path::new(&record.output_file).exists());
-        assert!(Path::new(&record.stderr_file).exists());
-    }
-    let retained = store.records_unlocked();
-    assert_eq!(retained.len(), 2);
-    assert!(retained
-        .iter()
-        .any(|record| record.id == boundary_finished.id));
-    assert!(retained.iter().any(|record| record.id == old_running.id));
-
-    let _ = fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn shell_job_retention_rejects_artifact_paths_outside_its_store() {
-    let dir = tmp_memory_dir("retention_path_escape");
-    let store = FileShellJobStore::new(&dir);
-    let outside = dir.join("must-remain.out");
-    let status = dir.join("shell_jobs/escaped.status");
-    fs::write(&outside, "do not delete").unwrap();
-    fs::write(&status, "exit:0").unwrap();
-    let record = ShellJobRecord {
-        id: "escaped".to_string(),
-        created_at_ms: 1,
-        kind: "background".to_string(),
-        session_id: "session".to_string(),
-        turn_id: "turn".to_string(),
-        pid: std::process::id(),
-        process_identity: None,
-        tool_call_id: "call".to_string(),
-        owner_id: Some("owner".to_string()),
-        command: "command".to_string(),
-        cwd: dir.display().to_string(),
-        output_file: outside.display().to_string(),
-        stderr_file: dir.join("shell_jobs/escaped.err").display().to_string(),
-        status_file: status.display().to_string(),
-        tail_out: false,
-    };
-    store.append(&record).unwrap();
-
-    assert_eq!(store.prune_finished_before(2).unwrap(), 0);
-    assert!(
-        outside.exists(),
-        "a corrupted index must not delete files outside shell_jobs"
-    );
-    assert_eq!(store.records_unlocked(), vec![record]);
-
-    let _ = fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn shutdown_terminates_only_shell_jobs_owned_by_this_process() {
+fn shutdown_terminates_shell_jobs_owned_by_this_manager() {
     let dir = tmp_memory_dir("owned_shutdown");
-    let store = FileShellJobStore::new(&dir);
+    let store = ShellJobManager::new(&dir);
     let _ = store.spawn_background("sleep 30", &dir, "session_owned", "turn_a");
 
     assert_eq!(store.terminate_owned_running(), 1);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !store.running_for_session("session_owned").is_empty() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
     assert!(store.running_for_session("session_owned").is_empty());
-    assert_eq!(store.terminate_owned_running(), 0);
-
-    let _ = fs::remove_dir_all(&dir);
-}
-
-#[cfg(unix)]
-#[test]
-fn shutdown_ignores_shell_job_record_owned_by_another_process() {
-    let dir = tmp_memory_dir("foreign_shutdown");
-    let store = FileShellJobStore::new(&dir);
-    let status_file = dir.join("foreign.status");
-    let record = ShellJobRecord {
-        id: "foreign-job".to_string(),
-        created_at_ms: now_ms(),
-        kind: "background".to_string(),
-        session_id: "foreign-session".to_string(),
-        turn_id: "foreign-turn".to_string(),
-        pid: std::process::id(),
-        process_identity: None,
-        tool_call_id: "test_call".to_string(),
-        owner_id: Some("foreign-runtime-owner".to_string()),
-        command: "foreign".to_string(),
-        cwd: dir.display().to_string(),
-        output_file: dir.join("foreign.out").display().to_string(),
-        stderr_file: dir.join("foreign.err").display().to_string(),
-        status_file: status_file.display().to_string(),
-        tail_out: false,
-    };
-    store.append(&record).unwrap();
-
-    assert_eq!(store.terminate_owned_running(), 0);
-    assert!(!status_file.exists());
-    assert_eq!(unsafe { libc::kill(libc::getpid(), 0) }, 0);
-
-    let _ = fs::remove_dir_all(&dir);
-}
-
-#[cfg(unix)]
-#[test]
-fn shutdown_and_session_cancel_refuse_pid_identity_mismatch() {
-    let dir = tmp_memory_dir("owned_identity_mismatch");
-    let store = FileShellJobStore::new(&dir);
-    let status_file = dir.join("identity-mismatch.status");
-    let record = ShellJobRecord {
-        id: "identity-mismatch-job".to_string(),
-        created_at_ms: now_ms(),
-        kind: "timeout".to_string(),
-        session_id: "identity-session".to_string(),
-        turn_id: "identity-turn".to_string(),
-        pid: std::process::id(),
-        process_identity: Some("not-the-current-process".to_string()),
-        tool_call_id: "identity-call".to_string(),
-        owner_id: Some(crate::runtime_process_owner_id().to_string()),
-        command: "must-not-be-signalled".to_string(),
-        cwd: dir.display().to_string(),
-        output_file: dir.join("identity-mismatch.out").display().to_string(),
-        stderr_file: dir.join("identity-mismatch.err").display().to_string(),
-        status_file: status_file.display().to_string(),
-        tail_out: false,
-    };
-    store.append(&record).unwrap();
-
-    assert_eq!(store.terminate_owned_running(), 0);
-    assert_eq!(
-        fs::read_to_string(&status_file).unwrap(),
-        "pid_identity_changed"
-    );
-    assert_eq!(unsafe { libc::kill(libc::getpid(), 0) }, 0);
-
-    fs::remove_file(&status_file).unwrap();
-    assert!(store
-        .cancel_unfinished_for_session("identity-session")
-        .is_empty());
-    assert_eq!(
-        fs::read_to_string(&status_file).unwrap(),
-        "pid_identity_changed"
-    );
-    assert_eq!(unsafe { libc::kill(libc::getpid(), 0) }, 0);
-
-    let _ = fs::remove_dir_all(&dir);
-}
-
-#[cfg(unix)]
-#[test]
-fn session_cancel_and_running_list_ignore_foreign_runtime_records() {
-    let dir = tmp_memory_dir("foreign_session_record");
-    let store = FileShellJobStore::new(&dir);
-    let status_file = dir.join("foreign-session.status");
-    let record = ShellJobRecord {
-        id: "foreign-session-job".to_string(),
-        created_at_ms: now_ms(),
-        kind: "timeout".to_string(),
-        session_id: "shared-session".to_string(),
-        turn_id: "foreign-turn".to_string(),
-        pid: std::process::id(),
-        process_identity: None,
-        tool_call_id: "test_call".to_string(),
-        owner_id: Some("foreign-runtime-owner".to_string()),
-        command: "must-not-be-exposed".to_string(),
-        cwd: dir.display().to_string(),
-        output_file: dir.join("foreign-session.out").display().to_string(),
-        stderr_file: dir.join("foreign-session.err").display().to_string(),
-        status_file: status_file.display().to_string(),
-        tail_out: false,
-    };
-    store.append(&record).unwrap();
-
-    assert!(store.running_for_session("shared-session").is_empty());
-    assert!(store.running_job_list_context("shared-session").is_none());
-    assert!(store
-        .cancel_unfinished_for_session("shared-session")
-        .is_empty());
-    assert!(!status_file.exists());
-    assert_eq!(unsafe { libc::kill(libc::getpid(), 0) }, 0);
-
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -1419,7 +1331,7 @@ fn session_cancel_and_running_list_ignore_foreign_runtime_records() {
 #[test]
 fn managed_shell_job_pid_is_a_distinct_runtime_child_process_group() {
     let dir = tmp_memory_dir("managed_child_group");
-    let store = FileShellJobStore::new(&dir);
+    let store = ShellJobManager::new(&dir);
     let started = store.spawn_background_outcome(
         "sleep 30",
         &dir,
@@ -1456,7 +1368,7 @@ fn terminate_process_ignores_missing_pid_without_signalling_broadly() {
 #[test]
 fn running_job_list_context_uses_pid_kind_and_command() {
     let dir = tmp_memory_dir("running_context");
-    let store = FileShellJobStore::new(&dir);
+    let store = ShellJobManager::new(&dir);
 
     let _ = store.spawn_background("sleep 10", &dir, "session_owned", "turn_a");
     let _ = store.spawn_background("sleep 10", &dir, "session_other", "turn_a");
@@ -1564,9 +1476,9 @@ fn shell_lifecycle_validation_allows_managed_background_and_ampersand_syntax() {
 
 #[cfg(unix)]
 #[test]
-fn watcher_waits_for_managed_process_group_after_launcher_exits() {
+fn supervisor_waits_for_managed_process_group_after_launcher_exits() {
     let dir = tmp_memory_dir("managed_process_group_lifecycle");
-    let store = FileShellJobStore::new(&dir);
+    let store = ShellJobManager::new(&dir);
     let started = store.spawn_background_outcome(
         "sleep 0.8 &",
         &dir,
@@ -1652,7 +1564,7 @@ fn bash_validation_allows_non_root_delete_variants() {
 
 #[test]
 fn run_bash_blocks_dangerous_delete_before_spawning_or_approval() {
-    let store = FileShellJobStore::new(&tmp_memory_dir("dangerous_delete_guard"));
+    let store = ShellJobManager::new(&tmp_memory_dir("dangerous_delete_guard"));
     let cwd = tmp_cwd("dangerous_delete_guard");
     let marker = cwd.join("marker.txt");
     let command = format!("rm -rf /; printf should_not_run > {}", marker.display());
@@ -1691,7 +1603,7 @@ fn run_bash_blocks_dangerous_delete_before_spawning_or_approval() {
 
 #[test]
 fn run_bash_blocks_dangerous_polling_loop_command() {
-    let store = FileShellJobStore::new(&tmp_memory_dir("dangerous_poll_guard"));
+    let store = ShellJobManager::new(&tmp_memory_dir("dangerous_poll_guard"));
     let cwd = tmp_cwd("dangerous_poll_guard");
     let result = execute_run_bash(
         "rm -rf $(printf '')/*",
@@ -1722,7 +1634,7 @@ fn run_bash_blocks_dangerous_polling_loop_command() {
 
 #[test]
 fn approved_bash_rechecks_safety_before_execution() {
-    let store = FileShellJobStore::new(&tmp_memory_dir("approved_dangerous_guard"));
+    let store = ShellJobManager::new(&tmp_memory_dir("approved_dangerous_guard"));
     let cwd = tmp_cwd("approved_dangerous_guard");
     let marker = cwd.join("marker.txt");
     let request = ApprovalRequest {
@@ -1766,7 +1678,7 @@ fn approved_bash_rechecks_safety_before_execution() {
 
 #[test]
 fn run_bash_allows_safe_tmp_delete() {
-    let store = FileShellJobStore::new(&tmp_memory_dir("safe_tmp_delete"));
+    let store = ShellJobManager::new(&tmp_memory_dir("safe_tmp_delete"));
     let cwd = tmp_cwd("safe_tmp_delete");
     let target = cwd.join("safe-delete");
     fs::create_dir_all(&target).unwrap();
@@ -1797,7 +1709,7 @@ fn run_bash_allows_safe_tmp_delete() {
 
 #[test]
 fn foreground_run_bash_preserves_raw_output_and_tail_policy_for_the_gate() {
-    let store = FileShellJobStore::new(&tmp_memory_dir("foreground_tail_out"));
+    let store = ShellJobManager::new(&tmp_memory_dir("foreground_tail_out"));
     let cwd = tmp_cwd("foreground_tail_out");
     let command =
         "printf BEGIN_MARKER; i=0; while [ $i -lt 33000 ]; do printf x; i=$((i+1)); done; printf END_MARKER"
@@ -1865,12 +1777,13 @@ fn polling_result_preserves_raw_output_for_the_gate() {
 }
 
 #[test]
-fn background_tail_out_is_persisted_until_exit_refresh() {
+fn background_tail_out_retains_bounded_tail_until_exit_refresh() {
     let dir = tmp_memory_dir("background_tail_out");
-    let store = FileShellJobStore::new(&dir);
-    let command =
-        "printf BEGIN_MARKER; i=0; while [ $i -lt 33000 ]; do printf x; i=$((i+1)); done; printf END_MARKER"
-            .to_string();
+    let store = ShellJobManager::new(&dir);
+    let command = format!(
+        "printf BEGIN_MARKER; head -c {} /dev/zero | tr '\\0' x; printf END_MARKER",
+        SHELL_OUTPUT_LIMIT_BYTES + 4096
+    );
     let started = store.spawn_background_outcome(
         &command,
         &dir,
@@ -1881,35 +1794,27 @@ fn background_tail_out_is_persisted_until_exit_refresh() {
     );
     assert_eq!(started.status, ActionStatus::BackgroundRunning);
 
-    let record = store
-        .guard
-        .with_read(|| store.records_unlocked().into_iter().next())
-        .unwrap()
-        .expect("persisted background record");
-    assert!(record.tail_out);
-
     let wait_started = Instant::now();
     let update = loop {
         let (_, updates) = store.refresh_for_session("session_tail_background");
         if let Some(update) = updates.into_iter().next() {
             break update;
         }
-        assert!(
-            wait_started.elapsed() < Duration::from_secs(5),
-            "tail background command did not finish"
-        );
+        assert!(wait_started.elapsed() < Duration::from_secs(5));
         thread::sleep(Duration::from_millis(20));
     };
-
-    assert!(!update.output.contains("truncated"), "{}", update.output);
-    assert!(update.output.contains("END_MARKER"), "{}", update.output);
-    assert!(update.output.contains("BEGIN_MARKER"), "{}", update.output);
-    let _ = fs::remove_dir_all(dir);
+    assert!(update.stdout.len() <= SHELL_OUTPUT_LIMIT_BYTES + 100);
+    assert!(update.stdout.contains("retained last"), "{}", update.stdout);
+    assert!(update.stdout.contains("END_MARKER"), "{}", update.stdout);
+    assert!(!update.stdout.contains("BEGIN_MARKER"), "{}", update.stdout);
+    let (_, repeated) = store.refresh_for_session("session_tail_background");
+    assert!(repeated.is_empty(), "exit notification must be one-shot");
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
 fn approval_pending_action_preserves_tail_out() {
-    let store = FileShellJobStore::new(&tmp_memory_dir("approval_tail_out"));
+    let store = ShellJobManager::new(&tmp_memory_dir("approval_tail_out"));
     let cwd = tmp_cwd("approval_tail_out");
     let result = execute_run_bash_with_tail(
         "printf approved",
@@ -1935,90 +1840,4 @@ fn approval_pending_action_preserves_tail_out() {
         PendingApprovedAction::RunBash { tail_out, .. } => assert!(tail_out),
         other => panic!("unexpected pending action: {other:?}"),
     }
-}
-
-#[test]
-fn finished_shell_job_temporary_items_are_sized_and_deleted_as_complete_bundles() {
-    let dir = tmp_memory_dir("finished_temporary_items");
-    let shell_dir = dir.join("shell_jobs");
-    fs::create_dir_all(&shell_dir).unwrap();
-    let finished_output = shell_dir.join("finished.out");
-    let finished_stderr = shell_dir.join("finished.err");
-    let finished_status = shell_dir.join("finished.status");
-    let finished_notified = shell_dir.join("finished.status.notified");
-    let active_output = shell_dir.join("active.out");
-    let active_stderr = shell_dir.join("active.err");
-    let active_status = shell_dir.join("active.status");
-    for (path, contents) in [
-        (&finished_output, "12345"),
-        (&finished_stderr, "678"),
-        (&finished_status, "0"),
-        (&finished_notified, "ok"),
-        (&active_output, "active"),
-        (&active_stderr, ""),
-        (&active_status, ""),
-    ] {
-        fs::write(path, contents).unwrap();
-    }
-    let record = |id: &str, output: &Path, stderr: &Path, status: &Path| ShellJobRecord {
-        id: id.to_string(),
-        created_at_ms: 42,
-        kind: "test".to_string(),
-        session_id: "session_a".to_string(),
-        turn_id: "turn_a".to_string(),
-        pid: std::process::id(),
-        process_identity: None,
-        tool_call_id: format!("call-{id}"),
-        owner_id: None,
-        command: "true".to_string(),
-        cwd: dir.display().to_string(),
-        output_file: output.display().to_string(),
-        stderr_file: stderr.display().to_string(),
-        status_file: status.display().to_string(),
-        tail_out: false,
-    };
-    let finished = record(
-        "finished-job",
-        &finished_output,
-        &finished_stderr,
-        &finished_status,
-    );
-    let active = record("active-job", &active_output, &active_stderr, &active_status);
-    fs::write(
-        shell_dir.join("jobs.jsonl"),
-        format!(
-            "{}\n{}\n",
-            serde_json::to_string(&finished).unwrap(),
-            serde_json::to_string(&active).unwrap()
-        ),
-    )
-    .unwrap();
-
-    let store = FileShellJobStore::new(&dir);
-    let items = store.finished_temporary_items().unwrap();
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].id, "finished-job");
-    assert_eq!(items[0].bytes, 11);
-    assert!(store
-        .delete_finished_temporary_items(&["active-job".to_string()])
-        .is_err());
-    assert_eq!(
-        store
-            .delete_finished_temporary_items(&["finished-job".to_string()])
-            .unwrap(),
-        1
-    );
-    for path in [
-        &finished_output,
-        &finished_stderr,
-        &finished_status,
-        &finished_notified,
-    ] {
-        assert!(!path.exists(), "{} should be deleted", path.display());
-    }
-    assert!(active_output.exists());
-    let index = fs::read_to_string(shell_dir.join("jobs.jsonl")).unwrap();
-    assert!(!index.contains("finished-job"));
-    assert!(index.contains("active-job"));
-    let _ = fs::remove_dir_all(dir);
 }

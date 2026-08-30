@@ -1362,6 +1362,7 @@ fn output_expansion_resolution_is_core_owned() {
         base_url: "https://example.test/v1".to_string(),
         api_key: "test-key".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         timeout_secs: 30,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
@@ -1405,6 +1406,7 @@ fn output_expansion_decline_returns_core_stop_summary() {
         base_url: "https://example.test/v1".to_string(),
         api_key: "test-key".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         timeout_secs: 30,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
@@ -1452,6 +1454,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         base_url: "https://example.test/v1".to_string(),
         api_key: "test-key".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         timeout_secs: 30,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
@@ -1530,6 +1533,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
         base_url: "https://example.test/v1".to_string(),
         api_key: "test-key".to_string(),
         http_headers: Default::default(),
+        request_fields: Default::default(),
         timeout_secs: 30,
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 3_000,
@@ -2525,9 +2529,10 @@ fn long_context_forces_shrink_at_ninety_percent_window_with_compaction_instructi
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("mode=force_shrink_required"));
+    assert!(prompt.contains("Your tool calls must start with context_compact"));
     assert!(prompt.contains("force_shrink_threshold_tokens=2700"));
     assert!(prompt.contains("target_dynamic_context_ratio=10%-20%"));
-    assert!(prompt.contains("summarize all dynamic prompt deltas into about 10%-20%"));
+    assert!(prompt.contains("Summarize all dynamic prompt deltas into about 10%-20%"));
     assert!(prompt.contains("task description"));
     assert!(prompt.contains("working environment facts"));
     assert!(prompt.contains("current progress"));
@@ -4459,6 +4464,83 @@ fn scratch_delete_missing_id_is_non_destructive() {
 }
 
 #[test]
+fn json_context_compact_runs_before_later_action_in_same_response() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("json_compact_then_action"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let initial_prompt = match core.begin_turn("OLD JSON CONTEXT", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected initial step: {other:?}"),
+    };
+    let old_delta_id = first_field_value(&initial_prompt, "delta_id");
+    assert!(old_delta_id.starts_with("pd_"));
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: serde_json::json!({
+            "free_talk": "compact first, then continue",
+            "context_compact": {
+                "discard": [old_delta_id],
+                "summary": "KEEP JSON ACTIVE STATE"
+            },
+            "working_still_action": {
+                "self_tool": {"type": "cwd"}
+            }
+        })
+        .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected compact plus later action to continue, got {other:?}"),
+    };
+
+    assert!(!prompt.contains("OLD JSON CONTEXT"));
+    assert!(prompt.contains("KEEP JSON ACTIVE STATE"));
+    assert!(prompt.contains("Action result: self_tool"));
+    assert!(prompt.contains("CWD:"));
+}
+
+#[test]
+fn json_failed_context_compact_blocks_later_action() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("json_compact_failure_barrier"),
+    );
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let _ = core.begin_turn("KEEP JSON OLD STATE", None);
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: serde_json::json!({
+            "context_compact": {
+                "discard": ["pd_missing"],
+                "summary": "INVALID JSON COMPACT"
+            },
+            "working_still_action": {
+                "self_tool": {"type": "cwd"}
+            }
+        })
+        .to_string(),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected failed compact barrier to continue, got {other:?}"),
+    };
+
+    assert!(prompt.contains("error: invalid_prompt_refs"));
+    assert!(!prompt.contains("Action result: self_tool"));
+    assert!(prompt.contains("KEEP JSON OLD STATE"));
+}
+
+#[test]
 fn context_compact_offload_stores_runtime_prompt_delta_by_id() {
     let mut core = test_core(
         "STATIC",
@@ -5813,6 +5895,7 @@ fn action_audit_groups_actions_by_user_turn_and_round() {
         CoreStep::NeedModel { .. } => {}
         other => panic!("unexpected step: {other:?}"),
     }
+    core.finish_action_audit_turn();
 
     let audit_path = dir.join("audit").join("action_audit.json");
     let audit_text = fs::read_to_string(audit_path).unwrap();
@@ -6306,6 +6389,34 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: run_bash"));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while core
+        .refresh_running_shell_jobs_for_session("default")
+        .iter()
+        .any(|job| job.pid.to_string() == pid)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for killed timeout job {pid} to exit"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"working_still_action":[{"run_bash":{"cmd":"printf after-kill","timeout_ms":1000}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("after-kill"), "{prompt}");
     assert!(prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
     assert!(prompt.contains("old timeout job"), "{prompt}");
     assert!(prompt.contains("now exits"), "{prompt}");
@@ -6406,11 +6517,15 @@ fn run_bash_requires_approval_for_mutating_commands() {
     assert_eq!(events[0]["approval_id"], request.approval_id);
     assert_eq!(events[0]["approved"], false);
 
-    let audit_text = fs::read_to_string(dir.join("audit").join("action_audit.json")).unwrap();
-    let audit: serde_json::Value = serde_json::from_str(&audit_text).unwrap();
-    let actions = audit["turns"][0]["interactions"][0]["actions"]
-        .as_array()
+    let active_dir = dir.join("audit").join("action_audit.active");
+    let active_files = fs::read_dir(&active_dir)
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
         .unwrap();
+    assert_eq!(active_files.len(), 1, "expected one active Turn checkpoint");
+    let audit: serde_json::Value =
+        serde_json::from_slice(&fs::read(active_files[0].path()).unwrap()).unwrap();
+    let actions = audit["interactions"][0]["actions"].as_array().unwrap();
     assert_eq!(actions.len(), 2);
     assert_eq!(actions[0]["action"], "run_bash");
     assert!(actions[0].get("intent").is_none());
@@ -7195,7 +7310,7 @@ fn rendered_prompt_response_schema_is_injected_from_resource() {
     assert!(prompt.contains("\"final_answer?\""));
     assert!(prompt.contains("\"free_talk?\""));
     assert!(prompt.contains("\"working_still_action?\""));
-    assert!(prompt.contains("context_compact is an exclusive action"));
+    assert!(prompt.contains("context_compact may be followed by other actions"));
     assert!(prompt.contains("context_compact"));
     assert!(prompt.contains("ALL_FINISHED"));
 }

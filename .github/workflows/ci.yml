@@ -83,3 +83,11 @@ jobs:
       - name: Run production CI gate
         shell: bash
         run: scripts/ci.sh
+
+      - name: Upload Timem runtime I/O report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-io-${{ matrix.os }}
+          path: target/runtime-io-guard/report.json
+          if-no-files-found: warn

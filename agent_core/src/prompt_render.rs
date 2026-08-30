@@ -10,16 +10,16 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 pub(crate) const RESPONSE_TRAILER: &str =
     "Please continue the work and respond as protocol requires in user's language:";
-pub(crate) const NATIVE_RESPONSE_TRAILER: &str = "Continue the work in the user's language. Call API tools when more evidence or actions are needed; otherwise give the final user-facing answer:";
+pub(crate) const NATIVE_RESPONSE_TRAILER: &str = "Continue the work and express thought in the user's language. Call API tools when more evidence or actions are needed; otherwise give the final user-facing answer:";
 pub(crate) const CONTEXT_COMPACT_REQUIRED_TRAILER: &str =
-    "Context too long, please compress first:";
-const NATIVE_PROTOCOL_SECTION: &str = "## Tool Calling\n\nCapabilities are provided through the model API. Call them through the API tool-call channel. You may request independent calls together. Text accompanying calls is a user-visible progress note. A response with no tool calls is the final user-facing answer. `context_compact` is an ordinary runtime capability and is exclusive with other calls in the same response.";
+    "Context is too long. Your tool calls must start with context_compact:";
+const NATIVE_PROTOCOL_SECTION: &str = "## Tool Calling\n\nCapabilities are provided through the model API. Call them through the API tool-call channel. You may request independent calls together. Text accompanying calls is a user-visible progress note. A response with no tool calls is the final user-facing answer. `context_compact` may be followed by other capability calls in the same response, but it must be the first call. Later calls run only after compaction succeeds.";
 const NATIVE_RESPONSE_MODE_INSTRUCTION: &str = "Use the API tool-call channel for runtime capabilities. Ordinary response text is user-visible, you should report to user your progress often, or answer questions while working; text without tool calls finishes the loop.";
 const INLINE_RESPONSE_MODE_INSTRUCTION: &str =
     "Your response MUST be exactly protocol-compliant in the response protocol below.";
 const INLINE_TOOL_CATALOG_SECTION_HEADING: &str = "## Actions\n\nGenerate actions to drive the runtime to do things for you. There are several builtin actions:\n\n### Available capabilities";
 const NATIVE_BUILTIN_TOOL_DESCRIPTIONS_HEADING: &str =
-    "## Built-in Tool Descriptions\n\nBuilt-in tool parameter schemas are provided separately through the model API.";
+    "## Built-in Tool Descriptions\n\nBuilt-in tool parameter schemas are provided separately through the model API. One response can reasonably contain multiple tool calls for better performance.";
 pub(crate) const MAX_ACTION_RESULT_PROMPT_BYTES: usize =
     tool_result_gate::MAX_MODEL_TOOL_RESULT_BYTES;
 

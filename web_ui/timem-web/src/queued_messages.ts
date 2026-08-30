@@ -216,7 +216,11 @@ export function shouldDirectManualMessage(
  sessionState: string,
  queuedMessageCount: number,
  paused: boolean,
+ _cancelling = false,
 ) {
+ // Stop is a visual hand-off, not a browser queue state. The Host accepts the
+ // next turn immediately and privately holds Core dispatch behind its terminal
+ // barrier while the cancelled execution finishes cleaning up.
  return (sessionState === "ready" || sessionState === "stopped" || sessionState === "error") && queuedMessageCount === 0 && !paused;
 }
 
@@ -307,7 +311,7 @@ export function applyQueuedMessagesAck(
 }
 
 export function selectQueuedDispatches(
-  sessions: readonly { session_id: string; state: string }[],
+  sessions: readonly { session_id: string; state: string; cancelling_turn_id?: string | null }[],
   queues: Readonly<Record<string, readonly QueuedMessage[]>>,
   dispatchingSessionIds: ReadonlySet<string>,
   editingSessionId?: string,
@@ -317,6 +321,7 @@ export function selectQueuedDispatches(
   return sessions.flatMap((session) => {
     if (
       session.state === "working"
+      || !!session.cancelling_turn_id
       || dispatchingSessionIds.has(session.session_id)
       || editingSessionId === session.session_id
       || pausedSessionIds.has(session.session_id)

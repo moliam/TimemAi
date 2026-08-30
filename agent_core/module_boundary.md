@@ -1,15 +1,41 @@
 # agent_core module boundary
 
-`agent_core` is the reusable Timem runtime. It owns agent state, prompt/context
-management, model service payload/transport, capability registration, tool execution
-coordination, memory access, retry policy, and structured topic events.
+`agent_core` is the reusable, UI-neutral Timem runtime. It owns agent state,
+prompt/context management, model service payload/transport, capability
+registration, tool execution coordination, memory access, retry policy, and the
+authoritative semantic contracts consumed by every Shell, Web, iOS, desktop, or
+future host. A new UI shell should adapt these contracts, not fork the agent
+loop or reconstruct Turn lifecycle from events.
 
 Before changing this module, also read the repository-level `AGENTS.md`.
+Also read `docs/turn-state-projection-architecture.md` for the shared Core, Host Adapter, Host Projection Adapter, and UI-shell lifecycle boundary.
 
 ## Belongs here
 
 - Protocol-neutral runtime data structures and algorithms.
-- Model request/response adapters and cache planning.
+- The authoritative per-Session Turn Gate and minimal Turn reducer: durable
+  `TurnId`, monotonic `TurnEpoch`, exact `TurnToken` validation, Active-Turn
+  ownership, stop intent, immutable terminal outcome, and rejection of stale or
+  late worker/model/tool events. Worker activity and topic state are subordinate
+  facts and must never create or revive a Turn.
+- The authoritative, UI-neutral Core Turn projection contract. Core exposes
+  current Active Turn identity, input admission, activity, stop intent, immutable
+  outcome, worker scope, and structured requests/replies without terminal,
+  browser, Swift, React, transport, or layout assumptions. All hosts must obtain
+  lifecycle truth from this contract. A host may cache or repackage the
+  projection, but cannot derive a competing lifecycle from topic order, worker
+  counts, or local command state.
+- A stable host-adapter surface for both deployment shapes: a simple synchronous
+  host may call Core and render the projection directly; an asynchronous,
+  reconnectable, or remote UI may place a Host Projection Adapter in front of
+  Core to add snapshots, revisions, reliable command delivery, and transport
+  sequencing. Those delivery mechanisms remain outside Core and must not alter
+  Core Turn semantics.
+- Model request/response adapters and cache planning. Provider-facing tool
+  schemas are rendered through a dedicated protocol-dialect module rather than
+  mutated in the capability registry or assembled ad hoc in hosts. The executor
+  always validates against the original registered schema; compatibility
+  renderers may only transform the model-facing copy.
 - Model API wire-request planning and transport, including endpoint, headers,
   payload shape, cache-control fields, structured-output fields, HTTP execution,
   response parsing, and audit redaction metadata. Hosts should not rebuild
@@ -56,8 +82,16 @@ Before changing this module, also read the repository-level `AGENTS.md`.
   response parsing/execution batch use the same earliest logical timestamp so
   they appear before later user/runtime submissions. Logical timestamps are only
   for prompt assembly order and must not be rendered into the model prompt.
-- Active-turn context updates such as user supplements entered while a model
-  turn is in progress, including their prompt-slice insertion and audit events.
+- Active-turn context updates such as explicit user supplements entered while a
+  model turn is in progress, including their prompt-slice insertion and audit
+  events. Core owns the Turn's one-way input-admission gate and seals a
+  `PromptCut` before each model request to record exactly which input sequence
+  that request consumes. Command acceptance alone does not prove that a
+  supplement influenced the current model response. When Core accepts a
+  terminal/final response, it keeps only input covered by an already-sent
+  PromptCut in the current Turn and returns every accepted-but-unconsumed task
+  input to the Host for atomic conversion into a new-turn intent. The new Turn
+  starts from its first model round with a fresh `TurnToken`.
 - Active-turn reminders. Core evaluates the host-loaded, user-global reminder
   schedules independently for active-time and completed-round intervals, then
   submits each due random selection as a SYSTEM component before the next model
@@ -259,12 +293,22 @@ Before changing this module, also read the repository-level `AGENTS.md`.
 - User-facing terminal copy that depends on a specific UI surface.
 - Direct assumptions about how a host renders progress, errors, prompts, or
   confirmations.
+- Browser/WebSocket-specific projection revisions, event cursors, reconnect
+  outboxes, HTTP authentication, or UI command queues. These belong to a Host
+  Projection Adapter such as `timem_web`, not to the reusable Core semantic
+  projection.
+- A separate lifecycle API for each UI toolkit. Rust, Swift, Web, desktop, and
+  process-IPC bindings must expose the same Turn identity and transition
+  semantics even when their language-level types differ.
 
 ## Interface rule
 
-Core should expose functions, structs, enums, and topic event streams. Host UIs
-render those structures in their own style. When core needs host input, it should
-return a structured request rather than printing or reading from stdin.
+Core should expose functions, structs, enums, an authoritative Turn
+projection, and topic event streams. Host adapters render or transport those
+structures in their own style. When Core needs host input, it returns a
+structured request rather than printing, reading from stdin, or assuming a UI
+framework. Adding a new UI should require a binding/adapter and presentation
+work, not a new Agent lifecycle implementation.
 
 Threading rule: `AgentCore` is the state owner for one logical session/context.
 The synchronous API is still valid for simple hosts. Hosts that need concurrent

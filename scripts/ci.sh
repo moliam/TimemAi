@@ -6,7 +6,7 @@ cd "$ROOT_DIR"
 
 echo "== shell scripts syntax =="
 bash -n install.sh uninstall.sh scripts/bootstrap_assistant_ui.sh scripts/clippy_check.sh scripts/install_logic_test.sh scripts/sensitive_scan.sh scripts/test_contract_check.sh scripts/edge_regression.sh scripts/update_static_prompt_snapshot.sh scripts/kvc_replay_test.sh scripts/performance_guard.sh scripts/module_boundary_check.sh scripts/cross_host_resume_smoke.sh scripts/web_runtime_lifecycle_smoke.sh scripts/web_public_runtime_smoke.sh scripts/linux_web_platform_smoke.sh scripts/web_license_check.sh scripts/version_consistency_check.sh scripts/ci.sh
-python3 -m py_compile scripts/fake_openai_server.py scripts/web_ui_matrix_check.py
+python3 -m py_compile scripts/fake_openai_server.py scripts/web_ui_matrix_check.py scripts/runtime_io_guard.py
 python3 scripts/fake_openai_server.py --self-test
 
 echo "== release version consistency =="
@@ -80,6 +80,11 @@ echo "== web production build =="
 pnpm --dir web_ui/timem-web build
 git diff --exit-code -- web_ui/timem-web/dist
 
+if [[ "$(uname -s)" == "Linux" ]]; then
+  echo "== real Chrome Web UI acceptance =="
+  pnpm --dir web_ui/timem-web test:browser
+fi
+
 echo "== performance guard =="
 scripts/performance_guard.sh
 
@@ -107,7 +112,9 @@ echo "== real TTY smoke =="
 if command -v expect >/dev/null 2>&1; then
   scripts/real_tty_smoke.expect
   scripts/real_tty_supplement_smoke.expect
-  scripts/real_tty_stress.expect
+
+  echo "== Timem runtime I/O guard =="
+  python3 scripts/runtime_io_guard.py
 else
   echo "error: expect is required for real TTY smoke" >&2
   exit 1
