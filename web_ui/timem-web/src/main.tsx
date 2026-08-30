@@ -11107,6 +11107,12 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
   );
 }
 
+function toolActivityGroupStatusLabel(summary: ToolActivitySummary) {
+  if (summary.status === "completed") return "Succ";
+  if (summary.status === "failed") return `Fail(${summary.failedCount})`;
+  return "running";
+}
+
 function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
   const [open, setOpen] = useState(false);
   const singleActivity =
@@ -11117,7 +11123,8 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
   )
     return <ToolActivity activity={singleActivity} />;
   const running = summary.status === "running";
-  const summaryLabel = `${open ? "收起" : "展开"}工具活动：${summary.label}，${summary.status}`;
+  const groupStatusLabel = toolActivityGroupStatusLabel(summary);
+  const summaryLabel = `${open ? "收起" : "展开"}工具活动：${summary.label}，${groupStatusLabel}`;
   return (
     <details
       className={`tool-activity-group ${summary.status}`}
@@ -11144,7 +11151,7 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
             </span>
           ))}
         </span>
-        <span className="tool-activity-group-status">· {summary.status}</span>
+        <span className="tool-activity-group-status">· {groupStatusLabel}</span>
         <ChevronRight className="tool-activity-chevron" size={14} />
       </summary>
       <div className="tool-activity-group-body">
