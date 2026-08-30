@@ -36,7 +36,7 @@ use timem_shell::{
     local_time_label, model_service_config_from_env, observation_events_from_core_topic_events,
     observation_panel_width_for_terminal, parse_cli_args, render_final_answer_markdown,
     render_final_response_at, render_prof_report_data, render_shell_status_bar,
-    render_thinking_view_at, render_turn_outcome_text, resolve_memory_dir, run_session_turn,
+    render_thinking_view_at, render_turn_outcome_text, resolve_memory_dir, run_in_process_turn,
     runtime_active_elapsed_secs, runtime_profile_report, shell_status_message_from_core_topic,
     stale_context_decision_request, topic_event_status_hint, work_instruction_load_report,
     work_instruction_load_request, work_instruction_load_topic_event,
@@ -233,7 +233,7 @@ fn main() {
             options.supporting_context.as_deref(),
         ]);
         let mut ui = NoopTurnUi;
-        let outcome = run_session_turn(
+        let outcome = run_in_process_turn(
             &mut core,
             &mut config,
             TurnInput {
@@ -487,7 +487,7 @@ fn main() {
             turn_work_instruction_context.as_deref(),
             workspace_ctx.as_deref(),
         ]);
-        let outcome = run_session_turn(
+        let outcome = run_in_process_turn(
             &mut core,
             &mut config,
             TurnInput {
