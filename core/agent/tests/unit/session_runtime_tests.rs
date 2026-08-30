@@ -242,12 +242,14 @@ impl TurnUi for DelayBeforeFirstModelUi {
     }
 }
 
+#[cfg(unix)]
 struct CancelWhenFilesReadyUi {
     started: Instant,
     ready_files: [std::path::PathBuf; 2],
     hard_timeout: Duration,
 }
 
+#[cfg(unix)]
 impl TurnUi for CancelWhenFilesReadyUi {
     fn is_cancel_requested(&mut self) -> bool {
         self.ready_files.iter().all(|path| path.is_file())
@@ -255,6 +257,7 @@ impl TurnUi for CancelWhenFilesReadyUi {
     }
 }
 
+#[cfg(unix)]
 struct ApproveAndCancelAfterDelayUi {
     started: Instant,
     ready_files: [std::path::PathBuf; 2],
@@ -262,6 +265,7 @@ struct ApproveAndCancelAfterDelayUi {
     approvals: u32,
 }
 
+#[cfg(unix)]
 impl TurnUi for ApproveAndCancelAfterDelayUi {
     fn is_cancel_requested(&mut self) -> bool {
         self.ready_files.iter().all(|path| path.is_file())
