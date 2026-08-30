@@ -117,8 +117,9 @@ checks. If a dimension is not applicable, record that residual decision in
   Turn scenarios with seeded replay, resource convergence checks, and latency
   percentiles. It uses hundreds/thousands of iterations per scenario rather than
   the two-iteration generic edge loop.
-- Performance guard: `scripts/performance_guard.sh` runs bounded hot-path
-  checks for large prompt rendering, topic fan-out, observation panel
+- Performance guard: `scripts/performance_guard.sh` first verifies the exact expected Rust
+  performance-test inventory so a stale filter cannot pass after discovering zero tests, then runs
+  bounded hot-path checks for large prompt rendering, topic fan-out, observation panel
   rendering with long rows, Web action-lifecycle coalescing, browser event
   burst draining, and the joint long-scroll/warm-Session-cache invalidation
   contract. Thresholds are intentionally broad enough for CI
