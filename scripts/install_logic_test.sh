@@ -31,7 +31,7 @@ assert_version_below "1.77.9" "1.78.0"
 assert_version_below "0.99.0" "1.0.0"
 
 case "$(detect_os)" in
-  macos|linux|unsupported_windows|unsupported) ;;
+  macos|linux|windows|unsupported) ;;
   *)
     echo "detect_os returned an unexpected value" >&2
     exit 1
@@ -117,6 +117,21 @@ fi
 
 if ! grep -q 'pkg-config' "$ROOT_DIR/install.sh"; then
   echo "install script should cover Linux pkg-config for native Rust crate builds" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'powershell -ExecutionPolicy Bypass -File .\install.ps1' "$ROOT_DIR/install.sh"; then
+  echo "install.sh should direct Windows users to the native PowerShell installer" >&2
+  exit 1
+fi
+
+if [ ! -f "$ROOT_DIR/install.ps1" ] || [ ! -f "$ROOT_DIR/uninstall.ps1" ] || [ ! -f "$ROOT_DIR/scripts/windows_install_logic_test.ps1" ]; then
+  echo "Windows delivery scripts must be shipped" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'interfaces\web\dist\index.html' "$ROOT_DIR/install.ps1"; then
+  echo "Windows installer must use the semantic interfaces/web frontend layout" >&2
   exit 1
 fi
 
