@@ -63,7 +63,7 @@ pub fn fill_secure_random(bytes: &mut [u8]) -> std::io::Result<()> {
 pub fn user_home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        return crate::windows::user_home_dir();
+        crate::windows::user_home_dir()
     }
     #[cfg(not(windows))]
     {
@@ -102,7 +102,7 @@ pub fn command_for_script(path: &Path) -> Result<Command, String> {
     }
     #[cfg(windows)]
     {
-        return crate::windows::command_for_script(path);
+        crate::windows::command_for_script(path)
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -378,7 +378,7 @@ pub fn current_parent_pid() -> Option<u32> {
     }
     #[cfg(windows)]
     {
-        return crate::windows::current_parent_pid().filter(|pid| *pid > 1);
+        crate::windows::current_parent_pid().filter(|pid| *pid > 1)
     }
     #[cfg(not(any(unix, windows)))]
     {
