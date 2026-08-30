@@ -86,6 +86,16 @@ fn linux_policy_uses_xdg_paths_and_parses_os_release() {
 }
 
 #[test]
+fn secure_random_fills_buffers_without_reusing_a_fixed_value() {
+    let mut first = [0_u8; 32];
+    let mut second = [0_u8; 32];
+    fill_secure_random(&mut first).expect("platform secure random source");
+    fill_secure_random(&mut second).expect("platform secure random source");
+    assert_ne!(first, [0_u8; 32]);
+    assert_ne!(first, second);
+}
+
+#[test]
 fn process_liveness_helpers_are_conservative_and_consistent() {
     let current_pid = std::process::id();
     assert_eq!(process_is_alive(u64::from(current_pid)), Some(true));
@@ -284,4 +294,52 @@ fn linux_process_group_safety_guards_current_runtime() {
     kill_process_group(current_group);
     assert_eq!(process_is_alive(u64::from(current_pid)), Some(true));
     assert_eq!(unsafe { libc::kill(libc::getpid(), 0) }, 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_policy_selects_native_script_interpreters() {
+    let powershell = windows::command_for_script(Path::new(r"C:\tools\echo.ps1"))
+        .expect("PowerShell script command");
+    assert_eq!(powershell.get_program(), "powershell.exe");
+    let powershell_args = powershell.get_args().collect::<Vec<_>>();
+    assert!(powershell_args.contains(&OsStr::new("-NoProfile")));
+    assert!(powershell_args.contains(&OsStr::new("-NonInteractive")));
+    assert!(powershell_args.contains(&OsStr::new("-File")));
+    assert_eq!(
+        powershell_args.last().copied(),
+        Some(OsStr::new(r"C:\tools\echo.ps1"))
+    );
+
+    let batch =
+        windows::command_for_script(Path::new(r"C:\tools\echo.cmd")).expect("cmd script command");
+    assert_eq!(batch.get_program(), "cmd.exe");
+    assert_eq!(
+        batch.get_args().collect::<Vec<_>>(),
+        vec![
+            OsStr::new("/d"),
+            OsStr::new("/s"),
+            OsStr::new("/c"),
+            OsStr::new(r"C:\tools\echo.cmd"),
+        ]
+    );
+
+    let executable = windows::command_for_script(Path::new(r"C:\tools\echo.exe"))
+        .expect("native executable command");
+    assert_eq!(executable.get_program(), OsStr::new(r"C:\tools\echo.exe"));
+    assert_eq!(
+        windows::command_for_script(Path::new(r"C:\tools\echo.py")).unwrap_err(),
+        "unsupported_windows_command_extension:py"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_process_identity_and_parent_are_available() {
+    let pid = std::process::id();
+    assert_eq!(process_is_alive(u64::from(pid)), Some(true));
+    let identity = process_identity(pid).expect("current Windows process identity");
+    assert!(identity.starts_with("windows-creation-time:"), "{identity}");
+    assert_eq!(process_identity(pid), Some(identity));
+    assert!(current_parent_pid().is_some());
 }

@@ -141,9 +141,12 @@ flowchart LR
 Its public API owns host/version detection, executable conventions,
 default configuration roots, browser/terminal launch commands, and reusable
 process/process-group lifecycle operations. Shared Unix process primitives live in
-`core/platform/src/shared.rs`; platform-specific identity and host policy live in
-`core/platform/src/macos.rs` and `core/platform/src/linux.rs`. Business modules consume the common interface
-and must not add direct macOS/Linux branches or fixed system command paths. Low-level Unix mechanisms intrinsic to a subsystem—such as
+`core/platform/src/shared.rs`; target-specific identity and host policy live in
+`core/platform/src/macos.rs`, `core/platform/src/linux.rs`, and
+`core/platform/src/windows/`. Business modules consume the common interface and must not add direct
+macOS/Linux/Windows branches or fixed system command paths. Windows support advances by layer under
+[`windows-support-matrix.md`](windows-support-matrix.md); the Platform backend alone does not claim
+that Agent, Shell, Web, or installation flows are supported. Low-level Unix mechanisms intrinsic to a subsystem—such as
 terminal `termios`, file permission bits, nonblocking file descriptors, and
 file locking—remain beside that subsystem rather than being hidden behind an
 OS policy facade.

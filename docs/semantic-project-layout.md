@@ -102,9 +102,11 @@ boundary cleanup.
 `benchmarks/` and `examples/` remain cross-cutting verification/support material until their final ownership is decided; they are not
 runtime layers.
 
-Windows and native desktop Interfaces are target architecture, not current support claims. They
-must gain an explicit behavior matrix and executable unsupported/supported contract before their
-paths are created.
+`core/platform` now has a real Windows backend governed by
+[`windows-support-matrix.md`](windows-support-matrix.md). This is not a product-level Windows
+support claim: Agent, Shell, Web, installer, and native desktop Interface status advances only with
+the executable evidence listed for that layer. Native desktop Interface paths remain target
+architecture and must not be created as placeholders.
 
 ## Incremental sequence and exit gates
 
