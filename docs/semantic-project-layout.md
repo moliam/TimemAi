@@ -10,8 +10,8 @@ Interface ↔ Bridge ↔ Core
 
 - **Interface** owns presentation and human interaction.
 - **Bridge** owns communication: direct calls/callbacks/channels, HTTP/WebSocket, or IPC.
-- **Core** owns reusable agent semantics, application orchestration, UI-neutral contracts, and
-  platform policy.
+- **Core** owns reusable agent semantics, Session/Context/Worker orchestration, UI-neutral
+  contracts, and platform policy.
 
 A Bridge is a logical communication boundary, not a process boundary. Shell and native clients may
 use an in-process bridge without serialization or networking. Browser clients use HTTP/WebSocket.
@@ -23,9 +23,9 @@ cancellation, approval, retry, or lifecycle semantics.
 ```text
 core/
   agent/                    # model loop, capabilities, prompt/protocol and agent execution
-  application/              # Session/Context/Worker orchestration and application use-cases
+  session/                  # Session/Context/Worker lifecycle, scheduling, and use-cases
   ui_contract/
-    commands/               # UI-neutral requests entering the application
+    commands/               # UI-neutral requests entering Session use-cases
     events/                 # semantic events emitted by Core
     projections/            # authoritative UI-readable state
   platform/
@@ -60,21 +60,21 @@ The intended compile-time direction is:
 
 ```text
 core/platform ───────────────┐
-core/ui_contract ────────────┼──> core/agent ──> core/application
+core/ui_contract ────────────┼──> core/agent ──> core/session
                              │                         ▲
                              └─────────────────────────┘
 
-core/{application,ui_contract} <── bridges/* <── interfaces/*
+core/{session,ui_contract} <── bridges/* <── interfaces/*
 ```
 
 More precisely:
 
-1. `core/platform` depends on no Agent, application, Bridge, or Interface crate.
+1. `core/platform` depends on no Agent, Session orchestration, Bridge, or Interface crate.
 2. `core/ui_contract` contains data contracts and pure contract helpers. It depends on neither
-   application orchestration nor any Bridge/Interface.
+   Session orchestration nor any Bridge/Interface.
 3. `core/agent` owns model/capability execution and may consume platform and UI-contract types. It
-   must not depend on application orchestration, Bridges, or Interfaces.
-4. `core/application` owns Session/Context/Worker use-cases and coordinates Agent behavior. It may
+   must not depend on Session orchestration, Bridges, or Interfaces.
+4. `core/session` owns Session/Context/Worker lifecycle, scheduling, and use-cases. It may
    depend on agent, UI-contract, and platform crates.
 5. Bridges depend inward on Core. Bridges may add transport identity, ordering, serialization,
    replay, reconnect, and backpressure metadata, but not domain lifecycle rules.
@@ -93,7 +93,7 @@ transitional roots:
 
 | Current owner | Target owner | Removal condition |
 | --- | --- | --- |
-| `core/agent/` | `core/application/` (remaining orchestration only) | Agent relocation is complete; Session/Context/Worker application ownership remains to extract. |
+| `core/agent/` | `core/session/` (remaining Session orchestration only) | Agent relocation is complete; Session/Context/Worker lifecycle and scheduling remain to extract. |
 | `host_projection/` | `bridges/http_websocket/` | Projection delivery is integrated without creating a second Turn state machine. |
 | `timem_web/` | `bridges/http_websocket/` | The `timem-web` binary, HTTP/WebSocket behavior, assets, and lifecycle tests pass at the target path. |
 
@@ -117,8 +117,8 @@ Each step is committed separately and must leave the workspace buildable:
    target dependency direction.
 3. **Agent relocation (complete)**: the `agent_core` package lives at `core/agent`; resource paths,
    tests, scripts, docs, and workspace references preserve behavior and compatibility.
-4. **Application extraction**: move Session/Context/Worker orchestration and application use-cases
-   to `core/application`; update callers to the new owner and remove temporary exports.
+4. **Session extraction**: move Session/Context/Worker lifecycle, scheduling, and use-cases
+   to `core/session`; update callers to the new owner and remove temporary exports.
 5. **In-process Bridge**: move Shell/native direct-call and callback/channel adaptation to
    `bridges/in_process`; presentation remains in `interfaces/shell`.
 6. **HTTP/WebSocket Bridge**: combine the Web host and asynchronous projection/delivery ownership

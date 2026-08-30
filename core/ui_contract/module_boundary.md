@@ -1,11 +1,11 @@
 # Core UI Contract Boundary
 
 `core/ui_contract` owns UI-neutral data exchanged between Core, Bridges, and Interfaces.
-It contains no presentation, transport, persistence, model execution, or application orchestration.
+It contains no presentation, transport, persistence, model execution, or Session orchestration.
 
 ## Current layout
 
-- `src/commands`: UI-neutral application requests. It currently owns the ToolGen request contract.
+- `src/commands`: UI-neutral Session requests. It currently owns the ToolGen request contract.
 - `src/projections`: authoritative UI-readable state shapes. It currently owns the Turn projection
   wire contract plus Session/Context/Worker identity, lifecycle, workspace, and aggregate activity
   shapes.
@@ -15,7 +15,7 @@ It contains no presentation, transport, persistence, model execution, or applica
 ## Rules
 
 - This crate may depend only on data/serialization libraries needed by its public contracts.
-- It must not depend on Agent, application, platform, Bridge, or Interface crates.
+- It must not depend on Agent, Session orchestration, platform, Bridge, or Interface crates.
 - Contract serialization is stable and protected by tests under `core/ui_contract/tests`.
 - Reducers, token allocation, lifecycle transitions, and use-case policy do not belong here.
 - Rust package moves must preserve cross-language wire names unless a versioned protocol change is
