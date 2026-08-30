@@ -108,12 +108,17 @@ fn profile(model: &str) -> CoreProfile {
     }
 }
 
+fn test_registry() -> CapabilityRegistry {
+    CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution())
+}
+
 fn test_core(
     static_prompt: impl Into<String>,
     profile: CoreProfile,
     memory_dir: impl AsRef<std::path::Path>,
 ) -> AgentCore {
     let mut core = AgentCore::new(static_prompt, profile, memory_dir);
+    core.set_capability_registry(test_registry());
     core.set_response_protocol(ResponseProtocolKind::Json);
     core
 }
@@ -142,6 +147,7 @@ fn usage() -> UsageStats {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn mcp_action_runs_through_protocol_registry_and_executor() {
     let config = McpServerConfig {
@@ -162,7 +168,7 @@ fn mcp_action_runs_through_protocol_registry_and_executor() {
     let tools: Vec<McpTool> = runtime.connect(&config).unwrap();
     let memory_dir = tmp_dir("mcp_full_path");
     let mut core = test_core("STATIC\n{{TOOL_CATALOG}}\n", profile("model"), &memory_dir);
-    core.configure_mcp(CapabilityRegistry::builtin(), runtime, vec![config], tools)
+    core.configure_mcp(test_registry(), runtime, vec![config], tools)
         .unwrap();
     let prompt = match core.begin_turn("Use the MCP echo tool", None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
@@ -199,7 +205,7 @@ fn mcp_action_runs_through_protocol_registry_and_executor() {
     });
     assert!(matches!(final_step, CoreStep::Final(_)));
     core.apply_mcp_update(
-        CapabilityRegistry::builtin(),
+        test_registry(),
         McpRuntime::default(),
         Vec::new(),
         Vec::new(),
@@ -237,7 +243,7 @@ fn native_mode_puts_builtin_descriptions_in_static_and_mcp_descriptions_in_api_f
         request_timeout_ms: 1_000,
     };
     core.configure_mcp_with_instructions(
-        CapabilityRegistry::builtin(),
+        test_registry(),
         McpRuntime::default(),
         vec![demo_server],
         vec![McpTool {
@@ -318,7 +324,7 @@ fn native_mode_puts_builtin_descriptions_in_static_and_mcp_descriptions_in_api_f
         .contains("Validate echo values before sending them."));
 
     core.apply_mcp_update(
-        CapabilityRegistry::builtin(),
+        test_registry(),
         McpRuntime::default(),
         Vec::new(),
         vec![McpTool {
@@ -365,6 +371,7 @@ fn native_mode_puts_builtin_descriptions_in_static_and_mcp_descriptions_in_api_f
     assert!(inline_prompt.contains("MCP update:"), "{inline_prompt}");
 }
 
+#[cfg(unix)]
 #[test]
 fn mcp_server_error_becomes_action_evidence_instead_of_protocol_repair() {
     let config = McpServerConfig {
@@ -385,7 +392,7 @@ fn mcp_server_error_becomes_action_evidence_instead_of_protocol_repair() {
     let tools = runtime.connect(&config).unwrap();
     let memory_dir = tmp_dir("mcp_server_error");
     let mut core = test_core("STATIC\n{{TOOL_CATALOG}}\n", profile("model"), &memory_dir);
-    core.configure_mcp(CapabilityRegistry::builtin(), runtime, vec![config], tools)
+    core.configure_mcp(test_registry(), runtime, vec![config], tools)
         .unwrap();
     assert!(matches!(
         core.begin_turn("Call the failing MCP tool", None),
@@ -414,6 +421,7 @@ fn mcp_server_error_becomes_action_evidence_instead_of_protocol_repair() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn unresponsive_mcp_tool_times_out_as_action_evidence_and_agent_continues() {
     let config = McpServerConfig {
@@ -434,7 +442,7 @@ fn unresponsive_mcp_tool_times_out_as_action_evidence_and_agent_continues() {
     let tools = runtime.connect(&config).unwrap();
     let memory_dir = tmp_dir("mcp_timeout_evidence");
     let mut core = test_core("STATIC\n{{TOOL_CATALOG}}\n", profile("model"), &memory_dir);
-    core.configure_mcp(CapabilityRegistry::builtin(), runtime, vec![config], tools)
+    core.configure_mcp(test_registry(), runtime, vec![config], tools)
         .unwrap();
     assert!(matches!(
         core.begin_turn("Call the unresponsive MCP tool", None),
@@ -478,7 +486,7 @@ fn write_audit_doc(path: &std::path::Path, events: Vec<Value>) {
 
 fn core_with_builtin_capabilities(name: &str) -> AgentCore {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir(name));
-    core.set_capability_registry(CapabilityRegistry::builtin());
+    core.set_capability_registry(test_registry());
     core
 }
 
@@ -762,7 +770,7 @@ fn xml_readfile_result_reports_file_name_matcher_and_line_range_before_content()
         profile("qwen-plus"),
         tmp_dir("xml_readfile_result_heading_memory"),
     );
-    core.set_capability_registry(CapabilityRegistry::builtin());
+    core.set_capability_registry(test_registry());
     core.set_response_protocol(ResponseProtocolKind::Xml);
     core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
     let _ = core.begin_turn("read a matched file range", None);
@@ -799,6 +807,7 @@ fn xml_readfile_result_reports_file_name_matcher_and_line_range_before_content()
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn xml_timeout_still_running_uses_orthogonal_lifecycle_evidence() {
     let mut core = AgentCore::new(
@@ -876,6 +885,7 @@ fn xml_timeout_still_running_uses_orthogonal_lifecycle_evidence() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn xml_parallel_run_bash_results_use_action_names_without_repeating_commands() {
     let mut core = AgentCore::new(
@@ -955,6 +965,7 @@ fn xml_parallel_run_bash_results_use_action_names_without_repeating_commands() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn xml_denied_approval_result_preserves_action_name() {
     let mut core = AgentCore::new(
@@ -2280,7 +2291,7 @@ fn response_context_compact_does_not_append_redundant_mcp_summary() {
     );
     core.set_response_protocol(ResponseProtocolKind::Json);
     core.configure_mcp(
-        CapabilityRegistry::builtin(),
+        test_registry(),
         McpRuntime::default(),
         Vec::new(),
         vec![McpTool {
@@ -2736,6 +2747,7 @@ fn canonical_tools_accept_json_object_args() {
     assert!(prompt.contains("TimemAi"));
 }
 
+#[cfg(unix)]
 #[test]
 fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
     let root = tmp_dir("builtin_tools_e2e");
@@ -2752,7 +2764,7 @@ fn builtin_tools_end_to_end_parse_validate_and_execute_manifest_args() {
     fs::write(&loop_marker, "ready").unwrap();
 
     let mut core = test_core("STATIC", profile("qwen-plus"), &memory_dir);
-    core.set_capability_registry(CapabilityRegistry::builtin());
+    core.set_capability_registry(test_registry());
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("覆盖 builtin tool 参数端到端", None);
 
@@ -2917,7 +2929,7 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     )
     .unwrap();
     let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
-    core.set_capability_registry(CapabilityRegistry::builtin());
+    core.set_capability_registry(test_registry());
     core.set_bash_approval_mode(BashApprovalMode::Approve);
 
     let _ = core.begin_turn("路径在哪里", None);
@@ -5498,7 +5510,13 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
     };
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("id: user_name"));
-    assert!(core.memory_git_commit_count() >= 1);
+    let git_available = Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if git_available {
+        assert!(core.memory_git_commit_count() >= 1);
+    }
     assert!(fs::read_to_string(core.memory_file())
         .unwrap()
         .contains("测试代号是 ALPHA-42"));
@@ -5535,7 +5553,9 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
     let stored = fs::read_to_string(core.memory_file()).unwrap();
     assert!(stored.contains("测试代号是 BETA-43"));
     assert!(!stored.contains("测试代号是 ALPHA-42\""));
-    assert!(core.memory_git_commit_count() >= 2);
+    if git_available {
+        assert!(core.memory_git_commit_count() >= 2);
+    }
 
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -5552,7 +5572,9 @@ fn memory_update_insert_update_and_delete_are_wrapped() {
     assert!(!fs::read_to_string(core.memory_file())
         .unwrap()
         .contains("user_name"));
-    assert!(core.memory_git_commit_count() >= 3);
+    if git_available {
+        assert!(core.memory_git_commit_count() >= 3);
+    }
 }
 
 #[test]
@@ -5844,6 +5866,7 @@ fn memory_update_requires_protocol_fields() {
     assert!(!prompt.contains("Action result: memmgr"));
 }
 
+#[cfg(unix)]
 #[test]
 fn run_bash_allows_readonly_count_command() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("bash_readonly"));
@@ -5972,6 +5995,7 @@ fn run_bash_unmanaged_background_is_rejected_and_reported_to_the_model() {
     assert!(core.running_shell_jobs_for_session("default").is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("bash_background"));
@@ -6014,6 +6038,7 @@ fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
     assert!(prompt.contains("background-ok"), "{prompt}");
 }
 
+#[cfg(unix)]
 #[test]
 fn still_running_table_survives_discard_of_the_original_action_delta() {
     let mut core = test_core(
@@ -6100,6 +6125,7 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_delta() {
     let mut core = test_core(
@@ -6173,6 +6199,7 @@ fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_de
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn still_running_table_survives_offload_of_the_original_action_delta() {
     let mut core = test_core(
@@ -6249,6 +6276,7 @@ fn still_running_table_survives_offload_of_the_original_action_delta() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn still_running_table_survives_xml_style_compaction_of_the_original_action_delta() {
     let mut core = test_core(
@@ -6354,6 +6382,7 @@ fn removed_shell_job_status_action_is_rejected_as_unsupported() {
     assert!(prompt.contains("unsupported_action:shell_job_status"));
 }
 
+#[cfg(unix)]
 #[test]
 fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("bash_timeout_kill"));
@@ -6600,6 +6629,7 @@ fn run_bash_always_allow_promotes_remaining_parallel_approvals() {
     assert!(prompt.contains("approved_by_user"));
 }
 
+#[cfg(unix)]
 #[test]
 fn run_bash_allows_compound_local_write_commands() {
     let mut core = test_core(
@@ -6654,6 +6684,7 @@ fn run_bash_requires_approval_for_high_risk_command_inside_compound_command() {
     assert_eq!(request.risk, "local_command_execution");
 }
 
+#[cfg(unix)]
 #[test]
 fn run_bash_executes_shell_syntax_after_user_approval() {
     let mut core = test_core(
@@ -6771,6 +6802,7 @@ fn run_bash_requires_approval_for_absolute_paths() {
     assert_eq!(request.risk, "local_command_execution");
 }
 
+#[cfg(unix)]
 #[test]
 fn run_bash_allows_low_risk_system_identity_commands() {
     let mut core = test_core(
@@ -6801,6 +6833,7 @@ fn run_bash_allows_low_risk_system_identity_commands() {
     assert!(!prompt.contains("approval_status: approved_by_user"));
 }
 
+#[cfg(unix)]
 #[test]
 fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     let dir = tmp_dir("ci_realistic_story");
@@ -6980,6 +7013,7 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
     assert!(long_prompt.contains("prompt_delta_count="));
 }
 
+#[cfg(unix)]
 #[test]
 fn scenario_coding_inspects_project_and_reports_from_shell_evidence() {
     let dir = tmp_dir("scenario_coding");
@@ -7046,7 +7080,7 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
     );
 
     let mut core = test_core("STATIC", profile("qwen-plus"), &memory_dir);
-    core.set_capability_registry(CapabilityRegistry::builtin());
+    core.set_capability_registry(test_registry());
     let _ = core.begin_turn("我的测试代号是什么？测试时段我们聊了什么？", None);
     let prompt = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -7117,6 +7151,7 @@ fn scenario_self_qa_returns_runtime_params_and_paths() {
     assert!(final_turn.final_answer.contains("运行参数"));
 }
 
+#[cfg(unix)]
 #[test]
 fn scenario_file_writing_outputs_artifact_and_verifies_content() {
     let mut core = test_core(
@@ -7833,7 +7868,7 @@ fn rendered_prompt_tool_catalog_is_generated_from_capability_manifests() {
 
 #[test]
 fn memmgr_tool_catalog_does_not_expose_legacy_query_surface() {
-    let prompt = CapabilityRegistry::builtin().enrich_static_prompt("{{TOOL_CATALOG}}");
+    let prompt = test_registry().enrich_static_prompt("{{TOOL_CATALOG}}");
     let start = prompt.find("#### `memmgr`").expect("memmgr section");
     let rest = &prompt[start + "#### `memmgr`".len()..];
     let end = rest
@@ -8566,6 +8601,7 @@ fn capmgr_invalid_values_request_protocol_repair_from_manifest_idl() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn runtime_overlay_add_remove_keeps_prompt_executor_and_repair_consistent() {
     let overlay_dir = tmp_dir("overlay_add_remove_consistency");
@@ -8690,6 +8726,7 @@ example_json: |
     assert!(!prompt.contains("Action result: shell_alias"));
 }
 
+#[cfg(unix)]
 #[test]
 fn runtime_overlay_command_tool_executes_with_json_input() {
     let memory_dir = tmp_dir("overlay_command_memory");
@@ -8798,6 +8835,7 @@ example_json: |
     assert!(!prompt.contains("background_started"));
 }
 
+#[cfg(unix)]
 #[test]
 fn overlay_command_background_job_uses_capmgr_job_status() {
     let memory_dir = tmp_dir("overlay_command_background_memory");
@@ -8885,6 +8923,7 @@ example_json: |
     assert!(prompt.contains("registered_background_ok"));
 }
 
+#[cfg(unix)]
 #[test]
 fn overlay_command_background_job_can_be_cancelled_through_capmgr() {
     let memory_dir = tmp_dir("overlay_command_cancel_memory");
@@ -8969,7 +9008,7 @@ example_json: |
 fn finished_with_actions_requests_repair_and_executes_nothing() {
     let memory_dir = tmp_dir("finished_actions_repair");
     let mut core = test_core("STATIC", profile("qwen-plus"), &memory_dir);
-    core.set_capability_registry(CapabilityRegistry::builtin());
+    core.set_capability_registry(test_registry());
     core.set_bash_approval_mode(BashApprovalMode::Approve);
     let _ = core.begin_turn("完成任务", None);
     let step = core.apply_model_response(LlmResponse {
