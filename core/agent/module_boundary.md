@@ -169,30 +169,14 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Host
   insertion after host/user cancellation.
 - Structured reports, requests, stop reasons, status snapshots, and topic events
   for any host UI to render.
-- Optional per-context worker lifecycle. Core may provide a worker that owns one
-  `AgentCore`, one Session identity, one Context identity, one Worker identity,
-  and one runtime loop on a dedicated thread. Multiple workers may belong to
-  the same Session while operating on separate contexts. This is a host adapter convenience for multi-session/web-style
-  execution; it must preserve the same topic/request semantics as the
-  synchronous `run_session_turn` path.
-- Multi-session worker management. Core owns the standard manager that allocates
-  worker identities from `ID0`, keeps worker handles/status snapshots by
-  `worker_id`,
-  shares global working-worker state across workers, polls worker events, and
-  shuts workers down. Hosts may choose to use the manager or manage workers
-  explicitly, but they should not create incompatible identity/lifecycle rules.
-- Session worker shutdown semantics. Core owns cancellation and cleanup for its
-  worker threads: shutdown cancels the active turn, rejects new work, skips
-  queued turn/rename commands that have not started, emits a stop event, and
-  joins the thread when the worker owner shuts down or is dropped.
-- Session worker identity and workspace metadata. Worker identity includes
-  `session_id`, `context_id`, `worker_id`, display name, ordinal, and optional
-  `parent_worker_id`. Default
-  display names are `ID0`, `ID1`, ... by ordinal, but host/user/parent-agent
-  code may rename a worker through core's worker handle. Workspace metadata may
-  include current directory, data/audit paths, runtime, bash target, sanitized
-  environment, and workspace reference directories. Do not expose full prompt
-  text as lifecycle metadata; expose only context summaries.
+- Agent-owned collaboration ports for Session orchestration. `agent_core` exposes narrow APIs for
+  detached-resource cancellation, running-job refresh with runtime event delivery, and temporary
+  ToolGen capability activation. It does not expose its job stores or capability registry for
+  Session code to mutate directly.
+- Session worker lifecycle, worker threads, multi-worker management, scheduling, shutdown, and
+  worker status belong to `timem_session`, which coordinates one `AgentCore` per Context.
+- Worker identity and workspace projections remain UI-neutral contracts re-exported by Agent for
+  compatibility; their lifecycle policy and mutable ownership do not belong in this crate.
 - Context ownership is exclusive in the current runtime: one `(session_id,
   context_id)` may have only one worker because that worker owns the mutable
   `AgentCore` prompt state. A subtask worker must receive a new Context. Do not
@@ -310,14 +294,11 @@ structured request rather than printing, reading from stdin, or assuming a UI
 framework. Adding a new UI should require a binding/adapter and presentation
 work, not a new Agent lifecycle implementation.
 
-Threading rule: `AgentCore` is the state owner for one logical session/context.
-The synchronous API is still valid for simple hosts. Hosts that need concurrent
-sessions should run one `AgentCore` per session, usually via
-`CoreSessionWorker`, instead of sharing a mutable core across sessions. Worker
-threads are an adapter around the same function/topic interface: user input is a
-function call into the worker, core-originated state is emitted as topic/events,
-and host decisions return through `TopicReply`. Do not add ad hoc shared global
-core state to make multi-session UI easier.
+Threading rule: `AgentCore` is the state owner for one logical Context. The synchronous API is
+still valid for simple hosts. Hosts that need concurrent Sessions should use `timem_session`,
+which runs one `AgentCore` per Context instead of sharing mutable Agent state. Agent-originated
+state still uses the same topic/event interface, and host decisions return through `TopicReply`.
+Do not add ad hoc shared global Agent state to make multi-session UI easier.
 
 Function calls are the host/user initiated control surface: start a turn, update
 configuration, add user input, query reports, or apply a host decision. Topic
@@ -380,6 +361,7 @@ session state is waiting.
 
 ## Test Layout
 
-Test functions and fixture corpora live under `core/agent/tests`. Production
+Agent test functions and fixture corpora live under `core/agent/tests`. Session orchestration
+tests live under `core/session/tests`. Production
 modules may keep only a minimal `#[cfg(test)]` external-module declaration or
 an explicitly test-only hook needed for private white-box access.

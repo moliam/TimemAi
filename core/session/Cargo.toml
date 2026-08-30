@@ -1,0 +1,10 @@
+[package]
+name = "timem_session"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+agent_core = { path = "../agent" }
+timem_ui_contract = { path = "../ui_contract" }
+serde_json = "1"

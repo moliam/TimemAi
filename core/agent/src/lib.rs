@@ -69,7 +69,6 @@ mod schema_optimizer;
 pub mod self_tool;
 pub mod session_runtime;
 pub mod session_store;
-pub mod session_worker;
 #[path = "../../../resources/capabilities/tools/run_bash.rs"]
 pub mod shell_exec;
 pub mod status_summary;
@@ -193,11 +192,6 @@ pub use runtime_context::{local_time_label, runtime_time_context, LocalTimeParts
 use self_tool::{SelfToolAbout, SelfToolPaths, SelfToolProcess, SelfToolState};
 pub use session_runtime::{
     cancelled_turn_result, run_session_turn, run_session_turn_with_model_client, ModelClient,
-};
-pub use session_worker::{
-    CoreSessionWorker, CoreSessionWorkerConfig, CoreSessionWorkerEvent, CoreSessionWorkerHandle,
-    CoreSessionWorkerLifecycleState, CoreSessionWorkerManager, CoreSessionWorkerRuntime,
-    CoreSessionWorkerStatus, ToolGenRequest,
 };
 use shell_exec::ShellJobManager;
 pub use shell_exec::{RunningShellJob, ShellJobExitUpdate};
@@ -2021,6 +2015,22 @@ impl AgentCore {
         }
     }
 
+    /// Returns a thread-safe cancellation callback for detached resources belonging to one Session.
+    /// The callback does not retain the mutable Agent state and can be used by an external Session
+    /// coordinator while the Agent is running on its worker thread.
+    pub fn background_resource_cancel_callback(
+        &self,
+        session_id: impl Into<String>,
+    ) -> Arc<dyn Fn() + Send + Sync> {
+        let shell_jobs = self.shell_jobs.clone();
+        let tool_jobs = self.tool_jobs.clone();
+        let session_id = session_id.into();
+        Arc::new(move || {
+            shell_jobs.cancel_unfinished_for_session(&session_id);
+            tool_jobs.cancel_unfinished_for_session(&session_id);
+        })
+    }
+
     /// Cancels detached background resources belonging to one Session.
     /// Foreground work is interrupted by the worker cancellation token.
     pub fn cancel_background_resources_for_session(&self, session_id: &str) -> usize {
@@ -2044,7 +2054,8 @@ impl AgentCore {
         self.refresh_running_shell_jobs_for_session_with_runtime(session_id, None)
     }
 
-    fn refresh_running_shell_jobs_for_session_with_runtime(
+    /// Refreshes detached shell jobs and reports exit events through the active Agent runtime.
+    pub fn refresh_running_shell_jobs_for_session_with_runtime(
         &mut self,
         session_id: &str,
         runtime: Option<&mut dyn ActionRuntime>,
@@ -2578,12 +2589,14 @@ impl AgentCore {
         Ok(true)
     }
 
-    pub(crate) fn enable_toolgen_capability(&mut self) -> Result<(), String> {
+    /// Temporarily enables the ToolGen capability for a Session-owned ToolGen use-case.
+    pub fn enable_toolgen_capability(&mut self) -> Result<(), String> {
         self.capabilities.enable_toolgen()?;
         self.refresh_rendered_static_prompt();
         Ok(())
     }
-    pub(crate) fn disable_toolgen_capability(&mut self) {
+    /// Restores the normal Agent capability set after a Session-owned ToolGen use-case.
+    pub fn disable_toolgen_capability(&mut self) {
         self.capabilities.disable_toolgen();
         self.refresh_rendered_static_prompt();
     }

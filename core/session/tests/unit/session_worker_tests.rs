@@ -1,5 +1,5 @@
 use super::*;
-use crate::{
+use agent_core::{
     ApiProtocol, ApprovalRequest, BashApprovalMode, CoreProfile, LlmResponse, ResponseProtocolKind,
     SessionToolRepo, UsageStats,
 };
@@ -47,7 +47,7 @@ fn failed_durable_supplement_append_releases_command_id_for_retry() {
 
 #[test]
 fn failed_runtime_update_notification_rolls_back_pending_update() {
-    use crate::RuntimeConfigField;
+    use agent_core::RuntimeConfigField;
 
     let (command_tx, command_rx) = std::sync::mpsc::channel();
     drop(command_rx);
@@ -155,15 +155,15 @@ fn test_config() -> ModelServiceConfig {
         max_llm_output_tokens: 10_000,
         max_llm_input_tokens: 100_000,
         api_protocol: ApiProtocol::OpenAiCompatible,
-        response_protocol: crate::ResponseProtocolKind::Json,
-        openai_compatible: crate::OpenAiCompatibleOptions::default(),
+        response_protocol: agent_core::ResponseProtocolKind::Json,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
     }
 }
 
 fn confirmed_xml_response(content: &str) -> String {
     let confirmed = format!(
         "<finish_confirm>{}</finish_confirm>",
-        crate::response_protocol::xml_suite::FINISH_CONFIRM_PREFIX
+        agent_core::response_protocol::xml_suite::FINISH_CONFIRM_PREFIX
     );
     let insertion_point = content
         .find("<toolgen_retrospect")
@@ -408,7 +408,7 @@ fn idle_worker_emits_terminal_topic_when_background_bash_exits_after_turn_finish
         &dir,
     );
     core.set_response_protocol(ResponseProtocolKind::Json);
-    core.set_bash_approval_mode(crate::BashApprovalMode::Approve);
+    core.set_bash_approval_mode(agent_core::BashApprovalMode::Approve);
     let worker = CoreSessionWorker::spawn_with_model_client(
         core,
         test_config(),
@@ -467,7 +467,7 @@ fn idle_worker_emits_terminal_topic_when_timed_out_bash_exits_after_turn_finish(
         &dir,
     );
     core.set_response_protocol(ResponseProtocolKind::Json);
-    core.set_bash_approval_mode(crate::BashApprovalMode::Approve);
+    core.set_bash_approval_mode(agent_core::BashApprovalMode::Approve);
     let worker = CoreSessionWorker::spawn_with_model_client(
         core,
         test_config(),
@@ -615,22 +615,22 @@ fn initial_supplement_batch_is_visible_before_an_immediate_final_can_close_the_m
     );
     assert!(projections.len() >= 2, "{projections:?}");
     let first_token = match projections.first().unwrap() {
-        crate::TurnProjection::Active(active) => active.token.clone(),
+        agent_core::TurnProjection::Active(active) => active.token.clone(),
         projection => panic!("first projection must be active: {projection:?}"),
     };
     let last_token = match projections.last().unwrap() {
-        crate::TurnProjection::Finished(finished) => finished.token.clone(),
+        agent_core::TurnProjection::Finished(finished) => finished.token.clone(),
         projection => panic!("last projection must be finished: {projection:?}"),
     };
     assert_eq!(first_token, last_token);
     assert!(projections.iter().all(|projection| match projection {
-        crate::TurnProjection::Active(active) => active.token == first_token,
-        crate::TurnProjection::Finished(finished) => finished.token == first_token,
+        agent_core::TurnProjection::Active(active) => active.token == first_token,
+        agent_core::TurnProjection::Finished(finished) => finished.token == first_token,
     }));
     assert_eq!(
         projections
             .iter()
-            .filter(|projection| matches!(projection, crate::TurnProjection::Finished(_)))
+            .filter(|projection| matches!(projection, agent_core::TurnProjection::Finished(_)))
             .count(),
         1
     );
@@ -677,7 +677,7 @@ impl ModelClient for TerminalRepairModel {
         let call = *calls;
         Ok(LlmResponse {
             tool_calls: Vec::new(),
-            content: if call <= crate::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1 {
+            content: if call <= agent_core::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1 {
                 format!("{{invalid repair response {call}")
             } else {
                 r#"{"status":"ALL_FINISHED","final_answer":"must not revive"}"#.to_string()
@@ -726,7 +726,7 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
                 .first()
                 .and_then(CoreTopicEvent::as_lifecycle)
                 .expect("first worker topic should be lifecycle initialized");
-            assert_eq!(lifecycle.event, crate::CoreLifecycleEvent::Initialized);
+            assert_eq!(lifecycle.event, agent_core::CoreLifecycleEvent::Initialized);
             assert_eq!(lifecycle.profile.model, "test-model");
             assert_eq!(
                 lifecycle
@@ -760,7 +760,7 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
                 let profile = interaction_profile
                     .expect("model request should carry the negotiated interaction profile");
                 assert_eq!(profile.model, "test-model");
-                assert_eq!(profile.resolved_mode, crate::ToolCallMode::Inline);
+                assert_eq!(profile.resolved_mode, agent_core::ToolCallMode::Inline);
                 let request = interaction_request
                     .expect("model request event should retain the structured API request");
                 assert_eq!(request.rendered_prompt, prompt);
@@ -935,7 +935,7 @@ fn session_worker_does_not_revive_terminal_repair_failure_with_late_supplement()
         {
             CoreSessionWorkerEvent::ModelResponse { .. } => {
                 responses += 1;
-                if responses == crate::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1 {
+                if responses == agent_core::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1 {
                     handle.add_user_supplement("补充不能复活硬停止");
                 }
             }
@@ -955,11 +955,11 @@ fn session_worker_does_not_revive_terminal_repair_failure_with_late_supplement()
 
     assert_eq!(
         outcome.stop_reason,
-        Some(crate::TurnStopReason::ProtocolRepairFailed)
+        Some(agent_core::TurnStopReason::ProtocolRepairFailed)
     );
     assert_eq!(
         *calls.lock().unwrap(),
-        crate::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1
+        agent_core::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1
     );
     assert_eq!(
         unconsumed_supplements,
@@ -1174,7 +1174,7 @@ fn manual_toolgen_continues_in_current_context_and_preserves_source_answer() {
                     if event.payload["runtime_phase"] == "toolgen" {
                         toolgen_topic_names.push(event.topic.name.clone());
                     }
-                    if event.topic.name == crate::CORE_TOPIC_TOOLGEN {
+                    if event.topic.name == agent_core::CORE_TOPIC_TOOLGEN {
                         phases.push((
                             event.payload["phase"].as_str().unwrap().to_string(),
                             event.context_id.unwrap(),
@@ -1232,10 +1232,10 @@ fn manual_toolgen_continues_in_current_context_and_preserves_source_answer() {
     assert!(phases.iter().all(|item| item.2 == phases[0].2));
     assert!(toolgen_topic_names
         .iter()
-        .any(|name| name == crate::CORE_TOPIC_MODEL_RESPONSE));
+        .any(|name| name == agent_core::CORE_TOPIC_MODEL_RESPONSE));
     assert!(toolgen_topic_names
         .iter()
-        .any(|name| name == crate::CORE_TOPIC_ACTION));
+        .any(|name| name == agent_core::CORE_TOPIC_ACTION));
     assert_eq!(live_usage_rounds, vec![1, 2]);
     let tools = SessionToolRepo::new(&dir, "session_toolgen")
         .list()
@@ -1462,7 +1462,7 @@ fn ordinary_prompt_does_not_advertise_manual_toolgen_response_fields() {
         );
         core.set_response_protocol(protocol);
         let prompt = match core.begin_turn("ordinary task", None) {
-            crate::CoreStep::NeedModel { prompt, .. } => prompt,
+            agent_core::CoreStep::NeedModel { prompt, .. } => prompt,
             other => panic!("ordinary turn should request a model: {other:?}"),
         };
         assert!(!prompt.contains("toolgen_retrospect"));
@@ -1481,24 +1481,16 @@ fn toolgen_publish_capability_can_be_scoped_to_one_run_on_the_same_context() {
         },
         &dir,
     );
+    let ordinary_tool_count = core.capability_tool_count();
     assert!(!core.capability_contains_tool("toolgen"));
-    assert!(!core
-        .capabilities
-        .render_tool_catalog_markdown()
-        .contains("`toolgen`"));
 
     core.enable_toolgen_capability().unwrap();
     assert!(core.capability_contains_tool("toolgen"));
-    assert!(core
-        .capabilities
-        .render_tool_catalog_markdown()
-        .contains("`toolgen`"));
+    assert_eq!(core.capability_tool_count(), ordinary_tool_count + 1);
+
     core.disable_toolgen_capability();
     assert!(!core.capability_contains_tool("toolgen"));
-    assert!(!core
-        .capabilities
-        .render_tool_catalog_markdown()
-        .contains("`toolgen`"));
+    assert_eq!(core.capability_tool_count(), ordinary_tool_count);
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -1578,7 +1570,7 @@ fn failed_manual_toolgen_has_bounded_protocol_repair_and_does_not_replace_source
         {
             CoreSessionWorkerEvent::Topics(events) => {
                 for event in events {
-                    if event.topic.name == crate::CORE_TOPIC_TOOLGEN
+                    if event.topic.name == agent_core::CORE_TOPIC_TOOLGEN
                         && event.payload["phase"] != "started"
                     {
                         terminal_phase = event.payload["phase"].as_str().map(str::to_string);
@@ -1602,11 +1594,11 @@ fn failed_manual_toolgen_has_bounded_protocol_repair_and_does_not_replace_source
         .contains("did not publish a verified tool"));
     assert_eq!(
         *child_calls.lock().unwrap(),
-        crate::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1
+        agent_core::MAX_PROTOCOL_REPAIR_ATTEMPTS + 1
     );
     assert_eq!(
         outcome.stats.repair_calls,
-        crate::MAX_PROTOCOL_REPAIR_ATTEMPTS
+        agent_core::MAX_PROTOCOL_REPAIR_ATTEMPTS
     );
     assert_eq!(terminal_phase.as_deref(), Some("failed"));
     assert!(terminal_error
@@ -1658,8 +1650,8 @@ fn toolgen_runs_beyond_ten_model_calls_with_the_normal_round_budget() {
         match worker.events().recv_timeout(remaining).unwrap() {
             CoreSessionWorkerEvent::Topics(events) => {
                 for event in events {
-                    assert_ne!(event.topic.name, crate::CORE_TOPIC_ROUND_LIMIT_REQUEST);
-                    if event.topic.name == crate::CORE_TOPIC_TOOLGEN
+                    assert_ne!(event.topic.name, agent_core::CORE_TOPIC_ROUND_LIMIT_REQUEST);
+                    if event.topic.name == agent_core::CORE_TOPIC_TOOLGEN
                         && event.payload["phase"] != "started"
                     {
                         terminal_phase = event.payload["phase"].as_str().map(str::to_string);
@@ -2540,7 +2532,7 @@ fn session_worker_stop_discards_queued_turns_but_allows_new_work() {
     );
     assert_eq!(
         skipped_outcome.stop_reason,
-        Some(crate::TurnStopReason::CancelledByUser)
+        Some(agent_core::TurnStopReason::CancelledByUser)
     );
     assert_eq!(skipped_outcome.elapsed, Duration::ZERO);
     assert_eq!(
@@ -3143,11 +3135,11 @@ fn shared_worker_runtime_reports_same_session_worker_count() {
 }
 
 trait WorkerEventTestExt {
-    fn as_topics_first_lifecycle(&self) -> Option<crate::CoreLifecycleTopic>;
+    fn as_topics_first_lifecycle(&self) -> Option<agent_core::CoreLifecycleTopic>;
 }
 
 impl WorkerEventTestExt for CoreSessionWorkerEvent {
-    fn as_topics_first_lifecycle(&self) -> Option<crate::CoreLifecycleTopic> {
+    fn as_topics_first_lifecycle(&self) -> Option<agent_core::CoreLifecycleTopic> {
         match self {
             CoreSessionWorkerEvent::Topics(events) => {
                 events.first().and_then(CoreTopicEvent::as_lifecycle)
@@ -3960,7 +3952,7 @@ fn wait_for_stress_turn_finished(
 
 #[test]
 fn update_runtime_config_applies_before_next_model_request_of_active_turn() {
-    use crate::RuntimeConfigField;
+    use agent_core::RuntimeConfigField;
     use std::sync::mpsc;
 
     struct BlockingConfigCapturingModel {
@@ -4083,7 +4075,7 @@ fn update_runtime_config_applies_before_next_model_request_of_active_turn() {
 
 #[test]
 fn update_runtime_config_changes_worker_model_service_config() {
-    use crate::RuntimeConfigField;
+    use agent_core::RuntimeConfigField;
 
     struct ConfigCapturingModel {
         captured_config: Arc<Mutex<Option<ModelServiceConfig>>>,
@@ -4209,7 +4201,7 @@ fn update_runtime_config_changes_worker_model_service_config() {
 
 #[test]
 fn update_runtime_config_max_input_also_updates_core() {
-    use crate::RuntimeConfigField;
+    use agent_core::RuntimeConfigField;
 
     struct MaxInputCapturingModel {
         captured_prompt_len: Arc<Mutex<usize>>,
@@ -4341,10 +4333,10 @@ fn queued_mcp_update_is_applied_before_the_next_user_turn_prompt() {
 
     handle
         .update_mcp(
-            crate::capability::CapabilityRegistry::builtin(),
-            crate::mcp::McpRuntime::default(),
+            agent_core::capability::CapabilityRegistry::builtin(),
+            agent_core::mcp::McpRuntime::default(),
             Vec::new(),
-            vec![crate::mcp::McpTool {
+            vec![agent_core::mcp::McpTool {
                 server_id: "demo".to_string(),
                 server_name: "Demo".to_string(),
                 name: "echo".to_string(),
