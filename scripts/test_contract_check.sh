@@ -42,7 +42,7 @@ ci_required=(
   "pnpm --dir interfaces/web test"
   "pnpm --dir interfaces/web build"
   "pnpm --dir interfaces/web test:browser"
-  "cargo build --locked -p timem_shell -p timem_web --release"
+  "cargo build --locked -p timem_web --release"
   "scripts/edge_regression.sh"
   "scripts/real_tty_smoke.expect"
   "scripts/real_tty_supplement_smoke.expect"
@@ -75,7 +75,7 @@ windows_ci_required=(
   "pnpm --dir interfaces/web test"
   "pnpm --dir interfaces/web build"
   "git diff --exit-code -- interfaces/web/dist"
-  "cargo build --locked -p timem_shell -p timem_web --release"
+  "cargo build --locked -p timem_web --release"
 )
 for pattern in "${windows_ci_required[@]}"; do
   if ! search_fixed "$pattern" .github/workflows/ci.yml; then
@@ -297,7 +297,7 @@ release_management_required=(
   "Never move or overwrite a published tag"
   "scripts/version_consistency_check.sh"
   "Ubuntu and macOS"
-  'run `timem-web`'
+  'run `timem`'
   'pull request from the release branch into `main`'
 )
 

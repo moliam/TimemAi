@@ -95,7 +95,7 @@ the projected semantic types remain in `core/ui_contract`.
 
 | Current owner | Target owner | Removal condition |
 | --- | --- | --- |
-| `timem_web/` | `bridges/http_websocket/` | The `timem-web` binary, HTTP/WebSocket behavior, assets, and lifecycle tests pass at the target path. |
+| `timem_web/` | `bridges/http_websocket/` | The unified `timem` binary’s Web mode, HTTP/WebSocket behavior, assets, and lifecycle tests pass at the target path. |
 
 `core/agent`, `core/session`, `core/ui_contract`, `interfaces/shell`, `interfaces/web`, and
 `core/platform` are already at their semantic roots, but some internal code still needs finer

@@ -71,6 +71,31 @@ function Copy-FileAtomically([string]$Source, [string]$Destination) {
     }
 }
 
+function Write-TextAtomically([string]$Destination, [string]$Content) {
+    $directory = Split-Path -Parent $Destination
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $temporary = Join-Path $directory ('.' + [IO.Path]::GetFileName($Destination) + '.tmp.' + [Guid]::NewGuid().ToString('N'))
+    try {
+        [IO.File]::WriteAllText($temporary, $Content, [Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temporary -Destination $Destination -Force
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Install-CommandArtifacts([string]$UnifiedExecutable, [string]$Directory) {
+    Copy-FileAtomically $UnifiedExecutable (Join-Path $Directory 'timem.exe')
+
+    # Remove independently executable legacy commands before installing the
+    # forwarding shim. On Windows, an old .exe would take precedence over .cmd.
+    foreach ($legacyName in @('timem-web.exe', 'timem-native-rs.exe', 'timem-shell.exe')) {
+        Remove-Item -LiteralPath (Join-Path $Directory $legacyName) -Force -ErrorAction SilentlyContinue
+    }
+
+    $webShim = "@echo off`r`n`"%~dp0timem.exe`" %*`r`nexit /b %ERRORLEVEL%`r`n"
+    Write-TextAtomically (Join-Path $Directory 'timem-web.cmd') $webShim
+}
+
 function Add-UserPathEntry([string]$Directory) {
     $canonical = [IO.Path]::GetFullPath($Directory).TrimEnd('\')
     $current = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -92,27 +117,25 @@ function Invoke-TimemInstall {
     try {
         Write-Host 'Fetching locked Rust dependencies...'
         Invoke-Cargo @('fetch', '--locked')
-        Write-Host 'Building Timem Web and terminal UI for Windows...'
-        Invoke-Cargo @('build', '--locked', '-p', 'timem_shell', '-p', 'timem_web', '--release')
+        Write-Host 'Building the unified Timem CLI for Windows...'
+        Invoke-Cargo @('build', '--locked', '-p', 'timem_web', '--release')
     } finally { Pop-Location }
 
-    $shell = Join-Path $RootDir 'target\release\timem-native-rs.exe'
-    $web = Join-Path $RootDir 'target\release\timem-web.exe'
+    $timem = Join-Path $RootDir 'target\release\timem.exe'
     $tips = Join-Path $RootDir 'resources\reminder_tips.json'
-    foreach ($path in @($shell, $web, $tips)) { if (-not (Test-Path $path)) { throw "Missing output: $path" } }
-    Copy-FileAtomically $shell (Join-Path $InstallDir 'timem-native-rs.exe')
-    Copy-FileAtomically $shell (Join-Path $InstallDir 'timem.exe')
-    Copy-FileAtomically $web (Join-Path $InstallDir 'timem-web.exe')
+    foreach ($path in @($timem, $tips)) { if (-not (Test-Path $path)) { throw "Missing output: $path" } }
+    Install-CommandArtifacts $timem $InstallDir
     Copy-FileAtomically $tips (Join-Path $ResourceDir 'reminder_tips.json')
     $pathAdded = -not $SkipPathUpdate -and (Add-UserPathEntry $InstallDir)
 
     Write-Host ''
     Write-Host 'TimemAi installation complete.'
-    Write-Host "  Timem Web (recommended): $(Join-Path $InstallDir 'timem-web.exe')"
-    Write-Host "  Terminal UI (optional):  $(Join-Path $InstallDir 'timem.exe')"
+    Write-Host "  Timem CLI:           $(Join-Path $InstallDir 'timem.exe')"
+    Write-Host "  Compatibility shim: $(Join-Path $InstallDir 'timem-web.cmd')"
     Write-Host "  Resources:               $ResourceDir"
     if ($pathAdded) { Write-Host 'The user PATH was updated. Open a new terminal before invoking Timem by name.' }
-    Write-Host 'Start Timem Web: timem-web'
+    Write-Host 'Start Timem Web (default): timem'
+    Write-Host 'Start the terminal Shell: timem --shell'
     Write-Host 'No environment file is required to open the local Web UI.'
 }
 

@@ -2323,8 +2323,10 @@ impl WebExitReason {
     }
 }
 
-pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitReason, String> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
+pub async fn run(
+    args: &[String],
+    diagnostics: &LifecycleDiagnostics,
+) -> Result<WebExitReason, String> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help();
         return Ok(WebExitReason::HelpRequested);
@@ -3339,7 +3341,7 @@ fn friendly_web_instance_error(error: String, data_dir: &std::path::Path, space:
     if error == "web_instance_in_use" {
         let space_dir = absolute_path(web_layout_for_space(data_dir, space).space_dir());
         format!(
-            "Timem Web is already running on this memory space.\n\n  data dir: {}\n  space:    {}\n  location:  {}\n\nOptions:\n  - Use a different MEM: timem-web --space /absolute/path/to/mem\n  - Or stop the other Timem Web instance first.",
+            "Timem Web is already running on this memory space.\n\n  data dir: {}\n  space:    {}\n  location:  {}\n\nOptions:\n  - Use a different MEM: timem --space /absolute/path/to/mem\n  - Or stop the other Timem Web instance first.",
             data_dir.display(),
             space,
             space_dir.display(),
@@ -11976,7 +11978,7 @@ fn highlighted_browser_url(browser_url: &str, use_color: bool) -> String {
 }
 
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
+    println!("Timem Web\n\nUsage: timem [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
 }
 
 fn public_access_url(configured_host: Option<&str>, port: u16, token: &str) -> Option<String> {

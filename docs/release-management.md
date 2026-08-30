@@ -31,8 +31,8 @@ executable authority for this rule.
 ## Timem Web Release Evidence
 
 For a Web-facing release, the notes and README must make the supported path
-explicit: install, run `timem-web`, then configure the selected Session in the
-browser. Highlight authenticated local startup, per-Session model/API settings,
+explicit: install, run `timem`, then configure the selected Session in the
+browser. Document `timem --shell` as the optional terminal mode. Highlight authenticated local startup, per-Session model/API settings,
 multi-Session work, reconnect/replay behavior, queued message recovery, MCP and
 ToolRepo controls, Markdown rendering, responsive layout, and server-side
 secret handling when those capabilities are present in the release.

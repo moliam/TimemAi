@@ -4,10 +4,6 @@ edition.workspace = true
 version.workspace = true
 license.workspace = true
 
-[[bin]]
-name = "timem-native-rs"
-path = "src/main.rs"
-
 [dependencies]
 agent_core = { path = "../../core/agent" }
 timem_in_process = { path = "../../bridges/in_process" }

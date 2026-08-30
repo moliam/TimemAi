@@ -324,7 +324,7 @@ fn public_repo_sources_do_not_contain_private_service_markers() {
         include_str!("../../../../env_template"),
         include_str!("../../../../resources/system_prompt/system_prompt.md"),
         include_str!("../../src/lib.rs"),
-        include_str!("../../src/main.rs"),
+        include_str!("../../src/app.rs"),
     ]
     .join("\n");
     let markers = [
@@ -1129,7 +1129,7 @@ fn cli_help_lists_all_env_backed_options() {
     assert!(help.contains(
         "--space <absolute-path>        env TIMEM_SPACE; MEM directory, default under the user home"
     ));
-    assert!(help.contains("timem --space /absolute/path/to/mem"));
+    assert!(help.contains("timem --shell --space /absolute/path/to/mem"));
     assert!(!help.contains("--space <name>"));
     assert!(!help.contains("default .test_mem"));
 }

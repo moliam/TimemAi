@@ -143,4 +143,4 @@ jobs:
 
       - name: Windows release build
         shell: pwsh
-        run: cargo build --locked -p timem_shell -p timem_web --release
+        run: cargo build --locked -p timem_web --release

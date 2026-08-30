@@ -2753,7 +2753,7 @@ function TimemApp() {
             tone: "notice",
             title: "Runtime disconnected",
             detail:
-              "Timem Web lost its runtime connection. If timem-web has exited, restart it and reopen the authenticated URL.",
+              "Timem Web lost its runtime connection. If Timem has exited, restart `timem` and reopen the authenticated URL.",
             createdAt: Date.now(),
           });
         }
@@ -2852,7 +2852,7 @@ function TimemApp() {
           tone: "error",
           title: "Runtime unavailable",
           detail:
-            "Timem Web runtime is not connected. Restart timem-web and reopen the authenticated URL before sending another message.",
+            "Timem Web runtime is not connected. Restart timem and reopen the authenticated URL before sending another message.",
           createdAt: Date.now(),
         });
         return false;
@@ -3115,7 +3115,7 @@ function TimemApp() {
     ? "Runtime unavailable"
     : "Connection lost";
   const runtimeDisconnectedDetail = runtimeUnavailable
-    ? "Restart timem-web and reopen the authenticated URL to continue."
+    ? "Restart timem and reopen the authenticated URL to continue."
     : "Reconnecting to Timem runtime… sending and session changes are paused until it reconnects.";
   const showRuntimeUnavailableDialog =
     runtimeUnavailable && !runtimeUnavailableDialogDismissed;
@@ -14953,7 +14953,7 @@ function MemSwitchConfirmDialog({
           To keep the current work running, start a separate instance for the
           destination MEM instead:{" "}
           <code>
-            timem-web --space {shellQuoteCommandArgument(candidate.path)}
+            timem --space {shellQuoteCommandArgument(candidate.path)}
           </code>
         </p>
         <code className="mem-switch-confirm-path" title={candidate.path}>

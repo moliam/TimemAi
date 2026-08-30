@@ -1,13 +1,13 @@
 # Timem Web Host
 
-`timem-web` is Timem's local browser host. It is not a separate agent runtime:
+The default `timem` mode is Timem's local browser host. It is not a separate agent runtime:
 it creates and manages `agent_core` session workers, serves the embedded
 assistant-ui frontend, and forwards structured core topics to the browser.
 
 ```bash
-timem-web
+timem
 # or, from source:
-cargo run -p timem_web
+cargo run -p timem_web --
 ```
 
 ## Runtime Model

@@ -4,10 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-binary="$ROOT_DIR/target/release/timem-native-rs"
+binary="$ROOT_DIR/target/release/timem"
 if [ ! -x "$binary" ]; then
   echo "missing executable: $binary" >&2
-  echo "run: cargo build --locked -p timem_shell -p timem_web --release" >&2
+  echo "run: cargo build --locked -p timem_web --release" >&2
   exit 1
 fi
 
@@ -135,6 +135,7 @@ TIMEM_MODEL=fake-cross-host-model \
 TIMEM_BASH_APPROVAL=approve \
 TIMEM_WORK_INSTRUCTIONS=off \
 "$binary" \
+  --shell \
   --space "$memory_dir" \
   --once-json "CROSS_HOST_RESUME_SMOKE" \
   >"$shell_output"

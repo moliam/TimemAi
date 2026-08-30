@@ -17,8 +17,10 @@
 ### Changed
 
 - Move the terminal Interface to `interfaces/shell` and the browser Interface to
-  `interfaces/web` while preserving the `timem_shell`, `timem-native-rs`, and
-  `timem-web` package/binary contracts.
+  `interfaces/web` while preserving the `timem_shell` and `timem_web` package contracts.
+- Deliver one real `timem` executable: Web launches by default and `timem --shell`
+  launches the terminal Interface. Installers migrate old independent binaries in
+  place and retain `timem-web` only as a symlink or forwarding compatibility shim.
 - Update build, install, CI, documentation, Web evidence-matrix, dependency-license,
   and performance gates to use the semantic project layout. License validation
   now fails closed if no dependency packages are actually scanned.
