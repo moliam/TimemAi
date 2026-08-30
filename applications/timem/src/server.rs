@@ -85,7 +85,7 @@ include!(concat!(env!("OUT_DIR"), "/embedded_web_assets.rs"));
 const MAX_NEXT_TURN_INTENTS: usize = 8;
 const MAX_NEXT_TURN_INTENT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
-const STATIC_PROMPT: &str = include_str!("../../resources/system_prompt/system_prompt.md");
+const STATIC_PROMPT: &str = include_str!("../../../resources/system_prompt/system_prompt.md");
 const PORT_START: u16 = 12_345;
 const PORT_END: u16 = 23_456;
 const DEFAULT_MEM_PREFERRED_PORT: u16 = 13_764;

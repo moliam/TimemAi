@@ -9,7 +9,7 @@ existing behavior; it does not apply a performance optimization.
 Start the Web Host with its existing debug switch:
 
 ```bash
-cargo run -p timem_web -- --debug --space .perf-investigation
+cargo run --bin timem -- --debug --space .perf-investigation
 ```
 
 `--debug` is the only enablement control. Without it, no PID diagnostic directory

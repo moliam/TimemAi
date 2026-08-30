@@ -2808,7 +2808,7 @@ async fn reuses_the_same_authenticated_url_after_closing_and_reopening_a_page() 
 // provided by scripts/web_runtime_lifecycle_smoke.sh in the production CI gate.
 #[test]
 fn restarts_timem_web_after_runtime_shutdown_with_the_same_data_and_port() {
-    let smoke = include_str!("../../../scripts/web_runtime_lifecycle_smoke.sh");
+    let smoke = include_str!("../../../../scripts/web_runtime_lifecycle_smoke.sh");
     assert!(smoke.contains("--port \"$first_port\""));
     assert!(smoke.contains("--space \"$test_root/lifecycle-mem\""));
     assert!(smoke.contains("kill -TERM"));

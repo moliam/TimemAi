@@ -1,44 +1,47 @@
 # Timem Architecture
 
-Timem provides terminal and local-browser hosts for the reusable Timem Rust
-agent core. Each host owns its input and rendering. `agent_core` owns the
-reusable runtime, model transport, memory, model protocol parsing,
-capability execution, session persistence, and structured core/UI topic
-protocol.
+Timem is delivered as one `timem` executable assembled by
+`applications/timem`. It exposes two Interfaces: the local browser UI by
+default and the terminal Shell through `timem --shell`. Interfaces own input
+and rendering; Bridges own communication; Core owns reusable Agent and Session
+semantics.
 
 ## Current Product Shape
 
-Timem is now a multi-host local agent:
-
-- `timem` is the native terminal host.
-- `timem-web` is an authenticated local-first browser host with an assistant-ui
-  frontend. It binds loopback by default and exposes non-loopback HTTP only
-  through the explicit `--public` mode.
-- Both hosts run the same `agent_core` and use the same memory/session store.
+- `applications/timem` is the product composition root and owns the `timem`
+  binary. Its Cargo package remains `timem_web` for command compatibility.
+- `interfaces/web` is the browser presentation layer. It communicates through
+  the reconnectable HTTP/WebSocket delivery boundary.
+- `interfaces/shell` is the terminal presentation layer. It enters synchronous
+  Turns through `bridges/in_process`, not through a direct Agent or Session
+  dependency.
+- Both Interfaces use the same Core semantics, MEM, Session history, tools, and
+  model service configuration.
 
 ### 1.1 Product Boundary
 
-Version 1.1 makes `timem-web` the recommended interface. The shortest supported
-path is to run `timem`, then configure the selected Session in the browser.
-The Web host owns authenticated transport and Session orchestration, the Web UI
-owns presentation and recoverable browser intent, and the core remains the
-single source of truth for agent behavior:
+The browser is the recommended Interface. The shortest supported path is to run
+`timem`, then configure the selected Session in the page. The Web Interface owns
+presentation and recoverable browser intent; HTTP/WebSocket delivery owns
+transport/reconnect metadata; Session owns worker orchestration; Agent Core
+remains authoritative for reusable Turn behavior:
 
 ```text
-Browser / assistant-ui
+Browser / interfaces/web
         |
-        | authenticated HTTP + WebSocket, structured commands/topics
+        | authenticated HTTP + WebSocket commands, events, projections
         v
-timem_web host
+applications/timem + bridges/http_websocket
         |
-        | session/context/worker routing
+        | Session/Context/Worker use-cases
         v
-agent_core
+core/session
         |
+        v
+core/agent
         +-- model transport and protocol adapters
         +-- prompt/context and memory persistence
         +-- capability registry and safe execution
-        +-- session workers and cross-host resume
 ```
 
 The Web surface includes per-Session model/API configuration, multi-session
@@ -100,7 +103,7 @@ For module-local work, also read:
 - [`core/agent/module_boundary.md`](../core/agent/module_boundary.md)
 - [`bridges/in_process/module_boundary.md`](../bridges/in_process/module_boundary.md)
 - [`interfaces/shell/module_boundary.md`](../interfaces/shell/module_boundary.md)
-- [`timem_web/module_boundary.md`](../timem_web/module_boundary.md)
+- [`applications/timem/module_boundary.md`](../applications/timem/module_boundary.md)
 - [`interfaces/web/module_boundary.md`](../interfaces/web/module_boundary.md)
 
 ## Goals
@@ -116,22 +119,27 @@ For module-local work, also read:
 
 ```mermaid
 flowchart LR
-    User["User terminal"] --> Shell["timem_shell\nterminal UI + CLI"]
-    Browser["Local browser"] --> WebUI["web_ui\nassistant-ui + React"]
-    WebUI <--> Web["timem_web\nloopback HTTP/WebSocket host"]
-    Shell --> Core["agent_core\nruntime + topic protocol"]
-    Web --> Core
-    Core --> Runtime["agent_core::session_runtime\nUI-neutral turn runner"]
-    Runtime --> Model service["agent_core::model_transport\nmodel service I/O"]
-    Model service --> Wire["agent_core::model_api\nwire-format adapter"]
-    Model service --> LLM["LLM service"]
-    Core --> Guard["MemGuard\nper MEM"]
-    Guard --> Store["Local data\nmemory + chat history + audit"]
-    Core --> Caps["Capability registry\nYAML IDL + tool callbacks"]
-    Caps --> Tools["resources/capabilities/tools\n{tool}.yaml + {tool}.rs"]
-    Core --> Exec["Tool execution\nbuiltin + command-bound jobs"]
-    Guard --> Audit["audit/api_audit.json\naudit/action_audit.json"]
+    App["applications/timem<br/>product composition + timem binary"]
+    User["User terminal"] --> Shell["interfaces/shell<br/>terminal UI + CLI"]
+    Browser["Local browser"] --> WebUI["interfaces/web<br/>assistant-ui + React"]
+    Shell --> InProc["bridges/in_process<br/>typed zero-transport calls"]
+    WebUI <--> App
+    App --> Http["bridges/http_websocket<br/>reconnect delivery"]
+    App --> Shell
+    InProc --> Session["core/session<br/>Session/Context/Worker orchestration"]
+    App --> Session
+    Session --> Core["core/agent<br/>Turn + model/capability runtime"]
+    Core --> Platform["core/platform<br/>OS policy"]
+    Core --> Contract["core/ui_contract<br/>commands/events/projections"]
+    Session --> Contract
+    InProc --> Contract
+    Http --> Contract
+    Core --> Model["model service I/O + wire adapters"]
+    Model --> LLM["LLM service"]
+    Core --> Store["Local MEM<br/>history + memory + audit"]
+    Core --> Tools["resources/capabilities/tools<br/>YAML IDL + callbacks"]
 ```
+
 
 ### `core/agent/`
 
@@ -269,8 +277,10 @@ serialization, networking, rendering, or lifecycle reinterpretation.
 
 ### `interfaces/shell/`
 
-`timem_shell` owns the terminal host and UI. Its synchronous Turn calls enter Core through
-`timem_in_process`; `CliTurnUi`, terminal rendering, and user decisions remain in the Interface.
+`timem_shell` owns terminal presentation and interaction. Its synchronous Turn calls enter
+Session/Agent semantics only through `timem_in_process`; `CliTurnUi`, terminal rendering, and user
+decisions remain in the Interface. The crate has no direct `timem_session` or `agent_core`
+dependency.
 
 - Reads CLI flags and environment config.
 - Parses terminal-only user commands and maps shared commands to core functions
@@ -312,32 +322,32 @@ shell-only shortcut.
 
 All hosts consume one authoritative, UI-neutral Core Turn semantic contract:
 `TurnToken`, input admission, `PromptCut`, activity, immutable outcome, and
-structured request/reply correlation. A synchronous in-process host such as the
-current terminal Shell may consume Core projection directly. An asynchronous,
+structured request/reply correlation. A synchronous same-process Interface such as Shell
+consumes that projection through `bridges/in_process` without a network/reconnect layer. An asynchronous,
 reconnectable, multi-client, cross-process, or remote UI may add a Host
 Projection Adapter that supplies snapshot/revision, reliable command ownership,
 transport sequencing, and bounded queues.
 
 That adapter is a delivery boundary, not an agent runtime. It cannot decide
 whether a Turn exists, accept input into a closed Turn, infer completion from
-workers/topics, or rewrite an outcome. `timem_web` Pod is the first such adapter,
-not a mandatory dependency for every UI. UI shells own rendering and local
+workers/topics, or rewrite an outcome. The current Web delivery assembled in
+`applications/timem` is the first such adapter; it is not a mandatory dependency for every UI. UI shells own rendering and local
 interaction only. This split is what makes adding Swift/iOS, desktop, another
 Web toolkit, or accessibility-first UI primarily an adapter/presentation task.
 
-### `timem_web/`
+### `applications/timem/`
 
-`timem_web/src/os/` is the Web host operating-system adapter. Unix parent-process
+`applications/timem/src/os/` is the Web host operating-system adapter. Unix parent-process
 capture, launcher-exit monitoring, and SIGINT/SIGTERM/SIGHUP registration stay
 there; `server.rs` consumes platform-neutral shutdown triggers. Storage-specific permissions remain in their owning storage modules; the per-MEM
 Web-instance lease and in-memory semantic delivery stay in dedicated Web host modules.
 
-`timem_web` is transitional Web server assembly around the HTTP/WebSocket Bridge, not a second agent runtime. It binds
+`applications/timem` is the product composition root around Core, Interfaces, and Bridges, not a second agent runtime. The Cargo package remains `timem_web` for command compatibility. It binds
 to `127.0.0.1` by default and binds to `0.0.0.0` only after the explicit
 `--public` option. Browser, API, upload, and WebSocket access remain protected
 by one per-process token in either mode. The host embeds the production
 frontend and maps browser commands to public
-`agent_core` worker/session interfaces. It preserves session and request ids on
+Session/Core worker interfaces. It preserves session and request ids on
 every topic, assigns stable event ids, and keeps one bounded host-side turn
 envelope for the task text, supplements, approvals, process events, final answer,
 and completion telemetry. Uploads, retained turns, per-turn user entries, and
@@ -742,8 +752,8 @@ continue. Rust panic recovery cannot safely recover a native SIGSEGV in the
 same process, so future untrusted native/FFI capabilities must run behind a
 process boundary.
 
-The terminal app is an Interface over the in-process Bridge. `timem_web` is transitional assembly
-around the reconnectable HTTP/WebSocket Bridge. iOS, desktop, or another Interface should select
+The terminal app is an Interface over the in-process Bridge. `applications/timem` assembles
+the reconnectable HTTP/WebSocket Bridge and current Web host. iOS, desktop, or another Interface should select
 an appropriate Bridge rather than fork the agent loop. Every Interface must consume the same Core
 Turn projection; its Bridge may add delivery metadata without redefining lifecycle.
 The iOS path should reuse `agent_core` through the existing JSON-in/JSON-out C
@@ -1861,7 +1871,7 @@ The standalone shell should stay releasable with:
 ```bash
 cargo fmt --check
 cargo test --workspace
-cargo build -p timem_web --release
+cargo build --release --bin timem
 ```
 
 Core tests cover:

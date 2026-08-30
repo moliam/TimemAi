@@ -279,8 +279,8 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   confirmations.
 - Browser/WebSocket-specific projection revisions, event cursors, reconnect
   outboxes, HTTP authentication, or UI command queues. These belong to a Host
-  Projection Adapter such as `timem_web`, not to the reusable Core semantic
-  projection.
+  Projection Adapter such as `bridges/http_websocket` plus its Application wiring,
+  not to the reusable Core semantic projection.
 - A separate lifecycle API for each UI toolkit. Rust, Swift, Web, desktop, and
   process-IPC bindings must expose the same Turn identity and transition
   semantics even when their language-level types differ.

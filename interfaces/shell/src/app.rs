@@ -21,16 +21,6 @@ use crate::{
     WorkspaceCommandMessageKind, WorkspaceCommandOutcome, WorkspaceCommandReport,
     WorkspaceMenuReport, SPINNER_ICONS, TIMEM_LOGO,
 };
-use agent_core::capability::CapabilityRegistry;
-use agent_core::self_tool::SelfToolPaths;
-use agent_core::session_store::{
-    ChatHistoryRecord, ChatHistoryRole, SessionResumeNotice, SessionStore, StoredSession,
-    StoredSessionProfile, StoredSessionState,
-};
-use agent_core::{
-    AgentCore, ApprovalRequest, BashApprovalMode, ResponseProtocolKind, TurnProjection,
-    TurnProjectionOutcome, TurnToken, UsageStats,
-};
 use crossterm::event::Event;
 use reedline::{
     default_emacs_keybindings, EditCommand, EditMode, Emacs, FileBackedHistory, Highlighter,
@@ -48,6 +38,16 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use timem_in_process::agent_api::capability::CapabilityRegistry;
+use timem_in_process::agent_api::self_tool::SelfToolPaths;
+use timem_in_process::agent_api::session_store::{
+    ChatHistoryRecord, ChatHistoryRole, SessionResumeNotice, SessionStore, StoredSession,
+    StoredSessionProfile, StoredSessionState,
+};
+use timem_in_process::agent_api::{
+    AgentCore, ApprovalRequest, BashApprovalMode, ResponseProtocolKind, TurnProjection,
+    TurnProjectionOutcome, TurnToken, UsageStats,
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[path = "os/mod.rs"]
@@ -106,18 +106,21 @@ pub fn run(args: Vec<String>) {
         eprintln!("[config_error] {error}");
         std::process::exit(2);
     }
-    let workspace_lock =
-        match agent_core::WorkspaceInstanceLock::acquire(&memory_dir, "timem-shell") {
-            Ok(lock) => lock,
-            Err(error) => {
-                eprintln!("[workspace_error] {error}: {}", memory_dir.display());
-                std::process::exit(2);
-            }
-        };
+    let workspace_lock = match timem_in_process::agent_api::WorkspaceInstanceLock::acquire(
+        &memory_dir,
+        "timem-shell",
+    ) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("[workspace_error] {error}: {}", memory_dir.display());
+            std::process::exit(2);
+        }
+    };
     let _workspace_lock = workspace_lock;
     let space = memory_dir.display().to_string();
     let data_root = memory_dir.clone();
-    let layout = agent_core::RuntimeDataLayout::from_memory_dir(&memory_dir, &memory_dir);
+    let layout =
+        timem_in_process::agent_api::RuntimeDataLayout::from_memory_dir(&memory_dir, &memory_dir);
     let audit_file = layout.api_audit_file();
     let action_audit_file = layout.action_audit_file();
     let session_store = SessionStore::new(&memory_dir);
@@ -563,7 +566,7 @@ fn absolute_path(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 fn load_or_create_shell_session(
     session_store: &SessionStore,
-    config: &agent_core::ModelServiceConfig,
+    config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
     current_dir: &Path,
@@ -607,7 +610,7 @@ fn load_resumable_shell_session(session_store: &SessionStore) -> Option<StoredSe
 
 fn new_shell_session(
     session_store: &SessionStore,
-    config: &agent_core::ModelServiceConfig,
+    config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
     current_dir: &Path,
@@ -662,7 +665,9 @@ fn shell_session_effective_env(
     merged
 }
 
-fn shell_session_profile(config: &agent_core::ModelServiceConfig) -> StoredSessionProfile {
+fn shell_session_profile(
+    config: &timem_in_process::agent_api::ModelServiceConfig,
+) -> StoredSessionProfile {
     StoredSessionProfile {
         model: config.model.clone(),
         api_protocol: config.api_protocol.label().to_string(),
@@ -671,7 +676,7 @@ fn shell_session_profile(config: &agent_core::ModelServiceConfig) -> StoredSessi
 }
 
 fn shell_session_env_values(
-    config: &agent_core::ModelServiceConfig,
+    config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
 ) -> BTreeMap<String, String> {
@@ -697,11 +702,12 @@ fn shell_session_env_values(
         ),
         (
             "TIMEM_BASH_APPROVAL".to_string(),
-            agent_core::bash_approval_mode_label(bash_approval_mode).to_string(),
+            timem_in_process::agent_api::bash_approval_mode_label(bash_approval_mode).to_string(),
         ),
         (
             "TIMEM_WORK_INSTRUCTIONS".to_string(),
-            agent_core::work_instruction_mode_label(work_instruction_mode).to_string(),
+            timem_in_process::agent_api::work_instruction_mode_label(work_instruction_mode)
+                .to_string(),
         ),
         ("TIMEM_API_KEY".to_string(), config.api_key.clone()),
         (
@@ -732,7 +738,7 @@ fn shell_session_env_values(
 
 fn cache_shell_session_runtime(
     stored_session: &mut StoredSession,
-    config: &agent_core::ModelServiceConfig,
+    config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
     current_dir: &Path,
@@ -791,7 +797,7 @@ fn append_shell_turn_result(
     turn_id: &str,
     assistant_text: &str,
     outcome: &crate::TurnOutcome,
-    config: &agent_core::ModelServiceConfig,
+    config: &timem_in_process::agent_api::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
     current_dir: &Path,
@@ -819,7 +825,7 @@ fn append_shell_turn_result(
             role: ChatHistoryRole::System,
             turn_id: turn_id.to_string(),
             created_at_ms: now_ms_i64(),
-            kind: agent_core::session_store::ChatHistoryEventKind::Stats,
+            kind: timem_in_process::agent_api::session_store::ChatHistoryEventKind::Stats,
             content: "turn stats".to_string(),
             extra,
         },
@@ -975,7 +981,7 @@ impl TurnUi for CliTurnUi<'_> {
         }
         if let Some(status) = self.status.as_deref_mut() {
             for event in events {
-                if event.topic.name == agent_core::CORE_TOPIC_SUB_ANSWER {
+                if event.topic.name == timem_in_process::agent_api::CORE_TOPIC_SUB_ANSWER {
                     let task = event.payload["task"].as_str().unwrap_or_default();
                     let answer = event.payload["answer"].as_str().unwrap_or_default();
                     if !task.trim().is_empty() && !answer.trim().is_empty() {

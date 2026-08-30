@@ -1,7 +1,7 @@
 # Turn 状态、Bridge 与 UI 投影架构
 
 状态：**Proposed，待确认后实施**
-范围：`agent_core`、所有 Bridge 与 UI shell；`timem_web`/`web_ui` 是首个迁移实现
+范围：`core/agent`、`core/session`、所有 Bridge 与 Interface；当前 Web Application/Interface 是首个迁移实现
 目标：由 Core 提供极小、UI-neutral、权威的 Turn 语义，使 Shell、Web、iOS、桌面或未来任意 UI 壳只需适配命令、投影与表现层，不再各自实现 Agent 生命周期。
 
 ## 1. 决策摘要
@@ -25,12 +25,12 @@ UI shell: render and interact only
 1. Agent Core 内部拆成两个很小的逻辑层：
    - **Turn Gate**：管理 Turn 身份、epoch 和消息归属；拒绝旧 Turn、旧 epoch、重复终结和迟到消息。
    - **Turn Reducer**：管理当前 Turn 的最小生命周期事实。
-2. Core Turn projection 是所有 Bridge/Interface 的共同权威生命周期输入。同步 Shell 可以直接消费；异步、可重连或远程 UI 可通过 reconnectable Bridge 增加 snapshot、revision 和可靠投递，但不能改变 Core 语义。
+2. Core Turn projection 是所有 Bridge/Interface 的共同权威生命周期输入。同步 Shell 可以通过 `bridges/in_process` 零传输消费；异步、可重连或远程 UI 可通过 reconnectable Bridge 增加 snapshot、revision 和可靠投递，但不能改变 Core 语义。
 3. 任何 UI shell 都不拥有 Agent 生命周期状态机。它只拥有：
    - Core projection 或 Bridge projection 的只读副本；
    - 输入框、弹窗、选中项、滚动位置等纯 UI 状态；
    - 命令发送/重试等传输状态。传输状态不能改变业务状态。
-4. `timem_web` Pod 是 reconnectable Bridge 的首个实现，不是 Core 的必经层。`timem_shell` 等同步/in-process Interface 不需要为了接入权威 Turn 语义而引入 WebSocket、event sequence 或 reconnect outbox。
+4. `applications/timem` 中的 Web Pod 是 reconnectable Bridge 的首个实现，不是 Core 的必经层。`timem_shell` 等同步/in-process Interface 不需要为了接入权威 Turn 语义而引入 WebSocket、event sequence 或 reconnect outbox。
 5. Worker、Tool、Topic activity 是 Active Turn 下的事实，不能创建 Turn、恢复 Turn 或覆盖终态。
 6. Session/Bridge/Interface 不再维护独立生命周期状态机。`working` 等显示值由 Core Turn 投影直接给出。
 
@@ -51,7 +51,7 @@ UI shell contract
 
 Core semantic contract 对所有 UI 完全一致。Bridge 可以有不同部署形态：
 
-- 同步、单 Session 的 Shell 可直接调用 Core 并渲染 Core projection；
+- 同步、单 Session 的 Shell 通过 `bridges/in_process` 调用 Session/Core 并渲染 Core projection；
 - 多 Session、异步、可重连的 Web/iOS/桌面 Interface 通常增加 reconnectable Bridge；
 - 跨进程或跨语言 binding 只改变编码和传输，不改变 Turn 身份、输入接纳、终态与 request/reply 语义。
 
@@ -63,9 +63,9 @@ Core semantic contract 对所有 UI 完全一致。Bridge 可以有不同部署�
 
 | 模块/壳 | 当前状态 | 目标适配 |
 |---|---|---|
-| `timem_shell` | 已是 Core 的直接 Bridge，但仍基于既有 topic/控制流展示生命周期 | 直接消费权威 Core Turn projection；删除 terminal-local 生命周期推断，不引入 Pod/WebSocket 复杂度 |
-| `timem_web` Pod/Bridge | 仍有 `active_turn_id`、`pending_turn_id`、`cancelling_turn_id` 和 worker/topic 聚合等旧逻辑 | 成为通用 reconnectable Bridge 的首个实现，只增加 revision、snapshot、可靠命令投递、FIFO 与 MEM barrier |
-| `web_ui` | 仍有既有 lifecycle reducer、cancel guard 和事件驱动推断 | 只消费 Host projection；topic/activity 仅追加 timeline |
+| `interfaces/shell` | 已通过 `bridges/in_process` 使用零传输调用，但仍基于既有 topic/控制流展示生命周期 | 通过 in-process Bridge 消费权威 Core Turn projection；删除 terminal-local 生命周期推断，不引入 Pod/WebSocket 复杂度 |
+| `applications/timem` Web Pod / HTTP-WebSocket Bridge | 仍有 `active_turn_id`、`pending_turn_id`、`cancelling_turn_id` 和 worker/topic 聚合等旧逻辑 | 成为通用 reconnectable Bridge 的首个实现，只增加 revision、snapshot、可靠命令投递、FIFO 与 MEM barrier |
+| `interfaces/web` | 仍有既有 lifecycle reducer、cancel guard 和事件驱动推断 | 只消费 Host projection；topic/activity 仅追加 timeline |
 | iOS/桌面/其他 UI | 尚无本架构适配实现 | 直接使用相同 Core semantic contract；根据部署需要选择直连或 reconnectable Bridge |
 
 因此完成标准必须包含现有 Shell、Web Bridge 和 WebUI 的实际代码迁移与测试，不能只更新边界文档。
@@ -76,16 +76,16 @@ Core semantic contract 对所有 UI 完全一致。Bridge 可以有不同部署�
 
 当前实现中，同一业务事实分散在三层：
 
-- `agent_core`
+- `core/agent`（Cargo 包名 `agent_core`）
   - `CoreSessionState::{Running, WaitingModel, WaitingUser, ...}` 随 topic 发出；
   - worker runtime 自己管理取消和完成。
-- `timem_web`
+- `applications/timem` Web runtime（Cargo 包名 `timem_web`）
   - `WebSession.state`；
   - `active_turn_id`、`pending_turn_id`、`cancelling_turn_id`；
   - `WebTurn.state`；
   - `WebWorker.state`；
   - 根据 worker 数量和 topic 再次聚合 Session 状态。
-- `web_ui`
+- `interfaces/web`
   - 消费 `turn_started`、`turn_finished`、`worker_activity`、`core_topic`；
   - 再次推断 Session/Turn/Worker 是否 working、cancelling 或 finished；
   - 重连时还需要把 snapshot 与浏览器持久化取消意图合并。
@@ -389,7 +389,7 @@ working = core_projection.active_turn != null
 
 ## 7. reconnectable Bridge：可选的权威投影出口
 
-reconnectable Bridge 指连接 Agent Core 与异步/可重连 UI 的投影与可靠投递层。它是可选部署层：同步 Shell 可以直接消费 Core projection；当前首个实现位于 `timem_web`，称为 Pod。未来 iOS、桌面或远程 Interface 可复用相同模式，但不要求复用 Web 进程或协议。
+reconnectable Bridge 指连接 Agent Core 与异步/可重连 UI 的投影与可靠投递层。它是可选部署层：同步 Shell 可以直接消费 Core projection；当前首个实现由 `applications/timem` 组装，称为 Web Pod。未来 iOS、桌面或远程 Interface 可复用相同模式，但不要求复用 Web 进程或协议。
 
 ### 7.1 Bridge 输入
 
@@ -799,7 +799,7 @@ ConvertedToNextTurnIntent { enqueue_seq } | Duplicate | Rejected
 
 ### Phase 3：Pod projection 与有界 intent FIFO
 
-- 从 `timem_web/src/server.rs` 提取小型 projection 模块；
+- 从 `applications/timem/src/server.rs` 提取小型 projection 模块；
 - 用 Core projection 替换 `active_turn_id/pending_turn_id/cancelling_turn_id` 的分散写入；
 - 建立按 `enqueue_seq` 排序、按 `command_id` 去重、容量明确且持久化的 Next intent FIFO；
 - lifecycle barrier、自动发送偏好和 outcome continuation grant 分别判断，不能把 `Empty` 当自动派发授权；
@@ -926,7 +926,7 @@ Stop(A) → ordinary Send(B) → Stop(B) → Send(C) → ...
 
 ### 14.4 压测三：真实 WebSocket 恢复与 FIFO ownership
 
-启动真实 `timem_web` Host、真实 Core worker 和 fake model endpoint；至少两个独立 WebSocket client 并发操作同一 Session。在 accepted、Core handoff、terminal commit、projection publish 和 ACK 前后主动断线/重连，并注入重复 command、普通 Send 与未消费 supplement、附件、队列编辑/重排/取消、MEM switch barrier。
+启动 `applications/timem` 中的真实 Web Host（Cargo 包名 `timem_web`）、真实 Core worker 和 fake model endpoint；至少两个独立 WebSocket client 并发操作同一 Session。在 accepted、Core handoff、terminal commit、projection publish 和 ACK 前后主动断线/重连，并注入重复 command、普通 Send 与未消费 supplement、附件、队列编辑/重排/取消、MEM switch barrier。
 
 验收：
 
@@ -1010,7 +1010,7 @@ core/agent/src/turn_state.rs
   InputAdmission / PendingTurnInput / PromptCut
   invariant tests
 
-timem_web/src/turn_projection.rs
+applications/timem/src/turn_projection.rs
   SessionProjection
   ProjectionRevision
   bounded NextTurnIntent FIFO (restart discards execution ownership)
@@ -1031,9 +1031,9 @@ interfaces/web/src/projection.ts
 
 - Core 是 Active Turn、input admission、PromptCut 和 outcome 的唯一写入者；
 - Core projection 是所有 Bridge/Interface 的共同生命周期真相；
-- reconnectable Bridge 只增加交付语义；`timem_web` Pod 只按明确 continuation policy 派发有界队列；
-- `timem_shell` 直接消费 Core projection，不维护 terminal lifecycle；
-- `web_ui` 删除生命周期推断；
+- reconnectable Bridge 只增加交付语义；`applications/timem` 的 Web Pod 只按明确 continuation policy 派发有界队列；
+- `interfaces/shell` 通过 `bridges/in_process` 消费 Core projection，不维护 terminal lifecycle；
+- `interfaces/web` 删除生命周期推断；
 - Web Bridge 删除 worker-count/topic-driven lifecycle 聚合；
 - 21 条不变量均有自动化测试；
 - 4 个真实并发压测在 PR、macOS/Linux release 和 soak profile 达到规定轮数，正确性、资源收敛和体验时延预算通过；

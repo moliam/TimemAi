@@ -1,6 +1,6 @@
 use super::*;
-use agent_core::{RuntimeProfiler, StorageProfile, UsageStats};
 use std::time::Duration;
+use timem_in_process::agent_api::{RuntimeProfiler, StorageProfile, UsageStats};
 
 #[test]
 fn profiler_token_cards_render_aggregated_core_data() {

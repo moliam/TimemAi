@@ -3,9 +3,9 @@
 `timem_shell` is Timem's terminal Interface. It owns CLI
 parsing, environment collection, terminal input, menus, rendering, and
 shell-only convenience commands. It consumes the same UI-neutral Core Turn
-semantics intended for Web, iOS, desktop, and future shells. Synchronous Turn
-calls cross `timem_in_process`; reusable lifecycle/runtime behavior and model
-transport remain in `agent_core`.
+semantics intended for Web, iOS, desktop, and future shells. Synchronous Turn calls and reusable Rust API access cross `timem_in_process`;
+lifecycle/runtime behavior and model transport remain behind Session/Agent Core. Shell depends on
+the in-process Bridge and UI contract, not directly on Session or Agent crates.
 
 Before changing this module, also read the repository-level `AGENTS.md`.
 Also read `docs/turn-state-projection-architecture.md` for the shared Core, Bridge, Interface, and lifecycle boundary.
@@ -61,8 +61,8 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
 - Applying model responses through core and rendering resulting topic events.
   Shell should not compare repair counters, classify repair issues, inject
   repair prompt slices, or construct model-repair audit events.
-- Adapters that translate `agent_core` structured reports/topic events into
-  terminal text.
+- Adapters that translate structured reports/topic events exposed by
+  `timem_in_process::agent_api` into terminal text.
 - Terminal rendering of core-provided report semantics and values. Shell owns
   labels, descriptions, language, icons, layout, and compact display strings;
   core owns the semantic field kinds and effective values.
@@ -107,6 +107,9 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   place where topic payload fields are defined.
 - Shell may branch on stable action topic fields such as `kind: "bash"` for
   rendering, but should not depend on Rust enum-default serialized shapes.
+  For command wait-budget display it renders core-provided effective budgets,
+  keeps the proposal/approval row untimed, and attaches the countdown only when
+  the matching action receives `event: "execution_start"`.
 - Terminal replies to core request topics. Shell collects the user choice and
   returns it through core's `TopicReply` shape with the original `session_id`,
   `topic_name`, and `request_id`; shell should not resume a waiting session by
@@ -114,7 +117,7 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
 - Calling core turn lifecycle audit helpers at terminal turn boundaries. Shell
   should not construct shared turn_start, turn_error, model_repair_request, or
   turn_final audit JSON.
-- Rendering `agent_core` host status messages with terminal-specific icons,
+- Rendering Bridge-exposed Core host status messages with terminal-specific icons,
   colors, and layout.
 - Rendering core-provided message severity and semantic kind into terminal
   wording. Shell may localize the sentence, but the shared severity and kind
@@ -207,7 +210,7 @@ responsible for terminal input/rendering; the worker/core owns session state,
 model/action loop, topic emission, and request correlation.
 
 The intended call chain is
-`timem_shell UI -> timem_in_process -> agent_core -> model service -> LLM`. The Bridge is a
+`timem_shell UI -> timem_in_process -> timem_session -> agent_core -> model service -> LLM`. The Bridge is a
 zero-transport typed call boundary; it must not add model transport or serialization. If model service
 transport needs to change, change the core/model service boundary first.
 
@@ -217,7 +220,7 @@ core-owned data structures. Core-initiated runtime events should be consumed as
 topic callbacks, not inferred by parsing prompt text or model output in the
 shell.
 
-Shell-initiated actions call core functions directly. Core-initiated work in an
+Shell-initiated actions call Core APIs exposed through `timem_in_process::agent_api`; Shell does not add a direct Core crate dependency. Core-initiated work in an
 already-running session arrives as topic events, including progress, waiting
 states, retries, and requests that need a user decision. Shell may route those
 topics to terminal callbacks, but it should not turn them back into ad hoc
@@ -250,8 +253,8 @@ for decisions that require a user choice.
 Topic callbacks are synchronous. If shell wants to preserve an event for delayed
 rendering, background processing, logs, or tests after the callback returns, it
 must clone the `CoreTopicEvent` or copy the specific fields it needs.
-Shell topic callbacks must not synchronously reenter the same `AgentCore`
-session. They should render/copy/enqueue, or return the correlated `TopicReply`
+Shell topic callbacks must not synchronously reenter the same active Core
+session through the Bridge. They should render/copy/enqueue, or return the correlated `TopicReply`
 for request topics, then let the active core call continue.
 
 ## Test Layout
@@ -260,3 +263,13 @@ Test functions and terminal fixtures live under `interfaces/shell/tests`.
 Production modules may keep only a minimal `#[cfg(test)]` external-module
 declaration or an explicitly test-only hook needed for private white-box
 access.
+
+
+## Dependency direction
+
+- Required outward-facing API dependencies are `bridges/in_process` and `core/ui_contract`.
+- Shell must not depend directly on `core/session` or `core/agent`; use
+  `timem_in_process` entry points and its deliberate `agent_api` re-export.
+- Shell must not depend on Web or an application composition root.
+- A future Rust-native desktop Interface is a peer of Shell and should consume the same in-process
+  Bridge. Do not add an empty desktop Interface or `native_ffi` Bridge in anticipation of it.

@@ -1,9 +1,9 @@
-use agent_core::{
+use std::path::{Path, PathBuf};
+use timem_in_process::agent_api::{
     ApiProtocol, CoreProfile, CoreTopicEvent, LlmResponse, ModelClient, ModelServiceConfig,
     NoopTurnUi, OpenAiCompatibleOptions, ResponseProtocolKind, TurnInput, TurnProjection, TurnUi,
     UsageStats,
 };
-use std::path::{Path, PathBuf};
 
 struct FinalAnswerModel {
     prompts: Vec<String>,
@@ -92,8 +92,8 @@ fn run_test_turn(
     session: &str,
     ui: &mut dyn TurnUi,
     model: &mut dyn ModelClient,
-) -> agent_core::TurnOutcome {
-    let mut core = agent_core::AgentCore::new(
+) -> timem_in_process::agent_api::TurnOutcome {
+    let mut core = timem_in_process::agent_api::AgentCore::new(
         "STATIC {{ response_protocol }} {{ capability_catalog }}",
         CoreProfile {
             model: "test-model".to_string(),
@@ -238,14 +238,14 @@ fn projection_semantics(projections: &[TurnProjection]) -> Vec<ProjectionSemanti
 #[test]
 fn in_process_bridge_is_semantically_equivalent_to_direct_core_call() {
     let root = temp_dir("equivalence");
-    let mut direct_core = agent_core::AgentCore::new(
+    let mut direct_core = timem_in_process::agent_api::AgentCore::new(
         "STATIC {{ response_protocol }} {{ capability_catalog }}",
         CoreProfile {
             model: "test-model".to_string(),
         },
         &root,
     );
-    let mut bridge_core = agent_core::AgentCore::new(
+    let mut bridge_core = timem_in_process::agent_api::AgentCore::new(
         "STATIC {{ response_protocol }} {{ capability_catalog }}",
         CoreProfile {
             model: "test-model".to_string(),
@@ -263,7 +263,7 @@ fn in_process_bridge_is_semantically_equivalent_to_direct_core_call() {
     let mut direct_ui = RecordingUi::default();
     let mut bridge_ui = RecordingUi::default();
 
-    let direct_outcome = agent_core::run_session_turn_with_model_client(
+    let direct_outcome = timem_in_process::agent_api::run_session_turn_with_model_client(
         &mut direct_core,
         &mut direct_config,
         TurnInput {

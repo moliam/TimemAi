@@ -1,10 +1,12 @@
-# timem_web Module Boundary
+# Timem Application Boundary
 
-`timem_web` is the transitional local-first Web server that currently combines
-HTTP/WebSocket Bridge integration with binary assembly. It binds a loopback HTTP/WebSocket
+`applications/timem` is the product composition root. Its Cargo package remains
+`timem_web` for command compatibility, but the physical top-level `timem_web/` root no longer
+exists. The application assembles Core, Bridges, and Interfaces; its current binary combines
+local-first Web hosting with Shell entry points. It binds a loopback HTTP/WebSocket
 server by default, allows an explicit authenticated `--public` bind, owns
 browser authentication and reliable delivery, maps browser commands to
-`agent_core` session worker handles, and projects the UI-neutral authoritative
+Session/Core worker handles, and projects the UI-neutral authoritative
 Core Turn contract for a reconnectable browser. Its Pod/projection layer is not
 a second agent runtime and is not required by synchronous or in-process Interfaces.
 
@@ -170,3 +172,18 @@ It must not contain:
   belong in `interfaces/web`.
 - Natural-language reinterpretation of core topics. UI receives semantic topic
   payloads and decides presentation.
+
+
+## Dependency direction
+
+- This application may depend inward on `core/*`, `bridges/*`, and `interfaces/*` to assemble a product.
+- Core, Bridges, and Interfaces must never depend back on `applications/timem`.
+- Product wiring belongs here; reusable synchronous Rust access belongs in
+  `bridges/in_process`, and reconnectable HTTP/WebSocket transport belongs in
+  `bridges/http_websocket`.
+- Do not recreate a top-level `timem_web/` directory. Keep the package name only while CLI/build
+  compatibility requires it.
+- Do not create placeholder desktop or FFI modules. Add `interfaces/desktop`,
+  `applications/timem_desktop`, `bridges/native_ffi`, or `bridges/ipc` only with a real consumer and
+  implemented behavior. A same-process Rust desktop Interface should use `bridges/in_process`; a
+  cross-language same-process client may justify `native_ffi`; a separate process may justify IPC.

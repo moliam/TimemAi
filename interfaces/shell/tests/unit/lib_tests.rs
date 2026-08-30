@@ -59,7 +59,7 @@ fn default_model_service_has_explicit_protocol_and_endpoint() {
     assert_eq!(config.api_protocol, ApiProtocol::OpenAiCompatible);
     assert_eq!(
         config.response_protocol,
-        agent_core::ResponseProtocolKind::Xml
+        timem_in_process::agent_api::ResponseProtocolKind::Xml
     );
 }
 
@@ -1010,11 +1010,18 @@ fn shell_status_bar_is_dim_wrapped_and_extensible() {
 
 #[test]
 fn shell_renders_core_lifecycle_topic_as_startup_status() {
-    let profile = agent_core::CoreProfile {
+    let profile = timem_in_process::agent_api::CoreProfile {
         model: "qwen-plus".to_string(),
     };
-    let event =
-        agent_core::core_initialized_topic_event("session_a", &profile, "xml", 100_000, 50, 6, 0);
+    let event = timem_in_process::agent_api::core_initialized_topic_event(
+        "session_a",
+        &profile,
+        "xml",
+        100_000,
+        50,
+        6,
+        0,
+    );
 
     let message = shell_status_message_from_core_topic(&event)
         .expect("shell should understand core lifecycle topic");
@@ -1032,14 +1039,15 @@ fn shell_renders_core_lifecycle_topic_as_startup_status() {
 
 #[test]
 fn shell_renders_work_instruction_load_topic_as_status() {
-    let report = agent_core::WorkInstructionLoadReport {
-        status: agent_core::WorkInstructionLoadStatus::Loaded,
+    let report = timem_in_process::agent_api::WorkInstructionLoadReport {
+        status: timem_in_process::agent_api::WorkInstructionLoadStatus::Loaded,
         directory: "/tmp/project".into(),
         file_names: vec!["AGENTS.md".to_string()],
         context: Some("guide".to_string()),
         error: None,
     };
-    let event = agent_core::work_instruction_load_topic_event("session_a", &report);
+    let event =
+        timem_in_process::agent_api::work_instruction_load_topic_event("session_a", &report);
 
     let message = shell_status_message_from_core_topic(&event)
         .expect("shell should understand work instruction status topic");
@@ -1053,16 +1061,16 @@ fn shell_renders_work_instruction_load_topic_as_status() {
 
 #[test]
 fn shell_renders_worker_identity_from_lifecycle_topic() {
-    let profile = agent_core::CoreProfile {
+    let profile = timem_in_process::agent_api::CoreProfile {
         model: "fake-model".to_string(),
     };
-    let identity = agent_core::CoreSessionWorkerIdentity::new(
+    let identity = timem_in_process::agent_api::CoreSessionWorkerIdentity::new(
         "session_worker",
         4,
         Some("日志分析".to_string()),
         Some("parent".to_string()),
     );
-    let event = agent_core::core_initialized_topic_event_with_worker(
+    let event = timem_in_process::agent_api::core_initialized_topic_event_with_worker(
         "session_worker",
         &profile,
         "json",

@@ -16,6 +16,18 @@
 
 ### Changed
 
+- Complete the runtime-root migration by moving the former top-level `timem_web/`
+  source tree to `applications/timem/`, preserving the `timem_web` Cargo package
+  and `timem` binary contracts while making the Application a product composition
+  root rather than an architectural dependency layer.
+- Route the Shell's synchronous Turn access through the reusable
+  `bridges/in_process` boundary, which now depends on `core/session` and
+  `core/ui_contract` instead of directly on Agent. The Bridge is the shared path
+  for all same-process Rust Interfaces; desktop, FFI, and IPC modules remain
+  absent until a real consumer and executable tests exist.
+- Update the repository README, development constitution, architecture diagrams,
+  module boundaries, test strategy/handbook, semantic-layout migration record,
+  scripts, CI, installers, and local documentation links to the completed layout.
 - Move the terminal Interface to `interfaces/shell` and the browser Interface to
   `interfaces/web` while preserving the `timem_shell` and `timem_web` package contracts.
 - Deliver one real `timem` executable: Web launches by default and `timem --shell`

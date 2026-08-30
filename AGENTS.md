@@ -53,39 +53,34 @@ workspace changes.
 
 ## 3. Physical boundaries and migration
 
-The final physical ownership is:
+The current physical ownership is:
 
-- `core/{agent,session,ui_contract/{commands,events,projections},platform/{api,shared,macos,windows,linux}}`
-- `bridges/{in_process,http_websocket,ipc}`
-- `interfaces/{shell,web,macos,windows,linux}`
+- `core/{agent,session,ui_contract,platform}`
+- `bridges/{in_process,http_websocket}`
+- `interfaces/{shell,web}`
+- `applications/timem` as the unified product composition root
 - `resources`, `tests`, `docs`, and `scripts` for shared non-runtime assets and verification.
 
-A Bridge is a logical communication boundary, not necessarily a process boundary. Shell and native
-Interfaces may use direct calls, callbacks, or channels through `bridges/in_process`; Web uses
-HTTP/WebSocket; a separate desktop companion uses IPC. Do not force serialization or network I/O
-onto an in-process path.
+A Bridge is a logical communication boundary, not necessarily a process boundary. Every
+same-process Rust Interface uses direct typed calls and callbacks through `bridges/in_process`;
+the browser uses HTTP/WebSocket delivery. Do not force serialization or network I/O onto an
+in-process path.
 
-The migration is incremental. `timem_web` is the only current transitional runtime root.
-Projection delivery state already lives in `bridges/http_websocket`; semantic projection types live
-in `core/ui_contract`. The package/crate named `agent_core` now lives at `core/agent`. Their exact
-destination, removal conditions, dependency graph, staged sequence, and non-regression gates are
-defined in `docs/semantic-project-layout.md`. Do not create a
-new transitional root or preserve duplicate ownership without updating that executable migration
-contract in the same reviewed change.
+The physical runtime-root migration is complete. The former top-level `timem_web/` root has moved
+to `applications/timem/`; projection delivery state lives in `bridges/http_websocket`; semantic
+projection types live in `core/ui_contract`; and the package/crate named `agent_core` lives at
+`core/agent`. The Cargo package names `timem_web`, `timem_shell`, and `agent_core` remain compatibility
+identities, not physical directory names or permission to bypass the dependency graph. The CLI
+delivery surface is one real executable named `timem`: it launches Web by default and Shell only
+with `--shell`. A `timem-web` symlink or forwarding shim may be installed for command compatibility,
+but must not be a second executable or delegated runtime.
 
-`core/agent`, `core/ui_contract`, `interfaces/shell`, `interfaces/web`, and `core/platform` are
-current semantic roots. Preserve the
-`timem_shell`, `timem_web`, and `agent_core` package compatibility needed during the
-migration. The CLI delivery surface is one real executable named `timem`: it launches Web by
-default and Shell only with `--shell`. A `timem-web` symlink or forwarding shim may be installed
-for command compatibility, but must not be a second executable or delegated runtime.
-Temporary re-exports are allowed only when they avoid dependency cycles and have an explicit
-removal stage.
-
-Do not restore legacy roots `timem_shell`, `web_ui`, `agent_core`, or `core/agent/src/os`. Do not
-create empty target directories. Windows and native desktop paths are target architecture, not current support
-claims; add them only with an explicit behavior matrix and executable supported/unsupported
-contract.
+Do not restore legacy roots `timem_web`, `timem_shell`, `web_ui`, `agent_core`, or
+`core/agent/src/os`. Do not create empty target directories. Add `bridges/native_ffi`,
+`bridges/ipc`, `interfaces/desktop`, or another application root only with a real consumer,
+implemented behavior, an explicit support matrix, and executable tests. A same-process Rust desktop
+Interface should reuse `bridges/in_process`; cross-language same-process access may justify
+`native_ffi`; a separate companion process may justify HTTP/WebSocket or IPC.
 
 Module-local rules in `*/module_boundary.md` remain mandatory. If a local rule conflicts with this
 file, this repository-level contract wins and both documents must be reconciled in the same change.
