@@ -5,28 +5,39 @@ the full setup reference.
 
 ## Install
 
+macOS/Linux:
+
 ```bash
 git clone https://github.com/moliam/TimemAi.git
 cd TimemAi
 ./install.sh
 ```
 
-Timem supports macOS and Linux. Windows is not supported yet.
+Windows PowerShell (delivery adapted; native revalidation is still required):
 
-`install.sh` checks platform prerequisites:
+```powershell
+git clone https://github.com/moliam/TimemAi.git
+cd TimemAi
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
 
+Platform prerequisites:
+
+- Windows: stable Rust with the `x86_64-pc-windows-msvc` host and Microsoft
+  Visual C++ Build Tools with the x64 C++ workload. `install.ps1` locates and
+  initializes `VsDevCmd.bat`; it does not require an administrator shell.
 - macOS: Xcode Command Line Tools and `curl`.
 - Linux: `cc`, `make`, `curl`, `pkg-config`, and `ca-certificates`; when
   possible it installs missing packages through the system package manager.
 
-If Rust/cargo is missing, the installer installs the Rust toolchain with
+On macOS/Linux, if Rust/cargo is missing, `install.sh` installs the Rust toolchain with
 rustup. Cargo 1.78+ is required. To disable automatic Rust install/update:
 
 ```bash
 TIMEM_SHELL_SKIP_RUST_INSTALL=1 ./install.sh
 ```
 
-The installer runs:
+Both installers run:
 
 ```bash
 cargo fetch --locked
@@ -38,14 +49,14 @@ It installs:
 - `timem-web`: recommended local browser UI with embedded production assets
 - `timem`: optional terminal UI command
 - `timem-native-rs`: terminal release binary used by the `timem` wrapper
-- `resources/reminder_tips.json`: runtime-loaded default reminder schedules, normally under `~/.local/share/timem/resources`
+- `resources/reminder_tips.json`: runtime-loaded default reminder schedules, normally under `~/.local/share/timem/resources` on macOS/Linux or `%LOCALAPPDATA%\TimemAi\share\timem\resources` on Windows
 
 The completion message leads with `timem-web`. No env file is required to open
 the Web UI; model and API credentials can be configured in the browser. Env
 files remain available for terminal use, automation, or defaults for new Web
 Sessions.
 
-`TIMEM_SHELL_INSTALL_DIR` changes the binary directory. Resources follow the same prefix at `../share/timem/resources` unless `TIMEM_RESOURCES_DIR` is set explicitly. User-level `reminder_tips.json` overrides are separate and are never overwritten by installation.
+On macOS/Linux, `TIMEM_SHELL_INSTALL_DIR` changes the binary directory. On Windows, `-InstallDir` and `-ResourceDir` override the default `%LOCALAPPDATA%\TimemAi` locations. Resources follow the binary prefix unless `TIMEM_RESOURCES_DIR` is set explicitly. User-level `reminder_tips.json` overrides are separate and are never overwritten by installation.
 
 Binary updates are installed with an atomic file replacement. This allows
 `./install.sh` to update an installation even while an older `timem-web`
@@ -442,3 +453,13 @@ Timem Web 左下角的 **Memory** 卡片用于打开当前 MEM 的设置；卡�
 - 不限
 
 设置保存在当前 MEM 的 `mem_settings.json` 中。用户修改为有限期限时，Timem 会先应用新期限再报告成功。Timem Web 启动时会先完成端口监听并报告 ready，再在后台应用该策略；切换到另一个 MEM 后也会在后台立即应用，运行期间每小时再执行一次。这样大体量历史或审计文件的扫描与原子重写不会阻塞 Web 启动。该操作不会删除 Session、ToolRepo 工具、角色、MCP 或模型接入点。为避免与正在写入的历史冲突，存在运行中任务时不能修改保留期限。
+
+## Windows Uninstall
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
+```
+
+The uninstaller removes installed binaries, the shipped reminder resource, and
+the installer-added user PATH entry. It does not remove MEM workspaces,
+Sessions, credentials, user configuration, Rust, or Visual C++ Build Tools.

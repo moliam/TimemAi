@@ -20,11 +20,26 @@ changes are enforced by `python3 scripts/architecture_guard.py`.
 
 ## Install
 
+macOS/Linux:
+
 ```bash
 git clone https://github.com/moliam/TimemAi.git
 cd TimemAi
 ./install.sh
 ```
+
+Windows PowerShell (delivery adapted; native revalidation is still required):
+
+```powershell
+git clone https://github.com/moliam/TimemAi.git
+cd TimemAi
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+The Windows installer uses `%LOCALAPPDATA%\TimemAi\bin` by default and can add
+that directory to the current user's PATH without administrator privileges. It
+requires stable Rust for `x86_64-pc-windows-msvc` and Microsoft Visual C++ x64
+Build Tools.
 
 The installer builds and installs `timem` and `timem-web`. Cargo downloads Rust crates
 automatically during the build. The released Web bundle is already included;
@@ -67,6 +82,7 @@ To customize tips globally for the current user, create `reminder_tips.json` in 
 
 - macOS: `~/Library/Application Support/TimemAi/reminder_tips.json`
 - Linux: `${XDG_CONFIG_HOME:-~/.config}/timem/reminder_tips.json`
+- Windows: `%APPDATA%\TimemAi\reminder_tips.json`
 - Config override: set `TIMEM_CONFIG_DIR` to the directory containing the user file.
 - Resource override: set `TIMEM_RESOURCES_DIR` to an alternate resources directory.
 
@@ -256,8 +272,16 @@ git pull --ff-only
 ./install.sh
 ```
 
+macOS/Linux:
+
 ```bash
 ./uninstall.sh
+```
+
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
 ```
 
 Runtime data and private environment files are user-managed and are not

@@ -19,7 +19,7 @@ detect_os() {
     Darwin) echo "macos" ;;
     Linux) echo "linux" ;;
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
-      echo "unsupported_windows"
+      echo "windows"
       ;;
     *)
       echo "unsupported"
@@ -84,12 +84,13 @@ ensure_build_dependencies() {
         exit 1
       fi
       ;;
-    unsupported_windows)
-      echo "error: Windows is not supported yet. Timem Web and the optional terminal UI currently support macOS and Linux." >&2
+    windows)
+      echo "error: On Windows, run the native PowerShell installer instead:" >&2
+      echo '  powershell -ExecutionPolicy Bypass -File .\install.ps1' >&2
       exit 1
       ;;
     *)
-      echo "error: unsupported OS. Timem Web and the optional terminal UI currently support macOS and Linux." >&2
+      echo "error: unsupported OS. Use the Timem installer for Windows, macOS, or Linux." >&2
       exit 1
       ;;
   esac
