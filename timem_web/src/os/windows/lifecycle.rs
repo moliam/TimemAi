@@ -1,4 +1,4 @@
-use super::ShutdownTrigger;
+use crate::os::ShutdownTrigger;
 
 pub(crate) struct ShutdownSignalMonitor;
 
