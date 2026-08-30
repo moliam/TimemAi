@@ -336,9 +336,9 @@ fn thinking_queue_terminal_mode_is_noncanonical_but_keeps_sigint() {
 #[test]
 fn public_repo_sources_do_not_contain_private_service_markers() {
     let source_text = [
-        include_str!("../../../README.md"),
-        include_str!("../../../env_template"),
-        include_str!("../../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../../README.md"),
+        include_str!("../../../../env_template"),
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
         include_str!("../../src/lib.rs"),
         include_str!("../../src/main.rs"),
     ]
@@ -1204,7 +1204,7 @@ fn startup_control_hint_points_to_help_instead_of_listing_commands() {
 
 #[test]
 fn env_template_exports_values_for_plain_source() {
-    let template = include_str!("../../../env_template");
+    let template = include_str!("../../../../env_template");
     for key in [
         "TIMEM_API_PROTOCOL",
         "TIMEM_API_KEY",

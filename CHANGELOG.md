@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a repository-level `AGENTS.md` development constitution covering durable
+  architecture, coding-quality, testing, performance, compatibility,
+  documentation, and delivery requirements.
+- Add `core/platform` as the `timem_platform` crate, with a public platform API,
+  shared Unix primitives, target-gated macOS/Linux implementations, and migrated
+  behavioral tests.
+- Add a semantic-layout architecture guard with negative fixture tests proving
+  that legacy directories, reverse dependencies, and escaped process primitives
+  are rejected.
+
+### Changed
+
+- Move the terminal Interface to `interfaces/shell` and the browser Interface to
+  `interfaces/web` while preserving the `timem_shell`, `timem-native-rs`, and
+  `timem-web` package/binary contracts.
+- Update build, install, CI, documentation, Web evidence-matrix, dependency-license,
+  and performance gates to use the semantic project layout. License validation
+  now fails closed if no dependency packages are actually scanned.
+
 ## [1.3.0] - 2026-08-30
 
 ### Added

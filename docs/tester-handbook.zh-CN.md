@@ -196,7 +196,7 @@ cargo fmt --all -- --check
 cargo test -p agent_core <相关测试名>
 cargo test -p timem_shell <相关测试名>
 cargo test -p timem_web <相关测试名>
-pnpm --dir web_ui/timem-web test -- <相关前端测试文件>
+pnpm --dir interfaces/web test -- <相关前端测试文件>
 git diff --check
 ```
 
@@ -662,9 +662,9 @@ cargo test -p timem_shell
 cargo test -p timem_web
 
 # 前端依赖、测试、构建
-pnpm --dir web_ui/timem-web install --frozen-lockfile
-pnpm --dir web_ui/timem-web test
-pnpm --dir web_ui/timem-web build
+pnpm --dir interfaces/web install --frozen-lockfile
+pnpm --dir interfaces/web test
+pnpm --dir interfaces/web build
 
 # 高风险重复回归
 TIMEM_EDGE_ITERATIONS=5 scripts/edge_regression.sh

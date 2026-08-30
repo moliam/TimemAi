@@ -17,6 +17,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "timem_platform",
 ]
 
 [[package]]
@@ -1430,6 +1431,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "timem_platform"
+version = "1.3.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

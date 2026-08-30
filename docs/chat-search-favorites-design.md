@@ -281,7 +281,7 @@ Snapshot 只携带：
 建议拆分文件，避免继续膨胀 `main.tsx`：
 
 ```text
-web_ui/timem-web/src/chat_library/
+interfaces/web/src/chat_library/
 ├─ protocol.ts
 ├─ reducer.ts
 ├─ SearchPanel.tsx

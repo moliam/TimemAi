@@ -1,96 +1,227 @@
-# Timem development guardrails
+# TimemAi Development Constitution
 
-This file records project-level principles that future agents must read before
-making changes. Keep it short, concrete, and enforceable.
+This file is the repository-level development contract. Every contributor and
+coding agent must read it before changing code. It records durable principles;
+detailed designs and temporary implementation plans belong under `docs/`.
 
-## Delivery discipline
+## 1. Product and delivery principles
 
-- Develop in the source project first. For split/public packages, modify
-  `timem_ios` or the canonical source first, verify, then sync outward.
-- Do not push remote changes until local implementation, tests, docs, and
-  release-quality checks are complete.
-- Every small feature needs an architecture/requirement consistency check:
-  confirm it matches the user's actual requirement, has reasonable UX, and
-  covers normal, edge, and awkward user flows.
-- New functionality must be tested end to end, not only by isolated helper
-  tests. Include multi-turn flows when the feature participates in agent
-  interaction.
-- Test functions and fixture corpora belong under each crate's `tests`
-  directory, not in production files under `src`. A `src` module may retain
-  only the minimal `#[cfg(test)]` path/module declaration or test-only hook
-  required for private white-box access.
-- Tests should challenge behavior with malformed model output, boundary sizes,
-  cancellation, retries, and realistic terminal interaction where relevant.
-- Do not use real user private facts, paths, keys, internal URLs, or personal
-  conversations as test fixtures or public docs.
-- User-facing docs are part of the product. When behavior, architecture,
-  install/run flow, host support, or release gates change, update README and
-  the relevant docs in the same change. Keep README as a concise entry point;
-  move detailed design, protocol, and test matrices under `docs/`.
+- Solve the user's real requirement, not merely the literal symptom. Confirm the
+  intended behavior, ownership boundary, compatibility needs, and failure modes
+  before making a broad change.
+- Prefer the smallest coherent change that fixes the root cause. Do not mix
+  unrelated architecture axes, speculative abstractions, or opportunistic
+  rewrites into one delivery.
+- Source, tests, architecture guards, documentation, generated assets, and
+  release scripts are one product. Update all affected surfaces together.
+- Never claim success from code inspection alone. Base conclusions on the
+  corresponding executable checks and report any check that was not run.
+- Do not push, publish, tag, or alter remote history unless the user explicitly
+  asks. Local implementation and release-quality validation come first.
 
-## Architecture boundaries
+## 2. Semantic architecture
 
-- The intended runtime chain is:
-  `host UI -> agent_core -> model transport -> LLM`.
-- `timem_shell` is a terminal host/UI. It owns terminal input, menus, rendering,
-  shell-only slash commands, and local process startup.
-- `timem_shell` must not implement model HTTP, model transport, model
-  response interpretation, cache-control protocol, or model response protocol
-  parsing.
-- `timem_shell` must not execute model-requested tools such as `run_bash`.
-  Tool execution, action evidence, capability validation, and tool audit belong
-  to `agent_core`/executor. Shell only renders action topics, shows approval UI,
-  collects user decisions, and signals cancellation.
-- `agent_core` owns reusable agent state, turn execution, prompt/context
-  management, model response protocol parsing, capability execution,
-  model cache planning, model transport, audit semantics, and structured
-  topic/request output.
-- Model API HTTP/payload logic lives inside `agent_core` for now. It may later
-  move to a model transport crate, but it must not move into shell UI code.
-- Core/UI communication is structured. Core provides semantic structures,
-  reports, topic events, request topics, and outcomes. UI renders those
-  structures in its own style.
-- UI is allowed to understand public protocol fields. The goal is not a dumb UI;
-  the goal is one shared core/UI contract so Rust shell, Swift, web, and IPC
-  hosts do not each invent different meanings.
-- Do not collapse semantically different strings into generic `text`. Preserve
-  meanings such as final answer, job progress, action intent, command evidence,
-  diagnostic reason, and status metadata.
-- Core may return strings when the string itself is data, such as model
-  `final_answer`, model service message, path, id, or diagnostic reason. Core should
-  not embed terminal-specific localized copy, ANSI styling, or UI layout.
-- Topic events are owned by core while callbacks run. If a host wants to render
-  later, cross a thread/process boundary, or store events for tests/logs, it
-  must copy/clone the event or the needed fields before the callback returns.
+The intended direction is:
 
-## Prompt and protocol rules
+```text
+Interface ↔ Bridge ↔ Core
+```
 
-- Runtime must not try to understand natural-language user semantics with
-  hard-coded case logic. If behavior depends on meaning, expose evidence/tools
-  and let the model reason.
-- Prompt is a protocol between runtime and model. Be precise about fields that
-  runtime parses, and concise about natural-language guidance.
-- The model is not a traditional backward-compatible client. When protocol is
-  intentionally changed before public release, update prompt, parser, tests, and
-  examples together instead of keeping old compatibility paths.
-- Capability descriptions should be useful to the model in natural language,
-  while executor validation remains structured and authoritative.
-- Built-in tool capability packages are paired files under
-  `resources/capabilities/tools/`: `{tool}.yaml` is the model/executor
-  interface and manifest-derived validation source, and `{tool}.rs` is the
-  concrete tool callback implementation. `agent_core` may know builtin action
-  names for dispatch, but concrete tool parameter parsing and execution belong
-  to the tool implementation, not the top-level turn loop.
-- Do not leak runtime internals unless the user asks for implementation details.
-  In normal answers, avoid exposing internal memory structures, tool caps, or
-  protocol mechanics.
+- **Interface** owns presentation and human interaction: terminal/browser/native
+  input, rendering, layout, accessibility, and UI-only convenience.
+- **Bridge** owns communication only: in-process calls, HTTP/WebSocket, IPC,
+  serialization, routing, sequencing, replay, and reconnect behavior.
+- **Core** owns reusable Agent and application semantics, authoritative state,
+  UI-neutral contracts, capability execution, persistence rules, and platform
+  policy.
+- A Bridge must not invent or reinterpret Agent, Session, Turn, cancellation,
+  approval, retry, or lifecycle semantics. An Interface must render structured
+  Core meaning rather than reconstructing state from strings or event timing.
+- Dependencies point inward. Core never depends on an Interface. Platform code
+  never depends on agent, Bridge, or UI crates. Avoid cycles and hidden global
+  coupling.
+- Preserve semantic types. Do not collapse final answers, progress, action
+  intent, evidence, diagnostics, status metadata, and lifecycle outcomes into a
+  generic `text` field when their meanings differ.
+- Core may return strings when the string itself is data. Core must not contain
+  terminal ANSI styling, browser layout, localized UI composition, or
+  host-specific presentation policy.
 
-## Shell UX rules
+Read `docs/semantic-project-layout.md` for the physical layout and migration
+scope. Run `python3 scripts/architecture_guard.py` after architecture or
+workspace changes.
 
-- `Ctrl+C` and `Esc` mean cancel the current user activity. During model work,
-  `Ctrl+C` also cancels the current thinking/model turn. A single accidental
-  `Ctrl+C` should not abruptly exit the whole process.
-- Terminal rendering must be tested with multi-line input, paste, CJK text,
-  malformed paste labels, retries, long status text, and cancellation paths.
-- Shell-only UI conveniences may live in `timem_shell`, but reusable behavior
-  that web/iOS would need belongs in `agent_core`.
+## 3. Current physical boundaries
+
+These locations are enforced for the current migration stage:
+
+- `interfaces/shell`: terminal Interface. Preserve package name `timem_shell`
+  and binary/user command compatibility.
+- `interfaces/web`: React/assistant-ui browser Interface.
+- `timem_web`: current Web host and HTTP/WebSocket Bridge.
+- `agent_core`: current reusable Agent/application/UI-contract Core.
+- `core/platform`: shared OS policy crate, exposed as `timem_platform`.
+  - `api.rs`: public UI-neutral platform facade.
+  - `shared.rs`: Unix primitives shared by macOS and Linux.
+  - `macos.rs` / `linux.rs`: target-specific policy and implementation.
+- `host_projection`: asynchronous projection/delivery support; it is not a
+  required layer for a direct in-process Interface.
+
+Do not restore legacy roots `timem_shell`, `web_ui`, or `agent_core/src/os`.
+Windows is intentionally absent until it has an explicit design, implementation,
+CI target, and behavior matrix; do not add an empty placeholder.
+
+Module-local rules in `*/module_boundary.md` remain mandatory. If a local rule
+conflicts with this file, this repository-level contract wins and both documents
+must be reconciled in the same change.
+
+## 4. Authoritative state and protocol rules
+
+- Core is authoritative for Agent, Session, Context, Worker, Turn, input
+  admission, cancellation, terminal outcomes, and structured host decisions.
+- UI and delivery layers may cache, project, or transport Core state, but must
+  not create a competing state machine from topic order, worker counts,
+  acknowledgements, visible output timing, or localized strings.
+- Prompt and model response formats are protocols. When changing them, update
+  producer, parser, validation, repair behavior, fixtures, examples, and tests
+  together. Do not leave accidental dual protocols.
+- Runtime code must not infer natural-language intent with hard-coded keyword
+  branches. Expose structured evidence and capabilities; let the model reason
+  where semantic judgment is required.
+- Built-in tools remain paired packages under
+  `resources/capabilities/tools/{tool}.yaml` and `{tool}.rs`. The manifest is
+  the model/executor interface and validation source; concrete parsing and
+  execution belong to the tool implementation, not the top-level turn loop.
+- Topic callbacks are synchronous and Core-owned during the call. A host that
+  retains data for async rendering, transport, tests, or logs must clone the
+  required fields before returning.
+
+## 5. Coding quality requirements
+
+- Keep modules cohesive, names semantic, dependencies explicit, and public APIs
+  minimal. Prefer composition and narrow interfaces over cross-layer helpers.
+- Preserve safety properties and fail closed for ownership, destructive actions,
+  process identity, permissions, and unsupported-platform decisions.
+- No silent error swallowing. Return or record actionable, redacted context;
+  distinguish invalid input, unavailable capability, transient failure,
+  cancellation, and internal defects.
+- Avoid unnecessary cloning, full-file reads, unbounded collections, blocking in
+  async paths, polling without bounds, quadratic rendering, and repeated prompt
+  or projection reconstruction.
+- Compatibility is an explicit constraint. Physical moves must preserve package,
+  binary, CLI, data schema, protocol, and generated-asset behavior unless a
+  separately documented decision changes them.
+- Do not add dead compatibility branches, empty architecture placeholders,
+  speculative traits, or abstractions with only one unclear responsibility.
+- Format and lint changed code. Keep the repository free of warnings, debug
+  leftovers, temporary files, generated dependency directories, and unrelated
+  formatting churn.
+- Never place real user paths, keys, private facts, internal URLs, conversations,
+  or secrets in source, fixtures, logs, snapshots, docs, or commits.
+
+## 6. Test requirements
+
+A feature is not protected by one happy-path helper test. Review both quality
+axes and all applicable coverage dimensions from `docs/test-strategy.md` and
+record feature coverage in `docs/feature-test-management.md`.
+
+### Quality axes
+
+1. **Core interaction correctness**: protocol, state transition, execution,
+   persistence, cancellation, retry, audit, and multi-round behavior.
+2. **Interface display correctness**: Shell/Web accurately render the same
+   structured semantics without cross-session leakage or lifecycle invention.
+
+Behavior crossing both axes requires tests on both sides.
+
+### Coverage dimensions
+
+For every changed behavior, cover or explicitly justify the absence of:
+
+1. Normal path.
+2. Boundary path: empty, maximum, long, narrow, threshold, and unusual values.
+3. Error/cancellation path: malformed input, permission failure, unavailable
+   service, stale identity, retry, and interruption where relevant.
+4. Stress/repetition/concurrency path for race-prone, stateful, or hot behavior.
+
+### Test placement and realism
+
+- Test functions and fixture corpora belong under each crate's `tests` directory.
+  Production `src` files may contain only a minimal external test-module hook or
+  a narrowly scoped test-only access point for private white-box coverage.
+- Prefer tests through real public boundaries. Use real temporary files,
+  subprocesses, fake model servers, HTTP/WebSocket flows, pseudo-TTYs, and built
+  frontend assets where those are part of production behavior.
+- Every bug fix needs a regression test that fails for the original defect.
+- Architecture guards need negative self-tests that inject violations and prove
+  the guard rejects them; checking only the current valid tree is insufficient.
+- Tests must be deterministic, isolated, bounded in time/resources, and clean up
+  their files and child processes even on failure.
+
+## 7. Performance and zero-regression policy
+
+- Architecture improvement is not permission for functional, performance,
+  efficiency, UX, compatibility, or security regression.
+- Establish evidence before changing a hot path and compare the same workload
+  afterward. Do not infer causality from execution order or unrelated metrics.
+- Preserve bounded memory, storage, event queues, rendered rows, output evidence,
+  retries, timeouts, and process lifecycles.
+- Run `scripts/performance_guard.sh` for changes touching prompt assembly, event
+  fan-out, rendering, projection, long histories, caching, process supervision,
+  or other measured hot paths.
+- Release binaries and embedded Web assets must still build reproducibly. A
+  frontend source change must regenerate the tracked `interfaces/web/dist` and
+  leave no unexplained bundle diff.
+
+## 8. Documentation requirements
+
+- Update README and the relevant architecture, protocol, test matrix, install,
+  or release document in the same change as behavior or layout changes.
+- Keep README concise; detailed rationale, diagrams, matrices, and migration
+  plans belong under `docs/`.
+- Documentation must describe current truth. Remove stale paths and commands
+  after moves; do not preserve misleading historical instructions outside
+  clearly marked historical audit documents.
+- State assumptions and unsupported targets explicitly. Do not imply support
+  from a directory name, placeholder module, or compile-only stub.
+
+## 9. Required workflow and quality gates
+
+Before editing:
+
+1. Read this file and affected `module_boundary.md` files.
+2. Inspect current behavior, callers, tests, scripts, and relevant history.
+3. Define invariants, compatibility constraints, risks, and a test plan.
+
+While editing:
+
+1. Keep changes in the owning semantic layer.
+2. Add/update executable tests and guards with the implementation.
+3. Run narrow tests first for fast feedback; clean temporary artifacts.
+
+Before declaring completion, run the applicable gates. For architecture or
+release-impacting work, the expected baseline is:
+
+```bash
+python3 scripts/architecture_guard.py --self-test
+scripts/module_boundary_check.sh
+scripts/test_contract_check.sh
+cargo fmt --all -- --check
+scripts/clippy_check.sh
+cargo test --workspace --locked -- --test-threads=1
+cargo doc --workspace --all-features --no-deps --locked
+pnpm --dir interfaces/web test
+pnpm --dir interfaces/web build
+git diff --exit-code -- interfaces/web/dist
+scripts/performance_guard.sh
+cargo build --locked -p timem_shell -p timem_web --release
+git diff --check
+```
+
+Run additional platform, pseudo-TTY, browser, runtime lifecycle, security,
+installation, and repeated-edge gates whenever the touched behavior requires
+them. `scripts/ci.sh` is the authoritative full local/CI gate.
+
+If a required gate cannot run, report exactly which gate, why, and the residual
+risk. Never weaken, delete, or bypass a failing test merely to make delivery
+appear green.

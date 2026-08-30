@@ -52,7 +52,7 @@ pub(super) fn os_release_value(content: &str, key: &str) -> Option<String> {
             .unwrap_or(value)
             .replace("\\\"", "\"")
             .replace("\\\\", "\\");
-        super::non_empty_one_line(&value)
+        crate::api::non_empty_one_line(&value)
     })
 }
 

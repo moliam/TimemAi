@@ -34,16 +34,16 @@ work.
 
 ## Frontend Assets
 
-The production frontend is built from `web_ui/timem-web` and tracked under
-`web_ui/timem-web/dist` because `build.rs` embeds those files into this Rust
+The production frontend is built from `interfaces/web` and tracked under
+`interfaces/web/dist` because `build.rs` embeds those files into this Rust
 binary. Release users do not need Node or a separate assistant-ui checkout.
 
 Before changing frontend behavior, follow
-[`web_ui/README.md`](../web_ui/README.md), then run at least:
+[`interfaces/web/README.md`](../interfaces/web/README.md), then run at least:
 
 ```bash
-pnpm --dir web_ui/timem-web test --run
-pnpm --dir web_ui/timem-web build
+pnpm --dir interfaces/web test --run
+pnpm --dir interfaces/web build
 cargo test -p timem_web
 ```
 

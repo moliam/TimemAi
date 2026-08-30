@@ -78,7 +78,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-          cache-dependency-path: web_ui/timem-web/pnpm-lock.yaml
+          cache-dependency-path: interfaces/web/pnpm-lock.yaml
 
       - name: Run production CI gate
         shell: bash

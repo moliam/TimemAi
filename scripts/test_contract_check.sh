@@ -39,9 +39,9 @@ search_lines_regex() {
 
 ci_required=(
   "cargo test --workspace"
-  "pnpm --dir web_ui/timem-web test"
-  "pnpm --dir web_ui/timem-web build"
-  "pnpm --dir web_ui/timem-web test:browser"
+  "pnpm --dir interfaces/web test"
+  "pnpm --dir interfaces/web build"
+  "pnpm --dir interfaces/web test:browser"
   "cargo build --locked -p timem_shell -p timem_web --release"
   "scripts/edge_regression.sh"
   "scripts/real_tty_smoke.expect"
@@ -55,6 +55,8 @@ ci_required=(
   "scripts/cross_host_resume_smoke.sh"
   "scripts/web_license_check.sh"
   "scripts/version_consistency_check.sh"
+  "python3 scripts/architecture_guard.py --self-test"
+  "scripts/module_boundary_check.sh"
 )
 
 for pattern in "${ci_required[@]}"; do
@@ -79,7 +81,7 @@ runtime_io_guard_required=(
   "mem_temporary_items_list"
 )
 for pattern in "${runtime_io_guard_required[@]}"; do
-  if ! search_fixed "$pattern" scripts/runtime_io_guard.py scripts/real_tty_stress.expect timem_web/src/server.rs web_ui/timem-web/src/main.tsx; then
+  if ! search_fixed "$pattern" scripts/runtime_io_guard.py scripts/real_tty_stress.expect timem_web/src/server.rs interfaces/web/src/main.tsx; then
     echo "missing Timem runtime I/O guard contract: $pattern" >&2
     exit 1
   fi
@@ -97,7 +99,7 @@ shell_lib_forbidden_wrappers=(
 )
 
 for pattern in "${shell_lib_forbidden_wrappers[@]}"; do
-  if search_fixed "$pattern" timem_shell/src/lib.rs; then
+  if search_fixed "$pattern" interfaces/shell/src/lib.rs; then
     echo "timem_shell must not re-expose core runtime layout/context wrapper: $pattern" >&2
     exit 1
   fi
@@ -120,7 +122,7 @@ shell_lib_forbidden_core_internals=(
 )
 
 for pattern in "${shell_lib_forbidden_core_internals[@]}"; do
-  if search_fixed "$pattern" timem_shell/src/lib.rs; then
+  if search_fixed "$pattern" interfaces/shell/src/lib.rs; then
     echo "timem_shell must not re-export model cache core internals: $pattern" >&2
     exit 1
   fi
@@ -135,7 +137,7 @@ shell_src_forbidden_execution=(
 )
 
 for pattern in "${shell_src_forbidden_execution[@]}"; do
-  if search_fixed "$pattern" timem_shell/src; then
+  if search_fixed "$pattern" interfaces/shell/src; then
     echo "timem_shell must not implement model transport/tool execution: $pattern" >&2
     exit 1
   fi
@@ -167,7 +169,7 @@ fi
 
 legacy_action_input_hits="$(
   search_lines_regex 'next_actions.*"input"[[:space:]]*:' \
-    agent_core/tests agent_core/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs \
+    agent_core/tests agent_core/src/session_runtime.rs interfaces/shell/src/observation.rs interfaces/shell/src/lib.rs \
     | grep -v 'allow_legacy_input_negative_test' || true
 )"
 if [ -n "$legacy_action_input_hits" ]; then
@@ -181,7 +183,7 @@ if ! search_fixed "allow_legacy_input_negative_test" agent_core/tests/core_tests
 fi
 string_args_hits="$(
   search_lines_regex '"args"[[:space:]]*:[[:space:]]*"' \
-    agent_core/tests agent_core/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs resources docs README.md CHANGELOG.md scripts \
+    agent_core/tests agent_core/src/session_runtime.rs interfaces/shell/src/observation.rs interfaces/shell/src/lib.rs resources docs README.md CHANGELOG.md scripts \
     | grep -v 'allow_string_args_negative_test' \
     | grep -v 'response_schema_summary.json' \
     || true
@@ -198,7 +200,7 @@ fi
 
 private_fixture_hits="$(
   search_lines_regex '默默|李默|儿子|son birthday|6月12|蓝色雨伞|绿色雨衣|fangchang|/Users/limo3|/Users/fangchang|v0\.6 发布检查|AURORA' \
-    agent_core/tests timem_shell/src resources docs README.md CHANGELOG.md scripts \
+    agent_core/tests interfaces/shell/src resources docs README.md CHANGELOG.md scripts \
     | grep -v 'scripts/test_contract_check.sh' \
     || true
 )"

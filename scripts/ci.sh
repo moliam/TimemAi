@@ -6,11 +6,14 @@ cd "$ROOT_DIR"
 
 echo "== shell scripts syntax =="
 bash -n install.sh uninstall.sh scripts/bootstrap_assistant_ui.sh scripts/clippy_check.sh scripts/install_logic_test.sh scripts/sensitive_scan.sh scripts/test_contract_check.sh scripts/edge_regression.sh scripts/update_static_prompt_snapshot.sh scripts/kvc_replay_test.sh scripts/performance_guard.sh scripts/module_boundary_check.sh scripts/cross_host_resume_smoke.sh scripts/web_runtime_lifecycle_smoke.sh scripts/web_public_runtime_smoke.sh scripts/linux_web_platform_smoke.sh scripts/web_license_check.sh scripts/version_consistency_check.sh scripts/ci.sh
-python3 -m py_compile scripts/fake_openai_server.py scripts/web_ui_matrix_check.py scripts/runtime_io_guard.py
+python3 -m py_compile scripts/architecture_guard.py scripts/fake_openai_server.py scripts/web_ui_matrix_check.py scripts/runtime_io_guard.py
 python3 scripts/fake_openai_server.py --self-test
 
 echo "== release version consistency =="
 scripts/version_consistency_check.sh
+
+echo "== architecture guard self-test =="
+python3 scripts/architecture_guard.py --self-test
 
 echo "== module boundary =="
 scripts/module_boundary_check.sh
@@ -68,21 +71,21 @@ echo "== rust documentation =="
 cargo doc --workspace --all-features --no-deps --locked
 
 echo "== web dependencies =="
-pnpm --dir web_ui/timem-web install --frozen-lockfile
+pnpm --dir interfaces/web install --frozen-lockfile
 
 echo "== web dependency licenses =="
 scripts/web_license_check.sh
 
 echo "== web tests =="
-pnpm --dir web_ui/timem-web test
+pnpm --dir interfaces/web test
 
 echo "== web production build =="
-pnpm --dir web_ui/timem-web build
-git diff --exit-code -- web_ui/timem-web/dist
+pnpm --dir interfaces/web build
+git diff --exit-code -- interfaces/web/dist
 
 if [[ "$(uname -s)" == "Linux" ]]; then
   echo "== real Chrome Web UI acceptance =="
-  pnpm --dir web_ui/timem-web test:browser
+  pnpm --dir interfaces/web test:browser
 fi
 
 echo "== performance guard =="

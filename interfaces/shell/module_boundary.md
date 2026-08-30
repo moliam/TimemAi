@@ -249,7 +249,7 @@ for request topics, then let the active core call continue.
 
 ## Test Layout
 
-Test functions and terminal fixtures live under `timem_shell/tests`.
+Test functions and terminal fixtures live under `interfaces/shell/tests`.
 Production modules may keep only a minimal `#[cfg(test)]` external-module
 declaration or an explicitly test-only hook needed for private white-box
 access.

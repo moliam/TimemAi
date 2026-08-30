@@ -98,9 +98,9 @@ For a new contributor, read these in order:
 For module-local work, also read:
 
 - [`agent_core/module_boundary.md`](../agent_core/module_boundary.md)
-- [`timem_shell/module_boundary.md`](../timem_shell/module_boundary.md)
+- [`interfaces/shell/module_boundary.md`](../interfaces/shell/module_boundary.md)
 - [`timem_web/module_boundary.md`](../timem_web/module_boundary.md)
-- [`web_ui/module_boundary.md`](../web_ui/module_boundary.md)
+- [`interfaces/web/module_boundary.md`](../interfaces/web/module_boundary.md)
 
 ## Goals
 
@@ -136,12 +136,12 @@ flowchart LR
 
 `agent_core` owns the agent loop and is platform independent.
 
-`agent_core/src/os/` is the centralized operating-system policy boundary.
-Its common interface owns host/version detection, executable conventions,
+`core/platform` is the centralized operating-system policy boundary.
+Its public API owns host/version detection, executable conventions,
 default configuration roots, browser/terminal launch commands, and reusable
-process/process-group lifecycle operations. Shared Unix process primitives live
-in `os/unix.rs`; platform-specific identity and host policy live in
-`os/macos.rs` and `os/linux.rs`. Business modules consume the common interface
+process/process-group lifecycle operations. Shared Unix process primitives live in
+`core/platform/src/shared.rs`; platform-specific identity and host policy live in
+`core/platform/src/macos.rs` and `core/platform/src/linux.rs`. Business modules consume the common interface
 and must not add direct macOS/Linux branches or fixed system command paths. Low-level Unix mechanisms intrinsic to a subsystem—such as
 terminal `termios`, file permission bits, nonblocking file descriptors, and
 file locking—remain beside that subsystem rather than being hidden behind an
@@ -255,7 +255,7 @@ process runs with no TTY or graphical display.
   interrupted, and missed time periods collapse instead of producing a backlog.
 - Exposes a JSON-in/JSON-out C ABI for host integrations.
 
-### `timem_shell/`
+### `interfaces/shell/`
 
 `timem_shell` owns the terminal host and UI.
 
@@ -436,9 +436,9 @@ failures remain hard errors because safe repair cannot be proven; those errors
 include the affected path and concrete manual recovery guidance rather than only
 an internal code.
 
-### `web_ui/`
+### `interfaces/web/`
 
-`web_ui/timem-web` owns assistant-ui/React composition, Markdown and syntax
+`interfaces/web` owns assistant-ui/React composition, Markdown and syntax
 highlighting, session navigation, session-scoped inline decision queues, themes,
 responsive layout, and turn rendering. One task is presented as a `YOU` frame
 that accumulates supplements and approval replies, a bounded scrollable Timem
@@ -476,7 +476,7 @@ includes `context_state.cwd`. `timem_web` updates the authoritative session befo
 forwarding the event, and the browser reducer updates only the matching session.
 This keeps reconnects, navigation, the composer, and later `run_bash` execution
 on the same cwd without creating a separate fine-grained topic.
-The ignored `web_ui/vendor/assistant-ui` checkout is only a pinned source
+The ignored `interfaces/web/vendor/assistant-ui` checkout is only a pinned source
 reference; production uses the package lock and embeds the built `dist` assets.
 
 In short:

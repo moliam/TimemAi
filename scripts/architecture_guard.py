@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Enforce Timem's semantic project layout and dependency direction."""
+
+from __future__ import annotations
+
+import argparse
+import tempfile
+from pathlib import Path
+
+REQUIRED = (
+    "Cargo.toml",
+    "agent_core/Cargo.toml",
+    "agent_core/src/lib.rs",
+    "core/platform/Cargo.toml",
+    "core/platform/module_boundary.md",
+    "core/platform/src/lib.rs",
+    "core/platform/src/api.rs",
+    "core/platform/src/shared.rs",
+    "core/platform/src/macos.rs",
+    "core/platform/src/linux.rs",
+    "core/platform/tests/unit/platform_tests.rs",
+    "interfaces/shell/Cargo.toml",
+    "interfaces/shell/module_boundary.md",
+    "interfaces/web/package.json",
+    "interfaces/web/module_boundary.md",
+)
+FORBIDDEN_DIRS = ("timem_shell", "web_ui", "agent_core/src/os", "core/platform/src/windows")
+PROCESS_PRIMITIVES = ("libc::getpgid", "libc::getpgrp", "libc::waitpid", ".process_group(0)")
+
+
+def text(root: Path, relative: str) -> str:
+    path = root / relative
+    return path.read_text(errors="replace") if path.is_file() else ""
+
+
+def violations(root: Path) -> list[str]:
+    errors: list[str] = []
+    for relative in REQUIRED:
+        if not (root / relative).is_file():
+            errors.append(f"missing required architecture file: {relative}")
+    for relative in FORBIDDEN_DIRS:
+        if (root / relative).exists():
+            errors.append(f"legacy or unsupported architecture path exists: {relative}")
+
+    workspace = text(root, "Cargo.toml")
+    for member in ('"core/platform"', '"interfaces/shell"'):
+        if member not in workspace:
+            errors.append(f"workspace must include {member}")
+    for legacy in ('"timem_shell"', '"web_ui/timem-web"'):
+        if legacy in workspace:
+            errors.append(f"workspace uses legacy member {legacy}")
+
+    agent_manifest = text(root, "agent_core/Cargo.toml")
+    if 'timem_platform = { path = "../core/platform" }' not in agent_manifest:
+        errors.append("agent_core must depend on core/platform through timem_platform")
+    agent_lib = text(root, "agent_core/src/lib.rs")
+    if "pub use timem_platform as os;" not in agent_lib:
+        errors.append("agent_core must preserve its public os facade through timem_platform")
+    if "pub mod os;" in agent_lib:
+        errors.append("agent_core must not restore its legacy embedded os module")
+
+    shell_manifest = text(root, "interfaces/shell/Cargo.toml")
+    if 'name = "timem_shell"' not in shell_manifest:
+        errors.append("interfaces/shell must preserve the timem_shell package name")
+    if 'agent_core = { path = "../../agent_core" }' not in shell_manifest:
+        errors.append("interfaces/shell must depend inward on agent_core")
+
+    platform_manifest = text(root, "core/platform/Cargo.toml")
+    if 'name = "timem_platform"' not in platform_manifest:
+        errors.append("core/platform must expose the timem_platform crate")
+    for forbidden in ("agent_core", "timem_shell", "timem_web", "host_projection", "interfaces/"):
+        if forbidden in platform_manifest:
+            errors.append(f"core/platform must not depend outward on {forbidden}")
+
+    platform_lib = text(root, "core/platform/src/lib.rs")
+    required_cfg_modules = (
+        '#[cfg(target_os = "linux")]\nmod linux;',
+        '#[cfg(target_os = "macos")]\nmod macos;',
+        '#[cfg(unix)]\nmod shared;',
+    )
+    for declaration in required_cfg_modules:
+        if declaration not in platform_lib:
+            errors.append(f"platform target selection missing: {declaration.splitlines()[-1]}")
+
+    for path in (root / "agent_core/src").rglob("*.rs") if (root / "agent_core/src").is_dir() else ():
+        source = path.read_text(errors="replace")
+        for primitive in PROCESS_PRIMITIVES:
+            if primitive in source:
+                errors.append(
+                    f"Core process primitive escaped core/platform/src/shared.rs: "
+                    f"{path.relative_to(root)} contains {primitive}"
+                )
+
+    return errors
+
+
+def write_fixture(root: Path) -> None:
+    files = {
+        "Cargo.toml": '[workspace]\nmembers = ["agent_core", "core/platform", "interfaces/shell"]\n',
+        "agent_core/Cargo.toml": '[dependencies]\ntimem_platform = { path = "../core/platform" }\n',
+        "agent_core/src/lib.rs": "pub use timem_platform as os;\n",
+        "core/platform/Cargo.toml": '[package]\nname = "timem_platform"\n',
+        "core/platform/module_boundary.md": "platform boundary\n",
+        "core/platform/src/lib.rs": 'mod api;\n#[cfg(target_os = "linux")]\nmod linux;\n#[cfg(target_os = "macos")]\nmod macos;\n#[cfg(unix)]\nmod shared;\n',
+        "core/platform/src/api.rs": "pub fn api() {}\n",
+        "core/platform/src/shared.rs": "pub fn shared() {}\n",
+        "core/platform/src/macos.rs": "pub fn macos() {}\n",
+        "core/platform/src/linux.rs": "pub fn linux() {}\n",
+        "core/platform/tests/unit/platform_tests.rs": "#[test] fn platform() {}\n",
+        "interfaces/shell/Cargo.toml": '[package]\nname = "timem_shell"\n[dependencies]\nagent_core = { path = "../../agent_core" }\n',
+        "interfaces/shell/module_boundary.md": "shell boundary\n",
+        "interfaces/web/package.json": "{}\n",
+        "interfaces/web/module_boundary.md": "web boundary\n",
+    }
+    for relative, content in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+
+def self_test() -> None:
+    cases = (
+        ("legacy directory", lambda root: (root / "timem_shell").mkdir()),
+        ("reverse dependency", lambda root: (root / "core/platform/Cargo.toml").write_text('[package]\nname = "timem_platform"\n[dependencies]\ntimem_shell = { path = "../../interfaces/shell" }\n')),
+        ("escaped process primitive", lambda root: (root / "agent_core/src/leak.rs").write_text("fn leak() { libc::waitpid(0, std::ptr::null_mut(), 0); }\n")),
+    )
+    for label, mutate in cases:
+        with tempfile.TemporaryDirectory(prefix="timem-architecture-guard-") as directory:
+            root = Path(directory)
+            write_fixture(root)
+            baseline = violations(root)
+            if baseline:
+                raise SystemExit(f"self-test fixture invalid for {label}: {baseline}")
+            mutate(root)
+            if not violations(root):
+                raise SystemExit(f"self-test failed to reject {label}")
+    print("architecture_guard self-test: ok")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent.parent)
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+    if args.self_test:
+        self_test()
+        return
+    errors = violations(args.root.resolve())
+    if errors:
+        raise SystemExit("\n".join(errors))
+    print("architecture_guard: ok")
+
+
+if __name__ == "__main__":
+    main()

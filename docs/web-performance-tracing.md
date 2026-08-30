@@ -128,7 +128,7 @@ scripts/performance_guard.sh
 Run only the Web browser hot-path experiments:
 
 ```bash
-TIMEM_PERF_GUARD=1 pnpm --dir web_ui/timem-web exec vitest run tests/performance_guard.test.ts
+TIMEM_PERF_GUARD=1 pnpm --dir interfaces/web exec vitest run tests/performance_guard.test.ts
 ```
 
 The Web experiments print elapsed time for 20,000 action lifecycle events, a

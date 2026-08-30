@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use super::command_first_line;
+use crate::api::command_first_line;
 
 pub(super) fn version() -> Option<String> {
     command_first_line("/usr/bin/sw_vers", &["-productVersion"])

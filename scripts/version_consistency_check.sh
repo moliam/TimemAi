@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 workspace_version="$(sed -nE 's/^version = "([^"]+)"$/\1/p' Cargo.toml | head -n 1)"
-frontend_version="$(node -p "require('./web_ui/timem-web/package.json').version")"
+frontend_version="$(node -p "require('./interfaces/web/package.json').version")"
 
 if [ -z "$workspace_version" ]; then
   echo "unable to read workspace package version from Cargo.toml" >&2
