@@ -26,6 +26,11 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Host
 - Final-answer Markdown rendering behind `final_answer_renderer`, with a
   replaceable renderer interface and a community renderer backend by default.
 - Reedline/input handling, paste recovery, Ctrl+C/Esc behavior, and TTY quirks.
+- Target-specific terminal mechanics under `src/os/`: Unix owns `/dev/tty`,
+  termios, file-descriptor flags, and SIGINT installation; Windows owns
+  Crossterm console events/raw mode and translates keys and paste events into
+  the shell's platform-neutral input-byte protocol. `main.rs` owns interaction
+  semantics, not OS primitives.
 - CLI flags, process env collection, shell history, and startup banner display.
 - Collecting CLI/env config values, then passing the effective runtime config to
   core. Shell should not duplicate which config fields update core state.

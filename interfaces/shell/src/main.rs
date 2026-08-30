@@ -17,11 +17,8 @@ use reedline::{
 use serde_json::json;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::fs::File;
-use std::fs::OpenOptions;
 use std::io::Read;
 use std::io::{self, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -52,6 +49,9 @@ use timem_shell::{
     WorkspaceMenuReport, SPINNER_ICONS, TIMEM_LOGO,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+mod os;
+use os::{InputSource as ShellInputSource, ModeGuard as TerminalModeGuard, NonblockingGuard};
 
 const STATIC_PROMPT: &str = include_str!("../../../resources/system_prompt/system_prompt.md");
 const ANSI_RESET: &str = timem_shell::ANSI_RESET;
@@ -460,7 +460,7 @@ fn main() {
         };
         let mut status = ThinkingStatus::start(&config.model, config.max_llm_input_tokens);
         TURN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
-        let _sigint_guard = SigintGuard::install();
+        let _sigint_guard = os::install_sigint_guard(&TURN_CANCEL_REQUESTED);
         let mut turn_ui = CliTurnUi {
             status: Some(&mut status),
             interactive_approval: true,
@@ -1471,17 +1471,7 @@ struct ThinkingQueuedInput {
 impl ThinkingQueuedInput {
     fn new() -> Option<Self> {
         let input = ShellInputSource::open().ok()?;
-        let fd = input.as_raw_fd();
-        let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
-        if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
-            return None;
-        }
-        let mode = thinking_queue_terminal_mode(original);
-        if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &mode) } != 0 {
-            return None;
-        }
-        let terminal_mode = TerminalModeGuard::new(fd, original);
-        let nonblocking_mode = NonblockingGuard::new(fd).ok()?;
+        let (terminal_mode, nonblocking_mode) = os::enter_thinking_mode(&input).ok()?;
         Some(Self {
             input,
             terminal_mode,
@@ -1521,6 +1511,9 @@ impl ThinkingQueuedInput {
     }
 
     fn push_bytes(&mut self, bytes: &[u8]) {
+        if bytes.contains(&3) {
+            TURN_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+        }
         push_thinking_queue_bytes(&mut self.buffer, &mut self.pending, bytes);
     }
 }
@@ -1531,15 +1524,6 @@ impl Drop for ThinkingQueuedInput {
         self.nonblocking_mode.restore();
         self.terminal_mode.restore();
     }
-}
-
-fn thinking_queue_terminal_mode(mut mode: libc::termios) -> libc::termios {
-    mode.c_lflag &= !(libc::ICANON | libc::ECHO);
-    // Keep ISIG enabled so Ctrl+C still reaches the process-level turn cancel
-    // handler while ordinary text can be polled as a queued next-question line.
-    mode.c_cc[libc::VMIN] = 0;
-    mode.c_cc[libc::VTIME] = 0;
-    mode
 }
 
 fn push_thinking_queue_bytes(buffer: &mut Vec<u8>, pending: &mut Vec<String>, bytes: &[u8]) {
@@ -1872,37 +1856,12 @@ fn choose_paste_recovery_with_keyboard(
             rendered_lines: 1,
         };
     };
-    let fd = input.as_raw_fd();
-    let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
-    if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+    let Ok((mut terminal_mode, mut nonblocking_mode)) = os::enter_interactive_mode(&input) else {
         println!();
         return PasteRecoveryOutcome {
             decision: PasteRecoveryDecision::Cancel,
             rendered_lines: 1,
         };
-    }
-    let mut raw = original;
-    raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
-    raw.c_cc[libc::VMIN] = 1;
-    raw.c_cc[libc::VTIME] = 1;
-    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
-        println!();
-        return PasteRecoveryOutcome {
-            decision: PasteRecoveryDecision::Cancel,
-            rendered_lines: 1,
-        };
-    }
-    let mut terminal_mode = TerminalModeGuard::new(fd, original);
-    let mut nonblocking_mode = match NonblockingGuard::new(fd) {
-        Ok(guard) => guard,
-        Err(_) => {
-            terminal_mode.restore();
-            println!();
-            return PasteRecoveryOutcome {
-                decision: PasteRecoveryDecision::Cancel,
-                rendered_lines: 1,
-            };
-        }
     };
     print!("{}{}", prompt, render_paste_recovery_choices(selected));
     let _ = io::stdout().flush();
@@ -2117,20 +2076,7 @@ enum WorkspaceSelection {
 
 fn choose_workspace_item(report: &WorkspaceMenuReport) -> Option<WorkspaceSelection> {
     let mut input = ShellInputSource::open().ok()?;
-    let fd = input.as_raw_fd();
-    let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
-    if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
-        return None;
-    }
-    let mut raw = original;
-    raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
-    raw.c_cc[libc::VMIN] = 1;
-    raw.c_cc[libc::VTIME] = 1;
-    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
-        return None;
-    }
-    let mut terminal_mode = TerminalModeGuard::new(fd, original);
-    let mut nonblocking_mode = NonblockingGuard::new(fd).ok()?;
+    let (mut terminal_mode, mut nonblocking_mode) = os::enter_interactive_mode(&input).ok()?;
     println!("\nWorkspace 目录用于提示模型参考资料位置，不限制模型只能在这些目录工作。");
     println!("使用 ↑/↓ 选择，回车确认，Esc/Ctrl+C 返回。\n");
     let mut selected = 0usize;
@@ -2248,20 +2194,7 @@ fn choose_config_field(
     work_instruction_mode: WorkInstructionLoadMode,
 ) -> Option<ConfigField> {
     let mut input = ShellInputSource::open().ok()?;
-    let fd = input.as_raw_fd();
-    let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
-    if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
-        return None;
-    }
-    let mut raw = original;
-    raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
-    raw.c_cc[libc::VMIN] = 1;
-    raw.c_cc[libc::VTIME] = 1;
-    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
-        return None;
-    }
-    let mut terminal_mode = TerminalModeGuard::new(fd, original);
-    let mut nonblocking_mode = NonblockingGuard::new(fd).ok()?;
+    let (mut terminal_mode, mut nonblocking_mode) = os::enter_interactive_mode(&input).ok()?;
     println!("\n选择要修改的配置，使用 ↑/↓ 选择，回车确认，Esc/Ctrl+C 取消。\n");
     let mut selected = 0usize;
     let report =
@@ -2430,22 +2363,9 @@ fn apply_config_value(
 
 fn read_tty_line_cancelable() -> Option<String> {
     TURN_CANCEL_REQUESTED.store(false, Ordering::SeqCst);
-    let _sigint_guard = SigintGuard::install();
+    let _sigint_guard = os::install_sigint_guard(&TURN_CANCEL_REQUESTED);
     let mut input = ShellInputSource::open().ok()?;
-    let fd = input.as_raw_fd();
-    let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
-    if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
-        return None;
-    }
-    let mut raw = original;
-    raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
-    raw.c_cc[libc::VMIN] = 1;
-    raw.c_cc[libc::VTIME] = 1;
-    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
-        return None;
-    }
-    let mut terminal_mode = TerminalModeGuard::new(fd, original);
-    let mut nonblocking_mode = NonblockingGuard::new(fd).ok()?;
+    let (mut terminal_mode, mut nonblocking_mode) = os::enter_interactive_mode(&input).ok()?;
     let mut out = String::new();
     let result = loop {
         if TURN_CANCEL_REQUESTED.load(Ordering::SeqCst) {
@@ -2560,28 +2480,9 @@ fn choose_with_keyboard_decision_timeout(
         println!();
         return ApprovalDecision::Cancel;
     };
-    let fd = input.as_raw_fd();
-    let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
-    if unsafe { libc::tcgetattr(fd, &mut original) } != 0 {
+    let Ok((mut terminal_mode, mut nonblocking_mode)) = os::enter_interactive_mode(&input) else {
         println!();
         return ApprovalDecision::Cancel;
-    }
-    let mut raw = original;
-    raw.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ISIG);
-    raw.c_cc[libc::VMIN] = 1;
-    raw.c_cc[libc::VTIME] = 1;
-    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
-        println!();
-        return ApprovalDecision::Cancel;
-    }
-    let mut terminal_mode = TerminalModeGuard::new(fd, original);
-    let mut nonblocking_mode = match NonblockingGuard::new(fd) {
-        Ok(guard) => guard,
-        Err(_) => {
-            terminal_mode.restore();
-            println!();
-            return ApprovalDecision::Cancel;
-        }
     };
     print!("{}", render_choices(selected));
     let _ = io::stdout().flush();
@@ -2620,71 +2521,6 @@ fn choose_with_keyboard_decision_timeout(
     terminal_mode.restore();
     println!();
     result
-}
-
-struct TerminalModeGuard {
-    fd: i32,
-    original: libc::termios,
-    active: bool,
-}
-
-impl TerminalModeGuard {
-    fn new(fd: i32, original: libc::termios) -> Self {
-        Self {
-            fd,
-            original,
-            active: true,
-        }
-    }
-
-    fn restore(&mut self) {
-        if self.active {
-            let _ = unsafe { libc::tcsetattr(self.fd, libc::TCSAFLUSH, &self.original) };
-            self.active = false;
-        }
-    }
-}
-
-impl Drop for TerminalModeGuard {
-    fn drop(&mut self) {
-        self.restore();
-    }
-}
-
-struct NonblockingGuard {
-    fd: i32,
-    original_flags: i32,
-    active: bool,
-}
-
-impl NonblockingGuard {
-    fn new(fd: i32) -> io::Result<Self> {
-        let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if original_flags < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags | libc::O_NONBLOCK) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self {
-            fd,
-            original_flags,
-            active: true,
-        })
-    }
-
-    fn restore(&mut self) {
-        if self.active {
-            let _ = unsafe { libc::fcntl(self.fd, libc::F_SETFL, self.original_flags) };
-            self.active = false;
-        }
-    }
-}
-
-impl Drop for NonblockingGuard {
-    fn drop(&mut self) {
-        self.restore();
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2836,49 +2672,6 @@ fn read_key_byte_once(input: &mut impl Read) -> KeyByteRead {
             KeyByteRead::Pending
         }
         Err(_) => KeyByteRead::Closed,
-    }
-}
-
-struct SigintGuard {
-    previous: libc::sigaction,
-    active: bool,
-}
-
-impl SigintGuard {
-    fn install() -> Option<Self> {
-        unsafe extern "C" fn handle_sigint(_: libc::c_int) {
-            TURN_CANCEL_REQUESTED.store(true, Ordering::SeqCst);
-        }
-
-        unsafe {
-            let mut previous: libc::sigaction = std::mem::zeroed();
-            let mut next: libc::sigaction = std::mem::zeroed();
-            next.sa_sigaction = handle_sigint as *const () as usize;
-            libc::sigemptyset(&mut next.sa_mask);
-            next.sa_flags = 0;
-            if libc::sigaction(libc::SIGINT, &next, &mut previous) != 0 {
-                return None;
-            }
-            Some(Self {
-                previous,
-                active: true,
-            })
-        }
-    }
-
-    fn restore(&mut self) {
-        if self.active {
-            unsafe {
-                let _ = libc::sigaction(libc::SIGINT, &self.previous, std::ptr::null_mut());
-            }
-            self.active = false;
-        }
-    }
-}
-
-impl Drop for SigintGuard {
-    fn drop(&mut self) {
-        self.restore();
     }
 }
 
@@ -3078,41 +2871,6 @@ struct PasteRecord {
 type SharedPasteRecords = Arc<Mutex<Vec<PasteRecord>>>;
 type SharedPrefillInput = Arc<Mutex<Option<String>>>;
 
-enum ShellInputSource {
-    Tty(File),
-    Stdin(File),
-}
-
-impl ShellInputSource {
-    fn open() -> io::Result<Self> {
-        if let Ok(tty) = OpenOptions::new().read(true).write(true).open("/dev/tty") {
-            return Ok(Self::Tty(tty));
-        }
-        let fd = unsafe { libc::dup(libc::STDIN_FILENO) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let file = unsafe { File::from_raw_fd(fd) };
-        Ok(Self::Stdin(file))
-    }
-}
-
-impl Read for ShellInputSource {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match self {
-            ShellInputSource::Tty(file) | ShellInputSource::Stdin(file) => file.read(buf),
-        }
-    }
-}
-
-impl AsRawFd for ShellInputSource {
-    fn as_raw_fd(&self) -> i32 {
-        match self {
-            ShellInputSource::Tty(file) | ShellInputSource::Stdin(file) => file.as_raw_fd(),
-        }
-    }
-}
-
 impl ShellLineEditor {
     fn new(history_file: PathBuf) -> Self {
         let history = FileBackedHistory::with_file(500, history_file).ok();
@@ -3272,58 +3030,9 @@ fn drain_queued_tty_input(
     quiet_window: Duration,
     hard_window: Duration,
 ) -> QueuedInputDrain {
-    let Ok(mut tty) = OpenOptions::new().read(true).open("/dev/tty") else {
-        return QueuedInputDrain::default();
-    };
-    let fd = tty.as_raw_fd();
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return QueuedInputDrain::default();
-    }
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return QueuedInputDrain::default();
-    }
-
-    let mut bytes = Vec::new();
-    let mut buf = [0u8; 4096];
-    let initial_deadline = Instant::now() + initial_wait;
-    while Instant::now() < initial_deadline {
-        match tty.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                bytes.extend_from_slice(&buf[..n]);
-                break;
-            }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(2));
-            }
-            Err(_) => break,
-        }
-    }
-    if bytes.is_empty() {
-        let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
-        return QueuedInputDrain::default();
-    }
-
-    let started = Instant::now();
-    let mut quiet_deadline = Instant::now() + quiet_window;
-    let hard_deadline = started + hard_window;
-    while Instant::now() < quiet_deadline && Instant::now() < hard_deadline {
-        match tty.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                bytes.extend_from_slice(&buf[..n]);
-                quiet_deadline = Instant::now() + quiet_window;
-            }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(2));
-            }
-            Err(_) => break,
-        }
-    }
-    let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
-
-    queued_input_drain_from_bytes(&bytes)
+    os::drain_pending_input(initial_wait, quiet_window, hard_window)
+        .map(|bytes| queued_input_drain_from_bytes(&bytes))
+        .unwrap_or_default()
 }
 
 fn queued_input_drain_from_bytes(bytes: &[u8]) -> QueuedInputDrain {
@@ -3672,23 +3381,7 @@ fn wrapped_terminal_rows(display_width: usize, terminal_width: usize) -> usize {
 }
 
 fn terminal_width() -> usize {
-    terminal_width_from_fd(io::stdout().as_raw_fd()).unwrap_or(80)
-}
-
-#[cfg(unix)]
-fn terminal_width_from_fd(fd: i32) -> Option<usize> {
-    let mut size = unsafe { std::mem::zeroed::<libc::winsize>() };
-    let rc = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) };
-    if rc == 0 && size.ws_col > 0 {
-        Some(size.ws_col as usize)
-    } else {
-        None
-    }
-}
-
-#[cfg(not(unix))]
-fn terminal_width_from_fd(_fd: i32) -> Option<usize> {
-    None
+    os::terminal_width()
 }
 
 fn print_final_response(
@@ -4018,7 +3711,7 @@ fn print_help() {
 }
 
 fn cli_help_text() -> &'static str {
-    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override non-empty process env values; non-empty process env values override the restored Session cache.\x1b[0m\n\nCreate a private env file from env_template, then load it for initial configuration:\n  cp env_template env\n  source /path/to/your/env\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n  export TIMEM_SPACE=/absolute/path/to/mem\n\nCommand line override example:\n  timem --space /absolute/path/to/mem --model qwen-plus\n\nOptions:\n  --space <absolute-path>        env TIMEM_SPACE; MEM directory, default ~/.timem/mem\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; model API format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; inline parser: json|xml, default xml\n  --tool-call-mode <mode>        env TIMEM_TOOL_CALL_MODE; auto|native|inline, default auto\n  --parallel-tool-calls <mode>   env TIMEM_PARALLEL_TOOL_CALLS; auto|true|false, default auto\n  --base-url <url>               env TIMEM_BASE_URL; model API base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --timeout <seconds>            env TIMEM_TIMEOUT; model connect/inactivity timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|20K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 20K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type another question and press Enter to queue a separate next turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai-compatible\n  Tool calling: auto (native when detected, otherwise inline)\n  Response protocol: xml (inline mode only)\n\nAPI key fallback env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
+    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override non-empty process env values; non-empty process env values override the restored Session cache.\x1b[0m\n\nConfigure each Session in Timem Web, or set process environment variables for terminal use.\n  macOS/Linux env file: source /path/to/your/env\n  Windows PowerShell: $env:TIMEM_API_KEY = '...'\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n  TIMEM_SPACE=/absolute/path/to/mem (Windows example: C:\\Users\\you\\timem-mem)\n\nCommand line override example:\n  timem --space /absolute/path/to/mem --model qwen-plus\n\nOptions:\n  --space <absolute-path>        env TIMEM_SPACE; MEM directory, default under the user home\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; model API format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; inline parser: json|xml, default xml\n  --tool-call-mode <mode>        env TIMEM_TOOL_CALL_MODE; auto|native|inline, default auto\n  --parallel-tool-calls <mode>   env TIMEM_PARALLEL_TOOL_CALLS; auto|true|false, default auto\n  --base-url <url>               env TIMEM_BASE_URL; model API base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --timeout <seconds>            env TIMEM_TIMEOUT; model connect/inactivity timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|20K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 20K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type another question and press Enter to queue a separate next turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai-compatible\n  Tool calling: auto (native when detected, otherwise inline)\n  Response protocol: xml (inline mode only)\n\nAPI key fallback env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
 fn runtime_help_text() -> &'static str {
