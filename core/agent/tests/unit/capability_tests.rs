@@ -2,8 +2,9 @@ use super::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
-fn builtin_registry_loads_manifest_tools() {
-    let registry = CapabilityRegistry::builtin();
+fn complete_test_registry_loads_manifest_tools() {
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
 
     assert!(registry.contains_tool("memmgr"));
     assert!(registry.contains_tool("capmgr"));
@@ -56,6 +57,17 @@ fn host_profile_can_enable_local_command_capabilities_without_shell_ui() {
 }
 
 #[test]
+fn host_profile_without_bash_keeps_native_commands_but_filters_run_bash() {
+    let profile = CapabilityHostProfile::with_local_command_execution_without_bash();
+    let registry = CapabilityRegistry::builtin_for_host(profile);
+
+    assert!(profile.local_command_execution);
+    assert!(!profile.bash_execution);
+    assert!(!registry.contains_tool("run_bash"));
+    assert!(registry.contains_tool("readfile"));
+}
+
+#[test]
 fn run_bash_host_environment_placeholder_is_replaced() {
     let description =
         "`run_bash` runs locally ({{RUN_BASH_HOST_ENVIRONMENT}}) and returns evidence.";
@@ -70,6 +82,7 @@ fn run_bash_host_environment_placeholder_is_replaced() {
     assert!(!rendered.contains(RUN_BASH_HOST_ENVIRONMENT_PLACEHOLDER));
 }
 
+#[cfg(unix)]
 #[test]
 fn builtin_run_bash_description_includes_dynamic_os_and_bash_versions() {
     let registry =
@@ -96,7 +109,8 @@ fn builtin_run_bash_description_includes_dynamic_os_and_bash_versions() {
 
 #[test]
 fn registry_renders_prompt_tool_catalog_from_manifests() {
-    let registry = CapabilityRegistry::builtin();
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
     let rendered = registry.render_tool_catalog_markdown();
 
     assert!(rendered.contains("#### `memmgr`"));
@@ -159,7 +173,8 @@ fn registry_renders_prompt_tool_catalog_from_manifests() {
 
 #[test]
 fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
-    let registry = CapabilityRegistry::builtin();
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
 
     let json = registry.render_tool_catalog_markdown_for_protocol("JSON");
     let markdown = registry.render_tool_catalog_markdown_for_protocol("Markdown");
@@ -206,7 +221,8 @@ fn readfile_synopsis_is_rendered_in_the_active_response_protocol() {
 
 #[test]
 fn tool_catalog_is_injected_for_the_active_protocol() {
-    let registry = CapabilityRegistry::builtin();
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
 
     let tools_only = registry.enrich_static_prompt_for_protocol("{{TOOL_CATALOG}}", "XML");
 
@@ -220,7 +236,8 @@ fn tool_catalog_is_injected_for_the_active_protocol() {
 
 #[test]
 fn registry_exposes_executor_binding_names() {
-    let registry = CapabilityRegistry::builtin();
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
 
     assert_eq!(registry.binding_name("memmgr"), Some("memmgr"));
     assert_eq!(registry.binding_name("capmgr"), Some("capmgr"));
@@ -234,7 +251,8 @@ fn registry_exposes_executor_binding_names() {
 
 #[test]
 fn registry_validates_required_input_fields_from_manifest() {
-    let registry = CapabilityRegistry::builtin();
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
 
     assert!(registry
         .validate_action_input("capmgr", &json_object([]))
@@ -489,7 +507,8 @@ fn registry_validates_required_input_fields_from_manifest() {
 
 #[test]
 fn registry_derives_validation_rules_from_json_schema_idl() {
-    let registry = CapabilityRegistry::builtin();
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
     let catalog = registry.tool_catalog_value();
     let capmgr = catalog
         .get("capmgr")
@@ -550,7 +569,8 @@ fn registry_derives_validation_rules_from_json_schema_idl() {
 
 #[test]
 fn registry_enriches_static_prompt_tool_catalog() {
-    let registry = CapabilityRegistry::builtin();
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
     let enriched = registry.enrich_static_prompt("## Tools\n{{TOOL_CATALOG}}");
 
     assert!(enriched.contains("#### `memmgr`"));
@@ -562,7 +582,8 @@ fn registry_enriches_static_prompt_tool_catalog() {
 
 #[test]
 fn run_bash_idl_uses_cmd_loop_cmd_without_removed_expect_fields() {
-    let registry = CapabilityRegistry::builtin();
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
     let catalog = registry.tool_catalog_value();
     let run_bash = catalog
         .get("run_bash")
@@ -609,6 +630,7 @@ fn run_bash_idl_uses_cmd_loop_cmd_without_removed_expect_fields() {
     assert!(!prompt.contains("expect_timeout_ms"));
 }
 
+#[cfg(unix)]
 #[test]
 fn capmgr_can_list_and_load_skill_content() {
     let dir = temp_release_quality_skill_overlay("capmgr_skill_load");
@@ -648,8 +670,8 @@ fn registry_loads_runtime_overlay_tools_and_skills_from_files() {
         r#"kind: tool
 id: local_echo
 binding_type: builtin
-binding_name: run_bash
-summary: Echo a bounded local string through Bash.
+binding_name: readfile
+summary: Load a bounded local file through a built-in binding.
 description: |
   Use this runtime overlay tool only when a bounded echo command is enough.
 input_properties:
@@ -686,7 +708,7 @@ when_to_use: |
 
     let registry = CapabilityRegistry::builtin_with_overlay_dir(&dir).unwrap();
 
-    assert_eq!(registry.binding_name("local_echo"), Some("run_bash"));
+    assert_eq!(registry.binding_name("local_echo"), Some("readfile"));
     assert!(registry
         .tool_catalog_value()
         .get("local_echo")
@@ -944,7 +966,8 @@ example_json: |
 
 #[test]
 fn native_tool_schemas_use_gateway_compatible_single_value_enums() {
-    let registry = CapabilityRegistry::builtin();
+    let registry =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution());
     let tools = registry.native_tool_definitions();
     for tool in &tools {
         let schema = serde_json::to_string(&tool.input_schema).unwrap();
@@ -978,7 +1001,9 @@ fn native_tool_schemas_use_gateway_compatible_single_value_enums() {
 
 #[test]
 fn native_schema_generation_avoids_redundant_required_any_expansion() {
-    let tools = CapabilityRegistry::builtin().native_tool_definitions();
+    let tools =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution())
+            .native_tool_definitions();
     let run_bash = tools.iter().find(|tool| tool.name == "run_bash").unwrap();
 
     assert_eq!(
@@ -1012,7 +1037,9 @@ fn native_schema_generation_avoids_redundant_required_any_expansion() {
 
 #[test]
 fn builtin_native_schemas_preserve_runtime_constraints_and_argument_examples() {
-    let tools = CapabilityRegistry::builtin().native_tool_definitions();
+    let tools =
+        CapabilityRegistry::builtin_for_host(CapabilityHostProfile::with_local_command_execution())
+            .native_tool_definitions();
     for tool in &tools {
         assert_eq!(
             tool.input_schema["additionalProperties"],
@@ -1067,6 +1094,7 @@ fn temp_capability_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("timem_capability_test_{name}_{nanos}"))
 }
 
+#[cfg(unix)]
 fn temp_release_quality_skill_overlay(name: &str) -> PathBuf {
     let dir = temp_capability_dir(name);
     let skill_dir = dir.join("skills").join("release_quality_gate");

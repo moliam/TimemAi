@@ -12,21 +12,51 @@ fn temp_root(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("timem_toolrepo_{label}_{stamp}"))
 }
 
-fn write_candidate(root: &Path, name: &str, script: &str, args: &[&str]) {
+#[cfg(unix)]
+const TOOL_ENTRYPOINT: &str = "tool.sh";
+#[cfg(windows)]
+const TOOL_ENTRYPOINT: &str = "tool.ps1";
+
+#[cfg(unix)]
+const TOOL_LANGUAGE: &str = "bash";
+#[cfg(windows)]
+const TOOL_LANGUAGE: &str = "powershell";
+
+#[cfg(unix)]
+fn platform_script<'a>(unix: &'a str, _windows: &'a str) -> &'a str {
+    unix
+}
+
+#[cfg(windows)]
+fn platform_script<'a>(_unix: &'a str, windows: &'a str) -> &'a str {
+    windows
+}
+
+fn write_candidate(
+    root: &Path,
+    name: &str,
+    unix_script: &str,
+    windows_script: &str,
+    args: &[&str],
+) {
     fs::create_dir_all(root).unwrap();
     fs::write(
         root.join("README.md"),
         format!("# {name}\n\n`{name} [value]`\n"),
     )
     .unwrap();
-    fs::write(root.join("tool.sh"), script).unwrap();
+    fs::write(
+        root.join(TOOL_ENTRYPOINT),
+        platform_script(unix_script, windows_script),
+    )
+    .unwrap();
     fs::write(
         root.join(".timem-tool.json"),
         serde_json::to_string_pretty(&serde_json::json!({
             "name": name,
             "type": "automation",
-            "language": "bash",
-            "entrypoint": "tool.sh",
+            "language": TOOL_LANGUAGE,
+            "entrypoint": TOOL_ENTRYPOINT,
             "synopsis": format!("{name} [value]"),
             "self_test": {"args": args, "timeout_ms": 2000}
         }))
@@ -44,6 +74,7 @@ fn publishes_validated_tool_and_supports_detail_search_and_rename() {
         &draft,
         "summarize-build-log",
         "#!/bin/bash\nset -euo pipefail\n[[ ${1:-} == --self-test ]] && { echo ready; exit 0; }\necho summary\n",
+        "if ($args[0] -eq '--self-test') { Write-Output 'ready'; exit 0 }\nWrite-Output 'summary'\n",
         &["--self-test"],
     );
 
@@ -56,7 +87,7 @@ fn publishes_validated_tool_and_supports_detail_search_and_rename() {
 
     let detail = repo.detail(&published.summary.tool_id).unwrap();
     assert!(detail.readme.contains("summarize-build-log"));
-    assert!(detail.files.iter().any(|file| file.path == "tool.sh"));
+    assert!(detail.files.iter().any(|file| file.path == TOOL_ENTRYPOINT));
 
     let renamed = repo
         .rename(&published.summary.tool_id, "inspect-build-log")
@@ -78,12 +109,14 @@ fn publishes_multiple_independent_tools_from_one_runtime_draft_root() {
         &first,
         "extract-log-fields",
         "#!/bin/bash\n[[ ${1:-} == --self-test ]] && { echo ready; exit 0; }\necho fields\n",
+        "if ($args[0] -eq '--self-test') { Write-Output 'ready'; exit 0 }\nWrite-Output 'fields'\n",
         &["--self-test"],
     );
     write_candidate(
         &second,
         "summarize-env-config",
         "#!/bin/bash\n[[ ${1:-} == --self-test ]] && { echo ready; exit 0; }\necho config\n",
+        "if ($args[0] -eq '--self-test') { Write-Output 'ready'; exit 0 }\nWrite-Output 'config'\n",
         &["--self-test"],
     );
 
@@ -109,6 +142,7 @@ fn rejects_failed_self_test_and_does_not_publish() {
         &draft,
         "broken-log-tool",
         "#!/bin/bash\necho broken >&2\nexit 7\n",
+        "[Console]::Error.WriteLine('broken')\nexit 7\n",
         &[],
     );
     let error = repo.publish(&draft).unwrap_err();
@@ -128,7 +162,7 @@ fn rejects_path_escape_symlink_and_nonsemantic_name() {
     );
 
     let draft = repo.create_draft().unwrap();
-    write_candidate(&draft, "Tool 1", "#!/bin/bash\nexit 0\n", &[]);
+    write_candidate(&draft, "Tool 1", "#!/bin/bash\nexit 0\n", "exit 0\n", &[]);
     assert_eq!(
         repo.publish(&draft).unwrap_err(),
         "tool_name_must_be_semantic_kebab_case"
@@ -138,7 +172,13 @@ fn rejects_path_escape_symlink_and_nonsemantic_name() {
     {
         use std::os::unix::fs::symlink;
         let draft = repo.create_draft().unwrap();
-        write_candidate(&draft, "safe-name", "#!/bin/bash\nexit 0\n", &[]);
+        write_candidate(
+            &draft,
+            "safe-name",
+            "#!/bin/bash\nexit 0\n",
+            "exit 0\n",
+            &[],
+        );
         symlink("/etc/passwd", draft.join("linked-secret")).unwrap();
         assert_eq!(
             repo.publish(&draft).unwrap_err(),
@@ -153,11 +193,23 @@ fn update_keeps_stable_id_and_replaces_files_after_validation() {
     let root = temp_root("update");
     let repo = SessionToolRepo::new(root.join("memory"), "session-d");
     let first = repo.create_draft().unwrap();
-    write_candidate(&first, "inspect-latency", "#!/bin/bash\necho v1\n", &[]);
+    write_candidate(
+        &first,
+        "inspect-latency",
+        "#!/bin/bash\necho v1\n",
+        "Write-Output 'v1'\n",
+        &[],
+    );
     let first = repo.publish(&first).unwrap();
 
     let second = repo.create_draft().unwrap();
-    write_candidate(&second, "inspect-latency", "#!/bin/bash\necho v2\n", &[]);
+    write_candidate(
+        &second,
+        "inspect-latency",
+        "#!/bin/bash\necho v2\n",
+        "Write-Output 'v2'\n",
+        &[],
+    );
     let mut manifest: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(second.join(".timem-tool.json")).unwrap())
             .unwrap();
@@ -172,7 +224,7 @@ fn update_keeps_stable_id_and_replaces_files_after_validation() {
     assert!(updated.updated_existing);
     assert_eq!(updated.summary.tool_id, first.summary.tool_id);
     assert!(
-        fs::read_to_string(Path::new(&updated.summary.path).join("tool.sh"))
+        fs::read_to_string(Path::new(&updated.summary.path).join(TOOL_ENTRYPOINT))
             .unwrap()
             .contains("v2")
     );
@@ -188,6 +240,7 @@ fn self_test_drains_large_output_without_deadlock_and_bounds_result() {
         &draft,
         "large-output-validator",
         "#!/bin/bash\nyes output-line | head -c 200000\n",
+        "[Console]::Out.Write(('output-line' * 20000).Substring(0, 200000))\n",
         &[],
     );
     let started = std::time::Instant::now();
@@ -207,16 +260,20 @@ fn manifest_can_use_a_separate_self_test_entrypoint() {
         &draft,
         "argument-required-tool",
         "#!/bin/bash\n[[ $# -eq 1 ]] || { echo usage >&2; exit 2; }\necho \"value=$1\"\n",
+        "if ($args.Count -ne 1) { [Console]::Error.WriteLine('usage'); exit 2 }\nWrite-Output \"value=$($args[0])\"\n",
         &[],
     );
+    let self_test_entrypoint = platform_script("self-test.sh", "self-test.ps1");
     fs::write(
-        draft.join("self-test.sh"),
-        "#!/bin/bash\nset -euo pipefail\n/bin/bash ./tool.sh fixture | grep -q 'value=fixture'\necho verified\n",
-    )
-    .unwrap();
+        draft.join(self_test_entrypoint),
+        platform_script(
+            "#!/bin/bash\nset -euo pipefail\n/bin/bash ./tool.sh fixture | grep -q 'value=fixture'\necho verified\n",
+            "$result = powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ./tool.ps1 fixture\nif ($LASTEXITCODE -ne 0 -or $result -ne 'value=fixture') { exit 1 }\nWrite-Output 'verified'\n",
+        ),
+    ).unwrap();
     let mut manifest: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(draft.join(".timem-tool.json")).unwrap()).unwrap();
-    manifest["self_test"]["entrypoint"] = serde_json::json!("self-test.sh");
+    manifest["self_test"]["entrypoint"] = serde_json::json!(self_test_entrypoint);
     fs::write(
         draft.join(".timem-tool.json"),
         serde_json::to_string_pretty(&manifest).unwrap(),

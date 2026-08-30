@@ -28,14 +28,18 @@ fn publish_action_returns_ready_only_after_runtime_self_test() {
         "# inspect-log\n\n`inspect-log --self-test`\n",
     )
     .unwrap();
-    fs::write(draft.join("tool.sh"), "#!/bin/bash\necho verified\n").unwrap();
+    #[cfg(unix)]
+    let (language, entrypoint, script) = ("bash", "tool.sh", "#!/bin/bash\necho verified\n");
+    #[cfg(windows)]
+    let (language, entrypoint, script) = ("powershell", "tool.ps1", "Write-Output 'verified'\n");
+    fs::write(draft.join(entrypoint), script).unwrap();
     fs::write(
         draft.join(".timem-tool.json"),
         serde_json::to_string_pretty(&json!({
             "name": "inspect-log",
             "type": "debug",
-            "language": "bash",
-            "entrypoint": "tool.sh",
+            "language": language,
+            "entrypoint": entrypoint,
             "synopsis": "inspect-log <file>",
             "self_test": {"args": ["--self-test"], "timeout_ms": 2000}
         }))

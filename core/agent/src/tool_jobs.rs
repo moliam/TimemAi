@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -68,24 +68,52 @@ impl FileToolJobStore {
             ));
         }
 
-        let script = format!(
-            "{} {} < {} > {} 2>&1; printf '%s' \"$?\" > {}",
-            crate::os::POSIX_SHELL_EXECUTABLE,
-            shell_quote_path(path),
-            shell_quote_path(&payload_file),
-            shell_quote_path(&output_file),
-            shell_quote_path(&status_file)
-        );
-        let mut command = Command::new(crate::os::POSIX_SHELL_EXECUTABLE);
+        let stdin = match fs::File::open(&payload_file) {
+            Ok(file) => file,
+            Err(err) => {
+                return ActionOutcome::failed(format!(
+                    "Action result: {action}\nerror: background_payload_open_failed\nreason: {}",
+                    compact_text(&err.to_string(), 1000)
+                ))
+            }
+        };
+        let output = match OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&output_file)
+        {
+            Ok(file) => file,
+            Err(err) => {
+                return ActionOutcome::failed(format!(
+                    "Action result: {action}\nerror: background_output_open_failed\nreason: {}",
+                    compact_text(&err.to_string(), 1000)
+                ))
+            }
+        };
+        let stderr = match output.try_clone() {
+            Ok(file) => file,
+            Err(err) => {
+                return ActionOutcome::failed(format!(
+                    "Action result: {action}\nerror: background_output_clone_failed\nreason: {}",
+                    compact_text(&err.to_string(), 1000)
+                ))
+            }
+        };
+        let mut command = match crate::os::command_for_script(path) {
+            Ok(command) => command,
+            Err(error) => {
+                return ActionOutcome::failed(format!(
+                    "Action result: {action}\nerror: background_interpreter_unavailable\nreason: {error}"
+                ))
+            }
+        };
         command
-            .arg("-lc")
-            .arg(script)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stdin(Stdio::from(stdin))
+            .stdout(Stdio::from(output))
+            .stderr(Stdio::from(stderr));
         crate::os::configure_child_process_group(&mut command);
-        let spawn = command.spawn();
-        let child = match spawn {
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(err) => {
                 return ActionOutcome::failed(format!(
@@ -94,10 +122,23 @@ impl FileToolJobStore {
                 ))
             }
         };
+        let pid = child.id();
+        let supervisor_status_file = status_file.clone();
+        thread::spawn(move || {
+            let status = child.wait();
+            let rendered = match status {
+                Ok(status) => status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "terminated".to_string()),
+                Err(error) => format!("wait_failed:{}", compact_text(&error.to_string(), 500)),
+            };
+            let _ = write_status_once(&supervisor_status_file, &rendered);
+        });
         let record = ToolJobRecord {
             id: id.clone(),
             created_at_ms: now_ms(),
-            pid: child.id(),
+            pid,
             owner_id: Some(crate::runtime_process_owner_id().to_string()),
             session_id: session_id.to_string(),
             action: action.to_string(),
@@ -189,9 +230,10 @@ impl FileToolJobStore {
             {
                 continue;
             }
-            terminate_process(record.pid);
-            let _ = fs::write(&record.status_file, "cancelled");
-            terminated += 1;
+            if write_status_once(&record.status_file, "cancelled").unwrap_or(false) {
+                terminate_process(record.pid);
+                terminated += 1;
+            }
         }
         terminated
     }
@@ -211,9 +253,10 @@ impl FileToolJobStore {
             {
                 continue;
             }
-            terminate_process(record.pid);
-            let _ = fs::write(&record.status_file, "cancelled");
-            cancelled.push(record.id);
+            if write_status_once(&record.status_file, "cancelled").unwrap_or(false) {
+                terminate_process(record.pid);
+                cancelled.push(record.id);
+            }
         }
         cancelled
     }
@@ -252,8 +295,10 @@ impl FileToolJobStore {
             ));
         }
 
+        if !write_status_once(&record.status_file, "cancelled").unwrap_or(false) {
+            return self.status_outcome(clean_id, 0);
+        }
         terminate_process(record.pid);
-        let _ = fs::write(&record.status_file, "cancelled");
         let output = read_output_tail(&record.output_file, 16 * 1024);
         ActionOutcome::cancelled(format!(
             "Action result: capmgr\nop: job_cancel\njob_id: {}\naction: {}\nstate: cancelled\npid: {}\noutput_file: {}\npartial_output:\n{}",
@@ -346,6 +391,22 @@ fn completed_status(path: impl AsRef<Path>) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
+fn write_status_once(path: impl AsRef<Path>, status: &str) -> std::io::Result<bool> {
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path.as_ref())
+    {
+        Ok(mut file) => {
+            file.write_all(status.as_bytes())?;
+            file.sync_data()?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 fn unique_job_id(prefix: &str) -> String {
     let seq = TOOL_JOB_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{prefix}_{}_{}", now_ms(), seq)
@@ -356,11 +417,6 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or_default()
-}
-
-fn shell_quote_path(path: &Path) -> String {
-    let raw = path.to_string_lossy();
-    format!("'{}'", raw.replace('\'', "'\\''"))
 }
 
 fn terminate_process(pid: u32) {

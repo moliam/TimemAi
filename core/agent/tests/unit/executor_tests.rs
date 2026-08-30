@@ -5,7 +5,9 @@ use std::fs;
 
 #[test]
 fn builtin_manifest_action_resolves_to_builtin_binding() {
-    let registry = CapabilityRegistry::builtin();
+    let registry = CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    );
 
     assert_eq!(
         resolve_action(&registry, "memmgr").unwrap(),
@@ -29,7 +31,9 @@ fn builtin_manifest_action_resolves_to_builtin_binding() {
 
 #[test]
 fn action_outside_manifest_is_rejected() {
-    let registry = CapabilityRegistry::builtin();
+    let registry = CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    );
 
     assert_eq!(
         resolve_action(&registry, "query_memory").unwrap_err(),
@@ -78,6 +82,7 @@ example_json: |
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn command_action_receives_json_payload_on_stdin() {
     let dir = temp_case_dir("command_payload");
@@ -100,6 +105,7 @@ fn command_action_receives_json_payload_on_stdin() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn command_action_merges_stderr_with_output() {
     let dir = temp_case_dir("command_stderr");
@@ -134,6 +140,7 @@ fn command_action_contains_script_sigsegv_and_executor_remains_usable() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn command_action_drains_large_output_without_pipe_deadlock() {
     let dir = temp_case_dir("command_large_output");
@@ -189,6 +196,7 @@ fn command_action_timeout_terminates_descendant_process_group() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn command_action_timeout_is_bounded() {
     let dir = temp_case_dir("command_timeout");
@@ -211,4 +219,93 @@ fn temp_case_dir(name: &str) -> PathBuf {
     ));
     fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_command_action_merges_stderr_with_output() {
+    let dir = temp_case_dir("windows_command_stderr");
+    let script = dir.join("stderr.ps1");
+    fs::write(
+        &script,
+        "[Console]::Out.Write('out')\n[Console]::Error.Write('err')\nexit 3\n",
+    )
+    .unwrap();
+
+    let result = execute_command_action("local_tool", &script, &json!({}), 1000);
+
+    assert!(result.contains("status: 3"), "{result}");
+    assert!(result.contains("out"), "{result}");
+    assert!(result.contains("stderr: err"), "{result}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_command_action_drains_large_output_without_pipe_deadlock() {
+    let dir = temp_case_dir("windows_command_large_output");
+    let script = dir.join("large_output.ps1");
+    fs::write(&script, "[Console]::Out.Write(('x' * 262144))\n").unwrap();
+
+    let result = execute_command_action("large_output_tool", &script, &json!({}), 5000);
+
+    assert!(result.contains("status: 0"), "{result}");
+    assert!(result.contains("xxxx"), "{result}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_command_action_timeout_is_bounded() {
+    let dir = temp_case_dir("windows_command_timeout");
+    let script = dir.join("slow.ps1");
+    fs::write(&script, "Start-Sleep -Seconds 2\n").unwrap();
+
+    let result = execute_command_action("slow_tool", &script, &json!({}), 1000);
+
+    assert!(result.contains("error: timeout"), "{result}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_powershell_command_action_receives_json_payload() {
+    let dir = temp_case_dir("windows_powershell_payload");
+    let script = dir.join("echo_payload.ps1");
+    fs::write(
+        &script,
+        "$payload = [Console]::In.ReadToEnd()\n$data = $payload | ConvertFrom-Json\nWrite-Output $data.args.message\n",
+    )
+    .unwrap();
+
+    let result = execute_command_action(
+        "local_echo",
+        &script,
+        &json!({"args":{"message":"windows payload ok"}}),
+        5000,
+    );
+
+    assert!(result.contains("status: 0"), "{result}");
+    assert!(result.contains("windows payload ok"), "{result}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_command_action_rejects_unknown_script_extension() {
+    let dir = temp_case_dir("windows_unknown_script");
+    let script = dir.join("unknown.py");
+    fs::write(&script, "print('not executed')\n").unwrap();
+
+    let result = execute_command_action("unknown", &script, &json!({}), 1000);
+
+    assert!(
+        result.contains("error: command_interpreter_unavailable"),
+        "{result}"
+    );
+    assert!(
+        result.contains("unsupported_windows_command_extension:py"),
+        "{result}"
+    );
+    let _ = fs::remove_dir_all(&dir);
 }

@@ -146,8 +146,10 @@ process/process-group lifecycle operations. Shared Unix process primitives live 
 `core/platform/src/windows/`. Business modules consume the common interface and must not add direct
 macOS/Linux/Windows branches or fixed system command paths. Windows support advances by layer under
 [`windows-support-matrix.md`](windows-support-matrix.md); the Platform backend alone does not claim
-that Agent, Shell, Web, or installation flows are supported. Low-level Unix mechanisms intrinsic to a subsystem—such as
-terminal `termios`, file permission bits, nonblocking file descriptors, and
+that Agent, Shell, Web, or installation flows are supported. Core capability detection distinguishes
+platform-native local script execution from Bash availability: command-bound tools may use the
+Platform interpreter policy while `run_bash` is advertised only when Bash is actually available.
+Low-level Unix mechanisms intrinsic to a subsystem—such as terminal `termios`, file permission bits, nonblocking file descriptors, and
 file locking—remain beside that subsystem rather than being hidden behind an
 OS policy facade.
 

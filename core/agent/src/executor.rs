@@ -3,7 +3,7 @@ use crate::ActionOutcome;
 use serde_json::Value;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -73,9 +73,15 @@ pub(crate) fn execute_command_action_outcome(
     payload: &Value,
     timeout_ms: u64,
 ) -> ActionOutcome {
-    let mut command = Command::new(crate::os::POSIX_SHELL_EXECUTABLE);
+    let mut command = match crate::os::command_for_script(path) {
+        Ok(command) => command,
+        Err(error) => {
+            return ActionOutcome::failed(format!(
+                "Action result: {action}\nerror: command_interpreter_unavailable\nreason: {error}"
+            ))
+        }
+    };
     command
-        .arg(path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

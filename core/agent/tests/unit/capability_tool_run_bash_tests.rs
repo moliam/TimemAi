@@ -21,10 +21,12 @@ impl ActionRuntime for ToggleCancelRuntime<'_> {
     }
 }
 
+#[cfg(unix)]
 struct CancelAfterFileRuntime {
     path: PathBuf,
 }
 
+#[cfg(unix)]
 impl ActionRuntime for CancelAfterFileRuntime {
     fn should_cancel(&mut self) -> bool {
         self.path
