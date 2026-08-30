@@ -66,6 +66,28 @@ for pattern in "${ci_required[@]}"; do
   fi
 done
 
+windows_ci_required=(
+  "runs-on: windows-latest"
+  "./scripts/windows_install_logic_test.ps1"
+  "cargo check --workspace --all-targets --locked"
+  "cargo test --workspace --locked -- --test-threads=1"
+  "cache-dependency-path: interfaces/web/pnpm-lock.yaml"
+  "pnpm --dir interfaces/web test"
+  "pnpm --dir interfaces/web build"
+  "git diff --exit-code -- interfaces/web/dist"
+  "cargo build --locked -p timem_shell -p timem_web --release"
+)
+for pattern in "${windows_ci_required[@]}"; do
+  if ! search_fixed "$pattern" .github/workflows/ci.yml; then
+    echo "missing required Windows CI gate: $pattern" >&2
+    exit 1
+  fi
+done
+if search_fixed "web_ui/timem-web" .github/workflows/ci.yml; then
+  echo "Windows CI must use the semantic interfaces/web layout" >&2
+  exit 1
+fi
+
 
 runtime_io_guard_required=(
   "DEFAULT_LIMIT_BPS = 500_000"

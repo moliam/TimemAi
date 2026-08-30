@@ -3,6 +3,6 @@
 /vendor/assistant-ui/
 
 # Future Timem web host/frontend build products.
-/timem-web/node_modules/
-/timem-web/.vite/
-/timem-web/coverage/
+/node_modules/
+/.vite/
+/coverage/

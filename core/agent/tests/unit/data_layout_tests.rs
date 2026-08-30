@@ -79,9 +79,14 @@ fn default_memory_directory_is_under_home() {
 
 #[test]
 fn space_resolves_only_absolute_memory_paths() {
+    let absolute = if cfg!(windows) {
+        r"C:\timem-test\custom-mem"
+    } else {
+        "/tmp/custom-mem"
+    };
     assert_eq!(
-        resolve_memory_dir(Some("/tmp/custom-mem")).unwrap(),
-        PathBuf::from("/tmp/custom-mem")
+        resolve_memory_dir(Some(absolute)).unwrap(),
+        PathBuf::from(absolute)
     );
     assert_eq!(
         resolve_memory_dir(Some("relative-mem")).unwrap_err(),

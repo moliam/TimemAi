@@ -91,3 +91,56 @@ jobs:
           name: runtime-io-${{ matrix.os }}
           path: target/runtime-io-guard/report.json
           if-no-files-found: warn
+
+  windows:
+    name: windows-latest
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable-x86_64-pc-windows-msvc
+          rustc --version
+          cargo --version
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6.0.9
+        with:
+          version: 11.7.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: interfaces/web/pnpm-lock.yaml
+
+      - name: Validate PowerShell delivery scripts
+        shell: pwsh
+        run: ./scripts/windows_install_logic_test.ps1
+
+      - name: Rust format
+        shell: pwsh
+        run: cargo fmt --all -- --check
+
+      - name: Rust check and tests
+        shell: pwsh
+        run: |
+          cargo check --workspace --all-targets --locked
+          cargo test --workspace --locked -- --test-threads=1
+
+      - name: Web dependencies, tests, and production build
+        shell: pwsh
+        run: |
+          pnpm --dir interfaces/web install --frozen-lockfile
+          pnpm --dir interfaces/web test
+          pnpm --dir interfaces/web build
+          git diff --exit-code -- interfaces/web/dist
+
+      - name: Windows release build
+        shell: pwsh
+        run: cargo build --locked -p timem_shell -p timem_web --release

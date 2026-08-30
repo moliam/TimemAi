@@ -33,6 +33,7 @@ done
 "#
 }
 
+#[cfg(unix)]
 #[test]
 fn stdio_client_initializes_discovers_and_calls_tool() {
     let runtime = McpRuntime::default();
@@ -56,6 +57,7 @@ fn stdio_client_initializes_discovers_and_calls_tool() {
     assert!(result.contains("echoed by fake MCP"));
 }
 
+#[cfg(unix)]
 #[test]
 fn mcp_tool_error_has_structured_failed_status() {
     let script = r#"
@@ -204,6 +206,7 @@ fn serve_legacy_sse_request(
         .unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn stdio_client_reports_timeout_without_hanging() {
     let runtime = McpRuntime::default();
@@ -212,6 +215,7 @@ fn stdio_client_reports_timeout_without_hanging() {
     assert_eq!(runtime.connect(&config).unwrap_err(), "mcp_request_timeout");
 }
 
+#[cfg(unix)]
 #[test]
 fn stdio_notifications_do_not_extend_request_deadline() {
     let runtime = McpRuntime::default();
@@ -231,6 +235,7 @@ done"#,
     assert!(started.elapsed() < Duration::from_millis(180));
 }
 
+#[cfg(unix)]
 #[test]
 fn stalled_mcp_call_does_not_block_an_independent_server() {
     let runtime = McpRuntime::default();
@@ -302,6 +307,7 @@ fn action_names_are_stable_namespaced_and_native_api_safe() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn server_config_rejects_ambiguous_ids_and_header_injection() {
     let runtime = McpRuntime::default();
@@ -329,6 +335,7 @@ fn server_config_rejects_ambiguous_ids_and_header_injection() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn discovery_rejects_tool_names_that_normalize_to_one_action() {
     let runtime = McpRuntime::default();
@@ -399,6 +406,7 @@ fn legacy_sse_endpoint_resolution_handles_absolute_root_and_relative_urls() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn call_requires_object_arguments() {
     let runtime = McpRuntime::default();
@@ -485,4 +493,151 @@ fn dynamic_tool_is_prompt_visible_and_protocol_parser_keeps_arguments_generic() 
     assert!(registry
         .validate_action_input("mcp_demo_server__echo_value", &json!({}))
         .is_ok());
+}
+
+#[cfg(windows)]
+fn windows_stdio_config(script: &str) -> McpServerConfig {
+    McpServerConfig {
+        id: "demo".to_string(),
+        name: "Demo server".to_string(),
+        enabled: true,
+        transport: McpTransportConfig::Stdio {
+            command: "powershell.exe".to_string(),
+            args: vec![
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            env: BTreeMap::new(),
+        },
+        request_timeout_ms: 2_000,
+    }
+}
+
+#[cfg(windows)]
+fn windows_fake_mcp_script() -> &'static str {
+    r#"
+$null=[Console]::In.ReadLine(); [Console]::Out.WriteLine('{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"},"instructions":"Always inspect metadata before using this server."}}')
+$null=[Console]::In.ReadLine(); [Console]::Out.WriteLine('{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo-value","description":"Echo a value","inputSchema":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}}]}}')
+$null=[Console]::In.ReadLine(); [Console]::Out.WriteLine('{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"echoed by fake MCP"}],"isError":false}}')
+"#
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_stdio_client_initializes_discovers_and_calls_tool() {
+    let runtime = McpRuntime::default();
+    let config = windows_stdio_config(windows_fake_mcp_script());
+    let capabilities = runtime.connect_with_capabilities(&config).unwrap();
+    assert_eq!(
+        capabilities.instructions.as_deref(),
+        Some("Always inspect metadata before using this server.")
+    );
+    assert_eq!(
+        capabilities.tools[0].action_name,
+        "mcp_demo_server__echo_value"
+    );
+    let result = runtime
+        .call_tool(&config, "echo-value", &json!({"value":"hello"}))
+        .unwrap();
+    assert!(result.contains("echoed by fake MCP"), "{result}");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_mcp_tool_error_has_structured_failed_status() {
+    let script = r#"
+$null=[Console]::In.ReadLine(); [Console]::Out.WriteLine('{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"}}}')
+$null=[Console]::In.ReadLine(); [Console]::Out.WriteLine('{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"fails","inputSchema":{"type":"object"}}]}}')
+$null=[Console]::In.ReadLine(); [Console]::Out.WriteLine('{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"ordinary payload text"}],"isError":true}}')
+"#;
+    let runtime = McpRuntime::default();
+    let config = windows_stdio_config(script);
+    runtime.connect(&config).unwrap();
+    let outcome = runtime
+        .call_tool_outcome(&config, "fails", &json!({}))
+        .unwrap();
+    assert_eq!(outcome.status, crate::ActionStatus::Failed);
+    assert!(outcome.text.contains("status: tool_error"));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_stdio_client_reports_timeout_without_hanging() {
+    let runtime = McpRuntime::default();
+    let mut config = windows_stdio_config("$null=[Console]::In.ReadLine(); Start-Sleep -Seconds 2");
+    config.request_timeout_ms = 30;
+    assert_eq!(runtime.connect(&config).unwrap_err(), "mcp_request_timeout");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_stdio_notifications_do_not_extend_request_deadline() {
+    let runtime = McpRuntime::default();
+    let script = r#"$null=[Console]::In.ReadLine(); 1..20 | ForEach-Object { [Console]::Out.WriteLine('{"jsonrpc":"2.0","method":"notifications/progress","params":{}}'); Start-Sleep -Milliseconds 10 }"#;
+    let mut config = windows_stdio_config(script);
+    config.request_timeout_ms = 40;
+    let started = Instant::now();
+    assert_eq!(runtime.connect(&config).unwrap_err(), "mcp_request_timeout");
+    assert!(started.elapsed() < Duration::from_millis(300));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_discovery_rejects_colliding_tool_names() {
+    let script = r#"
+$null=[Console]::In.ReadLine(); [Console]::Out.WriteLine('{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}}')
+$null=[Console]::In.ReadLine(); [Console]::Out.WriteLine('{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"same/name","inputSchema":{"type":"object"}},{"name":"same_name","inputSchema":{"type":"object"}}]}}')
+"#;
+    let runtime = McpRuntime::default();
+    let config = windows_stdio_config(script);
+    assert_eq!(
+        runtime.connect(&config).unwrap_err(),
+        "mcp_tool_action_name_collision:mcp_demo_server__same_name"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_call_requires_object_arguments() {
+    let runtime = McpRuntime::default();
+    let config = windows_stdio_config(windows_fake_mcp_script());
+    runtime.connect(&config).unwrap();
+    assert_eq!(
+        runtime
+            .call_tool(&config, "echo-value", &json!("wrong"))
+            .unwrap_err(),
+        "mcp_tool_arguments_must_be_object"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_server_config_rejects_ambiguous_ids_and_header_injection() {
+    let runtime = McpRuntime::default();
+    let mut config = windows_stdio_config(windows_fake_mcp_script());
+    config.id = "Git Hub".to_string();
+    assert_eq!(
+        runtime.connect(&config).unwrap_err(),
+        "mcp_server_id_must_be_canonical"
+    );
+    config.id = "remote-server".to_string();
+    assert!(runtime.connect(&config).is_ok());
+    config.id = "remote".to_string();
+    config.transport = McpTransportConfig::StreamableHttp {
+        url: "https://example.invalid/mcp".to_string(),
+        headers: BTreeMap::from([(
+            "Authorization".to_string(),
+            "Bearer token\r\nX-Injected: true".to_string(),
+        )]),
+    };
+    assert_eq!(
+        runtime.connect(&config).unwrap_err(),
+        "mcp_http_header_value_invalid:Authorization"
+    );
 }

@@ -2383,6 +2383,7 @@ fn public_url_uses_explicit_host_without_placeholder() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn mcp_definition_is_mem_scoped_and_session_enablement_is_isolated() {
     let state = routing_test_state();
@@ -4871,6 +4872,7 @@ fn restore_keeps_multiple_legacy_sessions_when_retired_provider_cache_is_present
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn session_create_and_restore_defer_unavailable_mcp_discovery_until_send() {
     let mut state = routing_test_state();
@@ -8149,6 +8151,7 @@ fn child_context_worker_uses_its_owning_sessions_runtime_profile_and_env() {
     manager.shutdown_all().unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn web_runtime_shutdown_stops_all_session_workers() {
     let state = routing_test_state();
@@ -11000,6 +11003,7 @@ fn background_exit_event_is_appended_to_its_original_turn() {
         .is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn polling_action_progress_reaches_web_event_stream_before_loop_finishes() {
     let state = routing_test_state();
@@ -11131,11 +11135,13 @@ fn active_turn_user_entries_drop_only_the_oldest_entries_at_the_bound() {
     );
 }
 
+#[cfg(unix)]
 struct PollingProgressModel {
     calls: u8,
     marker: PathBuf,
 }
 
+#[cfg(unix)]
 impl ModelClient for PollingProgressModel {
     fn call_model(
         &mut self,
@@ -11224,10 +11230,12 @@ impl ModelClient for ToolGenPromptCaptureModel {
     }
 }
 
+#[cfg(unix)]
 struct ToolGenPublishModel {
     calls: u8,
 }
 
+#[cfg(unix)]
 impl ModelClient for ToolGenPublishModel {
     fn call_model(
         &mut self,
@@ -11325,6 +11333,7 @@ impl ModelClient for InspectPathModel {
     }
 }
 
+#[cfg(unix)]
 fn register_polling_progress_worker(state: &AppState, marker: PathBuf) -> String {
     let ordinal = state.sessions.lock().unwrap().len() as u32;
     let session_id = unique_web_id("polling_progress_session");
@@ -11486,6 +11495,7 @@ fn register_toolgen_capture_worker(state: &AppState, prompts: Arc<Mutex<Vec<Stri
     session_id
 }
 
+#[cfg(unix)]
 fn register_toolgen_publish_worker(state: &AppState) -> String {
     let ordinal = state.sessions.lock().unwrap().len() as u32;
     let session_id = unique_web_id("toolgen_publish_session");
@@ -11692,6 +11702,7 @@ fn manual_toolgen_adds_optional_guidance_as_user_component() {
     assert!(!toolgen_delta.contains("## USER"));
 }
 
+#[cfg(unix)]
 #[test]
 fn manual_toolgen_publishes_tool_and_retains_the_complete_web_event_chain() {
     let state = routing_test_state();
@@ -12212,6 +12223,7 @@ async fn ask_mode_decline_continues_the_turn_without_loading_work_instructions()
     assert!(!context.contains("MUST_NOT_REACH_MODEL"));
 }
 
+#[cfg(unix)]
 fn publish_web_test_tool(repo: &SessionToolRepo, name: &str, searchable: &str) -> ToolSummary {
     let draft = repo.create_draft().unwrap();
     std::fs::write(
@@ -12240,6 +12252,7 @@ fn publish_web_test_tool(repo: &SessionToolRepo, name: &str, searchable: &str) -
     repo.publish(&draft).unwrap().summary
 }
 
+#[cfg(unix)]
 #[test]
 fn toolrepo_commands_are_session_scoped() {
     let state = routing_test_state();
@@ -12274,6 +12287,7 @@ fn toolrepo_commands_are_session_scoped() {
     assert!(matches!(event, WireEvent::ToolRepoSearchResult { ref tools, .. } if tools.is_empty()));
 }
 
+#[cfg(unix)]
 #[test]
 fn toolrepo_detail_rename_and_future_prompt_hint_share_the_published_state() {
     let state = routing_test_state();

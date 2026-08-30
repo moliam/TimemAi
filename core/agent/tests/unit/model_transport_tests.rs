@@ -5,6 +5,26 @@ use std::net::TcpListener;
 use std::thread;
 use std::time::Instant;
 
+#[cfg(unix)]
+fn test_shell_command(script: &str) -> Command {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(script);
+    command
+}
+
+#[cfg(windows)]
+fn test_shell_command(script: &str) -> Command {
+    let mut command = Command::new("powershell.exe");
+    command.args([
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        script,
+    ]);
+    command
+}
+
 fn local_llm_key_file_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../key")
 }
@@ -14,11 +34,11 @@ fn cancellable_command_returns_without_waiting_for_process_timeout() {
     let started = Instant::now();
     let cancel_after = Instant::now() + Duration::from_millis(80);
     let err = run_command_with_optional_input_and_cancel(
-        {
-            let mut command = Command::new("sh");
-            command.arg("-c").arg("sleep 5; echo done");
-            command
-        },
+        test_shell_command(if cfg!(windows) {
+            "Start-Sleep -Seconds 5; Write-Output done"
+        } else {
+            "sleep 5; echo done"
+        }),
         None,
         &mut || Instant::now() >= cancel_after,
     )
@@ -36,13 +56,11 @@ fn cancellable_command_returns_without_waiting_for_process_timeout() {
 fn large_model_request_body_is_streamed_through_stdin_without_argv_limits() {
     let body = vec![b'x'; 4 * 1024 * 1024];
     let output = run_command_with_input_and_cancel(
-        {
-            let mut command = Command::new("sh");
-            command
-                .arg("-c")
-                .arg("received=$(wc -c | tr -d ' '); printf '%s\\n200' \"$received\"");
-            command
-        },
+        test_shell_command(if cfg!(windows) {
+            r#"$received = [Console]::In.ReadToEnd().Length; [Console]::Out.Write("$received`n200")"#
+        } else {
+            "received=$(wc -c | tr -d ' '); printf '%s\n200' \"$received\""
+        }),
         body,
         &mut || false,
     )
@@ -353,13 +371,11 @@ fn curl_config_file_is_owner_readable_only_on_unix() {
 #[test]
 fn large_stdout_and_stderr_are_drained_without_pipe_deadlock() {
     let output = run_command_with_optional_input_and_cancel(
-        {
-            let mut command = Command::new("sh");
-            command
-                .arg("-c")
-                .arg("head -c 2097152 /dev/zero; head -c 2097152 /dev/zero >&2");
-            command
-        },
+        test_shell_command(if cfg!(windows) {
+            "$bytes = New-Object byte[] 2097152; [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length); [Console]::OpenStandardError().Write($bytes, 0, $bytes.Length)"
+        } else {
+            "head -c 2097152 /dev/zero; head -c 2097152 /dev/zero >&2"
+        }),
         None,
         &mut || false,
     )
