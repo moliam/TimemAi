@@ -568,7 +568,7 @@ C active
 - 每个 start 使用稳定 `command_id`，重试不会创建重复 Turn；
 - Pod 使用按 `enqueue_seq` 排序、按 `command_id` 去重的有界 FIFO；不允许无界队列；
 - queued intent 可以被用户显式编辑、重排或取消，但这些都是 Pod command-intent 操作，不能修改当前 Core Turn；
-- 每次最多只允许队首进入 Core；权威 terminal outcome 只解除生命周期 barrier，是否自动派发仍由显式自动发送偏好与该 outcome 的 continuation grant 决定。
+- 每次最多只允许队首进入 Core；Host 在上一 Turn 达到权威 terminal barrier 后自动派发下一项，不依赖浏览器存活、可见性或 completion 回调。显式暂停只适用于尚未交接 Host 的兼容浏览器队列。
 
 ### 9.5 推荐产品策略：有界 Next Intent FIFO
 
@@ -609,7 +609,7 @@ Bridge/Core 进程重启则完全不同：旧 runtime incarnation 的 Active Tur
 | 显式 supplement | 进入 pending input；仅被 `PromptCut` 覆盖后才算当前 Turn 已消费 | 未消费项原子转换为 Next intent | 保留同一 `command_id`，恰好消费一次 |
 | Stop | 关闭执行，不替代输入封口规则 | 对已终结 token 幂等成功 | 旧 Stop 不能作用于新 Turn |
 | final answer | 必须关联产生它的 `PromptCut` | terminal commit 关闭输入门并迁移未消费输入 | final answer 永远留在原 Turn |
-| queued 自动发送 | 只排队 | 仅在允许 continuation 的 outcome 后派发队首 | error/reject 不得误触发或跳过顺序 |
+| queued 自动发送 | Host 立即持久化为 Next intent | 权威 terminal barrier 后派发队首 | 浏览器关闭/断线不影响同一 runtime 内已接纳 FIFO；error/reject 不得跳过顺序 |
 | 附件 | 随 command 进入 pending；随 PromptCut 消费 | 未消费时与 command 整体迁移 | 不能旧 Turn 和新 Turn 各消费一次 |
 | inline decision / approval | 只回复精确 `{TurnToken, request_id}` | stale，忽略或明确过期 | 不能转换成新 Turn 用户输入 |
 | ToolGen | 仅绑定已完成 source turn，作为独立受控 Turn | 不追加 source turn | source final answer 不变 |
@@ -758,7 +758,7 @@ ConvertedToNextTurnIntent { enqueue_seq } | Duplicate | Rejected
 15. `input_admission` 只能从 Open 变为 Closed，不能重新打开。
 16. terminal commit 时，未被任何已发送 PromptCut 消费的 task 输入只能进入 Next intent，不能追加到旧 Turn。
 17. supplement 与 Next intent 的转换必须保留 command ownership、顺序，并且输入与附件恰好消费一次。
-18. Next intent FIFO 必须有界、去重，且一次只派发队首；Session 变为 Empty 本身不构成自动派发授权。队列写盘只用于同进程可靠性与重启后的历史中断识别，绝不授予跨进程 redrive。
+18. Next intent FIFO 必须有界、去重，且一次只派发队首；派发由 Host 的权威 terminal barrier 触发，不依赖浏览器 completion 事件。队列写盘只用于同进程可靠性与重启后的历史中断识别，绝不授予跨进程 redrive。
 19. Bridge/Core 进程重启是硬 Stop 边界：Active 与 queued ownership 全部失效，旧 command ID 不得再次调用 Core。
 20. decision、ToolGen guidance、设置变更不能被泛化成 late supplement。
 21. final answer、outcome、completion stats 永远绑定原 Turn，不因后续输入迁移。
