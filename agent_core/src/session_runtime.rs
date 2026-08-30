@@ -1,4 +1,4 @@
-use crate::turn_state::TurnProjectionState;
+use crate::turn_state::{allocate_turn_token, TurnProjectionState};
 use crate::{
     append_audit_event, is_model_input_too_large_error, model_input_overflow_recovery_audit_event,
     model_retry_audit_event, model_retry_decision, normalize_user_supplements_with_context,
@@ -7,7 +7,7 @@ use crate::{
     ModelInteractionRequest, ModelServiceConfig, ModelSystemRetryPolicy, PromptComponentRole,
     RoundLimitDecisionRequest, RoundLimitResolution, RuntimeProfiler, StoppedTurn, TurnActivity,
     TurnInput, TurnOutcome, TurnProjection, TurnProjectionOutcome, TurnStopReason, TurnStopSummary,
-    TurnToken, TurnUi, UsageStats, UserSupplement,
+    TurnUi, UsageStats, UserSupplement,
 };
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
@@ -249,7 +249,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
     focus_reminder_interval: Option<Duration>,
 ) -> TurnOutcome {
     core.set_response_protocol(config.response_protocol);
-    let turn_token = TurnToken::allocate(request.session, epoch_millis());
+    let turn_token = allocate_turn_token(request.session, epoch_millis());
     let turn_id = turn_token.turn_id.clone();
     let (mut turn_projection, started_projection) = TurnProjectionState::start(turn_token);
     ui.on_turn_projection(&started_projection);
