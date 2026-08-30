@@ -44,7 +44,9 @@ fn prompt_renderer_injects_protocol_and_visible_delta_roles() {
     let rendered_static = render_static_prompt(
         "{{RESPONSE_PROTOCOL_SECTION}}
 {{TOOL_CATALOG}}",
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &JsonSuiteV1,
         "TIMEM_ASSISTANT",
         "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
@@ -137,7 +139,9 @@ fn user_supplement_has_an_explicit_visible_marker() {
 fn xml_protocol_wraps_static_prompt_with_timem_system_prompt_boundary() {
     let rendered = render_static_prompt(
         "STATIC",
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &XmlSuiteV1,
         "TIMEM_ASSISTANT",
         "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
@@ -150,7 +154,9 @@ fn xml_protocol_wraps_static_prompt_with_timem_system_prompt_boundary() {
 
     let json = render_static_prompt(
         "STATIC",
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &JsonSuiteV1,
         "TIMEM_ASSISTANT",
         "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
@@ -1142,14 +1148,18 @@ fn prompt_renderer_replaces_current_protocol_language() {
     let template = "Return {{CURRENT_PROTOCOL_LANG}}\n{{RESPONSE_PROTOCOL_SECTION}}";
     let json = render_static_prompt(
         template,
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &JsonSuiteV1,
         "Ai7",
         "startup",
     );
     let xml = render_static_prompt(
         template,
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &XmlSuiteV1,
         "Ai7",
         "startup",
@@ -1166,14 +1176,18 @@ fn prompt_renderer_injects_only_the_active_protocol_context_structure() {
     let template = "{{PROMPT_CONTEXT_STRUCTURE}}";
     let json = render_static_prompt(
         template,
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &JsonSuiteV1,
         "Ai7",
         "startup",
     );
     let xml = render_static_prompt(
         template,
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &XmlSuiteV1,
         "Ai7",
         "startup",
@@ -1192,14 +1206,18 @@ fn prompt_renderer_injects_only_the_active_protocol_delta_example() {
     let template = "{{PROMPT_DELTA_EXAMPLE}}";
     let json = render_static_prompt(
         template,
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &JsonSuiteV1,
         "Ai7",
         "startup",
     );
     let xml = render_static_prompt(
         template,
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &XmlSuiteV1,
         "Ai7",
         "startup",
@@ -1250,14 +1268,18 @@ fn prompt_renderer_uses_protocol_native_tool_synopses() {
     let template = "# Tools\n\n{{TOOL_CATALOG}}\n\n{{RESPONSE_PROTOCOL_SECTION}}";
     let xml = render_static_prompt(
         template,
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &XmlSuiteV1,
         "Ai7",
         "startup",
     );
     let json = render_static_prompt(
         template,
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &JsonSuiteV1,
         "Ai7",
         "startup",
@@ -1275,7 +1297,9 @@ fn prompt_renderer_uses_protocol_native_tool_synopses() {
 fn native_prompt_encourages_progress_updates_without_changing_finalization_semantics() {
     let rendered = render_static_prompt_for_mode(
         "{{RESPONSE_MODE_INSTRUCTION}}",
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &JsonSuiteV1,
         "Ai7",
         "startup",
@@ -1298,7 +1322,9 @@ fn native_prompt_encourages_progress_updates_without_changing_finalization_seman
 fn native_prompt_contains_builtin_descriptions_without_schemas_or_dynamic_tools() {
     let rendered = render_static_prompt_for_mode(
         "{{TOOL_CATALOG_SECTION_HEADING}}\n\n{{TOOL_CATALOG}}\n\n{{RESPONSE_PROTOCOL_SECTION}}",
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &JsonSuiteV1,
         "Ai7",
         "startup",
@@ -1336,7 +1362,9 @@ fn native_prompt_contains_builtin_descriptions_without_schemas_or_dynamic_tools(
 fn prompt_renderer_replaces_assistant_id() {
     let rendered = render_static_prompt(
         "YOUR ID is: {{ASSSISTANT_ID}}\n## ASSSISTANT_ID",
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &JsonSuiteV1,
         "Ai7",
         "startup",
@@ -1351,7 +1379,9 @@ fn prompt_renderer_replaces_assistant_id() {
 fn prompt_renderer_replaces_startup_stamp() {
     let rendered = render_static_prompt(
         "## TIMESTAMP\n{{STARTUP_STAMP}}",
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &JsonSuiteV1,
         "Ai7",
         "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
@@ -1380,7 +1410,9 @@ fn context_compaction_summary_has_an_explicit_assistant_heading() {
     };
     let rendered_static = render_static_prompt(
         "STATIC",
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &JsonSuiteV1,
         "TIMEM_ASSISTANT",
         "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
@@ -1415,7 +1447,9 @@ fn xml_context_compaction_summary_uses_an_assistant_kind_attribute() {
     };
     let rendered_static = render_static_prompt(
         "STATIC",
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &XmlSuiteV1,
         "TIMEM_ASSISTANT",
         "2026-08-17 12:34:56 local_time, weekday=周一/Monday",
@@ -1454,7 +1488,9 @@ fn prompt_serialization_is_byte_stable_and_append_only_before_trailer() {
 
     let rendered_static = render_static_prompt(
         "STATIC",
-        &CapabilityRegistry::builtin(),
+        &CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
         &XmlSuiteV1,
         "TIMEM_ASSISTANT",
         "2026-08-17 12:34:56 local_time, weekday=周一/Monday",

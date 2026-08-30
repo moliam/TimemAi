@@ -3,7 +3,9 @@ use crate::ActionGroupOrder;
 use serde_json::json;
 
 fn caps() -> CapabilityRegistry {
-    CapabilityRegistry::builtin()
+    CapabilityRegistry::builtin_for_host(
+        crate::capability::CapabilityHostProfile::with_local_command_execution(),
+    )
 }
 
 fn documented_json_examples(text: &str) -> Vec<String> {

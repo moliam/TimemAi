@@ -7,13 +7,13 @@ use crate::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const LONG_RUNNING_COMMAND_PROMPT_AFTER: Duration = Duration::from_secs(60);
 
@@ -274,7 +274,7 @@ impl ShellJobManager {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_long_running_prompt_after_for_tests(&mut self, duration: Duration) {
         self.long_running_prompt_after = duration.max(Duration::from_millis(1));
     }
@@ -682,7 +682,7 @@ impl ShellJobManager {
         Some(out)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn tracked_job_count_for_tests(&self) -> usize {
         self.state
             .jobs
@@ -1447,7 +1447,7 @@ pub(crate) fn execute_run_bash_action(
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_run_bash(
     command: &str,
@@ -1632,7 +1632,7 @@ pub(crate) fn execute_run_bash_with_tail(
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_approved_bash(
     command: &str,
@@ -1746,7 +1746,7 @@ pub fn execute_one_bash(command: &str, timeout_ms: i64, runtime: &mut dyn Action
     execute_one_bash_structured(command, &cwd, timeout_ms, runtime).to_action_result("run_bash")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn execute_polling_bash_outcome(
     command: &str,
     cwd: &Path,
@@ -2366,12 +2366,12 @@ fn normalized_shell_output(output: &str) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn process_running(pid: u32) -> bool {
     crate::os::child_process_running(pid)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn shell_quote_path(path: &Path) -> String {
     let raw = path.to_string_lossy();
     format!("'{}'", raw.replace('\'', "'\\''"))
@@ -2399,12 +2399,12 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn unique_shell_id(prefix: &str) -> String {
     let seq = SHELL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{}_{}_{}", prefix, now_ms(), seq)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "../../../core/agent/tests/unit/capability_tool_run_bash_tests.rs"]
 mod tests;
