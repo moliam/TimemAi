@@ -9,7 +9,7 @@ host, installer, or end-to-end product flow is supported.
 | `core/agent` storage and time primitives | Adapted, awaiting native revalidation | macOS `cargo test -p agent_core`; Platform-backed lease, private-file, home, and local-time APIs | Agent storage tests compile and pass natively on Windows. |
 | `core/agent` local execution and jobs | Adapted, awaiting native revalidation | macOS `cargo test -p agent_core`; platform-neutral command, capability, tool self-test, and background-job tests | Agent tests compile and pass natively on Windows. macOS cross-check currently stops in bundled SQLite C compilation before full Agent validation. |
 | `bridges/in_process` | Platform-neutral contract exists | Existing Bridge tests on supported development hosts | Revalidated as part of a Windows Shell test run. |
-| `interfaces/shell` | Not yet supported on Windows | None in this slice | Windows console/input adapter and Shell tests pass natively. |
+| `interfaces/shell` | Adapted, awaiting native revalidation | macOS `cargo test -p timem_shell`; target-specific Unix/Windows terminal adapters and platform-neutral Shell input tests | Shell tests compile and pass natively on Windows. The macOS Windows-target cross-check currently stops in bundled SQLite and Oniguruma C compilation before full Shell validation. |
 | `timem_web` / HTTP host | Not yet supported on Windows | None in this slice | Windows lifecycle adapter, Web tests, and HTTP smoke pass natively. |
 | Install, uninstall, release packaging | Not yet supported on Windows | None in this slice | PowerShell install tests and a packaged install/uninstall smoke pass natively. |
 

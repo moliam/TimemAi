@@ -23,14 +23,13 @@ use super::{
     sanitize_user_input, shell_session_effective_env, shell_session_env_values,
     shell_session_profile, shell_session_work_dir, startup_control_hint, strip_ansi,
     strip_paste_markers, submitted_input_rows, take_shell_resume_notice,
-    thinking_queue_terminal_mode, timem_reedline_keybindings, utf8_expected_len,
-    work_instruction_shell_load_result, workspace_menu_line_count, wrapped_terminal_rows,
-    ApprovalChoice, ApprovalKey, CliTurnUi, ConfigField, ConfigRow, ConfigTableItem,
-    CoreTopicEvent, HostDecision, HostDecisionRequest, MenuKey, PasteRecord, PasteRecoveryChoice,
-    PasteRecoveryKey, PasteRecoverySummary, QueuedInputDrain, SharedPasteRecords,
-    SharedPrefillInput, ThinkingStatus, TimemEditMode, TimemPasteHighlighter, TimemReedlinePrompt,
-    TurnUi, ANSI_HIGHLIGHT, PASTE_END_MARKER, PASTE_START_MARKER, STATIC_PROMPT,
-    TURN_CANCEL_REQUESTED,
+    timem_reedline_keybindings, utf8_expected_len, work_instruction_shell_load_result,
+    workspace_menu_line_count, wrapped_terminal_rows, ApprovalChoice, ApprovalKey, CliTurnUi,
+    ConfigField, ConfigRow, ConfigTableItem, CoreTopicEvent, HostDecision, HostDecisionRequest,
+    MenuKey, PasteRecord, PasteRecoveryChoice, PasteRecoveryKey, PasteRecoverySummary,
+    QueuedInputDrain, SharedPasteRecords, SharedPrefillInput, ThinkingStatus, TimemEditMode,
+    TimemPasteHighlighter, TimemReedlinePrompt, TurnUi, ANSI_HIGHLIGHT, PASTE_END_MARKER,
+    PASTE_START_MARKER, STATIC_PROMPT, TURN_CANCEL_REQUESTED,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -65,6 +64,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
+#[cfg(unix)]
 use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -315,22 +315,6 @@ fn queued_thinking_text_splits_nonempty_questions() {
         queued_text_to_questions("\n 补充一 \r\n\n补充二\n"),
         vec!["补充一", "补充二"]
     );
-}
-
-#[test]
-fn thinking_queue_terminal_mode_is_noncanonical_but_keeps_sigint() {
-    let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
-    original.c_lflag = libc::ICANON | libc::ECHO | libc::ISIG;
-    original.c_cc[libc::VMIN] = 1;
-    original.c_cc[libc::VTIME] = 1;
-
-    let mode = thinking_queue_terminal_mode(original);
-
-    assert_eq!(mode.c_lflag & libc::ICANON, 0);
-    assert_eq!(mode.c_lflag & libc::ECHO, 0);
-    assert_ne!(mode.c_lflag & libc::ISIG, 0);
-    assert_eq!(mode.c_cc[libc::VMIN], 0);
-    assert_eq!(mode.c_cc[libc::VTIME], 0);
 }
 
 #[test]
@@ -1096,8 +1080,8 @@ fn cli_help_lists_all_env_backed_options() {
     for expected in [
         "\x1b[1mPrecedence:",
         "command line options override non-empty process env values; non-empty process env values override the restored Session cache.\x1b[0m",
-        "cp env_template env",
-        "source /path/to/your/env",
+        "macOS/Linux env file: source /path/to/your/env",
+        "Windows PowerShell: $env:TIMEM_API_KEY",
         "--space",
         "TIMEM_SPACE",
         "--api-protocol",
@@ -1143,7 +1127,7 @@ fn cli_help_lists_all_env_backed_options() {
             "  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay"
         ));
     assert!(help.contains(
-        "--space <absolute-path>        env TIMEM_SPACE; MEM directory, default ~/.timem/mem"
+        "--space <absolute-path>        env TIMEM_SPACE; MEM directory, default under the user home"
     ));
     assert!(help.contains("timem --space /absolute/path/to/mem"));
     assert!(!help.contains("--space <name>"));
@@ -1262,6 +1246,7 @@ fn capabilities_dir_option_overrides_env() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn sourced_env_file_reaches_child_process_without_set_a() {
     let mut path = std::env::temp_dir();

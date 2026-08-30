@@ -42,6 +42,10 @@ REQUIRED = (
     "bridges/in_process/tests/turn_bridge_tests.rs",
     "interfaces/shell/Cargo.toml",
     "interfaces/shell/module_boundary.md",
+    "interfaces/shell/src/os/mod.rs",
+    "interfaces/shell/src/os/unix.rs",
+    "interfaces/shell/src/os/windows/mod.rs",
+    "interfaces/shell/src/os/windows/console.rs",
     "interfaces/web/package.json",
     "interfaces/web/module_boundary.md",
 )
@@ -169,6 +173,12 @@ def violations(root: Path) -> list[str]:
         errors.append("interfaces/shell must enter synchronous Turns through the in-process Bridge")
     if "run_session_turn(" in shell_main:
         errors.append("interfaces/shell must not bypass the in-process Bridge for synchronous Turns")
+    for primitive in ("libc::", "/dev/tty", "termios", "tcsetattr", "fcntl(", "AsRawFd", "FromRawFd"):
+        if primitive in shell_main:
+            errors.append(
+                f"Shell OS primitive escaped interfaces/shell/src/os: "
+                f"interfaces/shell/src/main.rs contains {primitive}"
+            )
 
     platform_manifest = text(root, "core/platform/Cargo.toml")
     if 'name = "timem_platform"' not in platform_manifest:
@@ -255,6 +265,10 @@ def write_fixture(root: Path) -> None:
         "interfaces/shell/Cargo.toml": '[package]\nname = "timem_shell"\n[dependencies]\nagent_core = { path = "../../core/agent" }\ntimem_in_process = { path = "../../bridges/in_process" }\n',
         "interfaces/shell/src/main.rs": "fn main() { run_in_process_turn(); }\n",
         "interfaces/shell/module_boundary.md": "shell boundary\n",
+        "interfaces/shell/src/os/mod.rs": "#[cfg(unix)] mod unix; #[cfg(windows)] mod windows;\n",
+        "interfaces/shell/src/os/unix.rs": "pub fn terminal() {}\n",
+        "interfaces/shell/src/os/windows/mod.rs": "mod console;\n",
+        "interfaces/shell/src/os/windows/console.rs": "pub fn terminal() {}\n",
         "interfaces/web/package.json": "{}\n",
         "interfaces/web/module_boundary.md": "web boundary\n",
     }
@@ -274,6 +288,8 @@ def self_test() -> None:
         ("Agent to Bridge reverse dependency", lambda root: (root / "core/agent/Cargo.toml").write_text('[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\ntimem_in_process = { path = "../../bridges/in_process" }\n')),
         ("Bridge to Interface reverse dependency", lambda root: (root / "bridges/in_process/Cargo.toml").write_text('[package]\nname = "timem_in_process"\n[dependencies]\nagent_core = { path = "../../core/agent" }\ntimem_shell = { path = "../../interfaces/shell" }\n')),
         ("Shell bypasses in-process Bridge", lambda root: (root / "interfaces/shell/src/main.rs").write_text("fn main() { run_session_turn(); }\n")),
+        ("Shell Unix primitive outside OS adapter", lambda root: (root / "interfaces/shell/src/main.rs").write_text("fn main() { run_in_process_turn(); libc::fcntl(0, 0); }\n")),
+        ("missing Windows Shell console adapter", lambda root: (root / "interfaces/shell/src/os/windows/console.rs").unlink()),
         ("Agent to Session reverse dependency", lambda root: (root / "core/agent/Cargo.toml").write_text('[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\ntimem_session = { path = "../session" }\n')),
         ("reverse dependency", lambda root: (root / "core/platform/Cargo.toml").write_text('[package]\nname = "timem_platform"\n[dependencies]\ntimem_shell = { path = "../../interfaces/shell" }\n')),
         ("UI contract reverse dependency", lambda root: (root / "core/ui_contract/Cargo.toml").write_text('[package]\nname = "timem_ui_contract"\n[dependencies]\nagent_core = { path = "../agent" }\n')),

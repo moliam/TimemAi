@@ -751,7 +751,9 @@ ABI or a thin generated binding, then implement only platform-specific pieces.
 
 Platform-specific pieces outside Core include:
 
-- native UI rendering and input
+- native UI rendering and input; the terminal Interface isolates OS console
+  mechanics under `interfaces/shell/src/os/`, while `main.rs` consumes a
+  platform-neutral input-byte protocol
 - user approval prompts
 - local shell bridge selection and transport
 - platform-specific audit and data-directory wiring

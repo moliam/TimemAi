@@ -70,6 +70,16 @@ if grep -nF 'run_session_turn(' interfaces/shell/src/main.rs >/tmp/timem_module_
   exit 1
 fi
 
+for shell_os_file in interfaces/shell/src/os/mod.rs interfaces/shell/src/os/unix.rs interfaces/shell/src/os/windows/mod.rs interfaces/shell/src/os/windows/console.rs; do
+  test -f "$shell_os_file" || { echo "error: missing Shell OS adapter: $shell_os_file" >&2; exit 1; }
+done
+
+if grep -nE 'libc::|/dev/tty|termios|tcsetattr|fcntl\(|AsRawFd|FromRawFd' interfaces/shell/src/main.rs >/tmp/timem_module_boundary_shell_os_primitives.txt; then
+  echo "error: Shell OS primitives belong under interfaces/shell/src/os" >&2
+  cat /tmp/timem_module_boundary_shell_os_primitives.txt >&2
+  exit 1
+fi
+
 if ! grep -nF 'agent_core = { path = "../agent" }' core/session/Cargo.toml >/dev/null ||
    ! grep -nF 'timem_ui_contract = { path = "../ui_contract" }' core/session/Cargo.toml >/dev/null; then
   echo "error: core/session must depend inward on Agent and UI contracts" >&2
