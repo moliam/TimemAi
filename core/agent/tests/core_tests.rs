@@ -6049,6 +6049,7 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
         .last()
         .expect("running delta id");
     assert_ne!(running_delta_id, user_delta_id);
+    #[cfg(unix)]
     let pid = prompt
         .lines()
         .find_map(|line| line.strip_prefix("pid="))
@@ -6128,6 +6129,7 @@ fn still_running_table_is_universal_even_when_compaction_targets_an_unrelated_de
         prompt.contains("now keeps running in background"),
         "{prompt}"
     );
+    #[cfg(unix)]
     let pid = prompt
         .lines()
         .find_map(|line| line.strip_prefix("pid="))
@@ -6199,6 +6201,7 @@ fn still_running_table_survives_offload_of_the_original_action_delta() {
         .into_iter()
         .last()
         .expect("running delta id");
+    #[cfg(unix)]
     let pid = prompt
         .lines()
         .find_map(|line| line.strip_prefix("pid="))
@@ -6277,6 +6280,7 @@ fn still_running_table_survives_xml_style_compaction_of_the_original_action_delt
         .into_iter()
         .last()
         .expect("running delta id");
+    #[cfg(unix)]
     let pid = prompt
         .lines()
         .find_map(|line| line.strip_prefix("pid="))
