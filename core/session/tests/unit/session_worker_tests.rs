@@ -201,10 +201,12 @@ struct ImmediateFinalPromptCaptureModel {
     prompts: Arc<Mutex<Vec<String>>>,
 }
 
+#[cfg(unix)]
 struct BackgroundThenFinalModel {
     calls: u32,
 }
 
+#[cfg(unix)]
 struct TimeoutThenFinalModel {
     calls: u32,
 }
@@ -231,6 +233,7 @@ impl ModelClient for TruncatedEventModel {
     }
 }
 
+#[cfg(unix)]
 impl ModelClient for TimeoutThenFinalModel {
     fn call_model(
         &mut self,
@@ -255,6 +258,7 @@ impl ModelClient for TimeoutThenFinalModel {
     }
 }
 
+#[cfg(unix)]
 impl ModelClient for BackgroundThenFinalModel {
     fn call_model(
         &mut self,
@@ -397,6 +401,7 @@ fn model_response_event_preserves_truncated_flag() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn idle_worker_emits_terminal_topic_when_background_bash_exits_after_turn_finish() {
     let dir = tmp_dir("idle_background_exit_topic");
@@ -456,6 +461,7 @@ fn idle_worker_emits_terminal_topic_when_background_bash_exits_after_turn_finish
     panic!("idle worker did not publish the background process terminal topic");
 }
 
+#[cfg(unix)]
 #[test]
 fn idle_worker_emits_terminal_topic_when_timed_out_bash_exits_after_turn_finish() {
     let dir = tmp_dir("idle_timeout_exit_topic");
@@ -1119,6 +1125,7 @@ impl ModelClient for ToolGenWorkflowModel {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn manual_toolgen_continues_in_current_context_and_preserves_source_answer() {
     let dir = tmp_dir("toolgen_workflow");
@@ -1343,10 +1350,12 @@ struct FailingToolGenModel {
     child_calls: Arc<Mutex<u32>>,
 }
 
+#[cfg(unix)]
 struct LongToolGenWorkflowModel {
     calls: Arc<Mutex<u32>>,
 }
 
+#[cfg(unix)]
 impl ModelClient for LongToolGenWorkflowModel {
     fn call_model(
         &mut self,
@@ -1613,6 +1622,7 @@ fn failed_manual_toolgen_has_bounded_protocol_repair_and_does_not_replace_source
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn toolgen_runs_beyond_ten_model_calls_with_the_normal_round_budget() {
     let dir = tmp_dir("toolgen_normal_round_budget");
@@ -2136,10 +2146,12 @@ fn session_worker_manager_tracks_global_working_count() {
     manager.shutdown_all().unwrap();
 }
 
+#[cfg(unix)]
 struct ApprovalReplayModel {
     calls: Arc<Mutex<u32>>,
 }
 
+#[cfg(unix)]
 impl ModelClient for ApprovalReplayModel {
     fn call_model(
         &mut self,
@@ -2334,6 +2346,7 @@ fn session_worker_identity_sets_prompt_assistant_heading() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
 #[test]
 fn session_worker_shutdown_cancels_pending_host_decision() {
     let dir = tmp_dir("decision_shutdown");
@@ -3189,6 +3202,7 @@ fn wait_for_turn_finished(events: &Receiver<CoreSessionWorkerEvent>, label: &str
 }
 
 #[derive(Debug, Clone)]
+#[cfg(unix)]
 struct StressModelCall {
     worker_idx: usize,
     turn_idx: usize,
@@ -3199,6 +3213,7 @@ struct StressModelCall {
     saw_cross_session_marker: bool,
 }
 
+#[cfg(unix)]
 struct StressWorkerModel {
     worker_idx: usize,
     worker_count: usize,
@@ -3300,6 +3315,7 @@ impl ModelClient for ProtocolTurnStressModel {
     }
 }
 
+#[cfg(unix)]
 fn stress_marker(worker_idx: usize, turn_idx: usize, step_idx: usize) -> String {
     format!("STRESS_ACTION_DONE_W{worker_idx}_T{turn_idx}_S{step_idx}")
 }
@@ -3316,6 +3332,7 @@ fn latest_stress_turn(prompt: &str, worker_idx: usize, turns_per_worker: usize) 
         .unwrap_or(0)
 }
 
+#[cfg(unix)]
 fn stress_target_actions(turn_idx: usize, long_turn_idx: usize, max_rounds: usize) -> usize {
     if turn_idx == long_turn_idx {
         max_rounds + 10
@@ -3324,6 +3341,7 @@ fn stress_target_actions(turn_idx: usize, long_turn_idx: usize, max_rounds: usiz
     }
 }
 
+#[cfg(unix)]
 fn completed_stress_actions(
     prompt: &str,
     worker_idx: usize,
@@ -3335,6 +3353,7 @@ fn completed_stress_actions(
         .count()
 }
 
+#[cfg(unix)]
 fn stress_progress(worker_idx: usize, turn_idx: usize, step_idx: usize) -> String {
     let marker = stress_marker(worker_idx, turn_idx, step_idx);
     if step_idx == 0 {
@@ -3347,6 +3366,7 @@ fn stress_progress(worker_idx: usize, turn_idx: usize, step_idx: usize) -> Strin
     }
 }
 
+#[cfg(unix)]
 fn stress_action_response(worker_idx: usize, turn_idx: usize, step_idx: usize) -> String {
     let marker = stress_marker(worker_idx, turn_idx, step_idx);
     let (action, args) = match step_idx % 8 {
@@ -3384,6 +3404,7 @@ fn stress_action_response(worker_idx: usize, turn_idx: usize, step_idx: usize) -
     serde_json::json!({ action: args }).to_string()
 }
 
+#[cfg(unix)]
 impl ModelClient for StressWorkerModel {
     fn call_model(
         &mut self,
@@ -3480,6 +3501,7 @@ impl ModelClient for StressWorkerModel {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn session_workers_stress_ui_threads_supplements_and_renames() {
     const WORKERS: usize = 5;
@@ -3870,6 +3892,7 @@ fn session_workers_protocol_payload_stress_exceeds_1000_turns() {
         );
 }
 
+#[cfg(unix)]
 fn wait_for_stress_turn_finished(
     events: &Receiver<CoreSessionWorkerEvent>,
     handle: &CoreSessionWorkerHandle,
