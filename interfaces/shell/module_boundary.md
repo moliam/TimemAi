@@ -3,8 +3,9 @@
 `timem_shell` is Timem's terminal Host Adapter and UI shell. It owns CLI
 parsing, environment collection, terminal input, menus, rendering, and
 shell-only convenience commands. It consumes the same UI-neutral Core Turn
-semantics intended for Web, iOS, desktop, and future shells, and delegates all
-reusable lifecycle/runtime behavior and model transport to `agent_core`.
+semantics intended for Web, iOS, desktop, and future shells. Synchronous Turn
+calls cross `timem_in_process`; reusable lifecycle/runtime behavior and model
+transport remain in `agent_core`.
 
 Before changing this module, also read the repository-level `AGENTS.md`.
 Also read `docs/turn-state-projection-architecture.md` for the shared Core, Host Adapter, Host Projection Adapter, and UI-shell lifecycle boundary.
@@ -17,8 +18,8 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Host
   immutable outcomes as terminal text, but must not infer lifecycle from the
   last topic, worker counts, local Ctrl+C state, or whether final-answer text has
   already painted.
-- A thin synchronous Host Adapter around Core functions, structured requests,
-  projection changes, and topic events. Shell does not need Web-style revision,
+- A terminal `TurnUi` adapter for structured requests, projection changes, and topic events. The
+  direct call boundary itself belongs to `timem_in_process`. Shell does not need Web-style revision,
   snapshot, outbox, or reconnect machinery merely to satisfy the shared
   contract; if it later becomes reconnectable or multi-client, that delivery
   adapter remains separate from terminal presentation.
@@ -193,15 +194,16 @@ terminal adapter and presentation here. The portability test is practical: a
 new UI shell must not need to copy Shell lifecycle branches to behave
 correctly.
 
-Threading rule: the terminal host may keep using the synchronous
-`run_session_turn` path for its single active session. If shell or a future host
+Threading rule: the terminal host uses the synchronous `timem_in_process::run_turn` path for its
+single active Session. If Shell or a future host
 needs concurrent sessions, it should use a core-owned per-session worker rather
 than building a separate terminal-specific runtime loop. Shell remains
 responsible for terminal input/rendering; the worker/core owns session state,
 model/action loop, topic emission, and request correlation.
 
-The intended call chain is `timem_shell UI -> agent_core -> model service -> LLM`.
-Shell should not insert a transport adapter between UI and model service. If model service
+The intended call chain is
+`timem_shell UI -> timem_in_process -> agent_core -> model service -> LLM`. The Bridge is a
+zero-transport typed call boundary; it must not add model transport or serialization. If model service
 transport needs to change, change the core/model service boundary first.
 
 Shell may expose core functions as shell-specific commands such as `/prof`,

@@ -98,6 +98,7 @@ For a new contributor, read these in order:
 For module-local work, also read:
 
 - [`core/agent/module_boundary.md`](../core/agent/module_boundary.md)
+- [`bridges/in_process/module_boundary.md`](../bridges/in_process/module_boundary.md)
 - [`interfaces/shell/module_boundary.md`](../interfaces/shell/module_boundary.md)
 - [`timem_web/module_boundary.md`](../timem_web/module_boundary.md)
 - [`interfaces/web/module_boundary.md`](../interfaces/web/module_boundary.md)
@@ -255,9 +256,16 @@ process runs with no TTY or graphical display.
   interrupted, and missed time periods collapse instead of producing a backlog.
 - Exposes a JSON-in/JSON-out C ABI for host integrations.
 
+### `bridges/in_process/`
+
+`timem_in_process` is the zero-transport typed call boundary for Interfaces embedded with Core.
+It forwards synchronous Turn inputs, `TurnUi` callbacks, profiler state, and outcomes without
+serialization, networking, rendering, or lifecycle reinterpretation.
+
 ### `interfaces/shell/`
 
-`timem_shell` owns the terminal host and UI.
+`timem_shell` owns the terminal host and UI. Its synchronous Turn calls enter Core through
+`timem_in_process`; `CliTurnUi`, terminal rendering, and user decisions remain in the Interface.
 
 - Reads CLI flags and environment config.
 - Parses terminal-only user commands and maps shared commands to core functions
@@ -659,7 +667,8 @@ sequenceDiagram
     participant T as Local tools/data
 
     U->>UI: type a message
-    UI->>C: run_session_turn(TurnInput, config, TurnUi)
+    UI->>B: run_turn(TurnInput, config, TurnUi)
+    B->>C: run_session_turn(TurnInput, config, TurnUi)
     C->>C: begin_turn(user_input, context)
     C-->>UI: topic events / on_model_request(round)
     C->>P: model request

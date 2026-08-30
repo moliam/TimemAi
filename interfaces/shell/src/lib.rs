@@ -10,6 +10,7 @@ mod final_answer_renderer;
 mod observation;
 mod profiler;
 
+pub use agent_core::cancelled_turn_result;
 pub use agent_core::{
     append_audit_event as append_audit, apply_runtime_config_value,
     apply_workspace_command_to_path, bash_approval_mode_from_sources, bash_approval_mode_label,
@@ -45,7 +46,6 @@ pub use agent_core::{
     CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_RESPONSE, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
     DEFAULT_STALE_CONTEXT_IDLE, DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD, RUNTIME_CONFIG_FIELDS,
 };
-pub use agent_core::{cancelled_turn_result, run_session_turn};
 pub use final_answer_renderer::{
     render_final_answer_markdown, FinalAnswerRenderer, TermimadFinalAnswerRenderer,
 };
@@ -56,6 +56,7 @@ pub use observation::{
     ObservationLineStyle, ObservationPanel,
 };
 pub use profiler::render_prof_report_data;
+pub use timem_in_process::run_turn as run_in_process_turn;
 
 pub const TIMEM_LOGO: &str = "𝓣𝓲𝓶𝓮𝓶";
 pub const ANSI_RESET: &str = "\x1b[0m";

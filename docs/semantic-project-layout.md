@@ -119,8 +119,9 @@ Each step is committed separately and must leave the workspace buildable:
    tests, scripts, docs, and workspace references preserve behavior and compatibility.
 4. **Session extraction (complete)**: `timem_session` owns Session/Context/Worker lifecycle,
    scheduling, and management; Web callers use the new owner and Agent has no reverse dependency.
-5. **In-process Bridge**: move Shell/native direct-call and callback/channel adaptation to
-   `bridges/in_process`; presentation remains in `interfaces/shell`.
+5. **In-process Bridge (in progress)**: `timem_in_process` now owns the synchronous typed Turn
+   call boundary used by Shell. Terminal `TurnUi` rendering and decisions remain in
+   `interfaces/shell`; additional callback/channel adapters will move in later slices.
 6. **HTTP/WebSocket Bridge**: combine the Web host and asynchronous projection/delivery ownership
    under `bridges/http_websocket`, preserving package/binary and wire behavior.
 7. **IPC and native Interfaces**: add the IPC contract and native clients only with real behavior,

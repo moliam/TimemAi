@@ -31,6 +31,10 @@ REQUIRED = (
     "core/ui_contract/src/projections/mod.rs",
     "core/ui_contract/tests/command_contract_tests.rs",
     "core/ui_contract/tests/projection_contract_tests.rs",
+    "bridges/in_process/Cargo.toml",
+    "bridges/in_process/module_boundary.md",
+    "bridges/in_process/src/lib.rs",
+    "bridges/in_process/tests/turn_bridge_tests.rs",
     "interfaces/shell/Cargo.toml",
     "interfaces/shell/module_boundary.md",
     "interfaces/web/package.json",
@@ -70,6 +74,7 @@ ARCHITECTURE_CONTRACT_MARKERS = (
     "  shell/",
     "  web/",
     "**Session extraction (complete)**",
+    "**In-process Bridge (in progress)**",
     "`host_projection/` | `bridges/http_websocket/`",
     "`timem_web/` | `bridges/http_websocket/`",
 )
@@ -100,7 +105,13 @@ def violations(root: Path) -> list[str]:
             errors.append(f"target architecture directory must not be an empty placeholder: {relative}")
 
     workspace = text(root, "Cargo.toml")
-    for member in ('"core/platform"', '"core/session"', '"core/ui_contract"', '"interfaces/shell"'):
+    for member in (
+        '"bridges/in_process"',
+        '"core/platform"',
+        '"core/session"',
+        '"core/ui_contract"',
+        '"interfaces/shell"',
+    ):
         if member not in workspace:
             errors.append(f"workspace must include {member}")
     for legacy in ('"timem_shell"', '"web_ui/timem-web"'):
@@ -112,7 +123,7 @@ def violations(root: Path) -> list[str]:
         errors.append("agent_core must depend on core/platform through timem_platform")
     if 'timem_ui_contract = { path = "../ui_contract" }' not in agent_manifest:
         errors.append("agent_core must depend inward on core/ui_contract")
-    for forbidden in ("timem_session", "../session"):
+    for forbidden in ("timem_session", "timem_in_process", "../session", "../../bridges/"):
         if forbidden in agent_manifest:
             errors.append(f"agent_core must not depend outward on {forbidden}")
     agent_lib = text(root, "core/agent/src/lib.rs")
@@ -132,11 +143,27 @@ def violations(root: Path) -> list[str]:
         if forbidden in session_manifest:
             errors.append(f"core/session must not depend outward on {forbidden}")
 
+    in_process_manifest = text(root, "bridges/in_process/Cargo.toml")
+    if 'name = "timem_in_process"' not in in_process_manifest:
+        errors.append("bridges/in_process must expose the timem_in_process crate")
+    if 'agent_core = { path = "../../core/agent" }' not in in_process_manifest:
+        errors.append("bridges/in_process must depend inward on agent_core")
+    for forbidden in ("timem_shell", "timem_web", "host_projection", "interfaces/"):
+        if forbidden in in_process_manifest:
+            errors.append(f"bridges/in_process must not depend outward on {forbidden}")
+
     shell_manifest = text(root, "interfaces/shell/Cargo.toml")
     if 'name = "timem_shell"' not in shell_manifest:
         errors.append("interfaces/shell must preserve the timem_shell package name")
     if 'agent_core = { path = "../../core/agent" }' not in shell_manifest:
         errors.append("interfaces/shell must depend inward on agent_core")
+    if 'timem_in_process = { path = "../../bridges/in_process" }' not in shell_manifest:
+        errors.append("interfaces/shell must use the in-process Bridge")
+    shell_main = text(root, "interfaces/shell/src/main.rs")
+    if "run_in_process_turn(" not in shell_main:
+        errors.append("interfaces/shell must enter synchronous Turns through the in-process Bridge")
+    if "run_session_turn(" in shell_main:
+        errors.append("interfaces/shell must not bypass the in-process Bridge for synchronous Turns")
 
     platform_manifest = text(root, "core/platform/Cargo.toml")
     if 'name = "timem_platform"' not in platform_manifest:
@@ -185,7 +212,7 @@ def violations(root: Path) -> list[str]:
 
 def write_fixture(root: Path) -> None:
     files = {
-        "Cargo.toml": '[workspace]\nmembers = ["core/agent", "core/platform", "core/session", "core/ui_contract", "interfaces/shell"]\n',
+        "Cargo.toml": '[workspace]\nmembers = ["bridges/in_process", "core/agent", "core/platform", "core/session", "core/ui_contract", "interfaces/shell"]\n',
         "docs/semantic-project-layout.md": "\n".join(ARCHITECTURE_CONTRACT_MARKERS),
         "core/agent/Cargo.toml": '[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\n',
         "core/agent/src/lib.rs": "pub use timem_platform as os;\n",
@@ -208,7 +235,12 @@ def write_fixture(root: Path) -> None:
         "core/ui_contract/src/projections/mod.rs": "pub struct TurnProjection;\n",
         "core/ui_contract/tests/command_contract_tests.rs": "#[test] fn command() {}\n",
         "core/ui_contract/tests/projection_contract_tests.rs": "#[test] fn projection() {}\n",
-        "interfaces/shell/Cargo.toml": '[package]\nname = "timem_shell"\n[dependencies]\nagent_core = { path = "../../core/agent" }\n',
+        "bridges/in_process/Cargo.toml": '[package]\nname = "timem_in_process"\n[dependencies]\nagent_core = { path = "../../core/agent" }\n',
+        "bridges/in_process/module_boundary.md": "in-process boundary\n",
+        "bridges/in_process/src/lib.rs": "pub fn run_turn() {}\n",
+        "bridges/in_process/tests/turn_bridge_tests.rs": "#[test] fn bridge() {}\n",
+        "interfaces/shell/Cargo.toml": '[package]\nname = "timem_shell"\n[dependencies]\nagent_core = { path = "../../core/agent" }\ntimem_in_process = { path = "../../bridges/in_process" }\n',
+        "interfaces/shell/src/main.rs": "fn main() { run_in_process_turn(); }\n",
         "interfaces/shell/module_boundary.md": "shell boundary\n",
         "interfaces/web/package.json": "{}\n",
         "interfaces/web/module_boundary.md": "web boundary\n",
@@ -226,6 +258,9 @@ def self_test() -> None:
             "legacy generic application directory",
             lambda root: (root / "core/application").mkdir(parents=True),
         ),
+        ("Agent to Bridge reverse dependency", lambda root: (root / "core/agent/Cargo.toml").write_text('[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\ntimem_in_process = { path = "../../bridges/in_process" }\n')),
+        ("Bridge to Interface reverse dependency", lambda root: (root / "bridges/in_process/Cargo.toml").write_text('[package]\nname = "timem_in_process"\n[dependencies]\nagent_core = { path = "../../core/agent" }\ntimem_shell = { path = "../../interfaces/shell" }\n')),
+        ("Shell bypasses in-process Bridge", lambda root: (root / "interfaces/shell/src/main.rs").write_text("fn main() { run_session_turn(); }\n")),
         ("Agent to Session reverse dependency", lambda root: (root / "core/agent/Cargo.toml").write_text('[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\ntimem_session = { path = "../session" }\n')),
         ("reverse dependency", lambda root: (root / "core/platform/Cargo.toml").write_text('[package]\nname = "timem_platform"\n[dependencies]\ntimem_shell = { path = "../../interfaces/shell" }\n')),
         ("UI contract reverse dependency", lambda root: (root / "core/ui_contract/Cargo.toml").write_text('[package]\nname = "timem_ui_contract"\n[dependencies]\nagent_core = { path = "../agent" }\n')),

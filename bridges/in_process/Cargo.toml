@@ -1,0 +1,8 @@
+[package]
+name = "timem_in_process"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+agent_core = { path = "../../core/agent" }
