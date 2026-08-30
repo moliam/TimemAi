@@ -98,7 +98,7 @@ pub fn command_for_script(path: &Path) -> Result<Command, String> {
     {
         let mut command = Command::new(POSIX_SHELL_EXECUTABLE);
         command.arg(path);
-        return Ok(command);
+        Ok(command)
     }
     #[cfg(windows)]
     {
@@ -372,9 +372,9 @@ pub fn process_group_running(group_leader_pid: u32) -> bool {
 pub fn current_parent_pid() -> Option<u32> {
     #[cfg(unix)]
     {
-        return u32::try_from(unsafe { libc::getppid() })
+        u32::try_from(unsafe { libc::getppid() })
             .ok()
-            .filter(|pid| *pid > 1);
+            .filter(|pid| *pid > 1)
     }
     #[cfg(windows)]
     {

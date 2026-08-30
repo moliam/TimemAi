@@ -2332,7 +2332,7 @@ pub async fn run(
         return Ok(WebExitReason::HelpRequested);
     }
 
-    let launch = WebLaunchOptions::parse(&args)?;
+    let launch = WebLaunchOptions::parse(args)?;
     agent_core::configure_audit_storage(launch.debug);
     if std::env::var_os("TIMEM_DATA_DIR").is_some() {
         return Err("unsupported_env:TIMEM_DATA_DIR; MEM is the complete workspace".to_string());
