@@ -1,7 +1,7 @@
 use std::{env, fs, path::Path};
 
 fn main() {
-    let dist_dir = Path::new("../interfaces/web/dist");
+    let dist_dir = Path::new("../../interfaces/web/dist");
     if !dist_dir.is_dir() {
         panic!(
             "Timem Web assets are missing. Run `pnpm --dir interfaces/web build` before building timem-web."

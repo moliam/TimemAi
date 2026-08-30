@@ -1,10 +1,10 @@
 use super::*;
-use agent_core::{
+use serde_json::json;
+use std::time::{Duration, Instant};
+use timem_in_process::agent_api::{
     CoreMemoryActivity, CoreSessionState, CoreTopic, CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_REPAIR,
     CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
-use serde_json::json;
-use std::time::{Duration, Instant};
 
 fn perf_guard_enabled() -> bool {
     std::env::var("TIMEM_PERF_GUARD").ok().as_deref() == Some("1")

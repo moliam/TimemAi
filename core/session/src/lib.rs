@@ -16,6 +16,30 @@ pub use timem_ui_contract::projections::{
     CoreSessionWorkerLifecycleState, CoreSessionWorkerStatus,
 };
 
+/// Typed Agent compatibility API exposed through the Session boundary.
+pub use agent_core as agent_api;
+
+pub fn run_synchronous_turn(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    input: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+) -> TurnOutcome {
+    agent_core::run_session_turn(core, config, input, ui, profiler)
+}
+
+pub fn run_synchronous_turn_with_model_client(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    input: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+    model_client: &mut dyn ModelClient,
+) -> TurnOutcome {
+    run_session_turn_with_model_client(core, config, input, ui, profiler, model_client)
+}
+
 const TOOLGEN_CONTEXT_INSTRUCTIONS: &str =
     include_str!("../../../resources/toolgen/toolgen_context.md");
 const TOOLGEN_XML_COMPLETION: &str =

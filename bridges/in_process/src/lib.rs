@@ -1,10 +1,15 @@
-//! Zero-transport Bridge for hosts embedded in the same process as Timem Core.
+//! Zero-transport Bridge for Interfaces embedded in the same process as Timem Core.
+//!
+//! It adapts typed calls to the Session-owned orchestration boundary and is reusable by Shell,
+//! future Rust-native desktop Interfaces, embedded hosts, and tests.
 
-use agent_core::{
+pub use timem_session::agent_api;
+pub use timem_ui_contract as ui_contract;
+
+use agent_api::{
     AgentCore, ModelClient, ModelServiceConfig, RuntimeProfiler, TurnInput, TurnOutcome, TurnUi,
 };
 
-/// Runs one synchronous Turn through direct calls and callbacks.
 pub fn run_turn(
     core: &mut AgentCore,
     config: &mut ModelServiceConfig,
@@ -12,10 +17,9 @@ pub fn run_turn(
     ui: &mut dyn TurnUi,
     profiler: Option<&mut RuntimeProfiler>,
 ) -> TurnOutcome {
-    agent_core::run_session_turn(core, config, input, ui, profiler)
+    timem_session::run_synchronous_turn(core, config, input, ui, profiler)
 }
 
-/// Runs one synchronous Turn with a caller-supplied model client.
 pub fn run_turn_with_model_client(
     core: &mut AgentCore,
     config: &mut ModelServiceConfig,
@@ -24,5 +28,12 @@ pub fn run_turn_with_model_client(
     profiler: Option<&mut RuntimeProfiler>,
     model_client: &mut dyn ModelClient,
 ) -> TurnOutcome {
-    agent_core::run_session_turn_with_model_client(core, config, input, ui, profiler, model_client)
+    timem_session::run_synchronous_turn_with_model_client(
+        core,
+        config,
+        input,
+        ui,
+        profiler,
+        model_client,
+    )
 }

@@ -1,5 +1,5 @@
-use agent_core::{CoreActionKind, CoreTopicEvent};
 use std::collections::VecDeque;
+use timem_in_process::agent_api::{CoreActionKind, CoreTopicEvent};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const ANSI_BOLD: &str = "\x1b[1m";

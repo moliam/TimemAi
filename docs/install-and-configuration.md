@@ -41,7 +41,7 @@ Both installers run:
 
 ```bash
 cargo fetch --locked
-cargo build --locked -p timem_web --release
+cargo build --locked --release --bin timem
 ```
 
 It installs:

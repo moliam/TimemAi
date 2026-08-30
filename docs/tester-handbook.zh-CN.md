@@ -31,25 +31,22 @@
 TimemAi 的主链路是：
 
 ```text
-Shell UI / Web UI
-        ↓
-Host（timem_shell / timem_web）
-        ↓
-agent_core
-        ↓
-模型传输层 / LLM
-        ↓
-工具执行、存储、审计与结构化事件
+interfaces/shell ──> bridges/in_process ──> core/session ──> core/agent
+interfaces/web   <──> applications/timem + bridges/http_websocket
+                                      └────> core/session ──> core/agent
 ```
 
-测试归属必须遵循以下边界：
+`applications/timem` 负责统一产品装配；Cargo 包名 `timem_web` 仅为命令兼容，
+不是顶层物理目录。测试归属必须遵循以下边界：
 
 | 层 | 负责内容 | 重点验证 |
 |---|---|---|
-| `agent_core` | turn 状态机、模型协议、工具、上下文、内存、审计、重试、取消 | 语义和状态是否正确；坏输入是否安全；动作是否只执行一次或按契约重放 |
-| `timem_shell` | 终端输入、菜单、渲染、Shell 专属命令 | CJK、粘贴、多行、窄终端、重绘、取消、第二次输入是否可继续 |
-| `timem_web` | Web Host、认证、Session Worker、命令路由、快照、事件与持久化 | Session 隔离、命令确认、重连恢复、顺序、并发、Host 生命周期 |
-| `web_ui` | 浏览器交互、渲染、草稿、队列、响应式布局 | 用户操作、可访问性、状态展示、断线体验、长页面、跨标签页一致性 |
+| `core/agent`（包名 `agent_core`） | Turn、模型协议、工具、上下文、内存、审计、重试、取消 | 语义和状态是否正确；坏输入是否安全；动作是否只执行一次或按契约重放 |
+| `core/session` | Session/Context/Worker 生命周期、调度和用例编排 | Worker 隔离、命令顺序、停止/关闭、配置传播和跨 Context 并发 |
+| `bridges/in_process` | 所有同进程 Rust Interface 的类型化同步调用/回调 | 不序列化、不改写生命周期、与 Session 直接语义等价 |
+| `interfaces/shell`（包名 `timem_shell`） | 终端输入、菜单、渲染、Shell 专属命令 | CJK、粘贴、多行、窄终端、重绘、取消、第二次输入是否可继续 |
+| `bridges/http_websocket` + `applications/timem`（包名 `timem_web`） | Web 认证、Session 路由、命令可靠投递、快照、事件和 Host 生命周期 | Session 隔离、命令确认、重连恢复、顺序、并发、Host 生命周期 |
+| `interfaces/web` | 浏览器交互、渲染、草稿、队列、响应式布局 | 用户操作、可访问性、状态展示、断线体验、长页面、跨标签页一致性 |
 | 安装与资源 | 安装脚本、配置、内嵌 Web bundle、能力清单 | 干净安装、版本一致、资源完整、升级兼容、无敏感信息 |
 
 ### 2.1 Core 与 UI 必须双向验证
@@ -673,7 +670,7 @@ TIMEM_EDGE_ITERATIONS=5 scripts/edge_regression.sh
 scripts/performance_guard.sh
 
 # Release 构建
-cargo build --locked -p timem_web --release
+cargo build --locked --release --bin timem
 
 # 敏感信息与格式
 scripts/sensitive_scan.sh --current

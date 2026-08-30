@@ -118,7 +118,7 @@ function Invoke-TimemInstall {
         Write-Host 'Fetching locked Rust dependencies...'
         Invoke-Cargo @('fetch', '--locked')
         Write-Host 'Building the unified Timem CLI for Windows...'
-        Invoke-Cargo @('build', '--locked', '-p', 'timem_web', '--release')
+        Invoke-Cargo @('build', '--locked', '--release', '--bin', 'timem')
     } finally { Pop-Location }
 
     $timem = Join-Path $RootDir 'target\release\timem.exe'

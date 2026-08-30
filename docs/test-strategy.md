@@ -78,7 +78,8 @@ checks. If a dimension is not applicable, record that residual decision in
   while a fake model service causes repeated model/action redraws, long
   Thought/Action rows, and queued next questions during active work.
 - Web host integration: real `CoreSessionWorker` instances publish concurrent
-  topics through `timem_web`, proving session isolation, request correlation,
+  topics through the Web runtime in `applications/timem` (Cargo package
+  `timem_web`), proving session isolation, request correlation,
   completion telemetry, work-instruction decisions, bounded host state, and
   independent per-session runtime profiles. Profile tests use two real workers,
   verify lifecycle model service/protocol/context values, ensure global

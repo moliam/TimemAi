@@ -12,7 +12,7 @@ MATRIX = ROOT / "docs" / "web-ui-feature-test-matrix.md"
 TEST_ROOTS = [
     ROOT / "core" / "agent" / "tests",
     ROOT / "core" / "session" / "tests",
-    ROOT / "timem_web" / "tests",
+    ROOT / "applications" / "timem" / "tests",
     ROOT / "interfaces" / "web" / "tests",
 ]
 CI_SCRIPT = ROOT / "scripts" / "ci.sh"
@@ -48,7 +48,7 @@ def file_exists_token(token: str) -> bool:
             ROOT / "interfaces" / "web" / "tests",
             ROOT / "core" / "agent" / "tests",
             ROOT / "core" / "session" / "tests",
-            ROOT / "timem_web" / "tests",
+            ROOT / "applications" / "timem" / "tests",
             ROOT / "scripts",
             ROOT / "docs",
         ]:
@@ -164,7 +164,7 @@ def main() -> int:
         if missing:
             failures.append(f"{requirement}: evidence not found: {', '.join(missing)}")
         if requirement in HOST_RUNTIME_ROWS:
-            has_host = any(evidence_in_roots(token, [ROOT / "timem_web" / "tests"]) for token in tokens)
+            has_host = any(evidence_in_roots(token, [ROOT / "applications" / "timem" / "tests"]) for token in tokens)
             has_frontend = any(evidence_in_roots(token, [ROOT / "interfaces" / "web" / "tests"]) for token in tokens)
             if not has_host or not has_frontend:
                 missing_sides = []

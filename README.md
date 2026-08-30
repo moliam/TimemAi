@@ -9,11 +9,32 @@ Both modes use the same local runtime, memory, session history, tools, and model
 
 ## Development Architecture
 
-The source tree follows `Interface ↔ Bridge ↔ Core`: terminal and browser
-presentation live under `interfaces/`, reusable OS policy lives under
-`core/platform`, and communication layers must not redefine Core semantics.
-Before contributing, read [`AGENTS.md`](AGENTS.md) and
-[`docs/semantic-project-layout.md`](docs/semantic-project-layout.md); architecture
+The source tree follows `Interface ↔ Bridge ↔ Core`. The unified product is
+assembled under `applications/timem/`; terminal and browser presentation live
+under `interfaces/`; direct Rust calls and HTTP/WebSocket delivery live under
+`bridges/`; reusable semantics live under `core/`.
+
+```text
+applications/timem        product composition and the `timem` binary
+interfaces/shell          terminal presentation and interaction
+interfaces/web            browser presentation and interaction
+bridges/in_process        typed zero-transport API for all same-process Rust Interfaces
+bridges/http_websocket    reconnectable browser delivery
+core/session              Session/Context/Worker orchestration
+core/agent                model, prompt, capability, memory, and Turn execution
+core/ui_contract          UI-neutral commands, events, and projections
+core/platform             reusable OS policy
+```
+
+The Cargo package name `timem_web` remains for command compatibility; there is
+no top-level `timem_web/` source root. Do not create placeholder desktop, FFI,
+or IPC directories. A future same-process Rust Interface reuses
+`bridges/in_process`; other Bridges are added only with a real consumer and
+executable behavior.
+
+Before contributing, read [`AGENTS.md`](AGENTS.md),
+[`docs/architecture.md`](docs/architecture.md), and
+[`docs/semantic-project-layout.md`](docs/semantic-project-layout.md). Architecture
 changes are enforced by `python3 scripts/architecture_guard.py`.
 
 ## Install
