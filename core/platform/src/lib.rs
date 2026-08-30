@@ -10,6 +10,8 @@ mod linux;
 mod macos;
 #[cfg(unix)]
 mod shared;
+#[cfg(windows)]
+mod windows;
 
 pub use api::*;
 

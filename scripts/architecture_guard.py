@@ -23,6 +23,11 @@ REQUIRED = (
     "core/platform/src/shared.rs",
     "core/platform/src/macos.rs",
     "core/platform/src/linux.rs",
+    "core/platform/src/windows/command.rs",
+    "core/platform/src/windows/mod.rs",
+    "core/platform/src/windows/process.rs",
+    "core/platform/src/windows/system.rs",
+    "docs/windows-support-matrix.md",
     "core/platform/tests/unit/platform_tests.rs",
     "core/ui_contract/Cargo.toml",
     "core/ui_contract/module_boundary.md",
@@ -46,7 +51,6 @@ FORBIDDEN_DIRS = (
     "web_ui",
     "core/application",
     "core/agent/src/os",
-    "core/platform/src/windows",
 )
 PROCESS_PRIMITIVES = ("libc::getpgid", "libc::getpgrp", "libc::waitpid", ".process_group(0)")
 TARGET_DIRECTORIES = (
@@ -77,6 +81,7 @@ ARCHITECTURE_CONTRACT_MARKERS = (
     "**In-process Bridge (in progress)**",
     "`host_projection/` | `bridges/http_websocket/`",
     "`timem_web/` | `bridges/http_websocket/`",
+    "windows-support-matrix.md",
 )
 
 
@@ -168,6 +173,8 @@ def violations(root: Path) -> list[str]:
     platform_manifest = text(root, "core/platform/Cargo.toml")
     if 'name = "timem_platform"' not in platform_manifest:
         errors.append("core/platform must expose the timem_platform crate")
+    if '[target.\'cfg(windows)\'.dependencies]' not in platform_manifest or 'windows-sys' not in platform_manifest:
+        errors.append("core/platform must declare its target-scoped Windows backend dependency")
     for forbidden in ("agent_core", "timem_shell", "timem_web", "host_projection", "interfaces/"):
         if forbidden in platform_manifest:
             errors.append(f"core/platform must not depend outward on {forbidden}")
@@ -193,6 +200,7 @@ def violations(root: Path) -> list[str]:
         '#[cfg(target_os = "linux")]\nmod linux;',
         '#[cfg(target_os = "macos")]\nmod macos;',
         '#[cfg(unix)]\nmod shared;',
+        '#[cfg(windows)]\nmod windows;',
     )
     for declaration in required_cfg_modules:
         if declaration not in platform_lib:
@@ -214,19 +222,24 @@ def write_fixture(root: Path) -> None:
     files = {
         "Cargo.toml": '[workspace]\nmembers = ["bridges/in_process", "core/agent", "core/platform", "core/session", "core/ui_contract", "interfaces/shell"]\n',
         "docs/semantic-project-layout.md": "\n".join(ARCHITECTURE_CONTRACT_MARKERS),
+        "docs/windows-support-matrix.md": "platform implemented; upper layers not yet supported\n",
         "core/agent/Cargo.toml": '[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\n',
         "core/agent/src/lib.rs": "pub use timem_platform as os;\n",
         "core/session/Cargo.toml": '[package]\nname = "timem_session"\n[dependencies]\nagent_core = { path = "../agent" }\ntimem_ui_contract = { path = "../ui_contract" }\n',
         "core/session/module_boundary.md": "session boundary\n",
         "core/session/src/lib.rs": "pub struct CoreSessionWorker;\n",
         "core/session/tests/unit/session_worker_tests.rs": "#[test] fn worker() {}\n",
-        "core/platform/Cargo.toml": '[package]\nname = "timem_platform"\n',
+        "core/platform/Cargo.toml": '[package]\nname = "timem_platform"\n[target.\'cfg(windows)\'.dependencies]\nwindows-sys = "0.61"\n',
         "core/platform/module_boundary.md": "platform boundary\n",
-        "core/platform/src/lib.rs": 'mod api;\n#[cfg(target_os = "linux")]\nmod linux;\n#[cfg(target_os = "macos")]\nmod macos;\n#[cfg(unix)]\nmod shared;\n',
+        "core/platform/src/lib.rs": 'mod api;\n#[cfg(target_os = "linux")]\nmod linux;\n#[cfg(target_os = "macos")]\nmod macos;\n#[cfg(unix)]\nmod shared;\n#[cfg(windows)]\nmod windows;\n',
         "core/platform/src/api.rs": "pub fn api() {}\n",
         "core/platform/src/shared.rs": "pub fn shared() {}\n",
         "core/platform/src/macos.rs": "pub fn macos() {}\n",
         "core/platform/src/linux.rs": "pub fn linux() {}\n",
+        "core/platform/src/windows/command.rs": "pub fn command() {}\n",
+        "core/platform/src/windows/mod.rs": "mod command; mod process; mod system;\n",
+        "core/platform/src/windows/process.rs": "pub fn process() {}\n",
+        "core/platform/src/windows/system.rs": "pub fn system() {}\n",
         "core/platform/tests/unit/platform_tests.rs": "#[test] fn platform() {}\n",
         "core/ui_contract/Cargo.toml": '[package]\nname = "timem_ui_contract"\n',
         "core/ui_contract/module_boundary.md": "ui contract boundary\n",
@@ -265,6 +278,8 @@ def self_test() -> None:
         ("reverse dependency", lambda root: (root / "core/platform/Cargo.toml").write_text('[package]\nname = "timem_platform"\n[dependencies]\ntimem_shell = { path = "../../interfaces/shell" }\n')),
         ("UI contract reverse dependency", lambda root: (root / "core/ui_contract/Cargo.toml").write_text('[package]\nname = "timem_ui_contract"\n[dependencies]\nagent_core = { path = "../agent" }\n')),
         ("escaped process primitive", lambda root: (root / "core/agent/src/leak.rs").write_text("fn leak() { libc::waitpid(0, std::ptr::null_mut(), 0); }\n")),
+        ("missing Windows Platform backend", lambda root: (root / "core/platform/src/windows/system.rs").unlink()),
+        ("missing target-scoped Windows dependency", lambda root: (root / "core/platform/Cargo.toml").write_text('[package]\nname = "timem_platform"\n')),
         ("empty target placeholder", lambda root: (root / "bridges/ipc").mkdir(parents=True)),
         ("target contract drift", lambda root: (root / "docs/semantic-project-layout.md").write_text("incomplete target\n")),
     )

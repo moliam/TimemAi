@@ -1,4 +1,50 @@
+pub(super) fn local_time(secs: libc::time_t) -> Option<libc::tm> {
+    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
+    let ptr = unsafe { libc::localtime_r(&secs, tm.as_mut_ptr()) };
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { tm.assume_init() })
+    }
+}
+
+use std::io::Read;
 use std::process::{Command, ExitStatus};
+
+pub(super) fn configure_private_file_options(options: &mut std::fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.mode(0o600);
+}
+
+pub(super) fn open_diagnostic_file_lease(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
+            error
+        } else {
+            std::io::Error::new(error.kind(), format!("file_lease_lock_failed:{error}"))
+        });
+    }
+    Ok(file)
+}
+
+pub(super) fn fill_secure_random(bytes: &mut [u8]) -> std::io::Result<()> {
+    std::fs::File::open("/dev/urandom")?.read_exact(bytes)
+}
+
+pub(super) fn configure_sanitized_child_environment(command: &mut Command) {
+    command.env("TMPDIR", std::env::temp_dir());
+}
 
 pub(super) fn configure_child_process_group(command: &mut Command) {
     use std::os::unix::process::CommandExt;
