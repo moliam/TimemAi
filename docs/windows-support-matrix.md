@@ -3,6 +3,11 @@
 Windows support is introduced by layer. A lower layer compiling does not imply that an Interface,
 host, installer, or end-to-end product flow is supported.
 
+A `windows-latest` CI job now runs the PowerShell delivery contract, full Rust workspace
+checks/tests, Web tests/build, and release builds using the semantic `interfaces/web` layout. Until
+that job completes successfully on the branch, its presence is a validation gate, not native-success
+evidence.
+
 | Layer | Status | Executable evidence | Remaining gate |
 | --- | --- | --- | --- |
 | `core/platform` | Implemented, awaiting native revalidation | macOS `cargo test -p timem_platform`; `cargo check -p timem_platform --target x86_64-pc-windows-msvc` | Native Windows tests exercise process, filesystem lease, command, and launch policy behavior. |

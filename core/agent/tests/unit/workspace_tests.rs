@@ -14,26 +14,31 @@ fn tmp_workspace_path(name: &str) -> PathBuf {
 
 #[test]
 fn state_adds_sorts_and_deduplicates_workspace_dirs() {
-    let home = Path::new("/home/example");
-    let mut state = WorkspaceState::new(vec!["/z".to_string(), "/a".to_string(), "/z".to_string()]);
+    let home_buf = if cfg!(windows) {
+        PathBuf::from(r"C:\Users\example")
+    } else {
+        PathBuf::from("/home/example")
+    };
+    let home = home_buf.as_path();
+    let project = home.join("project").to_string_lossy().to_string();
+    let first = home.join("a").to_string_lossy().to_string();
+    let last = home.join("z").to_string_lossy().to_string();
+    let mut state = WorkspaceState::new(vec![last.clone(), first.clone(), last.clone()]);
 
-    assert_eq!(state.dirs(), &["/a".to_string(), "/z".to_string()]);
+    let mut initial_expected = vec![first.clone(), last.clone()];
+    initial_expected.sort();
+    assert_eq!(state.dirs(), initial_expected.as_slice());
     assert_eq!(
         state.add_dir("~/project", home),
-        WorkspaceChange::Added("/home/example/project".to_string())
+        WorkspaceChange::Added(project.clone())
     );
     assert_eq!(
         state.add_dir("~/project", home),
         WorkspaceChange::Unchanged(WorkspaceUnchangedReason::Duplicate)
     );
-    assert_eq!(
-        state.dirs(),
-        &[
-            "/a".to_string(),
-            "/home/example/project".to_string(),
-            "/z".to_string()
-        ]
-    );
+    let mut expected = vec![first, project, last];
+    expected.sort();
+    assert_eq!(state.dirs(), expected.as_slice());
 }
 
 #[test]
@@ -78,40 +83,42 @@ fn workspace_menu_report_is_ui_neutral_command_data() {
 #[test]
 fn workspace_command_report_adds_removes_and_persists_dirs() {
     let path = tmp_workspace_path("command_report");
-    let home_dir = PathBuf::from("/home/example");
+    let home_dir = if cfg!(windows) {
+        PathBuf::from(r"C:\Users\example")
+    } else {
+        PathBuf::from("/home/example")
+    };
+    let project = home_dir.join("project").to_string_lossy().to_string();
 
     let added = apply_workspace_command_to_path(
         &path,
         WorkspaceCommand::AddDir {
             value: "~/project".to_string(),
-            home_dir,
+            home_dir: home_dir.clone(),
         },
     );
     assert_eq!(
         added.outcome,
-        WorkspaceCommandOutcome::Added("/home/example/project".to_string())
+        WorkspaceCommandOutcome::Added(project.clone())
     );
     assert_eq!(
         added.message(),
         WorkspaceCommandMessage {
             kind: WorkspaceCommandMessageKind::Added,
             level: HostStatusLevel::Info,
-            subject: Some("/home/example/project".to_string()),
+            subject: Some(project.clone()),
             error: None,
         }
     );
-    assert_eq!(added.dirs, vec!["/home/example/project".to_string()]);
+    assert_eq!(added.dirs, vec![project.clone()]);
     assert!(added.changed);
-    assert_eq!(
-        load_workspace_dirs_from_path(&path),
-        vec!["/home/example/project".to_string()]
-    );
+    assert_eq!(load_workspace_dirs_from_path(&path), vec![project.clone()]);
 
     let duplicate = apply_workspace_command_to_path(
         &path,
         WorkspaceCommand::AddDir {
-            value: "/home/example/project".to_string(),
-            home_dir: PathBuf::from("/home/example"),
+            value: project.clone(),
+            home_dir: home_dir.clone(),
         },
     );
     assert_eq!(duplicate.outcome, WorkspaceCommandOutcome::Duplicate);
@@ -122,10 +129,7 @@ fn workspace_command_report_adds_removes_and_persists_dirs() {
     assert!(!duplicate.changed);
 
     let removed = apply_workspace_command_to_path(&path, WorkspaceCommand::RemoveIndex(0));
-    assert_eq!(
-        removed.outcome,
-        WorkspaceCommandOutcome::Removed("/home/example/project".to_string())
-    );
+    assert_eq!(removed.outcome, WorkspaceCommandOutcome::Removed(project));
     assert_eq!(removed.message().kind, WorkspaceCommandMessageKind::Removed);
     assert!(removed.dirs.is_empty());
     assert!(removed.changed);
