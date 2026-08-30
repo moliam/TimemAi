@@ -162,3 +162,158 @@ fn direct_turn_accepts_the_core_noop_ui_contract() {
     assert_eq!(outcome.text, "bridge complete");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[derive(Debug, PartialEq, Eq)]
+enum ProjectionSemantics {
+    Active {
+        session_id: String,
+        stop_requested: bool,
+        input_admission: String,
+        activity: String,
+    },
+    Finished {
+        session_id: String,
+        outcome: String,
+    },
+}
+
+fn stable_prompt_semantics(prompt: &str) -> String {
+    prompt
+        .lines()
+        .map(|line| {
+            if line.starts_with("[BEGIN DELTA delta_id:") {
+                "[BEGIN DELTA <runtime-generated>]".to_string()
+            } else if line.starts_with("[BEGIN TURN turn_id:") {
+                "[BEGIN TURN <runtime-generated>]".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn assert_single_turn_identity(projections: &[TurnProjection]) {
+    let mut identity: Option<(&str, &str, u64)> = None;
+    for projection in projections {
+        let token = match projection {
+            TurnProjection::Active(active) => &active.token,
+            TurnProjection::Finished(finished) => &finished.token,
+        };
+        let current = (
+            token.session_id.as_str(),
+            token.turn_id.as_str(),
+            token.epoch,
+        );
+        if let Some(expected) = identity {
+            assert_eq!(
+                current, expected,
+                "one call changed Turn identity mid-stream"
+            );
+        } else {
+            identity = Some(current);
+        }
+    }
+    assert!(identity.is_some(), "one call emitted no Turn projection");
+}
+
+fn projection_semantics(projections: &[TurnProjection]) -> Vec<ProjectionSemantics> {
+    projections
+        .iter()
+        .map(|projection| match projection {
+            TurnProjection::Active(active) => ProjectionSemantics::Active {
+                session_id: active.token.session_id.clone(),
+                stop_requested: active.stop_requested,
+                input_admission: format!("{:?}", active.input_admission),
+                activity: format!("{:?}", active.activity),
+            },
+            TurnProjection::Finished(finished) => ProjectionSemantics::Finished {
+                session_id: finished.token.session_id.clone(),
+                outcome: format!("{:?}", finished.outcome),
+            },
+        })
+        .collect()
+}
+
+#[test]
+fn in_process_bridge_is_semantically_equivalent_to_direct_core_call() {
+    let root = temp_dir("equivalence");
+    let mut direct_core = agent_core::AgentCore::new(
+        "STATIC {{ response_protocol }} {{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &root,
+    );
+    let mut bridge_core = agent_core::AgentCore::new(
+        "STATIC {{ response_protocol }} {{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &root,
+    );
+    let mut direct_config = config();
+    let mut bridge_config = config();
+    let mut direct_model = FinalAnswerModel {
+        prompts: Vec::new(),
+    };
+    let mut bridge_model = FinalAnswerModel {
+        prompts: Vec::new(),
+    };
+    let mut direct_ui = RecordingUi::default();
+    let mut bridge_ui = RecordingUi::default();
+
+    let direct_outcome = agent_core::run_session_turn_with_model_client(
+        &mut direct_core,
+        &mut direct_config,
+        TurnInput {
+            input: "equivalent task",
+            session: "session_equivalence",
+            audit_file: &root.join("direct-audit.json"),
+            runtime: "test-interface",
+            run_bash_target: "test-host",
+            additional_context: Some("same context"),
+        },
+        &mut direct_ui,
+        None,
+        &mut direct_model,
+    );
+    let bridge_outcome = timem_in_process::run_turn_with_model_client(
+        &mut bridge_core,
+        &mut bridge_config,
+        TurnInput {
+            input: "equivalent task",
+            session: "session_equivalence",
+            audit_file: &root.join("bridge-audit.json"),
+            runtime: "test-interface",
+            run_bash_target: "test-host",
+            additional_context: Some("same context"),
+        },
+        &mut bridge_ui,
+        None,
+        &mut bridge_model,
+    );
+
+    assert_eq!(bridge_model.prompts.len(), direct_model.prompts.len());
+    for (bridge_prompt, direct_prompt) in bridge_model.prompts.iter().zip(&direct_model.prompts) {
+        assert_eq!(
+            stable_prompt_semantics(bridge_prompt),
+            stable_prompt_semantics(direct_prompt)
+        );
+    }
+    assert_eq!(bridge_outcome.text, direct_outcome.text);
+    assert_eq!(bridge_outcome.stats, direct_outcome.stats);
+    assert_eq!(bridge_outcome.latest_usage, direct_outcome.latest_usage);
+    assert_eq!(bridge_outcome.repair_issue, direct_outcome.repair_issue);
+    assert_eq!(bridge_outcome.stop_reason, direct_outcome.stop_reason);
+    assert_eq!(bridge_ui.model_responses, direct_ui.model_responses);
+    assert_eq!(bridge_ui.topic_names, direct_ui.topic_names);
+    assert_single_turn_identity(&direct_ui.projections);
+    assert_single_turn_identity(&bridge_ui.projections);
+    assert_eq!(
+        projection_semantics(&bridge_ui.projections),
+        projection_semantics(&direct_ui.projections)
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
