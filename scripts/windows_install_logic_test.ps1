@@ -14,7 +14,7 @@ try {
     if (Get-ChildItem (Split-Path $destination -Parent) -Filter '*.tmp.*') { throw 'atomic copy left temporary files' }
 
     $shim = Join-Path $temp 'nested\timem-web.cmd'
-    Write-TextAtomically $shim "@echo off`r`n`\"%~dp0timem.exe`\" %*`r`nexit /b %ERRORLEVEL%`r`n"
+    Write-TextAtomically $shim "@echo off`r`n`"%~dp0timem.exe`" %*`r`nexit /b %ERRORLEVEL%`r`n"
     $shimText = [IO.File]::ReadAllText($shim)
     if (-not $shimText.Contains('"%~dp0timem.exe" %*')) { throw 'compatibility shim must forward every argument to timem.exe' }
 
