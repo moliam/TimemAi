@@ -691,34 +691,13 @@ impl WorkspaceInstanceLock {
         fs::create_dir_all(&guard_dir)
             .map_err(|error| format!("workspace_instance_lock_dir_failed:{error}"))?;
         let path = Self::lock_path(&memory_dir);
-        let mut options = OpenOptions::new();
-        options.create(true).read(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            options.share_mode(0);
-        }
-        let mut file = options
-            .open(&path)
-            .map_err(|error| format!("workspace_instance_lock_open_failed:{error}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if result != 0 {
-                let error = std::io::Error::last_os_error();
-                return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
-                    "workspace_already_in_use".to_string()
-                } else {
-                    format!("workspace_instance_lock_failed:{error}")
-                });
+        let mut file = os::open_diagnostic_file_lease(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                "workspace_already_in_use".to_string()
+            } else {
+                format!("workspace_instance_lock_open_failed:{error}")
             }
-        }
+        })?;
         let owner = WorkspaceInstanceOwner {
             schema_version: 1,
             pid: std::process::id(),

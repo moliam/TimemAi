@@ -39,12 +39,7 @@ pub fn format_runtime_time_context(parts: LocalTimeParts) -> String {
 
 pub fn local_time_parts() -> Option<LocalTimeParts> {
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as libc::time_t;
-    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
-    let ptr = unsafe { libc::localtime_r(&secs, tm.as_mut_ptr()) };
-    if ptr.is_null() {
-        return None;
-    }
-    let tm = unsafe { tm.assume_init() };
+    let tm = crate::os::local_time(secs)?;
     Some(LocalTimeParts {
         year: tm.tm_year + 1900,
         month: tm.tm_mon + 1,

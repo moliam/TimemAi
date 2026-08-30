@@ -59,7 +59,8 @@ impl RuntimeDataLayout {
 }
 
 pub fn default_memory_dir() -> Result<PathBuf, String> {
-    default_memory_dir_from_home(std::env::var_os("HOME").as_deref())
+    let home = crate::os::user_home_dir();
+    default_memory_dir_from_home(home.as_deref().map(Path::as_os_str))
 }
 
 fn default_memory_dir_from_home(home: Option<&std::ffi::OsStr>) -> Result<PathBuf, String> {

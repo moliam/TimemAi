@@ -6,7 +6,8 @@ host, installer, or end-to-end product flow is supported.
 | Layer | Status | Executable evidence | Remaining gate |
 | --- | --- | --- | --- |
 | `core/platform` | Implemented, awaiting native revalidation | macOS `cargo test -p timem_platform`; `cargo check -p timem_platform --target x86_64-pc-windows-msvc` | Native Windows tests exercise process, filesystem lease, command, and launch policy behavior. |
-| `core/agent` local execution and storage | Not yet adapted | None in this slice | Agent tests compile and pass on Windows with native command, storage, and job semantics. |
+| `core/agent` storage and time primitives | Adapted, awaiting native revalidation | macOS `cargo test -p agent_core`; Platform-backed lease, private-file, home, and local-time APIs | Agent storage tests compile and pass natively on Windows. |
+| `core/agent` local execution and jobs | Not yet adapted | None in this slice | Agent command, capability, tool self-test, and background-job tests compile and pass natively on Windows. |
 | `bridges/in_process` | Platform-neutral contract exists | Existing Bridge tests on supported development hosts | Revalidated as part of a Windows Shell test run. |
 | `interfaces/shell` | Not yet supported on Windows | None in this slice | Windows console/input adapter and Shell tests pass natively. |
 | `timem_web` / HTTP host | Not yet supported on Windows | None in this slice | Windows lifecycle adapter, Web tests, and HTTP smoke pass natively. |

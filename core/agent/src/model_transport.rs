@@ -174,16 +174,7 @@ impl CurlConfigFile {
             ));
             let mut options = OpenOptions::new();
             options.create_new(true).write(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::fs::OpenOptionsExt;
-                options.share_mode(0);
-            }
+            crate::os::configure_private_file_options(&mut options);
             match options.open(&path) {
                 Ok(mut file) => {
                     if let Err(error) = file.write_all(contents.as_bytes()) {
