@@ -2305,14 +2305,15 @@ async fn browser_command_queue_is_bounded_under_click_flood() {
 
 #[test]
 fn web_absolute_mem_layout_uses_the_selected_directory_directly() {
-    let data_dir = PathBuf::from("/tmp/timem-config");
-    let memory_dir = PathBuf::from("/tmp/timem selected mem");
+    let root = std::env::temp_dir().join(unique_web_id("absolute_mem_layout"));
+    let data_dir = root.join("timem-config");
+    let memory_dir = root.join("timem selected mem");
     let layout = web_layout_for_space(&data_dir, memory_dir.to_str().unwrap());
 
     assert_eq!(layout.memory_dir(), memory_dir);
     assert_eq!(
         layout.api_audit_file(),
-        PathBuf::from("/tmp/timem selected mem/audit/api_audit.json")
+        memory_dir.join("audit").join("api_audit.json")
     );
 }
 
@@ -5722,7 +5723,9 @@ fn snapshot_reports_the_active_mem_space_and_paths() {
     assert_eq!(snapshot.server.mem.space, ".test_mem");
     assert!(snapshot.server.mem.data_dir.contains("timem_web_data_test"));
     assert!(snapshot.server.mem.space_dir.ends_with(".test_mem"));
-    assert!(snapshot.server.mem.memory_dir.ends_with(".test_mem/memory"));
+    assert!(
+        Path::new(&snapshot.server.mem.memory_dir).ends_with(Path::new(".test_mem").join("memory"))
+    );
     assert_eq!(snapshot.server.mem.temporary_retention_days, Some(5));
     assert_eq!(
         snapshot.server.mem.temporary_capacity_bytes,

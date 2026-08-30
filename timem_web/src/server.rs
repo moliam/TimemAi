@@ -60,7 +60,7 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     ffi::OsString,
-    io::{IsTerminal, Read, Write},
+    io::{IsTerminal, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
     process::Command,
@@ -2300,7 +2300,9 @@ impl ClientCommand {
 pub(crate) enum WebExitReason {
     HelpRequested,
     CtrlC,
+    #[cfg(unix)]
     Sigterm,
+    #[cfg(unix)]
     Sighup,
     ParentProcessExited,
     ServerCompleted,
@@ -2311,7 +2313,9 @@ impl WebExitReason {
         match self {
             Self::HelpRequested => "help_requested",
             Self::CtrlC => "ctrl_c",
+            #[cfg(unix)]
             Self::Sigterm => "sigterm",
+            #[cfg(unix)]
             Self::Sighup => "sighup",
             Self::ParentProcessExited => "parent_process_exited",
             Self::ServerCompleted => "server_completed",
@@ -2520,7 +2524,9 @@ pub async fn run_from_env(diagnostics: &LifecycleDiagnostics) -> Result<WebExitR
 fn shutdown_trigger_exit_reason(trigger: crate::os::ShutdownTrigger) -> WebExitReason {
     match trigger {
         crate::os::ShutdownTrigger::CtrlC => WebExitReason::CtrlC,
+        #[cfg(unix)]
         crate::os::ShutdownTrigger::Sigterm => WebExitReason::Sigterm,
+        #[cfg(unix)]
         crate::os::ShutdownTrigger::Sighup => WebExitReason::Sighup,
         crate::os::ShutdownTrigger::ParentProcessExited => WebExitReason::ParentProcessExited,
     }
@@ -2546,7 +2552,7 @@ fn web_shutdown_signal_names() -> &'static [&'static str] {
     crate::os::shutdown_signal_names()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn launch_parent_has_exited(initial_parent_pid: u32, current_parent_pid: u32) -> bool {
     crate::os::launch_parent_has_exited(initial_parent_pid, current_parent_pid)
 }
@@ -6200,9 +6206,9 @@ fn write_new_private_synced_file(path: &Path, body: &[u8], label: &str) -> Resul
         .map_err(|error| format!("{label}_write_failed:{error}"))
 }
 
-fn sync_state_parent_directory(path: &Path) -> Result<(), String> {
+fn sync_state_parent_directory(_path: &Path) -> Result<(), String> {
     #[cfg(unix)]
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = _path.parent() {
         std::fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|error| format!("recoverable_state_dir_sync_failed:{error}"))?;
@@ -11933,8 +11939,7 @@ const ACCESS_TOKEN_BYTES: usize = 8;
 
 fn generate_token() -> Result<String, String> {
     let mut bytes = [0_u8; ACCESS_TOKEN_BYTES];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut bytes))
+    agent_core::os::fill_secure_random(&mut bytes)
         .map_err(|error| format!("secure_access_token_generation_failed:{error}"))?;
     let mut token = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -11971,7 +11976,7 @@ fn highlighted_browser_url(browser_url: &str, use_color: bool) -> String {
 }
 
 fn print_help() {
-    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default ~/.timem/mem\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
+    println!("Timem Web\n\nUsage: timem-web [options]\n\nOptions:\n  --port <n>                   web port in {PORT_START}..={PORT_END}; default MEM prefers {DEFAULT_MEM_PREFERRED_PORT}\n  --public                     bind to 0.0.0.0; browser/API/WebSocket/upload require the access token\n  --public-host <host>         advertised browser host; env TIMEM_PUBLIC_HOST; auto-detected when omitted\n  --no-open                    do not open the browser automatically\n  --space <absolute-path>      MEM directory; default under the user home\n  --api-protocol <protocol>    model API wire protocol\n  --response-protocol <name>   model response protocol\n  --model <name>               model\n  --api-key <key>              API key (environment is safer)\n  --base-url <url>             model API base URL\n  --timeout <seconds>          model connect/inactivity timeout\n  --max-llm-input <n>          input context limit\n  --max-llm-output <n>         output limit\n  --bash-approval <mode>       ask|approve\n  --work-instructions <mode>   silent|ask|off\n");
 }
 
 fn public_access_url(configured_host: Option<&str>, port: u16, token: &str) -> Option<String> {

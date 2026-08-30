@@ -21,12 +21,20 @@ fi
 
 python3 - <<'PY_BOUNDARY'
 from pathlib import Path
-checks = [(
-    Path("timem_web/src"),
-    {Path("timem_web/src/os/unix.rs")},
-    ("libc::getppid", "tokio::signal::unix", "SignalKind::interrupt", "SignalKind::terminate", "SignalKind::hangup"),
-    "Web parent-process and shutdown-signal primitives belong in timem_web/src/os/unix.rs",
-)]
+checks = [
+    (
+        Path("timem_web/src"),
+        {Path("timem_web/src/os/unix.rs")},
+        ("libc::getppid", "tokio::signal::unix", "SignalKind::interrupt", "SignalKind::terminate", "SignalKind::hangup"),
+        "Web Unix parent-process and shutdown-signal primitives belong in timem_web/src/os/unix.rs",
+    ),
+    (
+        Path("timem_web/src"),
+        {Path("timem_web/src/os/windows/lifecycle.rs")},
+        ("agent_core::os::current_parent_pid", "agent_core::os::process_is_alive"),
+        "Web Windows launcher-process primitives belong in timem_web/src/os/windows/lifecycle.rs",
+    ),
+]
 violations = []
 for root, allowed, needles, message in checks:
     for path in root.rglob("*.rs"):
@@ -97,6 +105,10 @@ if ! grep -nF 'agent_core = { path = "../core/agent" }' timem_web/Cargo.toml >/d
   echo "error: timem_web must depend on Agent and Session through their crate boundaries" >&2
   exit 1
 fi
+
+for web_os_file in timem_web/src/os/mod.rs timem_web/src/os/unix.rs timem_web/src/os/windows/mod.rs timem_web/src/os/windows/lifecycle.rs; do
+  test -f "$web_os_file" || { echo "error: missing Web OS adapter: $web_os_file" >&2; exit 1; }
+done
 
 for boundary in bridges/in_process/module_boundary.md core/agent/module_boundary.md core/session/module_boundary.md core/platform/module_boundary.md core/ui_contract/module_boundary.md interfaces/shell/module_boundary.md interfaces/web/module_boundary.md timem_web/module_boundary.md; do
   test -f "$boundary" || { echo "error: missing module boundary: $boundary" >&2; exit 1; }

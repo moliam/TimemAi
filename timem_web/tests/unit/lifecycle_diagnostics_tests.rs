@@ -21,9 +21,10 @@ fn arguments_record_only_option_names_and_resolve_mem_root() {
         sanitized_option_names(&args),
         vec!["--api-key", "--base-url", "--debug"]
     );
+    let memory_root = temp_data_root("arguments-mem");
     assert_eq!(
-        memory_root_from_args(&["--space=/tmp/timem-mem".into()]).unwrap(),
-        PathBuf::from("/tmp/timem-mem")
+        memory_root_from_args(&[format!("--space={}", memory_root.display())]).unwrap(),
+        memory_root
     );
     assert!(memory_root_from_args(&["--data-dir=/tmp/removed".into()])
         .unwrap_err()
