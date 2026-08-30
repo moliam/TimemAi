@@ -1,5 +1,7 @@
 use super::*;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 #[test]
