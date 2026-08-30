@@ -3438,28 +3438,44 @@ function TimemApp() {
           tabIndex={-1}
         >
           {leftSidebarCollapsed && (
-            <button
-              type="button"
-              className="collapsed-brand brand-logo-toggle brand-logo-restore"
-              title="Show session navigation"
-              aria-label="Show session navigation"
-              onClick={() =>
-                setSidebarLayout((current) => ({
-                  ...current,
-                  leftCollapsed: false,
-                }))
-              }
-            >
-              <img src="/timem_logo.png" alt="" className="brand-logo" />
-              <span
-                className="brand-scale-corner top-left"
-                aria-hidden="true"
-              />
-              <span
-                className="brand-scale-corner bottom-right"
-                aria-hidden="true"
-              />
-            </button>
+            <>
+              <button
+                type="button"
+                className="collapsed-brand brand-logo-toggle brand-logo-restore"
+                title="Show session navigation"
+                aria-label="Show session navigation"
+                onClick={() =>
+                  setSidebarLayout((current) => ({
+                    ...current,
+                    leftCollapsed: false,
+                  }))
+                }
+              >
+                <img src="/timem_logo.png" alt="" className="brand-logo" />
+                <span
+                  className="brand-scale-corner top-left"
+                  aria-hidden="true"
+                />
+                <span
+                  className="brand-scale-corner bottom-right"
+                  aria-hidden="true"
+                />
+              </button>
+              <button
+                type="button"
+                className="collapsed-session-card"
+                title={activeSession?.display_name ?? "No session"}
+                aria-label={`Current session: ${activeSession?.display_name ?? "No session"}. Show session navigation`}
+                onClick={() =>
+                  setSidebarLayout((current) => ({
+                    ...current,
+                    leftCollapsed: false,
+                  }))
+                }
+              >
+                <span>{activeSession?.display_name ?? "No session"}</span>
+              </button>
+            </>
           )}
           {!leftSidebarCollapsed && (
             <button
@@ -4295,9 +4311,6 @@ function TimemApp() {
               </button>
             </div>
             <div className="header-session-cluster">
-              <strong title={activeSession?.display_name ?? "No session"}>
-                {activeSession?.display_name ?? "No session"}
-              </strong>
               <div className="header-model-guide-anchor">
                 <button
                   type="button"
@@ -11156,12 +11169,11 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
         aria-label={summaryLabel}
         title={open ? "收起工具活动" : "展开工具活动"}
       >
-        <span
-          className="tool-activity-group-icon tool-command-symbol"
+        <ChevronRight
+          className="tool-activity-group-icon tool-activity-chevron"
+          size={14}
           aria-hidden="true"
-        >
-          &gt;_
-        </span>
+        />
         <span className="tool-activity-group-status">{groupStatusLabel}</span>
         <span className="tool-activity-group-counts" aria-hidden="true">
           {summary.counts.map(({ name, count }, index) => (
@@ -11172,7 +11184,6 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
             </span>
           ))}
         </span>
-        <ChevronRight className="tool-activity-chevron" size={14} />
       </summary>
       <div className="tool-activity-group-body">
         {summary.activities.map((activity, index) => (
@@ -11228,12 +11239,20 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;
   const summaryContent = (
     <>
-      <span
-        className={`tool-activity-icon ${pollingActivity ? "poll-activity-icon" : "tool-command-symbol"}`}
-        aria-hidden="true"
-      >
-        {pollingActivity ? <Clock3 size={13} /> : ">_"}
-      </span>
+      {hasExpandableDetail ? (
+        <ChevronRight
+          className="tool-activity-icon tool-activity-chevron"
+          size={14}
+          aria-hidden="true"
+        />
+      ) : (
+        <span
+          className={`tool-activity-icon ${pollingActivity ? "poll-activity-icon" : "tool-command-symbol"}`}
+          aria-hidden="true"
+        >
+          {pollingActivity ? <Clock3 size={13} /> : ">_"}
+        </span>
+      )}
       <b>{toolName}</b>
       <span className="tool-activity-meta">
         <span className="tool-activity-status">{statusLabel}</span>
@@ -11278,7 +11297,6 @@ function ToolActivity({ activity }: { activity: Activity }) {
         aria-label={summaryLabel}
       >
         {summaryContent}
-        <ChevronRight className="tool-activity-chevron" size={14} />
       </summary>
       <div className="tool-activity-body">
         {detail && (
