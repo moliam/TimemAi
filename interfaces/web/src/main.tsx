@@ -7573,7 +7573,7 @@ function TimemThread({
   const showStopAction =
     composerPrimaryAction(interactionPhase, draft) === "stop";
   const sendLabel =
-    activeSession?.state === "working" ? "Queue message" : "Send message";
+    activeSession?.state === "working" ? "Queue next task" : "Send message";
   const lockedControlHint = sessionInteractionLocked
     ? sessionInteractionLockReason
     : "";
@@ -7589,7 +7589,7 @@ function TimemThread({
     (uploadingAttachment
       ? `${uploadingAttachmentText} · send is paused until it finishes`
       : activeSession?.state === "working"
-        ? "Enter to queue · use 立即 to send during this turn"
+        ? "Enter to queue safely in Timem · use 立即 to supplement this turn"
         : "Enter to send · Shift+Enter for newline");
   const attachTitle =
     missingSessionHint ||
@@ -8883,7 +8883,7 @@ function TimemThread({
                   <small title={queuedMessagesPause?.reason}>
                     {queuedMessagesPause
                       ? `自动发送已停止${queuedMessagesPause.reason ? `：${queuedMessagesPause.reason}` : ""}`
-                      : "上一条正常完成后自动发送"}
+                      : "正在迁移到 Timem 运行时队列"}
                   </small>
                 )}
                 <div className="queued-message-header-actions">

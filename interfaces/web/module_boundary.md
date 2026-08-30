@@ -35,7 +35,10 @@ It may contain:
   These presentation optimizations must not drop or reorder semantic events.
 - A durable browser command outbox for non-idempotent mutations. The UI assigns
   one stable `command_id`, keeps user content until the matching committed
-  acknowledgement, and retries the same ID after reconnect. Accepted commands
+  acknowledgement, and retries the same ID after reconnect. Ordinary Send while
+  a Turn is active must be submitted to the Host immediately as a distinct next
+  task; browser lifecycle, visibility, and completion callbacks must not own its
+  execution. Accepted commands
   remain owned and cannot be silently replaced by editing, deleting, reordering,
   switching Session, or another tab. The UI may render Pod-projected input as
   waiting for the next Turn, but it must not decide this from whether a final

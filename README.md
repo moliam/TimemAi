@@ -196,7 +196,10 @@ Common controls:
 - `Ctrl+D` or `/exit`: exit the shell.
 
 While the model is working, type another question and press Enter to queue it as
-a separate next turn. The current final answer stays visible before the queued turn starts.
+a separate next turn. Timem Host accepts and durably orders each queued task immediately,
+so the queue continues while the browser is locked, disconnected, or closed as long as the
+same Timem runtime process remains alive. The current final answer stays visible before the
+next queued turn starts.
 
 ## Timem Web Details
 

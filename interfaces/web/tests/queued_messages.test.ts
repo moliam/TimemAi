@@ -10,7 +10,7 @@ attachmentIds: index === 0 ? ["upload-a"] : [], }));
 describe("queued messages", () => {
   it("direct-sends from ready, stopped, or error without backlog or pause", () => {
     expect(shouldDirectManualMessage("ready", 0, false)).toBe(true);
-    expect(shouldDirectManualMessage("working", 0, false)).toBe(false);
+    expect(shouldDirectManualMessage("working", 0, false)).toBe(true);
     expect(shouldDirectManualMessage("error", 0, false)).toBe(true);
     expect(shouldDirectManualMessage("stopped", 0, false)).toBe(true);
     expect(shouldDirectManualMessage("ready", 1, false)).toBe(false);
@@ -18,9 +18,9 @@ describe("queued messages", () => {
     expect(shouldDirectManualMessage("ready", 0, false, true)).toBe(true);
   });
 
-  it("requires a new ready-state decision after a direct submission is occupied", () => {
+  it("hands a working-session message directly to Host ownership", () => {
     expect(shouldDirectManualMessage("ready", 0, false)).toBe(true);
-    expect(shouldDirectManualMessage("working", 0, false)).toBe(false);
+    expect(shouldDirectManualMessage("working", 0, false)).toBe(true);
   });
 
   it("changes automatic sending only from an explicit user switch action", () => {
@@ -280,18 +280,24 @@ describe("queued messages", () => {
     expect(reorderQueuedMessages(original, "c", "a", claims, "session_a")).toEqual(original);
   });
 
-  it("does not dispatch from ready state without a successful completion grant", () => {
+  it("hands every unpaused legacy row to Host without waiting for browser lifecycle grants", () => {
     const queues = {
-      session_a: [{ id: "a1", text: "A next", createdAtMs: 1 }],
+      session_a: [
+        { id: "a1", text: "A next", createdAtMs: 1 },
+        { id: "a2", text: "A after that", createdAtMs: 2 },
+      ],
     };
     expect(selectQueuedDispatches(
-      [{ session_id: "session_a", state: "ready" }],
+      [{ session_id: "session_a", state: "working" }],
       queues,
-      new Set(),
-    )).toEqual([]);
+      new Set(["session_a"]),
+    )).toEqual([
+      { sessionId: "session_a", message: queues.session_a[0] },
+      { sessionId: "session_a", message: queues.session_a[1] },
+    ]);
   });
 
-  it("routes background auto-dispatch by owning session rather than active UI session", () => {
+  it("routes legacy migration by owning session and skips editing, paused, or rejected rows", () => {
     const sessions = [
       { session_id: "session_a", state: "ready" },
       { session_id: "session_b", state: "working" },
@@ -308,78 +314,35 @@ describe("queued messages", () => {
       new Set(),
       "session_b",
       new Set(),
-      new Set(["session_a"]),
     )).toEqual([
       { sessionId: "session_a", message: queues.session_a[0] },
     ]);
-  });
-
-  it("holds the second message across committed ack until authoritative lifecycle unlocks its session", () => {
-    const queues = { session_a: [{ id: "a2", text: "second", createdAtMs: 2 }] };
-    const dispatching = new Set(["session_a"]);
-    expect(selectQueuedDispatches([{ session_id: "session_a", state: "ready" }], queues, dispatching)).toEqual([]);
-    expect(selectQueuedDispatches([{ session_id: "session_a", state: "working" }], queues, new Set())).toEqual([]);
     expect(selectQueuedDispatches(
-      [{ session_id: "session_a", state: "ready" }],
+      sessions,
       queues,
       new Set(),
       undefined,
-      new Set(),
       new Set(["session_a"]),
     )).toEqual([
-      { sessionId: "session_a", message: queues.session_a[0] },
+      { sessionId: "session_b", message: queues.session_b[0] },
     ]);
   });
 
-  it("keeps simultaneous session dispatch locks independent under interleaved lifecycle and rejection", () => {
+  it("keeps simultaneous session migration independent of runtime working state", () => {
     const queues = {
       session_a: [{ id: "a1", text: "A next", createdAtMs: 1 }],
       session_b: [{ id: "b1", text: "B next", createdAtMs: 2 }],
       session_c: [{ id: "c-retry", text: "C retry", createdAtMs: 3, deliveryError: "busy" }],
     };
-    const dispatching = new Set<string>();
-    let sessions = [
+    const sessions = [
       { session_id: "session_a", state: "working" },
       { session_id: "session_b", state: "working" },
       { session_id: "session_c", state: "ready" },
     ];
-    expect(selectQueuedDispatches(sessions, queues, dispatching)).toEqual([]);
-
-    // A finishes while B is still working. Neither B nor C's rejected item can
-    // prevent A from becoming independently dispatchable.
-    sessions = sessions.map((session) => session.session_id === "session_a" ? { ...session, state: "ready" } : session);
-    expect(selectQueuedDispatches(
-      sessions,
-      queues,
-      dispatching,
-      undefined,
-      new Set(),
-      new Set(["session_a"]),
-    )).toEqual([
+    expect(selectQueuedDispatches(sessions, queues, new Set())).toEqual([
       { sessionId: "session_a", message: queues.session_a[0] },
-    ]);
-    dispatching.add("session_a");
-
-    // B finishing remains independently dispatchable while A awaits its
-    // authoritative working transition/terminal lifecycle event.
-    sessions = sessions.map((session) => session.session_id === "session_b" ? { ...session, state: "ready" } : session);
-    expect(selectQueuedDispatches(
-      sessions,
-      queues,
-      dispatching,
-      undefined,
-      new Set(),
-      new Set(["session_b"]),
-    )).toEqual([
       { sessionId: "session_b", message: queues.session_b[0] },
     ]);
-    dispatching.add("session_b");
-
-    // An authoritative working transition releases only A's transient lock.
-    sessions = sessions.map((session) => session.session_id === "session_a" ? { ...session, state: "working" } : session);
-    dispatching.delete("session_a");
-    expect(dispatching).toEqual(new Set(["session_b"]));
-    expect(selectQueuedDispatches(sessions, queues, dispatching)).toEqual([]);
   });
 
  it("persists and clears pauses independently for each session without changing queued messages", () => {

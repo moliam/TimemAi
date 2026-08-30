@@ -4619,7 +4619,7 @@ fn handle_command_with_id(
                 let text = nonempty_text(text, "turn text")?;
                 let worker_roles =
                     resolve_worker_roles(state, &session_id, &role_ids, role_id.as_deref())?;
-                let stopping = {
+                let must_queue = {
                     let sessions = state
                         .sessions
                         .lock()
@@ -4627,9 +4627,9 @@ fn handle_command_with_id(
                     let session = sessions
                         .get(&session_id)
                         .ok_or_else(|| "session_not_found".to_string())?;
-                    session.cancelling_turn_id.is_some() && current_turn_id(session).is_some()
+                    current_turn_id(session).is_some() || !session.next_turn_intents.is_empty()
                 };
-                if stopping {
+                if must_queue {
                     let command_id = command_id
                         .ok_or_else(|| "next_turn_intent_command_id_required".to_string())?;
                     enqueue_next_turn_intent(
@@ -6903,8 +6903,8 @@ fn enqueue_next_turn_intent(
         let session = sessions
             .get_mut(session_id)
             .ok_or_else(|| "session_not_found".to_string())?;
-        if session.cancelling_turn_id.is_none() || current_turn_id(session).is_none() {
-            return Err("next_turn_intent_requires_stopping_turn".to_string());
+        if current_turn_id(session).is_none() && session.next_turn_intents.is_empty() {
+            return Err("next_turn_intent_requires_active_or_queued_turn".to_string());
         }
         previous_session = session.clone();
         let attachments = take_pending_attachments_for_ids(session, attachment_ids)?;
@@ -7017,6 +7017,10 @@ fn enqueue_next_turn_intent(
             turn: turn.clone(),
         },
     );
+    // A command may arrive after the previous Turn's terminal facts but before
+    // the browser observes them. Preserve FIFO by queueing behind older intents,
+    // then immediately retry the authoritative Host dispatch barrier.
+    dispatch_next_turn_intent_if_ready(state, session_id);
     Ok(turn)
 }
 

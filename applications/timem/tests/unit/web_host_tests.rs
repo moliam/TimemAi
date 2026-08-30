@@ -8655,6 +8655,186 @@ fn stop_then_immediate_submit_is_visible_once_and_runs_after_the_cancelled_turn(
 }
 
 #[test]
+fn multiple_host_owned_tasks_continue_without_browser_completion_callbacks() {
+    let state = routing_test_state();
+    let session_id = "session_a";
+    let calls = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(AtomicUsize::new(0));
+    let context_id = "host_fifo_context".to_string();
+    let worker_dir = std::env::temp_dir().join(unique_web_id("host_fifo_worker"));
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &worker_dir,
+    );
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            state.template.settings.lock().unwrap().config.clone(),
+            CoreSessionWorkerWorkspace::new(
+                &worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id,
+            context_id.clone(),
+            Some("Primary".to_string()),
+            None,
+            CancelThenFinishModel {
+                calls: Arc::clone(&calls),
+                entered: Arc::clone(&entered),
+                final_text: "QUEUED_TASK_FINISHED",
+            },
+        )
+        .unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(session_id).unwrap();
+        session.contexts = vec![WebContext {
+            context_id: context_id.clone(),
+            current_dir: worker_dir.display().to_string(),
+            worker_ids: vec![worker_id.clone()],
+        }];
+        session.workers = vec![WebWorker {
+            worker_id: worker_id.clone(),
+            context_id: context_id.clone(),
+            display_name: "Primary".to_string(),
+            ordinal: 0,
+            state: "ready".to_string(),
+            parent_worker_id: None,
+        }];
+        session.active_context_id = context_id;
+        session.primary_worker_id = worker_id;
+        session.current_dir = worker_dir.display().to_string();
+    }
+
+    handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("fifo-q1"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.to_string(),
+            text: "Q1 blocks until Stop".to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+    let started = Instant::now();
+    while entered.load(Ordering::SeqCst) == 0 {
+        for (event_session_id, event_context_id, event_worker_id, event) in
+            drain_worker_events(&state)
+        {
+            handle_scoped_worker_event(
+                &state,
+                &event_session_id,
+                &event_context_id,
+                &event_worker_id,
+                event,
+            );
+        }
+        assert!(started.elapsed() < Duration::from_secs(3));
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    for (command_id, text) in [("fifo-q2", "Q2"), ("fifo-q3", "Q3"), ("fifo-q4", "Q4")] {
+        handle_command_with_id(
+            &state,
+            TEST_PORT,
+            Some(command_id),
+            ClientCommand::TurnSubmit {
+                session_id: session_id.to_string(),
+                text: text.to_string(),
+                attachment_ids: None,
+                input_kind: None,
+                source_turn_id: None,
+                role_id: None,
+                role_ids: Vec::new(),
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        state.sessions.lock().unwrap()[session_id]
+            .next_turn_intents
+            .len(),
+        3
+    );
+
+    handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("fifo-stop-q1"),
+        ClientCommand::TurnCancel {
+            session_id: session_id.to_string(),
+            target_command_id: Some("fifo-q1".to_string()),
+        },
+    )
+    .unwrap();
+
+    // From here onward no browser event or completion callback is simulated.
+    // Only authoritative worker events are fed back into Host.
+    let finished = Instant::now();
+    loop {
+        for (event_session_id, event_context_id, event_worker_id, event) in
+            drain_worker_events(&state)
+        {
+            handle_scoped_worker_event(
+                &state,
+                &event_session_id,
+                &event_context_id,
+                &event_worker_id,
+                event,
+            );
+        }
+        let complete = {
+            let sessions = state.sessions.lock().unwrap();
+            let session = &sessions[session_id];
+            calls.load(Ordering::SeqCst) == 4
+                && session.next_turn_intents.is_empty()
+                && session
+                    .turns
+                    .iter()
+                    .filter(|turn| {
+                        turn.user_entries.iter().any(|entry| {
+                            matches!(
+                                entry.command_id.as_deref(),
+                                Some("fifo-q2" | "fifo-q3" | "fifo-q4")
+                            )
+                        })
+                    })
+                    .all(|turn| turn.state == "finished")
+        };
+        if complete {
+            break;
+        }
+        assert!(finished.elapsed() < Duration::from_secs(8));
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert!(load_next_turn_intents(&state, session_id)
+        .unwrap()
+        .is_empty());
+
+    let manager = {
+        let mut guard = state.manager.lock().unwrap();
+        std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
+    };
+    manager.shutdown_all().unwrap();
+    let _ = std::fs::remove_dir_all(worker_dir);
+}
+
+#[test]
 fn cancel_stops_all_session_workers_and_next_turn_runs_only_primary() {
     let state = routing_test_state();
     let session_id = "session_a";
@@ -10255,17 +10435,136 @@ fn duplicate_cancel_commands_are_idempotent_for_one_active_turn() {
 }
 
 #[test]
-fn turn_submit_during_an_active_turn_cannot_merge_into_the_current_turn() {
+fn repeated_turn_submit_during_an_active_turn_is_host_owned_fifo() {
     let state = routing_test_state();
     let session_id = register_real_worker(&state, "QUEUED_NEXT_TURN");
     let first = start_web_turn(&state, &session_id, "Q1").unwrap();
 
-    let error = handle_command(
+    for (command_id, text) in [
+        ("queued-q2", "Q2"),
+        ("queued-q3", "Q3"),
+        ("queued-q4", "Q4"),
+    ] {
+        let event = handle_command_with_id(
+            &state,
+            TEST_PORT,
+            Some(command_id),
+            ClientCommand::TurnSubmit {
+                session_id: session_id.clone(),
+                text: text.to_string(),
+                input_kind: None,
+                source_turn_id: None,
+                attachment_ids: None,
+                role_id: None,
+                role_ids: Vec::new(),
+            },
+        )
+        .unwrap()
+        .expect("active-turn submission must be visible immediately");
+        let WireEvent::TurnUpdated { turn, .. } = event else {
+            panic!("active-turn submission must return its pending turn")
+        };
+        assert_eq!(turn.state, "pending");
+        assert_eq!(turn.user_entries[0].text, text);
+        assert_eq!(turn.user_entries[0].command_id.as_deref(), Some(command_id));
+    }
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(session.turns[0].turn_id, first.turn_id);
+    assert_eq!(session.turns.len(), 4);
+    assert_eq!(
+        session
+            .next_turn_intents
+            .snapshot()
+            .items
+            .iter()
+            .map(|intent| (intent.command_id.as_str(), intent.payload.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("queued-q2", "Q2"),
+            ("queued-q3", "Q3"),
+            ("queued-q4", "Q4")
+        ],
+    );
+}
+
+#[test]
+fn stop_preserves_multiple_host_owned_next_tasks_in_fifo_order() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "STOP_PRESERVES_FIFO");
+    let active = start_web_turn(&state, &session_id, "Q1").unwrap();
+
+    for (command_id, text) in [("queued-q2", "Q2"), ("queued-q3", "Q3")] {
+        handle_command_with_id(
+            &state,
+            TEST_PORT,
+            Some(command_id),
+            ClientCommand::TurnSubmit {
+                session_id: session_id.clone(),
+                text: text.to_string(),
+                input_kind: None,
+                source_turn_id: None,
+                attachment_ids: None,
+                role_id: None,
+                role_ids: Vec::new(),
+            },
+        )
+        .unwrap();
+    }
+
+    handle_command_with_id(
         &state,
         TEST_PORT,
+        Some("stop-q1"),
+        ClientCommand::TurnCancel {
+            session_id: session_id.clone(),
+            target_command_id: None,
+        },
+    )
+    .unwrap();
+
+    let sessions = state.sessions.lock().unwrap();
+    let session = &sessions[&session_id];
+    assert_eq!(
+        session.cancelling_turn_id.as_deref(),
+        Some(active.turn_id.as_str())
+    );
+    assert_eq!(
+        session
+            .next_turn_intents
+            .snapshot()
+            .items
+            .iter()
+            .map(|intent| (intent.command_id.as_str(), intent.payload.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("queued-q2", "Q2"), ("queued-q3", "Q3")],
+    );
+}
+
+#[test]
+fn send_after_stop_with_an_empty_queue_becomes_one_distinct_next_task() {
+    let state = routing_test_state();
+    let session_id = register_real_worker(&state, "STOP_THEN_SEND_EMPTY_QUEUE");
+    let active = start_web_turn(&state, &session_id, "Q1").unwrap();
+
+    handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("stop-q1"),
+        ClientCommand::TurnCancel {
+            session_id: session_id.clone(),
+            target_command_id: None,
+        },
+    )
+    .unwrap();
+    let event = handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("after-stop-q2"),
         ClientCommand::TurnSubmit {
             session_id: session_id.clone(),
-            text: "Q2".to_string(),
+            text: "Q2 after stop".to_string(),
             input_kind: None,
             source_turn_id: None,
             attachment_ids: None,
@@ -10273,15 +10572,23 @@ fn turn_submit_during_an_active_turn_cannot_merge_into_the_current_turn() {
             role_ids: Vec::new(),
         },
     )
-    .unwrap_err();
+    .unwrap()
+    .expect("send after Stop must be recorded as a distinct pending Turn");
+    let WireEvent::TurnUpdated { turn, .. } = event else {
+        panic!("send after Stop must return the pending Turn")
+    };
 
-    assert_eq!(error, "turn_already_active_use_supplement");
+    assert_ne!(turn.turn_id, active.turn_id);
+    assert_eq!(turn.state, "pending");
+    assert_eq!(turn.user_entries[0].text, "Q2 after stop");
     let sessions = state.sessions.lock().unwrap();
     let session = &sessions[&session_id];
-    assert_eq!(session.turns.len(), 1);
-    assert_eq!(session.turns[0].turn_id, first.turn_id);
+    assert_eq!(session.next_turn_intents.len(), 1);
+    assert_eq!(
+        session.next_turn_intents.front().unwrap().command_id,
+        "after-stop-q2"
+    );
     assert_eq!(session.turns[0].user_entries.len(), 1);
-    assert_eq!(session.turns[0].user_entries[0].text, "Q1");
 }
 
 #[test]

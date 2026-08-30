@@ -79,8 +79,12 @@ and the terminal command record.
 
 ## UI outbox cases
 
-- Automatic queued dispatch must claim a message without removing it.  Only a
-  matching `committed(command_id)` removes it.
+- Ordinary next-task Send must enter the durable browser command outbox and be
+  offered to Host immediately, even while another Turn is active. Once Host
+  acknowledges ownership, browser visibility, lock, disconnect, refresh, or
+  window close cannot gate execution in the same live runtime.
+- Legacy browser-queued rows must be claimed without removal and handed to Host
+  in FIFO order. Only a matching `committed(command_id)` removes each row.
 - `accepted` leaves the row visible as sending; reconnect does not release it
   into a second distinct command ID.
 - `rejected` and connection loss leave text, attachments, editing state, and

@@ -213,15 +213,16 @@ export function reservedQueuedAttachmentIds(messages: readonly QueuedMessage[]) 
 }
 
 export function shouldDirectManualMessage(
- sessionState: string,
+ _sessionState: string,
  queuedMessageCount: number,
  paused: boolean,
  _cancelling = false,
 ) {
- // Stop is a visual hand-off, not a browser queue state. The Host accepts the
- // next turn immediately and privately holds Core dispatch behind its terminal
- // barrier while the cancelled execution finishes cleaning up.
- return (sessionState === "ready" || sessionState === "stopped" || sessionState === "error") && queuedMessageCount === 0 && !paused;
+ // Normal sends belong to the Host immediately, including while a Turn is
+ // active. Only an explicit user pause or a legacy browser backlog keeps a new
+ // item browser-local long enough to preserve editable FIFO order during
+ // migration.
+ return queuedMessageCount === 0 && !paused;
 }
 
 export type QueuedMessageClaims = Set<string>;
@@ -313,22 +314,22 @@ export function applyQueuedMessagesAck(
 export function selectQueuedDispatches(
   sessions: readonly { session_id: string; state: string; cancelling_turn_id?: string | null }[],
   queues: Readonly<Record<string, readonly QueuedMessage[]>>,
-  dispatchingSessionIds: ReadonlySet<string>,
+  _dispatchingSessionIds: ReadonlySet<string>,
   editingSessionId?: string,
   pausedSessionIds: ReadonlySet<string> = new Set(),
-  autoContinueSessionIds: ReadonlySet<string> = new Set(),
+  _autoContinueSessionIds: ReadonlySet<string> = new Set(),
 ) {
+  // Legacy browser queues are migration state, not execution ownership. Hand
+  // every unpaused row to the Host immediately; stable command IDs and claims
+  // keep reconnect/re-render retries idempotent while Host preserves FIFO.
   return sessions.flatMap((session) => {
     if (
-      session.state === "working"
-      || !!session.cancelling_turn_id
-      || dispatchingSessionIds.has(session.session_id)
-      || editingSessionId === session.session_id
+      editingSessionId === session.session_id
       || pausedSessionIds.has(session.session_id)
-      || !autoContinueSessionIds.has(session.session_id)
     ) return [];
-    const message = queues[session.session_id]?.[0];
-    return message && !message.deliveryError ? [{ sessionId: session.session_id, message }] : [];
+    return (queues[session.session_id] ?? [])
+      .filter((message) => !message.deliveryError)
+      .map((message) => ({ sessionId: session.session_id, message }));
   });
 }
 
