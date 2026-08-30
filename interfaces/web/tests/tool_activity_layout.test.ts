@@ -12,9 +12,13 @@ describe("tool activity row layout", () => {
     );
   });
 
-  it("keeps the command beside metadata and reserves the final column for the chevron", () => {
+  it("uses the leading icon as the expand control without a redundant trailing chevron", () => {
+    expect(source).toContain('className="tool-activity-icon tool-activity-chevron"');
+    expect(source).toContain('className="tool-activity-group-icon tool-activity-chevron"');
+    expect(source).not.toContain('<ChevronRight className="tool-activity-chevron" size={14} />');
     expect(styles).toContain(".tool-activity-command { min-width: 0; grid-column: 4; justify-self: start;");
-    expect(styles).toContain(".tool-activity-chevron { grid-column: 5; justify-self: end;");
+    expect(styles).toContain("grid-template-columns: 16px max-content max-content minmax(0, 1fr);");
+    expect(styles).not.toContain("grid-template-columns: 16px max-content max-content minmax(0, 1fr) 14px;");
   });
   it("keeps the top-level background status before the shrinkable tool counts", () => {
     expect(source).toContain('toolActivityGroupStatusLabel(summary)');
@@ -23,7 +27,7 @@ describe("tool activity row layout", () => {
       /className="tool-activity-group-status"[\s\S]*className="tool-activity-group-counts"/,
     );
     expect(styles).toContain(
-      "grid-template-columns: 16px max-content minmax(0, 1fr) 14px",
+      "grid-template-columns: 16px max-content minmax(0, 1fr)",
     );
     expect(styles).toContain(
       ".tool-activity-group-counts { min-width: 0;",
