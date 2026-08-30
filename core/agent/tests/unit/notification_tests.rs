@@ -128,7 +128,9 @@ fn run_bash_notifications_publish_effective_wait_budgets() {
     let suite = ResponseProtocolKind::Json.suite();
     let envelope = suite.parse(
         r#"{"working_still_action":[{"run_bash":{"cmd":"sleep 10"}},{"run_bash":{"loop_cmd":"test -f done","interval_ms":1000}},{"run_bash":{"cmd":"long-task","background":true}}]}"#,
-        &crate::capability::CapabilityRegistry::builtin(),
+        &crate::capability::CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::with_local_command_execution(),
+        ),
     );
     let events = notifications_from_envelope(&envelope);
     let bash_kinds = events

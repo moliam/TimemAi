@@ -22,19 +22,29 @@ fn parse_confirmed_final(content: &str) -> ParsedEnvelope {
 }
 
 fn extract_response_examples(text: &str) -> Vec<String> {
+    let normalized = text.replace("\r\n", "\n");
     let mut examples = Vec::new();
     let mut cursor = 0usize;
-    while let Some(start_rel) = text[cursor..].find("\n<ASSISTANT>\n") {
+    while let Some(start_rel) = normalized[cursor..].find("\n<ASSISTANT>\n") {
         let start = cursor + start_rel + 1;
         let search_from = start + "<ASSISTANT>".len();
-        let Some(end_rel) = text[search_from..].find("</ASSISTANT>") else {
+        let Some(end_rel) = normalized[search_from..].find("</ASSISTANT>") else {
             break;
         };
         let end = search_from + end_rel + "</ASSISTANT>".len();
-        examples.push(text[start..end].to_string());
+        examples.push(normalized[start..end].to_string());
         cursor = end;
     }
     examples
+}
+
+#[test]
+fn documented_xml_response_example_extraction_accepts_crlf() {
+    let crlf = XML_RESPONSE_PROTOCOL_SECTION.replace("\n", "\r\n");
+    assert_eq!(
+        extract_response_examples(&crlf),
+        extract_response_examples(XML_RESPONSE_PROTOCOL_SECTION)
+    );
 }
 
 #[test]
