@@ -885,6 +885,7 @@ button:disabled { cursor: not-allowed; }
 .tool-activity b { color: #b8b8b8; font-size: 12px; font-weight: 550; }
 .tool-activity-meta { min-width: 0; display: inline-flex; align-items: baseline; gap: 6px; white-space: nowrap; }
 .tool-activity-status { color: #747474; font-size: 10px; }
+.tool-activity-countdown { color: #b9a06f; font-size: 10px; font-variant-numeric: tabular-nums; }
 .tool-activity.running .tool-activity-status { color: #a89878; }
 .tool-activity.poll-activity summary,
 .tool-activity.poll-activity.tool-activity-static { grid-template-rows: auto auto; }
@@ -1612,7 +1613,7 @@ body {
 
 .turn-work-content { min-height: 100%; }
 .tool-activity-group { margin: 3px 0; color: #aaa; font-size: 10px; }
-.tool-activity-group > summary { min-width: 0; min-height: 28px; display: grid; grid-template-columns: 16px minmax(0, 1fr) max-content 14px; align-items: center; gap: 6px; padding: 2px 6px; border-radius: 7px; list-style: none; cursor: pointer; }
+.tool-activity-group > summary { min-width: 0; min-height: 28px; display: grid; grid-template-columns: 16px max-content minmax(0, 1fr) 14px; align-items: center; gap: 6px; padding: 2px 6px; border-radius: 7px; list-style: none; cursor: pointer; }
 .tool-activity-group > summary::-webkit-details-marker { display: none; }
 .tool-activity-group > summary:hover { background: #ffffff08; }
 .tool-activity-group > summary:focus { outline: none; }

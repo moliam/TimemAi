@@ -163,6 +163,13 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   as internal action failures, and audited as `internal_error`. A tool that can
   cause a native in-process fault must use process isolation rather than relying
   on panic recovery.
+- Foreground `run_bash` action timing and lifecycle topics. Core publishes the
+  effective wait budgets used by execution, including defaults when the model
+  omits `timeout_ms`, `loop_timeout_ms`, or `once_timeout_ms`. The action
+  lifecycle uses `event: "start"` for proposal/approval visibility,
+  `event: "execution_start"` when foreground execution handling begins, and
+  the terminal finish event for settlement. Hosts must start countdown UI from
+  `execution_start`, not from proposal or approval time.
 - Long foreground command lifecycle for positive model-provided `timeout_ms`:
   core owns process waiting, long-running decision requests, timeout transition
   into the session running-pid set, action result shaping, and user-supplement

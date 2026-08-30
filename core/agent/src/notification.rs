@@ -132,13 +132,15 @@ fn action_kind(action: &ParsedAction) -> CoreActionKind {
                     "normal".to_string()
                 },
                 interval_ms,
-                timeout_ms: if interval_ms.is_some() {
+                timeout_ms: if interval_ms.is_some() || action.background() {
                     None
                 } else {
-                    action.input_i64("timeout_ms")
+                    Some(action.timeout_ms_i64(5000))
                 },
-                loop_timeout_ms: interval_ms.and_then(|_| action.input_i64("loop_timeout_ms")),
-                once_timeout_ms: interval_ms.and_then(|_| action.input_u64("once_timeout_ms")),
+                loop_timeout_ms: interval_ms
+                    .map(|_| action.input_i64("loop_timeout_ms").unwrap_or(600_000)),
+                once_timeout_ms: interval_ms
+                    .map(|_| action.input_u64("once_timeout_ms").unwrap_or(5000)),
             }
         }
         "memmgr" => CoreActionKind::Memory {
