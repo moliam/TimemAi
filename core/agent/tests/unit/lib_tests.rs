@@ -178,7 +178,8 @@ fn native_final_keeps_structured_tool_history_before_final_replay() {
     assert_eq!(next_request.native_exchanges.len(), 1);
     assert_eq!(next_request.native_exchanges[0].delta_id, "pd_1");
     assert!(!next_prompt.contains("Tool calls:"));
-    assert!(!next_prompt.to_ascii_lowercase().contains("native"));
+    assert!(!next_prompt.contains("I will inspect it."));
+    assert!(!next_prompt.contains("call_read"));
     assert_eq!(next_prompt.matches("PROJECT-EVIDENCE-42").count(), 1);
     assert!(
         next_prompt
