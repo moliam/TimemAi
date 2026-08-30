@@ -165,13 +165,18 @@ fn execute_path_action(core: &AgentCore) -> String {
         .api_audit_file
         .parent()
         .unwrap_or(&core.self_tool.paths.space_dir);
+    let api_audit_stream = crate::api_audit_stream_path(&core.self_tool.paths.api_audit_file);
+    let api_audit_segments_dir = crate::rolling_file_store::segmented_directory(&api_audit_stream);
+    let action_audit_stream = &core.self_tool.paths.action_audit_file;
+    let action_audit_segments_dir =
+        crate::rolling_file_store::segmented_directory(action_audit_stream);
     let workspace_config_file = crate::workspace_config_file(data_root);
     let sessions_dir = core.self_tool.paths.memory_dir.join("sessions");
     let session_index_file = sessions_dir.join("index.jsonl");
     let tool_repo_dir = core.tool_repo().root();
     let capabilities_dir = env_path_param(&core.self_tool.env, "TIMEM_CAPABILITIES_DIR");
     format!(
-        "cwd: {}\nprocess_cwd: {}\nexecutable: {}\nconfig_root: {}\nreminder_tips_file: {}\ncapabilities_dir: {}\ndata_root: {}\nworkspace_config_file: {}\nspace_dir: {}\nmemory_dir: {}\nmemory_file: {}\nscratch_file: {}\nsessions_dir: {}\nsession_index_file: {}\ntool_repo_dir: {}\naudit_dir: {}\napi_audit_file: {}\naction_audit_file: {}",
+        "cwd: {}\nprocess_cwd: {}\nexecutable: {}\nconfig_root: {}\nreminder_tips_file: {}\ncapabilities_dir: {}\ndata_root: {}\nworkspace_config_file: {}\nspace_dir: {}\nmemory_dir: {}\nmemory_file: {}\nscratch_file: {}\nsessions_dir: {}\nsession_index_file: {}\ntool_repo_dir: {}\naudit_dir: {}\napi_audit_logical_stream: {}\napi_audit_segments_dir: {}\naction_audit_logical_stream: {}\naction_audit_segments_dir: {}\naudit_storage_note: Logical stream paths identify the current audit stores. Records are physically stored in the corresponding segments directories; use the audit aggregation API or search those directories for complete history.",
         core.current_prompt_cwd().display(),
         core.self_tool.process.current_dir.display(),
         core.self_tool.process.executable.display(),
@@ -188,8 +193,10 @@ fn execute_path_action(core: &AgentCore) -> String {
         session_index_file.display(),
         tool_repo_dir.display(),
         audit_dir.display(),
-        core.self_tool.paths.api_audit_file.display(),
-        core.self_tool.paths.action_audit_file.display(),
+        api_audit_stream.display(),
+        api_audit_segments_dir.display(),
+        action_audit_stream.display(),
+        action_audit_segments_dir.display(),
     )
 }
 

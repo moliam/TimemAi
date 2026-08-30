@@ -1,5 +1,5 @@
 use super::*;
-use crate::{read_audit_doc, LocalLLMKeyFile};
+use crate::{api_audit_stream_path, read_api_audit_doc, LocalLLMKeyFile};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
@@ -474,7 +474,7 @@ fn explicit_cache_schema_rejection_retries_once_without_cache_control() {
     assert!(requests[0].contains(r#""cache_control""#));
     assert!(!requests[1].contains(r#""cache_control""#));
 
-    let audit = read_audit_doc(&audit_file).unwrap();
+    let audit = read_api_audit_doc(&api_audit_stream_path(&audit_file)).unwrap();
     let request_events = audit["events"]
         .as_array()
         .unwrap()
@@ -545,7 +545,7 @@ fn unrelated_client_error_does_not_retry_without_cache_control() {
     let request = server.join().unwrap();
     assert!(request.contains(r#""cache_control""#));
 
-    let audit = read_audit_doc(&audit_file).unwrap();
+    let audit = read_api_audit_doc(&api_audit_stream_path(&audit_file)).unwrap();
     let request_count = audit["events"]
         .as_array()
         .unwrap()

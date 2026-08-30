@@ -619,19 +619,38 @@ fn empty_repair_output_doc() -> Value {
     })
 }
 
-pub fn read_audit_doc(path: &Path) -> std::io::Result<Value> {
-    let mut doc = read_audit_doc_single(path)?;
-    let sidecar = audit_sidecar_path(path);
-    if sidecar != path {
-        let sidecar_doc = read_audit_doc_single(&sidecar)?;
-        if let (Some(base), Some(extra)) = (
-            doc["events"].as_array_mut(),
-            sidecar_doc["events"].as_array(),
-        ) {
-            base.extend(extra.iter().cloned());
-        }
+/// Returns the current append-only API-audit logical stream derived from the
+/// legacy JSON base path.
+pub fn api_audit_stream_path(legacy_base: &Path) -> std::path::PathBuf {
+    let Some(file_name) = legacy_base.file_name().and_then(|name| name.to_str()) else {
+        return legacy_base.with_extension("jsonl");
+    };
+    legacy_base.with_file_name(format!("{file_name}l"))
+}
+
+/// Reads the complete API audit using the current logical stream as the primary
+/// input and merging records retained in the legacy JSON base.
+pub fn read_api_audit_doc(stream: &Path) -> std::io::Result<Value> {
+    let legacy_base = api_audit_legacy_base_path(stream);
+    let mut doc = read_audit_doc_single(&legacy_base)?;
+    let stream_doc = read_audit_doc_single(stream)?;
+    if let (Some(base), Some(extra)) = (
+        doc["events"].as_array_mut(),
+        stream_doc["events"].as_array(),
+    ) {
+        base.extend(extra.iter().cloned());
     }
     Ok(doc)
+}
+
+fn api_audit_legacy_base_path(stream: &Path) -> std::path::PathBuf {
+    let Some(file_name) = stream.file_name().and_then(|name| name.to_str()) else {
+        return stream.with_extension("json");
+    };
+    match file_name.strip_suffix(".jsonl") {
+        Some(stem) => stream.with_file_name(format!("{stem}.json")),
+        None => stream.with_extension("json"),
+    }
 }
 
 fn read_audit_doc_single(path: &Path) -> std::io::Result<Value> {
@@ -695,10 +714,7 @@ pub fn api_audit_maintenance_hint_path(path: &Path) -> std::path::PathBuf {
 }
 
 fn audit_sidecar_path(path: &Path) -> std::path::PathBuf {
-    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-        return path.with_extension("jsonl");
-    };
-    path.with_file_name(format!("{file_name}l"))
+    api_audit_stream_path(path)
 }
 
 fn empty_audit_doc() -> Value {
