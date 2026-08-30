@@ -6,7 +6,7 @@ binary="${1:-$ROOT_DIR/target/release/timem}"
 
 if [ ! -x "$binary" ]; then
   echo "missing executable: $binary" >&2
-  echo "run: cargo build --locked -p timem_web --release" >&2
+  echo "run: cargo build --locked --release --bin timem" >&2
   exit 1
 fi
 for command in curl node; do

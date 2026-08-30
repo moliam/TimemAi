@@ -42,7 +42,7 @@ ci_required=(
   "pnpm --dir interfaces/web test"
   "pnpm --dir interfaces/web build"
   "pnpm --dir interfaces/web test:browser"
-  "cargo build --locked -p timem_web --release"
+  "cargo build --locked --release --bin timem"
   "scripts/edge_regression.sh"
   "scripts/real_tty_smoke.expect"
   "scripts/real_tty_supplement_smoke.expect"
@@ -75,7 +75,7 @@ windows_ci_required=(
   "pnpm --dir interfaces/web test"
   "pnpm --dir interfaces/web build"
   "git diff --exit-code -- interfaces/web/dist"
-  "cargo build --locked -p timem_web --release"
+  "cargo build --locked --release --bin timem"
 )
 for pattern in "${windows_ci_required[@]}"; do
   if ! search_fixed "$pattern" .github/workflows/ci.yml; then
@@ -103,7 +103,7 @@ runtime_io_guard_required=(
   "mem_temporary_items_list"
 )
 for pattern in "${runtime_io_guard_required[@]}"; do
-  if ! search_fixed "$pattern" scripts/runtime_io_guard.py scripts/real_tty_stress.expect timem_web/src/server.rs interfaces/web/src/main.tsx; then
+  if ! search_fixed "$pattern" scripts/runtime_io_guard.py scripts/real_tty_stress.expect applications/timem/src/server.rs interfaces/web/src/main.tsx; then
     echo "missing Timem runtime I/O guard contract: $pattern" >&2
     exit 1
   fi

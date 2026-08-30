@@ -2808,7 +2808,7 @@ async fn reuses_the_same_authenticated_url_after_closing_and_reopening_a_page() 
 // provided by scripts/web_runtime_lifecycle_smoke.sh in the production CI gate.
 #[test]
 fn restarts_timem_web_after_runtime_shutdown_with_the_same_data_and_port() {
-    let smoke = include_str!("../../../scripts/web_runtime_lifecycle_smoke.sh");
+    let smoke = include_str!("../../../../scripts/web_runtime_lifecycle_smoke.sh");
     assert!(smoke.contains("--port \"$first_port\""));
     assert!(smoke.contains("--space \"$test_root/lifecycle-mem\""));
     assert!(smoke.contains("kill -TERM"));
@@ -5938,7 +5938,10 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
         record,
         ChatHistoryRecord::Event { content, .. } if content == "recent temporary action result"
     )));
-    let audit = agent_core::read_audit_doc(&layout.api_audit_file()).unwrap();
+    let audit = agent_core::read_api_audit_doc(&agent_core::api_audit_stream_path(
+        &layout.api_audit_file(),
+    ))
+    .unwrap();
     assert_eq!(audit["events"].as_array().unwrap().len(), 1);
     assert_eq!(audit["events"][0]["type"], "recent");
     assert_eq!(

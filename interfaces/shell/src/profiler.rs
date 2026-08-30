@@ -1,4 +1,4 @@
-use agent_core::RuntimeProfileReport;
+use timem_in_process::agent_api::RuntimeProfileReport;
 
 const ANSI_BOLD: &str = "\x1b[1m";
 const ANSI_RESET: &str = "\x1b[0m";

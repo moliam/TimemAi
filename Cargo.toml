@@ -1,5 +1,5 @@
 [workspace]
-members = ["bridges/in_process", "core/agent", "core/platform", "core/session", "core/ui_contract", "bridges/http_websocket", "interfaces/shell", "timem_web"]
+members = ["bridges/in_process", "core/agent", "core/platform", "core/session", "core/ui_contract", "bridges/http_websocket", "interfaces/shell", "applications/timem"]
 resolver = "2"
 
 [workspace.package]

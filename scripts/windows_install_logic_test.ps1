@@ -38,7 +38,7 @@ try {
     $uninstallText = [IO.File]::ReadAllText((Join-Path $root 'uninstall.ps1'))
     foreach ($required in @(
         "Invoke-Cargo @('fetch', '--locked')",
-        "Invoke-Cargo @('build', '--locked', '-p', 'timem_web', '--release')",
+        "Invoke-Cargo @('build', '--locked', '--release', '--bin', 'timem')",
         "target\release\timem.exe",
         'Install-CommandArtifacts $timem $InstallDir',
         "Write-TextAtomically (Join-Path `$Directory 'timem-web.cmd')",

@@ -87,13 +87,13 @@ pub mod turn_state;
 pub mod work_instructions;
 pub mod workspace;
 pub use audit::{
-    api_audit_maintenance_hint_path, append_audit_event, append_repair_output_event,
-    configure_audit_storage, host_start_audit_event, max_llm_output_increased_audit_event,
-    model_input_overflow_recovery_audit_event, model_repair_output_event,
-    model_repair_request_audit_event, model_retry_audit_event, prune_api_audit_before,
-    read_audit_doc, round_limit_audit_event, stale_context_choice_audit_event,
-    turn_error_audit_event, turn_final_audit_event, turn_start_audit_event,
-    user_approval_audit_event, user_supplement_audit_event,
+    api_audit_maintenance_hint_path, api_audit_stream_path, append_audit_event,
+    append_repair_output_event, configure_audit_storage, host_start_audit_event,
+    max_llm_output_increased_audit_event, model_input_overflow_recovery_audit_event,
+    model_repair_output_event, model_repair_request_audit_event, model_retry_audit_event,
+    prune_api_audit_before, read_api_audit_doc, round_limit_audit_event,
+    stale_context_choice_audit_event, turn_error_audit_event, turn_final_audit_event,
+    turn_start_audit_event, user_approval_audit_event, user_supplement_audit_event,
 };
 pub use config_edit::{
     apply_runtime_config_value, bash_approval_mode_from_sources, capabilities_dir_from_sources,
@@ -3910,6 +3910,24 @@ impl AgentCore {
             );
         }
         let action_cpu_start = thread_cpu_time();
+        let approved_action = ParsedAction {
+            action: pending.request.action.clone(),
+            name: pending.action_name.clone(),
+            call_id: pending.action_call_id.clone(),
+            raw_input: pending.approved_action.audit_input(
+                &pending.request.approval_id,
+                &pending.request.risk,
+                &pending.request.reason,
+            ),
+        };
+        if approved
+            && matches!(
+                pending.approved_action,
+                PendingApprovedAction::RunBash { .. }
+            )
+        {
+            self.emit_action_execution_start_topic(&approved_action, runtime);
+        }
         let outcome = if approved {
             match &pending.approved_action {
                 PendingApprovedAction::RunBash {
@@ -3954,16 +3972,7 @@ impl AgentCore {
         };
         self.record_pending_approval_audit(&pending, approved, &outcome.text);
         self.emit_action_finish_topic(
-            &ParsedAction {
-                action: pending.request.action.clone(),
-                name: pending.action_name.clone(),
-                call_id: pending.action_call_id.clone(),
-                raw_input: pending.approved_action.audit_input(
-                    &pending.request.approval_id,
-                    &pending.request.risk,
-                    &pending.request.reason,
-                ),
-            },
+            &approved_action,
             &outcome,
             match &pending.approved_action {
                 PendingApprovedAction::RunBash { .. } => None,
@@ -4021,6 +4030,17 @@ impl AgentCore {
 
         let mut approved_bash_handles = Vec::new();
         for (idx, pending) in approved {
+            let action = ParsedAction {
+                action: pending.request.action.clone(),
+                name: pending.action_name.clone(),
+                call_id: pending.action_call_id.clone(),
+                raw_input: pending.approved_action.audit_input(
+                    &pending.request.approval_id,
+                    &pending.request.risk,
+                    &pending.request.reason,
+                ),
+            };
+            self.emit_action_execution_start_topic(&action, runtime);
             approved_bash_handles.push(self.spawn_approved_parallel_bash_action(
                 idx,
                 pending,
@@ -5404,6 +5424,7 @@ Runtime tool_call ids:",
         let cancel_requested = Arc::new(AtomicBool::new(false));
         for (idx, action) in actions.iter().cloned().enumerate() {
             if self.can_spawn_parallel_bash_action(&action) {
+                self.emit_action_execution_start_topic(&action, runtime);
                 handles.push(self.spawn_parallel_bash_action(
                     idx,
                     action,
@@ -5548,6 +5569,9 @@ Runtime tool_call ids:",
         };
 
         self.current_stats.tool_calls += 1;
+        if action.action == "run_bash" && self.bash_approval_mode == BashApprovalMode::Approve {
+            self.emit_action_execution_start_topic(&action, runtime);
+        }
         let execution = match tool_registry::execute_builtin_tool(
             self,
             dispatch_name,
@@ -5605,6 +5629,20 @@ Runtime tool_call ids:",
                 ActionExecution::NeedsApproval(pending)
             }
         }
+    }
+
+    fn emit_action_execution_start_topic(
+        &self,
+        action: &ParsedAction,
+        runtime: &mut dyn ActionRuntime,
+    ) {
+        let notification = notification::notification_from_action(action);
+        let mut event = host::notification_topic_event(&self.current_session_id(), &notification);
+        event.topic.attributes["event"] = json!("execution_start");
+        event.payload["event"] = json!("execution_start");
+        event.payload["active"] = json!(true);
+        event.payload["status"] = json!("running");
+        runtime.on_core_topic_events(&[event]);
     }
 
     fn emit_action_finish_topic(

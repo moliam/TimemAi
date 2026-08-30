@@ -1,6 +1,6 @@
-# web_ui Module Boundary
+# Web Interface Boundary
 
-`web_ui` is Timem's browser UI shell. It uses assistant-ui primitives for the
+`interfaces/web` is Timem's browser Interface. It uses assistant-ui primitives for the
 conversation surface and renders HTTP/WebSocket Bridge projections. It is
 one presentation implementation of the same UI-neutral Core Turn semantics used
 by Shell, iOS, desktop, and future clients; browser framework choices must not
@@ -26,7 +26,7 @@ It may contain:
 - Bounded client history and revision-aware projection storage for WebSocket
   data, plus progressive DOM mounting and UI-owned scroll anchoring for long
   conversations. Agent lifecycle state is rendered from the authoritative Host
-  projection supplied by `timem_web` Pod, whose lifecycle fields come directly
+  projection supplied by the Web Pod assembled in `applications/timem`, whose lifecycle fields come directly
   from Core. Browser reducers must not infer Session/Turn working,
   input-admission, cancellation, or terminal state from core topics, worker
   activity, command ACK order, or visible final-answer timing.

@@ -169,7 +169,7 @@ build_release_binary() {
     echo "error: embedded Timem Web assets are missing from this source package." >&2
     exit 1
   fi
-  if ! cargo build --locked -p timem_web --release; then
+  if ! cargo build --locked --release --bin timem; then
     echo "error: release build failed." >&2
     echo "If this is a fresh machine, rerun ./install.sh after confirming Rust and system build dependencies installed successfully." >&2
     exit 1

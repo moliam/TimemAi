@@ -3438,28 +3438,44 @@ function TimemApp() {
           tabIndex={-1}
         >
           {leftSidebarCollapsed && (
-            <button
-              type="button"
-              className="collapsed-brand brand-logo-toggle brand-logo-restore"
-              title="Show session navigation"
-              aria-label="Show session navigation"
-              onClick={() =>
-                setSidebarLayout((current) => ({
-                  ...current,
-                  leftCollapsed: false,
-                }))
-              }
-            >
-              <img src="/timem_logo.png" alt="" className="brand-logo" />
-              <span
-                className="brand-scale-corner top-left"
-                aria-hidden="true"
-              />
-              <span
-                className="brand-scale-corner bottom-right"
-                aria-hidden="true"
-              />
-            </button>
+            <>
+              <button
+                type="button"
+                className="collapsed-brand brand-logo-toggle brand-logo-restore"
+                title="Show session navigation"
+                aria-label="Show session navigation"
+                onClick={() =>
+                  setSidebarLayout((current) => ({
+                    ...current,
+                    leftCollapsed: false,
+                  }))
+                }
+              >
+                <img src="/timem_logo.png" alt="" className="brand-logo" />
+                <span
+                  className="brand-scale-corner top-left"
+                  aria-hidden="true"
+                />
+                <span
+                  className="brand-scale-corner bottom-right"
+                  aria-hidden="true"
+                />
+              </button>
+              <button
+                type="button"
+                className="collapsed-session-card"
+                title={activeSession?.display_name ?? "No session"}
+                aria-label={`Current session: ${activeSession?.display_name ?? "No session"}. Show session navigation`}
+                onClick={() =>
+                  setSidebarLayout((current) => ({
+                    ...current,
+                    leftCollapsed: false,
+                  }))
+                }
+              >
+                <span>{activeSession?.display_name ?? "No session"}</span>
+              </button>
+            </>
           )}
           {!leftSidebarCollapsed && (
             <button
@@ -4295,9 +4311,6 @@ function TimemApp() {
               </button>
             </div>
             <div className="header-session-cluster">
-              <strong title={activeSession?.display_name ?? "No session"}>
-                {activeSession?.display_name ?? "No session"}
-              </strong>
               <div className="header-model-guide-anchor">
                 <button
                   type="button"
@@ -8101,7 +8114,12 @@ function TimemThread({
     if (!viewport || !activeSessionId) return;
     const position = sessionScrollPositionsRef.current.get(activeSessionId);
     followThreadLatest.current = position?.followLatest ?? true;
-    restoredSessionIdRef.current = activeSessionId;
+    // Only a Session that already has a Turn needs the next turn-id effect to
+    // treat this render as restoration. Leaving this marker on an empty Session
+    // would incorrectly suppress its first real Turn's start scroll.
+    restoredSessionIdRef.current = latestTurn?.turn_id
+      ? activeSessionId
+      : undefined;
     const previousBehavior = viewport.style.scrollBehavior;
     viewport.style.scrollBehavior = "auto";
     viewport.scrollTop = restoreSessionScrollTop(
@@ -8537,6 +8555,11 @@ function TimemThread({
     }
     followThreadLatest.current = true;
     viewport.scrollTop = viewport.scrollHeight;
+    const frame = window.requestAnimationFrame(() => {
+      if (!followThreadLatest.current || previousScrollMetrics.current) return;
+      viewport.scrollTop = viewport.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [activeSessionId, latestTurn?.turn_id]);
 
   useLayoutEffect(() => {
@@ -9667,7 +9690,14 @@ function TimemThread({
           >
             <span className="thread-edge-symbol" aria-hidden="true">
               {activeSession.state === "working" ? (
-                <span className="thread-working-orbit">
+                <span className="thread-working-mark">
+                  <svg
+                    className="thread-working-arc"
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <circle cx="12" cy="12" r="9" pathLength="100" />
+                  </svg>
                   <span className="thread-working-core" />
                 </span>
               ) : (
@@ -11107,6 +11137,22 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
   );
 }
 
+function toolActivityGroupStatusLabel(summary: ToolActivitySummary) {
+  if (summary.status === "completed") return "Succ";
+  if (summary.status === "failed") return `Fail(${summary.failedCount})`;
+
+  const activeParts: string[] = [];
+  if (summary.foregroundRunningCount > 0)
+    activeParts.push(`fg ${summary.foregroundRunningCount}`);
+  if (summary.backgroundRunningCount > 0)
+    activeParts.push(`bg ${summary.backgroundRunningCount}`);
+  if (summary.failedCount > 0)
+    activeParts.push(`failed ${summary.failedCount}`);
+  return activeParts.length > 0
+    ? `running (${activeParts.join(" · ")})`
+    : "running";
+}
+
 function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
   const [open, setOpen] = useState(false);
   const singleActivity =
@@ -11117,7 +11163,8 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
   )
     return <ToolActivity activity={singleActivity} />;
   const running = summary.status === "running";
-  const summaryLabel = `${open ? "收起" : "展开"}工具活动：${summary.label}，${summary.status}`;
+  const groupStatusLabel = toolActivityGroupStatusLabel(summary);
+  const summaryLabel = `${open ? "收起" : "展开"}工具活动：${summary.label}，${groupStatusLabel}`;
   return (
     <details
       className={`tool-activity-group ${summary.status}`}
@@ -11129,12 +11176,12 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
         aria-label={summaryLabel}
         title={open ? "收起工具活动" : "展开工具活动"}
       >
-        <span
-          className="tool-activity-group-icon tool-command-symbol"
+        <ChevronRight
+          className="tool-activity-group-icon tool-activity-chevron"
+          size={14}
           aria-hidden="true"
-        >
-          &gt;_
-        </span>
+        />
+        <span className="tool-activity-group-status">{groupStatusLabel}</span>
         <span className="tool-activity-group-counts" aria-hidden="true">
           {summary.counts.map(({ name, count }, index) => (
             <span className="tool-activity-group-count" key={name}>
@@ -11144,8 +11191,6 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
             </span>
           ))}
         </span>
-        <span className="tool-activity-group-status">· {summary.status}</span>
-        <ChevronRight className="tool-activity-chevron" size={14} />
       </summary>
       <div className="tool-activity-group-body">
         {summary.activities.map((activity, index) => (
@@ -11162,17 +11207,22 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const bashActivity = activity.tool_name === "run_bash";
   const pollingActivity = bashActivity && activity.tool_mode === "poll";
   const [open, setOpen] = useState(false);
+  const waitBudgetMs = pollingActivity
+    ? activity.loop_timeout_ms
+    : bashActivity && activity.tool_mode !== "background"
+      ? activity.timeout_ms
+      : undefined;
   const [liveElapsedMs, setLiveElapsedMs] = useState(() =>
     Math.max(0, Date.now() - activity.createdAt),
   );
   useEffect(() => {
-    if (!pollingActivity || !running) return;
+    if (!running || (!pollingActivity && waitBudgetMs === undefined)) return;
     const updateElapsed = () =>
       setLiveElapsedMs(Math.max(0, Date.now() - activity.createdAt));
     updateElapsed();
     const timer = window.setInterval(updateElapsed, 1_000);
     return () => window.clearInterval(timer);
-  }, [activity.createdAt, pollingActivity, running]);
+  }, [activity.createdAt, pollingActivity, running, waitBudgetMs]);
   const invocationPreview = toolInvocationPreview(activity);
   const detail = activity.detail?.trim();
   const code = activity.code?.trim();
@@ -11183,24 +11233,45 @@ function ToolActivity({ activity }: { activity: Activity }) {
   );
   const displayedElapsedMs =
     pollingActivity && running ? liveElapsedMs : activity.elapsed_ms;
+  const remainingWaitMs =
+    running && activity.execution_started && waitBudgetMs !== undefined
+      ? Math.max(0, waitBudgetMs - liveElapsedMs)
+      : undefined;
+  const statusLabel =
+    status === "timeout" && bashActivity
+      ? activity.pid !== undefined
+        ? `wait ended · process still running · pid ${activity.pid}`
+        : "wait ended · process may still be running"
+      : humanizeToolStatus(status);
   const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;
   const summaryContent = (
     <>
-      <span
-        className={`tool-activity-icon ${pollingActivity ? "poll-activity-icon" : "tool-command-symbol"}`}
-        aria-hidden="true"
-      >
-        {pollingActivity ? <Clock3 size={13} /> : ">_"}
-      </span>
+      {hasExpandableDetail ? (
+        <ChevronRight
+          className="tool-activity-icon tool-activity-chevron"
+          size={14}
+          aria-hidden="true"
+        />
+      ) : (
+        <span
+          className={`tool-activity-icon ${pollingActivity ? "poll-activity-icon" : "tool-command-symbol"}`}
+          aria-hidden="true"
+        >
+          {pollingActivity ? <Clock3 size={13} /> : ">_"}
+        </span>
+      )}
       <b>{toolName}</b>
       <span className="tool-activity-meta">
-        <span className="tool-activity-status">
-          {humanizeToolStatus(status)}
-        </span>
+        <span className="tool-activity-status">{statusLabel}</span>
+        {remainingWaitMs !== undefined && (
+          <span className="tool-activity-countdown">
+            {formatRemainingDuration(remainingWaitMs)} remaining
+          </span>
+        )}
         {displayedElapsedMs !== undefined && (pollingActivity || !running) && (
           <span className="tool-activity-duration">
             {pollingActivity
-              ? formatClockDuration(displayedElapsedMs)
+              ? `${formatClockDuration(displayedElapsedMs)} elapsed`
               : formatDuration(displayedElapsedMs)}
           </span>
         )}
@@ -11233,7 +11304,6 @@ function ToolActivity({ activity }: { activity: Activity }) {
         aria-label={summaryLabel}
       >
         {summaryContent}
-        <ChevronRight className="tool-activity-chevron" size={14} />
       </summary>
       <div className="tool-activity-body">
         {detail && (
@@ -13582,6 +13652,17 @@ function isNotableStopReason(reason: string | null | undefined) {
 
 function formatOptionalTokens(value: number | undefined) {
   return value ? formatTokens(value) : undefined;
+}
+
+function formatRemainingDuration(remainingMs: number) {
+  const seconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`
+    : `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
 function formatClockDuration(elapsedMs: number) {

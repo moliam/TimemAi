@@ -1,20 +1,31 @@
 extern crate self as timem_shell;
 
-use agent_core::{
-    model_service_config_from_sources, parse_parallel_tool_calls, parse_tool_call_mode,
-    ModelServiceConfigSource, UsageStats,
-};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+use timem_in_process::agent_api::{
+    model_service_config_from_sources, parse_parallel_tool_calls, parse_tool_call_mode,
+    ModelServiceConfigSource, UsageStats,
+};
 
 mod app;
 mod final_answer_renderer;
 mod observation;
 mod profiler;
 
-pub use agent_core::cancelled_turn_result;
-pub use agent_core::{
+pub use app::run as run_shell;
+pub use final_answer_renderer::{
+    render_final_answer_markdown, FinalAnswerRenderer, TermimadFinalAnswerRenderer,
+};
+pub use observation::{
+    observation_events_from_core_topic_events, observation_panel_width_for_terminal,
+    render_observation_panel, render_observation_panel_at,
+    render_observation_panel_at_with_elapsed, ObservationEvent, ObservationLine,
+    ObservationLineStyle, ObservationPanel,
+};
+pub use profiler::render_prof_report_data;
+pub use timem_in_process::agent_api::cancelled_turn_result;
+pub use timem_in_process::agent_api::{
     append_audit_event as append_audit, apply_runtime_config_value,
     apply_workspace_command_to_path, bash_approval_mode_from_sources, bash_approval_mode_label,
     capabilities_dir_from_sources, collect_storage_profile, combine_additional_contexts,
@@ -49,17 +60,6 @@ pub use agent_core::{
     CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_RESPONSE, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
     DEFAULT_STALE_CONTEXT_IDLE, DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD, RUNTIME_CONFIG_FIELDS,
 };
-pub use app::run as run_shell;
-pub use final_answer_renderer::{
-    render_final_answer_markdown, FinalAnswerRenderer, TermimadFinalAnswerRenderer,
-};
-pub use observation::{
-    observation_events_from_core_topic_events, observation_panel_width_for_terminal,
-    render_observation_panel, render_observation_panel_at,
-    render_observation_panel_at_with_elapsed, ObservationEvent, ObservationLine,
-    ObservationLineStyle, ObservationPanel,
-};
-pub use profiler::render_prof_report_data;
 pub use timem_in_process::run_turn as run_in_process_turn;
 
 pub const TIMEM_LOGO: &str = "𝓣𝓲𝓶𝓮𝓶";
@@ -72,7 +72,7 @@ pub const SPINNER_ICONS: [&str; 27] = [
     "🦐", "🦁", "🐮", "🐷", "🐸", "🐒", "🐭", "🐹", "🐰", "🦊", "🦝",
 ];
 
-pub type ShellStatusSnapshot = agent_core::RuntimeStatusSnapshot;
+pub type ShellStatusSnapshot = timem_in_process::agent_api::RuntimeStatusSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThinkingViewSnapshot {
