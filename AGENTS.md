@@ -65,20 +65,22 @@ Interfaces may use direct calls, callbacks, or channels through `bridges/in_proc
 HTTP/WebSocket; a separate desktop companion uses IPC. Do not force serialization or network I/O
 onto an in-process path.
 
-The migration is incremental. `agent_core`, `host_projection`, and `timem_web` are the only current
-transitional runtime roots. Their exact destination, removal conditions, dependency graph, staged
-sequence, and non-regression gates are defined in `docs/semantic-project-layout.md`. Do not create a
+The migration is incremental. `host_projection` and `timem_web` are the only current transitional
+runtime roots. The package/crate named `agent_core` now lives at `core/agent`. Their exact
+destination, removal conditions, dependency graph, staged sequence, and non-regression gates are
+defined in `docs/semantic-project-layout.md`. Do not create a
 new transitional root or preserve duplicate ownership without updating that executable migration
 contract in the same reviewed change.
 
-`interfaces/shell`, `interfaces/web`, and `core/platform` are current semantic roots. Preserve the
+`core/agent`, `core/ui_contract`, `interfaces/shell`, `interfaces/web`, and `core/platform` are
+current semantic roots. Preserve the
 `timem_shell`, `timem_web`, `agent_core`, and `host_projection` package compatibility needed during
 the migration, as well as the `timem-native-rs` and `timem-web` binary/user command surfaces.
 Temporary re-exports are allowed only when they avoid dependency cycles and have an explicit
 removal stage.
 
-Do not restore legacy roots `timem_shell`, `web_ui`, or `agent_core/src/os`. Do not create empty
-target directories. Windows and native desktop paths are target architecture, not current support
+Do not restore legacy roots `timem_shell`, `web_ui`, `agent_core`, or `core/agent/src/os`. Do not
+create empty target directories. Windows and native desktop paths are target architecture, not current support
 claims; add them only with an explicit behavior matrix and executable supported/unsupported
 contract.
 

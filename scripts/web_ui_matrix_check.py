@@ -10,7 +10,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MATRIX = ROOT / "docs" / "web-ui-feature-test-matrix.md"
 TEST_ROOTS = [
-    ROOT / "agent_core" / "tests",
+    ROOT / "core" / "agent" / "tests",
     ROOT / "timem_web" / "tests",
     ROOT / "interfaces" / "web" / "tests",
 ]
@@ -45,7 +45,7 @@ def file_exists_token(token: str) -> bool:
         for base in [
             ROOT,
             ROOT / "interfaces" / "web" / "tests",
-            ROOT / "agent_core" / "tests",
+            ROOT / "core" / "agent" / "tests",
             ROOT / "timem_web" / "tests",
             ROOT / "scripts",
             ROOT / "docs",

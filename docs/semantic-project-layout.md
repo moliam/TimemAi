@@ -93,13 +93,13 @@ transitional roots:
 
 | Current owner | Target owner | Removal condition |
 | --- | --- | --- |
-| `agent_core/` | `core/agent/`, `core/application/`, `core/ui_contract/` | All source/tests are split by ownership; package/API compatibility is verified. |
+| `core/agent/` | `core/application/` (remaining orchestration only) | Agent relocation is complete; Session/Context/Worker application ownership remains to extract. |
 | `host_projection/` | `bridges/http_websocket/` | Projection delivery is integrated without creating a second Turn state machine. |
 | `timem_web/` | `bridges/http_websocket/` | The `timem-web` binary, HTTP/WebSocket behavior, assets, and lifecycle tests pass at the target path. |
 
-`interfaces/shell`, `interfaces/web`, and `core/platform` are already at their semantic roots, but
-some internal code still needs finer boundary cleanup. `benchmarks/` and `examples/` remain
-cross-cutting verification/support material until their final ownership is decided; they are not
+`core/agent`, `core/ui_contract`, `interfaces/shell`, `interfaces/web`, and `core/platform` are
+already at their semantic roots, but some internal code still needs finer boundary cleanup.
+`benchmarks/` and `examples/` remain cross-cutting verification/support material until their final ownership is decided; they are not
 runtime layers.
 
 Windows and native desktop Interfaces are target architecture, not current support claims. They
@@ -115,8 +115,8 @@ Each step is committed separately and must leave the workspace buildable:
 2. **UI contract extraction**: create `core/ui_contract` from genuinely UI-neutral commands,
    events, and projections. Keep temporary `agent_core` re-exports where they do not reverse the
    target dependency direction.
-3. **Agent relocation**: move the existing `agent_core` package to `core/agent`, update resource
-   paths, tests, scripts, docs, and workspace references without changing behavior.
+3. **Agent relocation (complete)**: the `agent_core` package lives at `core/agent`; resource paths,
+   tests, scripts, docs, and workspace references preserve behavior and compatibility.
 4. **Application extraction**: move Session/Context/Worker orchestration and application use-cases
    to `core/application`; update callers to the new owner and remove temporary exports.
 5. **In-process Bridge**: move Shell/native direct-call and callback/channel adaptation to

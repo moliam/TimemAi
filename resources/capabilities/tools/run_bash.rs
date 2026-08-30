@@ -2406,5 +2406,5 @@ fn unique_shell_id(prefix: &str) -> String {
 }
 
 #[cfg(test)]
-#[path = "../../../agent_core/tests/unit/capability_tool_run_bash_tests.rs"]
+#[path = "../../../core/agent/tests/unit/capability_tool_run_bash_tests.rs"]
 mod tests;

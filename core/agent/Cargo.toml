@@ -9,8 +9,8 @@ name = "agent_core"
 crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
-timem_platform = { path = "../core/platform" }
-timem_ui_contract = { path = "../core/ui_contract" }
+timem_platform = { path = "../platform" }
+timem_ui_contract = { path = "../ui_contract" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }

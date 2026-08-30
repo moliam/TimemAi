@@ -901,5 +901,5 @@ fn quote(value: &str) -> String {
 }
 
 #[cfg(test)]
-#[path = "../../../agent_core/tests/unit/capability_tool_readfile_tests.rs"]
+#[path = "../../../core/agent/tests/unit/capability_tool_readfile_tests.rs"]
 mod tests;

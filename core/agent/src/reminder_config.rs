@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 pub const REMINDER_TIPS_FILE_NAME: &str = "reminder_tips.json";
 pub const TIMEM_RESOURCES_DIR_ENV: &str = "TIMEM_RESOURCES_DIR";
-const SHIPPED_REMINDER_TIPS: &str = include_str!("../../resources/reminder_tips.json");
+const SHIPPED_REMINDER_TIPS: &str = include_str!("../../../resources/reminder_tips.json");
 const MAX_SCHEDULES: usize = 32;
 const MAX_TIPS_PER_SCHEDULE: usize = 128;
 const MAX_TIP_BYTES: usize = 4_096;
@@ -88,7 +88,7 @@ pub fn default_resources_dir() -> PathBuf {
     resource_dir_candidates_from_values(
         std::env::var_os(TIMEM_RESOURCES_DIR_ENV).as_deref(),
         std::env::current_exe().ok().as_deref(),
-        Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources")),
+        Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources")),
     )
     .into_iter()
     .next()
@@ -99,7 +99,7 @@ fn resource_dir_candidates() -> Vec<PathBuf> {
     resource_dir_candidates_from_values(
         std::env::var_os(TIMEM_RESOURCES_DIR_ENV).as_deref(),
         std::env::current_exe().ok().as_deref(),
-        Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../resources")),
+        Some(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources")),
     )
 }
 

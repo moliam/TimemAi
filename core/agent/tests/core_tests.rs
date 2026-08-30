@@ -582,7 +582,7 @@ fn prompt_is_append_only_and_segmented() {
 #[test]
 fn startup_stamp_is_fixed_for_one_core_instance_across_static_prompt_refreshes() {
     let mut core = AgentCore::new(
-        include_str!("../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../resources/system_prompt/system_prompt.md"),
         profile("qwen-plus"),
         tmp_dir("startup_stamp"),
     );
@@ -1164,7 +1164,7 @@ fn assistant_prompt_heading_uses_current_worker_speaker_name() {
 #[test]
 fn assistant_name_is_not_explained_in_static_prompt_and_action_results_remain_clean() {
     let mut core = test_core(
-        include_str!("../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../resources/system_prompt/system_prompt.md"),
         profile("qwen-plus"),
         tmp_dir("assistant_name_placeholder"),
     );
@@ -1202,7 +1202,7 @@ fn assistant_name_is_not_explained_in_static_prompt_and_action_results_remain_cl
 #[test]
 fn explicit_supporting_context_is_dynamic_context_not_static_prompt() {
     let mut core = test_core(
-        include_str!("../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../resources/system_prompt/system_prompt.md"),
         profile("qwen-plus"),
         tmp_dir("explicit_dynamic_context"),
     );
@@ -7260,8 +7260,8 @@ fn free_talk_string_is_kept_in_context() {
 
 #[test]
 fn static_prompt_keeps_contracts_concise() {
-    let template = include_str!("../../resources/system_prompt/system_prompt.md");
-    let protocol_section = include_str!("../../resources/protocol/json/response_protocol.md");
+    let template = include_str!("../../../resources/system_prompt/system_prompt.md");
+    let protocol_section = include_str!("../../../resources/protocol/json/response_protocol.md");
     // Template-level checks
     assert!(template.contains("# Timem System Prompt"));
     assert!(template.contains("{{RESPONSE_MODE_INSTRUCTION}}"));
@@ -7279,7 +7279,7 @@ fn static_prompt_keeps_contracts_concise() {
     assert!(template.contains("prompt/context structure"));
     assert!(template.contains("tool/capability catalog"));
     assert!(!template.contains("resources/response_v1_summary.json"));
-    let xml_protocol = include_str!("../../resources/protocol/xml/response_protocol.md");
+    let xml_protocol = include_str!("../../../resources/protocol/xml/response_protocol.md");
     assert!(xml_protocol.contains("Two mutually-exclusive state branches"));
     assert!(xml_protocol.contains("<actions>"));
     assert!(xml_protocol.contains("<parallel>"));
@@ -7381,7 +7381,7 @@ unique_workspace_reference_should_remain_visible
 #[test]
 fn rendered_static_prompt_preserves_source_rule_order() {
     let mut core = test_core(
-        include_str!("../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../resources/system_prompt/system_prompt.md"),
         profile("qwen-plus"),
         tmp_dir("static_prompt_order"),
     );
@@ -7404,7 +7404,7 @@ fn rendered_static_prompt_preserves_source_rule_order() {
 
 #[test]
 fn response_protocol_kind_controls_rendered_protocol_section() {
-    let template = include_str!("../../resources/system_prompt/system_prompt.md");
+    let template = include_str!("../../../resources/system_prompt/system_prompt.md");
     let mut default_core = AgentCore::new(
         template,
         profile("qwen-plus"),
@@ -7506,7 +7506,7 @@ fn response_protocol_kind_controls_rendered_protocol_section() {
 
 #[test]
 fn static_prompt_does_not_handwrite_tool_catalog() {
-    let static_prompt = include_str!("../../resources/system_prompt/system_prompt.md");
+    let static_prompt = include_str!("../../../resources/system_prompt/system_prompt.md");
     assert!(static_prompt.contains("{{TOOL_CATALOG}}"));
     assert!(
         !static_prompt.contains("\"run_bash\":"),
@@ -7517,7 +7517,7 @@ fn static_prompt_does_not_handwrite_tool_catalog() {
 #[test]
 fn no_local_command_host_omits_bash_from_prompt_and_rejects_bash_actions() {
     let mut core = test_core(
-        include_str!("../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../resources/system_prompt/system_prompt.md"),
         profile("qwen-plus"),
         tmp_dir("no_local_command_host"),
     );
@@ -7639,7 +7639,7 @@ fn agent_core_stays_terminal_ui_free_for_host_adapters() {
 
 #[test]
 fn architecture_docs_do_not_bind_bash_capability_to_shell_ui() {
-    let docs = include_str!("../../docs/architecture.md");
+    let docs = include_str!("../../../docs/architecture.md");
 
     assert!(
         !docs.contains("run_bash` is for shell sessions only"),
@@ -7780,7 +7780,7 @@ fn external_tool_call_protocol_repairs_without_showing_raw_tool_call() {
 #[test]
 fn rendered_static_prompt_examples_avoid_task_like_action_instructions() {
     let mut core = test_core(
-        include_str!("../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../resources/system_prompt/system_prompt.md"),
         profile("qwen-plus"),
         tmp_dir("static_prompt_examples_not_task_like"),
     );
@@ -7883,7 +7883,7 @@ fn canonical_tool_action_is_validated_through_capability_registry() {
 #[test]
 fn legacy_actions_are_not_visible_or_executable() {
     let mut core = test_core(
-        include_str!("../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../resources/system_prompt/system_prompt.md"),
         profile("qwen-plus"),
         tmp_dir("legacy_action_fallback_boundary"),
     );
@@ -9217,7 +9217,7 @@ when_to_use: |
 #[test]
 fn performance_guard_large_context_prompt_render_is_bounded() {
     let mut core = test_core(
-        include_str!("../../resources/system_prompt/system_prompt.md"),
+        include_str!("../../../resources/system_prompt/system_prompt.md"),
         profile("qwen-plus"),
         tmp_dir("perf_large_prompt_render"),
     );

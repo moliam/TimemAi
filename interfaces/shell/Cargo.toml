@@ -9,7 +9,7 @@ name = "timem-native-rs"
 path = "src/main.rs"
 
 [dependencies]
-agent_core = { path = "../../agent_core" }
+agent_core = { path = "../../core/agent" }
 serde_json = "1"
 home = "=0.5.9"
 unicode-segmentation = "=1.12.0"

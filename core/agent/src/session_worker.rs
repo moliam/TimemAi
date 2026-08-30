@@ -13,11 +13,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const TOOLGEN_CONTEXT_INSTRUCTIONS: &str =
-    include_str!("../../resources/toolgen/toolgen_context.md");
+    include_str!("../../../resources/toolgen/toolgen_context.md");
 const TOOLGEN_XML_COMPLETION: &str =
-    include_str!("../../resources/protocol/xml/toolgen_retrospect.md");
+    include_str!("../../../resources/protocol/xml/toolgen_retrospect.md");
 const TOOLGEN_JSON_COMPLETION: &str =
-    include_str!("../../resources/protocol/json/toolgen_retrospect.md");
+    include_str!("../../../resources/protocol/json/toolgen_retrospect.md");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolGenRequest {
