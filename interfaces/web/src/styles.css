@@ -3589,11 +3589,11 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   overflow: hidden;
   border: 1px solid #59636b5c !important;
   border-radius: 50% !important;
-  background: #252b30e8 !important;
-  color: #969da3 !important;
-  box-shadow: 0 5px 14px #0000002b, inset 0 1px #ffffff0a !important;
-  backdrop-filter: blur(12px);
-  transition: border-color .5s ease, color .5s ease, box-shadow .5s ease, transform .16s ease, opacity .5s ease !important;
+  background: #252a2e !important;
+  color: #8f989e !important;
+  box-shadow: 0 1px 2px #0000003d, inset 0 1px #ffffff08 !important;
+  backdrop-filter: none;
+  transition: border-color .2s ease, background-color .2s ease, color .2s ease, transform .16s ease, opacity .2s ease !important;
 }
 .thread-working-away::before {
   content: "";
@@ -3601,10 +3601,10 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   inset: 0;
   z-index: 0;
   border-radius: inherit;
-  background: #23394be8;
+  background: #29343b;
   opacity: 0;
   pointer-events: none;
-  transition: opacity .5s ease;
+  transition: opacity .2s ease;
 }
 .thread-edge-symbol {
   position: absolute;
@@ -3616,73 +3616,59 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 }
 .thread-working-away.is-working::before { opacity: 1; }
 .thread-working-away.is-working {
-  border-color: #5798cf80 !important;
-  color: #8bc9ff !important;
-  box-shadow: 0 6px 16px #00000032, inset 0 1px #ffffff10 !important;
+  border-color: #526b7c !important;
+  color: #8db6d1 !important;
+  box-shadow: 0 1px 3px #00000042, inset 0 1px #ffffff09 !important;
 }
-.thread-working-orbit {
+.thread-working-mark {
   position: relative;
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
   display: grid;
   place-items: center;
-  border: 1px solid #8c969d38;
-  border-radius: 50%;
-  box-shadow: inset 0 0 5px #a3adb51a;
-  contain: paint;
-  transition: border-color .5s ease, box-shadow .5s ease, transform .5s ease, opacity .5s ease;
 }
-.thread-working-away.is-working .thread-working-orbit { border-color: #72afe066; box-shadow: inset 0 0 4px #559dd326; }
-.thread-idle-bottom-icon { display: block; margin: 0; overflow: visible; color: currentColor; filter: drop-shadow(0 0 2px #aab3b547); }
-.thread-working-orbit::before {
-  content: "";
+.thread-idle-bottom-icon { display: block; margin: 0; overflow: visible; color: currentColor; filter: none; }
+.thread-working-arc {
   position: absolute;
-  inset: -2px;
-  border-radius: inherit;
-  background: conic-gradient(from 20deg, transparent 0 48%, #78909f22 61%, #aeb9c066 78%, transparent 94%);
-  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
-  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
-  opacity: .52;
-  transition: opacity .5s ease, filter .5s ease;
-}
-.thread-working-away.is-working .thread-working-orbit::before {
-  inset: -1px;
-  background: conic-gradient(from 0deg, transparent 0 62%, #70b6eb 76%, #a8d8f7 86%, transparent 100%);
-  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
-  mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
-  filter: none;
-  opacity: .9;
-  animation: thread-working-orbit 1.25s linear infinite;
+  inset: 0;
+  width: 24px;
+  height: 24px;
+  overflow: visible;
+  color: #7aa5bf;
+  animation: thread-working-spin 1.8s linear infinite;
   will-change: transform;
 }
+.thread-working-arc circle {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-dasharray: 18 82;
+  opacity: .82;
+}
 .thread-working-core {
+  position: relative;
+  z-index: 1;
   width: 4px;
   height: 4px;
   border-radius: 50%;
-  background: #9ba4aa;
-  box-shadow: 0 0 0 2px #aab1b51a, 0 0 4px #aab1b533;
-  opacity: .78;
-  transition: background .5s ease, box-shadow .5s ease, opacity .5s ease, transform .5s ease;
-}
-.thread-working-away.is-working .thread-working-core {
-  width: 4px;
-  height: 4px;
-  background: #8bc9f4;
-  box-shadow: 0 0 0 2px #5a9dcd24;
+  background: #89adc3;
+  box-shadow: none;
   opacity: 1;
+  transition: background .2s ease, opacity .2s ease;
 }
-.thread-working-away.is-working.away-from-bottom .thread-working-orbit::before { animation-duration: 1.05s; }
-.thread-working-away.is-working.away-from-bottom .thread-working-core { background: #9bd2f6; box-shadow: 0 0 0 2px #65a9d52b; }
+.thread-working-away.is-working.away-from-bottom .thread-working-arc { animation-duration: 1.65s; }
+.thread-working-away.is-working.away-from-bottom .thread-working-core { background: #94b8cd; }
 .thread-working-away:hover {
-  border-color: #6aa7d775 !important;
-  background: #2b3339f0 !important;
-  color: #b4d9f8 !important;
-  box-shadow: 0 7px 17px #00000038, inset 0 1px #ffffff10 !important;
+  border-color: #647582 !important;
+  background: #2b3034 !important;
+  color: #adc1ce !important;
+  box-shadow: 0 2px 4px #00000038, inset 0 1px #ffffff0a !important;
 }
-.thread-working-away.is-working:hover::before { opacity: .92; }
-.thread-working-away.is-working:hover .thread-working-orbit::before { animation-duration: 1.05s; }
+.thread-working-away.is-working:hover::before { opacity: 1; }
+.thread-working-away.is-working:hover .thread-working-arc { animation-duration: 1.8s; }
 .thread-working-away:focus-visible { outline-color: #69aef5 !important; }
-@keyframes thread-working-orbit { to { transform: rotate(1turn); } }
+@keyframes thread-working-spin { to { transform: rotate(1turn); } }
 
 :root[data-theme="light"] .session-row.has-unread-completion:not(.active) .session-name { color: #174f87; }
 :root[data-theme="light"] .session-unread-dot { background: #2784df; box-shadow: 0 0 0 3px #2784df16, 0 0 10px #2784df38; }
@@ -3692,26 +3678,19 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 :root[data-theme="light"] .worker-state.working { color: #2879c5; }
 :root[data-theme="light"] .worker-working-icon { color: #2e88df; filter: drop-shadow(0 0 4px #2e88df35); }
 :root[data-theme="light"] .thread-working-away {
-  border-color: #8d989f70 !important;
-  background: #f4f6f7 !important;
+  border-color: #aab2b7 !important;
+  background: #f1f3f4 !important;
   color: #747e84 !important;
-  box-shadow: 0 5px 14px #315b7d16, inset 0 1px #fff !important;
+  box-shadow: 0 1px 2px #2636401f, inset 0 1px #ffffffb8 !important;
 }
-:root[data-theme="light"] .thread-working-away::before { background: #e3f0f9; }
+:root[data-theme="light"] .thread-working-away::before { background: #e7ecef; }
 :root[data-theme="light"] .thread-working-away.is-working {
-  border-color: #4d8fc681 !important;
-  color: #247fcf !important;
-  box-shadow: 0 5px 15px #315b7d20, inset 0 1px #fff !important;
+  border-color: #7995a7 !important;
+  color: #3c718f !important;
+  box-shadow: 0 1px 3px #26364024, inset 0 1px #ffffffc2 !important;
 }
-:root[data-theme="light"] .thread-working-away.is-working .thread-working-orbit {
-  border-color: #438bc55e;
-  box-shadow: inset 0 0 4px #438bc51c;
-}
-:root[data-theme="light"] .thread-working-away.is-working .thread-working-orbit::before {
-  background: conic-gradient(from 0deg, transparent 0 62%, #398fd0 76%, #82bfe9 86%, transparent 100%);
-  filter: none;
-}
-:root[data-theme="light"] .thread-working-away:hover { border-color: #3d86c782 !important; background: #fff !important; box-shadow: 0 6px 16px #315b7d22, inset 0 1px #fff !important; }
+:root[data-theme="light"] .thread-working-away.is-working .thread-working-arc { color: #527f99; }
+:root[data-theme="light"] .thread-working-away:hover { border-color: #82939d !important; background: #f7f8f8 !important; box-shadow: 0 2px 4px #26364024, inset 0 1px #fff !important; }
 
 @media (max-width: 720px) {
   .thread-working-away { width: 27px !important; height: 27px !important; min-width: 27px; min-height: 27px; justify-self: center; }
@@ -3720,12 +3699,9 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 @media (prefers-reduced-motion: reduce) {
   .worker-working-icon,
   .thread-working-away.is-working,
-  .thread-working-away.is-working .thread-working-orbit::before,
-  .thread-working-away.is-working .thread-working-core { animation: none; }
+  .thread-working-away.is-working .thread-working-arc { animation: none; }
   .thread-working-away,
   .thread-working-away::before,
-  .thread-working-orbit,
-  .thread-working-orbit::before,
   .thread-working-core { transition: none; }
 }
 

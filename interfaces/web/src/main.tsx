@@ -9690,7 +9690,14 @@ function TimemThread({
           >
             <span className="thread-edge-symbol" aria-hidden="true">
               {activeSession.state === "working" ? (
-                <span className="thread-working-orbit">
+                <span className="thread-working-mark">
+                  <svg
+                    className="thread-working-arc"
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <circle cx="12" cy="12" r="9" pathLength="100" />
+                  </svg>
                   <span className="thread-working-core" />
                 </span>
               ) : (
