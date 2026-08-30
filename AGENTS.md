@@ -31,7 +31,7 @@ Interface ↔ Bridge ↔ Core
   input, rendering, layout, accessibility, and UI-only convenience.
 - **Bridge** owns communication only: in-process calls, HTTP/WebSocket, IPC,
   serialization, routing, sequencing, replay, and reconnect behavior.
-- **Core** owns reusable Agent and application semantics, authoritative state,
+- **Core** owns reusable Agent and Session semantics, authoritative state,
   UI-neutral contracts, capability execution, persistence rules, and platform
   policy.
 - A Bridge must not invent or reinterpret Agent, Session, Turn, cancellation,
@@ -55,7 +55,7 @@ workspace changes.
 
 The final physical ownership is:
 
-- `core/{agent,application,ui_contract/{commands,events,projections},platform/{api,shared,macos,windows,linux}}`
+- `core/{agent,session,ui_contract/{commands,events,projections},platform/{api,shared,macos,windows,linux}}`
 - `bridges/{in_process,http_websocket,ipc}`
 - `interfaces/{shell,web,macos,windows,linux}`
 - `resources`, `tests`, `docs`, and `scripts` for shared non-runtime assets and verification.

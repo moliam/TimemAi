@@ -32,11 +32,18 @@ REQUIRED = (
     "interfaces/web/package.json",
     "interfaces/web/module_boundary.md",
 )
-FORBIDDEN_DIRS = ("agent_core", "timem_shell", "web_ui", "core/agent/src/os", "core/platform/src/windows")
+FORBIDDEN_DIRS = (
+    "agent_core",
+    "timem_shell",
+    "web_ui",
+    "core/application",
+    "core/agent/src/os",
+    "core/platform/src/windows",
+)
 PROCESS_PRIMITIVES = ("libc::getpgid", "libc::getpgrp", "libc::waitpid", ".process_group(0)")
 TARGET_DIRECTORIES = (
     "core/agent",
-    "core/application",
+    "core/session",
     "core/ui_contract",
     "bridges/in_process",
     "bridges/http_websocket",
@@ -49,7 +56,7 @@ ARCHITECTURE_CONTRACT_MARKERS = (
     "## Target physical layout",
     "core/",
     "  agent/",
-    "  application/",
+    "  session/",
     "  ui_contract/",
     "bridges/",
     "  in_process/",
@@ -58,7 +65,7 @@ ARCHITECTURE_CONTRACT_MARKERS = (
     "interfaces/",
     "  shell/",
     "  web/",
-    "`core/agent/` | `core/application/` (remaining orchestration only)",
+    "`core/agent/` | `core/session/` (remaining Session orchestration only)",
     "`host_projection/` | `bridges/http_websocket/`",
     "`timem_web/` | `bridges/http_websocket/`",
 )
@@ -129,7 +136,7 @@ def violations(root: Path) -> list[str]:
         "timem_shell",
         "timem_web",
         "host_projection",
-        "core/application",
+        "core/session",
         "bridges/",
         "interfaces/",
     ):
@@ -193,6 +200,10 @@ def write_fixture(root: Path) -> None:
 def self_test() -> None:
     cases = (
         ("legacy directory", lambda root: (root / "timem_shell").mkdir()),
+        (
+            "legacy generic application directory",
+            lambda root: (root / "core/application").mkdir(parents=True),
+        ),
         ("reverse dependency", lambda root: (root / "core/platform/Cargo.toml").write_text('[package]\nname = "timem_platform"\n[dependencies]\ntimem_shell = { path = "../../interfaces/shell" }\n')),
         ("UI contract reverse dependency", lambda root: (root / "core/ui_contract/Cargo.toml").write_text('[package]\nname = "timem_ui_contract"\n[dependencies]\nagent_core = { path = "../agent" }\n')),
         ("escaped process primitive", lambda root: (root / "core/agent/src/leak.rs").write_text("fn leak() { libc::waitpid(0, std::ptr::null_mut(), 0); }\n")),
