@@ -23,8 +23,14 @@ fn shell_process_rejects_mem_workspace_owned_by_another_host() {
     fs::create_dir_all(&mem).unwrap();
     let lock = agent_core::WorkspaceInstanceLock::acquire(&mem, "timem-web-test").unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_timem-native-rs"))
-        .args(["--space", mem.to_str().unwrap(), "--once-json", "test"])
+    let output = Command::new(env!("CARGO_BIN_EXE_timem"))
+        .args([
+            "--shell",
+            "--space",
+            mem.to_str().unwrap(),
+            "--once-json",
+            "test",
+        ])
         .env_remove("TIMEM_DATA_DIR")
         .output()
         .unwrap();
@@ -43,7 +49,7 @@ fn shell_process_rejects_mem_workspace_owned_by_another_host() {
 #[test]
 fn removed_data_dir_option_is_rejected_before_mem_access() {
     let removed = temporary_mem();
-    let output = Command::new(env!("CARGO_BIN_EXE_timem-native-rs"))
+    let output = Command::new(env!("CARGO_BIN_EXE_timem"))
         .args(["--data-dir", removed.to_str().unwrap()])
         .env_remove("TIMEM_DATA_DIR")
         .output()

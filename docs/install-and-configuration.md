@@ -41,17 +41,16 @@ Both installers run:
 
 ```bash
 cargo fetch --locked
-cargo build --locked -p timem_shell -p timem_web --release
+cargo build --locked -p timem_web --release
 ```
 
 It installs:
 
-- `timem-web`: recommended local browser UI with embedded production assets
-- `timem`: optional terminal UI command
-- `timem-native-rs`: terminal release binary used by the `timem` wrapper
+- `timem`: the single executable; Web is the default mode and `--shell` selects the terminal UI
+- `timem-web`: a compatibility symlink on macOS/Linux or forwarding `.cmd` shim on Windows, not a second executable
 - `resources/reminder_tips.json`: runtime-loaded default reminder schedules, normally under `~/.local/share/timem/resources` on macOS/Linux or `%LOCALAPPDATA%\TimemAi\share\timem\resources` on Windows
 
-The completion message leads with `timem-web`. No env file is required to open
+The completion message leads with `timem`. No env file is required to open
 the Web UI; model and API credentials can be configured in the browser. Env
 files remain available for terminal use, automation, or defaults for new Web
 Sessions.
@@ -59,8 +58,7 @@ Sessions.
 On macOS/Linux, `TIMEM_SHELL_INSTALL_DIR` changes the binary directory. On Windows, `-InstallDir` and `-ResourceDir` override the default `%LOCALAPPDATA%\TimemAi` locations. Resources follow the binary prefix unless `TIMEM_RESOURCES_DIR` is set explicitly. User-level `reminder_tips.json` overrides are separate and are never overwritten by installation.
 
 Binary updates are installed with an atomic file replacement. This allows
-`./install.sh` to update an installation even while an older `timem-web`
-process is still running, without invalidating the executable inode used by
+`./install.sh` to update an installation even while an older `timem` Web host process is still running, without invalidating the executable inode used by
 that process on macOS. Restart the old process to use the newly installed
 version.
 
@@ -72,7 +70,7 @@ are only needed for frontend development.
 Start the installed Web host with one command:
 
 ```bash
-timem-web
+timem
 ```
 
 The loopback-only local UI opens without an access token or model credentials at
@@ -110,7 +108,7 @@ intend to change stored Session configuration.
 
 ```bash
 timem --help
-timem-web --help
+timem --shell --help
 ```
 
 ## Model Service Examples
@@ -311,7 +309,7 @@ export TIMEM_SPACE=/absolute/path/to/project-mem
 
 Relative paths such as `--space .test_mem` are rejected.
 
-When `timem-web` resolves the MEM directory to the system default
+When the `timem` Web mode resolves the MEM directory to the system default
 `~/.timem/mem` and no `--port` is supplied, it tries port `13764` first. If that
 port is unavailable, it continues through the existing automatic port range
 (`12345`–`23456`). A custom MEM uses the rotating automatic selection order,
@@ -332,7 +330,7 @@ independent and may run at the same time.
 
 ### Timem Web lifecycle diagnostics
 
-`timem-web` enables a small process-lifecycle recorder by default. Its purpose is
+The `timem` Web mode enables a small process-lifecycle recorder by default. Its purpose is
 to preserve evidence for a later investigation when the Web host exits
 unexpectedly, without continuously logging model or browser traffic.
 
@@ -423,10 +421,29 @@ Web:
 
 ## Update
 
+The installers support both first installation and in-place upgrade. They install the current source checkout and intentionally do not run `git pull`, because selecting and reviewing the source revision remains the user's or release system's responsibility.
+
+macOS/Linux:
+
 ```bash
+cd /path/to/TimemAi
 git pull --ff-only
 ./install.sh
 ```
+
+The installer atomically replaces `timem`, converts an old independent `timem-web` file into a relative symlink to `timem`, and removes legacy `timem-native-rs` and `timem-shell` artifacts. Existing running processes continue using their already-open executable image on Unix; restart them to use the update.
+
+Windows PowerShell:
+
+```powershell
+cd C:\path\to\TimemAi
+git pull --ff-only
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Exit Timem before a Windows upgrade because Windows may lock a running `.exe`. The installer replaces `timem.exe`, removes old `timem-web.exe`, `timem-native-rs.exe`, and `timem-shell.exe` files, then creates `timem-web.cmd`. Removing `timem-web.exe` is required because Windows command lookup would otherwise prefer that stale executable over the compatibility `.cmd` shim.
+
+Neither installer removes MEM workspaces, Sessions, cached runtime configuration, API credentials, private env files, or user `reminder_tips.json` overrides.
 
 ## Uninstall
 

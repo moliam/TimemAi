@@ -673,7 +673,7 @@ TIMEM_EDGE_ITERATIONS=5 scripts/edge_regression.sh
 scripts/performance_guard.sh
 
 # Release 构建
-cargo build --locked -p timem_shell -p timem_web --release
+cargo build --locked -p timem_web --release
 
 # 敏感信息与格式
 scripts/sensitive_scan.sh --current

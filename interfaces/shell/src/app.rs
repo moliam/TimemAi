@@ -1,3 +1,26 @@
+use crate::{
+    append_audit, apply_workspace_command_to_path, bash_approval_mode_from_sources,
+    capabilities_dir_from_sources, combine_additional_contexts, create_memory_dir,
+    default_config_root, estimate_prompt_context_tokens, format_token_count,
+    host_start_audit_event, load_reminder_tips_config, load_workspace_dirs_from_path,
+    local_time_label, model_service_config_from_env, observation_events_from_core_topic_events,
+    observation_panel_width_for_terminal, parse_cli_args, render_final_answer_markdown,
+    render_final_response_at, render_prof_report_data, render_shell_status_bar,
+    render_thinking_view_at, render_turn_outcome_text, resolve_memory_dir, run_in_process_turn,
+    runtime_active_elapsed_secs, runtime_profile_report, shell_status_message_from_core_topic,
+    stale_context_decision_request, topic_event_status_hint, work_instruction_load_report,
+    work_instruction_load_request, work_instruction_load_topic_event,
+    work_instruction_mode_from_sources, workspace_config_file, workspace_reference_context,
+    CoreMemoryActivity, CoreTopicEvent, HostDecision, HostDecisionRequest, HostStatusMessage,
+    ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, OutputExpansionRequest,
+    RoundLimitDecisionRequest, RuntimeConfigApplyError, RuntimeConfigApplyMessageKind,
+    RuntimeConfigApplyReport, RuntimeConfigField, RuntimeConfigMenuReport, RuntimeProfiler,
+    RuntimeRetryStatus, ShellStatusSnapshot, StaleContextDecisionRequest, ThinkingViewSnapshot,
+    TurnInput, TurnUi, WorkInstructionLoadMessageKind, WorkInstructionLoadMode,
+    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkspaceCommand,
+    WorkspaceCommandMessageKind, WorkspaceCommandOutcome, WorkspaceCommandReport,
+    WorkspaceMenuReport, SPINNER_ICONS, TIMEM_LOGO,
+};
 use agent_core::capability::CapabilityRegistry;
 use agent_core::self_tool::SelfToolPaths;
 use agent_core::session_store::{
@@ -25,37 +48,15 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use timem_shell::{
-    append_audit, apply_workspace_command_to_path, bash_approval_mode_from_sources,
-    capabilities_dir_from_sources, combine_additional_contexts, create_memory_dir,
-    default_config_root, estimate_prompt_context_tokens, format_token_count,
-    host_start_audit_event, load_reminder_tips_config, load_workspace_dirs_from_path,
-    local_time_label, model_service_config_from_env, observation_events_from_core_topic_events,
-    observation_panel_width_for_terminal, parse_cli_args, render_final_answer_markdown,
-    render_final_response_at, render_prof_report_data, render_shell_status_bar,
-    render_thinking_view_at, render_turn_outcome_text, resolve_memory_dir, run_in_process_turn,
-    runtime_active_elapsed_secs, runtime_profile_report, shell_status_message_from_core_topic,
-    stale_context_decision_request, topic_event_status_hint, work_instruction_load_report,
-    work_instruction_load_request, work_instruction_load_topic_event,
-    work_instruction_mode_from_sources, workspace_config_file, workspace_reference_context,
-    CoreMemoryActivity, CoreTopicEvent, HostDecision, HostDecisionRequest, HostStatusMessage,
-    ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, OutputExpansionRequest,
-    RoundLimitDecisionRequest, RuntimeConfigApplyError, RuntimeConfigApplyMessageKind,
-    RuntimeConfigApplyReport, RuntimeConfigField, RuntimeConfigMenuReport, RuntimeProfiler,
-    RuntimeRetryStatus, ShellStatusSnapshot, StaleContextDecisionRequest, ThinkingViewSnapshot,
-    TurnInput, TurnUi, WorkInstructionLoadMessageKind, WorkInstructionLoadMode,
-    WorkInstructionLoadReport, WorkInstructionLoadRequest, WorkspaceCommand,
-    WorkspaceCommandMessageKind, WorkspaceCommandOutcome, WorkspaceCommandReport,
-    WorkspaceMenuReport, SPINNER_ICONS, TIMEM_LOGO,
-};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+#[path = "os/mod.rs"]
 mod os;
 use os::{InputSource as ShellInputSource, ModeGuard as TerminalModeGuard, NonblockingGuard};
 
 const STATIC_PROMPT: &str = include_str!("../../../resources/system_prompt/system_prompt.md");
-const ANSI_RESET: &str = timem_shell::ANSI_RESET;
-const ANSI_BOLD: &str = timem_shell::ANSI_BOLD;
+const ANSI_RESET: &str = crate::ANSI_RESET;
+const ANSI_BOLD: &str = crate::ANSI_BOLD;
 const ANSI_HIGHLIGHT: &str = "\x1b[1;33m";
 const PASTE_START_MARKER: char = '\u{2063}';
 const PASTE_END_MARKER: char = '\u{2064}';
@@ -72,8 +73,7 @@ enum ConfigTableItem {
     Row(ConfigRow),
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+pub fn run(args: Vec<String>) {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help();
         return;
@@ -790,7 +790,7 @@ fn append_shell_turn_result(
     session_id: &str,
     turn_id: &str,
     assistant_text: &str,
-    outcome: &timem_shell::TurnOutcome,
+    outcome: &crate::TurnOutcome,
     config: &agent_core::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
@@ -1592,7 +1592,7 @@ fn render_stale_context_prompt(request: StaleContextDecisionRequest) -> String {
     format!(
         "\n距离上次对话已经过去 {}，当前旧任务上下文约 {} tokens。\n是否继续使用上次对话任务上下文？{}\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n",
         format_idle_duration(request.idle),
-        timem_shell::compact_count(request.dynamic_context_tokens),
+        crate::compact_count(request.dynamic_context_tokens),
         no_effect
     )
 }
@@ -1618,14 +1618,14 @@ fn render_paste_recovery_prompt(summary: &PasteRecoverySummary) -> String {
     format!("\n{}", render_note_box("Note", &lines))
 }
 
-fn render_startup_status_block(messages: &[timem_shell::HostStatusMessage]) -> String {
+fn render_startup_status_block(messages: &[crate::HostStatusMessage]) -> String {
     let lines = messages
         .iter()
         .map(|message| {
             let label = match message.level {
-                timem_shell::HostStatusLevel::Info => "\x1b[1;32m[INFO]\x1b[0m",
-                timem_shell::HostStatusLevel::Warning => "\x1b[1;33m[WARN]\x1b[0m",
-                timem_shell::HostStatusLevel::Error => "\x1b[1;31m[ERROR]\x1b[0m",
+                crate::HostStatusLevel::Info => "\x1b[1;32m[INFO]\x1b[0m",
+                crate::HostStatusLevel::Warning => "\x1b[1;33m[WARN]\x1b[0m",
+                crate::HostStatusLevel::Error => "\x1b[1;31m[ERROR]\x1b[0m",
             };
             format!("{label} {}", message.text.trim())
         })
@@ -1787,7 +1787,7 @@ fn work_instruction_shell_load_result(
             (
                 report.context,
                 Some(HostStatusMessage {
-                    level: message.level.unwrap_or(timem_shell::HostStatusLevel::Info),
+                    level: message.level.unwrap_or(crate::HostStatusLevel::Info),
                     text: format!("已加载当前工作目录指令：{names}"),
                 }),
             )
@@ -1796,9 +1796,7 @@ fn work_instruction_shell_load_result(
         WorkInstructionLoadMessageKind::Failed => (
             None,
             Some(HostStatusMessage {
-                level: message
-                    .level
-                    .unwrap_or(timem_shell::HostStatusLevel::Warning),
+                level: message.level.unwrap_or(crate::HostStatusLevel::Warning),
                 text: format!(
                     "工作目录指令加载失败：{}",
                     message.error.unwrap_or_else(|| "unknown_error".to_string())
@@ -1919,7 +1917,7 @@ fn paste_recovery_return_edit_clear_lines(
 type ConfigField = RuntimeConfigField;
 
 fn run_config_menu(
-    config: &mut timem_shell::ModelServiceConfig,
+    config: &mut crate::ModelServiceConfig,
     core: &mut AgentCore,
     bash_approval_mode: &mut BashApprovalMode,
     work_instruction_mode: &mut WorkInstructionLoadMode,
@@ -1976,14 +1974,14 @@ fn apply_work_instruction_mode_after_config(
     mode: WorkInstructionLoadMode,
     current_work_dir: &Path,
     work_instruction_context: &mut Option<String>,
-) -> Option<timem_shell::HostStatusMessage> {
+) -> Option<crate::HostStatusMessage> {
     match mode {
         WorkInstructionLoadMode::Silent => {
             let (context, notice) = load_work_instructions_for_shell(current_work_dir);
             *work_instruction_context = context;
             notice.or_else(|| {
-                Some(timem_shell::HostStatusMessage {
-                    level: timem_shell::HostStatusLevel::Info,
+                Some(crate::HostStatusMessage {
+                    level: crate::HostStatusLevel::Info,
                     text: "当前工作目录未发现 AGENTS.md/CLAUDE.md 指令。".to_string(),
                 })
             })
@@ -1996,23 +1994,23 @@ fn apply_work_instruction_mode_after_config(
                     notice
                 } else {
                     *work_instruction_context = None;
-                    Some(timem_shell::HostStatusMessage {
-                        level: timem_shell::HostStatusLevel::Info,
+                    Some(crate::HostStatusMessage {
+                        level: crate::HostStatusLevel::Info,
                         text: "已跳过当前工作目录的 AGENTS.md/CLAUDE.md 指令。".to_string(),
                     })
                 }
             } else {
                 *work_instruction_context = None;
-                Some(timem_shell::HostStatusMessage {
-                    level: timem_shell::HostStatusLevel::Info,
+                Some(crate::HostStatusMessage {
+                    level: crate::HostStatusLevel::Info,
                     text: "当前工作目录未发现 AGENTS.md/CLAUDE.md 指令。".to_string(),
                 })
             }
         }
         WorkInstructionLoadMode::Off => {
             *work_instruction_context = None;
-            Some(timem_shell::HostStatusMessage {
-                level: timem_shell::HostStatusLevel::Info,
+            Some(crate::HostStatusMessage {
+                level: crate::HostStatusLevel::Info,
                 text: "已关闭当前工作目录指令的后续注入；历史上下文中的既有内容不会被删除。"
                     .to_string(),
             })
@@ -2022,8 +2020,7 @@ fn apply_work_instruction_mode_after_config(
 
 fn run_workspace_menu(workspace_config: &Path) -> bool {
     loop {
-        let report =
-            timem_shell::workspace_menu_report(&load_workspace_dirs_from_path(workspace_config));
+        let report = crate::workspace_menu_report(&load_workspace_dirs_from_path(workspace_config));
         let Some(selection) = choose_workspace_item(&report) else {
             println!("已退出 workspace 配置。");
             return false;
@@ -2189,7 +2186,7 @@ fn home_dir() -> PathBuf {
 }
 
 fn choose_config_field(
-    config: &timem_shell::ModelServiceConfig,
+    config: &crate::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
 ) -> Option<ConfigField> {
@@ -2198,7 +2195,7 @@ fn choose_config_field(
     println!("\n选择要修改的配置，使用 ↑/↓ 选择，回车确认，Esc/Ctrl+C 取消。\n");
     let mut selected = 0usize;
     let report =
-        timem_shell::runtime_config_menu_report(config, bash_approval_mode, work_instruction_mode);
+        crate::runtime_config_menu_report(config, bash_approval_mode, work_instruction_mode);
     print!("{}", render_config_menu(&report, selected));
     let _ = io::stdout().flush();
     let result = loop {
@@ -2304,14 +2301,14 @@ fn read_menu_key(input: &mut impl Read) -> MenuKey {
 }
 
 fn config_field_value(
-    config: &timem_shell::ModelServiceConfig,
+    config: &crate::ModelServiceConfig,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
     field: ConfigField,
 ) -> String {
     config_display_value(
         config_field_row_kind(field),
-        &timem_shell::runtime_config_field_value(
+        &crate::runtime_config_field_value(
             config,
             bash_approval_mode,
             work_instruction_mode,
@@ -2320,32 +2317,33 @@ fn config_field_value(
     )
 }
 
-fn config_display_value(kind: timem_shell::RuntimeConfigRowKind, value: &str) -> String {
+fn config_display_value(kind: crate::RuntimeConfigRowKind, value: &str) -> String {
     match kind {
-        timem_shell::RuntimeConfigRowKind::MaxLlmInput
-        | timem_shell::RuntimeConfigRowKind::MaxLlmOutput => value
-            .parse::<u32>()
-            .map(format_token_count)
-            .unwrap_or_else(|_| value.to_string()),
+        crate::RuntimeConfigRowKind::MaxLlmInput | crate::RuntimeConfigRowKind::MaxLlmOutput => {
+            value
+                .parse::<u32>()
+                .map(format_token_count)
+                .unwrap_or_else(|_| value.to_string())
+        }
         _ => value.to_string(),
     }
 }
 
-fn config_field_row_kind(field: ConfigField) -> timem_shell::RuntimeConfigRowKind {
+fn config_field_row_kind(field: ConfigField) -> crate::RuntimeConfigRowKind {
     match field {
-        RuntimeConfigField::Model => timem_shell::RuntimeConfigRowKind::Model,
-        RuntimeConfigField::ApiProtocol => timem_shell::RuntimeConfigRowKind::ApiProtocol,
-        RuntimeConfigField::ResponseProtocol => timem_shell::RuntimeConfigRowKind::ResponseProtocol,
-        RuntimeConfigField::BaseUrl => timem_shell::RuntimeConfigRowKind::BaseUrl,
-        RuntimeConfigField::MaxInput => timem_shell::RuntimeConfigRowKind::MaxLlmInput,
-        RuntimeConfigField::MaxOutput => timem_shell::RuntimeConfigRowKind::MaxLlmOutput,
-        RuntimeConfigField::BashApproval => timem_shell::RuntimeConfigRowKind::BashApproval,
-        RuntimeConfigField::WorkInstructions => timem_shell::RuntimeConfigRowKind::WorkInstructions,
+        RuntimeConfigField::Model => crate::RuntimeConfigRowKind::Model,
+        RuntimeConfigField::ApiProtocol => crate::RuntimeConfigRowKind::ApiProtocol,
+        RuntimeConfigField::ResponseProtocol => crate::RuntimeConfigRowKind::ResponseProtocol,
+        RuntimeConfigField::BaseUrl => crate::RuntimeConfigRowKind::BaseUrl,
+        RuntimeConfigField::MaxInput => crate::RuntimeConfigRowKind::MaxLlmInput,
+        RuntimeConfigField::MaxOutput => crate::RuntimeConfigRowKind::MaxLlmOutput,
+        RuntimeConfigField::BashApproval => crate::RuntimeConfigRowKind::BashApproval,
+        RuntimeConfigField::WorkInstructions => crate::RuntimeConfigRowKind::WorkInstructions,
     }
 }
 
 fn apply_config_value(
-    config: &mut timem_shell::ModelServiceConfig,
+    config: &mut crate::ModelServiceConfig,
     core: &mut AgentCore,
     bash_approval_mode: &mut BashApprovalMode,
     work_instruction_mode: &mut WorkInstructionLoadMode,
@@ -3286,7 +3284,7 @@ struct PromptStatusBar {
 impl PromptStatusBar {
     fn show_info(&mut self, text: &str) {
         self.replace_with(HostStatusMessage {
-            level: timem_shell::HostStatusLevel::Info,
+            level: crate::HostStatusLevel::Info,
             text: text.to_string(),
         });
     }
@@ -3407,15 +3405,15 @@ fn print_final_response(
 
 fn render_startup_banner(
     space: &str,
-    config: &timem_shell::ModelServiceConfig,
+    config: &crate::ModelServiceConfig,
     audit_file: &std::path::Path,
     action_audit_file: &std::path::Path,
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
 ) -> String {
-    let report = timem_shell::runtime_config_report(
+    let report = crate::runtime_config_report(
         config,
-        timem_shell::RuntimeConfigReportInput {
+        crate::RuntimeConfigReportInput {
             space: space.to_string(),
             api_audit_path: absolute_display_path(audit_file),
             action_audit_path: absolute_display_path(action_audit_file),
@@ -3431,12 +3429,12 @@ fn render_startup_banner(
     boxed_config_table(&items)
 }
 
-fn config_report_item_to_table_item(item: timem_shell::RuntimeConfigReportItem) -> ConfigTableItem {
+fn config_report_item_to_table_item(item: crate::RuntimeConfigReportItem) -> ConfigTableItem {
     match item {
-        timem_shell::RuntimeConfigReportItem::Section(section) => {
+        crate::RuntimeConfigReportItem::Section(section) => {
             ConfigTableItem::Section(config_section_label(section).to_string())
         }
-        timem_shell::RuntimeConfigReportItem::Row(row) => ConfigTableItem::Row(ConfigRow {
+        crate::RuntimeConfigReportItem::Row(row) => ConfigTableItem::Row(ConfigRow {
             desc: config_row_description(row.kind).to_string(),
             key: row.key,
             value: config_display_value(row.kind, &row.value),
@@ -3445,29 +3443,27 @@ fn config_report_item_to_table_item(item: timem_shell::RuntimeConfigReportItem) 
     }
 }
 
-fn config_section_label(section: timem_shell::RuntimeConfigSection) -> &'static str {
+fn config_section_label(section: crate::RuntimeConfigSection) -> &'static str {
     match section {
-        timem_shell::RuntimeConfigSection::Model => "MODEL",
-        timem_shell::RuntimeConfigSection::Runtime => "RUNTIME",
-        timem_shell::RuntimeConfigSection::Data => "DATA",
+        crate::RuntimeConfigSection::Model => "MODEL",
+        crate::RuntimeConfigSection::Runtime => "RUNTIME",
+        crate::RuntimeConfigSection::Data => "DATA",
     }
 }
 
-fn config_row_description(kind: timem_shell::RuntimeConfigRowKind) -> &'static str {
+fn config_row_description(kind: crate::RuntimeConfigRowKind) -> &'static str {
     match kind {
-        timem_shell::RuntimeConfigRowKind::Model => "模型名称",
-        timem_shell::RuntimeConfigRowKind::ApiProtocol => "API 提交网络包格式",
-        timem_shell::RuntimeConfigRowKind::ResponseProtocol => "模型响应协议格式",
-        timem_shell::RuntimeConfigRowKind::BaseUrl => "模型服务 base URL",
-        timem_shell::RuntimeConfigRowKind::MaxLlmInput => "最大输入 token",
-        timem_shell::RuntimeConfigRowKind::MaxLlmOutput => "最大输出 token",
-        timem_shell::RuntimeConfigRowKind::BashApproval => "bash 允许策略，approve/ask",
-        timem_shell::RuntimeConfigRowKind::WorkInstructions => {
-            "AGENTS/CLAUDE 自动加载，silent/ask/off"
-        }
-        timem_shell::RuntimeConfigRowKind::Space => "记忆空间",
-        timem_shell::RuntimeConfigRowKind::ApiAudit => "payload 记录",
-        timem_shell::RuntimeConfigRowKind::ActionAudit => "action 记录",
+        crate::RuntimeConfigRowKind::Model => "模型名称",
+        crate::RuntimeConfigRowKind::ApiProtocol => "API 提交网络包格式",
+        crate::RuntimeConfigRowKind::ResponseProtocol => "模型响应协议格式",
+        crate::RuntimeConfigRowKind::BaseUrl => "模型服务 base URL",
+        crate::RuntimeConfigRowKind::MaxLlmInput => "最大输入 token",
+        crate::RuntimeConfigRowKind::MaxLlmOutput => "最大输出 token",
+        crate::RuntimeConfigRowKind::BashApproval => "bash 允许策略，approve/ask",
+        crate::RuntimeConfigRowKind::WorkInstructions => "AGENTS/CLAUDE 自动加载，silent/ask/off",
+        crate::RuntimeConfigRowKind::Space => "记忆空间",
+        crate::RuntimeConfigRowKind::ApiAudit => "payload 记录",
+        crate::RuntimeConfigRowKind::ActionAudit => "action 记录",
     }
 }
 
@@ -3711,7 +3707,7 @@ fn print_help() {
 }
 
 fn cli_help_text() -> &'static str {
-    "Usage:\n  timem [options]\n\n\x1b[1mPrecedence:\n  command line options override non-empty process env values; non-empty process env values override the restored Session cache.\x1b[0m\n\nConfigure each Session in Timem Web, or set process environment variables for terminal use.\n  macOS/Linux env file: source /path/to/your/env\n  Windows PowerShell: $env:TIMEM_API_KEY = '...'\n\nRecommended run:\n  timem\n\nUseful env values to put in your env file:\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n  TIMEM_SPACE=/absolute/path/to/mem (Windows example: C:\\Users\\you\\timem-mem)\n\nCommand line override example:\n  timem --space /absolute/path/to/mem --model qwen-plus\n\nOptions:\n  --space <absolute-path>        env TIMEM_SPACE; MEM directory, default under the user home\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; model API format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; inline parser: json|xml, default xml\n  --tool-call-mode <mode>        env TIMEM_TOOL_CALL_MODE; auto|native|inline, default auto\n  --parallel-tool-calls <mode>   env TIMEM_PARALLEL_TOOL_CALLS; auto|true|false, default auto\n  --base-url <url>               env TIMEM_BASE_URL; model API base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --timeout <seconds>            env TIMEM_TIMEOUT; model connect/inactivity timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|20K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 20K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type another question and press Enter to queue a separate next turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai-compatible\n  Tool calling: auto (native when detected, otherwise inline)\n  Response protocol: xml (inline mode only)\n\nAPI key fallback env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
+    "Usage:\n  timem --shell [options]\n\n\x1b[1mPrecedence:\n  command line options override non-empty process env values; non-empty process env values override the restored Session cache.\x1b[0m\n\nConfigure each Session in Timem Web, or set process environment variables for terminal use.\n  macOS/Linux env file: source /path/to/your/env\n  Windows PowerShell: $env:TIMEM_API_KEY = '...'\n\nShell run:\n  timem --shell\n\nUseful env values to put in your env file:\n  export TIMEM_API_KEY=your_api_key_here\n  export TIMEM_MODEL=qwen-plus\n  export TIMEM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n  TIMEM_SPACE=/absolute/path/to/mem (Windows example: C:\\Users\\you\\timem-mem)\n\nCommand line override example:\n  timem --shell --space /absolute/path/to/mem --model qwen-plus\n\nOptions:\n  --space <absolute-path>        env TIMEM_SPACE; MEM directory, default under the user home\n  --api-protocol <protocol>      env TIMEM_API_PROTOCOL; model API format: openai-compatible|openai-responses|anthropic\n  --response-protocol <protocol> env TIMEM_RESPONSE_PROTOCOL; inline parser: json|xml, default xml\n  --tool-call-mode <mode>        env TIMEM_TOOL_CALL_MODE; auto|native|inline, default auto\n  --parallel-tool-calls <mode>   env TIMEM_PARALLEL_TOOL_CALLS; auto|true|false, default auto\n  --base-url <url>               env TIMEM_BASE_URL; model API base URL\n  --model <name>                 env TIMEM_MODEL; model name\n  --api-key <key>                env TIMEM_API_KEY; API key, env is safer than shell history\n  --timeout <seconds>            env TIMEM_TIMEOUT; model connect/inactivity timeout, default 120\n  --max-llm-input <n|100K>       env TIMEM_MAX_LLM_INPUT; max input context, default 100K\n  --max-llm-output <n|20K>       env TIMEM_MAX_LLM_OUTPUT; max output tokens, default 20K\n  --capabilities-dir <path>      env TIMEM_CAPABILITIES_DIR; runtime capability manifest overlay\n  --bash-approval <mode>         env TIMEM_BASH_APPROVAL; ask|approve, default ask\n  --work-instructions <mode>     env TIMEM_WORK_INSTRUCTIONS; silent|ask|off, default silent\n  --once-json <text>             run one non-interactive turn and print JSON\n  --supporting-context <text>    append extra runtime context for --once-json/debug\n  -h, --help                     show this help\n\nInteractive commands:\n  /help                          show these control commands\n  /config                        edit runtime model and token settings\n  /workspace                     manage workspace directories shown to the model as reference context\n  /prof                          show runtime profiling for tokens, model wait/local time, and storage size\n\nInteractive keys:\n  Ctrl+C or Esc cancels the current input, menu, or confirmation prompt.\n  While Timem is thinking, type another question and press Enter to queue a separate next turn.\n  Ctrl+C also cancels an active model turn; one Ctrl+C never exits Timem by itself.\n  Use Ctrl+D or /exit to leave the shell intentionally.\n\nProtocol defaults:\n  API protocol: openai-compatible\n  Tool calling: auto (native when detected, otherwise inline)\n  Response protocol: xml (inline mode only)\n\nAPI key fallback env vars:\n  DASHSCOPE_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN\n"
 }
 
 fn runtime_help_text() -> &'static str {

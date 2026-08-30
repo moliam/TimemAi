@@ -79,7 +79,7 @@ fn spawn_running_web(root: &Path) -> (ChildGuard, PathBuf, PathBuf) {
     let mem = root.join("mem");
     fs::create_dir_all(&mem).unwrap();
     let output = fs::File::create(root.join("output.log")).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_timem-web"))
+    let child = Command::new(env!("CARGO_BIN_EXE_timem"))
         .args(["--no-open", "--space", mem.to_str().unwrap()])
         .stdout(Stdio::from(output.try_clone().unwrap()))
         .stderr(Stdio::from(output))
@@ -132,7 +132,7 @@ fn injected_rust_panic_writes_redacted_report_and_preserves_running_marker() {
     let root = temporary_root("panic");
     let mem = root.join("mem");
     fs::create_dir_all(&mem).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_timem-web"))
+    let output = Command::new(env!("CARGO_BIN_EXE_timem"))
         .args(["--help", "--space", mem.to_str().unwrap()])
         .env("TIMEM_WEB_TEST_FAULT", "panic_after_diagnostics_install")
         .output()
@@ -160,7 +160,7 @@ fn sigkill_residue_is_promoted_by_the_next_start_without_guessing_cause() {
     wait_until(WAIT_TIMEOUT, || child.0.try_wait().ok().flatten().is_some());
     assert!(current.is_file());
     assert!(!diagnostics.join("last-exit.json").exists());
-    let restart = Command::new(env!("CARGO_BIN_EXE_timem-web"))
+    let restart = Command::new(env!("CARGO_BIN_EXE_timem"))
         .args(["--help", "--space", mem.to_str().unwrap()])
         .output()
         .unwrap();
@@ -182,7 +182,7 @@ fn second_web_process_cannot_open_the_same_mem_workspace() {
     let root = temporary_root("same-mem-exclusive");
     let (mut first, diagnostics, first_marker) = spawn_running_web(&root);
     let mem = root.join("mem");
-    let second = Command::new(env!("CARGO_BIN_EXE_timem-web"))
+    let second = Command::new(env!("CARGO_BIN_EXE_timem"))
         .args(["--no-open", "--space", mem.to_str().unwrap()])
         .output()
         .unwrap();
@@ -225,7 +225,7 @@ fn startup_configuration_failure_records_bounded_error_without_secret_values() {
     let mem = root.join("mem");
     fs::create_dir_all(&mem).unwrap();
     let secret = "process-test-private-credential";
-    let output = Command::new(env!("CARGO_BIN_EXE_timem-web"))
+    let output = Command::new(env!("CARGO_BIN_EXE_timem"))
         .args([
             "--space",
             mem.to_str().unwrap(),
@@ -255,7 +255,7 @@ fn startup_configuration_failure_records_bounded_error_without_secret_values() {
 #[test]
 fn removed_data_dir_option_is_rejected_explicitly() {
     let root = temporary_root("removed-data-dir");
-    let output = Command::new(env!("CARGO_BIN_EXE_timem-web"))
+    let output = Command::new(env!("CARGO_BIN_EXE_timem"))
         .args(["--data-dir", root.to_str().unwrap()])
         .output()
         .unwrap();
@@ -270,7 +270,7 @@ fn unavailable_mem_diagnostics_degrades_without_hiding_configuration_error() {
     fs::create_dir_all(&root).unwrap();
     let unusable_mem = root.join("mem-is-a-file");
     fs::write(&unusable_mem, b"not a directory").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_timem-web"))
+    let output = Command::new(env!("CARGO_BIN_EXE_timem"))
         .args(["--space", unusable_mem.to_str().unwrap()])
         .output()
         .unwrap();

@@ -6,7 +6,7 @@ param(
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-foreach ($name in @('timem-native-rs.exe','timem.exe','timem-web.exe','timem-shell.exe')) {
+foreach ($name in @('timem.exe','timem-web.cmd','timem-native-rs.exe','timem-web.exe','timem-shell.exe')) {
     Remove-Item -LiteralPath (Join-Path $InstallDir $name) -Force -ErrorAction SilentlyContinue
 }
 Remove-Item -LiteralPath (Join-Path $ResourceDir 'reminder_tips.json') -Force -ErrorAction SilentlyContinue

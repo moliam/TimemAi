@@ -79,12 +79,12 @@ if grep -nE 'timem_shell|timem_web|host_projection|interfaces/' bridges/http_web
 fi
 
 if ! grep -nF 'timem_in_process = { path = "../../bridges/in_process" }' interfaces/shell/Cargo.toml >/dev/null ||
-   ! grep -nF 'run_in_process_turn(' interfaces/shell/src/main.rs >/dev/null; then
+   ! grep -nF 'run_in_process_turn(' interfaces/shell/src/app.rs >/dev/null; then
   echo "error: interfaces/shell must enter synchronous Turns through bridges/in_process" >&2
   exit 1
 fi
 
-if grep -nF 'run_session_turn(' interfaces/shell/src/main.rs >/tmp/timem_module_boundary_shell_direct_turn.txt; then
+if grep -nF 'run_session_turn(' interfaces/shell/src/app.rs >/tmp/timem_module_boundary_shell_direct_turn.txt; then
   echo "error: interfaces/shell must not bypass bridges/in_process for synchronous Turns" >&2
   cat /tmp/timem_module_boundary_shell_direct_turn.txt >&2
   exit 1
@@ -94,7 +94,7 @@ for shell_os_file in interfaces/shell/src/os/mod.rs interfaces/shell/src/os/unix
   test -f "$shell_os_file" || { echo "error: missing Shell OS adapter: $shell_os_file" >&2; exit 1; }
 done
 
-if grep -nE 'libc::|/dev/tty|termios|tcsetattr|fcntl\(|AsRawFd|FromRawFd' interfaces/shell/src/main.rs >/tmp/timem_module_boundary_shell_os_primitives.txt; then
+if grep -nE 'libc::|/dev/tty|termios|tcsetattr|fcntl\(|AsRawFd|FromRawFd' interfaces/shell/src/app.rs >/tmp/timem_module_boundary_shell_os_primitives.txt; then
   echo "error: Shell OS primitives belong under interfaces/shell/src/os" >&2
   cat /tmp/timem_module_boundary_shell_os_primitives.txt >&2
   exit 1

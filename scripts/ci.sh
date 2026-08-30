@@ -95,7 +95,7 @@ echo "== repeated edge regression =="
 scripts/edge_regression.sh
 
 echo "== release build =="
-cargo build --locked -p timem_shell -p timem_web --release
+cargo build --locked -p timem_web --release
 
 echo "== cross-host resume smoke =="
 scripts/cross_host_resume_smoke.sh

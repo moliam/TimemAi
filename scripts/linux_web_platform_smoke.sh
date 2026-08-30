@@ -7,7 +7,7 @@ if [ "$(uname -s)" != "Linux" ]; then
 fi
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-binary="${1:-$ROOT_DIR/target/release/timem-web}"
+binary="${1:-$ROOT_DIR/target/release/timem}"
 
 if [ ! -x "$binary" ]; then
   echo "missing executable: $binary" >&2

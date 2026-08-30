@@ -76,7 +76,9 @@ contract in the same reviewed change.
 `core/agent`, `core/ui_contract`, `interfaces/shell`, `interfaces/web`, and `core/platform` are
 current semantic roots. Preserve the
 `timem_shell`, `timem_web`, and `agent_core` package compatibility needed during the
-migration, as well as the `timem-native-rs` and `timem-web` binary/user command surfaces.
+migration. The CLI delivery surface is one real executable named `timem`: it launches Web by
+default and Shell only with `--shell`. A `timem-web` symlink or forwarding shim may be installed
+for command compatibility, but must not be a second executable or delegated runtime.
 Temporary re-exports are allowed only when they avoid dependency cycles and have an explicit
 removal stage.
 
@@ -227,7 +229,7 @@ pnpm --dir interfaces/web test
 pnpm --dir interfaces/web build
 git diff --exit-code -- interfaces/web/dist
 scripts/performance_guard.sh
-cargo build --locked -p timem_shell -p timem_web --release
+cargo build --locked -p timem_web --release
 git diff --check
 ```
 

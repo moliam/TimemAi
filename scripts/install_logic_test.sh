@@ -63,32 +63,50 @@ if find "$atomic_test_dir" -maxdepth 1 -name 'destination.tmp.*' | grep -q .; th
   exit 1
 fi
 
+printf 'legacy web executable\n' > "$atomic_test_dir/timem-web"
+printf 'legacy shell executable\n' > "$atomic_test_dir/timem-native-rs"
+printf 'legacy shell wrapper\n' > "$atomic_test_dir/timem-shell"
+install_web_alias "$atomic_test_dir/timem-web"
+rm -f "$atomic_test_dir/timem-native-rs" "$atomic_test_dir/timem-shell"
+if [ -e "$atomic_test_dir/timem-native-rs" ] || [ -e "$atomic_test_dir/timem-shell" ]; then
+  echo "upgrade should remove legacy independent Shell artifacts" >&2
+  exit 1
+fi
+if [ ! -L "$atomic_test_dir/timem-web" ]; then
+  echo "compatibility entry should be a symbolic link, not a second executable copy" >&2
+  exit 1
+fi
+if [ "$(readlink "$atomic_test_dir/timem-web")" != "timem" ]; then
+  echo "compatibility entry should point relatively to the unified timem executable" >&2
+  exit 1
+fi
+
 install_prompt="$(
   INSTALL_DIR="/example/bin"
   RESOURCE_DIR="/example/share/timem/resources"
   ENV_TEMPLATE="/example/source/env_template"
-  WEB_BIN_NAME="timem-web"
   COMMAND_NAME="timem"
-  BIN_NAME="timem-native-rs"
+  WEB_ALIAS_NAME="timem-web"
   print_install_success
 )"
 
 for expected in \
   "TimemAi installation complete." \
-  "Timem Web (recommended): /example/bin/timem-web" \
-  "Start Timem Web:" \
-  "2. Run: timem-web" \
+  "Timem CLI:               /example/bin/timem" \
+  "Compatibility alias:     /example/bin/timem-web -> timem" \
+  "Start Timem Web (default):" \
+  "2. Run: timem" \
   "Configure the model and API key in Timem Web" \
   "No env file is required to open Timem Web." \
-  "Terminal UI (optional):  /example/bin/timem" \
+  "Run: timem --shell" \
   "Optional terminal workflow:"; do
   if ! grep -Fq "$expected" <<< "$install_prompt"; then
-    echo "install prompt is missing Web-first product guidance: $expected" >&2
+    echo "install prompt is missing unified CLI guidance: $expected" >&2
     exit 1
   fi
 done
 
-web_start_line="$(grep -nF "Start Timem Web:" <<< "$install_prompt" | cut -d: -f1)"
+web_start_line="$(grep -nF "Start Timem Web (default):" <<< "$install_prompt" | cut -d: -f1)"
 terminal_start_line="$(grep -nF "Optional terminal workflow:" <<< "$install_prompt" | cut -d: -f1)"
 if [ "$web_start_line" -ge "$terminal_start_line" ]; then
   echo "install prompt should present Timem Web before the optional terminal workflow" >&2
@@ -105,13 +123,22 @@ if ! grep -q 'cargo fetch --locked' "$ROOT_DIR/install.sh"; then
   exit 1
 fi
 
-if ! grep -q 'cargo build --locked -p timem_shell -p timem_web --release' "$ROOT_DIR/install.sh"; then
-  echo "install script should build both release binaries with locked dependencies" >&2
+if ! grep -q 'cargo build --locked -p timem_web --release' "$ROOT_DIR/install.sh"; then
+  echo "install script should build the unified release executable with locked dependencies" >&2
   exit 1
 fi
 
-if ! grep -q 'target/release/$WEB_BIN_NAME' "$ROOT_DIR/install.sh"; then
-  echo "install script should install the embedded Web UI binary" >&2
+if grep -q 'cargo build --locked .*timem_shell' "$ROOT_DIR/install.sh"; then
+  echo "install script must not build a second Shell executable" >&2
+  exit 1
+fi
+
+if ! grep -Fq 'target/release/$COMMAND_NAME' "$ROOT_DIR/install.sh"; then
+  echo "install script should install the unified Timem executable" >&2
+  exit 1
+fi
+if ! grep -Fq 'install_web_alias "$INSTALL_DIR/$WEB_ALIAS_NAME"' "$ROOT_DIR/install.sh"; then
+  echo "install script should create the compatibility alias without duplicating the executable" >&2
   exit 1
 fi
 

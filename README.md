@@ -1,13 +1,11 @@
 # TimemAi
 
-TimemAi is a local-first AI agent with two interfaces:
+TimemAi is a local-first AI agent delivered as one `timem` executable with two interfaces:
 
-- **`timem-web` (Recommended):** browser UI for sessions, configuration, chat
-  history, tools, and live work status.
-- `timem`: terminal UI for shell-heavy work.
+- **Web (default, recommended):** run `timem` for the browser UI, including sessions, configuration, chat history, tools, and live work status.
+- **Shell (optional):** run `timem --shell` for terminal-heavy work.
 
-Both interfaces use the same local runtime, memory, session history, tools, and
-model service configuration.
+Both modes use the same local runtime, memory, session history, tools, and model service configuration. Installers may also provide `timem-web` as a compatibility alias to `timem`; it is not a second executable.
 
 ## Development Architecture
 
@@ -41,8 +39,7 @@ that directory to the current user's PATH without administrator privileges. It
 requires stable Rust for `x86_64-pc-windows-msvc` and Microsoft Visual C++ x64
 Build Tools.
 
-The installer builds and installs `timem` and `timem-web`. Cargo downloads Rust crates
-automatically during the build. The released Web bundle is already included;
+The installer builds and installs one `timem` executable. On macOS/Linux it also creates a `timem-web` symlink, and on Windows a forwarding `timem-web.cmd`, for compatibility. Cargo downloads Rust crates automatically during the build. The released Web bundle is already included;
 Node.js is only needed when developing the Web frontend.
 
 ## Quick Start — Timem Web (Recommended)
@@ -50,13 +47,13 @@ Node.js is only needed when developing the Web frontend.
 After installation, the shortest local start is:
 
 ```bash
-timem-web
+timem
 ```
 
 To open Timem Web from another machine, enable public listening:
 
 ```bash
-timem-web --public
+timem --public
 ```
 
 `--public` binds to all network interfaces and prints a token-protected URL;
@@ -76,7 +73,7 @@ can use different models or endpoints without changing the others.
 
 ### Reminder tips configuration
 
-The default schedules live in `resources/reminder_tips.json`. `install.sh` installs that file under the installation prefix, normally `~/.local/share/timem/resources/reminder_tips.json`, and both `timem` and `timem-web` load it at startup.
+The default schedules live in `resources/reminder_tips.json`. `install.sh` installs that file under the installation prefix, normally `~/.local/share/timem/resources/reminder_tips.json`, and both Web and Shell modes load it at startup.
 
 To customize tips globally for the current user, create `reminder_tips.json` in one of these locations. A user file takes precedence over the installed resource and is never overwritten or removed by install/uninstall:
 
@@ -142,8 +139,7 @@ rejected. A MEM can hold many Sessions: each Session keeps its own metadata and
 history files and uses a Session-scoped lock, so unrelated Sessions can read,
 write, and run concurrently without rewriting one global Session index.
 
-Use `timem --help` or `timem-web --help` to inspect available startup
-options. After the first successful configuration, Timem caches the effective
+Use `timem --help` for Web startup options or `timem --shell --help` for Shell options. After the first successful configuration, Timem caches the effective
 runtime environment with the local Session, so later starts can resume without
 re-entering it. Runtime configuration changes update that cache. Command-line
 options always override cached values.
@@ -151,7 +147,7 @@ options always override cached values.
 ## Run Shell (Optional)
 
 ```bash
-timem
+timem --shell
 ```
 
 The `source ./env` step is needed for the initial configuration or when you
@@ -204,7 +200,7 @@ Local mode binds to `127.0.0.1` and opens the page automatically without an
 access token when a local graphical session is available:
 
 ```bash
-timem-web
+timem
 ```
 
 On SSH or headless Linux, the server prints the URL without trying to open a
@@ -213,7 +209,7 @@ browser. Open that URL on a machine with a browser.
 Public mode binds to all interfaces and prints a token-protected URL:
 
 ```bash
-timem-web --public
+timem --public
 ```
 
 Open the complete URL printed in the terminal, including `?token=...`, from
@@ -224,7 +220,7 @@ selection strategy. An explicit `--port` always takes priority. To choose a
 fixed port or advertised host:
 
 ```bash
-timem-web --public --port 20699 --public-host 10.125.112.83
+timem --public --port 20699 --public-host 10.125.112.83
 ```
 
 Public mode does not open a browser on the server. HTTP access may show a
@@ -267,10 +263,27 @@ for the files to inspect.
 
 ## Update and Uninstall
 
+The installers support both first installation and in-place upgrade. They install the current source checkout; they do not fetch newer source automatically.
+
+macOS/Linux upgrade from any older checkout-based installation:
+
 ```bash
+cd /path/to/TimemAi
 git pull --ff-only
 ./install.sh
 ```
+
+This atomically replaces the old `timem` command, removes the former independent `timem-native-rs`/`timem-shell` artifacts, and replaces an old independent `timem-web` binary with a compatibility symlink to the unified `timem`. MEM data, Sessions, credentials, and user configuration are preserved. Restart running Timem processes after upgrading.
+
+On Windows, first exit running Timem processes so Windows file locks do not block replacement, then run:
+
+```powershell
+cd C:\path\to\TimemAi
+git pull --ff-only
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+The Windows upgrade removes legacy independent `.exe` files and installs `timem-web.cmd` as a forwarding compatibility shim.
 
 macOS/Linux:
 

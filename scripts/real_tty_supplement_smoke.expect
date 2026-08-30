@@ -6,7 +6,7 @@
 set timeout 60
 
 set repo_root [file normalize [file join [file dirname [info script]] ".."]]
-set binary [file join $repo_root "target" "release" "timem-native-rs"]
+set binary [file join $repo_root "target" "release" "timem"]
 set model_server_script [file join $repo_root "scripts" "fake_openai_server.py"]
 if {[info exists env(TMPDIR)] && $env(TMPDIR) ne ""} {
     set temp_root $env(TMPDIR)
@@ -18,7 +18,7 @@ set port 0
 
 if {![file executable $binary]} {
     puts stderr "missing executable: $binary"
-    puts stderr "run: cargo build -p timem_shell --release"
+    puts stderr "run: cargo build -p timem_web --release"
     exit 1
 }
 
@@ -107,7 +107,7 @@ spawn env \
     TIMEM_API_PROTOCOL=openai-compatible \
     TIMEM_BASE_URL=http://127.0.0.1:$port/v1 \
     TIMEM_MODEL=fake-supplement-model \
-    $binary --space $memory_dir
+    $binary --shell --space $memory_dir
 expect {
     -re "\033\\\[\\?2004h" {}
     timeout {

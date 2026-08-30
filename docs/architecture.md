@@ -19,7 +19,7 @@ Timem is now a multi-host local agent:
 ### 1.1 Product Boundary
 
 Version 1.1 makes `timem-web` the recommended interface. The shortest supported
-path is to run `timem-web`, then configure the selected Session in the browser.
+path is to run `timem`, then configure the selected Session in the browser.
 The Web host owns authenticated transport and Session orchestration, the Web UI
 owns presentation and recoverable browser intent, and the core remains the
 single source of truth for agent behavior:
@@ -1861,7 +1861,7 @@ The standalone shell should stay releasable with:
 ```bash
 cargo fmt --check
 cargo test --workspace
-cargo build -p timem_shell --release
+cargo build -p timem_web --release
 ```
 
 Core tests cover:

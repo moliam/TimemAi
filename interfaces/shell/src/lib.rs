@@ -1,3 +1,5 @@
+extern crate self as timem_shell;
+
 use agent_core::{
     model_service_config_from_sources, parse_parallel_tool_calls, parse_tool_call_mode,
     ModelServiceConfigSource, UsageStats,
@@ -6,6 +8,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod app;
 mod final_answer_renderer;
 mod observation;
 mod profiler;
@@ -46,6 +49,7 @@ pub use agent_core::{
     CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_RESPONSE, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
     DEFAULT_STALE_CONTEXT_IDLE, DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD, RUNTIME_CONFIG_FIELDS,
 };
+pub use app::run as run_shell;
 pub use final_answer_renderer::{
     render_final_answer_markdown, FinalAnswerRenderer, TermimadFinalAnswerRenderer,
 };

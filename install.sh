@@ -6,9 +6,9 @@ INSTALL_DIR="${TIMEM_SHELL_INSTALL_DIR:-$HOME/.local/bin}"
 RESOURCE_DIR="${TIMEM_RESOURCES_DIR:-$(dirname "$INSTALL_DIR")/share/timem/resources}"
 REMINDER_TIPS_SOURCE="$ROOT_DIR/resources/reminder_tips.json"
 ENV_TEMPLATE="$ROOT_DIR/env_template"
-BIN_NAME="timem-native-rs"
-WEB_BIN_NAME="timem-web"
 COMMAND_NAME="timem"
+WEB_ALIAS_NAME="timem-web"
+OLD_BIN_NAME="timem-native-rs"
 OLD_WRAPPER_NAME="timem-shell"
 MIN_RUST_VERSION="1.78.0"
 
@@ -164,12 +164,12 @@ fetch_rust_dependencies() {
 }
 
 build_release_binary() {
-  echo "Building Timem Web and the optional terminal UI..."
+  echo "Building the unified Timem CLI (Web by default, Shell with --shell)..."
   if [ ! -f "$ROOT_DIR/interfaces/web/dist/index.html" ]; then
     echo "error: embedded Timem Web assets are missing from this source package." >&2
     exit 1
   fi
-  if ! cargo build --locked -p timem_shell -p timem_web --release; then
+  if ! cargo build --locked -p timem_web --release; then
     echo "error: release build failed." >&2
     echo "If this is a fresh machine, rerun ./install.sh after confirming Rust and system build dependencies installed successfully." >&2
     exit 1
@@ -190,6 +190,18 @@ install_binary_atomically() {
 }
 
 
+install_web_alias() {
+  local destination="$1"
+  local temporary="${destination}.tmp.$$"
+
+  rm -f "$temporary"
+  if ! ln -s "$COMMAND_NAME" "$temporary" || ! mv -f "$temporary" "$destination"; then
+    rm -f "$temporary"
+    echo "error: failed to install compatibility alias $destination atomically." >&2
+    return 1
+  fi
+}
+
 install_resource_atomically() {
   local source="$1"
   local destination="$2"
@@ -208,26 +220,25 @@ print_install_success() {
   echo
   echo "TimemAi installation complete."
   echo
-  echo "Installed applications:"
-  echo "  Timem Web (recommended): $INSTALL_DIR/$WEB_BIN_NAME"
-  echo "  Terminal UI (optional):  $INSTALL_DIR/$COMMAND_NAME"
-  echo "  Terminal binary:         $INSTALL_DIR/$BIN_NAME"
+  echo "Installed program:"
+  echo "  Timem CLI:               $INSTALL_DIR/$COMMAND_NAME"
+  echo "  Compatibility alias:     $INSTALL_DIR/$WEB_ALIAS_NAME -> $COMMAND_NAME"
   echo
   echo "Installed support files:"
   echo "  Resources:    $RESOURCE_DIR"
   echo "  Env template: $ENV_TEMPLATE"
   echo "  Uninstaller:  $ROOT_DIR/uninstall.sh"
   echo
-  echo "Start Timem Web:"
+  echo "Start Timem Web (default):"
   echo "  1. Ensure $INSTALL_DIR is in PATH."
-  echo "  2. Run: $WEB_BIN_NAME"
+  echo "  2. Run: $COMMAND_NAME"
   echo "  3. Your browser should open automatically. Configure the model and API key in Timem Web, then start chatting."
   echo
   echo "No env file is required to open Timem Web."
-  echo "For remote access on a trusted network, run: $WEB_BIN_NAME --public"
+  echo "For remote access on a trusted network, run: $COMMAND_NAME --public"
   echo
   echo "Optional terminal workflow:"
-  echo "  Run: $COMMAND_NAME"
+  echo "  Run: $COMMAND_NAME --shell"
   echo "  To provide environment defaults, copy $ENV_TEMPLATE to a private file, edit it, then source it before launch."
   echo
   echo "Update later from this git clone:"
@@ -244,18 +255,12 @@ main() {
   build_release_binary
 
   mkdir -p "$INSTALL_DIR"
-  install_binary_atomically "$ROOT_DIR/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
-  install_binary_atomically "$ROOT_DIR/target/release/$WEB_BIN_NAME" "$INSTALL_DIR/$WEB_BIN_NAME"
+  install_binary_atomically "$ROOT_DIR/target/release/$COMMAND_NAME" "$INSTALL_DIR/$COMMAND_NAME"
   install_resource_atomically "$REMINDER_TIPS_SOURCE" "$RESOURCE_DIR/reminder_tips.json"
 
-  cat > "$INSTALL_DIR/$COMMAND_NAME" <<SH
-#!/usr/bin/env bash
-set -euo pipefail
-
-exec "\$(dirname "\$0")/timem-native-rs" "\$@"
-SH
-  rm -f "$INSTALL_DIR/$OLD_WRAPPER_NAME"
-  chmod +x "$INSTALL_DIR/$BIN_NAME" "$INSTALL_DIR/$COMMAND_NAME" "$INSTALL_DIR/$WEB_BIN_NAME"
+  install_web_alias "$INSTALL_DIR/$WEB_ALIAS_NAME"
+  rm -f "$INSTALL_DIR/$OLD_BIN_NAME" "$INSTALL_DIR/$OLD_WRAPPER_NAME"
+  chmod +x "$INSTALL_DIR/$COMMAND_NAME"
 
   print_install_success
 }

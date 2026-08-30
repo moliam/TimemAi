@@ -1204,7 +1204,7 @@ describe("web topic view model", () => {
       "Connection lost. Reconnecting…",
     );
     expect(sessionInteractionLockReason(false, false, true, 3)).toBe(
-      "Runtime unavailable. Restart timem-web.",
+      "Runtime unavailable. Restart timem.",
     );
     expect(sessionInteractionLockReason(false, false, false)).toBe(
       "Waiting for runtime snapshot…",
@@ -1225,7 +1225,7 @@ describe("web topic view model", () => {
       "Connection lost. Reconnecting…",
     );
     expect(runtimeConnectionLabel(false, false, true, 3)).toBe(
-      "Runtime unavailable. Restart timem-web.",
+      "Runtime unavailable. Restart timem.",
     );
     expect(runtimeConnectionLabel(true, false, true)).toBe("Syncing runtime…");
     expect(runtimeConnectionLabel(true, true, true)).toBe("Runtime connected");

@@ -203,7 +203,7 @@ export function runtimeConnectionLabel(
 ) {
   if (!connected && runtimeEverConnected) {
     return reconnectAttempt >= 3
-      ? "Runtime unavailable. Restart timem-web."
+      ? "Runtime unavailable. Restart timem."
       : "Connection lost. Reconnecting…";
   }
   if (!connected) return "Connecting to runtime…";
@@ -219,7 +219,7 @@ export function sessionInteractionLockReason(
   if (pendingMemSwitch) return "Mem switch is in progress";
   if (!connected && runtimeEverConnected) {
     return reconnectAttempt >= 3
-      ? "Runtime unavailable. Restart timem-web."
+      ? "Runtime unavailable. Restart timem."
       : "Connection lost. Reconnecting…";
   }
   return "Waiting for runtime snapshot…";
