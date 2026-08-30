@@ -11,6 +11,10 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+pub use timem_ui_contract::commands::ToolGenRequest;
+pub use timem_ui_contract::projections::{
+    CoreSessionWorkerLifecycleState, CoreSessionWorkerStatus,
+};
 
 const TOOLGEN_CONTEXT_INSTRUCTIONS: &str =
     include_str!("../../../resources/toolgen/toolgen_context.md");
@@ -18,19 +22,6 @@ const TOOLGEN_XML_COMPLETION: &str =
     include_str!("../../../resources/protocol/xml/toolgen_retrospect.md");
 const TOOLGEN_JSON_COMPLETION: &str =
     include_str!("../../../resources/protocol/json/toolgen_retrospect.md");
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolGenRequest {
-    pub user_instruction: Option<String>,
-}
-
-impl ToolGenRequest {
-    pub fn new(user_instruction: Option<String>) -> Self {
-        Self {
-            user_instruction: user_instruction.filter(|value| !value.trim().is_empty()),
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct CoreSessionWorkerConfig {
@@ -815,19 +806,6 @@ pub struct CoreSessionWorker {
     handle: CoreSessionWorkerHandle,
     event_rx: Receiver<CoreSessionWorkerEvent>,
     join: Option<JoinHandle<()>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoreSessionWorkerLifecycleState {
-    Running,
-    Stopping,
-    Stopped,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CoreSessionWorkerStatus {
-    pub identity: CoreSessionWorkerIdentity,
-    pub state: CoreSessionWorkerLifecycleState,
 }
 
 struct ManagedSessionWorker {

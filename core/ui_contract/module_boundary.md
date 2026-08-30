@@ -5,11 +5,12 @@ It contains no presentation, transport, persistence, model execution, or applica
 
 ## Current layout
 
+- `src/commands`: UI-neutral application requests. It currently owns the ToolGen request contract.
 - `src/projections`: authoritative UI-readable state shapes. It currently owns the Turn projection
-  wire contract plus Session/Context/Worker identity, workspace, and aggregate activity shapes.
+  wire contract plus Session/Context/Worker identity, lifecycle, workspace, and aggregate activity
+  shapes.
 
-`commands` and `events` are added only when real types are extracted; empty architecture
-placeholders are forbidden.
+`events` is added only when real types are extracted; empty architecture placeholders are forbidden.
 
 ## Rules
 

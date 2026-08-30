@@ -1,8 +1,9 @@
 use serde_json::json;
 use timem_ui_contract::projections::{
     session_worker_default_display_name, ActiveTurnProjection, CoreGlobalWorkerStatus,
-    CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, FinishedTurnProjection, TurnActivity,
-    TurnInputAdmission, TurnProjection, TurnProjectionOutcome, TurnToken,
+    CoreSessionWorkerIdentity, CoreSessionWorkerLifecycleState, CoreSessionWorkerStatus,
+    CoreSessionWorkerWorkspace, FinishedTurnProjection, TurnActivity, TurnInputAdmission,
+    TurnProjection, TurnProjectionOutcome, TurnToken,
 };
 
 fn token() -> TurnToken {
@@ -94,4 +95,15 @@ fn worker_workspace_and_aggregate_status_keep_existing_defaults() {
             .session_working_worker_count,
         2
     );
+}
+
+#[test]
+fn worker_lifecycle_status_keeps_identity_and_explicit_state() {
+    let identity = CoreSessionWorkerIdentity::new("session-a", 0, None, None);
+    let status = CoreSessionWorkerStatus {
+        identity: identity.clone(),
+        state: CoreSessionWorkerLifecycleState::Stopping,
+    };
+    assert_eq!(status.identity, identity);
+    assert_eq!(status.state, CoreSessionWorkerLifecycleState::Stopping);
 }

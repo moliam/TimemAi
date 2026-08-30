@@ -84,6 +84,21 @@ impl CoreSessionWorkerIdentity {
     }
 }
 
+/// Application lifecycle state for a managed Session worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreSessionWorkerLifecycleState {
+    Running,
+    Stopping,
+    Stopped,
+}
+
+/// UI-neutral status of one managed Session worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoreSessionWorkerStatus {
+    pub identity: CoreSessionWorkerIdentity,
+    pub state: CoreSessionWorkerLifecycleState,
+}
+
 pub fn session_worker_default_display_name(ordinal: u32, requested: Option<String>) -> String {
     requested
         .map(|name| name.trim().to_string())
