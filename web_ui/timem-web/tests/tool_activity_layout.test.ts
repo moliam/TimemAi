@@ -12,6 +12,11 @@ describe("tool activity row layout", () => {
     );
   });
 
+  it("uses compact terminal labels and always shows the failure count", () => {
+    expect(source).toContain('summary.status === "completed") return "Succ"');
+    expect(source).toContain('return `Fail(${summary.failedCount})`');
+  });
+
   it("keeps the command beside metadata and reserves the final column for the chevron", () => {
     expect(styles).toContain(".tool-activity-command { min-width: 0; grid-column: 4; justify-self: start;");
     expect(styles).toContain(".tool-activity-chevron { grid-column: 5; justify-self: end;");

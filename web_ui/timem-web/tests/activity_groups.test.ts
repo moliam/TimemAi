@@ -49,11 +49,12 @@ describe("tool activity grouping", () => {
     expect(summary?.status).toBe("running");
   });
 
-  it("reports failed after all tools settle if any failed", () => {
+  it("reports failed after all tools settle and counts failures", () => {
     expect(summarizeToolActivities([
       activity("run_bash", "completed"),
       activity("self_tool", "timeout"),
-    ])?.status).toBe("failed");
+      activity("memmgr", "cancelled"),
+    ])).toMatchObject({ status: "failed", failedCount: 2 });
   });
 
   it("reports completed when every tool completes", () => {

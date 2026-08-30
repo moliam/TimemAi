@@ -13,6 +13,7 @@ export type ToolActivitySummary = {
   label: string;
   counts: ToolActivityCount[];
   status: ToolActivityGroupStatus;
+  failedCount: number;
   activities: Activity[];
 };
 
@@ -27,9 +28,10 @@ export function summarizeToolActivities(activities: Activity[]): ToolActivitySum
   }
 
   const statuses = tools.map((activity) => activity.tool_status || "running");
+  const failedCount = statuses.filter(isToolActivityFailed).length;
   const status = statuses.some(isToolActivityRunning)
     ? "running"
-    : statuses.some(isToolActivityFailed)
+    : failedCount > 0
       ? "failed"
       : "completed";
 
@@ -41,6 +43,7 @@ export function summarizeToolActivities(activities: Activity[]): ToolActivitySum
     label: countItems.map(({ name, count }) => `${name} ${count}`).join(" | "),
     counts: countItems,
     status,
+    failedCount,
     activities: tools,
   };
 }
