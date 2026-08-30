@@ -48,6 +48,10 @@ REQUIRED = (
     "interfaces/shell/src/os/windows/console.rs",
     "interfaces/web/package.json",
     "interfaces/web/module_boundary.md",
+    "timem_web/src/os/mod.rs",
+    "timem_web/src/os/unix.rs",
+    "timem_web/src/os/windows/mod.rs",
+    "timem_web/src/os/windows/lifecycle.rs",
 )
 FORBIDDEN_DIRS = (
     "agent_core",
@@ -271,6 +275,10 @@ def write_fixture(root: Path) -> None:
         "interfaces/shell/src/os/windows/console.rs": "pub fn terminal() {}\n",
         "interfaces/web/package.json": "{}\n",
         "interfaces/web/module_boundary.md": "web boundary\n",
+        "timem_web/src/os/mod.rs": "#[cfg(unix)] mod unix; #[cfg(windows)] mod windows;\n",
+        "timem_web/src/os/unix.rs": "pub fn lifecycle() {}\n",
+        "timem_web/src/os/windows/mod.rs": "mod lifecycle;\n",
+        "timem_web/src/os/windows/lifecycle.rs": "pub fn lifecycle() {}\n",
     }
     for relative, content in files.items():
         path = root / relative
@@ -290,6 +298,7 @@ def self_test() -> None:
         ("Shell bypasses in-process Bridge", lambda root: (root / "interfaces/shell/src/main.rs").write_text("fn main() { run_session_turn(); }\n")),
         ("Shell Unix primitive outside OS adapter", lambda root: (root / "interfaces/shell/src/main.rs").write_text("fn main() { run_in_process_turn(); libc::fcntl(0, 0); }\n")),
         ("missing Windows Shell console adapter", lambda root: (root / "interfaces/shell/src/os/windows/console.rs").unlink()),
+        ("missing Windows Web lifecycle adapter", lambda root: (root / "timem_web/src/os/windows/lifecycle.rs").unlink()),
         ("Agent to Session reverse dependency", lambda root: (root / "core/agent/Cargo.toml").write_text('[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\ntimem_session = { path = "../session" }\n')),
         ("reverse dependency", lambda root: (root / "core/platform/Cargo.toml").write_text('[package]\nname = "timem_platform"\n[dependencies]\ntimem_shell = { path = "../../interfaces/shell" }\n')),
         ("UI contract reverse dependency", lambda root: (root / "core/ui_contract/Cargo.toml").write_text('[package]\nname = "timem_ui_contract"\n[dependencies]\nagent_core = { path = "../agent" }\n')),

@@ -14,6 +14,14 @@ It may contain:
 
 - HTTP/WebSocket lifecycle, local port selection, explicit public-bind policy,
   and per-process access tokens.
+- Target-specific host-process lifecycle adapters under `src/os/`: Unix owns
+  SIGINT/SIGTERM/SIGHUP streams and parent-shell detection; Windows owns
+  Ctrl+C monitoring and PID-reuse-safe launcher-process detection through the
+  Core Platform process APIs. Shared Web lifecycle semantics remain in
+  `server.rs`.
+- Platform-backed secure random generation and diagnostic file leases. Web owns
+  access-token and single-instance policy, while `core/platform` owns OS random,
+  permissions, sharing, and lock primitives.
 - Session worker orchestration and browser-facing snapshots.
 - A Host Projection Adapter that converts Core projection changes into
   revisioned, self-sufficient browser snapshots/updates while preserving Core

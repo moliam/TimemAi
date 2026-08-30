@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 #[cfg(test)]
@@ -46,46 +46,13 @@ pub(crate) struct WebInstanceLease {
 impl WebInstanceLease {
     pub fn acquire(instance_path: &Path) -> Result<Self, String> {
         let lock_path = instance_path.to_path_buf();
-        let mut options = OpenOptions::new();
-        options.create(true).read(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            options.share_mode(0);
-        }
-        let file = options.open(&lock_path).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::PermissionDenied {
+        let file = agent_core::os::open_diagnostic_file_lease(&lock_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::WouldBlock {
                 "web_instance_in_use".to_string()
             } else {
                 format!("web_instance_lock_open_failed:{error}")
             }
         })?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|error| format!("web_instance_lock_permissions_failed:{error}"))?;
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::fd::AsRawFd;
-            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if result != 0 {
-                let error = std::io::Error::last_os_error();
-                return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
-                    "web_instance_in_use".to_string()
-                } else {
-                    format!("web_instance_lock_failed:{error}")
-                });
-            }
-        }
 
         let info = WebInstanceInfo::starting();
         let mut instance_lock = Self {

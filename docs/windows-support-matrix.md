@@ -10,7 +10,7 @@ host, installer, or end-to-end product flow is supported.
 | `core/agent` local execution and jobs | Adapted, awaiting native revalidation | macOS `cargo test -p agent_core`; platform-neutral command, capability, tool self-test, and background-job tests | Agent tests compile and pass natively on Windows. macOS cross-check currently stops in bundled SQLite C compilation before full Agent validation. |
 | `bridges/in_process` | Platform-neutral contract exists | Existing Bridge tests on supported development hosts | Revalidated as part of a Windows Shell test run. |
 | `interfaces/shell` | Adapted, awaiting native revalidation | macOS `cargo test -p timem_shell`; target-specific Unix/Windows terminal adapters and platform-neutral Shell input tests | Shell tests compile and pass natively on Windows. The macOS Windows-target cross-check currently stops in bundled SQLite and Oniguruma C compilation before full Shell validation. |
-| `timem_web` / HTTP host | Not yet supported on Windows | None in this slice | Windows lifecycle adapter, Web tests, and HTTP smoke pass natively. |
+| `timem_web` / HTTP host | Adapted, awaiting native revalidation | macOS `cargo test -p timem_web`; Windows launcher lifecycle adapter; Platform-backed random and instance lease | Web tests and HTTP lifecycle smoke pass natively on Windows. The current macOS Windows-target cross-check stops in bundled SQLite C compilation because the MSVC target standard-library headers are unavailable, before full Web Rust validation. |
 | Install, uninstall, release packaging | Not yet supported on Windows | None in this slice | PowerShell install tests and a packaged install/uninstall smoke pass natively. |
 
 ## Platform contract
