@@ -88,13 +88,13 @@ pub mod turn_state;
 pub mod work_instructions;
 pub mod workspace;
 pub use audit::{
-    api_audit_maintenance_hint_path, append_audit_event, append_repair_output_event,
-    configure_audit_storage, host_start_audit_event, max_llm_output_increased_audit_event,
-    model_input_overflow_recovery_audit_event, model_repair_output_event,
-    model_repair_request_audit_event, model_retry_audit_event, prune_api_audit_before,
-    read_audit_doc, round_limit_audit_event, stale_context_choice_audit_event,
-    turn_error_audit_event, turn_final_audit_event, turn_start_audit_event,
-    user_approval_audit_event, user_supplement_audit_event,
+    api_audit_maintenance_hint_path, api_audit_stream_path, append_audit_event,
+    append_repair_output_event, configure_audit_storage, host_start_audit_event,
+    max_llm_output_increased_audit_event, model_input_overflow_recovery_audit_event,
+    model_repair_output_event, model_repair_request_audit_event, model_retry_audit_event,
+    prune_api_audit_before, read_api_audit_doc, round_limit_audit_event,
+    stale_context_choice_audit_event, turn_error_audit_event, turn_final_audit_event,
+    turn_start_audit_event, user_approval_audit_event, user_supplement_audit_event,
 };
 pub use config_edit::{
     apply_runtime_config_value, bash_approval_mode_from_sources, capabilities_dir_from_sources,
