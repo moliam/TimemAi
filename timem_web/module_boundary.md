@@ -159,6 +159,6 @@ It must not contain:
 - Model API wire formatting, curl calls, prompt assembly, memory semantics,
   tool argument parsing, MCP protocol execution, or other tool execution.
 - React layout, CSS, browser state reducers, or user-facing visual policy. Those
-  belong in `web_ui/timem-web`.
+  belong in `interfaces/web`.
 - Natural-language reinterpretation of core topics. UI receives semantic topic
   payloads and decides presentation.

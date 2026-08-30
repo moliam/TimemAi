@@ -1,5 +1,6 @@
 use super::*;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 
 #[test]
 fn host_environment_contains_os_and_bash_without_template_syntax() {

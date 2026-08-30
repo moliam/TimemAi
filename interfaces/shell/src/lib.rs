@@ -716,7 +716,7 @@ impl LineBuffer {
 }
 
 pub fn local_llm_key_file_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../key")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../key")
 }
 
 #[cfg(test)]

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-source_file="$repo_root/web_ui/vendor/assistant-ui.SOURCE.json"
-target_dir="$repo_root/web_ui/vendor/assistant-ui"
+source_file="$repo_root/interfaces/web/vendor/assistant-ui.SOURCE.json"
+target_dir="$repo_root/interfaces/web/vendor/assistant-ui"
 
 if [[ ! -f "$source_file" ]]; then
   echo "missing assistant-ui source pin: $source_file" >&2

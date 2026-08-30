@@ -3,13 +3,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::OnceLock;
 
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(unix)]
-mod unix;
-
 pub const BASH_EXECUTABLE: &str = "/bin/bash";
 pub const POSIX_SHELL_EXECUTABLE: &str = "/bin/sh";
 
@@ -72,14 +65,14 @@ pub fn graphical_session_available() -> bool {
 
 pub fn configure_child_process_group(command: &mut Command) {
     #[cfg(unix)]
-    unix::configure_child_process_group(command);
+    crate::shared::configure_child_process_group(command);
     #[cfg(not(unix))]
     let _ = command;
 }
 
 pub fn exit_signal(status: &ExitStatus) -> Option<i32> {
     #[cfg(unix)]
-    return unix::exit_signal(status);
+    return crate::shared::exit_signal(status);
     #[cfg(not(unix))]
     {
         let _ = status;
@@ -89,7 +82,7 @@ pub fn exit_signal(status: &ExitStatus) -> Option<i32> {
 
 pub fn process_is_alive(pid: u64) -> Option<bool> {
     #[cfg(unix)]
-    return unix::process_is_alive(pid);
+    return crate::shared::process_is_alive(pid);
     #[cfg(not(unix))]
     {
         let _ = pid;
@@ -136,9 +129,9 @@ pub fn path_owned_by_current_user(path: &Path) -> bool {
 /// positive match.
 pub fn process_identity(pid: u32) -> Option<String> {
     #[cfg(target_os = "macos")]
-    return macos::process_identity(pid);
+    return crate::macos::process_identity(pid);
     #[cfg(target_os = "linux")]
-    return linux::process_identity(pid);
+    return crate::linux::process_identity(pid);
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = pid;
@@ -148,7 +141,7 @@ pub fn process_identity(pid: u32) -> Option<String> {
 
 pub fn child_process_running(pid: u32) -> bool {
     #[cfg(unix)]
-    return unix::child_process_running(pid);
+    return crate::shared::child_process_running(pid);
     #[cfg(not(unix))]
     {
         process_running(pid)
@@ -157,7 +150,7 @@ pub fn child_process_running(pid: u32) -> bool {
 
 pub fn is_runtime_child_process_group(pid: u32) -> bool {
     #[cfg(unix)]
-    return unix::is_runtime_child_process_group(pid);
+    return crate::shared::is_runtime_child_process_group(pid);
     #[cfg(not(unix))]
     {
         pid > 1 && pid != std::process::id()
@@ -166,7 +159,7 @@ pub fn is_runtime_child_process_group(pid: u32) -> bool {
 
 pub fn runtime_child_pid_kind() -> &'static str {
     #[cfg(unix)]
-    return unix::runtime_child_pid_kind();
+    return crate::shared::runtime_child_pid_kind();
     #[cfg(not(unix))]
     {
         "runtime_child_process"
@@ -175,28 +168,28 @@ pub fn runtime_child_pid_kind() -> &'static str {
 
 pub fn terminate_process(pid: u32) {
     #[cfg(unix)]
-    unix::terminate_process(pid);
+    crate::shared::terminate_process(pid);
     #[cfg(not(unix))]
     let _ = pid;
 }
 
 pub fn terminate_process_group(group_leader_pid: u32) {
     #[cfg(unix)]
-    unix::terminate_process_group(group_leader_pid);
+    crate::shared::terminate_process_group(group_leader_pid);
     #[cfg(not(unix))]
     let _ = group_leader_pid;
 }
 
 pub fn kill_process_group(pid: u32) {
     #[cfg(unix)]
-    unix::kill_process_group(pid);
+    crate::shared::kill_process_group(pid);
     #[cfg(not(unix))]
     let _ = pid;
 }
 
 pub fn process_group_running(group_leader_pid: u32) -> bool {
     #[cfg(unix)]
-    return unix::process_group_running(group_leader_pid);
+    return crate::shared::process_group_running(group_leader_pid);
     #[cfg(not(unix))]
     {
         process_running(group_leader_pid)
@@ -229,12 +222,12 @@ pub(crate) fn non_empty_one_line(value: &str) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn platform_version() -> Option<String> {
-    macos::version()
+    crate::macos::version()
 }
 
 #[cfg(target_os = "linux")]
 fn platform_version() -> Option<String> {
-    linux::version()
+    crate::linux::version()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -244,12 +237,12 @@ fn platform_version() -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn platform_config_root(_xdg: Option<&OsStr>, home: Option<&OsStr>) -> PathBuf {
-    macos::config_root(home)
+    crate::macos::config_root(home)
 }
 
 #[cfg(target_os = "linux")]
 fn platform_config_root(xdg: Option<&OsStr>, home: Option<&OsStr>) -> PathBuf {
-    linux::config_root(xdg, home)
+    crate::linux::config_root(xdg, home)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -265,12 +258,12 @@ fn platform_config_root(xdg: Option<&OsStr>, home: Option<&OsStr>) -> PathBuf {
 
 #[cfg(target_os = "macos")]
 fn platform_browser_command(url: &str) -> Option<(OsString, Vec<OsString>)> {
-    Some(macos::browser_command(url))
+    Some(crate::macos::browser_command(url))
 }
 
 #[cfg(target_os = "linux")]
 fn platform_browser_command(url: &str) -> Option<(OsString, Vec<OsString>)> {
-    Some(linux::browser_command(url))
+    Some(crate::linux::browser_command(url))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -280,12 +273,12 @@ fn platform_browser_command(_url: &str) -> Option<(OsString, Vec<OsString>)> {
 
 #[cfg(target_os = "macos")]
 fn platform_terminal_command(path: &Path) -> Option<(OsString, Vec<OsString>)> {
-    Some(macos::terminal_command(path))
+    Some(crate::macos::terminal_command(path))
 }
 
 #[cfg(target_os = "linux")]
 fn platform_terminal_command(path: &Path) -> Option<(OsString, Vec<OsString>)> {
-    Some(linux::terminal_command(path))
+    Some(crate::linux::terminal_command(path))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -295,19 +288,15 @@ fn platform_terminal_command(_path: &Path) -> Option<(OsString, Vec<OsString>)> 
 
 #[cfg(target_os = "macos")]
 fn platform_graphical_session_available() -> bool {
-    macos::graphical_session_available()
+    crate::macos::graphical_session_available()
 }
 
 #[cfg(target_os = "linux")]
 fn platform_graphical_session_available() -> bool {
-    linux::graphical_session_available()
+    crate::linux::graphical_session_available()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn platform_graphical_session_available() -> bool {
     false
 }
-
-#[cfg(test)]
-#[path = "../../tests/unit/os_tests.rs"]
-mod tests;

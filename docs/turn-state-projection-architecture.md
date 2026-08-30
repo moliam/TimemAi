@@ -1017,7 +1017,7 @@ timem_web/src/turn_projection.rs
   Core projection → Web projection
   compatibility/shadow comparison
 
-web_ui/timem-web/src/projection.ts
+interfaces/web/src/projection.ts
   revision acceptance
   immutable projection replacement
   no lifecycle inference

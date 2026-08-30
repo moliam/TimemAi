@@ -9,6 +9,15 @@ TimemAi is a local-first AI agent with two interfaces:
 Both interfaces use the same local runtime, memory, session history, tools, and
 model service configuration.
 
+## Development Architecture
+
+The source tree follows `Interface ↔ Bridge ↔ Core`: terminal and browser
+presentation live under `interfaces/`, reusable OS policy lives under
+`core/platform`, and communication layers must not redefine Core semantics.
+Before contributing, read [`AGENTS.md`](AGENTS.md) and
+[`docs/semantic-project-layout.md`](docs/semantic-project-layout.md); architecture
+changes are enforced by `python3 scripts/architecture_guard.py`.
+
 ## Install
 
 ```bash

@@ -50,7 +50,7 @@ pub mod model_service_config;
 pub mod model_transport;
 pub mod negotiation;
 mod notification;
-pub mod os;
+pub use timem_platform as os;
 pub mod profiler;
 pub mod prompt_cache;
 pub mod prompt_components;

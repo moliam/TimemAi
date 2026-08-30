@@ -164,7 +164,7 @@ fetch_rust_dependencies() {
 
 build_release_binary() {
   echo "Building Timem Web and the optional terminal UI..."
-  if [ ! -f "$ROOT_DIR/web_ui/timem-web/dist/index.html" ]; then
+  if [ ! -f "$ROOT_DIR/interfaces/web/dist/index.html" ]; then
     echo "error: embedded Timem Web assets are missing from this source package." >&2
     exit 1
   fi

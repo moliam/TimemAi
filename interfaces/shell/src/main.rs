@@ -53,7 +53,7 @@ use timem_shell::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const STATIC_PROMPT: &str = include_str!("../../resources/system_prompt/system_prompt.md");
+const STATIC_PROMPT: &str = include_str!("../../../resources/system_prompt/system_prompt.md");
 const ANSI_RESET: &str = timem_shell::ANSI_RESET;
 const ANSI_BOLD: &str = timem_shell::ANSI_BOLD;
 const ANSI_HIGHLIGHT: &str = "\x1b[1;33m";
