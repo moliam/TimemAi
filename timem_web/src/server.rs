@@ -28,12 +28,12 @@ use agent_core::{
     load_workspace_dirs_from_path, model_service_config_from_sources_allow_missing_api_key,
     resolve_memory_dir, runtime_config_menu_report, validate_api_key, work_instruction_load_report,
     work_instruction_load_request, work_instruction_mode_from_sources, AgentCore, BashApprovalMode,
-    CoreSessionWorkerEvent, CoreSessionWorkerManager, CoreSessionWorkerWorkspace, HostDecision,
-    HostDecisionRequest, ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind,
-    RuntimeDataLayout, SessionToolRepo, ToolDetail, ToolGenRequest, ToolSummary, TopicReply,
-    TurnProjection, WorkInstructionLoadMode, CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_REPAIR,
-    CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_SUB_ANSWER,
-    CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest, ModelServiceConfig,
+    ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout, SessionToolRepo, ToolDetail,
+    ToolSummary, TopicReply, TurnProjection, WorkInstructionLoadMode, CORE_TOPIC_ACTION,
+    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
+    CORE_TOPIC_SUB_ANSWER, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
+    CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, rolling_file_store::RollingCapacity, self_tool::SelfToolPaths,
@@ -69,6 +69,9 @@ use std::{
         Arc, Mutex, RwLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use timem_session::{
+    CoreSessionWorkerEvent, CoreSessionWorkerHandle, CoreSessionWorkerManager, ToolGenRequest,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -7923,7 +7926,7 @@ fn resolve_work_instruction_decision(
 fn primary_worker_handle(
     state: &AppState,
     session_id: &str,
-) -> Result<agent_core::CoreSessionWorkerHandle, String> {
+) -> Result<CoreSessionWorkerHandle, String> {
     session_worker_handle(state, session_id, None)
 }
 
@@ -7931,7 +7934,7 @@ fn session_worker_handle(
     state: &AppState,
     session_id: &str,
     requested_worker_id: Option<&str>,
-) -> Result<agent_core::CoreSessionWorkerHandle, String> {
+) -> Result<CoreSessionWorkerHandle, String> {
     let worker_id = {
         let sessions = state
             .sessions

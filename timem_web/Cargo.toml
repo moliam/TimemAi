@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 agent_core = { path = "../core/agent" }
+timem_session = { path = "../core/session" }
 host_projection = { path = "../host_projection" }
 axum = { version = "0.7", features = ["multipart", "ws"] }
 chrono = "0.4"

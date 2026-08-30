@@ -169,7 +169,7 @@ fi
 
 legacy_action_input_hits="$(
   search_lines_regex 'next_actions.*"input"[[:space:]]*:' \
-    core/agent/tests core/agent/src/session_runtime.rs interfaces/shell/src/observation.rs interfaces/shell/src/lib.rs \
+    core/agent/tests core/session/tests core/agent/src/session_runtime.rs interfaces/shell/src/observation.rs interfaces/shell/src/lib.rs \
     | grep -v 'allow_legacy_input_negative_test' || true
 )"
 if [ -n "$legacy_action_input_hits" ]; then
@@ -183,7 +183,7 @@ if ! search_fixed "allow_legacy_input_negative_test" core/agent/tests/core_tests
 fi
 string_args_hits="$(
   search_lines_regex '"args"[[:space:]]*:[[:space:]]*"' \
-    core/agent/tests core/agent/src/session_runtime.rs interfaces/shell/src/observation.rs interfaces/shell/src/lib.rs resources docs README.md CHANGELOG.md scripts \
+    core/agent/tests core/session/tests core/agent/src/session_runtime.rs interfaces/shell/src/observation.rs interfaces/shell/src/lib.rs resources docs README.md CHANGELOG.md scripts \
     | grep -v 'allow_string_args_negative_test' \
     | grep -v 'response_schema_summary.json' \
     || true
@@ -200,7 +200,7 @@ fi
 
 private_fixture_hits="$(
   search_lines_regex '默默|李默|儿子|son birthday|6月12|蓝色雨伞|绿色雨衣|fangchang|/Users/limo3|/Users/fangchang|v0\.6 发布检查|AURORA' \
-    core/agent/tests interfaces/shell/src resources docs README.md CHANGELOG.md scripts \
+    core/agent/tests core/session/tests interfaces/shell/src resources docs README.md CHANGELOG.md scripts \
     | grep -v 'scripts/test_contract_check.sh' \
     || true
 )"

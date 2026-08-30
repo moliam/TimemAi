@@ -93,12 +93,12 @@ transitional roots:
 
 | Current owner | Target owner | Removal condition |
 | --- | --- | --- |
-| `core/agent/` | `core/session/` (remaining Session orchestration only) | Agent relocation is complete; Session/Context/Worker lifecycle and scheduling remain to extract. |
 | `host_projection/` | `bridges/http_websocket/` | Projection delivery is integrated without creating a second Turn state machine. |
 | `timem_web/` | `bridges/http_websocket/` | The `timem-web` binary, HTTP/WebSocket behavior, assets, and lifecycle tests pass at the target path. |
 
-`core/agent`, `core/ui_contract`, `interfaces/shell`, `interfaces/web`, and `core/platform` are
-already at their semantic roots, but some internal code still needs finer boundary cleanup.
+`core/agent`, `core/session`, `core/ui_contract`, `interfaces/shell`, `interfaces/web`, and
+`core/platform` are already at their semantic roots, but some internal code still needs finer
+boundary cleanup.
 `benchmarks/` and `examples/` remain cross-cutting verification/support material until their final ownership is decided; they are not
 runtime layers.
 
@@ -117,8 +117,8 @@ Each step is committed separately and must leave the workspace buildable:
    target dependency direction.
 3. **Agent relocation (complete)**: the `agent_core` package lives at `core/agent`; resource paths,
    tests, scripts, docs, and workspace references preserve behavior and compatibility.
-4. **Session extraction**: move Session/Context/Worker lifecycle, scheduling, and use-cases
-   to `core/session`; update callers to the new owner and remove temporary exports.
+4. **Session extraction (complete)**: `timem_session` owns Session/Context/Worker lifecycle,
+   scheduling, and management; Web callers use the new owner and Agent has no reverse dependency.
 5. **In-process Bridge**: move Shell/native direct-call and callback/channel adaptation to
    `bridges/in_process`; presentation remains in `interfaces/shell`.
 6. **HTTP/WebSocket Bridge**: combine the Web host and asynchronous projection/delivery ownership

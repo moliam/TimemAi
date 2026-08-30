@@ -785,14 +785,14 @@ not hard-code shell identity into model context.
 Threading is a host/runtime deployment choice, not a separate agent semantic.
 The synchronous `run_session_turn` API remains the simplest path for a single
 active CLI session. For concurrent sessions, use one `AgentCore` per logical
-session/context, normally through `agent_core::session_worker::CoreSessionWorker`.
+session/context, normally through `timem_session::CoreSessionWorker`.
 That worker owns the session's `AgentCore`, model service config, profiler, cancel
 flag, supplement queue, request-reply channel, and event channel on a dedicated
 thread. It emits the same `CoreTopicEvent` values and `TurnOutcome` structures
 as the synchronous path. Hosts should not share one mutable `AgentCore` across
 multiple sessions or recreate a terminal-specific model/action loop.
 
-`CoreSessionWorkerManager` is the core-side multi-session owner. It allocates
+`timem_session::CoreSessionWorkerManager` is the Session-side multi-session owner. It allocates
 worker identities from ordinal 0, creates `ID0` as the default worker when a
 host asks for the default session, keeps a registry of workers by worker id,
 exposes handles/status snapshots, polls worker events without forcing a

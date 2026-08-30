@@ -12,6 +12,10 @@ REQUIRED = (
     "docs/semantic-project-layout.md",
     "core/agent/Cargo.toml",
     "core/agent/src/lib.rs",
+    "core/session/Cargo.toml",
+    "core/session/module_boundary.md",
+    "core/session/src/lib.rs",
+    "core/session/tests/unit/session_worker_tests.rs",
     "core/platform/Cargo.toml",
     "core/platform/module_boundary.md",
     "core/platform/src/lib.rs",
@@ -65,7 +69,7 @@ ARCHITECTURE_CONTRACT_MARKERS = (
     "interfaces/",
     "  shell/",
     "  web/",
-    "`core/agent/` | `core/session/` (remaining Session orchestration only)",
+    "**Session extraction (complete)**",
     "`host_projection/` | `bridges/http_websocket/`",
     "`timem_web/` | `bridges/http_websocket/`",
 )
@@ -96,7 +100,7 @@ def violations(root: Path) -> list[str]:
             errors.append(f"target architecture directory must not be an empty placeholder: {relative}")
 
     workspace = text(root, "Cargo.toml")
-    for member in ('"core/platform"', '"core/ui_contract"', '"interfaces/shell"'):
+    for member in ('"core/platform"', '"core/session"', '"core/ui_contract"', '"interfaces/shell"'):
         if member not in workspace:
             errors.append(f"workspace must include {member}")
     for legacy in ('"timem_shell"', '"web_ui/timem-web"'):
@@ -108,11 +112,25 @@ def violations(root: Path) -> list[str]:
         errors.append("agent_core must depend on core/platform through timem_platform")
     if 'timem_ui_contract = { path = "../ui_contract" }' not in agent_manifest:
         errors.append("agent_core must depend inward on core/ui_contract")
+    for forbidden in ("timem_session", "../session"):
+        if forbidden in agent_manifest:
+            errors.append(f"agent_core must not depend outward on {forbidden}")
     agent_lib = text(root, "core/agent/src/lib.rs")
     if "pub use timem_platform as os;" not in agent_lib:
         errors.append("agent_core must preserve its public os facade through timem_platform")
     if "pub mod os;" in agent_lib:
         errors.append("agent_core must not restore its legacy embedded os module")
+
+    session_manifest = text(root, "core/session/Cargo.toml")
+    if 'name = "timem_session"' not in session_manifest:
+        errors.append("core/session must expose the timem_session crate")
+    if 'agent_core = { path = "../agent" }' not in session_manifest:
+        errors.append("core/session must depend inward on agent_core")
+    if 'timem_ui_contract = { path = "../ui_contract" }' not in session_manifest:
+        errors.append("core/session must depend inward on core/ui_contract")
+    for forbidden in ("timem_shell", "timem_web", "host_projection", "bridges/", "interfaces/"):
+        if forbidden in session_manifest:
+            errors.append(f"core/session must not depend outward on {forbidden}")
 
     shell_manifest = text(root, "interfaces/shell/Cargo.toml")
     if 'name = "timem_shell"' not in shell_manifest:
@@ -167,10 +185,14 @@ def violations(root: Path) -> list[str]:
 
 def write_fixture(root: Path) -> None:
     files = {
-        "Cargo.toml": '[workspace]\nmembers = ["core/agent", "core/platform", "core/ui_contract", "interfaces/shell"]\n',
+        "Cargo.toml": '[workspace]\nmembers = ["core/agent", "core/platform", "core/session", "core/ui_contract", "interfaces/shell"]\n',
         "docs/semantic-project-layout.md": "\n".join(ARCHITECTURE_CONTRACT_MARKERS),
         "core/agent/Cargo.toml": '[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\n',
         "core/agent/src/lib.rs": "pub use timem_platform as os;\n",
+        "core/session/Cargo.toml": '[package]\nname = "timem_session"\n[dependencies]\nagent_core = { path = "../agent" }\ntimem_ui_contract = { path = "../ui_contract" }\n',
+        "core/session/module_boundary.md": "session boundary\n",
+        "core/session/src/lib.rs": "pub struct CoreSessionWorker;\n",
+        "core/session/tests/unit/session_worker_tests.rs": "#[test] fn worker() {}\n",
         "core/platform/Cargo.toml": '[package]\nname = "timem_platform"\n',
         "core/platform/module_boundary.md": "platform boundary\n",
         "core/platform/src/lib.rs": 'mod api;\n#[cfg(target_os = "linux")]\nmod linux;\n#[cfg(target_os = "macos")]\nmod macos;\n#[cfg(unix)]\nmod shared;\n',
@@ -204,6 +226,7 @@ def self_test() -> None:
             "legacy generic application directory",
             lambda root: (root / "core/application").mkdir(parents=True),
         ),
+        ("Agent to Session reverse dependency", lambda root: (root / "core/agent/Cargo.toml").write_text('[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\ntimem_session = { path = "../session" }\n')),
         ("reverse dependency", lambda root: (root / "core/platform/Cargo.toml").write_text('[package]\nname = "timem_platform"\n[dependencies]\ntimem_shell = { path = "../../interfaces/shell" }\n')),
         ("UI contract reverse dependency", lambda root: (root / "core/ui_contract/Cargo.toml").write_text('[package]\nname = "timem_ui_contract"\n[dependencies]\nagent_core = { path = "../agent" }\n')),
         ("escaped process primitive", lambda root: (root / "core/agent/src/leak.rs").write_text("fn leak() { libc::waitpid(0, std::ptr::null_mut(), 0); }\n")),

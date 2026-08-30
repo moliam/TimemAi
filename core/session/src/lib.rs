@@ -1,4 +1,4 @@
-use crate::{
+use agent_core::{
     core_initialized_topic_event_with_worker, run_session_turn_with_model_client, AgentCore,
     CoreGlobalWorkerStatus, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopicEvent,
     HostDecision, HostDecisionRequest, HttpModelClient, ModelClient, ModelServiceConfig,
@@ -228,13 +228,13 @@ pub enum CoreSessionWorkerEvent {
     },
     /// Complete Core-owned lifecycle projection. Hosts may cache and deliver it,
     /// but must not rewrite it from worker/topic arrival order.
-    TurnProjection(crate::TurnProjection),
+    TurnProjection(agent_core::TurnProjection),
     Topics(Vec<CoreTopicEvent>),
     ModelRequest {
         round: u32,
         prompt: String,
-        interaction_profile: Option<crate::InteractionProfile>,
-        interaction_request: Option<Box<crate::ModelInteractionRequest>>,
+        interaction_profile: Option<agent_core::InteractionProfile>,
+        interaction_request: Option<Box<agent_core::ModelInteractionRequest>>,
         api_payload: Option<Box<serde_json::Value>>,
     },
     ModelRequestCompleted {
@@ -247,7 +247,7 @@ pub enum CoreSessionWorkerEvent {
         round: u32,
         usage: UsageStats,
         content: String,
-        tool_calls: Vec<crate::NativeToolCall>,
+        tool_calls: Vec<agent_core::NativeToolCall>,
         truncated: bool,
         runtime_phase: Option<String>,
     },
@@ -287,7 +287,7 @@ enum CoreSessionWorkerCommand {
         assistant_speaker_name: Option<String>,
     },
     UpdateBashApproval {
-        mode: crate::BashApprovalMode,
+        mode: agent_core::BashApprovalMode,
     },
     RuntimeConfigUpdated,
     MaxRoundsUpdated,
@@ -301,10 +301,10 @@ enum CoreSessionWorkerCommand {
         request_fields: BTreeMap<String, serde_json::Value>,
     },
     UpdateMcp {
-        base_capabilities: crate::capability::CapabilityRegistry,
-        runtime: crate::mcp::McpRuntime,
-        servers: Vec<crate::mcp::McpServerConfig>,
-        tools: Vec<crate::mcp::McpTool>,
+        base_capabilities: agent_core::capability::CapabilityRegistry,
+        runtime: agent_core::mcp::McpRuntime,
+        servers: Vec<agent_core::mcp::McpServerConfig>,
+        tools: Vec<agent_core::mcp::McpTool>,
         instructions: BTreeMap<String, String>,
     },
     Shutdown,
@@ -324,7 +324,7 @@ struct QueuedSupplement {
 
 enum PendingRuntimeUpdate {
     Config {
-        field: crate::RuntimeConfigField,
+        field: agent_core::RuntimeConfigField,
         value: String,
     },
     OpenAiCompatible {
@@ -378,7 +378,7 @@ impl CoreSessionWorkerHandle {
             command_id,
             supplements
                 .into_iter()
-                .map(|(text, command_id)| (crate::UserSupplement::from(text), command_id))
+                .map(|(text, command_id)| (agent_core::UserSupplement::from(text), command_id))
                 .collect(),
         )
     }
@@ -388,7 +388,7 @@ impl CoreSessionWorkerHandle {
         input: impl Into<String>,
         additional_context: Option<String>,
         command_id: Option<String>,
-        supplements: Vec<(crate::UserSupplement, Option<String>)>,
+        supplements: Vec<(agent_core::UserSupplement, Option<String>)>,
     ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
@@ -666,7 +666,7 @@ impl CoreSessionWorkerHandle {
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
-    pub fn update_bash_approval(&self, mode: crate::BashApprovalMode) -> Result<(), String> {
+    pub fn update_bash_approval(&self, mode: agent_core::BashApprovalMode) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
         }
@@ -677,7 +677,7 @@ impl CoreSessionWorkerHandle {
 
     pub fn update_runtime_config(
         &self,
-        field: crate::RuntimeConfigField,
+        field: agent_core::RuntimeConfigField,
         value: String,
     ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
@@ -765,10 +765,10 @@ impl CoreSessionWorkerHandle {
 
     pub fn update_mcp(
         &self,
-        base_capabilities: crate::capability::CapabilityRegistry,
-        runtime: crate::mcp::McpRuntime,
-        servers: Vec<crate::mcp::McpServerConfig>,
-        tools: Vec<crate::mcp::McpTool>,
+        base_capabilities: agent_core::capability::CapabilityRegistry,
+        runtime: agent_core::mcp::McpRuntime,
+        servers: Vec<agent_core::mcp::McpServerConfig>,
+        tools: Vec<agent_core::mcp::McpTool>,
     ) -> Result<(), String> {
         self.update_mcp_with_instructions(
             base_capabilities,
@@ -781,10 +781,10 @@ impl CoreSessionWorkerHandle {
 
     pub fn update_mcp_with_instructions(
         &self,
-        base_capabilities: crate::capability::CapabilityRegistry,
-        runtime: crate::mcp::McpRuntime,
-        servers: Vec<crate::mcp::McpServerConfig>,
-        tools: Vec<crate::mcp::McpTool>,
+        base_capabilities: agent_core::capability::CapabilityRegistry,
+        runtime: agent_core::mcp::McpRuntime,
+        servers: Vec<agent_core::mcp::McpServerConfig>,
+        tools: Vec<agent_core::mcp::McpTool>,
         instructions: BTreeMap<String, String>,
     ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
@@ -1290,13 +1290,8 @@ impl CoreSessionWorker {
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let accepted_command_ids = Arc::new(Mutex::new(BTreeSet::new()));
         let pending_runtime_updates = Arc::new(Mutex::new(Vec::new()));
-        let cancel_shell_jobs = core.shell_jobs.clone();
-        let cancel_tool_jobs = core.tool_jobs.clone();
-        let cancel_session_id = worker_config.identity.session_id.clone();
-        let background_cancel: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            cancel_shell_jobs.cancel_unfinished_for_session(&cancel_session_id);
-            cancel_tool_jobs.cancel_unfinished_for_session(&cancel_session_id);
-        });
+        let background_cancel =
+            core.background_resource_cancel_callback(worker_config.identity.session_id.clone());
         let handle = CoreSessionWorkerHandle {
             command_tx,
             supplement_mailbox: Arc::clone(&supplement_mailbox),
@@ -1494,7 +1489,7 @@ impl CoreSessionWorker {
                                         supplement.additional_context.as_deref()
                                     })
                                     .collect::<Vec<_>>();
-                                additional_context = crate::combine_additional_contexts(
+                                additional_context = agent_core::combine_additional_contexts(
                                     std::iter::once(Some("These user messages arrived while the previous response was being finalized. Address them before finalizing again."))
                                         .chain(supplement_contexts.into_iter().map(Some)),
                                 );
@@ -1603,7 +1598,7 @@ impl CoreSessionWorker {
                         core.set_bash_approval_mode(mode);
                         core.set_self_tool_runtime_param(
                             "TIMEM_BASH_APPROVAL",
-                            crate::bash_approval_mode_label(mode),
+                            agent_core::bash_approval_mode_label(mode),
                         );
                         core.notify_runtime_config_changed();
                     }
@@ -1703,7 +1698,7 @@ struct WorkerTurnUi {
     continue_supplements_after_final_answer: bool,
     pending_bash_always_allow: bool,
     pending_runtime_updates: Arc<Mutex<Vec<PendingRuntimeUpdate>>>,
-    interaction_profile: Option<crate::InteractionProfile>,
+    interaction_profile: Option<agent_core::InteractionProfile>,
 }
 
 fn toolgen_completion_instruction(protocol: ResponseProtocolKind) -> &'static str {
@@ -1749,7 +1744,7 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
         core.current_prompt_cwd().display(),
     );
         core.submit_prompt_component(
-            crate::PromptComponentRole::system(),
+            agent_core::PromptComponentRole::system(),
             "runtime_note",
             system_instruction,
             "toolgen_request",
@@ -1796,7 +1791,7 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
                 .map(|supplement| supplement.text.as_str())
                 .collect::<Vec<_>>()
                 .join("\n\n");
-            additional_context = crate::combine_additional_contexts(
+            additional_context = agent_core::combine_additional_contexts(
                 supplements
                     .iter()
                     .filter_map(|supplement| supplement.additional_context.as_deref())
@@ -1874,7 +1869,7 @@ fn apply_worker_runtime_update(
     config: &mut ModelServiceConfig,
     update: PendingRuntimeUpdate,
 ) {
-    use crate::RuntimeConfigField;
+    use agent_core::RuntimeConfigField;
 
     match update {
         PendingRuntimeUpdate::Config { field, value } => match field {
@@ -1883,13 +1878,13 @@ fn apply_worker_runtime_update(
                 core.set_self_tool_runtime_param(field.label(), config.model.clone());
             }
             RuntimeConfigField::ApiProtocol => {
-                if let Ok(protocol) = crate::parse_api_protocol(&value) {
+                if let Ok(protocol) = agent_core::parse_api_protocol(&value) {
                     config.api_protocol = protocol;
                     core.set_self_tool_runtime_param(field.label(), config.api_protocol.label());
                 }
             }
             RuntimeConfigField::ResponseProtocol => {
-                config.response_protocol = crate::ResponseProtocolKind::from_name(&value);
+                config.response_protocol = agent_core::ResponseProtocolKind::from_name(&value);
                 core.set_response_protocol(config.response_protocol);
                 core.set_self_tool_runtime_param(field.label(), config.response_protocol.name());
             }
@@ -1898,7 +1893,7 @@ fn apply_worker_runtime_update(
                 core.set_self_tool_runtime_param(field.label(), config.base_url.clone());
             }
             RuntimeConfigField::MaxInput => {
-                if let Some(tokens) = crate::parse_token_count(&value) {
+                if let Some(tokens) = agent_core::parse_token_count(&value) {
                     let tokens = tokens.max(3_000);
                     config.max_llm_input_tokens = tokens;
                     core.set_max_llm_input_tokens(tokens);
@@ -1906,7 +1901,7 @@ fn apply_worker_runtime_update(
                 }
             }
             RuntimeConfigField::MaxOutput => {
-                if let Some(tokens) = crate::parse_token_count(&value) {
+                if let Some(tokens) = agent_core::parse_token_count(&value) {
                     config.max_llm_output_tokens = tokens.max(512);
                     core.set_self_tool_runtime_param(
                         field.label(),
@@ -1916,15 +1911,15 @@ fn apply_worker_runtime_update(
             }
             RuntimeConfigField::BashApproval => {
                 let mode = match value.trim().to_lowercase().as_str() {
-                    "approve" => Some(crate::BashApprovalMode::Approve),
-                    "ask" => Some(crate::BashApprovalMode::Ask),
+                    "approve" => Some(agent_core::BashApprovalMode::Approve),
+                    "ask" => Some(agent_core::BashApprovalMode::Ask),
                     _ => None,
                 };
                 if let Some(mode) = mode {
                     core.set_bash_approval_mode(mode);
                     core.set_self_tool_runtime_param(
                         field.label(),
-                        crate::bash_approval_mode_label(mode),
+                        agent_core::bash_approval_mode_label(mode),
                     );
                 }
             }
@@ -1933,8 +1928,12 @@ fn apply_worker_runtime_update(
             }
         },
         PendingRuntimeUpdate::OpenAiCompatible { key, value } => {
-            if crate::apply_openai_compatible_env_value(&mut config.openai_compatible, &key, &value)
-                .unwrap_or(false)
+            if agent_core::apply_openai_compatible_env_value(
+                &mut config.openai_compatible,
+                &key,
+                &value,
+            )
+            .unwrap_or(false)
             {
                 core.set_self_tool_runtime_param(&key, value);
             }
@@ -1945,7 +1944,7 @@ fn apply_worker_runtime_update(
 }
 
 impl TurnUi for WorkerTurnUi {
-    fn on_turn_projection(&mut self, projection: &crate::TurnProjection) {
+    fn on_turn_projection(&mut self, projection: &agent_core::TurnProjection) {
         let _ = self
             .event_tx
             .send(CoreSessionWorkerEvent::TurnProjection(projection.clone()));
@@ -1976,7 +1975,7 @@ impl TurnUi for WorkerTurnUi {
         self.cancel_requested.swap(false, Ordering::SeqCst)
     }
 
-    fn drain_user_supplements_with_context(&mut self) -> Vec<crate::UserSupplement> {
+    fn drain_user_supplements_with_context(&mut self) -> Vec<agent_core::UserSupplement> {
         if !self.accept_supplements {
             return Vec::new();
         }
@@ -1993,7 +1992,7 @@ impl TurnUi for WorkerTurnUi {
     fn on_model_api_request(
         &mut self,
         round: u32,
-        request: &crate::ModelInteractionRequest,
+        request: &agent_core::ModelInteractionRequest,
         api_payload: &serde_json::Value,
     ) {
         let _ = self.event_tx.send(CoreSessionWorkerEvent::ModelRequest {
@@ -2017,11 +2016,11 @@ impl TurnUi for WorkerTurnUi {
             .send(CoreSessionWorkerEvent::ModelResponseParsed { tool_count });
     }
 
-    fn on_interaction_profile(&mut self, profile: &crate::InteractionProfile) {
+    fn on_interaction_profile(&mut self, profile: &agent_core::InteractionProfile) {
         self.interaction_profile = Some(profile.clone());
     }
 
-    fn on_model_interaction_response(&mut self, round: u32, response: &crate::LlmResponse) {
+    fn on_model_interaction_response(&mut self, round: u32, response: &agent_core::LlmResponse) {
         let _ = self.event_tx.send(CoreSessionWorkerEvent::ModelResponse {
             round,
             usage: response.usage.clone(),
@@ -2106,7 +2105,7 @@ impl TurnUi for WorkerTurnUi {
             let Some(reply) = reply else {
                 continue;
             };
-            if let Ok(decision) = crate::resolve_topic_reply(&event, None, &reply) {
+            if let Ok(decision) = agent_core::resolve_topic_reply(&event, None, &reply) {
                 if reply.always_allow {
                     self.pending_bash_always_allow = true;
                 }
@@ -2122,7 +2121,7 @@ impl TurnUi for WorkerTurnUi {
     }
 }
 
-impl crate::ActionRuntime for WorkerTurnUi {
+impl agent_core::ActionRuntime for WorkerTurnUi {
     fn should_cancel(&mut self) -> bool {
         self.cancel_requested.load(Ordering::SeqCst)
     }
@@ -2142,7 +2141,7 @@ impl WorkerTurnUi {
     fn accept_queued_supplements(
         &self,
         queued: Vec<QueuedSupplement>,
-    ) -> Vec<crate::UserSupplement> {
+    ) -> Vec<agent_core::UserSupplement> {
         queued
             .into_iter()
             .map(|queued| {
@@ -2151,12 +2150,12 @@ impl WorkerTurnUi {
                         .event_tx
                         .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
                 }
-                crate::UserSupplement::new(queued.text, queued.additional_context)
+                agent_core::UserSupplement::new(queued.text, queued.additional_context)
             })
             .collect()
     }
 
-    fn take_or_close_supplements_for_main_context(&mut self) -> Vec<crate::UserSupplement> {
+    fn take_or_close_supplements_for_main_context(&mut self) -> Vec<agent_core::UserSupplement> {
         self.supplement_mailbox
             .lock()
             .map(|mut mailbox| {
@@ -2169,7 +2168,7 @@ impl WorkerTurnUi {
             .unwrap_or_default()
     }
 
-    fn close_supplements_for_main_context(&mut self) -> Vec<crate::UserSupplement> {
+    fn close_supplements_for_main_context(&mut self) -> Vec<agent_core::UserSupplement> {
         self.supplement_mailbox
             .lock()
             .map(|mut mailbox| {
@@ -2181,9 +2180,15 @@ impl WorkerTurnUi {
 
     fn begin_toolgen_run(&mut self, tool_count: usize) {
         self.phase = Some("toolgen".to_string());
-        let event =
-            crate::toolgen_topic_event(&self.session_id, "started", tool_count, None, None, None)
-                .with_worker_scope(&self.context_id, &self.worker_id);
+        let event = agent_core::toolgen_topic_event(
+            &self.session_id,
+            "started",
+            tool_count,
+            None,
+            None,
+            None,
+        )
+        .with_worker_scope(&self.context_id, &self.worker_id);
         let _ = self
             .event_tx
             .send(CoreSessionWorkerEvent::Topics(vec![event]));
@@ -2192,7 +2197,7 @@ impl WorkerTurnUi {
     fn finish_toolgen_run(
         &mut self,
         tool_count: usize,
-        tool: Option<&crate::ToolSummary>,
+        tool: Option<&agent_core::ToolSummary>,
         retrospect: &str,
         error: Option<&str>,
     ) {
@@ -2201,7 +2206,7 @@ impl WorkerTurnUi {
         } else {
             "published"
         };
-        let event = crate::toolgen_topic_event(
+        let event = agent_core::toolgen_topic_event(
             &self.session_id,
             phase,
             tool_count,
@@ -2217,7 +2222,7 @@ impl WorkerTurnUi {
     }
 
     fn emit_toolgen_failure(&mut self, error: &str, tool_count: usize) {
-        let event = crate::toolgen_topic_event(
+        let event = agent_core::toolgen_topic_event(
             &self.session_id,
             "failed",
             tool_count,
