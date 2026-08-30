@@ -288,6 +288,11 @@ export type Activity = {
   tool_status?: string;
   tool_mode?: string;
   elapsed_ms?: number;
+  timeout_ms?: number;
+  loop_timeout_ms?: number;
+  interval_ms?: number;
+  pid?: number;
+  execution_started?: boolean;
   kind?: "context_compact" | "toolgen" | "free_talk" | "user_supplement";
   toolgen_phase?: string;
   before_tokens?: number;

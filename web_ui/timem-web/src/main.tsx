@@ -11110,7 +11110,17 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
 function toolActivityGroupStatusLabel(summary: ToolActivitySummary) {
   if (summary.status === "completed") return "Succ";
   if (summary.status === "failed") return `Fail(${summary.failedCount})`;
-  return "running";
+
+  const activeParts: string[] = [];
+  if (summary.foregroundRunningCount > 0)
+    activeParts.push(`fg ${summary.foregroundRunningCount}`);
+  if (summary.backgroundRunningCount > 0)
+    activeParts.push(`bg ${summary.backgroundRunningCount}`);
+  if (summary.failedCount > 0)
+    activeParts.push(`failed ${summary.failedCount}`);
+  return activeParts.length > 0
+    ? `running (${activeParts.join(" · ")})`
+    : "running";
 }
 
 function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
@@ -11142,6 +11152,7 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
         >
           &gt;_
         </span>
+        <span className="tool-activity-group-status">{groupStatusLabel}</span>
         <span className="tool-activity-group-counts" aria-hidden="true">
           {summary.counts.map(({ name, count }, index) => (
             <span className="tool-activity-group-count" key={name}>
@@ -11151,7 +11162,6 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
             </span>
           ))}
         </span>
-        <span className="tool-activity-group-status">· {groupStatusLabel}</span>
         <ChevronRight className="tool-activity-chevron" size={14} />
       </summary>
       <div className="tool-activity-group-body">
@@ -11169,17 +11179,22 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const bashActivity = activity.tool_name === "run_bash";
   const pollingActivity = bashActivity && activity.tool_mode === "poll";
   const [open, setOpen] = useState(false);
+  const waitBudgetMs = pollingActivity
+    ? activity.loop_timeout_ms
+    : bashActivity && activity.tool_mode !== "background"
+      ? activity.timeout_ms
+      : undefined;
   const [liveElapsedMs, setLiveElapsedMs] = useState(() =>
     Math.max(0, Date.now() - activity.createdAt),
   );
   useEffect(() => {
-    if (!pollingActivity || !running) return;
+    if (!running || (!pollingActivity && waitBudgetMs === undefined)) return;
     const updateElapsed = () =>
       setLiveElapsedMs(Math.max(0, Date.now() - activity.createdAt));
     updateElapsed();
     const timer = window.setInterval(updateElapsed, 1_000);
     return () => window.clearInterval(timer);
-  }, [activity.createdAt, pollingActivity, running]);
+  }, [activity.createdAt, pollingActivity, running, waitBudgetMs]);
   const invocationPreview = toolInvocationPreview(activity);
   const detail = activity.detail?.trim();
   const code = activity.code?.trim();
@@ -11190,6 +11205,16 @@ function ToolActivity({ activity }: { activity: Activity }) {
   );
   const displayedElapsedMs =
     pollingActivity && running ? liveElapsedMs : activity.elapsed_ms;
+  const remainingWaitMs =
+    running && activity.execution_started && waitBudgetMs !== undefined
+      ? Math.max(0, waitBudgetMs - liveElapsedMs)
+      : undefined;
+  const statusLabel =
+    status === "timeout" && bashActivity
+      ? activity.pid !== undefined
+        ? `wait ended · process still running · pid ${activity.pid}`
+        : "wait ended · process may still be running"
+      : humanizeToolStatus(status);
   const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;
   const summaryContent = (
     <>
@@ -11201,13 +11226,16 @@ function ToolActivity({ activity }: { activity: Activity }) {
       </span>
       <b>{toolName}</b>
       <span className="tool-activity-meta">
-        <span className="tool-activity-status">
-          {humanizeToolStatus(status)}
-        </span>
+        <span className="tool-activity-status">{statusLabel}</span>
+        {remainingWaitMs !== undefined && (
+          <span className="tool-activity-countdown">
+            {formatRemainingDuration(remainingWaitMs)} remaining
+          </span>
+        )}
         {displayedElapsedMs !== undefined && (pollingActivity || !running) && (
           <span className="tool-activity-duration">
             {pollingActivity
-              ? formatClockDuration(displayedElapsedMs)
+              ? `${formatClockDuration(displayedElapsedMs)} elapsed`
               : formatDuration(displayedElapsedMs)}
           </span>
         )}
@@ -13589,6 +13617,17 @@ function isNotableStopReason(reason: string | null | undefined) {
 
 function formatOptionalTokens(value: number | undefined) {
   return value ? formatTokens(value) : undefined;
+}
+
+function formatRemainingDuration(remainingMs: number) {
+  const seconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`
+    : `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
 function formatClockDuration(elapsedMs: number) {

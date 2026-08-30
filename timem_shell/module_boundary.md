@@ -101,6 +101,9 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Host
   place where topic payload fields are defined.
 - Shell may branch on stable action topic fields such as `kind: "bash"` for
   rendering, but should not depend on Rust enum-default serialized shapes.
+  For command wait-budget display it renders core-provided effective budgets,
+  keeps the proposal/approval row untimed, and attaches the countdown only when
+  the matching action receives `event: "execution_start"`.
 - Terminal replies to core request topics. Shell collects the user choice and
   returns it through core's `TopicReply` shape with the original `session_id`,
   `topic_name`, and `request_id`; shell should not resume a waiting session by
