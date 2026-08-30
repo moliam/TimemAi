@@ -1,6 +1,6 @@
 # timem_shell module boundary
 
-`timem_shell` is Timem's terminal Host Adapter and UI shell. It owns CLI
+`timem_shell` is Timem's terminal Interface. It owns CLI
 parsing, environment collection, terminal input, menus, rendering, and
 shell-only convenience commands. It consumes the same UI-neutral Core Turn
 semantics intended for Web, iOS, desktop, and future shells. Synchronous Turn
@@ -8,7 +8,7 @@ calls cross `timem_in_process`; reusable lifecycle/runtime behavior and model
 transport remain in `agent_core`.
 
 Before changing this module, also read the repository-level `AGENTS.md`.
-Also read `docs/turn-state-projection-architecture.md` for the shared Core, Host Adapter, Host Projection Adapter, and UI-shell lifecycle boundary.
+Also read `docs/turn-state-projection-architecture.md` for the shared Core, Bridge, Interface, and lifecycle boundary.
 
 ## Belongs here
 
@@ -183,8 +183,8 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Host
   epoch, or rules that revive/finish a Turn from display events. Those semantics
   belong to Core and must remain identical for every UI shell.
 - A dependency on `timem_web` or its Pod just to consume Core lifecycle truth.
-  The Shell may use Core directly; Pod is one asynchronous Host Projection
-  Adapter implementation, not a mandatory layer in front of Core.
+  The Shell uses the in-process Bridge; Pod is one asynchronous HTTP/WebSocket
+  delivery implementation, not a mandatory layer in front of Core.
 - User-facing stopped-turn copy inside the reusable turn loop. A stopped turn
   should be represented structurally so non-terminal hosts can render it in
   their own language and UI style.

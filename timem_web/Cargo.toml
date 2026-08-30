@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 agent_core = { path = "../core/agent" }
 timem_session = { path = "../core/session" }
-host_projection = { path = "../host_projection" }
+timem_http_websocket = { path = "../bridges/http_websocket" }
 axum = { version = "0.7", features = ["multipart", "ws"] }
 chrono = "0.4"
 futures-util = "0.3"

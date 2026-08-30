@@ -1,14 +1,14 @@
 # timem_web Module Boundary
 
-`timem_web` is a local-first Host Adapter and the first implementation of the
-generic Host Projection Adapter pattern. It binds a loopback HTTP/WebSocket
+`timem_web` is the transitional local-first Web server that currently combines
+HTTP/WebSocket Bridge integration with binary assembly. It binds a loopback HTTP/WebSocket
 server by default, allows an explicit authenticated `--public` bind, owns
 browser authentication and reliable delivery, maps browser commands to
 `agent_core` session worker handles, and projects the UI-neutral authoritative
 Core Turn contract for a reconnectable browser. Its Pod/projection layer is not
-a second agent runtime and is not required by synchronous or in-process hosts.
+a second agent runtime and is not required by synchronous or in-process Interfaces.
 
-Before changing this module, read `docs/turn-state-projection-architecture.md` for the shared Core, Host Adapter, Host Projection Adapter, and UI-shell lifecycle boundary.
+Before changing this module, read `docs/turn-state-projection-architecture.md` for the shared Core, Bridge, Interface, and lifecycle boundary.
 
 It may contain:
 
@@ -23,13 +23,13 @@ It may contain:
   access-token and single-instance policy, while `core/platform` owns OS random,
   permissions, sharing, and lock primitives.
 - Session worker orchestration and browser-facing snapshots.
-- A Host Projection Adapter that converts Core projection changes into
+- HTTP/WebSocket Bridge projection delivery that converts Core projection changes into
   revisioned, self-sufficient browser snapshots/updates while preserving Core
   Turn identity, input admission, activity, and immutable outcome exactly. The
-  adapter may add transport metadata but may not reinterpret lifecycle.
+  Bridge may add transport metadata but may not reinterpret lifecycle.
 - Web-specific reliable command delivery, bounded NextTurnIntent FIFO,
   projection revision, event sequence, reconnect baseline, and MEM barrier.
-  These are reusable adapter patterns for future asynchronous hosts, but they
+  These are reusable adapter patterns for future asynchronous Interfaces, but they
   are not Core business state and must not be required by a direct Shell/native
   binding.
 - Per-session runtime-profile collection and safe projection. The host copies

@@ -8,7 +8,7 @@ future host. A new UI shell should adapt these contracts, not fork the agent
 loop or reconstruct Turn lifecycle from events.
 
 Before changing this module, also read the repository-level `AGENTS.md`.
-Also read `docs/turn-state-projection-architecture.md` for the shared Core, Host Adapter, Host Projection Adapter, and UI-shell lifecycle boundary.
+Also read `docs/turn-state-projection-architecture.md` for the shared Core, Bridge, Interface, and lifecycle boundary.
 
 ## Belongs here
 
@@ -27,7 +27,7 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Host
   counts, or local command state.
 - A stable host-adapter surface for both deployment shapes: a simple synchronous
   host may call Core and render the projection directly; an asynchronous,
-  reconnectable, or remote UI may place a Host Projection Adapter in front of
+  reconnectable, or remote UI may place a reconnectable Bridge in front of
   Core to add snapshots, revisions, reliable command delivery, and transport
   sequencing. Those delivery mechanisms remain outside Core and must not alter
   Core Turn semantics.

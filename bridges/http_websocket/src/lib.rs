@@ -1,10 +1,11 @@
-//! UI- and transport-neutral caching for authoritative Agent Core projections.
+//! HTTP/WebSocket delivery state for authoritative Core projections and commands.
 //!
-//! This crate does not own a Turn lifecycle. It stores the latest exact Core
-//! projection and adds only Host delivery metadata such as a monotonic revision.
+//! This crate owns only communication concerns such as monotonic revisions,
+//! duplicate/stale delivery rejection, bounded queues, and reconnect snapshots.
+//! It does not own or reinterpret Turn lifecycle semantics.
 
-use agent_core::{TurnProjection, TurnToken};
 use serde::{Deserialize, Serialize, Serializer};
+use timem_ui_contract::projections::{TurnProjection, TurnToken};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VersionedTurnProjection {
@@ -94,7 +95,7 @@ fn projection_token(projection: &TurnProjection) -> &TurnToken {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_core::{
+    use timem_ui_contract::projections::{
         ActiveTurnProjection, FinishedTurnProjection, TurnActivity, TurnInputAdmission,
         TurnProjectionOutcome,
     };
@@ -164,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn newer_core_epoch_replaces_finished_projection_without_host_lifecycle() {
+    fn newer_core_epoch_replaces_finished_projection_without_bridge_lifecycle() {
         let mut cache = TurnProjectionCache::default();
         cache.apply(finished("a", 1));
         assert_eq!(
@@ -247,7 +248,7 @@ mod tests {
     }
 }
 
-/// Host-owned input accepted for a future Core Turn. This is delivery state,
+/// Input accepted for delivery to a future Core Turn. This is communication state,
 /// not a Turn lifecycle state, and therefore carries no Turn token or epoch.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NextTurnIntent<T> {
@@ -280,7 +281,7 @@ pub enum NextTurnRemoveResult<T> {
     },
 }
 
-/// Bounded FIFO Host delivery storage for future-turn commands.
+/// Bounded FIFO HTTP/WebSocket delivery storage for future-turn commands.
 /// It never dispatches by itself and cannot change Core lifecycle state.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NextTurnIntentQueue<T> {

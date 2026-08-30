@@ -1,7 +1,7 @@
-# Turn 状态与 Host 投影架构
+# Turn 状态、Bridge 与 UI 投影架构
 
 状态：**Proposed，待确认后实施**
-范围：`agent_core`、所有 Host Adapter 与 UI shell；`timem_web`/`web_ui` 是首个迁移实现
+范围：`agent_core`、所有 Bridge 与 UI shell；`timem_web`/`web_ui` 是首个迁移实现
 目标：由 Core 提供极小、UI-neutral、权威的 Turn 语义，使 Shell、Web、iOS、桌面或未来任意 UI 壳只需适配命令、投影与表现层，不再各自实现 Agent 生命周期。
 
 ## 1. 决策摘要
@@ -11,11 +11,11 @@ Timem 的业务状态只有一个权威来源：**Agent Core 的 Turn 聚合器*
 ```text
 UI command
     ↓
-Host Adapter（同步直连或异步/远程）
+Bridge（同步直连或异步/远程）
     ↓
 Agent Core: Turn Gate → Turn Reducer → authoritative Core projection
     ↓
-optional Host Projection Adapter（snapshot/revision/reliable delivery）
+optional reconnectable Bridge（snapshot/revision/reliable delivery）
     ↓
 UI shell: render and interact only
 ```
@@ -25,14 +25,14 @@ UI shell: render and interact only
 1. Agent Core 内部拆成两个很小的逻辑层：
    - **Turn Gate**：管理 Turn 身份、epoch 和消息归属；拒绝旧 Turn、旧 epoch、重复终结和迟到消息。
    - **Turn Reducer**：管理当前 Turn 的最小生命周期事实。
-2. Core Turn projection 是所有 Host/UI 的共同权威生命周期输入。同步 Shell 可以直接消费；异步、可重连或远程 UI 可通过 Host Projection Adapter 增加 snapshot、revision 和可靠投递，但不能改变 Core 语义。
+2. Core Turn projection 是所有 Bridge/Interface 的共同权威生命周期输入。同步 Shell 可以直接消费；异步、可重连或远程 UI 可通过 reconnectable Bridge 增加 snapshot、revision 和可靠投递，但不能改变 Core 语义。
 3. 任何 UI shell 都不拥有 Agent 生命周期状态机。它只拥有：
-   - Core projection 或 Host projection 的只读副本；
+   - Core projection 或 Bridge projection 的只读副本；
    - 输入框、弹窗、选中项、滚动位置等纯 UI 状态；
    - 命令发送/重试等传输状态。传输状态不能改变业务状态。
-4. `timem_web` Pod 是 Host Projection Adapter 的首个实现，不是 Core 的必经层。`timem_shell` 等同步/in-process Host 不需要为了接入权威 Turn 语义而引入 WebSocket、event sequence 或 reconnect outbox。
+4. `timem_web` Pod 是 reconnectable Bridge 的首个实现，不是 Core 的必经层。`timem_shell` 等同步/in-process Interface 不需要为了接入权威 Turn 语义而引入 WebSocket、event sequence 或 reconnect outbox。
 5. Worker、Tool、Topic activity 是 Active Turn 下的事实，不能创建 Turn、恢复 Turn 或覆盖终态。
-6. Session/Host/UI 不再维护独立生命周期状态机。`working` 等显示值由 Core Turn 投影直接给出。
+6. Session/Bridge/Interface 不再维护独立生命周期状态机。`working` 等显示值由 Core Turn 投影直接给出。
 
 ## 2. UI 壳可移植性与当前适配状态
 
@@ -42,20 +42,20 @@ UI shell: render and interact only
 Core semantic contract
   TurnToken / input admission / PromptCut / activity / outcome / request-reply
 
-Host Adapter contract
+Bridge contract
   command mapping / host policy / optional projection + reliable delivery
 
 UI shell contract
   render / local interaction / accessibility / transport feedback
 ```
 
-Core semantic contract 对所有 UI 完全一致。Host 可以有不同部署形态：
+Core semantic contract 对所有 UI 完全一致。Bridge 可以有不同部署形态：
 
 - 同步、单 Session 的 Shell 可直接调用 Core 并渲染 Core projection；
-- 多 Session、异步、可重连的 Web/iOS/桌面 Host 通常增加 Host Projection Adapter；
+- 多 Session、异步、可重连的 Web/iOS/桌面 Interface 通常增加 reconnectable Bridge；
 - 跨进程或跨语言 binding 只改变编码和传输，不改变 Turn 身份、输入接纳、终态与 request/reply 语义。
 
-接入一个新 UI 壳时，允许新增 binding、Host policy、projection transport 和视觉组件；不允许复制一套 `working/cancelling/finished` reducer 或根据事件顺序猜测 Turn 状态。
+接入一个新 UI 壳时，允许新增 binding、Interface policy、projection transport 和视觉组件；不允许复制一套 `working/cancelling/finished` reducer 或根据事件顺序猜测 Turn 状态。
 
 ### 2.2 当前实现状态
 
@@ -63,12 +63,12 @@ Core semantic contract 对所有 UI 完全一致。Host 可以有不同部署形
 
 | 模块/壳 | 当前状态 | 目标适配 |
 |---|---|---|
-| `timem_shell` | 已是 Core 的直接 Host Adapter，但仍基于既有 topic/控制流展示生命周期 | 直接消费权威 Core Turn projection；删除 terminal-local 生命周期推断，不引入 Pod/WebSocket 复杂度 |
-| `timem_web` Pod/Host | 仍有 `active_turn_id`、`pending_turn_id`、`cancelling_turn_id` 和 worker/topic 聚合等旧逻辑 | 成为通用 Host Projection Adapter 的首个实现，只增加 revision、snapshot、可靠命令投递、FIFO 与 MEM barrier |
+| `timem_shell` | 已是 Core 的直接 Bridge，但仍基于既有 topic/控制流展示生命周期 | 直接消费权威 Core Turn projection；删除 terminal-local 生命周期推断，不引入 Pod/WebSocket 复杂度 |
+| `timem_web` Pod/Bridge | 仍有 `active_turn_id`、`pending_turn_id`、`cancelling_turn_id` 和 worker/topic 聚合等旧逻辑 | 成为通用 reconnectable Bridge 的首个实现，只增加 revision、snapshot、可靠命令投递、FIFO 与 MEM barrier |
 | `web_ui` | 仍有既有 lifecycle reducer、cancel guard 和事件驱动推断 | 只消费 Host projection；topic/activity 仅追加 timeline |
-| iOS/桌面/其他 UI | 尚无本架构适配实现 | 直接使用相同 Core semantic contract；根据部署需要选择直连或 Host Projection Adapter |
+| iOS/桌面/其他 UI | 尚无本架构适配实现 | 直接使用相同 Core semantic contract；根据部署需要选择直连或 reconnectable Bridge |
 
-因此完成标准必须包含现有 Shell、Web Host 和 WebUI 的实际代码迁移与测试，不能只更新边界文档。
+因此完成标准必须包含现有 Shell、Web Bridge 和 WebUI 的实际代码迁移与测试，不能只更新边界文档。
 
 ## 3. 为什么必须重构
 
@@ -146,7 +146,7 @@ TurnSlot = Empty | Active
 - 结束 Active Turn；
 - 写入终态 outcome。
 
-Host Adapter、Host Projection Adapter 和 UI shell 都不能执行这些状态转换。
+Bridge、reconnectable Bridge 和 UI shell 都不能执行这些状态转换。
 
 ### 4.3 身份先于内容
 
@@ -161,7 +161,7 @@ Host Adapter、Host Projection Adapter 和 UI shell 都不能执行这些状态�
 
 ### 4.5 Snapshot 必须自足
 
-任意 UI shell 仅凭最新 Core projection 或 Host projection 就能正确渲染。可重连 UI 不得依赖旧 reducer 状态或本地取消目标纠正业务状态。
+任意 UI shell 仅凭最新 Core projection 或 Bridge projection 就能正确渲染。可重连 UI 不得依赖旧 reducer 状态或本地取消目标纠正业务状态。
 
 ## 5. 核心概念
 
@@ -319,7 +319,7 @@ Active(input_closed) --finish--> Empty + immutable TurnOutcome record
 - worker working 恢复已结束 Turn；
 - finish 后再 start 同一个 token；
 - 旧 epoch 修改当前 activity；
-- Host Adapter、Projection Adapter 或 UI shell 直接写 reducer。
+- Bridge、Projection Adapter 或 UI shell 直接写 reducer。
 
 ### 6.3 Activity 不是第二套生命周期
 
@@ -387,11 +387,11 @@ working = core_projection.active_turn != null
 
 不是“是否存在 working worker”，也不是“最后一个 topic 的 state 是 Running”。
 
-## 7. Host Projection Adapter：可选的权威投影出口
+## 7. reconnectable Bridge：可选的权威投影出口
 
-Host Projection Adapter 指连接 Agent Core 与异步/可重连 UI 的投影与可靠投递层。它是可选部署层：同步 Shell 可以直接消费 Core projection；当前首个实现位于 `timem_web`，称为 Pod。未来 iOS、桌面或远程 Host 可复用相同模式，但不要求复用 Web 进程或协议。
+reconnectable Bridge 指连接 Agent Core 与异步/可重连 UI 的投影与可靠投递层。它是可选部署层：同步 Shell 可以直接消费 Core projection；当前首个实现位于 `timem_web`，称为 Pod。未来 iOS、桌面或远程 Interface 可复用相同模式，但不要求复用 Web 进程或协议。
 
-### 7.1 Adapter 输入
+### 7.1 Bridge 输入
 
 - Core authoritative Turn projection；
 - Core timeline facts：topic、worker activity、sub-answer、final outcome；
@@ -399,9 +399,9 @@ Host Projection Adapter 指连接 Agent Core 与异步/可重连 UI 的投影与
 - Session metadata、history、attachments、settings；
 - MEM barrier 和 semantic delivery sequence。
 
-### 7.2 Adapter 输出
+### 7.2 Bridge 输出
 
-Host Projection Adapter 输出完整、可直接渲染的 Session projection；当前 Web 实现由 Pod 输出：
+reconnectable Bridge 输出完整、可直接渲染的 Session projection；当前 Web 实现由 Pod 输出：
 
 ```rust
 struct SessionProjection {
@@ -425,9 +425,9 @@ struct ActiveTurnProjection {
 
 兼容期可继续输出 `state: "working" | "ready"`，但该字段必须由 `active_turn.is_some()` 单向派生，不能再由 worker/topic/WebUI 写入。
 
-### 7.3 Adapter 不拥有第二套状态机
+### 7.3 Bridge 不拥有第二套状态机
 
-Host Projection Adapter 可以：
+reconnectable Bridge 可以：
 
 - 校验 projection revision；
 - 合并 history 与实时 timeline 数据；
@@ -435,7 +435,7 @@ Host Projection Adapter 可以：
 - 管理 command ack、MEM barrier 和 WebSocket sequence；
 - 将 Core outcome 映射成稳定 wire enum。
 
-Host Projection Adapter 不可以：
+reconnectable Bridge 不可以：
 
 - 根据 worker 数量决定 Turn 是否结束；
 - 根据 topic 的 `CoreSessionState` 恢复 working；
@@ -589,7 +589,7 @@ C active
 
 浏览器刷新、WebSocket 断线和重连不改变 Host/Core 进程，因此同一 runtime incarnation 内仍可从 Pod snapshot 恢复有序 queued intents 并继续等待 terminal barrier。
 
-Host/Core 进程重启则完全不同：旧 runtime incarnation 的 Active Turn 与所有未派发 NextTurnIntent 都失去执行权。启动恢复必须：
+Bridge/Core 进程重启则完全不同：旧 runtime incarnation 的 Active Turn 与所有未派发 NextTurnIntent 都失去执行权。启动恢复必须：
 
 1. 读取残留队列只用于识别对应的可见历史 Turn；
 2. 将尚无 final outcome/completion 的对应 Turn 标记为 `interrupted`；
@@ -616,7 +616,7 @@ Host/Core 进程重启则完全不同：旧 runtime incarnation 的 Active Turn 
 | Role/MCP/runtime 设置 | 记录 desired revision | 在下一新 Turn 边界应用 | 不改变已封口 prompt |
 | child worker/tool callback | 只更新匹配 token 的当前 activity/timeline | Gate 丢弃迟到回调 | 不得触发 Next intent |
 | 浏览器 reconnect/retry（同一进程） | 从 Pod 恢复 Active + admission + intent | 重放同一 command | 不能依据浏览器旧状态重新判归属 |
-| Host/Core 进程重启 | 所有 live ownership 失效 | 队列历史标记 interrupted 后清空；旧 ID 只回显 | 必须以新 command ID 创建新 Turn，绝不 redrive |
+| Bridge/Core 进程重启 | 所有 live ownership 失效 | 队列历史标记 interrupted 后清空；旧 ID 只回显 | 必须以新 command ID 创建新 Turn，绝不 redrive |
 | MEM switch | 受 `mem_epoch` barrier 阻断 | 旧 MEM intent 不进入新 MEM | 输入、附件、ACK 同 epoch 隔离 |
 | Session delete/shutdown | 拒绝新 intent并取消当前 Turn | 丢弃/显式失败未启动 intent | 不在后台偷偷启动下一 Turn |
 
@@ -644,16 +644,16 @@ Host/Core 进程重启则完全不同：旧 runtime incarnation 的 Active Turn 
 4. Stop command 必须绑定精确 token；无目标 Stop 不得影响未来 Turn。
 5. start command 的重复投递只产生一个 queued intent 或一个 Turn。
 6. 同一 Host 进程内 UI 断线重连后，Pod snapshot 必须同时包含 Active Turn projection 与有序 queued intents projection。
-7. Host/Core 进程重启后，所有 queued intent 执行权必须清空；其旧 `command_id` 只能回显 interrupted 历史，不能 redrive。
+7. Bridge/Core 进程重启后，所有 queued intent 执行权必须清空；其旧 `command_id` 只能回显 interrupted 历史，不能 redrive。
 8. 用户取消 queued intent 后，它不能因重试或旧 ack 再次启动。
 9. 队列达到上限时必须在 command acceptance 前明确拒绝，不得静默覆盖。
 10. 同一 `command_id` 在 pending input、PromptCut、队列和 Active Turn 间始终只有一个 owner。
 
 ## 10. 建议协议
 
-### 10.1 Core → Host Adapter
+### 10.1 Core → Bridge
 
-优先输出权威 projection change，而不是让 Host 根据细粒度事件重建生命周期：
+优先输出权威 projection change，而不是让 Bridge 根据细粒度事件重建生命周期：
 
 ```text
 CoreTurnProjectionChanged {
@@ -684,7 +684,7 @@ turn:
 
 不再使用无 Turn 身份的 activity 改变生命周期。
 
-### 10.2 Host Projection Adapter → UI shell
+### 10.2 reconnectable Bridge → UI shell
 
 过渡期新增：
 
@@ -759,7 +759,7 @@ ConvertedToNextTurnIntent { enqueue_seq } | Duplicate | Rejected
 16. terminal commit 时，未被任何已发送 PromptCut 消费的 task 输入只能进入 Next intent，不能追加到旧 Turn。
 17. supplement 与 Next intent 的转换必须保留 command ownership、顺序，并且输入与附件恰好消费一次。
 18. Next intent FIFO 必须有界、去重，且一次只派发队首；Session 变为 Empty 本身不构成自动派发授权。队列写盘只用于同进程可靠性与重启后的历史中断识别，绝不授予跨进程 redrive。
-19. Host/Core 进程重启是硬 Stop 边界：Active 与 queued ownership 全部失效，旧 command ID 不得再次调用 Core。
+19. Bridge/Core 进程重启是硬 Stop 边界：Active 与 queued ownership 全部失效，旧 command ID 不得再次调用 Core。
 20. decision、ToolGen guidance、设置变更不能被泛化成 late supplement。
 21. final answer、outcome、completion stats 永远绑定原 Turn，不因后续输入迁移。
 
@@ -1030,11 +1030,11 @@ interfaces/web/src/projection.ts
 只有同时满足以下条件才算重构完成：
 
 - Core 是 Active Turn、input admission、PromptCut 和 outcome 的唯一写入者；
-- Core projection 是所有 Host/UI 的共同生命周期真相；
-- Host Projection Adapter 只增加交付语义；`timem_web` Pod 只按明确 continuation policy 派发有界队列；
+- Core projection 是所有 Bridge/Interface 的共同生命周期真相；
+- reconnectable Bridge 只增加交付语义；`timem_web` Pod 只按明确 continuation policy 派发有界队列；
 - `timem_shell` 直接消费 Core projection，不维护 terminal lifecycle；
 - `web_ui` 删除生命周期推断；
-- Host 删除 worker-count/topic-driven lifecycle 聚合；
+- Web Bridge 删除 worker-count/topic-driven lifecycle 聚合；
 - 21 条不变量均有自动化测试；
 - 4 个真实并发压测在 PR、macOS/Linux release 和 soak profile 达到规定轮数，正确性、资源收敛和体验时延预算通过；
 - 旧兼容协议和迁移 guard 已删除，而不是永久保留两套路径。
