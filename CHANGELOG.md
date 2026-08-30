@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-30
+
 ### Added
 
 - Add a Linux/macOS runtime disk-I/O gate that measures only the fully started Timem process tree across idle and real model/action work, fails above 500,000 B/s average combined reads and writes, and uploads a JSON report from CI.
