@@ -431,7 +431,7 @@ fn model_response_maps_run_bash_to_user_facing_bash() {
 }
 
 #[test]
-fn model_response_maps_polling_run_bash_to_user_facing_poll() {
+fn model_response_maps_polling_run_bash_to_running_before_execution_starts() {
     let events = observation_events_from_core_topic_events(&[action_topic(
         "run_bash",
         polling_bash_kind("gh run list --branch main"),
@@ -439,45 +439,34 @@ fn model_response_maps_polling_run_bash_to_user_facing_poll() {
     )]);
     assert_eq!(
         events,
-        vec![ObservationEvent::ActiveWithTimer {
-            text: "`gh run list --branch main`".to_string(),
-            timer: ActionTimer {
-                started_at_ms: events
-                    .iter()
-                    .find_map(|event| match event {
-                        ObservationEvent::ActiveWithTimer { timer, .. } => {
-                            Some(timer.started_at_ms)
-                        }
-                        _ => None,
-                    })
-                    .unwrap(),
-                timeout_ms: None,
-                loop_timeout_ms: Some(60000),
-                interval_ms: Some(5000),
-                once_timeout_ms: Some(5000),
-            }
-        }]
+        vec![ObservationEvent::Active(
+            "`gh run list --branch main`".to_string()
+        )]
     );
 }
 
 #[test]
-fn polling_action_topic_renders_active_countdown() {
-    let events = observation_events_from_core_topic_events(&[action_topic(
-        "run_bash",
-        polling_bash_kind("test -f /tmp/timem_poll_demo"),
-        true,
-    )]);
+fn polling_execution_start_renders_active_countdown_without_duplicate_row() {
+    let kind = polling_bash_kind("test -f /tmp/timem_poll_demo");
     let mut panel = ObservationPanel::new(8, 80);
-    panel.apply_all(events);
+    panel.apply_all(observation_events_from_core_topic_events(&[action_topic(
+        "run_bash",
+        kind.clone(),
+        true,
+    )]));
+    let before = strip_ansi(&render_observation_panel_at(&panel, 0));
+    assert!(!before.contains("⏱"), "{before}");
 
-    let rendered = render_observation_panel_at(&panel, 0);
-    let plain = strip_ansi(&rendered);
-    assert!(
-        plain.contains("[⏱ 4/01:00] test -f /tmp/timem_poll_demo"),
-        "{plain}"
+    panel.apply_all(observation_events_from_core_topic_events(&[
+        action_topic_with_status("run_bash", kind, true, "execution_start", "running"),
+    ]));
+    let after = strip_ansi(&render_observation_panel_at(&panel, 0));
+    assert!(after.contains("⏱"), "{after}");
+    assert_eq!(
+        after.matches("test -f /tmp/timem_poll_demo").count(),
+        1,
+        "{after}"
     );
-    assert!(!plain.contains("Poll"));
-    assert!(rendered.contains("\x1b[38;5;245m"));
 }
 
 #[test]
@@ -545,7 +534,7 @@ fn background_exit_updates_the_same_action_id_after_the_running_label_changed() 
     let plain = strip_ansi(&rendered);
     assert!(plain.contains("[✔] sleep 0.1"), "{plain}");
     assert_eq!(plain.matches("sleep 0.1").count(), 1, "{plain}");
-    assert!(!plain.contains("后台执行 pid="), "{plain}");
+    assert!(!plain.contains("运行中 (bg) pid="), "{plain}");
     assert!(!rendered.contains("\x1b[38;5;245m"), "{rendered:?}");
 }
 
@@ -570,7 +559,7 @@ fn background_action_and_exit_status_render_user_facing_state() {
     panel.apply_all(background);
     let rendered = render_observation_panel(&panel);
     let plain = strip_ansi(&rendered);
-    assert!(plain.contains("(后台执行) [后台执行] sleep 30"), "{plain}");
+    assert!(plain.contains("(后台执行) [运行中 (bg)] sleep 30"), "{plain}");
     assert!(rendered.contains(ANSI_BOLD) || rendered.contains("\x1b["));
 
     let finished = observation_events_from_core_topic_events(&[action_topic_with_status(
@@ -1133,6 +1122,29 @@ fn normal_bash_without_timeout_renders_without_countdown() {
     assert!(plain.contains("sleep 10 && touch /tmp/timem_poll_demo2.txt"));
     assert!(!plain.contains("⏱"), "{plain}");
     assert!(rendered.contains("\x1b[38;5;245m"));
+}
+
+#[test]
+fn normal_bash_effective_default_timeout_starts_at_execution_start() {
+    let mut panel = ObservationPanel::new(8, 80);
+    let mut kind = bash_kind("sleep 10");
+    if let CoreActionKind::Bash { timeout_ms, .. } = &mut kind {
+        *timeout_ms = Some(5000);
+    }
+    panel.apply_all(observation_events_from_core_topic_events(&[action_topic(
+        "run_bash",
+        kind.clone(),
+        true,
+    )]));
+    let before = strip_ansi(&render_observation_panel_at(&panel, 0));
+    assert!(!before.contains("⏱"), "{before}");
+
+    panel.apply_all(observation_events_from_core_topic_events(&[
+        action_topic_with_status("run_bash", kind, true, "execution_start", "running"),
+    ]));
+    let after = strip_ansi(&render_observation_panel_at(&panel, 0));
+    assert!(after.contains("[⏱ 05s] sleep 10"), "{after}");
+    assert_eq!(after.matches("sleep 10").count(), 1, "{after}");
 }
 
 #[test]

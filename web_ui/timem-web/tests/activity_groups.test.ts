@@ -40,16 +40,46 @@ describe("tool activity grouping", () => {
     ]);
   });
 
-  it("reports running while any tool remains active", () => {
+  it("counts foreground, background, failed, and completed children independently", () => {
     const summary = summarizeToolActivities([
-      activity("run_bash", "completed"),
+      activity("run_bash", "running"),
+      activity("run_bash", "background_running"),
       activity("self_tool", "background_running"),
       activity("memmgr", "failed"),
+      activity("self_tool", "completed"),
     ]);
-    expect(summary?.status).toBe("running");
+    expect(summary).toMatchObject({
+      status: "running",
+      foregroundRunningCount: 1,
+      backgroundRunningCount: 2,
+      failedCount: 1,
+      completedCount: 1,
+    });
   });
 
-  it("reports failed after all tools settle and counts failures", () => {
+  it("keeps the group running until every background child exits", () => {
+    const oneStillRunning = summarizeToolActivities([
+      activity("run_bash", "background_finished"),
+      activity("run_bash", "background_running"),
+    ]);
+    expect(oneStillRunning).toMatchObject({
+      status: "running",
+      backgroundRunningCount: 1,
+      completedCount: 1,
+    });
+
+    const allExited = summarizeToolActivities([
+      activity("run_bash", "background_finished"),
+      activity("run_bash", "completed"),
+    ]);
+    expect(allExited).toMatchObject({
+      status: "completed",
+      backgroundRunningCount: 0,
+      completedCount: 2,
+    });
+  });
+
+  it("reports failed only after all tools settle and preserves the failure count", () => {
     expect(summarizeToolActivities([
       activity("run_bash", "completed"),
       activity("self_tool", "timeout"),

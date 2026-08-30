@@ -156,7 +156,7 @@ const assistantMessage = (text: string): ChatMessage => ({
 
 const actionEvent = (
   id: string,
-  lifecycle: "start" | "finish",
+  lifecycle: "start" | "execution_start" | "finish",
   status: string,
   input: Record<string, unknown> = { cmd: "git status" },
   actionId?: string,
@@ -3007,6 +3007,47 @@ describe("web topic view model", () => {
     });
   });
 
+  it("preserves effective Bash wait budgets for live UI countdowns", () => {
+    const normal = activityFromTopic(
+      topic("core.action", {
+        action: "run_bash",
+        status: "running",
+        input: { cmd: "sleep 10" },
+        kind: {
+          kind: "bash",
+          command: "sleep 10",
+          mode: "normal",
+          timeout_ms: 5000,
+        },
+      }),
+    );
+    expect(normal).toMatchObject({
+      tool_name: "run_bash",
+      tool_mode: "normal",
+      timeout_ms: 5000,
+    });
+
+    const poll = activityFromTopic(
+      topic("core.action", {
+        action: "run_bash",
+        status: "running",
+        input: { loop_cmd: "test -f done" },
+        kind: {
+          kind: "bash",
+          command: "test -f done",
+          mode: "poll",
+          interval_ms: 1000,
+          loop_timeout_ms: 600000,
+        },
+      }),
+    );
+    expect(poll).toMatchObject({
+      tool_mode: "poll",
+      interval_ms: 1000,
+      loop_timeout_ms: 600000,
+    });
+  });
+
   it("renders polling run_bash as Poll and preserves its loop command", () => {
     const activity = activityFromTopic(
       topic("core.action", {
@@ -3085,7 +3126,7 @@ describe("web topic view model", () => {
       }),
     );
     expect(background).toMatchObject({
-      title: "Bash · background running",
+      title: "Bash · running (bg)",
       tool_status: "background_running",
     });
 
@@ -3093,12 +3134,38 @@ describe("web topic view model", () => {
       topic("core.action", {
         action: "run_bash",
         status: "timeout",
+        pid: 4321,
         input: { cmd: "sleep 30" },
       }),
     );
     expect(timeout).toMatchObject({
       title: "Bash · timed out",
       tool_status: "timeout",
+      pid: 4321,
+    });
+  });
+
+  it("uses execution_start as the authoritative countdown and elapsed-time origin", () => {
+    const proposed = actionEvent("1000", "start", "running", { cmd: "sleep 10" }, "slow");
+    const executionStart = actionEvent(
+      "6000",
+      "execution_start",
+      "running",
+      { cmd: "sleep 10" },
+      "slow",
+    );
+    const executionTopic = executionStart.payload as unknown as CoreTopicEvent;
+    executionTopic.payload.kind = {
+      kind: "bash",
+      command: "sleep 10",
+      mode: "normal",
+      timeout_ms: 5000,
+    };
+    const [visible] = coalesceActionLifecycle([proposed, executionStart]);
+    expect(visible.event_id).toBe("6000");
+    expect(activityFromTopic(visible.payload as unknown as CoreTopicEvent)).toMatchObject({
+      execution_started: true,
+      timeout_ms: 5000,
     });
   });
 

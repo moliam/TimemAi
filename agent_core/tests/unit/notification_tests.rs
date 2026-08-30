@@ -54,7 +54,7 @@ fn notification_events_are_protocol_independent_core_data() {
                     command: "pwd".to_string(),
                     mode: "normal".to_string(),
                     interval_ms: None,
-                    timeout_ms: None,
+                    timeout_ms: Some(5000),
                     loop_timeout_ms: None,
                     once_timeout_ms: None,
                 },
@@ -121,4 +121,45 @@ fn grouped_actions_emit_each_action_without_intent_metadata() {
             } if command == "printf b"
         )
     }));
+}
+
+#[test]
+fn run_bash_notifications_publish_effective_wait_budgets() {
+    let suite = ResponseProtocolKind::Json.suite();
+    let envelope = suite.parse(
+        r#"{"working_still_action":[{"run_bash":{"cmd":"sleep 10"}},{"run_bash":{"loop_cmd":"test -f done","interval_ms":1000}},{"run_bash":{"cmd":"long-task","background":true}}]}"#,
+        &crate::capability::CapabilityRegistry::builtin(),
+    );
+    let events = notifications_from_envelope(&envelope);
+    let bash_kinds = events
+        .iter()
+        .filter_map(|event| match event {
+            CoreNotification::Action {
+                kind:
+                    CoreActionKind::Bash {
+                        mode,
+                        timeout_ms,
+                        loop_timeout_ms,
+                        once_timeout_ms,
+                        ..
+                    },
+                ..
+            } => Some((
+                mode.as_str(),
+                *timeout_ms,
+                *loop_timeout_ms,
+                *once_timeout_ms,
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        bash_kinds,
+        vec![
+            ("normal", Some(5000), None, None),
+            ("poll", None, Some(600_000), Some(5000)),
+            ("background", None, None, None),
+        ]
+    );
 }
