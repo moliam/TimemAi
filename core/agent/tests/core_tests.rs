@@ -2,12 +2,12 @@ use agent_core::capability::{CapabilityHostProfile, CapabilityRegistry};
 use agent_core::mcp::{McpRuntime, McpServerConfig, McpTool, McpTransportConfig};
 use agent_core::self_tool::SelfToolPaths;
 use agent_core::{
-    read_audit_doc, worker_role_supporting_context, ActionRuntime, AgentCore, AssistantReplayMode,
-    BashApprovalMode, CoreProfile, CoreStep, LlmResponse, MemGuard, ModelServiceConfig,
-    OutputExpansionRequest, OutputExpansionResolution, ResponseProtocolKind,
-    RoundLimitDecisionRequest, RoundLimitResolution, RuntimeConfigField, TurnFinal, TurnStopDetail,
-    TurnStopReason, UsageStats, UserSupplement, MAX_PROTOCOL_REPAIR_ATTEMPTS,
-    UNLIMITED_ROUND_BUDGET, WORKER_ROLE_CONTEXT_PREFIX,
+    api_audit_stream_path, read_api_audit_doc, rolling_file_store, worker_role_supporting_context,
+    ActionRuntime, AgentCore, AssistantReplayMode, BashApprovalMode, CoreProfile, CoreStep,
+    LlmResponse, MemGuard, ModelServiceConfig, OutputExpansionRequest, OutputExpansionResolution,
+    ResponseProtocolKind, RoundLimitDecisionRequest, RoundLimitResolution, RuntimeConfigField,
+    TurnFinal, TurnStopDetail, TurnStopReason, UsageStats, UserSupplement,
+    MAX_PROTOCOL_REPAIR_ATTEMPTS, UNLIMITED_ROUND_BUDGET, WORKER_ROLE_CONTEXT_PREFIX,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -1273,7 +1273,7 @@ fn round_limit_can_be_continued_without_model_visible_task_reset() {
     else {
         panic!("unexpected step: {step:?}");
     };
-    let audit = read_audit_doc(&audit_file).unwrap();
+    let audit = read_api_audit_doc(&api_audit_stream_path(&audit_file)).unwrap();
     let events = audit["events"].as_array().unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["type"], "round_limit");
@@ -1345,7 +1345,7 @@ fn round_limit_stop_resolution_is_core_owned() {
     assert_eq!(stop.latest_usage, Some(latest));
     assert_eq!(stop.repair_issue.as_deref(), Some("round_limit_reached"));
     assert!(stop.stats.llm_calls > 0);
-    let audit = read_audit_doc(&audit_file).unwrap();
+    let audit = read_api_audit_doc(&api_audit_stream_path(&audit_file)).unwrap();
     let events = audit["events"].as_array().unwrap();
     assert_eq!(events[0]["type"], "round_limit");
     assert_eq!(events[0]["continued"], false);
@@ -1388,7 +1388,7 @@ fn output_expansion_resolution_is_core_owned() {
     };
     assert_eq!(max_llm_output_tokens, 20_000);
     assert_eq!(config.max_llm_output_tokens, 20_000);
-    let audit = read_audit_doc(&audit_file).unwrap();
+    let audit = read_api_audit_doc(&api_audit_stream_path(&audit_file)).unwrap();
     let events = audit["events"].as_array().unwrap();
     assert_eq!(events[0]["type"], "max_llm_output_increased");
     assert_eq!(events[0]["session"], "session_1");
@@ -1984,7 +1984,7 @@ fn user_supplements_with_audit_are_core_owned_turn_updates() {
     let first_supplement = prompt.find("补充：优先考虑跨平台实现").unwrap();
     let second_supplement = prompt.find("补充：保持 UI 无关的数据结构").unwrap();
     assert!(first_supplement < second_supplement);
-    let audit = read_audit_doc(&audit_file).unwrap();
+    let audit = read_api_audit_doc(&api_audit_stream_path(&audit_file)).unwrap();
     let events = audit["events"].as_array().unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[0]["type"], "user_supplement");
@@ -2428,7 +2428,7 @@ fn stale_context_decision_resolution_is_core_owned() {
     assert!(!core.resolve_stale_context_with_audit(request, false, &audit_file, "session_1"));
     assert_eq!(core.dynamic_context_estimated_tokens(), 0);
 
-    let audit = read_audit_doc(&audit_file).unwrap();
+    let audit = read_api_audit_doc(&api_audit_stream_path(&audit_file)).unwrap();
     let event = &audit["events"][0];
     assert_eq!(event["type"], "stale_context_choice");
     assert_eq!(event["session"], "session_1");
@@ -2453,7 +2453,7 @@ fn stale_context_continue_keeps_dynamic_context() {
 
     assert!(core.resolve_stale_context_with_audit(request, true, &audit_file, "session_1"));
     assert_eq!(core.dynamic_context_estimated_tokens(), before);
-    let audit = read_audit_doc(&audit_file).unwrap();
+    let audit = read_api_audit_doc(&api_audit_stream_path(&audit_file)).unwrap();
     assert_eq!(audit["events"][0]["continue_old_context"], true);
 }
 
@@ -3688,7 +3688,7 @@ fn model_repair_audit_is_core_owned_when_applying_response() {
     );
 
     assert!(matches!(step, CoreStep::NeedModel { .. }));
-    let audit = read_audit_doc(&audit_file).unwrap();
+    let audit = read_api_audit_doc(&api_audit_stream_path(&audit_file)).unwrap();
     let events = audit["events"].as_array().unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["type"], "model_repair_request");
@@ -3746,7 +3746,7 @@ fn turn_lifecycle_audit_is_core_owned() {
     core.record_turn_error_audit(&audit_file, "session_1", "turn_1", "model_network_error");
     core.record_turn_final_audit(&audit_file, "session_1", "turn_1", &outcome);
 
-    let audit = read_audit_doc(&audit_file).unwrap();
+    let audit = read_api_audit_doc(&api_audit_stream_path(&audit_file)).unwrap();
     let events = audit["events"].as_array().unwrap();
     assert_eq!(events.len(), 3);
     assert_eq!(events[0]["type"], "turn_start");
@@ -6508,7 +6508,7 @@ fn run_bash_requires_approval_for_mutating_commands() {
     };
     assert!(prompt.contains("status: denied_by_user"));
     assert!(prompt.contains(&request.approval_id));
-    let turn_audit_doc = read_audit_doc(&turn_audit).unwrap();
+    let turn_audit_doc = read_api_audit_doc(&api_audit_stream_path(&turn_audit)).unwrap();
     let events = turn_audit_doc["events"].as_array().unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["type"], "user_approval");
@@ -7095,7 +7095,12 @@ fn scenario_self_qa_returns_runtime_params_and_paths() {
     assert!(prompt.contains("type: params"));
     assert!(prompt.contains("name: TimemAi"));
     assert!(prompt.contains("type: path"));
-    assert!(prompt.contains("api_audit_file:"));
+    assert!(prompt.contains("api_audit_logical_stream:"));
+    assert!(prompt.contains("api_audit_segments_dir:"));
+    assert!(prompt.contains("action_audit_logical_stream:"));
+    assert!(prompt.contains("action_audit_segments_dir:"));
+    assert!(prompt.contains("audit_storage_note:"));
+    assert!(!prompt.contains("api_audit_file:"));
 
     let final_turn = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
@@ -7965,7 +7970,12 @@ fn self_tool_reads_runtime_paths_and_params() {
     assert!(prompt.contains("reminder_tips_file:"));
     assert!(prompt.contains("session_index_file:"));
     assert!(prompt.contains("tool_repo_dir:"));
-    assert!(prompt.contains("api_audit_file:"));
+    assert!(prompt.contains("api_audit_logical_stream:"));
+    assert!(prompt.contains("api_audit_segments_dir:"));
+    assert!(prompt.contains("action_audit_logical_stream:"));
+    assert!(prompt.contains("action_audit_segments_dir:"));
+    assert!(prompt.contains("audit_storage_note:"));
+    assert!(!prompt.contains("api_audit_file:"));
     assert!(prompt.contains("type: params"));
     assert!(prompt.contains("name: TimemAi"));
     assert!(prompt.contains("pid:"));
@@ -8155,14 +8165,24 @@ fn self_tool_runtime_configuration_keeps_core_owned_identity() {
 
     assert!(prompt.contains(&format!("space_dir: {}", configured_space.display())));
     assert!(prompt.contains(&format!("memory_dir: {}", configured_memory.display())));
+    let configured_api_stream = api_audit_stream_path(&configured_api_audit);
     assert!(prompt.contains(&format!(
-        "api_audit_file: {}",
-        configured_api_audit.display()
+        "api_audit_logical_stream: {}",
+        configured_api_stream.display()
     )));
     assert!(prompt.contains(&format!(
-        "action_audit_file: {}",
+        "api_audit_segments_dir: {}",
+        rolling_file_store::segmented_directory(&configured_api_stream).display()
+    )));
+    assert!(prompt.contains(&format!(
+        "action_audit_logical_stream: {}",
         configured_action_audit.display()
     )));
+    assert!(prompt.contains(&format!(
+        "action_audit_segments_dir: {}",
+        rolling_file_store::segmented_directory(&configured_action_audit).display()
+    )));
+    assert!(!prompt.contains("api_audit_file:"));
     assert!(prompt.contains("name: TimemAi"));
 }
 

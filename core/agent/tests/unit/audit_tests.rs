@@ -9,7 +9,7 @@ fn append_audit_writes_json_document() {
     append_audit_event(&path, &json!({"type":"turn_final","ok":true})).unwrap();
     append_audit_event(&path, &json!({"type":"llm_request","ok":true})).unwrap();
 
-    let doc = read_audit_doc(&path).unwrap();
+    let doc = read_api_audit_doc(&api_audit_stream_path(&path)).unwrap();
     assert_eq!(doc["version"], 1);
     let events = doc["events"].as_array().unwrap();
     assert_eq!(events.len(), 2);
@@ -18,6 +18,35 @@ fn append_audit_writes_json_document() {
     assert!(events.iter().all(|event| event["time_ms"].is_i64()));
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir_all(segmented_directory(&audit_sidecar_path(&path)));
+}
+
+#[test]
+fn explicit_api_audit_stream_reader_merges_legacy_base_and_segments() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_explicit_api_audit_stream_{}_{}",
+        std::process::id(),
+        audit_now_ms()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let legacy_base = root.join("api_audit.json");
+    std::fs::write(
+        &legacy_base,
+        r#"{"version":1,"events":[{"type":"legacy","time_ms":1}]}"#,
+    )
+    .unwrap();
+    append_audit_event(&legacy_base, &json!({"type":"current"})).unwrap();
+
+    let stream = api_audit_stream_path(&legacy_base);
+    assert_eq!(stream, root.join("api_audit.jsonl"));
+    let doc = read_api_audit_doc(&stream).unwrap();
+    let events = doc["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0]["type"], "legacy");
+    assert_eq!(events[1]["type"], "current");
+    assert!(segmented_directory(&stream).exists());
+
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -49,7 +78,7 @@ fn append_audit_migrates_legacy_jsonl_without_applying_retention_policy() {
 
     append_audit_event(&path, &json!({"type":"turn_final","ok":true})).unwrap();
 
-    let doc = read_audit_doc(&path).unwrap();
+    let doc = read_api_audit_doc(&api_audit_stream_path(&path)).unwrap();
     assert_eq!(doc["version"], 1);
     let events = doc["events"].as_array().unwrap();
     assert_eq!(events.len(), 2);
@@ -95,7 +124,7 @@ fn append_audit_uses_segmented_sidecar_and_read_merges_existing_snapshot_events(
     assert!(String::from_utf8(sidecar_text)
         .unwrap()
         .contains("\"turn_final\""));
-    let doc = read_audit_doc(&path).unwrap();
+    let doc = read_api_audit_doc(&api_audit_stream_path(&path)).unwrap();
     let events = doc["events"].as_array().unwrap();
     assert_eq!(events.len(), 2);
     assert_eq!(events[0]["type"], "seed");
@@ -296,7 +325,7 @@ fn api_audit_retention_uses_the_requested_rolling_cutoff_across_json_and_jsonl()
         "repeating the same rolling cleanup must be idempotent"
     );
 
-    let doc = read_audit_doc(&path).unwrap();
+    let doc = read_api_audit_doc(&api_audit_stream_path(&path)).unwrap();
     let types = doc["events"]
         .as_array()
         .unwrap()

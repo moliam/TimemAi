@@ -5938,7 +5938,10 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
         record,
         ChatHistoryRecord::Event { content, .. } if content == "recent temporary action result"
     )));
-    let audit = agent_core::read_audit_doc(&layout.api_audit_file()).unwrap();
+    let audit = agent_core::read_api_audit_doc(&agent_core::api_audit_stream_path(
+        &layout.api_audit_file(),
+    ))
+    .unwrap();
     assert_eq!(audit["events"].as_array().unwrap().len(), 1);
     assert_eq!(audit["events"][0]["type"], "recent");
     assert_eq!(
