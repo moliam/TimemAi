@@ -312,6 +312,11 @@ pub fn migrate_legacy_file(path: &Path, slice_bytes: u64) -> std::io::Result<()>
         if let Some(file) = output.as_mut() {
             file.sync_all()?;
         }
+        // Windows prevents renaming a directory that contains an open file and
+        // deleting the legacy source while its reader is still alive. Release
+        // both handles before publishing the segmented directory.
+        drop(output);
+        drop(reader);
         let mut entries = fs::read_dir(&temporary)?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(|entry| entry.file_name());
         let segments = entries

@@ -547,6 +547,10 @@ fn prune_audit_segment(path: &Path, cutoff_ms: i64, now_ms: i64) -> std::io::Res
     if removed == 0 {
         return Ok(0);
     }
+    // Windows does not allow replacing or deleting a file while this process
+    // still holds an open reader for it. Release the segment handle before the
+    // atomic rewrite/removal; the surrounding MemGuard keeps writers serialized.
+    drop(reader);
     if retained.is_empty() {
         remove_audit_segment(path)?;
     } else {
