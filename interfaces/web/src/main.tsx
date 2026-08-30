@@ -8101,7 +8101,12 @@ function TimemThread({
     if (!viewport || !activeSessionId) return;
     const position = sessionScrollPositionsRef.current.get(activeSessionId);
     followThreadLatest.current = position?.followLatest ?? true;
-    restoredSessionIdRef.current = activeSessionId;
+    // Only a Session that already has a Turn needs the next turn-id effect to
+    // treat this render as restoration. Leaving this marker on an empty Session
+    // would incorrectly suppress its first real Turn's start scroll.
+    restoredSessionIdRef.current = latestTurn?.turn_id
+      ? activeSessionId
+      : undefined;
     const previousBehavior = viewport.style.scrollBehavior;
     viewport.style.scrollBehavior = "auto";
     viewport.scrollTop = restoreSessionScrollTop(
@@ -8537,6 +8542,11 @@ function TimemThread({
     }
     followThreadLatest.current = true;
     viewport.scrollTop = viewport.scrollHeight;
+    const frame = window.requestAnimationFrame(() => {
+      if (!followThreadLatest.current || previousScrollMetrics.current) return;
+      viewport.scrollTop = viewport.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [activeSessionId, latestTurn?.turn_id]);
 
   useLayoutEffect(() => {
