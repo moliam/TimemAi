@@ -694,6 +694,17 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
       pendingStarts.set(key, [...(pendingStarts.get(key) ?? []), index]);
       continue;
     }
+    if (lifecycle === "execution_start") {
+      const startIndexes = pendingStarts.get(key);
+      const startIndex = startIndexes?.[0];
+      if (startIndex !== undefined) {
+        visible[startIndex] = event;
+      } else {
+        const index = visible.push(event) - 1;
+        pendingStarts.set(key, [index]);
+      }
+      continue;
+    }
     if (lifecycle === "finish") {
       const status =
         typeof topicEvent.payload.status === "string"
@@ -1861,6 +1872,10 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
                 typeof value === "string" && value.trim().length > 0,
             )
           : undefined;
+      const numericKindValue = (name: string) =>
+        typeof kind?.[name] === "number" && Number.isFinite(kind[name])
+          ? (kind[name] as number)
+          : undefined;
       const detail = command ? "" : formatToolArguments(input);
       return {
         id: clientId(),
@@ -1874,6 +1889,15 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
           typeof payload.elapsed_ms === "number"
             ? payload.elapsed_ms
             : undefined,
+        timeout_ms: numericKindValue("timeout_ms"),
+        loop_timeout_ms: numericKindValue("loop_timeout_ms"),
+        interval_ms: numericKindValue("interval_ms"),
+        pid:
+          typeof payload.pid === "number" && Number.isFinite(payload.pid)
+            ? payload.pid
+            : undefined,
+        execution_started:
+          payload.event === "execution_start" || payload.event === "finish",
         detail,
         code: command ? redactSensitiveDisplayText(command) : undefined,
         code_language: command ? "bash" : undefined,

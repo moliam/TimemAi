@@ -23,16 +23,16 @@ python3 - <<'PY_BOUNDARY'
 from pathlib import Path
 checks = [
     (
-        Path("timem_web/src"),
-        {Path("timem_web/src/os/unix.rs")},
+        Path("applications/timem/src"),
+        {Path("applications/timem/src/os/unix.rs")},
         ("libc::getppid", "tokio::signal::unix", "SignalKind::interrupt", "SignalKind::terminate", "SignalKind::hangup"),
-        "Web Unix parent-process and shutdown-signal primitives belong in timem_web/src/os/unix.rs",
+        "Web Unix parent-process and shutdown-signal primitives belong in applications/timem/src/os/unix.rs",
     ),
     (
-        Path("timem_web/src"),
-        {Path("timem_web/src/os/windows/lifecycle.rs")},
+        Path("applications/timem/src"),
+        {Path("applications/timem/src/os/windows/lifecycle.rs")},
         ("agent_core::os::current_parent_pid", "agent_core::os::process_is_alive"),
-        "Web Windows launcher-process primitives belong in timem_web/src/os/windows/lifecycle.rs",
+        "Web Windows launcher-process primitives belong in applications/timem/src/os/windows/lifecycle.rs",
     ),
 ]
 violations = []
@@ -55,12 +55,13 @@ if grep -nE 'agent_core|timem_platform|timem_shell|timem_web|host_projection|bri
   exit 1
 fi
 
-if ! grep -nF 'agent_core = { path = "../../core/agent" }' bridges/in_process/Cargo.toml >/dev/null; then
-  echo "error: bridges/in_process must depend inward on agent_core" >&2
+if ! grep -nF 'timem_session = { path = "../../core/session" }' bridges/in_process/Cargo.toml >/dev/null ||
+   ! grep -nF 'timem_ui_contract = { path = "../../core/ui_contract" }' bridges/in_process/Cargo.toml >/dev/null; then
+  echo "error: bridges/in_process must depend inward on Session and UI contracts" >&2
   exit 1
 fi
 
-if grep -nE 'timem_shell|timem_web|host_projection|interfaces/' bridges/in_process/Cargo.toml >/tmp/timem_module_boundary_in_process_refs.txt; then
+if grep -nE 'agent_core|timem_shell|timem_web|host_projection|interfaces/' bridges/in_process/Cargo.toml >/tmp/timem_module_boundary_in_process_refs.txt; then
   echo "error: bridges/in_process must not depend on an Interface or host" >&2
   cat /tmp/timem_module_boundary_in_process_refs.txt >&2
   exit 1
@@ -75,6 +76,12 @@ fi
 if grep -nE 'timem_shell|timem_web|host_projection|interfaces/' bridges/http_websocket/Cargo.toml >/tmp/timem_module_boundary_http_refs.txt; then
   echo "error: bridges/http_websocket must not depend outward on an Interface" >&2
   cat /tmp/timem_module_boundary_http_refs.txt >&2
+  exit 1
+fi
+
+if grep -nE 'agent_core|timem_session' interfaces/shell/Cargo.toml >/tmp/timem_module_boundary_shell_core_refs.txt; then
+  echo "error: interfaces/shell must not bypass bridges/in_process" >&2
+  cat /tmp/timem_module_boundary_shell_core_refs.txt >&2
   exit 1
 fi
 
@@ -112,17 +119,19 @@ if grep -nE 'timem_shell|timem_web|host_projection|bridges/|interfaces/' core/se
   exit 1
 fi
 
-if ! grep -nF 'agent_core = { path = "../core/agent" }' timem_web/Cargo.toml >/dev/null ||
-   ! grep -nF 'timem_session = { path = "../core/session" }' timem_web/Cargo.toml >/dev/null; then
-  echo "error: timem_web must depend on Agent and Session through their crate boundaries" >&2
+if ! grep -nF 'agent_core = { path = "../../core/agent" }' applications/timem/Cargo.toml >/dev/null ||
+   ! grep -nF 'timem_session = { path = "../../core/session" }' applications/timem/Cargo.toml >/dev/null ||
+   ! grep -nF 'timem_shell = { path = "../../interfaces/shell" }' applications/timem/Cargo.toml >/dev/null ||
+   ! grep -nF 'timem_http_websocket = { path = "../../bridges/http_websocket" }' applications/timem/Cargo.toml >/dev/null; then
+  echo "error: applications/timem must assemble Core, Bridges, and Interfaces" >&2
   exit 1
 fi
 
-for web_os_file in timem_web/src/os/mod.rs timem_web/src/os/unix.rs timem_web/src/os/windows/mod.rs timem_web/src/os/windows/lifecycle.rs; do
+for web_os_file in applications/timem/src/os/mod.rs applications/timem/src/os/unix.rs applications/timem/src/os/windows/mod.rs applications/timem/src/os/windows/lifecycle.rs; do
   test -f "$web_os_file" || { echo "error: missing Web OS adapter: $web_os_file" >&2; exit 1; }
 done
 
-for boundary in bridges/in_process/module_boundary.md bridges/http_websocket/module_boundary.md core/agent/module_boundary.md core/session/module_boundary.md core/platform/module_boundary.md core/ui_contract/module_boundary.md interfaces/shell/module_boundary.md interfaces/web/module_boundary.md timem_web/module_boundary.md; do
+for boundary in bridges/in_process/module_boundary.md bridges/http_websocket/module_boundary.md core/agent/module_boundary.md core/session/module_boundary.md core/platform/module_boundary.md core/ui_contract/module_boundary.md interfaces/shell/module_boundary.md interfaces/web/module_boundary.md applications/timem/module_boundary.md; do
   test -f "$boundary" || { echo "error: missing module boundary: $boundary" >&2; exit 1; }
 done
 

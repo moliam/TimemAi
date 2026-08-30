@@ -1,8 +1,9 @@
 # Timem Web UI
 
-`interfaces/web` is the browser presentation layer for Timem. It uses
-assistant-ui primitives for the chat surface and renders structured events from
-`timem_web` / `agent_core`.
+`interfaces/web` is Timem's browser Interface. It uses assistant-ui primitives
+for the chat surface and consumes the authenticated HTTP/WebSocket command,
+event, and projection contract assembled by `applications/timem`. It does not
+import or call Rust Session/Agent crates directly.
 
 The UI owns:
 
@@ -14,7 +15,7 @@ The UI owns:
   themes, fonts, and responsive layout
 
 The UI must not implement model calls, prompt parsing, memory/tool execution,
-or command approval policy. Those are core/host responsibilities.
+or command approval policy. Those belong to Core and the HTTP/WebSocket Bridge/Application boundary.
 
 ## Development
 

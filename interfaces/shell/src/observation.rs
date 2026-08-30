@@ -1,5 +1,5 @@
-use agent_core::{CoreActionKind, CoreTopicEvent};
 use std::collections::VecDeque;
+use timem_in_process::agent_api::{CoreActionKind, CoreTopicEvent};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const ANSI_BOLD: &str = "\x1b[1m";
@@ -35,6 +35,11 @@ pub enum ObservationEvent {
         action_id: Option<String>,
         active_text: String,
         status_text: String,
+    },
+    StartActionTimer {
+        action_id: Option<String>,
+        active_text: String,
+        timer: ActionTimer,
     },
     ActiveChildWithTimer {
         text: String,
@@ -156,6 +161,11 @@ impl ObservationPanel {
                 active_text,
                 status_text,
             } => self.update_action_status(action_id.as_deref(), &active_text, status_text),
+            ObservationEvent::StartActionTimer {
+                action_id,
+                active_text,
+                timer,
+            } => self.start_action_timer(action_id.as_deref(), &active_text, timer),
             ObservationEvent::ActiveChildWithTimer {
                 text,
                 is_last,
@@ -181,6 +191,31 @@ impl ObservationPanel {
                 action_id,
             ),
         }
+    }
+
+    fn start_action_timer(
+        &mut self,
+        action_id: Option<&str>,
+        active_text: &str,
+        timer: ActionTimer,
+    ) {
+        let action_id = action_id.filter(|value| !value.trim().is_empty());
+        if let Some(line) = self.lines.iter_mut().rev().find(|line| {
+            action_id
+                .map(|action_id| line.action_id.as_deref() == Some(action_id))
+                .unwrap_or_else(|| line.text == active_text)
+        }) {
+            line.style = ObservationLineStyle::ActiveBlink;
+            line.timer = Some(timer);
+            return;
+        }
+        self.push_line_with_action(
+            active_text.to_string(),
+            ObservationLineStyle::ActiveBlink,
+            OBSERVATION_LINE_PREFIX.to_string(),
+            Some(timer),
+            action_id.map(str::to_string),
+        );
     }
 
     fn update_action_status(
@@ -590,6 +625,17 @@ pub fn observation_events_from_core_topic_events(
         }
         if let Some(action) = event.as_action() {
             let (detail_text, timer) = action_detail_for_shell(&action.kind);
+            if action.event == "execution_start" {
+                if let Some(timer) = timer {
+                    observations.push(ObservationEvent::StartActionTimer {
+                        action_id: (!action.action_id.trim().is_empty())
+                            .then(|| action.action_id.clone()),
+                        active_text: detail_text,
+                        timer,
+                    });
+                }
+                continue;
+            }
             if action.event == "finish" {
                 observations.push(ObservationEvent::UpdateActionStatus {
                     action_id: (!action.action_id.trim().is_empty())
@@ -613,14 +659,14 @@ pub fn observation_events_from_core_topic_events(
                     None,
                     child_style,
                     detail_text,
-                    timer,
+                    None,
                 ));
             } else {
                 observations.push(ObservationEvent::StartAction {
                     action_id: Some(action.action_id.clone()),
                     text: detail_text,
                     style: child_style,
-                    timer,
+                    timer: None,
                 });
             }
         }
@@ -720,8 +766,8 @@ fn action_status_label(status: &str, pid: Option<u32>) -> String {
         "cancelled" => "已取消".to_string(),
         "failed" => "失败".to_string(),
         "background_running" => pid
-            .map(|pid| format!("后台执行 pid={pid}"))
-            .unwrap_or_else(|| "后台执行".to_string()),
+            .map(|pid| format!("运行中 (bg) pid={pid}"))
+            .unwrap_or_else(|| "运行中 (bg)".to_string()),
         "background_finished" => "后台完成".to_string(),
         _ => "已结束".to_string(),
     }

@@ -13,9 +13,9 @@ Interface ↔ Bridge ↔ Core
 - **Core** owns reusable agent semantics, Session/Context/Worker orchestration, UI-neutral
   contracts, and platform policy.
 
-A Bridge is a logical communication boundary, not a process boundary. Shell and native clients may
-use an in-process bridge without serialization or networking. Browser clients use HTTP/WebSocket.
-A separately running desktop companion uses IPC. No Bridge may invent Agent, Session, Turn,
+A Bridge is a logical communication boundary, not a process boundary. Shell and same-process Rust Interfaces may
+use the in-process Bridge without serialization or networking. Browser clients use HTTP/WebSocket.
+A separately running desktop companion may use HTTP/WebSocket or a real IPC Bridge when implemented. No Bridge may invent Agent, Session, Turn,
 cancellation, approval, retry, or lifecycle semantics.
 
 ## Target physical layout
@@ -37,13 +37,15 @@ core/
 bridges/
   in_process/               # direct functions, callbacks and channels
   http_websocket/           # browser HTTP/WebSocket and reconnect delivery
-  ipc/                      # desktop companion process transport
+  native_ffi/               # create for a real cross-language same-process client
+  ipc/                      # create for a real desktop companion process transport
 interfaces/
   shell/
   web/
-  macos/
-  windows/
-  linux/
+  desktop/                 # create only with a real implementation
+applications/
+  timem/                   # unified CLI/Web/Shell composition root
+  timem_desktop/           # create only with a real desktop product
 resources/
 tests/
 docs/
@@ -88,53 +90,60 @@ preserve callers, but they must not introduce a cycle or become permanent duplic
 
 ## Migration inventory
 
-The repository is deliberately migrated in compiling, reviewable steps. The only current
-transitional runtime root is `timem_web/`. Projection delivery foundation now lives at `bridges/http_websocket/`.
-Its revision, deduplication, bounded queue, and reconnect state are communication concerns, while
-the projected semantic types remain in `core/ui_contract`.
+Migration complete for the physical runtime roots covered by this change:
 
-| Current owner | Target owner | Removal condition |
-| --- | --- | --- |
-| `timem_web/` | `bridges/http_websocket/` | The unified `timem` binary’s Web mode, HTTP/WebSocket behavior, assets, and lifecycle tests pass at the target path. |
+- The transitional top-level `timem_web/` directory has been removed.
+- The unified executable composition root now lives at `applications/timem/`.
+- The Cargo package name `timem_web` remains temporarily for package-command compatibility; it no
+  longer denotes a physical architecture root.
+- `bridges/in_process` depends on `core/session` and `core/ui_contract`, not directly on Agent.
+- `interfaces/shell` depends on `bridges/in_process` and `core/ui_contract`, not directly on Agent or
+  Session.
+- `bridges/http_websocket` owns reusable reconnect/delivery state. Further internal extraction of
+  HTTP route implementation may proceed without recreating a transitional top-level runtime root.
 
-`core/agent`, `core/session`, `core/ui_contract`, `interfaces/shell`, `interfaces/web`, and
-`core/platform` are already at their semantic roots, but some internal code still needs finer
-boundary cleanup.
-`benchmarks/` and `examples/` remain cross-cutting verification/support material until their final ownership is decided; they are not
-runtime layers.
+The in-process Bridge is for **all same-process Rust Interfaces**, not specifically Shell. Shell is
+the first production consumer. A future Rust-native desktop Interface, embedded GUI, or test Host
+reuses the same Bridge. A cross-language same-process desktop client may add `bridges/native_ffi`,
+which adapts ABI ownership and callbacks to `bridges/in_process` rather than duplicating Session
+semantics. A separate-process desktop client may use HTTP/WebSocket or add IPC when real behavior
+and tests exist.
 
-`core/platform` now has a real Windows backend governed by
-[`windows-support-matrix.md`](windows-support-matrix.md). This is not a product-level Windows
-support claim: Agent, Shell, Web, installer, and native desktop Interface status advances only with
-the executable evidence listed for that layer. Native desktop Interface paths remain target
-architecture and must not be created as placeholders.
+## Extension and no-placeholder rule
 
-## Incremental sequence and exit gates
+The no-placeholder rule remains mandatory. Do not create `interfaces/desktop`,
+`applications/timem_desktop`, `bridges/native_ffi`, or `bridges/ipc` until a real implementation,
+contract, and executable tests are delivered together. Bridge names follow communication mechanics;
+Interface names follow interaction form; Application directories are composition roots for concrete
+products.
 
-Each step is committed separately and must leave the workspace buildable:
+## Final dependency graph
 
-1. **Architecture contract**: record this target, migration inventory, no-placeholder rule, and
-   executable guard checks.
-2. **UI contract extraction**: create `core/ui_contract` from genuinely UI-neutral commands,
-   events, and projections. Keep temporary `agent_core` re-exports where they do not reverse the
-   target dependency direction.
-3. **Agent relocation (complete)**: the `agent_core` package lives at `core/agent`; resource paths,
-   tests, scripts, docs, and workspace references preserve behavior and compatibility.
-4. **Session extraction (complete)**: `timem_session` owns Session/Context/Worker lifecycle,
-   scheduling, and management; Web callers use the new owner and Agent has no reverse dependency.
-5. **In-process Bridge (in progress)**: `timem_in_process` now owns the synchronous typed Turn
-   call boundary used by Shell. Terminal `TurnUi` rendering and decisions remain in
-   `interfaces/shell`; additional callback/channel adapters will move in later slices.
-6. **HTTP/WebSocket Bridge (in progress)**: combine the Web server and asynchronous projection/delivery ownership
-   under `bridges/http_websocket`, preserving package/binary and wire behavior.
-7. **IPC and native Interfaces**: add the IPC contract and native clients only with real behavior,
-   tests, and explicit platform support status.
-8. **Final cleanup**: remove transitional roots and compatibility shims; update all docs, guards,
-   release paths, and full CI evidence.
+All arrows mean “depends on”:
 
-For every step, run the architecture guard, module/test contract checks, formatting, relevant crate
-and Interface tests, and `git diff --check`. Run the full `scripts/ci.sh` at behavior-sensitive
-milestones and before declaring the migration complete.
+```text
+applications/timem
+  -> interfaces/shell
+  -> bridges/in_process
+  -> bridges/http_websocket
+  -> core/session
+  -> core/agent
+  -> core/platform
+
+interfaces/shell -> bridges/in_process
+interfaces/shell -> core/ui_contract
+bridges/in_process -> core/session
+bridges/in_process -> core/ui_contract
+bridges/http_websocket -> core/ui_contract
+core/session -> core/agent
+core/session -> core/ui_contract
+core/agent -> core/platform
+core/agent -> core/ui_contract
+```
+
+The browser project communicates with the HTTP/WebSocket Bridge through its wire protocol; it is not
+a Cargo dependency. The Application embeds `interfaces/web/dist` and performs top-level lifecycle,
+mode selection, and dependency assembly.
 
 ## Non-regression invariants
 

@@ -125,7 +125,8 @@ fn prompt_field_values(prompt: &str, field: &str) -> Vec<String> {
 }
 
 fn read_audit_events(path: &Path) -> Vec<Value> {
-    let doc = crate::audit::read_audit_doc(path).unwrap();
+    let stream = crate::audit::api_audit_stream_path(path);
+    let doc = crate::audit::read_api_audit_doc(&stream).unwrap();
     doc["events"].as_array().unwrap().clone()
 }
 

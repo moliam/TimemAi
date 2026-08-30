@@ -163,6 +163,13 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   as internal action failures, and audited as `internal_error`. A tool that can
   cause a native in-process fault must use process isolation rather than relying
   on panic recovery.
+- Foreground `run_bash` action timing and lifecycle topics. Core publishes the
+  effective wait budgets used by execution, including defaults when the model
+  omits `timeout_ms`, `loop_timeout_ms`, or `once_timeout_ms`. The action
+  lifecycle uses `event: "start"` for proposal/approval visibility,
+  `event: "execution_start"` when foreground execution handling begins, and
+  the terminal finish event for settlement. Hosts must start countdown UI from
+  `execution_start`, not from proposal or approval time.
 - Long foreground command lifecycle for positive model-provided `timeout_ms`:
   core owns process waiting, long-running decision requests, timeout transition
   into the session running-pid set, action result shaping, and user-supplement
@@ -279,8 +286,8 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   confirmations.
 - Browser/WebSocket-specific projection revisions, event cursors, reconnect
   outboxes, HTTP authentication, or UI command queues. These belong to a Host
-  Projection Adapter such as `timem_web`, not to the reusable Core semantic
-  projection.
+  Projection Adapter such as `bridges/http_websocket` plus its Application wiring,
+  not to the reusable Core semantic projection.
 - A separate lifecycle API for each UI toolkit. Rust, Swift, Web, desktop, and
   process-IPC bindings must expose the same Turn identity and transition
   semantics even when their language-level types differ.

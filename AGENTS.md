@@ -1,221 +1,104 @@
-# TimemAi Development Constitution
+# TimemAi Development Contract
 
-This file is the repository-level development contract. Every contributor and
-coding agent must read it before changing code. It records durable principles;
-detailed designs and temporary implementation plans belong under `docs/`.
+本文件是仓库级开发契约。修改代码前必须阅读；进入具体模块时，还必须阅读该目录的
+`module_boundary.md`。详细设计、迁移记录和测试矩阵放在 `docs/`，不要堆入本文件。
 
-## 1. Product and delivery principles
+## 1. 目录结构与归属
 
-- Solve the user's real requirement, not merely the literal symptom. Confirm the
-  intended behavior, ownership boundary, compatibility needs, and failure modes
-  before making a broad change.
-- Prefer the smallest coherent change that fixes the root cause. Do not mix
-  unrelated architecture axes, speculative abstractions, or opportunistic
-  rewrites into one delivery.
-- Source, tests, architecture guards, documentation, generated assets, and
-  release scripts are one product. Update all affected surfaces together.
-- Never claim success from code inspection alone. Base conclusions on the
-  corresponding executable checks and report any check that was not run.
-- Do not push, publish, tag, or alter remote history unless the user explicitly
-  asks. Local implementation and release-quality validation come first.
+```text
+core/
+  agent/              # 模型循环、能力执行、Prompt/协议
+  session/            # Session/Context/Worker/Turn 生命周期与用例
+  ui_contract/        # UI 中立的命令、事件、投影和语义类型
+  platform/           # 平台契约及 macOS/Windows/Linux 实现
+bridges/
+  in_process/         # 同进程类型化调用、回调和通道
+  http_websocket/     # HTTP/WebSocket、序列、重放和重连
+interfaces/
+  shell/              # 终端交互与渲染
+  web/                # 浏览器交互与渲染；dist 为受版本控制的构建产物
+applications/
+  timem/              # 统一产品组合根与唯一真实可执行程序
+resources/            # 能力清单、工具实现及共享资源
+tests/                # 跨模块/产品级测试
+docs/                 # 架构、协议、测试、安装和发布文档
+scripts/              # 架构守卫、质量门禁和交付脚本
+```
 
-## 2. Semantic architecture
+Cargo 包名 `timem_web`、`timem_shell`、`agent_core` 是兼容身份，不代表物理目录归属。
+不要恢复旧根目录 `timem_web/`、`timem_shell/`、`web_ui/`、`agent_core/` 或
+`core/agent/src/os/`。完整布局见 `docs/semantic-project-layout.md`。
 
-The intended direction is:
+## 2. 架构设计
+
+唯一语义方向是：
 
 ```text
 Interface ↔ Bridge ↔ Core
 ```
 
-- **Interface** owns presentation and human interaction: terminal/browser/native
-  input, rendering, layout, accessibility, and UI-only convenience.
-- **Bridge** owns communication only: in-process calls, HTTP/WebSocket, IPC,
-  serialization, routing, sequencing, replay, and reconnect behavior.
-- **Core** owns reusable Agent and Session semantics, authoritative state,
-  UI-neutral contracts, capability execution, persistence rules, and platform
-  policy.
-- A Bridge must not invent or reinterpret Agent, Session, Turn, cancellation,
-  approval, retry, or lifecycle semantics. An Interface must render structured
-  Core meaning rather than reconstructing state from strings or event timing.
-- Dependencies point inward. Core never depends on an Interface. Platform code
-  never depends on agent, Bridge, or UI crates. Avoid cycles and hidden global
-  coupling.
-- Preserve semantic types. Do not collapse final answers, progress, action
-  intent, evidence, diagnostics, status metadata, and lifecycle outcomes into a
-  generic `text` field when their meanings differ.
-- Core may return strings when the string itself is data. Core must not contain
-  terminal ANSI styling, browser layout, localized UI composition, or
-  host-specific presentation policy.
+- **Interface** 只负责人机交互、布局、渲染、可访问性和 UI 本地便利功能。
+- **Bridge** 只负责通信、路由、序列化、排序、重放、重连和背压。
+- **Core** 负责可复用的 Agent/Session 语义、权威状态、能力执行、持久化规则和平台策略。
+- **Application** 只负责组装具体产品、选择运行模式和注入依赖。
 
-Read `docs/semantic-project-layout.md` for the physical layout and migration
-scope. Run `python3 scripts/architecture_guard.py` after architecture or
-workspace changes.
+依赖必须向内：
 
-## 3. Physical boundaries and migration
+```text
+interfaces/* -> bridges/* -> core/{session,ui_contract}
+core/session -> core/{agent,ui_contract,platform}
+core/agent   -> core/{ui_contract,platform}
+```
 
-The final physical ownership is:
+`core/platform` 不得依赖 Agent、Session、Bridge 或 Interface；Core 不得依赖 Interface；
+Interface 之间不得相互依赖。同进程 Rust Interface 使用 `bridges/in_process`，不得为了抽象
+强加网络或序列化。浏览器通过 HTTP/WebSocket Bridge 通信。
 
-- `core/{agent,session,ui_contract/{commands,events,projections},platform/{api,shared,macos,windows,linux}}`
-- `bridges/{in_process,http_websocket,ipc}`
-- `interfaces/{shell,web,macos,windows,linux}`
-- `resources`, `tests`, `docs`, and `scripts` for shared non-runtime assets and verification.
+Core 对 Session、Context、Worker、Turn、输入准入、取消和终态拥有最终解释权。Bridge
+不得发明领域状态机；Interface 不得根据字符串、事件时序、Worker 数量或可见输出反推生命周期。
+保留语义类型，不要把最终答案、进度、意图、证据、诊断和状态压成通用 `text`。
 
-A Bridge is a logical communication boundary, not necessarily a process boundary. Shell and native
-Interfaces may use direct calls, callbacks, or channels through `bridges/in_process`; Web uses
-HTTP/WebSocket; a separate desktop companion uses IPC. Do not force serialization or network I/O
-onto an in-process path.
+## 3. 扩展原则
 
-The migration is incremental. `timem_web` is the only current transitional runtime root.
-Projection delivery state already lives in `bridges/http_websocket`; semantic projection types live
-in `core/ui_contract`. The package/crate named `agent_core` now lives at `core/agent`. Their exact
-destination, removal conditions, dependency graph, staged sequence, and non-regression gates are
-defined in `docs/semantic-project-layout.md`. Do not create a
-new transitional root or preserve duplicate ownership without updating that executable migration
-contract in the same reviewed change.
+- 新目录必须对应真实消费者、明确契约、已实现行为和可执行测试；禁止空占位和名称式支持声明。
+- 同进程 Rust 客户端复用 `bridges/in_process`。
+- 跨语言同进程客户端确有需要时，才添加 `bridges/native_ffi`，并适配到 in-process Bridge。
+- 独立进程客户端优先复用 HTTP/WebSocket；只有通信语义确需时才添加 `bridges/ipc`。
+- 新交互形态放入 `interfaces/<kind>`；新产品组合根放入 `applications/<product>`。
+- 扩展不能复制 Agent、Session、Turn、取消、审批、重试或生命周期语义。
+- 物理迁移默认保持包名、二进制、CLI、数据格式和线协议兼容；例外必须单独说明并测试。
 
-`core/agent`, `core/ui_contract`, `interfaces/shell`, `interfaces/web`, and `core/platform` are
-current semantic roots. Preserve the
-`timem_shell`, `timem_web`, and `agent_core` package compatibility needed during the
-migration. The CLI delivery surface is one real executable named `timem`: it launches Web by
-default and Shell only with `--shell`. A `timem-web` symlink or forwarding shim may be installed
-for command compatibility, but must not be a second executable or delegated runtime.
-Temporary re-exports are allowed only when they avoid dependency cycles and have an explicit
-removal stage.
+## 4. 模块原则
 
-Do not restore legacy roots `timem_shell`, `web_ui`, `agent_core`, or `core/agent/src/os`. Do not
-create empty target directories. Windows and native desktop paths are target architecture, not current support
-claims; add them only with an explicit behavior matrix and executable supported/unsupported
-contract.
+- 行为放入拥有该语义的最内层模块；跨层便利不是越界理由。
+- 模块保持内聚、命名表达语义、依赖显式、公开 API 最小化；优先组合与窄接口。
+- Prompt 和模型响应格式属于协议。修改时必须同步生产端、解析、校验、修复、样例和测试。
+- 内置工具保持 `resources/capabilities/tools/{tool}.yaml` 与 `{tool}.rs` 成对；清单定义接口，
+  实现负责解析与执行，顶层 Turn 循环不得吸收工具细节。
+- Core topic 回调在调用期间同步且由 Core 所有；异步保留前必须复制所需数据。
+- 测试优先通过真实公开边界；测试主体放在各 crate 的 `tests/`，生产 `src` 仅允许最小测试钩子。
+- 模块规则与本文件冲突时，以本文件为准，并在同一变更中修正文档冲突。
 
-Module-local rules in `*/module_boundary.md` remain mandatory. If a local rule conflicts with this
-file, this repository-level contract wins and both documents must be reconciled in the same change.
+## 5. 硬性约束
 
-## 4. Authoritative state and protocol rules
+- 选择修复根因的最小完整改动，不混入无关重构或投机抽象。
+- 禁止硬编码自然语言关键词来判断用户意图；提供结构化证据和能力，由模型完成语义判断。
+- 权限、所有权、破坏性操作、进程身份和平台支持必须 fail closed。
+- 不得静默吞错；区分无效输入、能力不可用、瞬时失败、取消和内部缺陷，并提供已脱敏上下文。
+- 避免无界集合/队列/历史/重试、异步路径阻塞、无界轮询、重复重建和不必要的全文件读取或克隆。
+- 不得提交密钥、真实用户路径、私有事实、内部 URL、对话、临时文件、依赖目录或调试残留。
+- Web 源码变化必须重新生成并提交 `interfaces/web/dist`，且解释所有产物差异。
+- 行为变化必须同时更新受影响的源码、测试、架构守卫、文档和生成资产。
+- 不得通过削弱、删除或绕过失败测试来制造成功。
+- 未经用户明确要求，不得 push、发布、打 tag 或改写远端历史。
 
-- Core is authoritative for Agent, Session, Context, Worker, Turn, input
-  admission, cancellation, terminal outcomes, and structured Interface decisions.
-- UI and delivery layers may cache, project, or transport Core state, but must
-  not create a competing state machine from topic order, worker counts,
-  acknowledgements, visible output timing, or localized strings.
-- Prompt and model response formats are protocols. When changing them, update
-  producer, parser, validation, repair behavior, fixtures, examples, and tests
-  together. Do not leave accidental dual protocols.
-- Runtime code must not infer natural-language intent with hard-coded keyword
-  branches. Expose structured evidence and capabilities; let the model reason
-  where semantic judgment is required.
-- Built-in tools remain paired packages under
-  `resources/capabilities/tools/{tool}.yaml` and `{tool}.rs`. The manifest is
-  the model/executor interface and validation source; concrete parsing and
-  execution belong to the tool implementation, not the top-level turn loop.
-- Topic callbacks are synchronous and Core-owned during the call. A host that
-  retains data for async rendering, transport, tests, or logs must clone the
-  required fields before returning.
+## 6. 交付与验证
 
-## 5. Coding quality requirements
+修改前：检查现状、调用方、相关历史、模块边界和风险；明确兼容约束及测试计划。
+修改中：先跑窄测试，保持语义归属，及时清理临时产物。提交前：格式化并运行适用门禁，
+至少执行改动模块测试和 `git diff --check`；架构、热路径、Web 或发布相关改动还需运行对应守卫。
 
-- Keep modules cohesive, names semantic, dependencies explicit, and public APIs
-  minimal. Prefer composition and narrow interfaces over cross-layer helpers.
-- Preserve safety properties and fail closed for ownership, destructive actions,
-  process identity, permissions, and unsupported-platform decisions.
-- No silent error swallowing. Return or record actionable, redacted context;
-  distinguish invalid input, unavailable capability, transient failure,
-  cancellation, and internal defects.
-- Avoid unnecessary cloning, full-file reads, unbounded collections, blocking in
-  async paths, polling without bounds, quadratic rendering, and repeated prompt
-  or projection reconstruction.
-- Compatibility is an explicit constraint. Physical moves must preserve package,
-  binary, CLI, data schema, protocol, and generated-asset behavior unless a
-  separately documented decision changes them.
-- Do not add dead compatibility branches, empty architecture placeholders,
-  speculative traits, or abstractions with only one unclear responsibility.
-- Format and lint changed code. Keep the repository free of warnings, debug
-  leftovers, temporary files, generated dependency directories, and unrelated
-  formatting churn.
-- Never place real user paths, keys, private facts, internal URLs, conversations,
-  or secrets in source, fixtures, logs, snapshots, docs, or commits.
-
-## 6. Test requirements
-
-A feature is not protected by one happy-path helper test. Review both quality
-axes and all applicable coverage dimensions from `docs/test-strategy.md` and
-record feature coverage in `docs/feature-test-management.md`.
-
-### Quality axes
-
-1. **Core interaction correctness**: protocol, state transition, execution,
-   persistence, cancellation, retry, audit, and multi-round behavior.
-2. **Interface display correctness**: Shell/Web accurately render the same
-   structured semantics without cross-session leakage or lifecycle invention.
-
-Behavior crossing both axes requires tests on both sides.
-
-### Coverage dimensions
-
-For every changed behavior, cover or explicitly justify the absence of:
-
-1. Normal path.
-2. Boundary path: empty, maximum, long, narrow, threshold, and unusual values.
-3. Error/cancellation path: malformed input, permission failure, unavailable
-   service, stale identity, retry, and interruption where relevant.
-4. Stress/repetition/concurrency path for race-prone, stateful, or hot behavior.
-
-### Test placement and realism
-
-- Test functions and fixture corpora belong under each crate's `tests` directory.
-  Production `src` files may contain only a minimal external test-module hook or
-  a narrowly scoped test-only access point for private white-box coverage.
-- Prefer tests through real public boundaries. Use real temporary files,
-  subprocesses, fake model servers, HTTP/WebSocket flows, pseudo-TTYs, and built
-  frontend assets where those are part of production behavior.
-- Every bug fix needs a regression test that fails for the original defect.
-- Architecture guards need negative self-tests that inject violations and prove
-  the guard rejects them; checking only the current valid tree is insufficient.
-- Tests must be deterministic, isolated, bounded in time/resources, and clean up
-  their files and child processes even on failure.
-
-## 7. Performance and zero-regression policy
-
-- Architecture improvement is not permission for functional, performance,
-  efficiency, UX, compatibility, or security regression.
-- Establish evidence before changing a hot path and compare the same workload
-  afterward. Do not infer causality from execution order or unrelated metrics.
-- Preserve bounded memory, storage, event queues, rendered rows, output evidence,
-  retries, timeouts, and process lifecycles.
-- Run `scripts/performance_guard.sh` for changes touching prompt assembly, event
-  fan-out, rendering, projection, long histories, caching, process supervision,
-  or other measured hot paths.
-- Release binaries and embedded Web assets must still build reproducibly. A
-  frontend source change must regenerate the tracked `interfaces/web/dist` and
-  leave no unexplained bundle diff.
-
-## 8. Documentation requirements
-
-- Update README and the relevant architecture, protocol, test matrix, install,
-  or release document in the same change as behavior or layout changes.
-- Keep README concise; detailed rationale, diagrams, matrices, and migration
-  plans belong under `docs/`.
-- Documentation must describe current truth. Remove stale paths and commands
-  after moves; do not preserve misleading historical instructions outside
-  clearly marked historical audit documents.
-- State assumptions and unsupported targets explicitly. Do not imply support
-  from a directory name, placeholder module, or compile-only stub.
-
-## 9. Required workflow and quality gates
-
-Before editing:
-
-1. Read this file and affected `module_boundary.md` files.
-2. Inspect current behavior, callers, tests, scripts, and relevant history.
-3. Define invariants, compatibility constraints, risks, and a test plan.
-
-While editing:
-
-1. Keep changes in the owning semantic layer.
-2. Add/update executable tests and guards with the implementation.
-3. Run narrow tests first for fast feedback; clean temporary artifacts.
-
-Before declaring completion, run the applicable gates. For architecture or
-release-impacting work, the expected baseline is:
+权威完整门禁是 `scripts/ci.sh`。常用专项检查：
 
 ```bash
 python3 scripts/architecture_guard.py --self-test
@@ -224,19 +107,11 @@ scripts/test_contract_check.sh
 cargo fmt --all -- --check
 scripts/clippy_check.sh
 cargo test --workspace --locked -- --test-threads=1
-cargo doc --workspace --all-features --no-deps --locked
 pnpm --dir interfaces/web test
 pnpm --dir interfaces/web build
 git diff --exit-code -- interfaces/web/dist
 scripts/performance_guard.sh
-cargo build --locked -p timem_web --release
-git diff --check
 ```
 
-Run additional platform, pseudo-TTY, browser, runtime lifecycle, security,
-installation, and repeated-edge gates whenever the touched behavior requires
-them. `scripts/ci.sh` is the authoritative full local/CI gate.
-
-If a required gate cannot run, report exactly which gate, why, and the residual
-risk. Never weaken, delete, or bypass a failing test merely to make delivery
-appear green.
+测试覆盖原则和功能登记见 `docs/test-strategy.md`、`docs/feature-test-management.md`。
+任何适用门禁未运行或失败时，必须准确报告原因与剩余风险；不得仅凭代码审阅宣称完成。

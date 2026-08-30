@@ -123,7 +123,7 @@ if ! grep -q 'cargo fetch --locked' "$ROOT_DIR/install.sh"; then
   exit 1
 fi
 
-if ! grep -q 'cargo build --locked -p timem_web --release' "$ROOT_DIR/install.sh"; then
+if ! grep -q 'cargo build --locked --release --bin timem' "$ROOT_DIR/install.sh"; then
   echo "install script should build the unified release executable with locked dependencies" >&2
   exit 1
 fi

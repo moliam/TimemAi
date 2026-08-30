@@ -22,7 +22,7 @@ export function isToolActivityFailed(status: string) {
 }
 
 export function humanizeToolStatus(status: string) {
-  if (status === TOOL_STATUS_BACKGROUND_RUNNING) return "background running";
+  if (status === TOOL_STATUS_BACKGROUND_RUNNING) return "running (bg)";
   if (status === "timeout") return "timed out";
   return status.replaceAll("_", " ");
 }
