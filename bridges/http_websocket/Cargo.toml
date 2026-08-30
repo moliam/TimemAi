@@ -1,11 +1,11 @@
 [package]
-name = "host_projection"
+name = "timem_http_websocket"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 
 [dependencies]
-agent_core = { path = "../core/agent" }
+timem_ui_contract = { path = "../../core/ui_contract" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

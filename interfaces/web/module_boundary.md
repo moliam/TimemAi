@@ -1,12 +1,12 @@
 # web_ui Module Boundary
 
 `web_ui` is Timem's browser UI shell. It uses assistant-ui primitives for the
-conversation surface and renders the Web Host Projection Adapter output. It is
+conversation surface and renders HTTP/WebSocket Bridge projections. It is
 one presentation implementation of the same UI-neutral Core Turn semantics used
 by Shell, iOS, desktop, and future clients; browser framework choices must not
 become Agent lifecycle rules.
 
-Before changing this module, read `docs/turn-state-projection-architecture.md` for the shared Core, Host Adapter, Host Projection Adapter, and UI-shell lifecycle boundary.
+Before changing this module, read `docs/turn-state-projection-architecture.md` for the shared Core, Bridge, Interface, and lifecycle boundary.
 
 It may contain:
 
@@ -53,7 +53,7 @@ It must not contain:
   Sending/Retrying, but it must not create, cancel, finish, or revive a Turn.
 - Browser-specific semantics that a Swift, desktop, or terminal UI would need to
   copy. Shared Turn behavior must be added to Core; shared asynchronous delivery
-  behavior belongs in a Host Projection Adapter; only visual and browser-local
+  behavior belongs in the HTTP/WebSocket Bridge; only visual and browser-local
   interaction behavior belongs here.
 - Direct lifecycle decisions from `turn_started`, `turn_finished`, `core_topic`,
   or `worker_activity`; those events may populate a timeline only after Pod/Core

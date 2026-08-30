@@ -66,6 +66,18 @@ if grep -nE 'timem_shell|timem_web|host_projection|interfaces/' bridges/in_proce
   exit 1
 fi
 
+if ! grep -nF 'timem_ui_contract = { path = "../../core/ui_contract" }' bridges/http_websocket/Cargo.toml >/dev/null ||
+   ! grep -nF 'timem_ui_contract::projections' bridges/http_websocket/src/lib.rs >/dev/null; then
+  echo "error: bridges/http_websocket must consume projection semantics from core/ui_contract" >&2
+  exit 1
+fi
+
+if grep -nE 'timem_shell|timem_web|host_projection|interfaces/' bridges/http_websocket/Cargo.toml >/tmp/timem_module_boundary_http_refs.txt; then
+  echo "error: bridges/http_websocket must not depend outward on an Interface" >&2
+  cat /tmp/timem_module_boundary_http_refs.txt >&2
+  exit 1
+fi
+
 if ! grep -nF 'timem_in_process = { path = "../../bridges/in_process" }' interfaces/shell/Cargo.toml >/dev/null ||
    ! grep -nF 'run_in_process_turn(' interfaces/shell/src/main.rs >/dev/null; then
   echo "error: interfaces/shell must enter synchronous Turns through bridges/in_process" >&2
@@ -110,7 +122,7 @@ for web_os_file in timem_web/src/os/mod.rs timem_web/src/os/unix.rs timem_web/sr
   test -f "$web_os_file" || { echo "error: missing Web OS adapter: $web_os_file" >&2; exit 1; }
 done
 
-for boundary in bridges/in_process/module_boundary.md core/agent/module_boundary.md core/session/module_boundary.md core/platform/module_boundary.md core/ui_contract/module_boundary.md interfaces/shell/module_boundary.md interfaces/web/module_boundary.md timem_web/module_boundary.md; do
+for boundary in bridges/in_process/module_boundary.md bridges/http_websocket/module_boundary.md core/agent/module_boundary.md core/session/module_boundary.md core/platform/module_boundary.md core/ui_contract/module_boundary.md interfaces/shell/module_boundary.md interfaces/web/module_boundary.md timem_web/module_boundary.md; do
   test -f "$boundary" || { echo "error: missing module boundary: $boundary" >&2; exit 1; }
 done
 

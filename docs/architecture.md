@@ -88,7 +88,7 @@ For a new contributor, read these in order:
 4. [`core-ui-topic-protocol.md`](core-ui-topic-protocol.md): cross-language
    topic contract between core and hosts.
 5. [`turn-state-projection-architecture.md`](turn-state-projection-architecture.md):
-   authoritative UI-neutral Turn state, optional Host Projection Adapters, and reusable UI-shell boundaries.
+   authoritative UI-neutral Turn state, optional reconnectable Bridges, and reusable UI-shell boundaries.
 6. [`capability-system.md`](capability-system.md): tool manifests and executor
    registration.
 7. [`test-strategy.md`](test-strategy.md) and
@@ -208,11 +208,11 @@ process runs with no TTY or graphical display.
 - Owns model service-agnostic prompt cache planning in `agent_core::prompt_cache`.
   The algorithm splits rendered prompt into static prompt and dynamic
   delta blocks, marks stable cache boundaries, and returns shell/UI-neutral
-  data structures for host adapters to translate into model requests.
+  data structures for Bridges and Interfaces to translate into model requests.
 - Owns UI-neutral profiling state in `agent_core::profiler`: per-model token
   totals, cache hit/create counters, model wait/local work timing, and storage
   size snapshots. It exposes raw `RuntimeProfileReport` data as the
-  shell-independent `/prof` data shape; host adapters decide how to format
+  shell-independent `/prof` data shape; Bridges and Interfaces decide how to format
   counts, durations, percentages, units, and layout.
 - Owns UI-neutral runtime configuration report data in
   `agent_core::config_report`, including effective model service/runtime/data
@@ -308,7 +308,7 @@ model, shared by iOS/Web/CLI, or reflected in prompt/capability contracts, it
 belongs in `agent_core` or `resources` instead of being implemented as a
 shell-only shortcut.
 
-### Host Projection Adapters and UI shells
+### Reconnectable Bridges and UI shells
 
 All hosts consume one authoritative, UI-neutral Core Turn semantic contract:
 `TurnToken`, input admission, `PromptCut`, activity, immutable outcome, and
@@ -332,7 +332,7 @@ capture, launcher-exit monitoring, and SIGINT/SIGTERM/SIGHUP registration stay
 there; `server.rs` consumes platform-neutral shutdown triggers. Storage-specific permissions remain in their owning storage modules; the per-MEM
 Web-instance lease and in-memory semantic delivery stay in dedicated Web host modules.
 
-`timem_web` is a local-first host adapter, not a second agent runtime. It binds
+`timem_web` is transitional Web server assembly around the HTTP/WebSocket Bridge, not a second agent runtime. It binds
 to `127.0.0.1` by default and binds to `0.0.0.0` only after the explicit
 `--public` option. Browser, API, upload, and WebSocket access remain protected
 by one per-process token in either mode. The host embeds the production
@@ -721,7 +721,7 @@ Non-interactive callers should use `NoopTurnUi`, whose defaults deny approvals,
 do not continue round limits, do not request output expansion, and do not
 require terminal state.
 
-## Host Adapter Boundary and iOS Readiness
+## Bridge/Interface Boundary and iOS Readiness
 
 `agent_core` is the reusable agent engine. It must remain free of terminal UI
 dependencies such as Reedline, Crossterm, ANSI rendering, prompt menus, or
@@ -742,10 +742,10 @@ continue. Rust panic recovery cannot safely recover a native SIGSEGV in the
 same process, so future untrusted native/FFI capabilities must run behind a
 process boundary.
 
-The terminal app is one direct host adapter. `timem_web` is a host plus a
-reconnectable Host Projection Adapter. iOS, desktop, or another UI should be
-another adapter, not a fork of the agent loop. New hosts must consume the same
-Core Turn projection and may add delivery metadata without redefining lifecycle.
+The terminal app is an Interface over the in-process Bridge. `timem_web` is transitional assembly
+around the reconnectable HTTP/WebSocket Bridge. iOS, desktop, or another Interface should select
+an appropriate Bridge rather than fork the agent loop. Every Interface must consume the same Core
+Turn projection; its Bridge may add delivery metadata without redefining lifecycle.
 The iOS path should reuse `agent_core` through the existing JSON-in/JSON-out C
 ABI or a thin generated binding, then implement only platform-specific pieces.
 

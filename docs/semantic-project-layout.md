@@ -36,7 +36,7 @@ core/
     linux/
 bridges/
   in_process/               # direct functions, callbacks and channels
-  http_websocket/           # browser host, HTTP/WebSocket and reconnect delivery
+  http_websocket/           # browser HTTP/WebSocket and reconnect delivery
   ipc/                      # desktop companion process transport
 interfaces/
   shell/
@@ -88,12 +88,13 @@ preserve callers, but they must not introduce a cycle or become permanent duplic
 
 ## Migration inventory
 
-The repository is deliberately migrated in compiling, reviewable steps. These are the only current
-transitional roots:
+The repository is deliberately migrated in compiling, reviewable steps. The only current
+transitional runtime root is `timem_web/`. Projection delivery foundation now lives at `bridges/http_websocket/`.
+Its revision, deduplication, bounded queue, and reconnect state are communication concerns, while
+the projected semantic types remain in `core/ui_contract`.
 
 | Current owner | Target owner | Removal condition |
 | --- | --- | --- |
-| `host_projection/` | `bridges/http_websocket/` | Projection delivery is integrated without creating a second Turn state machine. |
 | `timem_web/` | `bridges/http_websocket/` | The `timem-web` binary, HTTP/WebSocket behavior, assets, and lifecycle tests pass at the target path. |
 
 `core/agent`, `core/session`, `core/ui_contract`, `interfaces/shell`, `interfaces/web`, and
@@ -124,7 +125,7 @@ Each step is committed separately and must leave the workspace buildable:
 5. **In-process Bridge (in progress)**: `timem_in_process` now owns the synchronous typed Turn
    call boundary used by Shell. Terminal `TurnUi` rendering and decisions remain in
    `interfaces/shell`; additional callback/channel adapters will move in later slices.
-6. **HTTP/WebSocket Bridge**: combine the Web host and asynchronous projection/delivery ownership
+6. **HTTP/WebSocket Bridge (in progress)**: combine the Web server and asynchronous projection/delivery ownership
    under `bridges/http_websocket`, preserving package/binary and wire behavior.
 7. **IPC and native Interfaces**: add the IPC contract and native clients only with real behavior,
    tests, and explicit platform support status.
@@ -138,7 +139,7 @@ milestones and before declaring the migration complete.
 ## Non-regression invariants
 
 - Core remains authoritative for Session, Context, Worker, Turn, input admission, cancellation,
-  terminal outcomes, and structured host decisions.
+  terminal outcomes, and structured Interface decisions.
 - Shell/native in-process paths do not acquire network, serialization, or reconnect overhead merely
   to satisfy the Bridge abstraction.
 - Web keeps bounded command delivery, event ordering, reconnect baselines, authentication, and

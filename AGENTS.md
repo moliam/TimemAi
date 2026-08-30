@@ -65,8 +65,9 @@ Interfaces may use direct calls, callbacks, or channels through `bridges/in_proc
 HTTP/WebSocket; a separate desktop companion uses IPC. Do not force serialization or network I/O
 onto an in-process path.
 
-The migration is incremental. `host_projection` and `timem_web` are the only current transitional
-runtime roots. The package/crate named `agent_core` now lives at `core/agent`. Their exact
+The migration is incremental. `timem_web` is the only current transitional runtime root.
+Projection delivery state already lives in `bridges/http_websocket`; semantic projection types live
+in `core/ui_contract`. The package/crate named `agent_core` now lives at `core/agent`. Their exact
 destination, removal conditions, dependency graph, staged sequence, and non-regression gates are
 defined in `docs/semantic-project-layout.md`. Do not create a
 new transitional root or preserve duplicate ownership without updating that executable migration
@@ -74,8 +75,8 @@ contract in the same reviewed change.
 
 `core/agent`, `core/ui_contract`, `interfaces/shell`, `interfaces/web`, and `core/platform` are
 current semantic roots. Preserve the
-`timem_shell`, `timem_web`, `agent_core`, and `host_projection` package compatibility needed during
-the migration, as well as the `timem-native-rs` and `timem-web` binary/user command surfaces.
+`timem_shell`, `timem_web`, and `agent_core` package compatibility needed during the
+migration, as well as the `timem-native-rs` and `timem-web` binary/user command surfaces.
 Temporary re-exports are allowed only when they avoid dependency cycles and have an explicit
 removal stage.
 
@@ -90,7 +91,7 @@ file, this repository-level contract wins and both documents must be reconciled 
 ## 4. Authoritative state and protocol rules
 
 - Core is authoritative for Agent, Session, Context, Worker, Turn, input
-  admission, cancellation, terminal outcomes, and structured host decisions.
+  admission, cancellation, terminal outcomes, and structured Interface decisions.
 - UI and delivery layers may cache, project, or transport Core state, but must
   not create a competing state machine from topic order, worker counts,
   acknowledgements, visible output timing, or localized strings.

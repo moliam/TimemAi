@@ -51,10 +51,6 @@ use axum::{
     Json, Router,
 };
 use futures_util::{sink::SinkExt, stream::StreamExt};
-use host_projection::{
-    NextTurnEnqueueResult, NextTurnIntentQueue, ProjectionApplyResult, TurnProjectionCache,
-    VersionedTurnProjection,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -69,6 +65,10 @@ use std::{
         Arc, Mutex, RwLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use timem_http_websocket::{
+    NextTurnEnqueueResult, NextTurnIntentQueue, ProjectionApplyResult, TurnProjectionCache,
+    VersionedTurnProjection,
 };
 use timem_session::{
     CoreSessionWorkerEvent, CoreSessionWorkerHandle, CoreSessionWorkerManager, ToolGenRequest,

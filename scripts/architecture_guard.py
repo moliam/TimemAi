@@ -40,6 +40,9 @@ REQUIRED = (
     "bridges/in_process/module_boundary.md",
     "bridges/in_process/src/lib.rs",
     "bridges/in_process/tests/turn_bridge_tests.rs",
+    "bridges/http_websocket/Cargo.toml",
+    "bridges/http_websocket/module_boundary.md",
+    "bridges/http_websocket/src/lib.rs",
     "interfaces/shell/Cargo.toml",
     "interfaces/shell/module_boundary.md",
     "interfaces/shell/src/os/mod.rs",
@@ -59,6 +62,7 @@ FORBIDDEN_DIRS = (
     "web_ui",
     "core/application",
     "core/agent/src/os",
+    "host_projection",
 )
 PROCESS_PRIMITIVES = ("libc::getpgid", "libc::getpgrp", "libc::waitpid", ".process_group(0)")
 TARGET_DIRECTORIES = (
@@ -87,7 +91,8 @@ ARCHITECTURE_CONTRACT_MARKERS = (
     "  web/",
     "**Session extraction (complete)**",
     "**In-process Bridge (in progress)**",
-    "`host_projection/` | `bridges/http_websocket/`",
+    "**HTTP/WebSocket Bridge (in progress)**",
+    "Projection delivery foundation now lives at `bridges/http_websocket/`",
     "`timem_web/` | `bridges/http_websocket/`",
     "windows-support-matrix.md",
 )
@@ -120,6 +125,7 @@ def violations(root: Path) -> list[str]:
     workspace = text(root, "Cargo.toml")
     for member in (
         '"bridges/in_process"',
+        '"bridges/http_websocket"',
         '"core/platform"',
         '"core/session"',
         '"core/ui_contract"',
@@ -155,6 +161,9 @@ def violations(root: Path) -> list[str]:
     for forbidden in ("timem_shell", "timem_web", "host_projection", "bridges/", "interfaces/"):
         if forbidden in session_manifest:
             errors.append(f"core/session must not depend outward on {forbidden}")
+    for forbidden in ("reedline", "crossterm", "termimad", "axum", "tungstenite", "websocket"):
+        if forbidden in session_manifest:
+            errors.append(f"core/session must not absorb Interface or transport dependency: {forbidden}")
 
     in_process_manifest = text(root, "bridges/in_process/Cargo.toml")
     if 'name = "timem_in_process"' not in in_process_manifest:
@@ -164,6 +173,39 @@ def violations(root: Path) -> list[str]:
     for forbidden in ("timem_shell", "timem_web", "host_projection", "interfaces/"):
         if forbidden in in_process_manifest:
             errors.append(f"bridges/in_process must not depend outward on {forbidden}")
+    for forbidden in ("serde", "serde_json", "tokio", "reqwest", "axum", "tungstenite", "websocket"):
+        if forbidden in in_process_manifest:
+            errors.append(
+                f"in-process Bridge must not add serialization, networking, or async runtime dependency: {forbidden}"
+            )
+    in_process_source = text(root, "bridges/in_process/src/lib.rs")
+    for forbidden in ("serde::", "serde_json::", "tokio::", "reqwest::", "axum::", "tungstenite", "TcpStream", "UdpSocket"):
+        if forbidden in in_process_source:
+            errors.append(f"in-process Bridge must remain direct-call and zero-transport: {forbidden}")
+
+    http_manifest = text(root, "bridges/http_websocket/Cargo.toml")
+    if 'name = "timem_http_websocket"' not in http_manifest:
+        errors.append("bridges/http_websocket must expose the timem_http_websocket crate")
+    if 'timem_ui_contract = { path = "../../core/ui_contract" }' not in http_manifest:
+        errors.append("HTTP/WebSocket Bridge must depend inward on core/ui_contract")
+    for forbidden in ("timem_shell", "timem_web", "host_projection", "interfaces/"):
+        if forbidden in http_manifest:
+            errors.append(f"HTTP/WebSocket Bridge must not depend outward on an Interface: {forbidden}")
+    http_source = text(root, "bridges/http_websocket/src/lib.rs")
+    if "timem_ui_contract::projections" not in http_source:
+        errors.append("HTTP/WebSocket delivery must consume projection semantics from core/ui_contract")
+
+    interfaces_root = root / "interfaces"
+    if interfaces_root.is_dir():
+        for manifest_path in interfaces_root.glob("*/Cargo.toml"):
+            manifest = manifest_path.read_text(errors="replace")
+            for other in interfaces_root.iterdir():
+                if other.is_dir() and other != manifest_path.parent:
+                    relative_reference = f"../{other.name}"
+                    if relative_reference in manifest:
+                        errors.append(
+                            f"Interface must not depend on another Interface: {manifest_path.relative_to(root)}"
+                        )
 
     shell_manifest = text(root, "interfaces/shell/Cargo.toml")
     if 'name = "timem_shell"' not in shell_manifest:
@@ -234,7 +276,7 @@ def violations(root: Path) -> list[str]:
 
 def write_fixture(root: Path) -> None:
     files = {
-        "Cargo.toml": '[workspace]\nmembers = ["bridges/in_process", "core/agent", "core/platform", "core/session", "core/ui_contract", "interfaces/shell"]\n',
+        "Cargo.toml": '[workspace]\nmembers = ["bridges/in_process", "bridges/http_websocket", "core/agent", "core/platform", "core/session", "core/ui_contract", "interfaces/shell"]\n',
         "docs/semantic-project-layout.md": "\n".join(ARCHITECTURE_CONTRACT_MARKERS),
         "docs/windows-support-matrix.md": "platform implemented; upper layers not yet supported\n",
         "core/agent/Cargo.toml": '[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\n',
@@ -266,6 +308,9 @@ def write_fixture(root: Path) -> None:
         "bridges/in_process/module_boundary.md": "in-process boundary\n",
         "bridges/in_process/src/lib.rs": "pub fn run_turn() {}\n",
         "bridges/in_process/tests/turn_bridge_tests.rs": "#[test] fn bridge() {}\n",
+        "bridges/http_websocket/Cargo.toml": '[package]\nname = "timem_http_websocket"\n[dependencies]\ntimem_ui_contract = { path = "../../core/ui_contract" }\n',
+        "bridges/http_websocket/module_boundary.md": "http websocket boundary\n",
+        "bridges/http_websocket/src/lib.rs": "use timem_ui_contract::projections::TurnProjection;\npub struct DeliveryRevision;\n",
         "interfaces/shell/Cargo.toml": '[package]\nname = "timem_shell"\n[dependencies]\nagent_core = { path = "../../core/agent" }\ntimem_in_process = { path = "../../bridges/in_process" }\n',
         "interfaces/shell/src/main.rs": "fn main() { run_in_process_turn(); }\n",
         "interfaces/shell/module_boundary.md": "shell boundary\n",
@@ -287,6 +332,22 @@ def write_fixture(root: Path) -> None:
 
 
 def self_test() -> None:
+    with tempfile.TemporaryDirectory(prefix="timem-architecture-extension-") as directory:
+        root = Path(directory)
+        write_fixture(root)
+        extension = root / "interfaces/desktop"
+        extension.mkdir(parents=True)
+        (extension / "Cargo.toml").write_text(
+            '[package]\nname = "timem_desktop"\n[dependencies]\n'
+            'timem_in_process = { path = "../../bridges/in_process" }\n'
+        )
+        extension_errors = violations(root)
+        if extension_errors:
+            raise SystemExit(
+                "self-test rejected a new Interface that depends only on the in-process Bridge: "
+                f"{extension_errors}"
+            )
+
     cases = (
         ("legacy directory", lambda root: (root / "timem_shell").mkdir()),
         (
@@ -295,6 +356,12 @@ def self_test() -> None:
         ),
         ("Agent to Bridge reverse dependency", lambda root: (root / "core/agent/Cargo.toml").write_text('[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\ntimem_in_process = { path = "../../bridges/in_process" }\n')),
         ("Bridge to Interface reverse dependency", lambda root: (root / "bridges/in_process/Cargo.toml").write_text('[package]\nname = "timem_in_process"\n[dependencies]\nagent_core = { path = "../../core/agent" }\ntimem_shell = { path = "../../interfaces/shell" }\n')),
+        ("HTTP Bridge to Web Interface reverse dependency", lambda root: (root / "bridges/http_websocket/Cargo.toml").write_text('[package]\nname = "timem_http_websocket"\n[dependencies]\ntimem_ui_contract = { path = "../../core/ui_contract" }\ntimem_web = { path = "../../timem_web" }\n')),
+        ("HTTP Bridge bypasses UI contract semantic owner", lambda root: ((root / "bridges/http_websocket/Cargo.toml").write_text('[package]\nname = "timem_http_websocket"\n[dependencies]\nagent_core = { path = "../../core/agent" }\n'), (root / "bridges/http_websocket/src/lib.rs").write_text("use agent_core::TurnProjection;\n"))),
+        ("in-process Bridge adds serialization", lambda root: (root / "bridges/in_process/Cargo.toml").write_text('[package]\nname = "timem_in_process"\n[dependencies]\nagent_core = { path = "../../core/agent" }\nserde_json = "1"\n')),
+        ("in-process Bridge adds network transport", lambda root: (root / "bridges/in_process/src/lib.rs").write_text("fn run_turn() { let _transport: Option<TcpStream> = None; }\n")),
+        ("Session absorbs terminal UI", lambda root: (root / "core/session/Cargo.toml").write_text('[package]\nname = "timem_session"\n[dependencies]\nagent_core = { path = "../agent" }\ntimem_ui_contract = { path = "../ui_contract" }\ncrossterm = "0.29"\n')),
+        ("Interface depends on another Interface", lambda root: (root / "interfaces/shell/Cargo.toml").write_text('[package]\nname = "timem_shell"\n[dependencies]\nagent_core = { path = "../../core/agent" }\ntimem_in_process = { path = "../../bridges/in_process" }\ntimem_web_ui = { path = "../web" }\n')),
         ("Shell bypasses in-process Bridge", lambda root: (root / "interfaces/shell/src/main.rs").write_text("fn main() { run_session_turn(); }\n")),
         ("Shell Unix primitive outside OS adapter", lambda root: (root / "interfaces/shell/src/main.rs").write_text("fn main() { run_in_process_turn(); libc::fcntl(0, 0); }\n")),
         ("missing Windows Shell console adapter", lambda root: (root / "interfaces/shell/src/os/windows/console.rs").unlink()),

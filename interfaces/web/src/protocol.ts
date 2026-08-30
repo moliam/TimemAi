@@ -152,7 +152,7 @@ export type Session = {
   cancelling_turn_id?: string | null;
   /** Durable Host intent recorded before Core emits TurnStarted. */
   pending_turn_id?: string | null;
-  /** Exact Core lifecycle projection plus Host delivery revision. */
+  /** Exact Core lifecycle projection plus HTTP/WebSocket delivery revision. */
   turn_projection?: VersionedTurnProjection | null;
 };
 
