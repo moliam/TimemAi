@@ -53,6 +53,10 @@ ci_required=(
   "scripts/clippy_check.sh"
   "scripts/performance_guard.sh"
   "scripts/cross_host_resume_smoke.sh"
+  "scripts/linux_web_platform_smoke.sh"
+  "scripts/macos_web_platform_smoke.sh"
+  "== Linux Timem Web platform smoke =="
+  "== macOS Timem Web platform smoke =="
   "scripts/web_license_check.sh"
   "scripts/version_consistency_check.sh"
   "python3 scripts/architecture_guard.py --self-test"
@@ -62,6 +66,17 @@ ci_required=(
 for pattern in "${ci_required[@]}"; do
   if ! search_fixed "$pattern" scripts/ci.sh; then
     echo "missing required CI gate: $pattern" >&2
+    exit 1
+  fi
+done
+
+platform_matrix_required=(
+  "ubuntu-latest"
+  "macos-latest"
+)
+for pattern in "${platform_matrix_required[@]}"; do
+  if ! search_fixed "$pattern" .github/workflows/ci.yml; then
+    echo "missing required macOS/Linux CI runner: $pattern" >&2
     exit 1
   fi
 done
