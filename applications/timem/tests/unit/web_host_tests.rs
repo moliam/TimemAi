@@ -698,7 +698,7 @@ fn command_dedup_is_process_local_and_does_not_write_workspace_state() {
         .exists());
 
     let mut restarted = CommandDedupCache::default();
-    assert!(restarted.reserve(command_id).is_none());
+    assert!(restarted.reserve(command_id).unwrap().is_none());
 }
 
 #[test]
@@ -875,7 +875,7 @@ fn concurrent_same_command_id_has_one_executor_but_distinct_ids_both_execute() {
             let executions = Arc::clone(&executions);
             thread::spawn(move || {
                 barrier.wait();
-                if cache.lock().unwrap().reserve("same_id").is_none() {
+                if cache.lock().unwrap().reserve("same_id").unwrap().is_none() {
                     executions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
             })
@@ -885,8 +885,18 @@ fn concurrent_same_command_id_has_one_executor_but_distinct_ids_both_execute() {
         thread.join().unwrap();
     }
     assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert!(cache.lock().unwrap().reserve("different_id_a").is_none());
-    assert!(cache.lock().unwrap().reserve("different_id_b").is_none());
+    assert!(cache
+        .lock()
+        .unwrap()
+        .reserve("different_id_a")
+        .unwrap()
+        .is_none());
+    assert!(cache
+        .lock()
+        .unwrap()
+        .reserve("different_id_b")
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -1091,7 +1101,10 @@ fn all_accepted_command_cache_is_bounded_instead_of_evicting_ownership() {
     {
         let mut cache = state.command_dedup.lock().unwrap();
         for ordinal in 0..COMMAND_DEDUP_CAPACITY {
-            assert!(cache.reserve(&format!("accepted_{ordinal}")).is_none());
+            assert!(cache
+                .reserve(&format!("accepted_{ordinal}"))
+                .unwrap()
+                .is_none());
         }
     }
 
@@ -1100,9 +1113,9 @@ fn all_accepted_command_cache_is_bounded_instead_of_evicting_ownership() {
         Err(error) if error == "command_dedup_capacity_exhausted"
     ));
     let cache = state.command_dedup.lock().unwrap();
-    assert_eq!(cache.records.len(), COMMAND_DEDUP_CAPACITY);
-    assert!(cache.records.contains_key("accepted_0"));
-    assert!(!cache.records.contains_key("one_too_many"));
+    assert_eq!(cache.len(), COMMAND_DEDUP_CAPACITY);
+    assert!(cache.contains("accepted_0"));
+    assert!(!cache.contains("one_too_many"));
 }
 
 #[test]
@@ -2011,12 +2024,20 @@ fn same_id_racing_across_sockets_has_one_owner_and_distinct_ids_all_execute() {
             thread::spawn(move || {
                 barrier.wait();
                 let mut cache = cache.lock().unwrap();
-                if cache.reserve("same_command_from_every_socket").is_none() {
+                if cache
+                    .reserve("same_command_from_every_socket")
+                    .unwrap()
+                    .is_none()
+                {
                     same_id_owners.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 // Payload equality is irrelevant. A distinct command ID means
                 // a distinct user intent and must not be content-deduplicated.
-                if cache.reserve(&format!("distinct_{connection}")).is_none() {
+                if cache
+                    .reserve(&format!("distinct_{connection}"))
+                    .unwrap()
+                    .is_none()
+                {
                     distinct_id_owners.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
             })
