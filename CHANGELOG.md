@@ -25,9 +25,12 @@
 
 ### Changed
 
+- Remove the transitional `timem_web` Cargo package identity. The unified Application package
+  and executable are now both `timem`; Cargo commands use `-p timem`, while installers may
+  retain `timem-web` only as a symlink or forwarding command shim.
 - Complete the runtime-root migration by moving the former top-level `timem_web/`
-  source tree to `applications/timem/`, preserving the `timem_web` Cargo package
-  and `timem` binary contracts while making the Application a product composition
+  source tree to `applications/timem/`, then unifying its Cargo package and binary as
+  `timem` while making the Application a product composition
   root rather than an architectural dependency layer.
 - Route the Shell's synchronous Turn access through the reusable
   `bridges/in_process` boundary, which now depends on `core/session` and
@@ -38,7 +41,8 @@
   module boundaries, test strategy/handbook, semantic-layout migration record,
   scripts, CI, installers, and local documentation links to the completed layout.
 - Move the terminal Interface to `interfaces/shell` and the browser Interface to
-  `interfaces/web` while preserving the `timem_shell` and `timem_web` package contracts.
+  `interfaces/web` while preserving the reusable `timem_shell` package contract and using
+  `timem` for the unified Application package.
 - Deliver one real `timem` executable: Web launches by default and `timem --shell`
   launches the terminal Interface. Installers migrate old independent binaries in
   place and retain `timem-web` only as a symlink or forwarding compatibility shim.

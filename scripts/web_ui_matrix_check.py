@@ -169,7 +169,7 @@ def main() -> int:
             if not has_host or not has_frontend:
                 missing_sides = []
                 if not has_host:
-                    missing_sides.append("timem_web host/runtime test evidence")
+                    missing_sides.append("timem host/runtime test evidence")
                 if not has_frontend:
                     missing_sides.append("interfaces/web frontend test evidence")
                 failures.append(f"{requirement}: missing cross-boundary evidence: {', '.join(missing_sides)}")

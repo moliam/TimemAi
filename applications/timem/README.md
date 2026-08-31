@@ -6,12 +6,13 @@
 Application wires Core, Bridges, and Interfaces together. It is not a second
 Agent runtime and must not become a reusable dependency of lower layers.
 
-The Cargo package remains named `timem_web` for compatibility with existing
-Cargo, CI, installation, and release commands:
+The Cargo package and binary are both named `timem`. Installer-created `timem-web`
+links or forwarding shims may remain for command compatibility, but no Cargo package uses
+that name:
 
 ```bash
-cargo run -p timem_web --
-cargo run -p timem_web -- --shell
+cargo run -p timem --
+cargo run -p timem -- --shell
 ```
 
 ## Dependency role
@@ -57,7 +58,7 @@ then run at least:
 ```bash
 pnpm --dir interfaces/web test
 pnpm --dir interfaces/web build
-cargo test -p timem_web
+cargo test -p timem
 ```
 
 Read [`module_boundary.md`](module_boundary.md) before changing Application,

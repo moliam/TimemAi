@@ -25,7 +25,7 @@ docs/                 # 架构、协议、测试、安装和发布文档
 scripts/              # 架构守卫、质量门禁和交付脚本
 ```
 
-Cargo 包名 `timem_web`、`timem_shell`、`agent_core` 是兼容身份，不代表物理目录归属。
+统一产品的 Cargo 包名与二进制名均为 `timem`；`timem_shell`、`agent_core` 等可复用 crate 名不代表物理目录归属。不得恢复 Cargo 包 `timem_web`。
 不要恢复旧根目录 `timem_web/`、`timem_shell/`、`web_ui/`、`agent_core/` 或
 `core/agent/src/os/`。完整布局见 `docs/semantic-project-layout.md`。
 

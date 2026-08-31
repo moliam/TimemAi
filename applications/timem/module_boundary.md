@@ -1,8 +1,8 @@
 # Timem Application Boundary
 
-`applications/timem` is the product composition root. Its Cargo package remains
-`timem_web` for command compatibility, but the physical top-level `timem_web/` root no longer
-exists. The application assembles Core, Bridges, and Interfaces; its current binary combines
+`applications/timem` is the product composition root. Its Cargo package and binary are both
+named `timem`; no `timem_web` Cargo package or physical top-level `timem_web/` root exists.
+The application assembles Core, Bridges, and Interfaces; its current binary combines
 local-first Web hosting with Shell entry points. It binds a loopback HTTP/WebSocket
 server by default, allows an explicit authenticated `--public` bind, owns
 browser authentication and bounded live command delivery, maps browser commands to
@@ -189,8 +189,8 @@ It must not contain:
 - Product wiring belongs here; reusable synchronous Rust access belongs in
   `bridges/in_process`, and reconnectable HTTP/WebSocket transport belongs in
   `bridges/http_websocket`.
-- Do not recreate a top-level `timem_web/` directory. Keep the package name only while CLI/build
-  compatibility requires it.
+- Do not recreate a `timem_web` Cargo package or top-level `timem_web/` directory. Command
+  compatibility, when required, belongs only in installer-created `timem-web` links or shims.
 - Do not create placeholder desktop or FFI modules. Add `interfaces/desktop`,
   `applications/timem_desktop`, `bridges/native_ffi`, or `bridges/ipc` only with a real consumer and
   implemented behavior. A same-process Rust desktop Interface should use `bridges/in_process`; a

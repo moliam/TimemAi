@@ -1426,6 +1426,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "timem"
+version = "1.3.0"
+dependencies = [
+ "agent_core",
+ "axum",
+ "chrono",
+ "futures-util",
+ "libc",
+ "serde",
+ "serde_json",
+ "timem_http_websocket",
+ "timem_session",
+ "timem_shell",
+ "tokio",
+]
+
+[[package]]
 name = "timem_http_websocket"
 version = "1.3.0"
 dependencies = [
@@ -1486,23 +1503,6 @@ version = "1.3.0"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "timem_web"
-version = "1.3.0"
-dependencies = [
- "agent_core",
- "axum",
- "chrono",
- "futures-util",
- "libc",
- "serde",
- "serde_json",
- "timem_http_websocket",
- "timem_session",
- "timem_shell",
- "tokio",
 ]
 
 [[package]]

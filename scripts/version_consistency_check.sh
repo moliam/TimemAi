@@ -17,7 +17,7 @@ if [ "$workspace_version" != "$frontend_version" ]; then
   exit 1
 fi
 
-for package in agent_core timem_shell timem_web; do
+for package in agent_core timem_shell timem; do
   if ! awk -v package="$package" -v version="$workspace_version" '
     $0 == "name = \"" package "\"" { found = 1; in_package = 1; next }
     in_package && /^name = / { in_package = 0 }

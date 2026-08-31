@@ -94,8 +94,8 @@ Migration complete for the physical runtime roots covered by this change:
 
 - The transitional top-level `timem_web/` directory has been removed.
 - The unified executable composition root now lives at `applications/timem/`.
-- The Cargo package name `timem_web` remains temporarily for package-command compatibility; it no
-  longer denotes a physical architecture root.
+- The unified Application Cargo package and binary are both `timem`; `timem_web` is neither a
+  package nor a physical architecture root. `timem-web` may exist only as an installer alias.
 - `bridges/in_process` depends on `core/session` and `core/ui_contract`, not directly on Agent.
 - `interfaces/shell` depends on `bridges/in_process` and `core/ui_contract`, not directly on Agent or
   Session.

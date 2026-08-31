@@ -79,7 +79,7 @@ Core semantic contract 对所有 UI 完全一致。Bridge 可以有不同部署�
 - `core/agent`（Cargo 包名 `agent_core`）
   - `CoreSessionState::{Running, WaitingModel, WaitingUser, ...}` 随 topic 发出；
   - worker runtime 自己管理取消和完成。
-- `applications/timem` Web runtime（Cargo 包名 `timem_web`）
+- `applications/timem` Web runtime（Cargo 包名 `timem`）
   - `WebSession.state`；
   - `active_turn_id`、`pending_turn_id`、`cancelling_turn_id`；
   - `WebTurn.state`；
@@ -926,7 +926,7 @@ Stop(A) → ordinary Send(B) → Stop(B) → Send(C) → ...
 
 ### 14.4 压测三：真实 WebSocket 恢复与 FIFO ownership
 
-启动 `applications/timem` 中的真实 Web Host（Cargo 包名 `timem_web`）、真实 Core worker 和 fake model endpoint；至少两个独立 WebSocket client 并发操作同一 Session。在 accepted、Core handoff、terminal commit、projection publish 和 ACK 前后主动断线/重连，并注入重复 command、普通 Send 与未消费 supplement、附件、队列编辑/重排/取消、MEM switch barrier。
+启动 `applications/timem` 中的真实 Web Host（Cargo 包名 `timem`）、真实 Core worker 和 fake model endpoint；至少两个独立 WebSocket client 并发操作同一 Session。在 accepted、Core handoff、terminal commit、projection publish 和 ACK 前后主动断线/重连，并注入重复 command、普通 Send 与未消费 supplement、附件、队列编辑/重排/取消、MEM switch barrier。
 
 验收：
 
@@ -973,7 +973,7 @@ browser_projection_applied → browser_painted
 scripts/turn_concurrency_stress.sh
 ```
 
-它只运行上述 4 个重压场景，不把整个 workspace 重复 1,000 次。Rust 并发场景进入 `agent_core`/`timem_web` integration test binary；Chrome 场景使用现有浏览器工具链启动 release binary。实现后由 `scripts/edge_regression.sh` 或 CI 的独立 Turn-stress step 调用 300 轮 PR profile，release gate 调用 1,000 轮，定时任务调用 soak profile。普通 edge loop 不得通过外层重复 300 次整个 workspace 来冒充该压力入口。
+它只运行上述 4 个重压场景，不把整个 workspace 重复 1,000 次。Rust 并发场景进入 `agent_core`/`timem` integration test binary；Chrome 场景使用现有浏览器工具链启动 release binary。实现后由 `scripts/edge_regression.sh` 或 CI 的独立 Turn-stress step 调用 300 轮 PR profile，release gate 调用 1,000 轮，定时任务调用 soak profile。普通 edge loop 不得通过外层重复 300 次整个 workspace 来冒充该压力入口。
 
 失败输出至少包含：
 

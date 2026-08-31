@@ -24,7 +24,7 @@ set port 0
 
 if {![file executable $binary]} {
     puts stderr "missing executable: $binary"
-    puts stderr "run: cargo build -p timem_web --release"
+    puts stderr "run: cargo build -p timem --release"
     exit 1
 }
 

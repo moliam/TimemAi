@@ -222,6 +222,14 @@ def violations(root: Path) -> list[str]:
                             f"Interface must not depend on another Interface: {manifest_path.relative_to(root)}"
                         )
 
+    application_manifest = text(root, "applications/timem/Cargo.toml")
+    if 'name = "timem"' not in application_manifest:
+        errors.append("applications/timem must expose the timem package")
+    if 'name = "timem_web"' in application_manifest:
+        errors.append("applications/timem must not restore the removed timem_web package identity")
+    if '[[bin]]\nname = "timem"' not in application_manifest:
+        errors.append("applications/timem must expose the timem binary")
+
     shell_manifest = text(root, "interfaces/shell/Cargo.toml")
     if 'name = "timem_shell"' not in shell_manifest:
         errors.append("interfaces/shell must preserve the timem_shell package name")
@@ -338,7 +346,7 @@ def write_fixture(root: Path) -> None:
         "interfaces/shell/src/os/windows/console.rs": "pub fn terminal() {}\n",
         "interfaces/web/package.json": "{}\n",
         "interfaces/web/module_boundary.md": "web boundary\n",
-        "applications/timem/Cargo.toml": '[package]\nname = "timem_web"\n',
+        "applications/timem/Cargo.toml": '[package]\nname = "timem"\n[[bin]]\nname = "timem"\n',
         "applications/timem/module_boundary.md": "application boundary\n",
         "applications/timem/src/lib.rs": "pub fn run() {}\n",
         "applications/timem/src/main.rs": "fn main() {}\n",
@@ -372,6 +380,8 @@ def self_test() -> None:
 
     cases = (
         ("legacy directory", lambda root: (root / "timem_shell").mkdir()),
+        ("removed timem_web package identity", lambda root: (root / "applications/timem/Cargo.toml").write_text('[package]\nname = "timem_web"\n')),
+        ("renamed unified binary", lambda root: (root / "applications/timem/Cargo.toml").write_text('[package]\nname = "timem"\n[[bin]]\nname = "timem-web"\n')),
         (
             "legacy generic application directory",
             lambda root: (root / "core/application").mkdir(parents=True),

@@ -36,7 +36,7 @@ assert_exact_performance_tests timem_shell \
 echo "performance_guard: timem_shell"
 cargo test --release -p timem_shell performance_guard --quiet
 
-echo "performance_guard: timem_web browser hot paths"
+echo "performance_guard: timem browser hot paths"
 pnpm --dir interfaces/web exec vitest run tests/performance_guard.test.ts
 
 echo "performance_guard: ok"
