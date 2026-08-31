@@ -1451,6 +1451,8 @@ dependencies = [
  "serde",
  "serde_json",
  "timem_ui_contract",
+ "tokio",
+ "tower",
 ]
 
 [[package]]

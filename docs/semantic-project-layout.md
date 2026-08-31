@@ -99,11 +99,11 @@ Migration complete for the physical runtime roots covered by this change:
 - `bridges/in_process` depends on `core/session` and `core/ui_contract`, not directly on Agent.
 - `interfaces/shell` depends on `bridges/in_process` and `core/ui_contract`, not directly on Agent or
   Session.
-- `bridges/http_websocket` owns reusable reconnect/delivery state plus generic WebSocket framing,
-  bounded JSON wire I/O, same-origin validation, and browser-safe transport headers.
-  `applications/timem` retains product authentication, route composition, snapshots, and
-  Session/Core command mapping. Further route extraction must preserve that policy/mechanism split
-  without recreating a transitional top-level runtime root.
+- `bridges/http_websocket` owns fixed HTTP/WebSocket paths and method composition, request bounds,
+  static fallback routing, reusable reconnect/delivery state, generic WebSocket framing, bounded
+  JSON wire I/O, same-origin validation, and browser-safe transport headers.
+  `applications/timem` injects product handlers and retains authentication, snapshots, state, and
+  Session/Core command mapping without recreating the route table or a transitional runtime root.
 
 The in-process Bridge is for **all same-process Rust Interfaces**, not specifically Shell. Shell is
 the first production consumer. A future Rust-native desktop Interface, embedded GUI, or test Host
