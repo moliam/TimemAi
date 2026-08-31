@@ -89,6 +89,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
+import { RestartCwdGate } from "./restart_cwd_gate";
 import { loadToolGenEnabled, saveToolGenEnabled } from "./beta_features";
 import {
   Activity,
@@ -8669,58 +8670,11 @@ function TimemThread({
               </div>
             )}
           {activeSession && restartCwdDecision ? (
-            <section
-              className="restart-cwd-gate"
-              role="alertdialog"
-              aria-live="assertive"
-              aria-labelledby="restart-cwd-title"
-            >
-              <div className="restart-cwd-gate-copy">
-                <span className="restart-cwd-gate-icon" aria-hidden="true">
-                  <FolderOpen size={17} />
-                </span>
-                <p id="restart-cwd-title">
-                  {restartCwdDecision.session_cwd_available
-                    ? "当前 Timem 的启动目录和 Session 上次工作的目录不同，您要将工作目录："
-                    : "原工作目录已不可用。聊天记录已保留，请切换到当前启动目录后继续："}
-                </p>
-              </div>
-              <div className="restart-cwd-options">
-                <div className="restart-cwd-option">
-                  <button
-                    type="button"
-                    disabled={!restartCwdResolutionEnabled}
-                    onClick={() => onResolveRestartCwd("use_runtime")}
-                  >
-                    {restartCwdDecision.session_cwd_available ? "切换" : "使用当前工作目录"}
-                  </button>
-                  {restartCwdDecision.session_cwd_available && (
-                    <>
-                      <span>至新启动目录：</span>
-                      <code title={restartCwdDecision.runtime_cwd}>
-                        {restartCwdDecision.runtime_cwd}
-                      </code>
-                    </>
-                  )}
-                </div>
-                {restartCwdDecision.session_cwd_available && (
-                  <div className="restart-cwd-option">
-                    <button
-                      type="button"
-                      className="secondary"
-                      disabled={!restartCwdResolutionEnabled}
-                      onClick={() => onResolveRestartCwd("keep_session")}
-                    >
-                      保持
-                    </button>
-                    <span>在旧工作目录：</span>
-                    <code title={restartCwdDecision.session_cwd}>
-                      {restartCwdDecision.session_cwd}
-                    </code>
-                  </div>
-                )}
-              </div>
-            </section>
+            <RestartCwdGate
+              decision={restartCwdDecision}
+              enabled={restartCwdResolutionEnabled}
+              onResolve={onResolveRestartCwd}
+            />
           ) : (
             <form
               className="composer"
