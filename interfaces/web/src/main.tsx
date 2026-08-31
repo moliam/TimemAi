@@ -14289,10 +14289,11 @@ function MemSwitchConfirmDialog({
           </button>
         </div>
         <p id={descriptionId}>
-          Switching MEM will stop all work in the current MEM.{" "}
-          {candidate.runningSessionCount} running Session
+          Switching MEM will stop all running and queued work in the current
+          MEM. {candidate.runningSessionCount} affected Session
           {candidate.runningSessionCount === 1 ? "" : "s"} will be marked
-          interrupted and will not continue in the background.
+          interrupted. Nothing from the current MEM will continue or restart
+          automatically.
         </p>
         <p className="mem-switch-alternative">
           To keep the current work running, start a separate instance for the
