@@ -14,7 +14,10 @@ It may contain:
   layout, accessibility, themes, animation, and browser-local preferences.
 - Session selection and rename controls, composer behavior, file-picker UI,
   session-scoped inline decision queues, activity rendering, completion telemetry, and context
-  compaction presentation.
+  compaction presentation. Destructive MEM-switch confirmation is isolated in
+  `src/mem_switch_confirm_dialog.tsx`: it renders the Host boundary and emits user intent only;
+  Session inspection, pending state, command delivery, and failure handling remain in the parent
+  composition.
 - A right-side Worker Role library shared across Sessions in the active memory
   space. The browser may select Roles per outgoing Session message, create and
   rename groups, and use dnd-kit for keyboard/pointer-accessible ordering and
