@@ -30,7 +30,7 @@ UI shell: render and interact only
    - Core projection 或 Bridge projection 的只读副本；
    - 输入框、弹窗、选中项、滚动位置等纯 UI 状态；
    - 命令发送/重试等传输状态。传输状态不能改变业务状态。
-4. `applications/timem` 中的 Web Pod 是 reconnectable Bridge 的首个实现，不是 Core 的必经层。`timem_shell` 等同步/in-process Interface 不需要为了接入权威 Turn 语义而引入 WebSocket、event sequence 或 reconnect outbox。
+4. `applications/timem` 中的 Web Pod 是 reconnectable Bridge 的首个实现，不是 Core 的必经层。`timem_shell` 等同步/in-process Interface 不需要为了接入权威 Turn 语义而引入 WebSocket、event sequence 或浏览器 command outbox。Web 客户端本身也不持久化或跨重连重放命令。
 5. Worker、Tool、Topic activity 是 Active Turn 下的事实，不能创建 Turn、恢复 Turn 或覆盖终态。
 6. Session/Bridge/Interface 不再维护独立生命周期状态机。`working` 等显示值由 Core Turn 投影直接给出。
 
@@ -459,7 +459,7 @@ Core topic、worker activity 仍可作为 timeline 数据展示，但必须满�
 - theme、layout、sidebar、modal；
 - composer draft、file picker、selection；
 - scroll、focus、expanded/collapsed；
-- command outbox、sending/retrying/ack status；
+- 极短的同步点击防重 guard、连接状态；不得拥有持久 command outbox 或逐命令 sending/retrying 状态；
 - projection cache，按 `revision` 替换。
 
 ### 8.2 UI shell 禁止拥有的状态
@@ -480,20 +480,20 @@ Core topic、worker activity 仍可作为 timeline 数据展示，但必须满�
 4. Pod/Core 的 `stop_requested`、worker join 与 terminal barrier 继续作为后台执行事实，但不映射成 `Stopping…`；
 5. Core finish outcome 到达后只补全权威统计和 continuation grant，不把 Turn 从 `Cancelled` 改回其他可见运行态；任意旧 worker/topic 消息也不能改变该结果。
 
-用户感知到的快速反馈来自 WebUI 与同进程 Host 之间的低延迟通信，而不是浏览器乐观推进生命周期。`Cancelled` 表示 Host 已确认用户与该 Turn 的交互终结，不代表外部调用或子进程已经物理退出；该清理由 runtime 在后台完成。若 Stop command 无法可靠保存或被 Host 拒绝，WebUI 继续呈现上一份 Host projection 并显示明确错误。
+用户感知到的快速反馈来自 WebUI 与同进程 Host 之间的低延迟通信，而不是浏览器乐观推进生命周期。`Cancelled` 表示 Host 已确认用户与该 Turn 的交互终结，不代表外部调用或子进程已经物理退出；该清理由 runtime 在后台完成。若 Stop command 未到达 Host，则没有发生；若 Host 明确拒绝，WebUI 继续呈现上一份 Host projection 并显示错误。
 
 ## 9. 快速 Stop / Start 用户体验
 
 该架构不仅减少竞态，也允许比当前实现更流畅的交互。设计必须区分“用户意图已接收”“Core 已请求停止”和“旧 Turn 已终结”。
 
-### 9.1 三种状态分层
+### 9.1 状态分层
 
 ```text
-WebUI transport state:
-  sending_stop | sending_start | retrying
+WebUI transport fact:
+  socket open + snapshot ready → write once
 
-Pod command intent state:
-  accepted | queued | committed | rejected
+Host live command control:
+  accepted | committed | rejected
 
 Core business state:
   Active(stop_requested=false)
@@ -501,7 +501,7 @@ Core business state:
   Empty + immutable outcome
 ```
 
-WebUI 可以立即显示 `Sending…` 或 `Waiting…`，但这些文案只说明命令/意图状态，不能冒充 Core 业务状态。
+WebUI 不显示逐命令 `Sending…`、`Waiting…` 或 `Retrying…`，也不因 `accepted` ACK 改变业务状态。写入 socket 后继续呈现上一份权威 projection；只有 Host/Core projection 或 event 能改变可见业务事实。明确 `rejected` 可以显示错误。
 
 ### 9.2 Stop 的即时反馈
 
@@ -514,7 +514,7 @@ WebUI 可以立即显示 `Sending…` 或 `Waiting…`，但这些文案只说�
 5. 对可终止的子进程触发安全终止；无法强制中断的外部调用继续在后台收敛；
 6. UI 不显示 `Stopping…`、清理超时或 worker join 进度，也不因迟到事件恢复 working；Core 写入权威 outcome 后只补全 elapsed/stats 等事实。
 
-这里的 `Cancelled` 表示用户与该 Turn 的交互已经终结，不是对底层资源瞬时释放的虚假声明。产品必须隐藏不影响用户决策的清理延迟，同时保留真实错误：如果取消命令没有可靠提交，必须明确回滚或报错。
+这里的 `Cancelled` 表示用户与该 Turn 的交互已经终结，不是对底层资源瞬时释放的虚假声明。产品必须隐藏不影响用户决策的清理延迟，同时保留真实错误：Host 明确拒绝取消命令时必须报错；仅断线不制造一条“等待确认”的命令状态。
 
 ### 9.3 Stop 期间立即开始下一轮
 
@@ -615,8 +615,8 @@ Bridge/Core 进程重启则完全不同：旧 runtime incarnation 的 Active Tur
 | ToolGen | 仅绑定已完成 source turn，作为独立受控 Turn | 不追加 source turn | source final answer 不变 |
 | Role/MCP/runtime 设置 | 记录 desired revision | 在下一新 Turn 边界应用 | 不改变已封口 prompt |
 | child worker/tool callback | 只更新匹配 token 的当前 activity/timeline | Gate 丢弃迟到回调 | 不得触发 Next intent |
-| 浏览器 reconnect/retry（同一进程） | 从 Pod 恢复 Active + admission + intent | 重放同一 command | 不能依据浏览器旧状态重新判归属 |
-| Bridge/Core 进程重启 | 所有 live ownership 失效 | 队列历史标记 interrupted 后清空；旧 ID 只回显 | 必须以新 command ID 创建新 Turn，绝不 redrive |
+| 浏览器 reconnect（同一进程） | 从 Pod Snapshot 恢复 Active + admission + intent | 不重放浏览器 command；继续接收后续权威事件 | 不能依据浏览器旧状态重新判归属 |
+| Bridge/Core 进程重启 | 所有 live dispatch ownership 失效 | 保留 Session FIFO 可见项，但清除派发锁与 continuation grant；未完成 Turn 标记 interrupted | 启动时绝不 redrive；队列项仅可在新的权威 grant 或显式队列命令后执行 |
 | MEM switch | 受 `mem_epoch` barrier 阻断 | 旧 MEM intent 不进入新 MEM | 输入、附件、ACK 同 epoch 隔离 |
 | Session delete/shutdown | 拒绝新 intent并取消当前 Turn | 丢弃/显式失败未启动 intent | 不在后台偷偷启动下一 Turn |
 
@@ -644,7 +644,7 @@ Bridge/Core 进程重启则完全不同：旧 runtime incarnation 的 Active Tur
 4. Stop command 必须绑定精确 token；无目标 Stop 不得影响未来 Turn。
 5. start command 的重复投递只产生一个 queued intent 或一个 Turn。
 6. 同一 Host 进程内 UI 断线重连后，Pod snapshot 必须同时包含 Active Turn projection 与有序 queued intents projection。
-7. Bridge/Core 进程重启后，所有 queued intent 执行权必须清空；其旧 `command_id` 只能回显 interrupted 历史，不能 redrive。
+7. Bridge/Core 进程重启后，queued intent 的 FIFO 项可恢复，但 live dispatch reservation 与 continuation grant 必须清空；启动不得因旧 `command_id` 自动 redrive Core。
 8. 用户取消 queued intent 后，它不能因重试或旧 ack 再次启动。
 9. 队列达到上限时必须在 command acceptance 前明确拒绝，不得静默覆盖。
 10. 同一 `command_id` 在 pending input、PromptCut、队列和 Active Turn 间始终只有一个 owner。
@@ -758,8 +758,8 @@ ConvertedToNextTurnIntent { enqueue_seq } | Duplicate | Rejected
 15. `input_admission` 只能从 Open 变为 Closed，不能重新打开。
 16. terminal commit 时，未被任何已发送 PromptCut 消费的 task 输入只能进入 Next intent，不能追加到旧 Turn。
 17. supplement 与 Next intent 的转换必须保留 command ownership、顺序，并且输入与附件恰好消费一次。
-18. Next intent FIFO 必须有界、去重，且一次只派发队首；派发由 Host 的权威 terminal barrier 触发，不依赖浏览器 completion 事件。队列写盘只用于同进程可靠性与重启后的历史中断识别，绝不授予跨进程 redrive。
-19. Bridge/Core 进程重启是硬 Stop 边界：Active 与 queued ownership 全部失效，旧 command ID 不得再次调用 Core。
+18. Next intent FIFO 必须有界、去重，且一次只派发队首；派发由 Host 的权威 terminal barrier 触发，不依赖浏览器 completion 事件。队列写盘保存 Session FIFO 与用户偏好，但恢复必须清除派发锁和 continuation grant，绝不授予启动时跨进程 redrive。
+19. Bridge/Core 进程重启是硬执行边界：Active 与 live dispatch ownership 失效；interrupted 历史的旧 command ID 不得再次调用 Core，恢复的队列项只能等待新的权威 grant 或显式队列命令。
 20. decision、ToolGen guidance、设置变更不能被泛化成 late supplement。
 21. final answer、outcome、completion stats 永远绑定原 Turn，不因后续输入迁移。
 
@@ -850,7 +850,7 @@ old_state != new_projection.derived_state
 
 ## 14. 并发压测与用户体验验收
 
-本架构不能依靠几个同步 reducer case 宣称竞态已解决。测试策略采用**少而重**：保留必要的纯不变量单元测试，但发布门槛集中在以下 4 个真实并发压测。每个压测都必须运行真实 `CoreSessionWorker`、Turn Gate/Reducer、Pod command/projection 路径和持久 command ownership；只允许用可控 fake model 替代外部模型服务。
+本架构不能依靠几个同步 reducer case 宣称竞态已解决。测试策略采用**少而重**：保留必要的纯不变量单元测试，但发布门槛集中在以下 4 个真实并发压测。每个压测都必须运行真实 `CoreSessionWorker`、Turn Gate/Reducer、Pod command/projection 路径和权威 Session/Turn ownership；只允许用可控 fake model 替代外部模型服务。
 
 ### 14.1 统一压测 harness
 
@@ -861,7 +861,7 @@ model/core side                  user/host side
 -----------------------------    -----------------------------
 real Core worker thread/task     independent command producer
 fake model request + delay       Send/Supplement/Stop/Reconnect
-PromptCut + terminal commit      command ack/outbox/FIFO changes
+PromptCut + terminal commit      live command/FIFO changes
 Core projection publication      projection/browser observation
 ```
 
@@ -872,7 +872,7 @@ Core projection publication      projection/browser observation
 - fake model 的短 `sleep` 用来模拟真实服务耗时和扩大调度窗口，**不能**用 `sleep` 的先后判断输入归属或测试是否成功。
 - 第二种模式在关键 barrier 之间加入可复现 jitter。jitter 由 seed 驱动，覆盖 0–20 ms 等小延迟以及少量较慢响应；失败必须打印 seed、iteration、command ID、TurnToken、PromptCut 和阶段记录。
 - 所有等待都有 deadline。超时必须报告卡住阶段，不能无限等待或用更长 sleep 掩盖死锁。
-- 每轮结束检查完整 ownership ledger：每个 command/附件恰好在 pending、PromptCut-consumed、FIFO、Active Turn 首轮或 rejected 中的一处。
+- 每轮结束检查权威 ownership 不变量：每个已由 Host 接纳的 command/附件恰好在 pending、PromptCut-consumed、bounded FIFO、Active Turn 首轮或 rejected 中的一处；该检查不得依赖持续增长的通用 ledger。
 - 使用单调时钟测同一进程/浏览器时延。跨浏览器与 Host 时钟不得相减；timestamp 顺序不能当成因果证据。
 
 运行规模不是“重复两次”：
@@ -922,7 +922,7 @@ Stop(A) → ordinary Send(B) → Stop(B) → Send(C) → ...
 - terminal outcome 不可逆，spinner/working 不复活；
 - FIFO 顺序、容量和 continuation policy 正确；
 - 每个 cycle 最终收敛为 terminal 或明确 queued/rejected，不留下幽灵 pending 状态；
-- worker、线程、channel、队列和持久记录在压测结束后回到有界基线。
+- worker、线程、channel、队列、进程内去重缓存和权威持久记录在压测结束后回到有界基线；不得生成逐命令碎片文件。
 
 ### 14.4 压测三：真实 WebSocket 恢复与 FIFO ownership
 
@@ -936,7 +936,7 @@ Stop(A) → ordinary Send(B) → Stop(B) → Send(C) → ...
 - 附件与 command 一起移动且恰好消费一次；
 - reconnect/duplicate ACK 不启动第二个 Turn；
 - 旧 `mem_epoch` command 不进入新 MEM；
-- 断线风暴后 outbox、Host ownership ledger、FIFO 和 Core projection 一致。
+- 断线风暴后浏览器没有待重放 outbox；Host bounded FIFO、进程内缓存和 Core projection 各自满足权威不变量。
 
 ### 14.5 压测四：真实 Chrome 用户体验时延
 
@@ -945,8 +945,8 @@ Stop(A) → ordinary Send(B) → Stop(B) → Send(C) → ...
 按 `command_id` 记录以下同域阶段：
 
 ```text
-browser_input → local_feedback → websocket_send
-server_received → accepted → core_projection
+browser_input → websocket_send
+server_received → accepted_control → core_projection
 terminal_commit → next_dispatch
 browser_projection_applied → browser_painted
 ```
@@ -957,13 +957,13 @@ browser_projection_applied → browser_painted
 
 | 用户可感知路径 | p95 | p99 | 说明 |
 |---|---:|---:|---|
-| 点击/输入 → 本地 Sending/Waiting/Stopping 反馈 | 50 ms | 100 ms | 浏览器单调时钟 |
+| 点击/输入 → 一次 WebSocket write | 50 ms | 100 ms | 浏览器单调时钟；不渲染逐命令等待态 |
 | WebSocket send → Host accepted | 100 ms | 250 ms | 同机 loopback，不含断线重试 |
 | Host accepted → 对应 Core/Pod projection 可用 | 200 ms | 500 ms | 不含 fake-model 固定 sleep |
 | terminal commit → 已授权的下一队首 dispatch | 100 ms | 250 ms | 自动发送开启且有 continuation grant |
 | projection 到达浏览器 → 首次 paint | 100 ms | 250 ms | Chrome 同一时钟域 |
 
-这些是产品预算，不是通过把测试 sleep 调短就能满足的数字。普通共享 CI 若机器噪声导致绝对时延不稳定，仍必须执行完整正确性压测，并使用同机空载基线后的附加时延与宽松上限防止数量级回退；Linux/macOS release stress runner 必须执行上表绝对预算。任何单样本超过 2 秒且不能由故意断线、重试 backoff 或 fake-model delay 解释，都作为 stall 失败并打印完整阶段链。
+这些是产品预算，不是通过把测试 sleep 调短就能满足的数字。普通共享 CI 若机器噪声导致绝对时延不稳定，仍必须执行完整正确性压测，并使用同机空载基线后的附加时延与宽松上限防止数量级回退；Linux/macOS release stress runner 必须执行上表绝对预算。任何单样本超过 2 秒且不能由故意断线或 fake-model delay 解释，都作为 stall 失败并打印完整阶段链。
 
 ### 14.6 失败证据与 CI 落点
 
@@ -1013,7 +1013,7 @@ core/agent/src/turn_state.rs
 applications/timem/src/turn_projection.rs
   SessionProjection
   ProjectionRevision
-  bounded NextTurnIntent FIFO (restart discards execution ownership)
+  bounded Session message FIFO (restart keeps items, clears live dispatch state)
   Core projection → Web projection
   compatibility/shadow comparison
 

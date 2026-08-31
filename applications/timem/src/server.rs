@@ -67,10 +67,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use timem_http_websocket::{
-    NextTurnEnqueueResult, NextTurnIntentQueue, ProjectionApplyResult, TurnProjectionCache,
-    VersionedTurnProjection,
+    NextTurnIntentQueue, ProjectionApplyResult, TurnProjectionCache, VersionedTurnProjection,
 };
 use timem_session::{
+    message_queue::{
+        MessageQueueBlockReason, MessageQueueProjection, SessionMessageQueue,
+        SessionMessageQueueError,
+    },
     CoreSessionWorkerEvent, CoreSessionWorkerHandle, CoreSessionWorkerManager, ToolGenRequest,
 };
 use tokio::{
@@ -244,29 +247,6 @@ struct CommandDedupCache {
     insertion_order: VecDeque<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct PersistedCommandDedup {
-    records: Vec<PersistedCommandDedupRecord>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PersistedCommandDedupRecord {
-    command_id: String,
-    status: PersistedCommandStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum PersistedCommandStatus {
-    Accepted,
-    Committed,
-    Rejected,
-}
-
 impl CommandDedupCache {
     fn reserve(&mut self, command_id: &str) -> Option<CommandDedupState> {
         if let Some(existing) = self.records.get(command_id) {
@@ -276,7 +256,6 @@ impl CommandDedupCache {
             let Some(oldest) = self.insertion_order.pop_front() else {
                 break;
             };
-            // An accepted command must remain reserved until it reaches a terminal state.
             if matches!(self.records.get(&oldest), Some(CommandDedupState::Accepted)) {
                 self.insertion_order.push_back(oldest);
                 if self
@@ -303,124 +282,6 @@ impl CommandDedupCache {
     fn unreserve(&mut self, command_id: &str) {
         self.records.remove(command_id);
         self.insertion_order.retain(|id| id != command_id);
-    }
-
-    fn load(path: &Path) -> Result<Self, String> {
-        if !path.exists() {
-            return Ok(Self::default());
-        }
-        let raw =
-            std::fs::read(path).map_err(|error| format!("command_dedup_read_failed:{error}"))?;
-        let persisted: PersistedCommandDedup = serde_json::from_slice(&raw)
-            .map_err(|error| format!("command_dedup_parse_failed:{error}"))?;
-        let mut cache = Self::default();
-        for record in persisted
-            .records
-            .into_iter()
-            .rev()
-            .take(COMMAND_DEDUP_CAPACITY)
-            .rev()
-        {
-            let state = match record.status {
-                // Accepted is deliberately retained as uncertain. Re-executing
-                // after a crash can duplicate a non-idempotent domain effect;
-                // a command-specific reconciler may later prove committed or
-                // rejected, but generic recovery must not guess.
-                PersistedCommandStatus::Accepted => CommandDedupState::Accepted,
-                PersistedCommandStatus::Committed => CommandDedupState::Committed {
-                    event: None,
-                    serialized_event: record.result,
-                },
-                PersistedCommandStatus::Rejected => CommandDedupState::Rejected {
-                    error: record
-                        .error
-                        .unwrap_or_else(|| "command_rejected".to_string()),
-                },
-            };
-            cache.insertion_order.push_back(record.command_id.clone());
-            cache.records.insert(record.command_id, state);
-        }
-        Ok(cache)
-    }
-
-    fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("command_dedup_dir_failed:{error}"))?;
-        }
-        let records = self
-            .insertion_order
-            .iter()
-            .filter_map(|command_id| {
-                self.records.get(command_id).map(|state| {
-                    let (status, error, result) = match state {
-                        CommandDedupState::Accepted => {
-                            (PersistedCommandStatus::Accepted, None, None)
-                        }
-                        CommandDedupState::Committed {
-                            event: _,
-                            serialized_event,
-                        } => (
-                            PersistedCommandStatus::Committed,
-                            None,
-                            serialized_event.clone(),
-                        ),
-                        CommandDedupState::Rejected { error } => {
-                            (PersistedCommandStatus::Rejected, Some(error.clone()), None)
-                        }
-                    };
-                    PersistedCommandDedupRecord {
-                        command_id: command_id.clone(),
-                        status,
-                        error,
-                        result,
-                    }
-                })
-            })
-            .collect();
-        let raw = serde_json::to_vec(&PersistedCommandDedup { records })
-            .map_err(|error| format!("command_dedup_serialize_failed:{error}"))?;
-        let temporary = path.with_extension("json.tmp");
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(&temporary)
-            .map_err(|error| format!("command_dedup_open_failed:{error}"))?;
-        file.write_all(&raw)
-            .and_then(|_| file.sync_all())
-            .map_err(|error| format!("command_dedup_write_failed:{error}"))?;
-        std::fs::rename(&temporary, path)
-            .map_err(|error| format!("command_dedup_replace_failed:{error}"))
-    }
-}
-
-fn load_command_dedup_resilient(path: &Path) -> Result<CommandDedupCache, String> {
-    match CommandDedupCache::load(path) {
-        Ok(cache) => Ok(cache),
-        Err(error) if error.starts_with("command_dedup_parse_failed:") => {
-            let replacement = serde_json::to_vec(&PersistedCommandDedup {
-                records: Vec::new(),
-            })
-            .map_err(|serialize_error| {
-                format!("command_dedup_recovery_serialize_failed:{serialize_error}")
-            })?;
-            let backup = backup_and_replace_corrupt_state(
-                path,
-                &replacement,
-                "command-dedup-corrupt-backup",
-            )?;
-            eprintln!(
-                "[timem_web_warning] command_dedup_corruption_quarantined error={error} backup={}",
-                backup.display()
-            );
-            CommandDedupCache::load(path)
-        }
-        Err(error) => Err(error),
     }
 }
 
@@ -1461,8 +1322,7 @@ struct WebSession {
     /// Latest complete Core-owned lifecycle projection. Pod caches and delivers
     /// this value but never reconstructs it from worker or topic events.
     turn_projection: TurnProjectionCache,
-    #[serde(skip)]
-    next_turn_intents: NextTurnIntentQueue<WebNextTurnPayload>,
+    message_queue: SessionMessageQueue<WebNextTurnPayload>,
     #[serde(skip)]
     pending_completion_message_id: Option<String>,
     #[serde(skip)]
@@ -1735,6 +1595,10 @@ enum WireEvent {
     TurnUpdated {
         session_id: String,
         turn: WebTurn,
+    },
+    MessageQueueUpdated {
+        session_id: String,
+        message_queue: MessageQueueProjection<WebNextTurnPayload>,
     },
     HostError {
         message: String,
@@ -2089,6 +1953,27 @@ enum ClientCommand {
         #[serde(default)]
         target_command_id: Option<String>,
     },
+    MessageQueueUpdate {
+        session_id: String,
+        queued_command_id: String,
+        text: String,
+    },
+    MessageQueueRemove {
+        session_id: String,
+        queued_command_id: String,
+    },
+    MessageQueueReorder {
+        session_id: String,
+        command_ids: Vec<String>,
+    },
+    MessageQueueAutoSendSet {
+        session_id: String,
+        enabled: bool,
+    },
+    MessageQueueSendNow {
+        session_id: String,
+        queued_command_id: String,
+    },
     AttachmentRemove {
         session_id: String,
         attachment_id: String,
@@ -2231,6 +2116,11 @@ impl ClientCommand {
             | Self::TurnSubmit { session_id, .. }
             | Self::TurnSupplement { session_id, .. }
             | Self::TurnCancel { session_id, .. }
+            | Self::MessageQueueUpdate { session_id, .. }
+            | Self::MessageQueueRemove { session_id, .. }
+            | Self::MessageQueueReorder { session_id, .. }
+            | Self::MessageQueueAutoSendSet { session_id, .. }
+            | Self::MessageQueueSendNow { session_id, .. }
             | Self::AttachmentRemove { session_id, .. }
             | Self::ToolRepoRename { session_id, .. }
             | Self::ToolRepoOpenTerminal { session_id, .. }
@@ -2351,7 +2241,6 @@ pub async fn run(
         template.initial_space.clone(),
         launch.debug,
     )?;
-    let command_dedup = load_command_dedup_resilient(&command_dedup_path(&initial_mem))?;
     let instance_path = web_instance_path(&initial_mem);
     let web_instance = match open_web_instance_after_handoff(
         &instance_path,
@@ -2413,7 +2302,7 @@ pub async fn run(
         mem,
         events: events.clone(),
         sessions,
-        command_dedup: Arc::new(Mutex::new(command_dedup)),
+        command_dedup: Arc::new(Mutex::new(CommandDedupCache::default())),
         semantic_delivery: Arc::new(SemanticEventDelivery::new(events.clone())),
         web_instance: Arc::new(Mutex::new(web_instance)),
         command_lanes: Arc::new(Mutex::new(HashMap::new())),
@@ -3052,10 +2941,6 @@ fn current_session_store(state: &AppState) -> Result<SessionStore, String> {
     Ok(current_mem_state(state)?.session_store)
 }
 
-fn command_dedup_path(mem: &WebMemState) -> PathBuf {
-    mem.layout.memory_dir().join("web_command_dedup.json")
-}
-
 fn publish_running_instance_info(
     state: &AppState,
     port: u16,
@@ -3379,10 +3264,6 @@ fn friendly_bind_error(error: String, requested_port: Option<u16>) -> String {
 
 fn web_instance_path(mem: &WebMemState) -> PathBuf {
     mem.layout.memory_dir().join("web_instance.json")
-}
-
-fn current_command_dedup_path(state: &AppState) -> Result<PathBuf, String> {
-    Ok(command_dedup_path(&current_mem_state(state)?))
 }
 
 fn session_tool_repo(state: &AppState, session_id: &str) -> Result<SessionToolRepo, String> {
@@ -3895,7 +3776,6 @@ fn reserve_command_dedup(
     state: &AppState,
     command_id: &str,
 ) -> Result<Option<CommandDedupState>, String> {
-    let path = current_command_dedup_path(state)?;
     let mut cache = state
         .command_dedup
         .lock()
@@ -3907,19 +3787,12 @@ fn reserve_command_dedup(
             .values()
             .all(|record| matches!(record, CommandDedupState::Accepted))
     {
-        // Accepted entries are ownership records and must never be evicted to
-        // make room for a click flood. Reject new ownership instead of letting
-        // an all-uncertain cache grow without bound.
+        // Accepted entries cannot be evicted safely while this Host process is
+        // still handling them. Reject new correlation ids instead of growing
+        // the in-memory cache without bound.
         return Err("command_dedup_capacity_exhausted".to_string());
     }
-    let previous = cache.reserve(command_id);
-    if previous.is_none() {
-        if let Err(error) = cache.save(&path) {
-            cache.unreserve(command_id);
-            return Err(error);
-        }
-    }
-    Ok(previous)
+    Ok(cache.reserve(command_id))
 }
 
 fn finish_command_dedup(
@@ -3927,13 +3800,12 @@ fn finish_command_dedup(
     command_id: &str,
     terminal: CommandDedupState,
 ) -> Result<(), String> {
-    let path = current_command_dedup_path(state)?;
     let mut cache = state
         .command_dedup
         .lock()
         .map_err(|_| "command_dedup_poisoned".to_string())?;
     cache.finish(command_id, terminal);
-    cache.save(&path)
+    Ok(())
 }
 
 fn command_ack(command_id: &str, status: CommandAckStatus, error: Option<String>) -> WireEvent {
@@ -4327,6 +4199,20 @@ fn handle_command_with_id(
             }));
         }
         ClientCommand::SessionStop { session_id } => {
+            {
+                let mut sessions = state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session_store_poisoned")?;
+                let session = sessions
+                    .get_mut(&session_id)
+                    .ok_or_else(|| "session_not_found".to_string())?;
+                session
+                    .message_queue
+                    .block_continuation(MessageQueueBlockReason::SessionStopped);
+            }
+            persist_message_queue(state, &session_id)?;
+            publish_message_queue(state, &session_id);
             let worker_ids = session_worker_ids(state, &session_id)?;
             let mut manager = state
                 .manager
@@ -4580,9 +4466,12 @@ fn handle_command_with_id(
             role_ids,
         } => {
             if let Some(command_id) = command_id {
-                if let Some(turn) = queued_turn_for_command_id(state, &session_id, command_id)? {
+                if queued_payload_for_command_id(state, &session_id, command_id)?.is_some() {
                     dispatch_next_turn_intent_if_ready(state, &session_id);
-                    return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
+                    return Ok(Some(WireEvent::MessageQueueUpdated {
+                        session_id: session_id.clone(),
+                        message_queue: message_queue_projection(state, &session_id)?,
+                    }));
                 }
                 if let Some(turn) = turn_for_command_id(state, &session_id, command_id)? {
                     redeliver_recorded_turn(
@@ -4627,31 +4516,119 @@ fn handle_command_with_id(
                     let session = sessions
                         .get(&session_id)
                         .ok_or_else(|| "session_not_found".to_string())?;
-                    current_turn_id(session).is_some() || !session.next_turn_intents.is_empty()
+                    current_turn_id(session).is_some() || !session.message_queue.is_empty()
                 };
                 if must_queue {
                     let command_id = command_id
-                        .ok_or_else(|| "next_turn_intent_command_id_required".to_string())?;
-                    enqueue_next_turn_intent(
+                        .ok_or_else(|| "message_queue_command_id_required".to_string())?;
+                    let message_queue = enqueue_next_turn_intent(
                         state,
                         &session_id,
                         command_id,
                         text,
                         attachment_ids.as_deref(),
                         worker_roles,
-                    )?
-                } else {
-                    submit_turn_with_selected_attachments(
-                        state,
-                        &session_id,
-                        text,
-                        attachment_ids.as_deref(),
-                        command_id,
-                        worker_roles,
-                    )?
+                    )?;
+                    return Ok(Some(WireEvent::MessageQueueUpdated {
+                        session_id,
+                        message_queue,
+                    }));
                 }
+                submit_turn_with_selected_attachments(
+                    state,
+                    &session_id,
+                    text,
+                    attachment_ids.as_deref(),
+                    command_id,
+                    worker_roles,
+                )?
             };
             return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
+        }
+        ClientCommand::MessageQueueUpdate {
+            session_id,
+            queued_command_id,
+            text,
+        } => {
+            let text = nonempty_text(text, "queued message text")?;
+            mutate_message_queue(state, &session_id, |session| {
+                session
+                    .message_queue
+                    .update_payload(&queued_command_id, {
+                        let mut payload = session
+                            .message_queue
+                            .item(&queued_command_id)
+                            .ok_or_else(|| "message_queue_item_not_found".to_string())?
+                            .payload
+                            .clone();
+                        payload.text = text;
+                        payload
+                    })
+                    .map_err(message_queue_error)
+            })?;
+            publish_message_queue(state, &session_id);
+            return Ok(Some(WireEvent::MessageQueueUpdated {
+                session_id: session_id.clone(),
+                message_queue: message_queue_projection(state, &session_id)?,
+            }));
+        }
+        ClientCommand::MessageQueueRemove {
+            session_id,
+            queued_command_id,
+        } => {
+            mutate_message_queue(state, &session_id, |session| {
+                let removed = session
+                    .message_queue
+                    .remove(&queued_command_id)
+                    .map_err(message_queue_error)?;
+                session.attachments.extend(removed.payload.attachments);
+                Ok(())
+            })?;
+            publish_message_queue(state, &session_id);
+            return Ok(Some(WireEvent::MessageQueueUpdated {
+                session_id: session_id.clone(),
+                message_queue: message_queue_projection(state, &session_id)?,
+            }));
+        }
+        ClientCommand::MessageQueueReorder {
+            session_id,
+            command_ids,
+        } => {
+            mutate_message_queue(state, &session_id, |session| {
+                session
+                    .message_queue
+                    .reorder(&command_ids)
+                    .map_err(message_queue_error)
+            })?;
+            publish_message_queue(state, &session_id);
+            return Ok(Some(WireEvent::MessageQueueUpdated {
+                session_id: session_id.clone(),
+                message_queue: message_queue_projection(state, &session_id)?,
+            }));
+        }
+        ClientCommand::MessageQueueAutoSendSet {
+            session_id,
+            enabled,
+        } => {
+            mutate_message_queue(state, &session_id, |session| {
+                session.message_queue.set_auto_send_enabled(enabled);
+                Ok(())
+            })?;
+            publish_message_queue(state, &session_id);
+            return Ok(Some(WireEvent::MessageQueueUpdated {
+                session_id: session_id.clone(),
+                message_queue: message_queue_projection(state, &session_id)?,
+            }));
+        }
+        ClientCommand::MessageQueueSendNow {
+            session_id,
+            queued_command_id,
+        } => {
+            send_queued_message_now(state, &session_id, &queued_command_id)?;
+            return Ok(Some(WireEvent::MessageQueueUpdated {
+                session_id: session_id.clone(),
+                message_queue: message_queue_projection(state, &session_id)?,
+            }));
         }
         ClientCommand::TurnSupplement {
             session_id,
@@ -5406,7 +5383,6 @@ fn switch_mem_space(
     if !live_sessions.is_empty() && !stop_running {
         return Err("mem_switch_active_sessions_confirmation_required".to_string());
     }
-    let next_command_dedup = load_command_dedup_resilient(&command_dedup_path(&next_mem))?;
     let running_instance_info = state
         .web_instance
         .lock()
@@ -5458,7 +5434,7 @@ fn switch_mem_space(
             .command_dedup
             .lock()
             .map_err(|_| "command_dedup_poisoned".to_string())?;
-        *cache = next_command_dedup;
+        *cache = CommandDedupCache::default();
     }
     {
         let mut lease = state
@@ -6042,7 +6018,7 @@ fn create_session(
                 cancelling_turn_id: None,
                 pending_turn_id: None,
                 turn_projection: TurnProjectionCache::default(),
-                next_turn_intents: NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS),
+                message_queue: SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS),
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
                 reported_session_working_worker_count: None,
@@ -6322,12 +6298,12 @@ fn restore_stored_session(
         .map(|path| path.display().to_string());
     let (mcp_config_revision, applied_mcp_config_revision) =
         initial_mcp_revisions(&stored.mcp_server_ids);
-    let persisted_next_turn_intents = load_next_turn_intents_resilient(state, &stored.session_id);
-    let queued_turn_ids = persisted_next_turn_intents
-        .snapshot()
+    let message_queue = load_message_queue_resilient(state, &stored.session_id);
+    let queued_turn_ids = message_queue
+        .projection()
         .items
-        .into_iter()
-        .map(|intent| intent.payload.turn_id)
+        .iter()
+        .map(|item| item.payload.turn_id.clone())
         .collect::<BTreeSet<_>>();
     for turn in &mut turns {
         if queued_turn_ids.contains(&turn.turn_id)
@@ -6339,7 +6315,6 @@ fn restore_stored_session(
                 .get_or_insert(stored.updated_at_ms.max(0) as u128);
         }
     }
-    let next_turn_intents = NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS);
     {
         let mut sessions = state
             .sessions
@@ -6391,7 +6366,7 @@ fn restore_stored_session(
                 cancelling_turn_id: None,
                 pending_turn_id: None,
                 turn_projection: TurnProjectionCache::default(),
-                next_turn_intents,
+                message_queue,
                 pending_completion_message_id: None,
                 pending_unconsumed_supplements: Vec::new(),
                 reported_session_working_worker_count: None,
@@ -6402,9 +6377,9 @@ fn restore_stored_session(
             },
         );
     }
-    if let Err(error) = persist_next_turn_intents(state, &stored.session_id) {
+    if let Err(error) = persist_message_queue(state, &stored.session_id) {
         eprintln!(
-            "[timem_web_warning] next_turn_intents_restart_discard_persist_failed session_id={:?} reason={error}",
+            "[timem_web_warning] message_queue_restore_persist_failed session_id={:?} reason={error}",
             stored.session_id
         );
     }
@@ -6781,79 +6756,313 @@ fn next_turn_intents_path(state: &AppState, session_id: &str) -> Result<PathBuf,
         .ok_or_else(|| "next_turn_intents_path_invalid".to_string())
 }
 
-fn load_next_turn_intents(
-    state: &AppState,
-    session_id: &str,
-) -> Result<NextTurnIntentQueue<WebNextTurnPayload>, String> {
-    let path = next_turn_intents_path(state, session_id)?;
-    if !path.exists() {
-        return Ok(NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS));
+fn message_queue_error(error: SessionMessageQueueError) -> String {
+    match error {
+        SessionMessageQueueError::CapacityReached { .. } => "message_queue_full",
+        SessionMessageQueueError::DuplicateCommandId { .. } => "message_queue_duplicate",
+        SessionMessageQueueError::UnknownCommandId { .. } => "message_queue_item_not_found",
+        SessionMessageQueueError::DispatchInProgress { .. } => "message_queue_dispatch_in_progress",
+        SessionMessageQueueError::InvalidOrder => "message_queue_invalid_order",
     }
-    let metadata = std::fs::metadata(&path)
-        .map_err(|error| format!("next_turn_intents_metadata_failed:{error}"))?;
-    if metadata.len() > MAX_NEXT_TURN_INTENT_FILE_BYTES {
-        return Err("next_turn_intents_file_too_large".to_string());
-    }
-    let raw =
-        std::fs::read(&path).map_err(|error| format!("next_turn_intents_read_failed:{error}"))?;
-    let queue: NextTurnIntentQueue<WebNextTurnPayload> = serde_json::from_slice(&raw)
-        .map_err(|error| format!("next_turn_intents_parse_failed:{error}"))?;
-    if queue.capacity() != MAX_NEXT_TURN_INTENTS || queue.len() > MAX_NEXT_TURN_INTENTS {
-        return Err("next_turn_intents_shape_invalid".to_string());
-    }
-    Ok(queue)
+    .to_string()
 }
 
-fn load_next_turn_intents_resilient(
+fn mutate_message_queue<F>(state: &AppState, session_id: &str, mutation: F) -> Result<(), String>
+where
+    F: FnOnce(&mut WebSession) -> Result<(), String>,
+{
+    let previous;
+    {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        previous = session.clone();
+        mutation(session)?;
+    }
+    if let Err(error) = persist_message_queue(state, session_id)
+        .and_then(|()| persist_web_session(state, session_id))
+    {
+        if let Ok(mut sessions) = state.sessions.lock() {
+            sessions.insert(session_id.to_string(), previous);
+        }
+        let _ = persist_message_queue(state, session_id);
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn send_queued_message_now(
     state: &AppState,
     session_id: &str,
-) -> NextTurnIntentQueue<WebNextTurnPayload> {
-    match load_next_turn_intents(state, session_id) {
+    command_id: &str,
+) -> Result<(), String> {
+    let active = session_has_active_turn(state, session_id)?;
+    if !active {
+        let item = {
+            let mut sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| "session_not_found".to_string())?;
+            let item = session
+                .message_queue
+                .begin_immediate_dispatch(command_id)
+                .map_err(message_queue_error)?
+                .clone();
+            session.pending_turn_id = Some(item.payload.turn_id.clone());
+            item
+        };
+        persist_message_queue(state, session_id)?;
+        publish_message_queue(state, session_id);
+        let payload = item.payload.clone();
+        let context = session_context_with_roles(
+            state,
+            session_id,
+            &payload.attachments,
+            &payload.worker_roles,
+        )?;
+        if let Err(error) = primary_worker_handle(state, session_id)?.run_turn_with_command_id(
+            payload.text,
+            context,
+            Some(item.command_id.clone()),
+        ) {
+            reject_queued_dispatch(state, session_id, &item.command_id, &payload.turn_id);
+            return Err(error);
+        }
+        return Ok(());
+    }
+
+    let item = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        sessions
+            .get(session_id)
+            .and_then(|session| session.message_queue.item(command_id))
+            .cloned()
+            .ok_or_else(|| "message_queue_item_not_found".to_string())?
+    };
+    let worker = primary_worker_handle(state, session_id)?;
+    let spec = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        sessions[session_id]
+            .runtime
+            .settings
+            .config
+            .response_protocol
+            .suite()
+            .prompt_boundaries()
+    };
+    let uploaded_context = uploaded_files_context(&item.payload.attachments, spec);
+    let role_context = worker_roles_context(&item.payload.worker_roles);
+    let additional_context =
+        combine_additional_contexts([uploaded_context.as_deref(), role_context.as_deref()]);
+    let mut appended = None;
+    let accepted = worker.try_add_user_supplement_with_context_and_command_id_after(
+        item.payload.text.clone(),
+        additional_context,
+        Some(item.command_id.clone()),
+        || {
+            let previous;
+            {
+                let mut sessions = state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session_store_poisoned".to_string())?;
+                let session = sessions
+                    .get_mut(session_id)
+                    .ok_or_else(|| "session_not_found".to_string())?;
+                previous = session.clone();
+                let removed = session
+                    .message_queue
+                    .remove(command_id)
+                    .map_err(message_queue_error)?;
+                drop(sessions);
+                match append_turn_user_entry_with_attachments(
+                    state,
+                    session_id,
+                    TurnUserEntryInput {
+                        kind: "supplement",
+                        text: removed.payload.text,
+                        attachments: removed.payload.attachments,
+                        attachment_ids: Some(&[]),
+                        command_id: Some(command_id),
+                        worker_roles: removed.payload.worker_roles,
+                    },
+                ) {
+                    Ok(turn) => appended = Some(turn),
+                    Err(error) => {
+                        state
+                            .sessions
+                            .lock()
+                            .map_err(|_| "session_store_poisoned".to_string())?
+                            .insert(session_id.to_string(), previous);
+                        return Err(error);
+                    }
+                }
+            }
+            persist_message_queue(state, session_id)
+        },
+    )?;
+    if !accepted {
+        return Err("message_queue_supplement_rejected".to_string());
+    }
+    publish_message_queue(state, session_id);
+    if let Some(turn) = appended {
+        publish_semantic(
+            state,
+            WireEvent::TurnUpdated {
+                session_id: session_id.to_string(),
+                turn,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn load_message_queue(
+    state: &AppState,
+    session_id: &str,
+) -> Result<SessionMessageQueue<WebNextTurnPayload>, String> {
+    let path = next_turn_intents_path(state, session_id)?;
+    if !path.exists() {
+        return Ok(SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS));
+    }
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| format!("message_queue_metadata_failed:{error}"))?;
+    if metadata.len() > MAX_NEXT_TURN_INTENT_FILE_BYTES {
+        return Err("message_queue_file_too_large".to_string());
+    }
+    let raw = std::fs::read(&path).map_err(|error| format!("message_queue_read_failed:{error}"))?;
+    if let Ok(mut projection) =
+        serde_json::from_slice::<MessageQueueProjection<WebNextTurnPayload>>(&raw)
+    {
+        if projection.items.len() > MAX_NEXT_TURN_INTENTS {
+            return Err("message_queue_shape_invalid".to_string());
+        }
+        // A process restart preserves the Session-owned FIFO, but never a live
+        // dispatch reservation or continuation grant. Those transient fields
+        // require facts from the previous Core process and must not redrive it.
+        projection.dispatching_command_id = None;
+        projection.continuation =
+            timem_session::message_queue::MessageQueueContinuation::AwaitingNormalCompletion;
+        return Ok(SessionMessageQueue::restore(
+            projection,
+            MAX_NEXT_TURN_INTENTS,
+        ));
+    }
+    // One-time migration from the former Bridge-owned transport FIFO.
+    let legacy: NextTurnIntentQueue<WebNextTurnPayload> = serde_json::from_slice(&raw)
+        .map_err(|error| format!("message_queue_parse_failed:{error}"))?;
+    if legacy.capacity() != MAX_NEXT_TURN_INTENTS || legacy.len() > MAX_NEXT_TURN_INTENTS {
+        return Err("message_queue_shape_invalid".to_string());
+    }
+    let snapshot = legacy.snapshot();
+    let projection = MessageQueueProjection {
+        revision: snapshot.revision,
+        items: snapshot
+            .items
+            .into_iter()
+            .map(|item| timem_session::message_queue::MessageQueueItem {
+                command_id: item.command_id,
+                enqueue_seq: item.enqueue_seq,
+                payload: item.payload,
+            })
+            .collect(),
+        auto_send_enabled: true,
+        continuation:
+            timem_session::message_queue::MessageQueueContinuation::AwaitingNormalCompletion,
+        dispatching_command_id: None,
+    };
+    Ok(SessionMessageQueue::restore(
+        projection,
+        MAX_NEXT_TURN_INTENTS,
+    ))
+}
+
+fn load_message_queue_resilient(
+    state: &AppState,
+    session_id: &str,
+) -> SessionMessageQueue<WebNextTurnPayload> {
+    match load_message_queue(state, session_id) {
         Ok(queue) => queue,
         Err(error) => {
             if let Ok(path) = next_turn_intents_path(state, session_id) {
                 if path.exists() {
-                    let backup = path
-                        .with_extension(format!("corrupt-{}", unique_web_id("next-turn-intents")));
+                    let backup =
+                        path.with_extension(format!("corrupt-{}", unique_web_id("message-queue")));
                     let _ = std::fs::rename(&path, &backup);
                 }
             }
-            eprintln!(
-                "[timem_web_warning] next_turn_intents_restore_failed session_id={session_id:?} reason={error}"
-            );
-            NextTurnIntentQueue::new(MAX_NEXT_TURN_INTENTS)
+            eprintln!("[timem_web_warning] message_queue_restore_failed session_id={session_id:?} reason={error}");
+            SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS)
         }
     }
 }
 
-fn persist_next_turn_intents(state: &AppState, session_id: &str) -> Result<(), String> {
+fn persist_message_queue(state: &AppState, session_id: &str) -> Result<(), String> {
     let queue = state
         .sessions
         .lock()
         .map_err(|_| "session_store_poisoned".to_string())?
         .get(session_id)
         .ok_or_else(|| "session_not_found".to_string())?
-        .next_turn_intents
+        .message_queue
         .clone();
     let payload = serde_json::to_vec_pretty(&queue)
-        .map_err(|error| format!("next_turn_intents_serialize_failed:{error}"))?;
+        .map_err(|error| format!("message_queue_serialize_failed:{error}"))?;
     if payload.len() as u64 > MAX_NEXT_TURN_INTENT_FILE_BYTES {
-        return Err("next_turn_intents_file_too_large".to_string());
+        return Err("message_queue_file_too_large".to_string());
     }
     let path = next_turn_intents_path(state, session_id)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|error| format!("next_turn_intents_dir_failed:{error}"))?;
+            .map_err(|error| format!("message_queue_dir_failed:{error}"))?;
     }
     agent_core::atomic_write_file(&path, &payload)
-        .map_err(|error| format!("next_turn_intents_write_failed:{error}"))
+        .map_err(|error| format!("message_queue_write_failed:{error}"))
 }
 
-fn queued_turn_for_command_id(
+fn message_queue_projection(
+    state: &AppState,
+    session_id: &str,
+) -> Result<MessageQueueProjection<WebNextTurnPayload>, String> {
+    state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .get(session_id)
+        .map(|session| session.message_queue.projection().clone())
+        .ok_or_else(|| "session_not_found".to_string())
+}
+
+fn publish_message_queue(state: &AppState, session_id: &str) {
+    if let Ok(message_queue) = message_queue_projection(state, session_id) {
+        publish_semantic(
+            state,
+            WireEvent::MessageQueueUpdated {
+                session_id: session_id.to_string(),
+                message_queue,
+            },
+        );
+    }
+}
+
+fn queued_payload_for_command_id(
     state: &AppState,
     session_id: &str,
     command_id: &str,
-) -> Result<Option<WebTurn>, String> {
+) -> Result<Option<WebNextTurnPayload>, String> {
     let sessions = state
         .sessions
         .lock()
@@ -6861,25 +7070,10 @@ fn queued_turn_for_command_id(
     let session = sessions
         .get(session_id)
         .ok_or_else(|| "session_not_found".to_string())?;
-    let queued = session
-        .next_turn_intents
-        .snapshot()
-        .items
-        .iter()
-        .any(|intent| intent.command_id == command_id);
-    Ok(queued
-        .then(|| {
-            session
-                .turns
-                .iter()
-                .find(|turn| {
-                    turn.user_entries
-                        .iter()
-                        .any(|entry| entry.command_id.as_deref() == Some(command_id))
-                })
-                .cloned()
-        })
-        .flatten())
+    Ok(session
+        .message_queue
+        .item(command_id)
+        .map(|item| item.payload.clone()))
 }
 
 fn enqueue_next_turn_intent(
@@ -6889,12 +7083,12 @@ fn enqueue_next_turn_intent(
     text: String,
     attachment_ids: Option<&[String]>,
     worker_roles: Vec<WorkerRole>,
-) -> Result<WebTurn, String> {
-    if let Some(turn) = queued_turn_for_command_id(state, session_id, command_id)? {
-        return Ok(turn);
+) -> Result<MessageQueueProjection<WebNextTurnPayload>, String> {
+    if queued_payload_for_command_id(state, session_id, command_id)?.is_some() {
+        dispatch_next_turn_intent_if_ready(state, session_id);
+        return message_queue_projection(state, session_id);
     }
     let previous_session;
-    let turn;
     {
         let mut sessions = state
             .sessions
@@ -6903,193 +7097,64 @@ fn enqueue_next_turn_intent(
         let session = sessions
             .get_mut(session_id)
             .ok_or_else(|| "session_not_found".to_string())?;
-        if current_turn_id(session).is_none() && session.next_turn_intents.is_empty() {
-            return Err("next_turn_intent_requires_active_or_queued_turn".to_string());
+        if current_turn_id(session).is_none() && session.message_queue.is_empty() {
+            return Err("message_queue_requires_active_or_queued_turn".to_string());
+        }
+        if session.message_queue.len() >= session.message_queue.capacity() {
+            return Err("message_queue_full".to_string());
         }
         previous_session = session.clone();
         let attachments = take_pending_attachments_for_ids(session, attachment_ids)?;
-        let created_at_ms = now_ms();
-        let turn_id = unique_web_id("web_turn");
         let payload = WebNextTurnPayload {
-            turn_id: turn_id.clone(),
-            created_at_ms,
-            text: text.clone(),
-            attachments: attachments.clone(),
-            worker_roles: worker_roles.clone(),
+            turn_id: unique_web_id("web_turn"),
+            created_at_ms: now_ms(),
+            text,
+            attachments,
+            worker_roles,
         };
-        match session
-            .next_turn_intents
+        session
+            .message_queue
             .enqueue(command_id.to_string(), payload)
-        {
-            NextTurnEnqueueResult::Enqueued { .. } => {}
-            NextTurnEnqueueResult::Duplicate { .. } => {
-                return session
-                    .turns
-                    .iter()
-                    .find(|turn| {
-                        turn.user_entries
-                            .iter()
-                            .any(|entry| entry.command_id.as_deref() == Some(command_id))
-                    })
-                    .cloned()
-                    .ok_or_else(|| "next_turn_intent_turn_missing".to_string());
-            }
-            NextTurnEnqueueResult::Full { .. } => {
-                *session = previous_session;
-                return Err("next_turn_intent_queue_full".to_string());
-            }
-        }
-        turn = WebTurn {
-            turn_id,
-            state: "pending".to_string(),
-            created_at_ms,
-            interrupted_at_ms: None,
-            user_entries: vec![WebTurnUserEntry {
-                kind: "task".to_string(),
-                text: text.clone(),
-                attachments,
-                created_at_ms,
-                command_id: Some(command_id.to_string()),
-                delivery_state: Some(ChatCommandDeliveryState::Recorded),
-                worker_roles,
-            }],
-            events: Vec::new(),
-            sub_answers: Vec::new(),
-            final_answer: None,
-            completion: None,
-        };
-        session.turns.push(turn.clone());
-        if session.turns.len() > MAX_SESSION_TURNS {
-            let excess = session.turns.len() - MAX_SESSION_TURNS;
-            session.turns.drain(..excess);
-        }
-        session.messages.push(WebChatMessage {
-            id: unique_web_id("msg_user"),
-            role: "user".to_string(),
-            text: text.clone(),
-            created_at_ms,
-            kind: None,
-            completion: None,
-        });
-        if session.messages.len() > MAX_SESSION_MESSAGES {
-            let excess = session.messages.len() - MAX_SESSION_MESSAGES;
-            session.messages.drain(..excess);
-        }
+            .map_err(|error| match error {
+                SessionMessageQueueError::CapacityReached { .. } => {
+                    "message_queue_full".to_string()
+                }
+                SessionMessageQueueError::DuplicateCommandId { .. } => {
+                    "message_queue_duplicate".to_string()
+                }
+                _ => "message_queue_enqueue_failed".to_string(),
+            })?;
     }
-    let persist_result = persist_next_turn_intents(state, session_id)
-        .and_then(|()| {
-            append_chat_history_message(
-                state,
-                session_id,
-                &turn.turn_id,
-                "user",
-                Some("task"),
-                Some(command_id),
-                turn.created_at_ms as i64,
-                text,
-            )
-        })
-        .and_then(|()| {
-            append_worker_roles_history(
-                state,
-                session_id,
-                &turn.turn_id,
-                turn.created_at_ms as i64,
-                &turn.user_entries[0].worker_roles,
-            )
-        })
-        .and_then(|()| persist_web_session(state, session_id));
-    if let Err(error) = persist_result {
+    if let Err(error) = persist_message_queue(state, session_id)
+        .and_then(|()| persist_web_session(state, session_id))
+    {
         if let Ok(mut sessions) = state.sessions.lock() {
             sessions.insert(session_id.to_string(), previous_session);
         }
-        if let Err(rollback_error) = persist_next_turn_intents(state, session_id) {
-            return Err(format!(
-                "{error};next_turn_intent_rollback_failed:{rollback_error}"
-            ));
-        }
+        let _ = persist_message_queue(state, session_id);
         return Err(error);
     }
-    publish_semantic(
-        state,
-        WireEvent::TurnUpdated {
-            session_id: session_id.to_string(),
-            turn: turn.clone(),
-        },
-    );
-    // A command may arrive after the previous Turn's terminal facts but before
-    // the browser observes them. Preserve FIFO by queueing behind older intents,
-    // then immediately retry the authoritative Host dispatch barrier.
+    publish_message_queue(state, session_id);
     dispatch_next_turn_intent_if_ready(state, session_id);
-    Ok(turn)
-}
-
-fn remove_dispatched_next_turn_intent(
-    state: &AppState,
-    session_id: &str,
-    command_id: &str,
-) -> Result<(), String> {
-    let queued = state
-        .sessions
-        .lock()
-        .map_err(|_| "session_store_poisoned".to_string())?
-        .get(session_id)
-        .ok_or_else(|| "session_not_found".to_string())?
-        .next_turn_intents
-        .snapshot()
-        .items
-        .iter()
-        .any(|intent| intent.command_id == command_id);
-    if !queued {
-        return Ok(());
-    }
-    {
-        let mut sessions = state
-            .sessions
-            .lock()
-            .map_err(|_| "session_store_poisoned".to_string())?;
-        let session = sessions
-            .get_mut(session_id)
-            .ok_or_else(|| "session_not_found".to_string())?;
-        let _ = session.next_turn_intents.remove(command_id);
-    }
-    persist_next_turn_intents(state, session_id)
+    message_queue_projection(state, session_id)
 }
 
 fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
-    let intent = state.sessions.lock().ok().and_then(|sessions| {
-        let session = sessions.get(session_id)?;
-        let projection = session
-            .turn_projection
-            .current()
-            .map(|item| item.projection);
-        let core_finished = matches!(projection, Some(TurnProjection::Finished(_)));
-        (core_finished && current_turn_id(session).is_none())
-            .then(|| session.next_turn_intents.front().cloned())
-            .flatten()
+    let intent = state.sessions.lock().ok().and_then(|mut sessions| {
+        let session = sessions.get_mut(session_id)?;
+        if current_turn_id(session).is_some() {
+            return None;
+        }
+        let item = session.message_queue.begin_automatic_dispatch()?.clone();
+        session.pending_turn_id = Some(item.payload.turn_id.clone());
+        Some(item)
     });
     let Some(intent) = intent else {
         return;
     };
+    let _ = persist_message_queue(state, session_id);
+    publish_message_queue(state, session_id);
     let payload = intent.payload.clone();
-    {
-        let mut sessions = match state.sessions.lock() {
-            Ok(sessions) => sessions,
-            Err(_) => return,
-        };
-        let Some(session) = sessions.get_mut(session_id) else {
-            return;
-        };
-        let Some(turn) = session
-            .turns
-            .iter_mut()
-            .find(|turn| turn.turn_id == payload.turn_id)
-        else {
-            return;
-        };
-        session.pending_turn_id = Some(payload.turn_id.clone());
-        turn.state = "pending".to_string();
-    }
     let context = match session_context_with_roles(
         state,
         session_id,
@@ -7098,12 +7163,12 @@ fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
     ) {
         Ok(context) => context,
         Err(error) => {
-            clear_pending_dispatched_turn(state, session_id, &payload.turn_id);
+            reject_queued_dispatch(state, session_id, &intent.command_id, &payload.turn_id);
             publish_core_semantic(
                 state,
                 session_id,
                 WireEvent::HostError {
-                    message: format!("next_turn_intent_context_failed:{error}"),
+                    message: format!("message_queue_context_failed:{error}"),
                 },
             );
             return;
@@ -7112,25 +7177,28 @@ fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
     if let Err(error) = primary_worker_handle(state, session_id).and_then(|worker| {
         worker.run_turn_with_command_id(payload.text, context, Some(intent.command_id.clone()))
     }) {
-        clear_pending_dispatched_turn(state, session_id, &payload.turn_id);
+        reject_queued_dispatch(state, session_id, &intent.command_id, &payload.turn_id);
         publish_core_semantic(
             state,
             session_id,
             WireEvent::HostError {
-                message: format!("next_turn_intent_core_send_failed:{error}"),
+                message: format!("message_queue_core_send_failed:{error}"),
             },
         );
     }
 }
 
-fn clear_pending_dispatched_turn(state: &AppState, session_id: &str, turn_id: &str) {
+fn reject_queued_dispatch(state: &AppState, session_id: &str, command_id: &str, turn_id: &str) {
     if let Ok(mut sessions) = state.sessions.lock() {
         if let Some(session) = sessions.get_mut(session_id) {
             if session.pending_turn_id.as_deref() == Some(turn_id) {
                 session.pending_turn_id = None;
             }
+            session.message_queue.reject_dispatch(command_id);
         }
     }
+    let _ = persist_message_queue(state, session_id);
+    publish_message_queue(state, session_id);
 }
 
 fn persist_web_session(state: &AppState, session_id: &str) -> Result<(), String> {
@@ -10089,6 +10157,41 @@ fn emit_worker_activity(
 }
 
 fn mark_core_command_accepted(state: &AppState, session_id: &str, command_id: &str) {
+    let queued = state
+        .sessions
+        .lock()
+        .ok()
+        .and_then(|sessions| {
+            sessions
+                .get(session_id)
+                .map(|session| session.message_queue.item(command_id).is_some())
+        })
+        .unwrap_or(false);
+    if queued {
+        match finish_command_dedup(
+            state,
+            command_id,
+            CommandDedupState::Committed {
+                serialized_event: None,
+                event: None,
+            },
+        ) {
+            Ok(()) => {
+                let _ =
+                    state
+                        .events
+                        .send(command_ack(command_id, CommandAckStatus::Committed, None));
+            }
+            Err(error) => {
+                let _ = state.events.send(command_ack(
+                    command_id,
+                    CommandAckStatus::Accepted,
+                    Some(format!("command_terminal_persist_pending:{error}")),
+                ));
+            }
+        }
+        return;
+    }
     let turn_id = state.sessions.lock().ok().and_then(|mut sessions| {
         let session = sessions.get_mut(session_id)?;
         for turn in &mut session.turns {
@@ -10130,8 +10233,7 @@ fn mark_core_command_accepted(state: &AppState, session_id: &str, command_id: &s
             extra,
         },
     )
-    .and_then(|()| persist_web_session(state, session_id))
-    .and_then(|()| remove_dispatched_next_turn_intent(state, session_id, command_id));
+    .and_then(|()| persist_web_session(state, session_id));
     if let Err(error) = persist_result {
         let _ = state.events.send(command_ack(
             command_id,
@@ -10168,24 +10270,78 @@ fn activate_core_started_turn(
     session_id: &str,
     worker_id: &str,
     command_id: Option<&str>,
-) -> Option<WebTurn> {
+) -> Option<(WebTurn, Option<WebNextTurnPayload>)> {
     let mut sessions = state.sessions.lock().ok()?;
     let session = sessions.get_mut(session_id)?;
+    let mut materialized_payload = None;
+
     let turn_id = if let Some(command_id) = command_id {
-        let pending_turn_id = session.pending_turn_id.as_deref()?;
-        let pending_turn = session
-            .turns
-            .iter()
-            .find(|turn| turn.turn_id == pending_turn_id)?;
-        let matches_command = pending_turn
-            .user_entries
-            .iter()
-            .any(|entry| entry.command_id.as_deref() == Some(command_id));
-        let host_cancelled = session.cancelling_turn_id.as_deref() == Some(pending_turn_id);
-        (matches_command
-            && (host_cancelled
-                || (pending_turn.final_answer.is_none() && pending_turn.completion.is_none())))
-        .then(|| pending_turn.turn_id.clone())?
+        if let Some(item) = session.message_queue.item(command_id).cloned() {
+            if session
+                .message_queue
+                .projection()
+                .dispatching_command_id
+                .as_deref()
+                != Some(command_id)
+            {
+                return None;
+            }
+            let payload = item.payload;
+            let turn = WebTurn {
+                turn_id: payload.turn_id.clone(),
+                state: "pending".to_string(),
+                created_at_ms: payload.created_at_ms,
+                interrupted_at_ms: None,
+                user_entries: vec![WebTurnUserEntry {
+                    kind: "task".to_string(),
+                    text: payload.text.clone(),
+                    attachments: payload.attachments.clone(),
+                    created_at_ms: payload.created_at_ms,
+                    command_id: Some(command_id.to_string()),
+                    delivery_state: Some(ChatCommandDeliveryState::CoreAccepted),
+                    worker_roles: payload.worker_roles.clone(),
+                }],
+                events: Vec::new(),
+                sub_answers: Vec::new(),
+                final_answer: None,
+                completion: None,
+            };
+            session.turns.push(turn);
+            if session.turns.len() > MAX_SESSION_TURNS {
+                let excess = session.turns.len() - MAX_SESSION_TURNS;
+                session.turns.drain(..excess);
+            }
+            session.messages.push(WebChatMessage {
+                id: unique_web_id("msg_user"),
+                role: "user".to_string(),
+                text: payload.text.clone(),
+                created_at_ms: payload.created_at_ms,
+                kind: None,
+                completion: None,
+            });
+            if session.messages.len() > MAX_SESSION_MESSAGES {
+                let excess = session.messages.len() - MAX_SESSION_MESSAGES;
+                session.messages.drain(..excess);
+            }
+            session.message_queue.confirm_turn_started(command_id)?;
+            materialized_payload = Some(payload.clone());
+            payload.turn_id
+        } else {
+            let pending_turn_id = session.pending_turn_id.as_deref()?;
+            let pending_turn = session
+                .turns
+                .iter()
+                .find(|turn| turn.turn_id == pending_turn_id)?;
+            let matches_command = pending_turn
+                .user_entries
+                .iter()
+                .any(|entry| entry.command_id.as_deref() == Some(command_id));
+            let host_cancelled = session.cancelling_turn_id.as_deref() == Some(pending_turn_id);
+            (matches_command
+                && (host_cancelled
+                    || (pending_turn.final_answer.is_none() && pending_turn.completion.is_none())))
+            .then(|| pending_turn.turn_id.clone())?
+        }
     } else {
         session
             .pending_turn_id
@@ -10197,7 +10353,6 @@ fn activate_core_started_turn(
         .turns
         .iter()
         .position(|turn| turn.turn_id == turn_id)?;
-
     if session.pending_turn_id.as_deref() == Some(turn_id.as_str()) {
         session.pending_turn_id = None;
     }
@@ -10212,7 +10367,6 @@ fn activate_core_started_turn(
     if !terminal {
         session.turns[turn_index].state = "working".to_string();
     }
-
     if let Some(worker) = session
         .workers
         .iter_mut()
@@ -10222,9 +10376,9 @@ fn activate_core_started_turn(
             worker.state = "working".to_string();
         }
     }
-
-    Some(session.turns[turn_index].clone())
+    Some((session.turns[turn_index].clone(), materialized_payload))
 }
+
 fn handle_scoped_worker_event(
     state: &AppState,
     session_id: &str,
@@ -10237,9 +10391,37 @@ fn handle_scoped_worker_event(
             mark_core_command_accepted(state, session_id, &command_id);
         }
         CoreSessionWorkerEvent::TurnStarted { command_id } => {
-            if let Some(turn) =
+            if let Some((turn, materialized_payload)) =
                 activate_core_started_turn(state, session_id, worker_id, command_id.as_deref())
             {
+                if let (Some(command_id), Some(payload)) =
+                    (command_id.as_deref(), materialized_payload.as_ref())
+                {
+                    let _ = persist_message_queue(state, session_id)
+                        .and_then(|()| {
+                            append_chat_history_message(
+                                state,
+                                session_id,
+                                &payload.turn_id,
+                                "user",
+                                Some("task"),
+                                Some(command_id),
+                                payload.created_at_ms as i64,
+                                payload.text.clone(),
+                            )
+                        })
+                        .and_then(|()| {
+                            append_worker_roles_history(
+                                state,
+                                session_id,
+                                &payload.turn_id,
+                                payload.created_at_ms as i64,
+                                &payload.worker_roles,
+                            )
+                        })
+                        .and_then(|()| persist_web_session(state, session_id));
+                    publish_message_queue(state, session_id);
+                }
                 publish_core_semantic(
                     state,
                     session_id,
@@ -10270,7 +10452,29 @@ fn handle_scoped_worker_event(
                         let versioned = session.turn_projection.current()?;
                         session.state = match &versioned.projection {
                             TurnProjection::Active(_) => "working",
-                            TurnProjection::Finished(_) => "ready",
+                            TurnProjection::Finished(finished) => {
+                                match &finished.outcome {
+                                    agent_core::TurnProjectionOutcome::Completed => {
+                                        session.message_queue.grant_after_normal_completion();
+                                    }
+                                    agent_core::TurnProjectionOutcome::Cancelled => {
+                                        session.message_queue.block_continuation(
+                                            MessageQueueBlockReason::UserCancelled,
+                                        );
+                                    }
+                                    agent_core::TurnProjectionOutcome::Failed { .. } => {
+                                        session.message_queue.block_continuation(
+                                            MessageQueueBlockReason::TurnFailed,
+                                        );
+                                    }
+                                    agent_core::TurnProjectionOutcome::Interrupted { .. } => {
+                                        session.message_queue.block_continuation(
+                                            MessageQueueBlockReason::TurnInterrupted,
+                                        );
+                                    }
+                                }
+                                "ready"
+                            }
                         }
                         .to_string();
                         Some(versioned)
@@ -10290,6 +10494,8 @@ fn handle_scoped_worker_event(
                     },
                 );
                 if finished {
+                    let _ = persist_message_queue(state, session_id);
+                    publish_message_queue(state, session_id);
                     dispatch_next_turn_intent_if_ready(state, session_id);
                 }
             }
@@ -10801,7 +11007,7 @@ fn handle_scoped_worker_event(
                     .and_then(|sessions| {
                         sessions
                             .get(session_id)
-                            .map(|session| !session.next_turn_intents.is_empty())
+                            .map(|session| !session.message_queue.is_empty())
                     })
                     .unwrap_or(false);
                 if !has_queued_intent {
