@@ -200,6 +200,15 @@ def violations(root: Path) -> list[str]:
     http_source = text(root, "bridges/http_websocket/src/lib.rs")
     if "timem_ui_contract::projections" not in http_source:
         errors.append("HTTP/WebSocket delivery must consume projection semantics from core/ui_contract")
+    http_source_root = root / "bridges/http_websocket/src"
+    http_sources = "\n".join(
+        path.read_text(errors="replace") for path in http_source_root.rglob("*.rs")
+    ) if http_source_root.is_dir() else ""
+    for forbidden in ("timem_shell::", "timem_web::", "interfaces/"):
+        if forbidden in http_sources:
+            errors.append(
+                f"HTTP/WebSocket Bridge source must not depend outward on an Interface/Application: {forbidden}"
+            )
 
     interfaces_root = root / "interfaces"
     if interfaces_root.is_dir():
