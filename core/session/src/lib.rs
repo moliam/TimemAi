@@ -6,6 +6,7 @@ use agent_core::{
     TurnStopSummary, TurnUi, UsageStats,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -312,6 +313,10 @@ enum CoreSessionWorkerCommand {
     },
     UpdateBashApproval {
         mode: agent_core::BashApprovalMode,
+    },
+    ChangeCwd {
+        current_dir: PathBuf,
+        result_tx: Sender<Result<PathBuf, String>>,
     },
     RuntimeConfigUpdated,
     MaxRoundsUpdated,
@@ -697,6 +702,24 @@ impl CoreSessionWorkerHandle {
         self.command_tx
             .send(CoreSessionWorkerCommand::UpdateBashApproval { mode })
             .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    /// Queues a prompt/workspace cwd change before any subsequently queued turn.
+    pub fn change_cwd(&self, current_dir: PathBuf) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        let (result_tx, result_rx) = mpsc::channel();
+        self.command_tx
+            .send(CoreSessionWorkerCommand::ChangeCwd {
+                current_dir,
+                result_tx,
+            })
+            .map_err(|_| "core_session_worker_stopped".to_string())?;
+        result_rx
+            .recv()
+            .map_err(|_| "core_session_worker_stopped".to_string())?
+            .map(|_| ())
     }
 
     pub fn update_runtime_config(
@@ -1329,7 +1352,7 @@ impl CoreSessionWorker {
         };
         let join = thread::spawn(move || {
             let mut identity = worker_config.identity.clone();
-            let workspace = worker_config.workspace.clone();
+            let mut workspace = worker_config.workspace.clone();
             let mut assistant_speaker_name = worker_config
                 .assistant_speaker_name
                 .clone()
@@ -1400,6 +1423,7 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::RunToolGen { .. }
                     | CoreSessionWorkerCommand::Rename { .. }
                     | CoreSessionWorkerCommand::UpdateBashApproval { .. }
+                    | CoreSessionWorkerCommand::ChangeCwd { .. }
                     | CoreSessionWorkerCommand::RuntimeConfigUpdated
                     | CoreSessionWorkerCommand::MaxRoundsUpdated
                     | CoreSessionWorkerCommand::UpdateApiKey { .. }
@@ -1617,6 +1641,23 @@ impl CoreSessionWorker {
                         )
                         .with_worker_scope(&identity.context_id, &identity.worker_id);
                         let _ = event_tx.send(CoreSessionWorkerEvent::Topics(vec![event]));
+                    }
+                    CoreSessionWorkerCommand::ChangeCwd {
+                        current_dir,
+                        result_tx,
+                    } => {
+                        let result = core
+                            .change_prompt_cwd(current_dir.display().to_string())
+                            .map(|canonical| {
+                                workspace.current_dir = Some(canonical.clone());
+                                canonical
+                            });
+                        if let Err(error) = &result {
+                            let _ = event_tx.send(CoreSessionWorkerEvent::ModelError {
+                                error: error.clone(),
+                            });
+                        }
+                        let _ = result_tx.send(result);
                     }
                     CoreSessionWorkerCommand::UpdateBashApproval { mode } => {
                         core.set_bash_approval_mode(mode);
