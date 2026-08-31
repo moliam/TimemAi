@@ -12,7 +12,7 @@ pub mod transport;
 pub use routes::{build_browser_router, BrowserRouteHandlers};
 pub use transport::{
     apply_browser_security_headers, request_origin_allowed, split_json_websocket, InboundJson,
-    JsonWebSocketReceiver, JsonWebSocketSender,
+    JsonWebSocketReceiver, JsonWebSocketSendError, JsonWebSocketSender,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

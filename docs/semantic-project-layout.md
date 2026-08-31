@@ -1,64 +1,50 @@
 # Semantic Project Layout
 
-## Runtime model
+This document is the normative physical ownership and dependency contract. The
+system overview is in [Architecture](architecture.md).
 
-Timem uses one architectural direction:
+## Runtime model
 
 ```text
 Interface ↔ Bridge ↔ Core
 ```
 
-- **Interface** owns presentation and human interaction.
-- **Bridge** owns communication: direct calls/callbacks/channels, HTTP/WebSocket, or IPC.
-- **Core** owns reusable agent semantics, Session/Context/Worker orchestration, UI-neutral
-  contracts, and platform policy.
-
-A Bridge is a logical communication boundary, not a process boundary. Shell and same-process Rust Interfaces may
-use the in-process Bridge without serialization or networking. Browser clients use HTTP/WebSocket.
-A separately running desktop companion may use HTTP/WebSocket or a real IPC Bridge when implemented. No Bridge may invent Agent, Session, Turn,
-cancellation, approval, retry, or lifecycle semantics.
+Interface owns presentation, Bridge owns communication, Core owns reusable and
+authoritative semantics, and Application owns concrete product assembly. A
+Bridge is not necessarily a process boundary.
 
 ## Target physical layout
 
+Only implemented directories are present. Commented extension points below are
+names, not placeholders to create.
+
 ```text
 core/
-  agent/                    # model loop, capabilities, prompt/protocol and agent execution
-  session/                  # Session/Context/Worker lifecycle, scheduling, and use-cases
-  ui_contract/
-    commands/               # UI-neutral requests entering Session use-cases
-    events/                 # semantic events emitted by Core
-    projections/            # authoritative UI-readable state
-  platform/
-    api/                     # target-neutral platform contract
-    shared/                  # implementation shared by multiple targets
-    macos/
-    windows/
-    linux/
+  agent/                    # model, prompt, capabilities, tools, memory, Turn engine
+  session/                  # Session/Context/Worker lifecycle and use cases
+  ui_contract/              # UI-neutral commands, events, topics, projections
+  platform/                 # target-neutral and target-specific OS policy
 bridges/
-  in_process/               # direct functions, callbacks and channels
-  http_websocket/           # browser HTTP/WebSocket and reconnect delivery
-  native_ffi/               # create for a real cross-language same-process client
-  ipc/                      # create for a real desktop companion process transport
+  in_process/               # typed calls, callbacks, and channels
+  http_websocket/           # HTTP/WebSocket routing and reconnect delivery
+  ipc/                      # future: only with a real separate-process consumer
 interfaces/
-  shell/
-  web/
-  desktop/                 # create only with a real implementation
+  shell/                    # terminal interaction and rendering
+  web/                      # browser interaction and rendering
 applications/
-  timem/                   # unified CLI/Web/Shell composition root
-  timem_desktop/           # create only with a real desktop product
-resources/
-tests/
-docs/
-scripts/
+  timem/                    # unified composition root and executable
+resources/                  # capability manifests, tool implementations, resources
+tests/                      # cross-module and product-level tests
+docs/                       # architecture, operation, protocol, and delivery docs
+scripts/                    # quality gates and delivery automation
 ```
 
-The tree describes ownership, not a requirement that every leaf be a separate crate. A directory is
-created only with a real implementation, contract, test, or explicitly truthful unsupported-target
-behavior. Empty placeholders and directory-only claims of platform support are forbidden.
+Do not create `bridges/ipc`, `bridges/native_ffi`, `interfaces/desktop`, or a
+second Application until implementation, consumer, contract, and executable
+tests arrive together. Empty placeholders and directory-only platform claims
+are forbidden.
 
 ## Dependency direction
-
-The intended compile-time direction is:
 
 ```text
 core/platform ───────────────┐
@@ -67,62 +53,25 @@ core/ui_contract ────────────┼──> core/agent ─�
                              └─────────────────────────┘
 
 core/{session,ui_contract} <── bridges/* <── interfaces/*
+applications/* assembles the complete graph
 ```
 
-More precisely:
+Rules:
 
-1. `core/platform` depends on no Agent, Session orchestration, Bridge, or Interface crate.
-2. `core/ui_contract` contains data contracts and pure contract helpers. It depends on neither
-   Session orchestration nor any Bridge/Interface.
-3. `core/agent` owns model/capability execution and may consume platform and UI-contract types. It
-   must not depend on Session orchestration, Bridges, or Interfaces.
-4. `core/session` owns Session/Context/Worker lifecycle, scheduling, and use-cases. It may
-   depend on agent, UI-contract, and platform crates.
-5. Bridges depend inward on Core. Bridges may add transport identity, ordering, serialization,
-   replay, reconnect, and backpressure metadata, but not domain lifecycle rules.
-6. Interfaces depend on the appropriate Bridge and shared UI contracts. Core never depends on an
-   Interface, and one Interface never depends on another.
-7. Package, binary, CLI, persisted-data, and wire-protocol compatibility stays stable during
-   physical moves unless a separately reviewed change documents and tests the exception.
+1. `core/platform` depends on no Agent, Session, Bridge, or Interface crate.
+2. `core/ui_contract` contains data contracts and pure helpers; it depends on no
+   Session orchestration, Bridge, or Interface.
+3. `core/agent` may consume platform and UI-contract types, but never Session,
+   Bridge, Interface, or Application layers.
+4. `core/session` may depend on Agent, UI contract, and platform policy.
+5. Bridges depend inward on Core and add communication mechanics only.
+6. Interfaces depend on their Bridge and shared UI contracts. Core never depends
+   on an Interface, and Interfaces never depend on one another.
+7. Applications compose products and are not reusable dependencies of lower layers.
+8. Physical moves preserve package, binary, CLI, persisted-data, and wire
+   compatibility unless an explicitly reviewed change documents and tests an exception.
 
-The arrows above are the target dependency graph. During extraction, temporary re-exports may
-preserve callers, but they must not introduce a cycle or become permanent duplicate ownership.
-
-## Migration inventory
-
-Migration complete for the physical runtime roots covered by this change:
-
-- The transitional top-level `timem_web/` directory has been removed.
-- The unified executable composition root now lives at `applications/timem/`.
-- The unified Application Cargo package and binary are both `timem`; `timem_web` is neither a
-  package nor a physical architecture root. `timem-web` may exist only as an installer alias.
-- `bridges/in_process` depends on `core/session` and `core/ui_contract`, not directly on Agent.
-- `interfaces/shell` depends on `bridges/in_process` and `core/ui_contract`, not directly on Agent or
-  Session.
-- `bridges/http_websocket` owns fixed HTTP/WebSocket paths and method composition, request bounds,
-  static fallback routing, reusable reconnect/delivery state, generic WebSocket framing, bounded
-  JSON wire I/O, same-origin validation, and browser-safe transport headers.
-  `applications/timem` injects product handlers and retains authentication, snapshots, state, and
-  Session/Core command mapping without recreating the route table or a transitional runtime root.
-
-The in-process Bridge is for **all same-process Rust Interfaces**, not specifically Shell. Shell is
-the first production consumer. A future Rust-native desktop Interface, embedded GUI, or test Host
-reuses the same Bridge. A cross-language same-process desktop client may add `bridges/native_ffi`,
-which adapts ABI ownership and callbacks to `bridges/in_process` rather than duplicating Session
-semantics. A separate-process desktop client may use HTTP/WebSocket or add IPC when real behavior
-and tests exist.
-
-## Extension and no-placeholder rule
-
-The no-placeholder rule remains mandatory. Do not create `interfaces/desktop`,
-`applications/timem_desktop`, `bridges/native_ffi`, or `bridges/ipc` until a real implementation,
-contract, and executable tests are delivered together. Bridge names follow communication mechanics;
-Interface names follow interaction form; Application directories are composition roots for concrete
-products.
-
-## Final dependency graph
-
-All arrows mean “depends on”:
+## Current graph
 
 ```text
 applications/timem
@@ -144,18 +93,33 @@ core/agent -> core/platform
 core/agent -> core/ui_contract
 ```
 
-The browser project communicates with the HTTP/WebSocket Bridge through its wire protocol; it is not
-a Cargo dependency. The Application embeds `interfaces/web/dist` and performs top-level lifecycle,
-mode selection, and dependency assembly.
+`interfaces/web` is a TypeScript project. It consumes the HTTP/WebSocket wire
+contract rather than becoming a Cargo dependency. `applications/timem` embeds
+its tracked `dist` bundle.
+
+## Current architecture contract
+
+The normative 2.0 state is:
+
+- `applications/timem` owns the executable and Cargo package named `timem`;
+  `timem-web` is installer command compatibility only.
+- Shell reaches Session use cases through `bridges/in_process`.
+- HTTP/WebSocket routing and reusable delivery mechanics live in
+  `bridges/http_websocket`; the Application supplies product composition and
+  concrete handlers.
+- The in-process Bridge serves **all same-process Rust Interfaces**, not only
+  Shell.
+- FFI or IPC Bridges exist only when required by a real, tested consumer and
+  adapt to Core semantics rather than duplicating them.
 
 ## Non-regression invariants
 
-- Core remains authoritative for Session, Context, Worker, Turn, input admission, cancellation,
-  terminal outcomes, and structured Interface decisions.
-- Shell/native in-process paths do not acquire network, serialization, or reconnect overhead merely
-  to satisfy the Bridge abstraction.
-- Web keeps bounded command delivery, event ordering, reconnect baselines, authentication, and
-  backpressure behavior.
-- Public semantic types are not replaced with generic text envelopes.
-- Tests move with behavior and remain outside production `src` except minimal external test hooks.
-- No step claims macOS, Windows, or Linux support from names alone.
+- Core is authoritative for Session, Context, Worker, Turn, admission,
+  cancellation, terminal outcomes, and structured Interface decisions.
+- Same-process Interfaces do not acquire networking or serialization overhead.
+- Browser delivery keeps bounded ordering, deduplication, reconnect baselines,
+  authentication, and backpressure behavior.
+- ACK state is not substituted for authoritative business projections.
+- Public semantic types are not replaced by generic text envelopes.
+- Tests move with behavior; production `src` contains only minimal test hooks.
+- New directory names never claim unsupported platform or product behavior.

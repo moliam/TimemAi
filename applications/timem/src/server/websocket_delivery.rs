@@ -607,7 +607,7 @@ async fn send_cached_command_state(
     sender: &mut JsonWebSocketSender,
     command_id: &str,
     state: CommandDedupState,
-) -> Result<(), ()> {
+) -> Result<(), timem_http_websocket::JsonWebSocketSendError> {
     match state {
         CommandDedupState::Accepted => {
             send_event(
@@ -667,6 +667,9 @@ pub(super) async fn run_ordered_blocking_queue<T, R, F>(
     }
 }
 
-async fn send_event(sender: &mut JsonWebSocketSender, event: &WireEvent) -> Result<(), ()> {
+async fn send_event(
+    sender: &mut JsonWebSocketSender,
+    event: &WireEvent,
+) -> Result<(), timem_http_websocket::JsonWebSocketSendError> {
     sender.send(event).await
 }

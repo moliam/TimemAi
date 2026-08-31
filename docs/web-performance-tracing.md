@@ -64,6 +64,11 @@ Command stages:
 | `browser_send` | Browser prepared the command immediately before WebSocket send. |
 | `server_received` | Host parsed the WebSocket command. |
 | `server_execute_start` | Ordered command worker began execution; `queue_ms` measures accepted-to-start delay. |
+| `turn_core_enqueue_start` / `turn_core_enqueue_finish` | Host began and completed admission of a newly published Web Turn into the primary Core worker; the finish record includes Host-local `elapsed_ms`. |
+| `core_turn_started_consumed` | Host consumed Core's typed `TurnStarted` event and can activate/publish the authoritative Turn. |
+| `core_model_request_consumed` | Host consumed a Core `ModelRequest`; includes producer-to-consumer `event_delay_ms` and prompt/API payload sizes. |
+| `debug_prompt_persisted` | Debug prompt artifacts were persisted; includes state, render/write, total persistence, and emitted-to-persisted durations. |
+| `debug_prompt_persist_failed` | Debug prompt persistence failed; includes the bounded failure reason. |
 | `supplement_handle_start` | Host entered supplement handling. |
 | `supplement_active_turn_observed` / `supplement_no_active_turn` | Host's active-turn branch decision. |
 | `supplement_core_accepted` / `supplement_core_rejected_closed_turn` | Core accepted the supplement or reported that the turn had closed. |
@@ -75,6 +80,20 @@ Command stages:
 
 Session-switch stages are `browser_session_selected` and
 `browser_session_painted` with the same generated command ID.
+
+### Initial capability negotiation
+
+For a Session/model combination whose native tool-call capability is not yet
+resolved, Core may perform a capability probe after `core_turn_started_consumed`
+and before the first formal `core_model_request_consumed`. A large interval in
+that sequence does not prove that Turn activation, Web delivery, or debug prompt
+persistence caused the delay. Correlate provider audit evidence and compare a
+subsequent request after the capability result is cached.
+
+Likewise, `debug_prompt_persisted.record_total_ms` measures only the synchronous
+debug persistence segment after the ModelRequest reaches the Host.
+`emitted_to_persisted_ms` also includes event-queue delay. Neither field includes
+time spent before Core emits that ModelRequest.
 
 ## Evidence-based interpretation
 

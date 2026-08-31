@@ -40,7 +40,8 @@ fn extract_response_examples(text: &str) -> Vec<String> {
 
 #[test]
 fn documented_xml_response_example_extraction_accepts_crlf() {
-    let crlf = XML_RESPONSE_PROTOCOL_SECTION.replace("\n", "\r\n");
+    let lf = XML_RESPONSE_PROTOCOL_SECTION.replace("\r\n", "\n");
+    let crlf = lf.replace("\n", "\r\n");
     assert_eq!(
         extract_response_examples(&crlf),
         extract_response_examples(XML_RESPONSE_PROTOCOL_SECTION)
