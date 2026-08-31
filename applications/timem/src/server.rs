@@ -2454,14 +2454,14 @@ If it is the old Timem process, request a graceful stop, verify that it exited, 
             "
   kill -TERM {}
   while kill -0 {} 2>/dev/null; do sleep 1; done
-  cargo run -p timem_web -- --public --debug",
+  cargo run -p timem -- --public --debug",
             owner.pid, owner.pid,
         ));
         #[cfg(windows)]
         message.push_str(&format!(
             "
   taskkill /PID {} /T
-  cargo run -p timem_web -- --public --debug",
+  cargo run -p timem -- --public --debug",
             owner.pid,
         ));
     } else {
@@ -2488,7 +2488,7 @@ Find the process that currently holds the lock:",
         "
 
 Escape route: start with a different MEM without touching the active one:
-  cargo run -p timem_web -- --public --debug --space /absolute/path/to/another-mem
+  cargo run -p timem -- --public --debug --space /absolute/path/to/another-mem
 
 Do not delete the lock file while a process still holds it. The operating system releases the held lock when the owner process exits; then retry the original MEM.",
     );
@@ -2513,7 +2513,7 @@ fn friendly_memory_space_error(error: String, data_dir: &std::path::Path, space:
     if error == "mem_guard_timeout" {
         let space_dir = absolute_path(web_layout_for_space(data_dir, space).space_dir());
         format!(
-            "The selected Timem workspace is still locked by another running operation.\n\n  data dir: {}\n  space:    {}\n  location: {}\n\nTimem automatically recovers locks left by processes that have exited. If this message persists, another Timem process is still using this workspace. Close that process and retry, or start with a different workspace:\n\n  cargo run -p timem_web -- --space /absolute/path/to/another-mem\n\n`--space` must be an absolute MEM directory path. Do not delete the lock while another Timem process is running.",
+            "The selected Timem workspace is still locked by another running operation.\n\n  data dir: {}\n  space:    {}\n  location: {}\n\nTimem automatically recovers locks left by processes that have exited. If this message persists, another Timem process is still using this workspace. Close that process and retry, or start with a different workspace:\n\n  cargo run -p timem -- --space /absolute/path/to/another-mem\n\n`--space` must be an absolute MEM directory path. Do not delete the lock while another Timem process is running.",
             data_dir.display(),
             space,
             space_dir.display(),
@@ -2526,10 +2526,10 @@ fn friendly_memory_space_error(error: String, data_dir: &std::path::Path, space:
 fn friendly_bind_error(error: String, requested_port: Option<u16>) -> String {
     match (error.as_str(), requested_port) {
         ("requested_port_unavailable", Some(port)) => format!(
-            "Port {port} is already in use or cannot be opened. Stop the process using it, choose another port, or let Timem select one automatically:\n\n  cargo run -p timem_web\n  cargo run -p timem_web -- --port 18080"
+            "Port {port} is already in use or cannot be opened. Stop the process using it, choose another port, or let Timem select one automatically:\n\n  cargo run -p timem\n  cargo run -p timem -- --port 18080"
         ),
         (error, _) if error.starts_with("no_available_port_in_range:") => format!(
-            "Timem could not open a local web port in the supported range {PORT_START}–{PORT_END}. Check whether local-network access is blocked by a firewall or sandbox, then retry with an explicit port:\n\n  cargo run -p timem_web -- --port 18080\n\nIf another Timem Web process is running, close it first."
+            "Timem could not open a local web port in the supported range {PORT_START}–{PORT_END}. Check whether local-network access is blocked by a firewall or sandbox, then retry with an explicit port:\n\n  cargo run -p timem -- --port 18080\n\nIf another Timem Web process is running, close it first."
         ),
         _ => error,
     }

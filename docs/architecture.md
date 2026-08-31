@@ -9,7 +9,7 @@ semantics.
 ## Current Product Shape
 
 - `applications/timem` is the product composition root and owns the `timem`
-  binary. Its Cargo package remains `timem_web` for command compatibility.
+  binary. Its Cargo package is also named `timem`.
 - `interfaces/web` is the browser presentation layer. It communicates through
   the reconnectable HTTP/WebSocket delivery boundary.
 - `interfaces/shell` is the terminal presentation layer. It enters synchronous
@@ -342,7 +342,7 @@ capture, launcher-exit monitoring, and SIGINT/SIGTERM/SIGHUP registration stay
 there; `server.rs` consumes platform-neutral shutdown triggers. Storage-specific permissions remain in their owning storage modules; the per-MEM
 Web-instance lease and in-memory semantic delivery stay in dedicated Web host modules.
 
-`applications/timem` is the product composition root around Core, Interfaces, and Bridges, not a second agent runtime. The Cargo package remains `timem_web` for command compatibility. It binds
+`applications/timem` is the product composition root around Core, Interfaces, and Bridges, not a second agent runtime. The Cargo package and binary are both named `timem`. It binds
 to `127.0.0.1` by default and binds to `0.0.0.0` only after the explicit
 `--public` option. Browser, API, upload, and WebSocket access remain protected
 by one per-process token in either mode. The host embeds the production
@@ -358,8 +358,8 @@ parsing, and tool execution remain in `agent_core`.
 Generic WebSocket frame splitting, one-pass JSON wire encoding/decoding, same-origin validation,
 and browser-safe response headers live in `bridges/http_websocket`. Product authentication,
 route composition, authoritative snapshot construction, command admission, ACK correlation, and
-Session/Core dispatch remain in `applications/timem`. The Cargo package identity `timem_web` is
-compatibility-only and does not denote a separate architecture module.
+Session/Core dispatch remain in `applications/timem`. The removed Cargo package identity
+`timem_web` must not return and does not denote a separate architecture module; only an installer-created `timem-web` command alias may remain.
 
 The product-side WebSocket delivery loop never executes host commands inline. Each connection
 uses one bounded FIFO command queue whose worker runs synchronous filesystem and Session
@@ -376,7 +376,7 @@ calling a worker. Missing credentials reject only that Send/ToolGen request;
 Shell and actual model calls continue to use strict model service validation.
 
 The Web Session is also the runtime-configuration ownership boundary. On
-creation, `timem_web` copies the current host defaults and applies a validated
+creation, `timem` copies the current host defaults and applies a validated
 allowlist of Session overrides for model service, model, wire/response protocols,
 base URL, token limits, timeout, approval/work-instruction policy, and API key.
 Existing Sessions are immutable when host defaults change; later Sessions see
@@ -502,7 +502,7 @@ and live-turn height semantics.
 
 The Web session snapshot includes the prompt context's cwd. When Core reports a
 successful prompt-context cwd change, its existing `core.action` finish topic
-includes `context_state.cwd`. `timem_web` updates the authoritative session before
+includes `context_state.cwd`. `timem` updates the authoritative session before
 forwarding the event, and the browser reducer updates only the matching session.
 This keeps reconnects, navigation, the composer, and later `run_bash` execution
 on the same cwd without creating a separate fine-grained topic.

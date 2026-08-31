@@ -26,8 +26,8 @@ core/ui_contract          UI-neutral commands, events, and projections
 core/platform             reusable OS policy
 ```
 
-The Cargo package name `timem_web` remains for command compatibility; there is
-no top-level `timem_web/` source root. Do not create placeholder desktop, FFI,
+The Cargo package and binary are both named `timem`; there is no Cargo package or
+top-level source root named `timem_web`. Installers may expose `timem-web` only as a compatibility alias. Do not create placeholder desktop, FFI,
 or IPC directories. A future same-process Rust Interface reuses
 `bridges/in_process`; other Bridges are added only with a real consumer and
 executable behavior.

@@ -1471,14 +1471,14 @@ describe("web topic view model", () => {
         "turn_event_1787626168440_155",
         "finish",
         "background_running",
-        { cmd: "cargo test -p timem_web", tail_out: true, timeout_ms: 300000 },
+        { cmd: "cargo test -p timem", tail_out: true, timeout_ms: 300000 },
         "call_TNTIyS9Gv3eSjDujSijCLyUD",
       ),
       actionEvent(
         "turn_event_1787626188091_162",
         "finish",
         "failed",
-        { cmd: "cargo test -p timem_web" },
+        { cmd: "cargo test -p timem" },
         "call_TNTIyS9Gv3eSjDujSijCLyUD",
       ),
     ]);

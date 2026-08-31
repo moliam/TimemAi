@@ -100,7 +100,7 @@ coalesced.
 
 ### Ordered delivery and snapshot recovery
 
-`timem_web::semantic_delivery::OrderedEventDelivery` supplies the in-memory
+`timem::semantic_delivery::OrderedEventDelivery` supplies the in-memory
 linearization point. The WebSocket integration follows this order:
 
 1. Subscribe to live publication.

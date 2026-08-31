@@ -12670,12 +12670,12 @@ fn startup_resource_errors_are_actionable_instead_of_internal_codes() {
         friendly_memory_space_error("mem_guard_timeout".to_string(), &data_dir, ".test_mem");
     assert!(locked.contains("locked by another running operation"));
     assert!(locked.contains("automatically recovers locks"));
-    assert!(locked.contains("cargo run -p timem_web -- --space"));
+    assert!(locked.contains("cargo run -p timem -- --space"));
     assert!(!locked.contains("mem_guard_timeout"));
 
     let requested = friendly_bind_error("requested_port_unavailable".to_string(), Some(18080));
     assert!(requested.contains("Port 18080"));
-    assert!(requested.contains("cargo run -p timem_web"));
+    assert!(requested.contains("cargo run -p timem"));
     assert!(!requested.contains("requested_port_unavailable"));
 
     let exhausted = friendly_bind_error(

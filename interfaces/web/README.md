@@ -30,7 +30,7 @@ Run checks after UI changes:
 ```bash
 pnpm --dir interfaces/web test --run
 pnpm --dir interfaces/web build
-cargo test -p timem_web
+cargo test -p timem
 ```
 
 Commit application source, tests, lockfile updates, and rebuilt `dist` assets

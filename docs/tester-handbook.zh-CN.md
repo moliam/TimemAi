@@ -36,7 +36,7 @@ interfaces/web   <──> applications/timem + bridges/http_websocket
                                       └────> core/session ──> core/agent
 ```
 
-`applications/timem` 负责统一产品装配；Cargo 包名 `timem_web` 仅为命令兼容，
+`applications/timem` 负责统一产品装配；Cargo 包名与二进制名均为 `timem`，
 不是顶层物理目录。测试归属必须遵循以下边界：
 
 | 层 | 负责内容 | 重点验证 |
@@ -45,7 +45,7 @@ interfaces/web   <──> applications/timem + bridges/http_websocket
 | `core/session` | Session/Context/Worker 生命周期、调度和用例编排 | Worker 隔离、命令顺序、停止/关闭、配置传播和跨 Context 并发 |
 | `bridges/in_process` | 所有同进程 Rust Interface 的类型化同步调用/回调 | 不序列化、不改写生命周期、与 Session 直接语义等价 |
 | `interfaces/shell`（包名 `timem_shell`） | 终端输入、菜单、渲染、Shell 专属命令 | CJK、粘贴、多行、窄终端、重绘、取消、第二次输入是否可继续 |
-| `bridges/http_websocket` + `applications/timem`（包名 `timem_web`） | Web 认证、Session 路由、命令可靠投递、快照、事件和 Host 生命周期 | Session 隔离、命令确认、重连恢复、顺序、并发、Host 生命周期 |
+| `bridges/http_websocket` + `applications/timem`（包名 `timem`） | Web 认证、Session 路由、命令可靠投递、快照、事件和 Host 生命周期 | Session 隔离、命令确认、重连恢复、顺序、并发、Host 生命周期 |
 | `interfaces/web` | 浏览器交互、渲染、草稿、队列、响应式布局 | 用户操作、可访问性、状态展示、断线体验、长页面、跨标签页一致性 |
 | 安装与资源 | 安装脚本、配置、内嵌 Web bundle、能力清单 | 干净安装、版本一致、资源完整、升级兼容、无敏感信息 |
 
@@ -192,7 +192,7 @@ interfaces/web   <──> applications/timem + bridges/http_websocket
 cargo fmt --all -- --check
 cargo test -p agent_core <相关测试名>
 cargo test -p timem_shell <相关测试名>
-cargo test -p timem_web <相关测试名>
+cargo test -p timem <相关测试名>
 pnpm --dir interfaces/web test -- <相关前端测试文件>
 git diff --check
 ```
@@ -655,7 +655,7 @@ cargo test --workspace --locked -- --test-threads=1
 # 单 crate
 cargo test -p agent_core
 cargo test -p timem_shell
-cargo test -p timem_web
+cargo test -p timem
 
 # 前端依赖、测试、构建
 pnpm --dir interfaces/web install --frozen-lockfile

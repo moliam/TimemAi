@@ -1,5 +1,5 @@
 [package]
-name = "timem_web"
+name = "timem"
 build = "build.rs"
 edition.workspace = true
 version.workspace = true
