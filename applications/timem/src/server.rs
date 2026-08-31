@@ -3937,6 +3937,7 @@ fn session_has_live_work_for_mem_switch(session: &WebSession) -> bool {
             .any(|worker| worker.state == "working")
         || !session.pending_unconsumed_supplements.is_empty()
         || session.pending_work_instruction_turn.is_some()
+        || !session.message_queue.is_empty()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3976,6 +3977,29 @@ fn interrupt_old_mem_sessions_after_worker_shutdown(
     state: &AppState,
     live_sessions: &[MemSwitchLiveSession],
 ) -> Result<(), String> {
+    let queued_items = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        live_sessions
+            .iter()
+            .filter_map(|live| {
+                sessions.get(&live.session_id).map(|session| {
+                    (
+                        live.session_id.clone(),
+                        session.message_queue.projection().items.clone(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    for (session_id, items) in &queued_items {
+        for item in items {
+            append_interrupted_queued_message_history(state, session_id, item)?;
+        }
+    }
+
     {
         let mut sessions = state
             .sessions
@@ -4012,6 +4036,32 @@ fn interrupt_old_mem_sessions_after_worker_shutdown(
             } else {
                 session.state = aggregate_web_session_state(&session.workers, "ready");
             }
+
+            // A confirmed MEM switch transfers execution ownership to another
+            // MEM. Materialize accepted input as interrupted history, then drop
+            // every executable queue/dispatch field before the old MEM is left.
+            let queued = session.message_queue.projection().items.clone();
+            for item in &queued {
+                if let Some(turn) = session
+                    .turns
+                    .iter_mut()
+                    .find(|turn| turn.turn_id == item.payload.turn_id)
+                {
+                    if turn.final_answer.is_none() && turn.completion.is_none() {
+                        turn.state = "interrupted".to_string();
+                        turn.interrupted_at_ms.get_or_insert(interrupted_at_ms);
+                    }
+                    continue;
+                }
+                let (message, turn) = interrupted_turn_from_queued_message(item, interrupted_at_ms);
+                session.messages.push(message);
+                session.turns.push(turn);
+            }
+            session
+                .messages
+                .sort_by_key(|message| message.created_at_ms);
+            session.turns.sort_by_key(|turn| turn.created_at_ms);
+            session.message_queue = SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS);
             session.active_turn_id = None;
             session.cancelling_turn_id = None;
             session.pending_turn_id = None;
@@ -4020,6 +4070,7 @@ fn interrupt_old_mem_sessions_after_worker_shutdown(
         }
     }
     for live in live_sessions {
+        persist_message_queue(state, &live.session_id)?;
         persist_web_session(state, &live.session_id)?;
     }
     Ok(())
@@ -4979,6 +5030,76 @@ fn resolve_restart_cwd_decision(
     }
 }
 
+/// Converts Host-accepted queued input into non-executable interrupted history.
+///
+/// Runtime restart and confirmed MEM switch are execution-ownership boundaries:
+/// no command, dispatch grant, or queue item may cross them. Keeping the user
+/// entry visible is presentation/history preservation only; it must never be
+/// interpreted as permission to recreate or resume a Core Turn.
+fn interrupted_turn_from_queued_message(
+    item: &timem_session::message_queue::MessageQueueItem<WebNextTurnPayload>,
+    interrupted_at_ms: u128,
+) -> (WebChatMessage, WebTurn) {
+    let payload = &item.payload;
+    (
+        WebChatMessage {
+            id: format!(
+                "history_msg_{}_{}_user",
+                payload.turn_id, payload.created_at_ms
+            ),
+            role: "user".to_string(),
+            text: payload.text.clone(),
+            created_at_ms: payload.created_at_ms,
+            kind: Some("task".to_string()),
+            completion: None,
+        },
+        WebTurn {
+            turn_id: payload.turn_id.clone(),
+            state: "interrupted".to_string(),
+            created_at_ms: payload.created_at_ms,
+            interrupted_at_ms: Some(interrupted_at_ms),
+            user_entries: vec![WebTurnUserEntry {
+                kind: "task".to_string(),
+                text: payload.text.clone(),
+                attachments: payload.attachments.clone(),
+                created_at_ms: payload.created_at_ms,
+                command_id: Some(item.command_id.clone()),
+                delivery_state: Some(ChatCommandDeliveryState::Recorded),
+                worker_roles: payload.worker_roles.clone(),
+            }],
+            events: Vec::new(),
+            sub_answers: Vec::new(),
+            final_answer: None,
+            completion: None,
+        },
+    )
+}
+
+fn append_interrupted_queued_message_history(
+    state: &AppState,
+    session_id: &str,
+    item: &timem_session::message_queue::MessageQueueItem<WebNextTurnPayload>,
+) -> Result<(), String> {
+    let payload = &item.payload;
+    append_chat_history_message(
+        state,
+        session_id,
+        &payload.turn_id,
+        "user",
+        Some("task"),
+        Some(&item.command_id),
+        payload.created_at_ms as i64,
+        payload.text.clone(),
+    )?;
+    append_worker_roles_history(
+        state,
+        session_id,
+        &payload.turn_id,
+        payload.created_at_ms as i64,
+        &payload.worker_roles,
+    )
+}
+
 fn restore_stored_session(
     state: &AppState,
     stored: StoredSession,
@@ -5073,7 +5194,7 @@ fn restore_stored_session(
         SESSION_HISTORY_PAGE_LIMIT,
     )?;
     let history_records = history_page.records;
-    let messages = restored_messages_from_history_records(&history_records);
+    let mut messages = restored_messages_from_history_records(&history_records);
     let mut turns = restored_turns_from_history_records(&history_records);
     mark_restored_interrupted_turn(
         &mut turns,
@@ -5090,23 +5211,34 @@ fn restore_stored_session(
         .map(|path| path.display().to_string());
     let (mcp_config_revision, applied_mcp_config_revision) =
         initial_mcp_revisions(&stored.mcp_server_ids);
-    let message_queue = load_message_queue_resilient(state, &stored.session_id);
-    let queued_turn_ids = message_queue
-        .projection()
-        .items
-        .iter()
-        .map(|item| item.payload.turn_id.clone())
-        .collect::<BTreeSet<_>>();
-    for turn in &mut turns {
-        if queued_turn_ids.contains(&turn.turn_id)
-            && turn.final_answer.is_none()
-            && turn.completion.is_none()
-        {
-            turn.state = "interrupted".to_string();
-            turn.interrupted_at_ms
-                .get_or_insert(stored.updated_at_ms.max(0) as u128);
+    let restored_message_queue = load_message_queue_resilient(state, &stored.session_id);
+    let message_queue = if record_runtime_restart {
+        let interrupted_at_ms = now_ms();
+        for item in &restored_message_queue.projection().items {
+            if let Some(turn) = turns
+                .iter_mut()
+                .find(|turn| turn.turn_id == item.payload.turn_id)
+            {
+                if turn.final_answer.is_none() && turn.completion.is_none() {
+                    turn.state = "interrupted".to_string();
+                    turn.interrupted_at_ms.get_or_insert(interrupted_at_ms);
+                }
+                continue;
+            }
+            append_interrupted_queued_message_history(state, &stored.session_id, item)?;
+            let (message, turn) = interrupted_turn_from_queued_message(item, interrupted_at_ms);
+            messages.push(message);
+            turns.push(turn);
         }
-    }
+        messages.sort_by_key(|message| message.created_at_ms);
+        turns.sort_by_key(|turn| turn.created_at_ms);
+        // A real process restart invalidates all execution ownership. Persisting
+        // an empty queue below prevents a later ordinary completion from ever
+        // granting or dispatching work accepted by the previous Runtime.
+        SessionMessageQueue::new(MAX_NEXT_TURN_INTENTS)
+    } else {
+        restored_message_queue
+    };
     {
         let mut sessions = state
             .sessions
@@ -5239,16 +5371,17 @@ fn append_runtime_restart_history_marker(state: &AppState, session_id: &str) -> 
 fn mark_restored_interrupted_turn(
     turns: &mut [WebTurn],
     state: StoredSessionState,
-    last_turn_id: Option<&str>,
+    _last_turn_id: Option<&str>,
     interrupted_at_ms: u128,
 ) {
     if state != StoredSessionState::Interrupted {
         return;
     }
-    let Some(last_turn_id) = last_turn_id else {
-        return;
-    };
-    if let Some(turn) = turns.iter_mut().find(|turn| turn.turn_id == last_turn_id) {
+    // Session interruption is an execution-domain boundary, not a pointer to
+    // one privileged Turn. Every non-terminal Turn belonged to the stopped
+    // Runtime/MEM and must remain history-only after restore. `last_turn_id` is
+    // retained in storage for indexing/compatibility, never as resume authority.
+    for turn in turns {
         if turn.final_answer.is_none() && turn.completion.is_none() {
             turn.state = "interrupted".to_string();
             turn.interrupted_at_ms.get_or_insert(interrupted_at_ms);

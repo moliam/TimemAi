@@ -1538,7 +1538,7 @@ fn unmatched_core_turn_started_does_not_activate_an_unrelated_pending_intent() {
 }
 
 #[test]
-fn restored_interrupted_marker_targets_only_the_persisted_last_turn() {
+fn restored_interrupted_session_marks_every_unfinished_turn() {
     let mut turns = vec![
         WebTurn {
             turn_id: "older_unfinished".to_string(),
@@ -1571,13 +1571,12 @@ fn restored_interrupted_marker_targets_only_the_persisted_last_turn() {
         99,
     );
 
-    assert_eq!(turns[0].state, "restored");
-    assert_eq!(turns[1].state, "interrupted");
-    assert_eq!(turns[1].interrupted_at_ms, Some(99));
+    assert!(turns.iter().all(|turn| turn.state == "interrupted"));
+    assert!(turns.iter().all(|turn| turn.interrupted_at_ms == Some(99)));
 }
 
 #[test]
-fn restored_interrupted_marker_never_relabels_terminal_or_unrelated_turns() {
+fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn() {
     let terminal = WebTurn {
         turn_id: "terminal_last".to_string(),
         state: "completed".to_string(),
@@ -1589,7 +1588,7 @@ fn restored_interrupted_marker_never_relabels_terminal_or_unrelated_turns() {
         final_answer: None,
         completion: Some(json!({"stop_reason": "model_error"})),
     };
-    let older = WebTurn {
+    let unfinished = WebTurn {
         turn_id: "older_unfinished".to_string(),
         state: "restored".to_string(),
         created_at_ms: 1,
@@ -1600,32 +1599,31 @@ fn restored_interrupted_marker_never_relabels_terminal_or_unrelated_turns() {
         final_answer: None,
         completion: None,
     };
-    let mut turns = vec![older, terminal];
+    let mut turns = vec![unfinished, terminal];
 
-    mark_restored_interrupted_turn(
-        &mut turns,
-        StoredSessionState::Interrupted,
-        Some("terminal_last"),
-        99,
-    );
-    assert_eq!(turns[0].state, "restored");
-    assert_eq!(turns[1].state, "completed");
-
-    mark_restored_interrupted_turn(
-        &mut turns,
-        StoredSessionState::Ready,
-        Some("older_unfinished"),
-        99,
-    );
     mark_restored_interrupted_turn(&mut turns, StoredSessionState::Interrupted, None, 99);
+    assert_eq!(turns[0].state, "interrupted");
+    assert_eq!(turns[0].interrupted_at_ms, Some(99));
+    assert_eq!(turns[1].state, "completed");
+
+    let mut ready_turns = vec![WebTurn {
+        turn_id: "ready_unfinished".to_string(),
+        state: "restored".to_string(),
+        created_at_ms: 3,
+        interrupted_at_ms: None,
+        user_entries: Vec::new(),
+        events: Vec::new(),
+        sub_answers: Vec::new(),
+        final_answer: None,
+        completion: None,
+    }];
     mark_restored_interrupted_turn(
-        &mut turns,
-        StoredSessionState::Interrupted,
-        Some("missing_turn"),
+        &mut ready_turns,
+        StoredSessionState::Ready,
+        Some("ready_unfinished"),
         99,
     );
-    assert_eq!(turns[0].state, "restored");
-    assert_eq!(turns[1].state, "completed");
+    assert_eq!(ready_turns[0].state, "restored");
 }
 
 #[test]
@@ -6654,6 +6652,21 @@ fn confirmed_mem_switch_stops_real_worker_persists_interruption_and_never_redriv
     let entered = Arc::new(AtomicUsize::new(0));
     let session_id = register_cancellable_mem_switch_worker(&state, Arc::clone(&entered), &root);
     let turn = submit_turn(&state, &session_id, "keep running".to_string()).unwrap();
+    handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("queued-before-mem-switch"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "must stop with the old MEM".to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap();
     let started = Instant::now();
     while entered.load(Ordering::SeqCst) == 0 {
         assert!(started.elapsed() < Duration::from_secs(3));
@@ -6677,7 +6690,6 @@ fn confirmed_mem_switch_stops_real_worker_persists_interruption_and_never_redriv
         .all(|status| status.identity.session_id != session_id));
     let stored = old_store.load_session(&session_id).unwrap().unwrap();
     assert_eq!(stored.state, StoredSessionState::Interrupted);
-    assert_eq!(stored.last_turn_id.as_deref(), Some(turn.turn_id.as_str()));
 
     let mut events = state.events.subscribe();
     switch_mem_space(&state, TEST_PORT, &alpha.display().to_string(), false).unwrap();
@@ -6696,6 +6708,20 @@ fn confirmed_mem_switch_stops_real_worker_persists_interruption_and_never_redriv
             .state,
         "interrupted"
     );
+    let queued = restored
+        .turns
+        .iter()
+        .find(|candidate| {
+            candidate
+                .user_entries
+                .iter()
+                .any(|entry| entry.command_id.as_deref() == Some("queued-before-mem-switch"))
+        })
+        .expect("queued input remains visible after switching back");
+    assert_eq!(queued.state, "interrupted");
+    assert_eq!(queued.user_entries[0].text, "must stop with the old MEM");
+    assert!(restored.message_queue.is_empty());
+    assert!(load_message_queue(&state, &session_id).unwrap().is_empty());
     thread::sleep(Duration::from_millis(30));
     while let Ok(event) = events.try_recv() {
         assert!(!matches!(event, WireEvent::TurnStarted { .. }));
@@ -10413,7 +10439,7 @@ fn repeated_user_sends_during_an_active_turn_are_ordered_supplements() {
 }
 
 #[test]
-fn runtime_restart_restores_persisted_message_queue_without_redrive() {
+fn runtime_restart_interrupts_and_clears_persisted_message_queue() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("restart_restores_queue"));
     std::fs::create_dir_all(&root).unwrap();
@@ -10482,19 +10508,25 @@ fn runtime_restart_restores_persisted_message_queue_without_redrive() {
         1
     );
     let sessions = restarted.sessions.lock().unwrap();
-    assert_eq!(sessions[&session_id].message_queue.len(), 1);
-    let queue = sessions[&session_id].message_queue.projection();
-    assert_eq!(queue.items[0].command_id, "queued-command");
     assert!(
-        queue.dispatching_command_id.is_none(),
-        "restart must release a persisted in-flight dispatch reservation"
+        sessions[&session_id].message_queue.is_empty(),
+        "runtime restart is a hard boundary and must not retain executable work"
     );
-    assert_eq!(
-        queue.continuation,
-        timem_session::message_queue::MessageQueueContinuation::AwaitingNormalCompletion,
-        "restart must not retain an automatic continuation grant"
-    );
+    let interrupted = sessions[&session_id]
+        .turns
+        .iter()
+        .find(|turn| {
+            turn.user_entries
+                .iter()
+                .any(|entry| entry.command_id.as_deref() == Some("queued-command"))
+        })
+        .expect("accepted queued input remains visible as interrupted history");
+    assert_eq!(interrupted.state, "interrupted");
+    assert_eq!(interrupted.user_entries[0].text, "queued survives");
     drop(sessions);
+    assert!(load_message_queue(&restarted, &session_id)
+        .unwrap()
+        .is_empty());
     let manager = {
         let mut guard = restarted.manager.lock().unwrap();
         std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
