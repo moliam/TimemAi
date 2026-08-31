@@ -1317,6 +1317,7 @@ fn late_core_working_events_cannot_revive_an_accepted_cancellation() {
         &context_id,
         &worker_id,
         CoreSessionWorkerEvent::ModelRequest {
+            emitted_at_ms: 0,
             round: 1,
             prompt: String::new(),
             interaction_profile: None,
@@ -7454,6 +7455,7 @@ fn barrier_synchronized_sessions_keep_request_action_final_and_completion_scoped
                     &state,
                     &session_id,
                     CoreSessionWorkerEvent::ModelRequest {
+                        emitted_at_ms: 0,
                         round: 1,
                         prompt: String::new(),
                         interaction_profile: None,
@@ -7562,6 +7564,7 @@ fn one_session_aggregates_primary_and_subworker_state_without_cross_finishing() 
         &primary_context_id,
         &primary_worker_id,
         CoreSessionWorkerEvent::ModelRequest {
+            emitted_at_ms: 0,
             round: 1,
             prompt: String::new(),
             interaction_profile: None,
@@ -7575,6 +7578,7 @@ fn one_session_aggregates_primary_and_subworker_state_without_cross_finishing() 
         &sub_context_id,
         &sub_worker_id,
         CoreSessionWorkerEvent::ModelRequest {
+            emitted_at_ms: 0,
             round: 1,
             prompt: String::new(),
             interaction_profile: None,
@@ -7661,6 +7665,7 @@ fn primary_turn_finish_clears_stale_working_workers_and_session_spinner() {
         &primary_context_id,
         &primary_worker_id,
         CoreSessionWorkerEvent::ModelRequest {
+            emitted_at_ms: 0,
             round: 1,
             prompt: String::new(),
             interaction_profile: None,
@@ -7830,6 +7835,7 @@ fn stopped_primary_turn_removes_its_stale_reported_working_count() {
         &primary_context_id,
         &primary_worker_id,
         CoreSessionWorkerEvent::ModelRequest {
+            emitted_at_ms: 0,
             round: 1,
             prompt: String::new(),
             interaction_profile: None,
@@ -7913,6 +7919,7 @@ fn stopped_primary_turn_preserves_a_reported_active_subworker() {
         &primary_context_id,
         &primary_worker_id,
         CoreSessionWorkerEvent::ModelRequest {
+            emitted_at_ms: 0,
             round: 1,
             prompt: String::new(),
             interaction_profile: None,
@@ -8015,6 +8022,7 @@ fn primary_turn_finish_preserves_explicitly_reported_active_subworker() {
         &primary_context_id,
         &primary_worker_id,
         CoreSessionWorkerEvent::ModelRequest {
+            emitted_at_ms: 0,
             round: 1,
             prompt: String::new(),
             interaction_profile: None,
@@ -8096,6 +8104,7 @@ fn primary_turn_finish_ignores_other_sessions_global_worker_count() {
         &primary_context_id,
         &primary_worker_id,
         CoreSessionWorkerEvent::ModelRequest {
+            emitted_at_ms: 0,
             round: 1,
             prompt: String::new(),
             interaction_profile: None,
@@ -9220,6 +9229,7 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
         &state,
         session_id,
         CoreSessionWorkerEvent::ModelRequest {
+            emitted_at_ms: 0,
             round: 1,
             prompt: "debug prompt".to_string(),
             interaction_profile: Some(agent_core::InteractionProfile {
@@ -9345,6 +9355,7 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
         &state,
         session_id,
         CoreSessionWorkerEvent::ModelRequest {
+            emitted_at_ms: 0,
             round: 2,
             prompt: "inline retry prompt".to_string(),
             interaction_profile: Some(agent_core::InteractionProfile {

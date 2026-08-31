@@ -19,6 +19,13 @@ pub use timem_ui_contract::projections::{
     CoreSessionWorkerLifecycleState, CoreSessionWorkerStatus,
 };
 
+fn unix_timestamp_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
 /// Typed Agent compatibility API exposed through the Session boundary.
 pub use agent_core as agent_api;
 
@@ -259,6 +266,7 @@ pub enum CoreSessionWorkerEvent {
     Topics(Vec<CoreTopicEvent>),
     ModelRequest {
         round: u32,
+        emitted_at_ms: u128,
         prompt: String,
         interaction_profile: Option<agent_core::InteractionProfile>,
         interaction_request: Option<Box<agent_core::ModelInteractionRequest>>,
@@ -2063,6 +2071,7 @@ impl TurnUi for WorkerTurnUi {
     ) {
         let _ = self.event_tx.send(CoreSessionWorkerEvent::ModelRequest {
             round,
+            emitted_at_ms: unix_timestamp_ms(),
             prompt: request.rendered_prompt.clone(),
             interaction_profile: self.interaction_profile.clone(),
             interaction_request: Some(Box::new(request.clone())),
