@@ -4969,7 +4969,9 @@ fn session_create_and_restore_defer_unavailable_mcp_discovery_until_send() {
                 ],
                 env: BTreeMap::new(),
             },
-            request_timeout_ms: 100,
+            // Keep discovery in `connecting` long enough to prove that turn
+            // preparation returns while the external MCP process is still blocked.
+            request_timeout_ms: 2_000,
         });
         mem.mcp_store.save(&mem.mcp_configs).unwrap();
     }
@@ -5029,28 +5031,36 @@ fn session_create_and_restore_defer_unavailable_mcp_discovery_until_send() {
     );
     drop(sessions);
 
-    let started = Instant::now();
     assert_eq!(
         schedule_selected_session_mcp_refreshes(&restarted).unwrap(),
         1
+    );
+    let connect_deadline = Instant::now() + Duration::from_secs(2);
+    while !marker.exists() {
+        assert!(
+            Instant::now() < connect_deadline,
+            "background MCP discovery did not start"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        mcp_reports(&restarted.mem.lock().unwrap())[0].state,
+        "connecting",
+        "prewarm must return while external MCP discovery is still blocked"
     );
     assert_eq!(
         schedule_selected_session_mcp_refreshes(&restarted).unwrap(),
         0,
         "an in-flight MCP discovery must be deduplicated"
     );
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "background MCP prewarm must return immediately"
-    );
 
-    let started = Instant::now();
     assert!(apply_pending_session_mcp(&restarted, &session_id).unwrap());
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "turn preparation must not wait for MCP discovery"
+    assert_eq!(
+        mcp_reports(&restarted.mem.lock().unwrap())[0].state,
+        "connecting",
+        "turn preparation must return before external MCP discovery completes"
     );
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(4);
     loop {
         let report = mcp_reports(&restarted.mem.lock().unwrap())
             .into_iter()
