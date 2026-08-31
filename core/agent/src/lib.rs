@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+pub use timem_ui_contract::preferences::{AssistantResponseFormat, InterfacePreferences};
 
 type ParallelActionResult = (usize, ParsedAction, ActionOutcome, Option<Duration>);
 type ApprovedParallelBashResult = (
@@ -1660,6 +1661,7 @@ pub struct AgentCore {
     static_prompt: String,
     rendered_static_prompt: String,
     startup_stamp: String,
+    interface_preferences: InterfacePreferences,
     profile: CoreProfile,
     pub(crate) capabilities: CapabilityRegistry,
     mcp_runtime: mcp::McpRuntime,
@@ -1717,6 +1719,20 @@ impl AgentCore {
         profile: CoreProfile,
         memory_dir: impl AsRef<Path>,
     ) -> Self {
+        Self::new_with_interface_preferences(
+            static_prompt,
+            profile,
+            memory_dir,
+            InterfacePreferences::default(),
+        )
+    }
+
+    pub fn new_with_interface_preferences(
+        static_prompt: impl Into<String>,
+        profile: CoreProfile,
+        memory_dir: impl AsRef<Path>,
+        interface_preferences: InterfacePreferences,
+    ) -> Self {
         let memory_dir = memory_dir.as_ref();
         let self_tool = SelfToolState::new(
             std::env::vars().collect::<BTreeMap<_, _>>(),
@@ -1731,19 +1747,21 @@ impl AgentCore {
         let assistant_speaker_name = "TIMEM_ASSISTANT".to_string();
         let startup_stamp = runtime_time_context();
         let current_prompt_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let rendered_static_prompt = prompt_render::render_static_prompt_for_mode(
+        let rendered_static_prompt = prompt_render::render_static_prompt_for_mode_with_preferences(
             &static_prompt,
             &capabilities,
             response_protocol.suite(),
             &assistant_speaker_name,
             &startup_stamp,
             ToolCallMode::Inline,
+            interface_preferences,
         );
         Self {
             memory_dir: memory_dir.to_path_buf(),
             static_prompt,
             rendered_static_prompt,
             startup_stamp,
+            interface_preferences,
             profile,
             capabilities,
             mcp_runtime: mcp::McpRuntime::default(),
@@ -1877,10 +1895,11 @@ impl AgentCore {
     }
 
     pub fn fork_ephemeral_context(&self, cwd: impl AsRef<Path>) -> Self {
-        let mut fork = Self::new(
+        let mut fork = Self::new_with_interface_preferences(
             self.static_prompt.clone(),
             self.profile.clone(),
             &self.memory_dir,
+            self.interface_preferences,
         );
         fork.capabilities = self.capabilities.clone();
         fork.configured_inline_response_protocol = self.configured_inline_response_protocol;
@@ -2254,13 +2273,14 @@ impl AgentCore {
         self.self_tool.set_env_value(key, value);
     }
     fn refresh_rendered_static_prompt(&mut self) {
-        self.rendered_static_prompt = prompt_render::render_static_prompt_for_mode(
+        self.rendered_static_prompt = prompt_render::render_static_prompt_for_mode_with_preferences(
             &self.static_prompt,
             &self.capabilities,
             self.response_protocol.suite(),
             &self.assistant_speaker_name,
             &self.startup_stamp,
             self.resolved_tool_call_mode,
+            self.interface_preferences,
         );
     }
     pub fn set_capability_registry(&mut self, capabilities: CapabilityRegistry) {
@@ -7312,6 +7332,8 @@ struct FfiCoreConfig {
     static_prompt: String,
     memory_dir: String,
     profile: CoreProfile,
+    #[serde(default)]
+    interface_preferences: InterfacePreferences,
 }
 
 #[derive(Debug, Deserialize)]
@@ -7334,7 +7356,12 @@ pub extern "C" fn timem_core_new(config_json: *const c_char) -> *mut AgentCoreHa
         return std::ptr::null_mut();
     };
     Box::into_raw(Box::new(AgentCoreHandle {
-        core: AgentCore::new(config.static_prompt, config.profile, config.memory_dir),
+        core: AgentCore::new_with_interface_preferences(
+            config.static_prompt,
+            config.profile,
+            config.memory_dir,
+            config.interface_preferences,
+        ),
     }))
 }
 

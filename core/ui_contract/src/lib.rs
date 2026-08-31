@@ -5,4 +5,5 @@
 
 pub mod commands;
 pub mod message_fifo;
+pub mod preferences;
 pub mod projections;
