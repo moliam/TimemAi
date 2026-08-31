@@ -18,10 +18,12 @@ description: |
 prompt_input: |
   Use type=path for runtime-resource locations. Use type=cwd without new_path to
   query the current prompt-context directory. To change it, set new_path to an
-  absolute path or a path relative to the current prompt-context cwd. Use
-  type=params for effective runtime configuration and limits.
+  absolute path or a path relative to the current prompt-context cwd.
+  Promptly switch the cwd to help users better understand your work.
+  Use type=params for effective runtime configuration and limits.
 prompt_result: |
-  path returns relevant runtime file and directory locations. cwd without
+  path returns relevant runtime file and directory locations, including audit
+  logical streams and their physical rolling-segment directories. cwd without
   new_path returns `CWD: ...` without changing state. cwd with new_path changes
   the prompt-context directory and returns `CWD changed to: ...`; later run_bash
   and readfile actions in the same context use the canonical path. params returns

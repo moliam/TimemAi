@@ -31,25 +31,22 @@
 TimemAi 的主链路是：
 
 ```text
-Shell UI / Web UI
-        ↓
-Host（timem_shell / timem_web）
-        ↓
-agent_core
-        ↓
-模型传输层 / LLM
-        ↓
-工具执行、存储、审计与结构化事件
+interfaces/shell ──> bridges/in_process ──> core/session ──> core/agent
+interfaces/web   <──> applications/timem + bridges/http_websocket
+                                      └────> core/session ──> core/agent
 ```
 
-测试归属必须遵循以下边界：
+`applications/timem` 负责统一产品装配；Cargo 包名与二进制名均为 `timem`，
+不是顶层物理目录。测试归属必须遵循以下边界：
 
 | 层 | 负责内容 | 重点验证 |
 |---|---|---|
-| `agent_core` | turn 状态机、模型协议、工具、上下文、内存、审计、重试、取消 | 语义和状态是否正确；坏输入是否安全；动作是否只执行一次或按契约重放 |
-| `timem_shell` | 终端输入、菜单、渲染、Shell 专属命令 | CJK、粘贴、多行、窄终端、重绘、取消、第二次输入是否可继续 |
-| `timem_web` | Web Host、认证、Session Worker、命令路由、快照、事件与持久化 | Session 隔离、命令确认、重连恢复、顺序、并发、Host 生命周期 |
-| `web_ui` | 浏览器交互、渲染、草稿、队列、响应式布局 | 用户操作、可访问性、状态展示、断线体验、长页面、跨标签页一致性 |
+| `core/agent`（包名 `agent_core`） | Turn、模型协议、工具、上下文、内存、审计、重试、取消 | 语义和状态是否正确；坏输入是否安全；动作是否只执行一次或按契约重放 |
+| `core/session` | Session/Context/Worker 生命周期、调度和用例编排 | Worker 隔离、命令顺序、停止/关闭、配置传播和跨 Context 并发 |
+| `bridges/in_process` | 所有同进程 Rust Interface 的类型化同步调用/回调 | 不序列化、不改写生命周期、与 Session 直接语义等价 |
+| `interfaces/shell`（包名 `timem_shell`） | 终端输入、菜单、渲染、Shell 专属命令 | CJK、粘贴、多行、窄终端、重绘、取消、第二次输入是否可继续 |
+| `bridges/http_websocket` + `applications/timem`（包名 `timem`） | Web 认证、Session 路由、命令可靠投递、快照、事件和 Host 生命周期 | Session 隔离、命令确认、重连恢复、顺序、并发、Host 生命周期 |
+| `interfaces/web` | 浏览器交互、渲染、草稿、队列、响应式布局 | 用户操作、可访问性、状态展示、断线体验、长页面、跨标签页一致性 |
 | 安装与资源 | 安装脚本、配置、内嵌 Web bundle、能力清单 | 干净安装、版本一致、资源完整、升级兼容、无敏感信息 |
 
 ### 2.1 Core 与 UI 必须双向验证
@@ -195,8 +192,8 @@ agent_core
 cargo fmt --all -- --check
 cargo test -p agent_core <相关测试名>
 cargo test -p timem_shell <相关测试名>
-cargo test -p timem_web <相关测试名>
-pnpm --dir web_ui/timem-web test -- <相关前端测试文件>
+cargo test -p timem <相关测试名>
+pnpm --dir interfaces/web test -- <相关前端测试文件>
 git diff --check
 ```
 
@@ -378,27 +375,26 @@ TIMEM_EDGE_ITERATIONS=5 scripts/edge_regression.sh
 - 重复 Stop 幂等；取消覆盖当前 Session 的主/子 worker、模型请求、前台工具和已注册后台任务，不影响其他 Session。
 - Stop 后的新任务只在权威取消完成后按 FIFO 启动；模型/系统错误不触发自动续发，也不以 `ready` 状态代替完成。
 
-### 8.4 可靠性交付与重连
+### 8.4 一次投递与重连
 
 严格按 `docs/web_reliability_test_matrix.md` 注入故障：
 
-- 写 socket 后、Host accept 前断开。
-- accept 后、commit 前断开。
-- commit 后丢最终 ack。
-- 重复 `command_id`、相同 payload 不同 ID、队列满。
+- 写 socket 后、Host 收到前断开；不得自动重试。
+- Host accept 后断开；Host 可独立完成，浏览器靠重连 Snapshot 恢复。
+- commit 后丢最终 ACK；不得因 ACK 丢失重发命令。
+- 当前进程内重复 `command_id`、相同 payload 不同 ID、队列/去重容量满。
 - snapshot 构建期间发生 mutation。
-- live broadcast lag 后按 cursor replay。
+- bounded live broadcast lag 后请求完整 Snapshot baseline。
 - 等待人工决策时断线重连。
-- Host 在 history 写入与 Core handoff 之间崩溃。
-- 四 Session 同时恢复，task 与 ordered supplements 原子交付。
+- Host/Core 进程重启后，unfinished Turn 按权威 Session 规则恢复为 interrupted，不重驱浏览器命令。
 
 核心判定：
 
-- 同一 ID 不产生重复领域效果。
-- 不同 ID 即使 payload 相同，也代表两次用户意图。
-- `accepted` 之前不能从浏览器 outbox 删除。
-- ack A 不能改变命令 B。
-- 刷新后 pending/accepted 命令从持久化浏览器存储恢复。
+- 浏览器不持久化 Outbox，不跨断线、刷新或 tab 重放命令。
+- `accepted` ACK 不修改业务成功状态；ACK A 不能改变命令 B。
+- 同一 ID 只在当前进程且记录仍驻留时防重；不同 ID 即使 payload 相同也代表两次操作。
+- command dedup、命令队列、事件通道都有硬上限；满时明确拒绝而非增长。
+- 不生成 `web_command_dedup.json`、逐命令 ledger 或持续累积碎片文件。
 
 ### 8.5 附件、MCP、Role 与决策
 
@@ -659,12 +655,12 @@ cargo test --workspace --locked -- --test-threads=1
 # 单 crate
 cargo test -p agent_core
 cargo test -p timem_shell
-cargo test -p timem_web
+cargo test -p timem
 
 # 前端依赖、测试、构建
-pnpm --dir web_ui/timem-web install --frozen-lockfile
-pnpm --dir web_ui/timem-web test
-pnpm --dir web_ui/timem-web build
+pnpm --dir interfaces/web install --frozen-lockfile
+pnpm --dir interfaces/web test
+pnpm --dir interfaces/web build
 
 # 高风险重复回归
 TIMEM_EDGE_ITERATIONS=5 scripts/edge_regression.sh
@@ -673,7 +669,7 @@ TIMEM_EDGE_ITERATIONS=5 scripts/edge_regression.sh
 scripts/performance_guard.sh
 
 # Release 构建
-cargo build --locked -p timem_shell -p timem_web --release
+cargo build --locked --release --bin timem
 
 # 敏感信息与格式
 scripts/sensitive_scan.sh --current

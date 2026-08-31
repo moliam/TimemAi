@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 workspace_version="$(sed -nE 's/^version = "([^"]+)"$/\1/p' Cargo.toml | head -n 1)"
-frontend_version="$(node -p "require('./web_ui/timem-web/package.json').version")"
+frontend_version="$(node -p "require('./interfaces/web/package.json').version")"
 
 if [ -z "$workspace_version" ]; then
   echo "unable to read workspace package version from Cargo.toml" >&2
@@ -17,7 +17,7 @@ if [ "$workspace_version" != "$frontend_version" ]; then
   exit 1
 fi
 
-for package in agent_core timem_shell timem_web; do
+for package in agent_core timem_shell timem; do
   if ! awk -v package="$package" -v version="$workspace_version" '
     $0 == "name = \"" package "\"" { found = 1; in_package = 1; next }
     in_package && /^name = / { in_package = 0 }

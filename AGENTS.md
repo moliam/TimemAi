@@ -1,96 +1,136 @@
-# Timem development guardrails
+# TimemAi Development Contract
 
-This file records project-level principles that future agents must read before
-making changes. Keep it short, concrete, and enforceable.
+本文件是仓库级开发契约。修改代码前必须阅读；进入具体模块时，还必须阅读该目录的
+`module_boundary.md`。详细设计、迁移记录和测试矩阵放在 `docs/`，不要堆入本文件。
 
-## Delivery discipline
+## 1. 目录结构与归属
 
-- Develop in the source project first. For split/public packages, modify
-  `timem_ios` or the canonical source first, verify, then sync outward.
-- Do not push remote changes until local implementation, tests, docs, and
-  release-quality checks are complete.
-- Every small feature needs an architecture/requirement consistency check:
-  confirm it matches the user's actual requirement, has reasonable UX, and
-  covers normal, edge, and awkward user flows.
-- New functionality must be tested end to end, not only by isolated helper
-  tests. Include multi-turn flows when the feature participates in agent
-  interaction.
-- Test functions and fixture corpora belong under each crate's `tests`
-  directory, not in production files under `src`. A `src` module may retain
-  only the minimal `#[cfg(test)]` path/module declaration or test-only hook
-  required for private white-box access.
-- Tests should challenge behavior with malformed model output, boundary sizes,
-  cancellation, retries, and realistic terminal interaction where relevant.
-- Do not use real user private facts, paths, keys, internal URLs, or personal
-  conversations as test fixtures or public docs.
-- User-facing docs are part of the product. When behavior, architecture,
-  install/run flow, host support, or release gates change, update README and
-  the relevant docs in the same change. Keep README as a concise entry point;
-  move detailed design, protocol, and test matrices under `docs/`.
+```text
+core/
+  agent/              # 模型循环、能力执行、Prompt/协议
+  session/            # Session/Context/Worker/Turn 生命周期与用例
+  ui_contract/        # UI 中立的命令、事件、投影和语义类型
+  platform/           # 平台契约及 macOS/Windows/Linux 实现
+bridges/
+  in_process/         # 同进程类型化调用、回调和通道
+  http_websocket/     # HTTP/WebSocket、序列、重放和重连
+interfaces/
+  shell/              # 终端交互与渲染
+  web/                # 浏览器交互与渲染；dist 为受版本控制的构建产物
+applications/
+  timem/              # 统一产品组合根与唯一真实可执行程序
+resources/            # 能力清单、工具实现及共享资源
+tests/                # 跨模块/产品级测试
+docs/                 # 架构、协议、测试、安装和发布文档
+scripts/              # 架构守卫、质量门禁和交付脚本
+```
 
-## Architecture boundaries
+统一产品的 Cargo 包名与二进制名均为 `timem`；`timem_shell`、`agent_core` 等可复用 crate 名不代表物理目录归属。不得恢复 Cargo 包 `timem_web`。
+不要恢复旧根目录 `timem_web/`、`timem_shell/`、`web_ui/`、`agent_core/` 或
+`core/agent/src/os/`。完整布局见 `docs/semantic-project-layout.md`。
 
-- The intended runtime chain is:
-  `host UI -> agent_core -> model transport -> LLM`.
-- `timem_shell` is a terminal host/UI. It owns terminal input, menus, rendering,
-  shell-only slash commands, and local process startup.
-- `timem_shell` must not implement model HTTP, model transport, model
-  response interpretation, cache-control protocol, or model response protocol
-  parsing.
-- `timem_shell` must not execute model-requested tools such as `run_bash`.
-  Tool execution, action evidence, capability validation, and tool audit belong
-  to `agent_core`/executor. Shell only renders action topics, shows approval UI,
-  collects user decisions, and signals cancellation.
-- `agent_core` owns reusable agent state, turn execution, prompt/context
-  management, model response protocol parsing, capability execution,
-  model cache planning, model transport, audit semantics, and structured
-  topic/request output.
-- Model API HTTP/payload logic lives inside `agent_core` for now. It may later
-  move to a model transport crate, but it must not move into shell UI code.
-- Core/UI communication is structured. Core provides semantic structures,
-  reports, topic events, request topics, and outcomes. UI renders those
-  structures in its own style.
-- UI is allowed to understand public protocol fields. The goal is not a dumb UI;
-  the goal is one shared core/UI contract so Rust shell, Swift, web, and IPC
-  hosts do not each invent different meanings.
-- Do not collapse semantically different strings into generic `text`. Preserve
-  meanings such as final answer, job progress, action intent, command evidence,
-  diagnostic reason, and status metadata.
-- Core may return strings when the string itself is data, such as model
-  `final_answer`, model service message, path, id, or diagnostic reason. Core should
-  not embed terminal-specific localized copy, ANSI styling, or UI layout.
-- Topic events are owned by core while callbacks run. If a host wants to render
-  later, cross a thread/process boundary, or store events for tests/logs, it
-  must copy/clone the event or the needed fields before the callback returns.
+## 2. 架构设计
 
-## Prompt and protocol rules
+唯一语义方向是：
 
-- Runtime must not try to understand natural-language user semantics with
-  hard-coded case logic. If behavior depends on meaning, expose evidence/tools
-  and let the model reason.
-- Prompt is a protocol between runtime and model. Be precise about fields that
-  runtime parses, and concise about natural-language guidance.
-- The model is not a traditional backward-compatible client. When protocol is
-  intentionally changed before public release, update prompt, parser, tests, and
-  examples together instead of keeping old compatibility paths.
-- Capability descriptions should be useful to the model in natural language,
-  while executor validation remains structured and authoritative.
-- Built-in tool capability packages are paired files under
-  `resources/capabilities/tools/`: `{tool}.yaml` is the model/executor
-  interface and manifest-derived validation source, and `{tool}.rs` is the
-  concrete tool callback implementation. `agent_core` may know builtin action
-  names for dispatch, but concrete tool parameter parsing and execution belong
-  to the tool implementation, not the top-level turn loop.
-- Do not leak runtime internals unless the user asks for implementation details.
-  In normal answers, avoid exposing internal memory structures, tool caps, or
-  protocol mechanics.
+```text
+Interface ↔ Bridge ↔ Core
+```
 
-## Shell UX rules
+- **Interface** 只负责人机交互、布局、渲染、可访问性和 UI 本地便利功能。
+- **Bridge** 只负责通信、路由、序列化、排序、重放、重连和背压。
+- **Core** 负责可复用的 Agent/Session 语义、权威状态、能力执行、持久化规则和平台策略。
+- **Application** 只负责组装具体产品、选择运行模式和注入依赖。
 
-- `Ctrl+C` and `Esc` mean cancel the current user activity. During model work,
-  `Ctrl+C` also cancels the current thinking/model turn. A single accidental
-  `Ctrl+C` should not abruptly exit the whole process.
-- Terminal rendering must be tested with multi-line input, paste, CJK text,
-  malformed paste labels, retries, long status text, and cancellation paths.
-- Shell-only UI conveniences may live in `timem_shell`, but reusable behavior
-  that web/iOS would need belongs in `agent_core`.
+依赖必须向内：
+
+```text
+interfaces/* -> bridges/* -> core/{session,ui_contract}
+core/session -> core/{agent,ui_contract,platform}
+core/agent   -> core/{ui_contract,platform}
+```
+
+`core/platform` 不得依赖 Agent、Session、Bridge 或 Interface；Core 不得依赖 Interface；
+Interface 之间不得相互依赖。同进程 Rust Interface 使用 `bridges/in_process`，不得为了抽象
+强加网络或序列化。浏览器通过 HTTP/WebSocket Bridge 通信。
+
+Core 对 Session、Context、Worker、Turn、输入准入、取消和终态拥有最终解释权。Bridge
+不得发明领域状态机；Interface 不得根据字符串、事件时序、Worker 数量或可见输出反推生命周期。
+保留语义类型，不要把最终答案、进度、意图、证据、诊断和状态压成通用 `text`。
+
+### 客户端权威状态边界
+
+WebUI、Shell、Desktop App 等 Interface 都只是 Host 的客户端与视图层，必须遵守：
+
+- 客户端快速提交 command，不得在收到 Host 权威响应前自行制造、确认或展示领域状态。
+- Host 与 Core 同进程协作；Host 将 Core/Session 的权威状态转换为类型化状态投影、topic 或 event，
+  再通过对应 Bridge 发送给客户端。
+- 客户端只根据 Host 返回的投影、topic 或 event 更新业务视图；command ACK 仅表示投递/受理结果，
+  除非协议明确规定，否则不得替代领域状态投影。
+- 客户端可以保留草稿、面板展开、拖拽预览等纯 UI 瞬时状态，但不得持久化或跨重连重放
+  command outbox，也不得保留一份能够决定执行、调度或可见业务事实的影子队列/影子状态机。
+- 浏览器刷新、页面关闭、客户端断线或锁屏不得改变 Host/Core 已受理工作的所有权和执行语义；
+  重连后必须由 Host 快照及事件重放恢复视图。
+
+该边界适用于所有 Interface，不得只在 Web 实现中成立。需要乐观 UI 时，必须使用协议中显式定义、
+可与权威状态区分且可回滚的展示类型，不能把乐观状态冒充 Core/Session 事实。
+
+## 3. 扩展原则
+
+- 新目录必须对应真实消费者、明确契约、已实现行为和可执行测试；禁止空占位和名称式支持声明。
+- 同进程 Rust 客户端复用 `bridges/in_process`。
+- 跨语言同进程客户端确有需要时，才添加 `bridges/native_ffi`，并适配到 in-process Bridge。
+- 独立进程客户端优先复用 HTTP/WebSocket；只有通信语义确需时才添加 `bridges/ipc`。
+- 新交互形态放入 `interfaces/<kind>`；新产品组合根放入 `applications/<product>`。
+- 扩展不能复制 Agent、Session、Turn、取消、审批、重试或生命周期语义。
+- 物理迁移默认保持包名、二进制、CLI、数据格式和线协议兼容；例外必须单独说明并测试。
+
+## 4. 模块原则
+
+- 行为放入拥有该语义的最内层模块；跨层便利不是越界理由。
+- 模块保持内聚、命名表达语义、依赖显式、公开 API 最小化；优先组合与窄接口。
+- Prompt 和模型响应格式属于协议。修改时必须同步生产端、解析、校验、修复、样例和测试。
+- 内置工具保持 `resources/capabilities/tools/{tool}.yaml` 与 `{tool}.rs` 成对；清单定义接口，
+  实现负责解析与执行，顶层 Turn 循环不得吸收工具细节。
+- Core topic 回调在调用期间同步且由 Core 所有；异步保留前必须复制所需数据。
+- 测试优先通过真实公开边界；测试主体放在各 crate 的 `tests/`，生产 `src` 仅允许最小测试钩子。
+- 模块规则与本文件冲突时，以本文件为准，并在同一变更中修正文档冲突。
+
+## 5. 硬性约束
+
+- 选择修复根因的最小完整改动，不混入无关重构或投机抽象。
+- 禁止硬编码自然语言关键词来判断用户意图；提供结构化证据和能力，由模型完成语义判断。
+- 权限、所有权、破坏性操作、进程身份和平台支持必须 fail closed。
+- 不得静默吞错；区分无效输入、能力不可用、瞬时失败、取消和内部缺陷，并提供已脱敏上下文。
+- 避免无界集合/队列/历史/重试、异步路径阻塞、无界轮询、重复重建和不必要的全文件读取或克隆。
+  不得用仅进程内存替代磁盘增长问题：传输去重、队列和事件缓存都必须有硬上限，容量耗尽时明确拒绝；
+  不得新增按命令或事件持续累积的碎片文件、ledger 或日志。
+- 不得提交密钥、真实用户路径、私有事实、内部 URL、对话、临时文件、依赖目录或调试残留。
+- Web 源码变化必须重新生成并提交 `interfaces/web/dist`，且解释所有产物差异。
+- 行为变化必须同时更新受影响的源码、测试、架构守卫、文档和生成资产。
+- 不得通过削弱、删除或绕过失败测试来制造成功。
+- 未经用户明确要求，不得 push、发布、打 tag 或改写远端历史。
+
+## 6. 交付与验证
+
+修改前：检查现状、调用方、相关历史、模块边界和风险；明确兼容约束及测试计划。
+修改中：先跑窄测试，保持语义归属，及时清理临时产物。提交前：格式化并运行适用门禁，
+至少执行改动模块测试和 `git diff --check`；架构、热路径、Web 或发布相关改动还需运行对应守卫。
+
+权威完整门禁是 `scripts/ci.sh`。常用专项检查：
+
+```bash
+python3 scripts/architecture_guard.py --self-test
+scripts/module_boundary_check.sh
+scripts/test_contract_check.sh
+cargo fmt --all -- --check
+scripts/clippy_check.sh
+cargo test --workspace --locked -- --test-threads=1
+pnpm --dir interfaces/web test
+pnpm --dir interfaces/web build
+git diff --exit-code -- interfaces/web/dist
+scripts/performance_guard.sh
+```
+
+测试覆盖原则和功能登记见 `docs/test-strategy.md`、`docs/feature-test-management.md`。
+任何适用门禁未运行或失败时，必须准确报告原因与剩余风险；不得仅凭代码审阅宣称完成。

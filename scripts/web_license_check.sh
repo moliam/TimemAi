@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WEB_DIR="$ROOT_DIR/web_ui/timem-web"
+WEB_DIR="$ROOT_DIR/interfaces/web"
 
 if [ ! -d "$WEB_DIR/node_modules/.pnpm" ]; then
-  echo "error: web dependencies are not installed; run pnpm --dir web_ui/timem-web install --frozen-lockfile" >&2
+  echo "error: web dependencies are not installed; run pnpm --dir interfaces/web install --frozen-lockfile" >&2
   exit 1
 fi
 
@@ -13,7 +13,7 @@ node <<'NODE'
 const fs = require("fs");
 const path = require("path");
 
-const storeRoot = path.join("web_ui", "timem-web", "node_modules", ".pnpm");
+const storeRoot = path.join("interfaces", "web", "node_modules", ".pnpm");
 const allowed = new Set([
   "0BSD",
   "Apache-2.0",
@@ -80,6 +80,11 @@ function normalizeLicense(value) {
 }
 
 walk(storeRoot);
+
+if (packages.size === 0) {
+  console.error(`web dependency license check failed: no packages found under ${storeRoot}`);
+  process.exit(1);
+}
 
 const failures = [];
 for (const [key, metadata] of packages) {

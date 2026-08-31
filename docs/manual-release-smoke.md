@@ -10,7 +10,7 @@ release notes or PR summary.
 
 ## Web Browser Matrix
 
-Run `timem-web` with a fake model server for deterministic behavior, then repeat a
+Run `timem` with a fake model server for deterministic behavior, then repeat a
 short live-model-service turn only when credentials are intentionally available.
 
 Required rows before a broad Web release:
@@ -23,7 +23,7 @@ Required rows before a broad Web release:
 
 Suggested fake-model-server sequence:
 
-1. Start `target/release/timem-web --no-open` with
+1. Start `target/release/timem --no-open` with
    `TIMEM_BASE_URL=http://127.0.0.1:<fake-model-server-port>/v1`.
 2. Submit one simple task.
 3. Submit one action-producing task.
@@ -35,7 +35,7 @@ Suggested fake-model-server sequence:
 The automated `scripts/web_runtime_lifecycle_smoke.sh` additionally proves that
 the complete authenticated URL can be reused after independent page connections
 close, and that a stopped runtime can immediately restart with the same data and
-port. It also force-kills the shell process that launched `timem-web` without
+port. It also force-kills the shell process that launched Timem Web mode without
 forwarding a shutdown signal, then verifies that the Web Host exits on its own
 and immediately releases its port and per-memory ownership lock. A restart
 intentionally rotates the token; the newly printed URL is the credential for the
@@ -65,12 +65,12 @@ Use a disposable VM, container, or fresh user account.
 
 Acceptance:
 
-- `./install.sh` installs `timem`, `timem-native-rs`, and `timem-web` without
+- `./install.sh` installs one `timem` executable plus a `timem-web` compatibility alias without
   requiring undocumented manual steps.
 - `cp env_template env && source env` works after adding a test API key/model.
 - `timem --help` matches README startup/config guidance.
-- `timem` starts, `/help` is intercepted by the shell UI, and `/exit` exits.
-- `timem-web --no-open` prints a loopback URL and serves the embedded Web UI.
+- `timem --shell` starts, `/help` is intercepted by the shell UI, and `/exit` exits.
+- `timem --no-open` prints a loopback URL and serves the embedded Web UI.
 - `./uninstall.sh` removes installed commands without deleting user-managed env
   files or memory data.
 
@@ -102,13 +102,13 @@ Acceptance:
 
 | Date | Commit | Host | Scope | Result |
 |---|---|---|---|---|
-| 2026-07-16 | `fd6ac7f` | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser | Fake-model-server Web smoke on `timem-web --no-open`: initial desktop layout, task submit, rapid repeated Stop/Send during an active turn, second turn completion, console error check, 390px mobile viewport composer/overflow check. | Passed: no horizontal overflow, composer stayed visible, session state returned from busy to ready, no `active_turn_not_found`/runtime-error text, no browser console errors. |
+| 2026-07-16 | `fd6ac7f` | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser | Fake-model-server Web smoke on `timem --no-open`: initial desktop layout, task submit, rapid repeated Stop/Send during an active turn, second turn completion, console error check, 390px mobile viewport composer/overflow check. | Passed: no horizontal overflow, composer stayed visible, session state returned from busy to ready, no `active_turn_not_found`/runtime-error text, no browser console errors. |
 | 2026-07-17 | working tree | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser, Aliyun XML model service | Manual ToolGen live-model-service smoke: complete a tool-using task, invoke ToolGen from that task's completion row, provide optional guidance, run the same Session/Context turn, self-test and publish one Session tool, then inspect it through ToolRepo. | Passed: the source final answer remained visible; one semantically named tool was published after runtime validation; the composer control count changed from 0 to 1; ToolRepo rendered its tree, synopsis, README, and source; desktop and 390px mobile layouts had no overlap or horizontal overflow. Three genuinely malformed model responses (non-array action payload, invalid JSON, and malformed CDATA closing) were repaired successfully and retained as protocol-robustness evidence. No credential, raw audit payload, or local Session identifier is recorded here. |
 | 2026-07-20 | working tree | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser | Responsive layout smoke at 1280px, 768px, 390px, and 320px, including shell width, composer width, header width, document overflow, and mobile sidebar transform/visibility. | Passed: each viewport had no horizontal overflow; the app shell matched the viewport width; the composer remained inside the shell; at 320px the sidebar stayed hidden off-canvas until explicitly opened. |
 | 2026-07-21 | `df659df` | macOS Darwin 25.5.0 arm64, release shell binary under `expect` pseudo-TTY | `scripts/real_tty_smoke.expect`: startup, `/help`, `/prof`, bracketed multiline paste, edited paste recovery with return-to-edit/cancel, `/config` protocol switch and invalid custom endpoint rejection, `/workspace` cancel, `/exit`. | Passed: shell commands were intercepted locally without model calls; paste placeholders rendered in reverse video; recovery prompts accepted Ctrl+C/Esc/return-to-edit paths; no duplicate prompt row or stuck input was detected by the smoke. |
 | 2026-07-21 | `a897439` | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser, fake OpenAI-compatible model service | Rebuilt `timem-web` release binary, opened authenticated local Web UI, confirmed connected baseline, stopped the runtime process, then inspected the page with the Activity panel closed. | Passed: sidebar state changed to `Runtime exited. Restart timem-web.`, the main chat workspace rendered a visible `Runtime exited` banner with restart guidance, and the document had no horizontal overflow. |
 | 2026-07-21 | working tree | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser, fake model server through OpenAI Responses wire protocol | Rebuilt `timem-web`, started `scripts/fake_openai_server.py`, opened authenticated Web UI, submitted one simple task, then stopped the Web host and inspected the still-open page. | Passed: default XML response completed without protocol repair, final answer and token telemetry rendered, composer stayed docked with no horizontal overflow, and after Web host shutdown the page showed `Runtime exited` plus restart guidance while disabling the composer. |
-| 2026-07-21 | `1.0` working tree | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser, fake OpenAI-compatible model service | Browser UX smoke on `timem-web --no-open`: authenticated startup, connected baseline, one user turn, final answer telemetry, desktop overflow check, 390px mobile overflow/composer check, then Web host shutdown while the page stayed open. | Passed: Session0, cwd, mem, and `Runtime connected` rendered; final answer and token telemetry appeared; desktop and 390px views had no horizontal overflow; composer stayed visible and enabled while runtime was connected; after shutdown, the page showed `Runtime exited` / `Restart timem-web` and disabled the composer. |
+| 2026-07-21 | `1.0` working tree | macOS Darwin 25.5.0 arm64, Codex in-app Chromium browser, fake OpenAI-compatible model service | Browser UX smoke on `timem --no-open`: authenticated startup, connected baseline, one user turn, final answer telemetry, desktop overflow check, 390px mobile overflow/composer check, then Web host shutdown while the page stayed open. | Passed: Session0, cwd, mem, and `Runtime connected` rendered; final answer and token telemetry appeared; desktop and 390px views had no horizontal overflow; composer stayed visible and enabled while runtime was connected; after shutdown, the page showed `Runtime exited` / `Restart timem-web` and disabled the composer. |
 | 2026-08-14 | `00f50e6` / `v1.1.0` | macOS arm64, Codex in-app Chromium browser, isolated temporary data root | Timem Web release review: authenticated keyless startup, desktop 1280px and mobile 390x844 layout, selected-Session model settings opened from the model name, API key/model/protocol/Base URL controls, Escape close/focus restoration, context indicator placement, composer bounds, and browser console inspection. | Passed: no horizontal overflow at either viewport, settings remained fully reachable, model label used the intended compact typography, context usage stayed adjacent, Escape restored focus, composer remained in bounds, and the console contained no warning or error. |
 | 2026-08-14 | `v1.1.2` | Ubuntu 22.04 x86_64 Host at `10.125.112.83`, macOS in-app Chromium client | Cross-machine `timem-web --public` smoke from the published tag: unauthenticated/invalid-token HTTP, authenticated page and asset fetch, HttpOnly cookie reopen, two simultaneous browser tabs, WebSocket connected state, Session-scoped runtime setting apply/restore, graceful Host stop, locked disconnected UI, same-data/same-port restart, and token rotation. | Passed: the Host listened on `0.0.0.0`; missing/invalid credentials returned 401; authenticated HTTP, assets, health, and UI loaded; both reopened tabs reached `Runtime connected`; remote Session configuration was acknowledged and restored; stopped pages disabled mutation controls with restart guidance; the restarted Host restored Session0/CWD, rejected the old token, and accepted only the new URL. |
 | 2026-08-15 | `31e06ea` / v1.1.3 candidate | macOS arm64, release `timem-web`, Codex in-app Chromium browser | Authenticated local startup and browser-tab identity smoke against the embedded production bundle. | Passed: the document title was `Timem`; the favicon and visible sidebar brand both resolved to `/timem_logo.png`; the PNG loaded at its expected 1236×1228 dimensions; the browser console contained no warning or error. |

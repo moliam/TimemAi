@@ -1,0 +1,275 @@
+# timem_shell module boundary
+
+`timem_shell` is Timem's terminal Interface. It owns CLI
+parsing, environment collection, terminal input, menus, rendering, and
+shell-only convenience commands. It consumes the same UI-neutral Core Turn
+semantics intended for Web, iOS, desktop, and future shells. Synchronous Turn calls and reusable Rust API access cross `timem_in_process`;
+lifecycle/runtime behavior and model transport remain behind Session/Agent Core. Shell depends on
+the in-process Bridge and UI contract, not directly on Session or Agent crates.
+
+Before changing this module, also read the repository-level `AGENTS.md`.
+Also read `docs/turn-state-projection-architecture.md` for the shared Core, Bridge, Interface, and lifecycle boundary.
+
+## Belongs here
+
+- Terminal UI rendering, ANSI styling, prompt lines, status panels, and menus.
+- Direct consumption of the authoritative Core Turn projection for the current
+  synchronous Session. Shell may render Active, stopping, waiting activity, and
+  immutable outcomes as terminal text, but must not infer lifecycle from the
+  last topic, worker counts, local Ctrl+C state, or whether final-answer text has
+  already painted.
+- A terminal `TurnUi` adapter for structured requests, projection changes, and topic events. The
+  direct call boundary itself belongs to `timem_in_process`. Shell does not need Web-style revision,
+  snapshot, outbox, or reconnect machinery merely to satisfy the shared
+  contract; if it later becomes reconnectable or multi-client, that delivery
+  adapter remains separate from terminal presentation.
+- Final-answer Markdown rendering behind `final_answer_renderer`, with a
+  replaceable renderer interface and a community renderer backend by default.
+- Reedline/input handling, paste recovery, Ctrl+C/Esc behavior, and TTY quirks.
+- Target-specific terminal mechanics under `src/os/`: Unix owns `/dev/tty`,
+  termios, file-descriptor flags, and SIGINT installation; Windows owns
+  Crossterm console events/raw mode and translates keys and paste events into
+  the shell's platform-neutral input-byte protocol. `main.rs` owns interaction
+  semantics, not OS primitives.
+- CLI flags, process env collection, shell history, and startup banner display.
+- Collecting CLI/env config values, then passing the effective runtime config to
+  core. Shell should not duplicate which config fields update core state.
+- Shell-only slash commands that improve terminal usage.
+- Shell wrappers around core-owned commands, such as exposing core runtime
+  configuration through `/config`. Shell owns the menu/input/rendering; core
+  owns validation, state changes, and structured command reports.
+- Collecting shell-side context sources such as work-instruction text or
+  workspace references, then passing them to core for model-context assembly.
+- Supplying shell host identity such as `runtime=timem_native_shell` and
+  `run_bash_target=user_local_machine` through `TurnInput`. Other hosts must
+  be able to supply different values without changing the reusable turn loop.
+- Collecting active-turn user supplement input from the terminal, then passing
+  it to core. Shell should not duplicate prompt-slice insertion or supplement
+  audit logic.
+- Rendering approval prompts and collecting approval decisions, then passing
+  those decisions to core. Shell should not duplicate pending-action resolution
+  or approval audit logic.
+- Rendering round-limit prompts and collecting continue/stop choices, then
+  passing those choices to core. Shell should not duplicate round-budget
+  recharge, round-limit audit, or stop-summary construction.
+- Rendering output-expansion prompts and collecting expand/stop choices, then
+  passing those choices to core. Shell should not duplicate max-output-token
+  updates, output-expansion audit, or output-limit stop-summary construction.
+- Rendering stale-context prompts and collecting continue/reset choices, then
+  passing those choices to core. Shell should not duplicate dynamic-context
+  clearing or stale-context audit events.
+- Applying model responses through core and rendering resulting topic events.
+  Shell should not compare repair counters, classify repair issues, inject
+  repair prompt slices, or construct model-repair audit events.
+- Adapters that translate structured reports/topic events exposed by
+  `timem_in_process::agent_api` into terminal text.
+- Terminal rendering of core-provided report semantics and values. Shell owns
+  labels, descriptions, language, icons, layout, and compact display strings;
+  core owns the semantic field kinds and effective values.
+- Terminal display formatting for runtime config values such as token limits;
+  shell may show `100K`, while core reports the raw effective token number.
+- Terminal localization and styling of core-provided command result messages;
+  shell should not infer reusable command outcome semantics from raw internal
+  state when core already provides a message kind and subject.
+- Terminal composition of core-provided runtime status values. Shell owns
+  symbols such as KVC markers, token/count display strings, line layout, colors,
+  and terminal copy; core owns context math and bounded status-text compaction.
+- Terminal rendering of core-provided profiling values. Shell may choose the
+  `/prof` layout, labels, language, and compact number/unit formatting; core
+  owns KVC/cache-hit percentage, average wait per 1K output, storage counts, and
+  raw durations.
+- Terminal wording for core-provided retry status views. Shell may choose
+  language, tree markers, and truncation, but should not compute retry attempt
+  defaults or countdown semantics.
+- Terminal wording for core-provided turn stop/outcome structures. Shell may
+  match public core enums and fields such as `TurnStopDetail` to choose terminal
+  copy/layout; those fields are the shared protocol, not opaque internals.
+- Terminal wording for structured failure diagnostics. Shell may render
+  protocol repair failures, model service errors, truncation flags, and other
+  core-provided observability fields as localized user-facing copy, while core
+  keeps those causes machine-readable for audit and other hosts.
+- Terminal rendering of stopped-turn messages. The turn loop should return
+  `TurnStopSummary`/`TurnStopDetail` as structure; shell decides the localized
+  text shown to terminal users.
+- Topic/event/request rendering and interaction. Shell subscribes to core
+  structured topic events and requests, understands their public fields, and
+  maps them to terminal UI affordances such as menus, prompts, status panels, or
+  transient messages.
+- Lifecycle topic rendering. Shell may render `core.lifecycle` as startup status
+  text, but it should not invent reusable core lifecycle state from local
+  control flow when core already exposes a structured topic.
+- Session worker display. Shell may render worker display names such as `ID0`
+  or user-renamed labels from lifecycle topics. It must not keep the canonical
+  worker identity as terminal-only state; identity belongs to the core/UI
+  protocol so future web/iOS hosts see the same worker.
+- Rust shell may use typed topic accessors, but the cross-language contract is
+  still the `CoreTopicEvent` wire shape. Shell tests should not be the only
+  place where topic payload fields are defined.
+- Shell may branch on stable action topic fields such as `kind: "bash"` for
+  rendering, but should not depend on Rust enum-default serialized shapes.
+  For command wait-budget display it renders core-provided effective budgets,
+  keeps the proposal/approval row untimed, and attaches the countdown only when
+  the matching action receives `event: "execution_start"`.
+- Terminal replies to core request topics. Shell collects the user choice and
+  returns it through core's `TopicReply` shape with the original `session_id`,
+  `topic_name`, and `request_id`; shell should not resume a waiting session by
+  matching only terminal-local state.
+- Calling core turn lifecycle audit helpers at terminal turn boundaries. Shell
+  should not construct shared turn_start, turn_error, model_repair_request, or
+  turn_final audit JSON.
+- Rendering Bridge-exposed Core host status messages with terminal-specific icons,
+  colors, and layout.
+- Rendering core-provided message severity and semantic kind into terminal
+  wording. Shell may localize the sentence, but the shared severity and kind
+  should come from core-owned data.
+- Terminal-side cancellation and interaction while a model turn is running.
+  Shell may signal cancellation through core APIs, but it must not implement
+  model HTTP/curl, model service endpoint/header/body construction, cache-control
+  protocol, or model response/error interpretation.
+- Terminal-side approval UI for model-requested tools such as `run_bash`.
+  Shell may render the request and collect the user's choice, but it must not
+  execute the command, shape stdout/stderr evidence, decide tool semantics, or
+  write tool audit records.
+- Terminal-side decision UI for long foreground `run_bash` commands with
+  positive model-provided `timeout_ms`. Shell renders the
+  keep-waiting/stop-waiting menu and returns the user's decision through the
+  core host-decision channel; core owns the process lifecycle, action result,
+  and any follow-up `user_supplement`.
+- Local host concerns such as where this shell process stores history or audit
+  files.
+- Shell participation in core-owned Session persistence. Shell may choose the
+  default stored Session for this terminal process, append user/assistant/stats
+  records through `agent_core::session_store`, and inject the shared resume
+  notice as host-provided context. It must not invent a shell-only chat-history
+  schema that Web or future hosts cannot page and replay.
+- Choosing host policy for this terminal process, while using `agent_core`
+  capability profiling so the active capability set matches the actual
+  environment. Shell should not imply it is the only host that can have Bash;
+  any host with local command execution may expose that capability through core.
+
+## Does not belong here
+
+- Model response protocol parsing rules.
+- Model transport, including HTTP/curl execution, SDK calls, model API payload
+  construction, response interpretation, and service-specific
+  cache-control details.
+- Parsing raw model responses to infer Thought / Action UI events; core must
+  emit structured topic events for those events.
+- Capability parameter parsing and tool semantics.
+- Built-in tool callback implementation files. Those belong with their YAML
+  capability manifests under `resources/capabilities/tools/`, and are invoked by
+  `agent_core` dispatch rather than by terminal UI code.
+- Model-requested tool execution, including `run_bash` process execution,
+  command output/evidence shaping, command status handling, and tool audit.
+- Registered tool job lifecycle management. For command-bound registered tools,
+  core owns job ids/status/output files and cancel semantics. For `run_bash`,
+  core owns the session running-pid set for background jobs and timed-out
+  normal commands, one-time job-exit updates, PID-reuse-safe process identities, and a request-scoped
+  `STILL RUNNING` table before every model call while commands remain active. Shell may display the resulting core topics or
+  action evidence, but must not manage those jobs itself.
+- Long-command process waiting and cancellation. Shell may prompt the user for
+  a decision, but core owns the process lifecycle and resulting prompt evidence.
+- Memory conflict logic, context shrink/compact algorithms, model service cache
+  planning, or retry policy.
+- Runtime configuration validation or reusable configuration side effects, such
+  as changing context-window state or bash-approval policy in core.
+- Prompt/resource language that should be shared by other Timem hosts.
+- Prompt/supporting-context assembly rules. Shell should provide context source
+  values, not decide how runtime identity and additional context are combined.
+- Session prompt component assembly. Shell may submit user input, user
+  supplements, and host-provided context values through core APIs, but it must
+  not build dynamic prompt deltas itself or format `## USER` / `## RUNTIME` /
+  assistant blocks. The per-session pending component buffer and
+  `build_next_prompt()` belong to `agent_core`.
+- Long-lived runtime state that another UI would need to reproduce.
+- A terminal-specific Turn lifecycle state machine, terminal-owned `TurnId` or
+  epoch, or rules that revive/finish a Turn from display events. Those semantics
+  belong to Core and must remain identical for every UI shell.
+- A dependency on `timem_web` or its Pod just to consume Core lifecycle truth.
+  The Shell uses the in-process Bridge; Pod is one asynchronous HTTP/WebSocket
+  delivery implementation, not a mandatory layer in front of Core.
+- User-facing stopped-turn copy inside the reusable turn loop. A stopped turn
+  should be represented structurally so non-terminal hosts can render it in
+  their own language and UI style.
+
+## Interface rule
+
+Shell code may choose how to render and interact, but it asks Core for
+structured data, authoritative Turn projection, and reusable operations. If a
+feature would also be needed by Web, iOS, desktop, or another host, put its
+semantic data model and business logic in `agent_core`, then implement only the
+terminal adapter and presentation here. The portability test is practical: a
+new UI shell must not need to copy Shell lifecycle branches to behave
+correctly.
+
+Threading rule: the terminal host uses the synchronous `timem_in_process::run_turn` path for its
+single active Session. If Shell or a future host
+needs concurrent sessions, it should use a core-owned per-session worker rather
+than building a separate terminal-specific runtime loop. Shell remains
+responsible for terminal input/rendering; the worker/core owns session state,
+model/action loop, topic emission, and request correlation.
+
+The intended call chain is
+`timem_shell UI -> timem_in_process -> timem_session -> agent_core -> model service -> LLM`. The Bridge is a
+zero-transport typed call boundary; it must not add model transport or serialization. If model service
+transport needs to change, change the core/model service boundary first.
+
+Shell may expose core functions as shell-specific commands such as `/prof`,
+`/config`, or `/workspace`, but those commands should return or render
+core-owned data structures. Core-initiated runtime events should be consumed as
+topic callbacks, not inferred by parsing prompt text or model output in the
+shell.
+
+Shell-initiated actions call Core APIs exposed through `timem_in_process::agent_api`; Shell does not add a direct Core crate dependency. Core-initiated work in an
+already-running session arrives as topic events, including progress, waiting
+states, retries, and requests that need a user decision. Shell may route those
+topics to terminal callbacks, but it should not turn them back into ad hoc
+string parsing.
+
+Active-turn progress and action rendering should consume `CoreTopicEvent`
+payloads emitted by core. The shell may map those topic payloads to terminal
+panels, status bars, colors, and line wrapping, but it should not recreate the
+underlying action/progress semantics from protocol text.
+
+When core returns or asks through a structured request, shell owns the terminal
+interaction around that request: menu layout, Ctrl+C/Esc handling, and optional
+timeouts. Optional requests should have a safe timeout default when blocking the
+terminal would hurt usability. For example, the AGENTS.md/CLAUDE.md load prompt
+times out after 30 seconds and continues without loading.
+
+For active turns, shell receives core requests through its `TurnUi`
+implementation and replies through core's `request_host_decision_topic` flow.
+Shell renders and collects the choice, while core publishes the topic, assigns
+request correlation, validates the `TopicReply`, and applies the safe default on
+mismatch. For startup/outer-shell flows, shell may call a core request builder,
+render the returned request, then call the matching core operation. In both
+cases shell should avoid inventing business rules that belong in core request
+metadata, such as safe defaults or whether a request is optional.
+
+When core emits topic events, shell treats non-request topics as non-blocking display updates.
+They feed the status bar or Thought / Action panel, but they are not the channel
+for decisions that require a user choice.
+
+Topic callbacks are synchronous. If shell wants to preserve an event for delayed
+rendering, background processing, logs, or tests after the callback returns, it
+must clone the `CoreTopicEvent` or copy the specific fields it needs.
+Shell topic callbacks must not synchronously reenter the same active Core
+session through the Bridge. They should render/copy/enqueue, or return the correlated `TopicReply`
+for request topics, then let the active core call continue.
+
+## Test Layout
+
+Test functions and terminal fixtures live under `interfaces/shell/tests`.
+Production modules may keep only a minimal `#[cfg(test)]` external-module
+declaration or an explicitly test-only hook needed for private white-box
+access.
+
+
+## Dependency direction
+
+- Required outward-facing API dependencies are `bridges/in_process` and `core/ui_contract`.
+- Shell must not depend directly on `core/session` or `core/agent`; use
+  `timem_in_process` entry points and its deliberate `agent_api` re-export.
+- Shell must not depend on Web or an application composition root.
+- A future Rust-native desktop Interface is a peer of Shell and should consume the same in-process
+  Bridge. Do not add an empty desktop Interface or `native_ffi` Bridge in anticipation of it.

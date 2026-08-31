@@ -123,5 +123,5 @@ fn execute_run_bash(
 }
 
 #[cfg(test)]
-#[path = "../../../agent_core/tests/unit/capability_tool_registry_tests.rs"]
+#[path = "../../../core/agent/tests/unit/capability_tool_registry_tests.rs"]
 mod tests;

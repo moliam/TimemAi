@@ -10,9 +10,10 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MATRIX = ROOT / "docs" / "web-ui-feature-test-matrix.md"
 TEST_ROOTS = [
-    ROOT / "agent_core" / "tests",
-    ROOT / "timem_web" / "tests",
-    ROOT / "web_ui" / "timem-web" / "tests",
+    ROOT / "core" / "agent" / "tests",
+    ROOT / "core" / "session" / "tests",
+    ROOT / "applications" / "timem" / "tests",
+    ROOT / "interfaces" / "web" / "tests",
 ]
 CI_SCRIPT = ROOT / "scripts" / "ci.sh"
 MANUAL_SMOKE = ROOT / "docs" / "manual-release-smoke.md"
@@ -26,7 +27,7 @@ def iter_files(root: pathlib.Path):
     if not root.exists():
         return
     for path in root.rglob("*"):
-        if path.is_file() and path.suffix in {".rs", ".ts", ".tsx", ".sh", ".md"}:
+        if path.is_file() and path.suffix in {".rs", ".ts", ".tsx", ".mjs", ".sh", ".md"}:
             yield path
 
 
@@ -41,12 +42,13 @@ def search_roots(needle: str, roots: list[pathlib.Path]) -> bool:
 def file_exists_token(token: str) -> bool:
     if "/" in token:
         return (ROOT / token).exists()
-    if token.endswith((".ts", ".tsx", ".rs", ".sh", ".md")):
+    if token.endswith((".ts", ".tsx", ".mjs", ".rs", ".sh", ".md")):
         for base in [
             ROOT,
-            ROOT / "web_ui" / "timem-web" / "tests",
-            ROOT / "agent_core" / "tests",
-            ROOT / "timem_web" / "tests",
+            ROOT / "interfaces" / "web" / "tests",
+            ROOT / "core" / "agent" / "tests",
+            ROOT / "core" / "session" / "tests",
+            ROOT / "applications" / "timem" / "tests",
             ROOT / "scripts",
             ROOT / "docs",
         ]:
@@ -72,7 +74,7 @@ def evidence_in_roots(token: str, roots: list[pathlib.Path]) -> bool:
         return search_roots(token.removesuffix(" tests"), roots)
     if token == "host_error handling in frontend contract tests":
         return search_roots("host_error", roots)
-    if "/" not in token and token.endswith((".ts", ".tsx", ".rs", ".sh", ".md")):
+    if "/" not in token and token.endswith((".ts", ".tsx", ".mjs", ".rs", ".sh", ".md")):
         for root in roots:
             for path in iter_files(root):
                 if path.name == token:
@@ -162,14 +164,14 @@ def main() -> int:
         if missing:
             failures.append(f"{requirement}: evidence not found: {', '.join(missing)}")
         if requirement in HOST_RUNTIME_ROWS:
-            has_host = any(evidence_in_roots(token, [ROOT / "timem_web" / "tests"]) for token in tokens)
-            has_frontend = any(evidence_in_roots(token, [ROOT / "web_ui" / "timem-web" / "tests"]) for token in tokens)
+            has_host = any(evidence_in_roots(token, [ROOT / "applications" / "timem" / "tests"]) for token in tokens)
+            has_frontend = any(evidence_in_roots(token, [ROOT / "interfaces" / "web" / "tests"]) for token in tokens)
             if not has_host or not has_frontend:
                 missing_sides = []
                 if not has_host:
-                    missing_sides.append("timem_web host/runtime test evidence")
+                    missing_sides.append("timem host/runtime test evidence")
                 if not has_frontend:
-                    missing_sides.append("web_ui frontend test evidence")
+                    missing_sides.append("interfaces/web frontend test evidence")
                 failures.append(f"{requirement}: missing cross-boundary evidence: {', '.join(missing_sides)}")
     if failures:
         print("web_ui_matrix_check failed:", file=sys.stderr)

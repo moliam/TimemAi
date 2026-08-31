@@ -39,10 +39,10 @@ search_lines_regex() {
 
 ci_required=(
   "cargo test --workspace"
-  "pnpm --dir web_ui/timem-web test"
-  "pnpm --dir web_ui/timem-web build"
-  "pnpm --dir web_ui/timem-web test:browser"
-  "cargo build --locked -p timem_shell -p timem_web --release"
+  "pnpm --dir interfaces/web test"
+  "pnpm --dir interfaces/web build"
+  "pnpm --dir interfaces/web test:browser"
+  "cargo build --locked --release --bin timem"
   "scripts/edge_regression.sh"
   "scripts/real_tty_smoke.expect"
   "scripts/real_tty_supplement_smoke.expect"
@@ -53,8 +53,14 @@ ci_required=(
   "scripts/clippy_check.sh"
   "scripts/performance_guard.sh"
   "scripts/cross_host_resume_smoke.sh"
+  "scripts/linux_web_platform_smoke.sh"
+  "scripts/macos_web_platform_smoke.sh"
+  "== Linux Timem Web platform smoke =="
+  "== macOS Timem Web platform smoke =="
   "scripts/web_license_check.sh"
   "scripts/version_consistency_check.sh"
+  "python3 scripts/architecture_guard.py --self-test"
+  "scripts/module_boundary_check.sh"
 )
 
 for pattern in "${ci_required[@]}"; do
@@ -63,6 +69,39 @@ for pattern in "${ci_required[@]}"; do
     exit 1
   fi
 done
+
+platform_matrix_required=(
+  "ubuntu-latest"
+  "macos-latest"
+)
+for pattern in "${platform_matrix_required[@]}"; do
+  if ! search_fixed "$pattern" .github/workflows/ci.yml; then
+    echo "missing required macOS/Linux CI runner: $pattern" >&2
+    exit 1
+  fi
+done
+
+windows_ci_required=(
+  "runs-on: windows-latest"
+  "./scripts/windows_install_logic_test.ps1"
+  "cargo check --workspace --all-targets --locked"
+  "cargo test --workspace --locked -- --test-threads=1"
+  "cache-dependency-path: interfaces/web/pnpm-lock.yaml"
+  "pnpm --dir interfaces/web test"
+  "pnpm --dir interfaces/web build"
+  "git diff --exit-code -- interfaces/web/dist"
+  "cargo build --locked --release --bin timem"
+)
+for pattern in "${windows_ci_required[@]}"; do
+  if ! search_fixed "$pattern" .github/workflows/ci.yml; then
+    echo "missing required Windows CI gate: $pattern" >&2
+    exit 1
+  fi
+done
+if search_fixed "web_ui/timem-web" .github/workflows/ci.yml; then
+  echo "Windows CI must use the semantic interfaces/web layout" >&2
+  exit 1
+fi
 
 
 runtime_io_guard_required=(
@@ -79,7 +118,7 @@ runtime_io_guard_required=(
   "mem_temporary_items_list"
 )
 for pattern in "${runtime_io_guard_required[@]}"; do
-  if ! search_fixed "$pattern" scripts/runtime_io_guard.py scripts/real_tty_stress.expect timem_web/src/server.rs web_ui/timem-web/src/main.tsx; then
+  if ! search_fixed "$pattern" scripts/runtime_io_guard.py scripts/real_tty_stress.expect applications/timem/src/server.rs applications/timem/src/server/mem_maintenance.rs interfaces/web/src/main.tsx; then
     echo "missing Timem runtime I/O guard contract: $pattern" >&2
     exit 1
   fi
@@ -97,7 +136,7 @@ shell_lib_forbidden_wrappers=(
 )
 
 for pattern in "${shell_lib_forbidden_wrappers[@]}"; do
-  if search_fixed "$pattern" timem_shell/src/lib.rs; then
+  if search_fixed "$pattern" interfaces/shell/src/lib.rs; then
     echo "timem_shell must not re-expose core runtime layout/context wrapper: $pattern" >&2
     exit 1
   fi
@@ -120,7 +159,7 @@ shell_lib_forbidden_core_internals=(
 )
 
 for pattern in "${shell_lib_forbidden_core_internals[@]}"; do
-  if search_fixed "$pattern" timem_shell/src/lib.rs; then
+  if search_fixed "$pattern" interfaces/shell/src/lib.rs; then
     echo "timem_shell must not re-export model cache core internals: $pattern" >&2
     exit 1
   fi
@@ -135,7 +174,7 @@ shell_src_forbidden_execution=(
 )
 
 for pattern in "${shell_src_forbidden_execution[@]}"; do
-  if search_fixed "$pattern" timem_shell/src; then
+  if search_fixed "$pattern" interfaces/shell/src; then
     echo "timem_shell must not implement model transport/tool execution: $pattern" >&2
     exit 1
   fi
@@ -167,7 +206,7 @@ fi
 
 legacy_action_input_hits="$(
   search_lines_regex 'next_actions.*"input"[[:space:]]*:' \
-    agent_core/tests agent_core/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs \
+    core/agent/tests core/session/tests core/agent/src/session_runtime.rs interfaces/shell/src/observation.rs interfaces/shell/src/lib.rs \
     | grep -v 'allow_legacy_input_negative_test' || true
 )"
 if [ -n "$legacy_action_input_hits" ]; then
@@ -175,13 +214,13 @@ if [ -n "$legacy_action_input_hits" ]; then
   echo "$legacy_action_input_hits" >&2
   exit 1
 fi
-if ! search_fixed "allow_legacy_input_negative_test" agent_core/tests/core_tests.rs; then
+if ! search_fixed "allow_legacy_input_negative_test" core/agent/tests/core_tests.rs; then
   echo "missing explicit negative test marker for legacy input rejection" >&2
   exit 1
 fi
 string_args_hits="$(
   search_lines_regex '"args"[[:space:]]*:[[:space:]]*"' \
-    agent_core/tests agent_core/src/session_runtime.rs timem_shell/src/observation.rs timem_shell/src/lib.rs resources docs README.md CHANGELOG.md scripts \
+    core/agent/tests core/session/tests core/agent/src/session_runtime.rs interfaces/shell/src/observation.rs interfaces/shell/src/lib.rs resources docs README.md CHANGELOG.md scripts \
     | grep -v 'allow_string_args_negative_test' \
     | grep -v 'response_schema_summary.json' \
     || true
@@ -191,14 +230,14 @@ if [ -n "$string_args_hits" ]; then
   echo "$string_args_hits" >&2
   exit 1
 fi
-if ! search_fixed "allow_string_args_negative_test" agent_core/tests/core_tests.rs; then
+if ! search_fixed "allow_string_args_negative_test" core/agent/tests/core_tests.rs; then
   echo "missing explicit negative test marker for string args rejection" >&2
   exit 1
 fi
 
 private_fixture_hits="$(
   search_lines_regex '默默|李默|儿子|son birthday|6月12|蓝色雨伞|绿色雨衣|fangchang|/Users/limo3|/Users/fangchang|v0\.6 发布检查|AURORA' \
-    agent_core/tests timem_shell/src resources docs README.md CHANGELOG.md scripts \
+    core/agent/tests core/session/tests interfaces/shell/src resources docs README.md CHANGELOG.md scripts \
     | grep -v 'scripts/test_contract_check.sh' \
     || true
 )"
@@ -273,7 +312,7 @@ release_management_required=(
   "Never move or overwrite a published tag"
   "scripts/version_consistency_check.sh"
   "Ubuntu and macOS"
-  'run `timem-web`'
+  'run `timem`'
   'pull request from the release branch into `main`'
 )
 

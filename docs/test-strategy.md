@@ -78,7 +78,8 @@ checks. If a dimension is not applicable, record that residual decision in
   while a fake model service causes repeated model/action redraws, long
   Thought/Action rows, and queued next questions during active work.
 - Web host integration: real `CoreSessionWorker` instances publish concurrent
-  topics through `timem_web`, proving session isolation, request correlation,
+  topics through the Web runtime in `applications/timem` (Cargo package
+  `timem`), proving session isolation, request correlation,
   completion telemetry, work-instruction decisions, bounded host state, and
   independent per-session runtime profiles. Profile tests use two real workers,
   verify lifecycle model service/protocol/context values, ensure global
@@ -105,20 +106,25 @@ checks. If a dimension is not applicable, record that residual decision in
   cross-session token isolation, and Session-creation profile overrides. A live
   Aliyun browser smoke submits turns to two Sessions with different models and
   verifies that both complete in their own conversation.
-- Web delivery reliability: deterministic Host and frontend tests cover stable
-  command IDs, accepted/committed/rejected acknowledgement reordering, lost-ack
-  replay, disconnect recovery, bounded durable browser outboxes, strictly ordered
-  in-memory semantic delivery, snapshot recovery after gaps or lag, cross-tab coordination,
-  same-Session FIFO, global mutation exclusion, memory epoch barriers, atomic
-  restored task/supplement batches, and four Sessions restoring concurrently
-  without cross-talk. The normative case list is
-  `docs/web_reliability_test_matrix.md`.
+- Web delivery reliability: deterministic Host and frontend tests cover one-shot
+  socket delivery, correlated accepted/committed/rejected control responses,
+  no browser persistence/replay, reconnect snapshot recovery, hard-bounded
+  process-local command deduplication and command/event queues, absence of
+  per-command state files, strictly ordered in-memory semantic delivery,
+  snapshot recovery after gaps or lag, same-Session FIFO, global mutation
+  exclusion, and memory epoch barriers. Real-Chrome acceptance starts from a
+  non-zero Host cursor, counts WebSocket connections, sends bursty
+  Thought/Action-style progress, and fails on any unjustified reconnect or
+  runtime-error/reconnect notice. Valid UI activity and rerenders must retain a
+  single connection while the Host and protocol remain healthy. The normative
+  case list is `docs/web_reliability_test_matrix.md`.
 - Turn concurrency stress: a focused stress entry runs the four real concurrent
   Turn scenarios with seeded replay, resource convergence checks, and latency
   percentiles. It uses hundreds/thousands of iterations per scenario rather than
   the two-iteration generic edge loop.
-- Performance guard: `scripts/performance_guard.sh` runs bounded hot-path
-  checks for large prompt rendering, topic fan-out, observation panel
+- Performance guard: `scripts/performance_guard.sh` first verifies the exact expected Rust
+  performance-test inventory so a stale filter cannot pass after discovering zero tests, then runs
+  bounded hot-path checks for large prompt rendering, topic fan-out, observation panel
   rendering with long rows, Web action-lifecycle coalescing, browser event
   burst draining, and the joint long-scroll/warm-Session-cache invalidation
   contract. Thresholds are intentionally broad enough for CI
