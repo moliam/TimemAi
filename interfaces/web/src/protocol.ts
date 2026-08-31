@@ -615,6 +615,7 @@ export type ClientCommand =
       type: "session_create";
       display_name?: string;
       workspace_dir?: string;
+      group_id?: string | null;
       env?: Record<string, string>;
     }
   | { type: "session_rename"; session_id: string; display_name: string }

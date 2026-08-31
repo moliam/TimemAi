@@ -50,20 +50,31 @@ cargo test --workspace --locked -- --test-threads=1
 
 if [[ "$(uname -s)" == "Linux" ]]; then
   echo "== Linux OS interface tests =="
-  cargo test -p agent_core --lib --locked 'os::tests::linux_' -- --test-threads=1
+  linux_test_filter='tests::linux_'
+  platform_test_list="$(cargo test -p timem_platform --lib --locked -- --list)"
+  if ! grep -Fq "$linux_test_filter" <<<"$platform_test_list"; then
+    echo "error: no Linux platform tests matched $linux_test_filter" >&2
+    exit 1
+  fi
+  cargo test -p timem_platform --lib --locked "$linux_test_filter" -- --test-threads=1
 
   echo "== Linux run_bash supervision tests =="
+  agent_test_list="$(cargo test -p agent_core --lib --locked -- --list)"
   for test_name in \
     shell_lifecycle_validation_rejects_unmanaged_background_without_wait \
     shell_lifecycle_validation_rejects_explicit_detach \
-    shutdown_and_session_cancel_refuse_pid_identity_mismatch \
     timeout_job_reports_pid_and_later_exit_update \
     timed_out_job_remains_cancellable_after_launcher_exits \
-    watcher_waits_for_managed_process_group_after_launcher_exits \
+    supervisor_waits_for_managed_process_group_after_launcher_exits \
     normal_bash_cancel_terminates_the_entire_process_group
   do
+    exact_test_name="shell_exec::tests::$test_name"
+    if ! grep -Fxq "$exact_test_name: test" <<<"$agent_test_list"; then
+      echo "error: required Linux supervision test not found: $exact_test_name" >&2
+      exit 1
+    fi
     cargo test -p agent_core --lib --locked \
-      "shell_exec::tests::$test_name" -- --exact --test-threads=1
+      "$exact_test_name" -- --exact --test-threads=1
   done
 fi
 

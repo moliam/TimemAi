@@ -3290,6 +3290,7 @@ fn runtime_update_propagates_to_existing_sessions_and_new_session_defaults() {
         ClientCommand::SessionCreate {
             display_name: Some("Future defaults".to_string()),
             workspace_dir: None,
+            group_id: None,
             env: BTreeMap::new(),
         },
     )
@@ -3656,6 +3657,7 @@ fn session_create_returns_the_complete_session_to_the_requesting_browser() {
         TEST_PORT,
         ClientCommand::SessionCreate {
             display_name: Some("Review".to_string()),
+            group_id: None,
             workspace_dir: Some(root.display().to_string()),
             env: BTreeMap::new(),
         },
@@ -3794,6 +3796,7 @@ fn session_create_accepts_an_unregistered_absolute_workspace_directory() {
         TEST_PORT,
         ClientCommand::SessionCreate {
             display_name: Some("Selected workspace".to_string()),
+            group_id: None,
             workspace_dir: Some(selected.display().to_string()),
             env: BTreeMap::new(),
         },
@@ -3860,6 +3863,7 @@ fn session_delete_stops_workers_and_removes_persisted_session() {
         TEST_PORT,
         ClientCommand::SessionCreate {
             display_name: Some("Disposable".to_string()),
+            group_id: None,
             workspace_dir: Some(root.display().to_string()),
             env: BTreeMap::new(),
         },
@@ -4329,6 +4333,7 @@ fn session_create_command_returns_session_with_runtime_overrides_applied() {
         TEST_PORT,
         ClientCommand::SessionCreate {
             display_name: Some("Override session".to_string()),
+            group_id: None,
             workspace_dir: Some(root.display().to_string()),
             env: BTreeMap::from([
                 ("TIMEM_MODEL".to_string(), "model-from-dialog".to_string()),
@@ -5571,17 +5576,10 @@ fn session_group_validation_rejects_case_insensitive_duplicate_names() {
 }
 
 #[test]
-fn session_groups_create_move_persist_and_delete_without_deleting_sessions() {
+fn session_groups_create_session_in_group_persist_and_reject_delete_while_nonempty() {
     let state = routing_test_state();
     let workspace = std::env::temp_dir().join(unique_web_id("session_group_workspace"));
     std::fs::create_dir_all(&workspace).unwrap();
-    let session_id = create_session(
-        &state,
-        Some("Grouped work".to_string()),
-        Some(workspace.display().to_string()),
-        BTreeMap::new(),
-    )
-    .unwrap();
 
     let Some(WireEvent::SessionGroupsUpdated { groups }) = handle_command(
         &state,
@@ -5596,22 +5594,21 @@ fn session_groups_create_move_persist_and_delete_without_deleting_sessions() {
     assert_eq!(groups.len(), 1);
     let group_id = groups[0].id.clone();
 
-    let moved = handle_command(
+    let Some(WireEvent::SessionCreated { session }) = handle_command(
         &state,
         TEST_PORT,
-        ClientCommand::SessionGroupMove {
-            session_id: session_id.clone(),
+        ClientCommand::SessionCreate {
+            display_name: Some("Grouped work".to_string()),
+            workspace_dir: Some(workspace.display().to_string()),
             group_id: Some(group_id.clone()),
+            env: BTreeMap::new(),
         },
     )
-    .unwrap();
-    assert!(matches!(
-        moved,
-        Some(WireEvent::SessionGroupChanged {
-            session_id: ref moved_session_id,
-            group_id: Some(ref persisted_group_id),
-        }) if moved_session_id == &session_id && persisted_group_id == &group_id
-    ));
+    .unwrap() else {
+        panic!("expected grouped session creation");
+    };
+    let session_id = session.session_id.clone();
+    assert_eq!(session.group_id.as_deref(), Some(group_id.as_str()));
     assert_eq!(
         current_session_store(&state)
             .unwrap()
@@ -5635,18 +5632,16 @@ fn session_groups_create_move_persist_and_delete_without_deleting_sessions() {
         Some(group_id.as_str())
     );
 
-    let deleted = handle_command(
+    let error = handle_command(
         &state,
         TEST_PORT,
         ClientCommand::SessionGroupDelete {
             group_id: group_id.clone(),
         },
     )
-    .unwrap();
-    assert!(matches!(
-        deleted,
-        Some(WireEvent::SessionGroupsUpdated { ref groups }) if groups.is_empty()
-    ));
+    .unwrap_err();
+    assert_eq!(error, "session_group_not_empty");
+    assert_eq!(current_mem_state(&state).unwrap().session_groups, groups);
     assert!(state.sessions.lock().unwrap().contains_key(&session_id));
     assert_eq!(
         current_session_store(&state)
@@ -5654,133 +5649,141 @@ fn session_groups_create_move_persist_and_delete_without_deleting_sessions() {
             .load_session(&session_id)
             .unwrap()
             .unwrap()
-            .group_id,
-        None
+            .group_id
+            .as_deref(),
+        Some(group_id.as_str())
     );
     let _ = std::fs::remove_dir_all(workspace);
 }
 
 #[test]
-fn session_group_move_persistence_failure_keeps_memory_and_disk_unchanged() {
+fn session_create_rejects_unknown_group_without_leaving_a_session() {
     let state = routing_test_state();
-    let Some(WireEvent::SessionGroupsUpdated { groups }) = handle_command(
+    let session_ids_before = state
+        .sessions
+        .lock()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    let error = handle_command(
         &state,
         TEST_PORT,
-        ClientCommand::SessionGroupCreate {
-            name: "Failure test".to_string(),
+        ClientCommand::SessionCreate {
+            display_name: Some("Invalid group".to_string()),
+            workspace_dir: None,
+            group_id: Some("missing-group".to_string()),
+            env: BTreeMap::new(),
         },
     )
-    .unwrap() else {
-        panic!("expected session groups update");
-    };
-    let group_id = groups[0].id.clone();
-    let store = current_session_store(&state).unwrap();
-    persist_web_session(&state, "session_a").unwrap();
-    let metadata = store.metadata_path_for_session("session_a");
-    let original = std::fs::read(&metadata).unwrap();
-    std::fs::remove_file(&metadata).unwrap();
-    std::fs::create_dir(&metadata).unwrap();
+    .unwrap_err();
 
+    assert_eq!(error, "session_group_not_found");
+    assert_eq!(
+        state
+            .sessions
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        session_ids_before
+    );
+}
+
+#[test]
+fn session_group_reorder_is_rejected_to_keep_creation_order_fixed() {
+    let state = routing_test_state();
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupsReorder { groups: Vec::new() },
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "session_group_order_fixed");
+}
+
+#[test]
+fn session_group_move_is_rejected_for_all_sessions() {
+    let state = routing_test_state();
     let error = handle_command(
         &state,
         TEST_PORT,
         ClientCommand::SessionGroupMove {
             session_id: "session_a".to_string(),
-            group_id: Some(group_id),
+            group_id: None,
         },
     )
     .unwrap_err();
-    assert!(error.contains("session_metadata_write_failed"));
-    assert_eq!(
-        state.sessions.lock().unwrap()["session_a"].group_id,
-        None,
-        "failed persistence must not mutate the in-memory session"
-    );
 
-    std::fs::remove_dir(&metadata).unwrap();
-    std::fs::write(&metadata, original).unwrap();
-    assert_eq!(
-        store.load_session("session_a").unwrap().unwrap().group_id,
-        None
-    );
+    assert_eq!(error, "session_group_assignment_fixed");
+    assert_eq!(state.sessions.lock().unwrap()["session_a"].group_id, None);
 }
 
 #[test]
-fn session_group_delete_persistence_failure_rolls_back_prior_metadata_writes() {
+fn deleting_unknown_session_group_is_rejected() {
+    let state = routing_test_state();
+
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupDelete {
+            group_id: "missing-group".to_string(),
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "session_group_not_found");
+    assert!(current_mem_state(&state).unwrap().session_groups.is_empty());
+}
+
+#[test]
+fn empty_session_group_can_be_deleted() {
     let state = routing_test_state();
     let Some(WireEvent::SessionGroupsUpdated { groups }) = handle_command(
         &state,
         TEST_PORT,
         ClientCommand::SessionGroupCreate {
-            name: "Rollback test".to_string(),
+            name: "Empty group".to_string(),
         },
     )
     .unwrap() else {
         panic!("expected session groups update");
     };
     let group_id = groups[0].id.clone();
-    for session_id in ["session_a", "session_b"] {
-        handle_command(
-            &state,
-            TEST_PORT,
-            ClientCommand::SessionGroupMove {
-                session_id: session_id.to_string(),
-                group_id: Some(group_id.clone()),
-            },
-        )
-        .unwrap();
-    }
-    let store = current_session_store(&state).unwrap();
-    let blocked_metadata = store.metadata_path_for_session("session_b");
-    let blocked_original = std::fs::read(&blocked_metadata).unwrap();
-    std::fs::remove_file(&blocked_metadata).unwrap();
-    std::fs::create_dir(&blocked_metadata).unwrap();
 
-    let error = handle_command(
+    let deleted = handle_command(
         &state,
         TEST_PORT,
-        ClientCommand::SessionGroupDelete {
-            group_id: group_id.clone(),
-        },
+        ClientCommand::SessionGroupDelete { group_id },
     )
-    .unwrap_err();
-    assert!(error.contains("session_group_delete_persist_failed"));
-    assert_eq!(
-        current_mem_state(&state).unwrap().session_groups,
-        groups,
-        "failed deletion must keep the group definition"
-    );
-    for session_id in ["session_a", "session_b"] {
+    .unwrap();
+    assert!(matches!(
+        deleted,
+        Some(WireEvent::SessionGroupsUpdated { ref groups }) if groups.is_empty()
+    ));
+    assert!(current_mem_state(&state).unwrap().session_groups.is_empty());
+}
+
+#[test]
+fn unsorted_name_is_reserved_for_the_builtin_group() {
+    let state = routing_test_state();
+    for name in ["Unsorted", " unsorted ", "UNSORTED"] {
         assert_eq!(
-            state.sessions.lock().unwrap()[session_id]
-                .group_id
-                .as_deref(),
-            Some(group_id.as_str()),
-            "failed deletion must keep every in-memory group assignment"
+            handle_command(
+                &state,
+                TEST_PORT,
+                ClientCommand::SessionGroupCreate {
+                    name: name.to_string(),
+                },
+            )
+            .unwrap_err(),
+            "session_group_name_reserved"
         );
     }
-    assert_eq!(
-        store
-            .load_session("session_a")
-            .unwrap()
-            .unwrap()
-            .group_id
-            .as_deref(),
-        Some(group_id.as_str()),
-        "metadata written before the injected failure must be compensated"
-    );
-
-    std::fs::remove_dir(&blocked_metadata).unwrap();
-    std::fs::write(&blocked_metadata, blocked_original).unwrap();
-    assert_eq!(
-        store
-            .load_session("session_b")
-            .unwrap()
-            .unwrap()
-            .group_id
-            .as_deref(),
-        Some(group_id.as_str())
-    );
+    assert!(current_mem_state(&state).unwrap().session_groups.is_empty());
 }
 
 #[test]

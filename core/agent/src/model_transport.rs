@@ -5,16 +5,204 @@ use crate::{
     ModelHttpResponseInterpretation, ModelInteractionRequest, ModelServiceConfig,
     OpenAiCompatibleCacheMode, PreparedModelHttpRequest,
 };
-use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use std::cell::RefCell;
+use std::future::Future;
+use std::path::Path;
 use std::time::Duration;
+use tokio::runtime::{Builder, Runtime};
+use tokio::time::sleep;
 
-pub struct HttpModelClient;
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_MODEL_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+thread_local! {
+    static THREAD_HTTP_MODEL_CLIENT: RefCell<HttpModelClient> =
+        RefCell::new(HttpModelClient::default());
+}
+
+#[derive(Default)]
+pub struct HttpModelClient {
+    transport: Option<NativeHttpTransport>,
+}
+
+struct NativeHttpTransport {
+    runtime: Runtime,
+    client: reqwest::Client,
+}
+
+impl NativeHttpTransport {
+    fn new() -> Result<Self, String> {
+        let runtime = Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(|error| {
+                format!("model_network_error: runtime initialization failed: {error}")
+            })?;
+        let client = reqwest::Client::builder().build().map_err(|error| {
+            format!("model_network_error: client initialization failed: {error}")
+        })?;
+        Ok(Self { runtime, client })
+    }
+
+    fn execute(
+        &mut self,
+        request: &PreparedModelHttpRequest,
+        inactivity_timeout: Duration,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<(u16, String), String> {
+        let headers = request_headers(request)?;
+        let body = serde_json::to_vec(&request.model_request.body)
+            .map_err(|error| format!("model_request_serialization_failed: {error}"))?;
+        let pending = self
+            .client
+            .post(&request.endpoint)
+            .headers(headers)
+            .body(body)
+            .send();
+
+        self.runtime.block_on(async move {
+            let mut response = wait_for_progress(pending, inactivity_timeout, should_cancel)
+                .await?
+                .map_err(map_reqwest_error)?;
+            let status = response.status().as_u16();
+            if response
+                .content_length()
+                .is_some_and(|length| length > MAX_MODEL_RESPONSE_BYTES as u64)
+            {
+                return Err(model_response_too_large());
+            }
+            let mut response_body = Vec::new();
+
+            loop {
+                let chunk = wait_for_progress(response.chunk(), inactivity_timeout, should_cancel)
+                    .await?
+                    .map_err(map_reqwest_error)?;
+                match chunk {
+                    Some(bytes) => {
+                        if response_body.len().saturating_add(bytes.len())
+                            > MAX_MODEL_RESPONSE_BYTES
+                        {
+                            return Err(model_response_too_large());
+                        }
+                        response_body.extend_from_slice(&bytes);
+                    }
+                    None => break,
+                }
+            }
+
+            Ok((status, String::from_utf8_lossy(&response_body).into_owned()))
+        })
+    }
+}
+
+async fn wait_for_progress<F, T>(
+    future: F,
+    inactivity_timeout: Duration,
+    should_cancel: &mut dyn FnMut() -> bool,
+) -> Result<T, String>
+where
+    F: Future<Output = T>,
+{
+    let mut future = std::pin::pin!(future);
+    let timeout = sleep(inactivity_timeout);
+    let mut timeout = std::pin::pin!(timeout);
+
+    loop {
+        if should_cancel() {
+            return Err("cancelled_by_user".to_string());
+        }
+        tokio::select! {
+            output = &mut future => return Ok(output),
+            _ = &mut timeout => {
+                return Err(format!(
+                    "model_timeout: no response progress for {} seconds",
+                    inactivity_timeout.as_secs()
+                ));
+            }
+            _ = sleep(CANCEL_POLL_INTERVAL) => {}
+        }
+    }
+}
+
+fn request_headers(request: &PreparedModelHttpRequest) -> Result<HeaderMap, String> {
+    let mut headers = HeaderMap::new();
+    for (name, value) in &request.headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|error| format!("invalid_model_http_header_name: {error}"))?;
+        let value = HeaderValue::from_str(value)
+            .map_err(|error| format!("invalid_model_http_header_value: {error}"))?;
+        headers.append(name, value);
+    }
+    Ok(headers)
+}
+
+fn model_response_too_large() -> String {
+    format!("model_response_too_large: response exceeds {MAX_MODEL_RESPONSE_BYTES} bytes")
+}
+
+fn map_reqwest_error(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        format!("model_timeout: {error}")
+    } else {
+        format!("model_network_error: {error}")
+    }
+}
+
+impl HttpModelClient {
+    fn transport(&mut self) -> Result<&mut NativeHttpTransport, String> {
+        if self.transport.is_none() {
+            self.transport = Some(NativeHttpTransport::new()?);
+        }
+        self.transport
+            .as_mut()
+            .ok_or_else(|| "model_network_error: transport initialization failed".to_string())
+    }
+
+    fn execute_prepared_request_with_cache_fallback(
+        &mut self,
+        config: &ModelServiceConfig,
+        http_request: PreparedModelHttpRequest,
+        audit_file: &Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        let first =
+            self.execute_model_http_request(config, &http_request, audit_file, should_cancel)?;
+
+        if should_retry_without_openai_cache_control(config, &http_request, &first) {
+            let fallback_request = without_openai_compatible_cache_control(&http_request);
+            return self
+                .execute_model_http_request(config, &fallback_request, audit_file, should_cancel)?
+                .result;
+        }
+
+        first.result
+    }
+
+    fn execute_model_http_request(
+        &mut self,
+        config: &ModelServiceConfig,
+        http_request: &PreparedModelHttpRequest,
+        audit_file: &Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<ModelHttpResponseInterpretation, String> {
+        let _ = append_audit_event(
+            audit_file,
+            &model_request_audit_event(config, &http_request.model_request),
+        );
+        let timeout = Duration::from_secs(config.timeout_secs);
+        let (status, raw_text) = self
+            .transport()?
+            .execute(http_request, timeout, should_cancel)?;
+        let interpreted = interpret_model_http_response(config, status, &raw_text, "");
+        let _ = append_audit_event(
+            audit_file,
+            &model_response_audit_event(interpreted.status, &interpreted.raw_json),
+        );
+        Ok(interpreted)
+    }
+}
 
 impl ModelClient for HttpModelClient {
     fn call_model(
@@ -24,7 +212,13 @@ impl ModelClient for HttpModelClient {
         audit_file: &Path,
         should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<LlmResponse, String> {
-        call_model_with_cancel(config, prompt, audit_file, should_cancel)
+        let http_request = prepare_model_http_request(config, prompt);
+        self.execute_prepared_request_with_cache_fallback(
+            config,
+            http_request,
+            audit_file,
+            should_cancel,
+        )
     }
 
     fn call_model_interaction(
@@ -35,7 +229,7 @@ impl ModelClient for HttpModelClient {
         should_cancel: &mut dyn FnMut() -> bool,
     ) -> Result<LlmResponse, String> {
         let http_request = prepare_model_interaction_http_request(config, request);
-        execute_prepared_request_with_cache_fallback(
+        self.execute_prepared_request_with_cache_fallback(
             config,
             http_request,
             audit_file,
@@ -58,63 +252,12 @@ pub fn call_model_with_cancel(
     audit_file: &Path,
     should_cancel: &mut dyn FnMut() -> bool,
 ) -> Result<LlmResponse, String> {
-    let http_request = prepare_model_http_request(config, prompt);
-    execute_prepared_request_with_cache_fallback(config, http_request, audit_file, should_cancel)
-}
-
-fn execute_prepared_request_with_cache_fallback(
-    config: &ModelServiceConfig,
-    http_request: PreparedModelHttpRequest,
-    audit_file: &Path,
-    should_cancel: &mut dyn FnMut() -> bool,
-) -> Result<LlmResponse, String> {
-    let first = execute_model_http_request(config, &http_request, audit_file, should_cancel)?;
-
-    if should_retry_without_openai_cache_control(config, &http_request, &first) {
-        let fallback_request = without_openai_compatible_cache_control(&http_request);
-        return execute_model_http_request(config, &fallback_request, audit_file, should_cancel)?
-            .result;
-    }
-
-    first.result
-}
-
-fn execute_model_http_request(
-    config: &ModelServiceConfig,
-    http_request: &PreparedModelHttpRequest,
-    audit_file: &Path,
-    should_cancel: &mut dyn FnMut() -> bool,
-) -> Result<ModelHttpResponseInterpretation, String> {
-    let _ = append_audit_event(
-        audit_file,
-        &model_request_audit_event(config, &http_request.model_request),
-    );
-    let body =
-        serde_json::to_string(&http_request.model_request.body).map_err(|e| e.to_string())?;
-    let curl_config = CurlConfigFile::create(&build_curl_config(http_request))?;
-    let command = build_curl_command(config.timeout_secs, curl_config.path());
-    let output = run_command_with_input_cancel_and_inactivity_timeout(
-        command,
-        body.into_bytes(),
-        Duration::from_secs(config.timeout_secs),
-        should_cancel,
-    )?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !output.status.success() && stdout.trim().is_empty() {
-        return Err(if stderr.is_empty() {
-            "curl_failed".to_string()
-        } else {
-            stderr
-        });
-    }
-    let (raw_text, status) = split_curl_body_status(&stdout)?;
-    let interpreted = interpret_model_http_response(config, status, &raw_text, &stderr);
-    let _ = append_audit_event(
-        audit_file,
-        &model_response_audit_event(interpreted.status, &interpreted.raw_json),
-    );
-    Ok(interpreted)
+    THREAD_HTTP_MODEL_CLIENT.with(|client| {
+        client
+            .try_borrow_mut()
+            .map_err(|_| "model_network_error: reentrant model HTTP call".to_string())?
+            .call_model(config, prompt, audit_file, should_cancel)
+    })
 }
 
 fn should_retry_without_openai_cache_control(
@@ -155,280 +298,6 @@ fn should_retry_without_openai_cache_control(
     .any(|indicator| error.contains(indicator));
 
     names_cache_control && rejects_schema
-}
-
-static CURL_CONFIG_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Debug)]
-struct CurlConfigFile {
-    path: PathBuf,
-}
-
-impl CurlConfigFile {
-    fn create(contents: &str) -> Result<Self, String> {
-        for _ in 0..100 {
-            let sequence = CURL_CONFIG_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!(
-                "timem-model-curl-{}-{sequence}.conf",
-                std::process::id()
-            ));
-            let mut options = OpenOptions::new();
-            options.create_new(true).write(true);
-            crate::os::configure_private_file_options(&mut options);
-            match options.open(&path) {
-                Ok(mut file) => {
-                    if let Err(error) = file.write_all(contents.as_bytes()) {
-                        let _ = fs::remove_file(&path);
-                        return Err(format!("model_curl_config_write_failed: {error}"));
-                    }
-                    return Ok(Self { path });
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => {
-                    return Err(format!("model_curl_config_create_failed: {error}"));
-                }
-            }
-        }
-        Err("model_curl_config_create_failed: temporary name exhausted".to_string())
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for CurlConfigFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn build_curl_command(timeout_secs: u64, config_path: &Path) -> Command {
-    let mut command = Command::new("curl");
-    command
-        .arg("-sS")
-        // Expose response bytes immediately so Core can measure real transport
-        // progress instead of imposing a total generation-time limit.
-        .arg("--no-buffer")
-        .arg("--connect-timeout")
-        .arg(timeout_secs.to_string())
-        .arg("-w")
-        .arg("\n%{http_code}")
-        .arg("--config")
-        .arg(config_path)
-        // Keep the potentially large and sensitive request body out of both
-        // argv and curl's size-limited config parser.
-        .arg("--data-binary")
-        .arg("@-");
-    command
-}
-
-fn build_curl_config(http_request: &crate::PreparedModelHttpRequest) -> String {
-    let mut config = String::new();
-    config.push_str("request = \"POST\"\n");
-    config.push_str("url = \"");
-    config.push_str(&curl_config_escape(&http_request.endpoint));
-    config.push_str("\"\n");
-    for (key, value) in &http_request.headers {
-        config.push_str("header = \"");
-        config.push_str(&curl_config_escape(&format!("{key}: {value}")));
-        config.push_str("\"\n");
-    }
-    config
-}
-
-fn curl_config_escape(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            _ => escaped.push(character),
-        }
-    }
-    escaped
-}
-
-#[cfg(test)]
-fn run_command_with_input_and_cancel(
-    command: Command,
-    input: Vec<u8>,
-    should_cancel: &mut dyn FnMut() -> bool,
-) -> Result<Output, String> {
-    run_command_with_optional_input_cancel_and_inactivity_timeout(
-        command,
-        Some(input),
-        None,
-        should_cancel,
-    )
-}
-
-fn run_command_with_input_cancel_and_inactivity_timeout(
-    command: Command,
-    input: Vec<u8>,
-    inactivity_timeout: Duration,
-    should_cancel: &mut dyn FnMut() -> bool,
-) -> Result<Output, String> {
-    run_command_with_optional_input_cancel_and_inactivity_timeout(
-        command,
-        Some(input),
-        Some(inactivity_timeout),
-        should_cancel,
-    )
-}
-
-#[cfg(test)]
-fn run_command_with_optional_input_and_cancel(
-    command: Command,
-    input: Option<Vec<u8>>,
-    should_cancel: &mut dyn FnMut() -> bool,
-) -> Result<Output, String> {
-    run_command_with_optional_input_cancel_and_inactivity_timeout(
-        command,
-        input,
-        None,
-        should_cancel,
-    )
-}
-
-fn run_command_with_optional_input_cancel_and_inactivity_timeout(
-    mut command: Command,
-    input: Option<Vec<u8>>,
-    inactivity_timeout: Option<Duration>,
-    should_cancel: &mut dyn FnMut() -> bool,
-) -> Result<Output, String> {
-    command.stdin(if input.is_some() {
-        Stdio::piped()
-    } else {
-        Stdio::null()
-    });
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let stdin_writer = input.map(|input| {
-        let mut stdin = child.stdin.take().expect("piped stdin is available");
-        thread::spawn(move || stdin.write_all(&input))
-    });
-    let last_stdout_progress =
-        inactivity_timeout.map(|_| Arc::new(Mutex::new(std::time::Instant::now())));
-    let stdout_reader = spawn_reader_with_progress(
-        child.stdout.take().expect("piped stdout is available"),
-        last_stdout_progress.clone(),
-    );
-    let stderr_reader = spawn_reader(child.stderr.take().expect("piped stderr is available"));
-    loop {
-        if should_cancel() {
-            let _ = child.kill();
-            let _ = child.wait();
-            drop(stdin_writer);
-            drop(stdout_reader);
-            drop(stderr_reader);
-            return Err("cancelled_by_user".to_string());
-        }
-        if let (Some(timeout), Some(last_progress)) = (inactivity_timeout, &last_stdout_progress) {
-            let stalled = last_progress
-                .lock()
-                .map_err(|_| "model_progress_clock_poisoned".to_string())?
-                .elapsed()
-                >= timeout;
-            if stalled {
-                let _ = child.kill();
-                let _ = child.wait();
-                drop(stdin_writer);
-                drop(stdout_reader);
-                drop(stderr_reader);
-                return Err(format!(
-                    "model_timeout: no response progress for {} seconds",
-                    timeout.as_secs()
-                ));
-            }
-        }
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(status) => {
-                return join_io_threads(stdin_writer, stdout_reader, stderr_reader, status);
-            }
-            None => thread::sleep(Duration::from_millis(10)),
-        }
-    }
-}
-
-fn spawn_reader(
-    reader: impl Read + Send + 'static,
-) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
-    spawn_reader_with_progress(reader, None)
-}
-
-fn spawn_reader_with_progress(
-    mut reader: impl Read + Send + 'static,
-    last_progress: Option<Arc<Mutex<std::time::Instant>>>,
-) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
-    thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let mut chunk = [0_u8; 8192];
-        loop {
-            let read = reader.read(&mut chunk)?;
-            if read == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&chunk[..read]);
-            if let Some(last_progress) = &last_progress {
-                if let Ok(mut progress) = last_progress.lock() {
-                    *progress = std::time::Instant::now();
-                }
-            }
-        }
-        Ok(bytes)
-    })
-}
-
-fn join_io_threads(
-    stdin_writer: Option<thread::JoinHandle<std::io::Result<()>>>,
-    stdout_reader: thread::JoinHandle<std::io::Result<Vec<u8>>>,
-    stderr_reader: thread::JoinHandle<std::io::Result<Vec<u8>>>,
-    status: ExitStatus,
-) -> Result<Output, String> {
-    let input_result = stdin_writer.map(|writer| {
-        writer
-            .join()
-            .map_err(|_| "model_request_stdin_writer_panicked".to_string())
-            .and_then(|result| result.map_err(|err| format!("model_request_stdin_failed: {err}")))
-    });
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| "model_stdout_reader_panicked".to_string())?
-        .map_err(|err| format!("model_stdout_read_failed: {err}"))?;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| "model_stderr_reader_panicked".to_string())?
-        .map_err(|err| format!("model_stderr_read_failed: {err}"))?;
-    if status.success() {
-        if let Some(Err(err)) = input_result {
-            return Err(err);
-        }
-    }
-    Ok(Output {
-        status,
-        stdout,
-        stderr,
-    })
-}
-
-fn split_curl_body_status(stdout: &str) -> Result<(String, u16), String> {
-    let trimmed = stdout.trim_end();
-    let split_at = trimmed
-        .rfind('\n')
-        .ok_or_else(|| "missing_http_status".to_string())?;
-    let (body, status_text) = trimmed.split_at(split_at);
-    let status = status_text
-        .trim()
-        .parse::<u16>()
-        .map_err(|_| "invalid_http_status".to_string())?;
-    Ok((body.to_string(), status))
 }
 
 #[cfg(test)]

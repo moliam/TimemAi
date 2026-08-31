@@ -822,10 +822,6 @@ enum WireEvent {
     SessionGroupsUpdated {
         groups: Vec<SessionGroup>,
     },
-    SessionGroupChanged {
-        session_id: String,
-        group_id: Option<String>,
-    },
     WorkerRoleLibraryUpdated {
         library: WorkerRoleLibrary,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1145,6 +1141,8 @@ enum ClientCommand {
         display_name: Option<String>,
         workspace_dir: Option<String>,
         #[serde(default)]
+        group_id: Option<String>,
+        #[serde(default)]
         env: BTreeMap<String, String>,
     },
     SessionRename {
@@ -1423,6 +1421,9 @@ impl ClientCommand {
             | Self::SessionGroupDelete { .. }
             | Self::SessionGroupsReorder { .. }
             | Self::SessionGroupMove { .. } => Some("session-groups".to_string()),
+            Self::SessionCreate {
+                group_id: Some(_), ..
+            } => Some("session-groups".to_string()),
             Self::SessionCreate { .. } => Some("session:create".to_string()),
             Self::McpServerUpsert { config, .. } => Some(format!("mcp:{}", config.id)),
             Self::SessionRename { session_id, .. }
@@ -2117,6 +2118,9 @@ fn ensure_unique_session_group_name(
     name: &str,
     except_id: Option<&str>,
 ) -> Result<(), String> {
+    if name.eq_ignore_ascii_case("Unsorted") {
+        return Err("session_group_name_reserved".to_string());
+    }
     if groups
         .iter()
         .any(|group| Some(group.id.as_str()) != except_id && group.name.eq_ignore_ascii_case(name))
@@ -2582,9 +2586,11 @@ fn handle_command_with_id(
         ClientCommand::SessionCreate {
             display_name,
             workspace_dir,
+            group_id,
             env,
         } => {
-            let session_id = create_session(state, display_name, workspace_dir, env)?;
+            let session_id =
+                create_session_in_group(state, display_name, workspace_dir, group_id, env)?;
             let session = state
                 .sessions
                 .lock()
@@ -2702,143 +2708,47 @@ fn handle_command_with_id(
             return Ok(Some(event));
         }
         ClientCommand::SessionGroupDelete { group_id } => {
-            let (memory_dir, groups, store) = {
-                let mem = state
-                    .mem
+            if !current_mem_state(state)?
+                .session_groups
+                .iter()
+                .any(|group| group.id == group_id)
+            {
+                return Err("session_group_not_found".to_string());
+            }
+            {
+                let sessions = state
+                    .sessions
                     .lock()
-                    .map_err(|_| "mem_state_poisoned".to_string())?;
-                let mut groups = mem.session_groups.clone();
+                    .map_err(|_| "session_store_poisoned".to_string())?;
+                if sessions
+                    .values()
+                    .any(|session| session.group_id.as_deref() == Some(group_id.as_str()))
+                {
+                    return Err("session_group_not_empty".to_string());
+                }
+            }
+            let groups = mutate_session_groups(state, |groups| {
                 let before = groups.len();
                 groups.retain(|group| group.id != group_id);
                 if before == groups.len() {
                     return Err("session_group_not_found".to_string());
                 }
-                (mem.layout.memory_dir(), groups, mem.session_store.clone())
-            };
-            let affected = {
-                let sessions = state
-                    .sessions
-                    .lock()
-                    .map_err(|_| "session_store_poisoned".to_string())?;
-                sessions
-                    .values()
-                    .filter(|session| session.group_id.as_deref() == Some(group_id.as_str()))
-                    .map(|session| {
-                        let previous = stored_session_from_web_session_with_store(&store, session);
-                        let mut updated = previous.clone();
-                        updated.group_id = None;
-                        (session.session_id.clone(), previous, updated)
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let mut affected = affected;
-            affected.sort_by(|left, right| left.0.cmp(&right.0));
-            let mut persisted = Vec::new();
-            for (session_id, previous, updated) in &affected {
-                if let Err(error) = store.upsert_session(updated) {
-                    rollback_stored_sessions(&store, &persisted)?;
-                    return Err(format!(
-                        "session_group_delete_persist_failed:{session_id}:{error}"
-                    ));
-                }
-                persisted.push(previous.clone());
-            }
-            if let Err(error) = save_session_groups(&memory_dir, &groups) {
-                rollback_stored_sessions(&store, &persisted)?;
-                return Err(format!("session_group_delete_persist_failed:{error}"));
-            }
-            {
-                let mut mem = state
-                    .mem
-                    .lock()
-                    .map_err(|_| "mem_state_poisoned".to_string())?;
-                mem.session_groups = groups.clone();
-                let mut sessions = state
-                    .sessions
-                    .lock()
-                    .map_err(|_| "session_store_poisoned".to_string())?;
-                for (session_id, _, _) in &affected {
-                    sessions
-                        .get_mut(session_id)
-                        .ok_or_else(|| "session_not_found".to_string())?
-                        .group_id = None;
-                }
-            }
+                Ok(())
+            })?;
             let event = WireEvent::SessionGroupsUpdated { groups };
             publish_semantic(state, event.clone());
-            for (session_id, _, _) in affected {
-                publish_semantic(
-                    state,
-                    WireEvent::SessionGroupChanged {
-                        session_id,
-                        group_id: None,
-                    },
-                );
-            }
             return Ok(Some(event));
         }
         ClientCommand::SessionGroupsReorder { groups } => {
-            let updated = mutate_session_groups(state, |current| {
-                let current_ids = current
-                    .iter()
-                    .map(|group| group.id.as_str())
-                    .collect::<BTreeSet<_>>();
-                let supplied_ids = groups
-                    .iter()
-                    .map(|group| group.id.as_str())
-                    .collect::<BTreeSet<_>>();
-                if current_ids != supplied_ids || supplied_ids.len() != groups.len() {
-                    return Err("session_group_set_mismatch".to_string());
-                }
-                *current = groups;
-                Ok(())
-            })?;
-            let event = WireEvent::SessionGroupsUpdated { groups: updated };
-            publish_semantic(state, event.clone());
-            return Ok(Some(event));
+            let _legacy_reorder_request = groups;
+            return Err("session_group_order_fixed".to_string());
         }
         ClientCommand::SessionGroupMove {
             session_id,
             group_id,
         } => {
-            let store = {
-                let mem = state
-                    .mem
-                    .lock()
-                    .map_err(|_| "mem_state_poisoned".to_string())?;
-                if let Some(group_id) = group_id.as_deref() {
-                    if !mem.session_groups.iter().any(|group| group.id == group_id) {
-                        return Err("session_group_not_found".to_string());
-                    }
-                }
-                mem.session_store.clone()
-            };
-            let updated = {
-                let sessions = state
-                    .sessions
-                    .lock()
-                    .map_err(|_| "session_store_poisoned")?;
-                let session = sessions
-                    .get(&session_id)
-                    .ok_or_else(|| "session_not_found".to_string())?;
-                let mut updated = stored_session_from_web_session_with_store(&store, session);
-                updated.group_id = group_id.clone();
-                updated
-            };
-            store.upsert_session(&updated)?;
-            state
-                .sessions
-                .lock()
-                .map_err(|_| "session_store_poisoned")?
-                .get_mut(&session_id)
-                .ok_or_else(|| "session_not_found".to_string())?
-                .group_id = group_id.clone();
-            let event = WireEvent::SessionGroupChanged {
-                session_id,
-                group_id,
-            };
-            publish_semantic(state, event.clone());
-            return Ok(Some(event));
+            let _legacy_move_request = (session_id, group_id);
+            return Err("session_group_assignment_fixed".to_string());
         }
         ClientCommand::SessionApiKeyUpdate {
             session_id,
@@ -4650,6 +4560,31 @@ fn create_session(
     requested_workspace: Option<String>,
     env_overrides: BTreeMap<String, String>,
 ) -> Result<String, String> {
+    create_session_in_group(
+        state,
+        display_name,
+        requested_workspace,
+        None,
+        env_overrides,
+    )
+}
+
+fn create_session_in_group(
+    state: &AppState,
+    display_name: Option<String>,
+    requested_workspace: Option<String>,
+    group_id: Option<String>,
+    env_overrides: BTreeMap<String, String>,
+) -> Result<String, String> {
+    if let Some(group_id) = group_id.as_deref() {
+        if !current_mem_state(state)?
+            .session_groups
+            .iter()
+            .any(|group| group.id == group_id)
+        {
+            return Err("session_group_not_found".to_string());
+        }
+    }
     let session_id = unique_web_id("session");
     let tool_repo = session_tool_repo(state, &session_id)?;
     let current_dir = state
@@ -4697,7 +4632,7 @@ fn create_session(
             session_id.clone(),
             WebSession {
                 session_id: session_id.clone(),
-                group_id: None,
+                group_id,
                 display_name: session_display_name,
                 ordinal,
                 state: "ready".to_string(),
@@ -5663,26 +5598,6 @@ fn history_user_entry_kind(kind: Option<&str>) -> &str {
     match kind {
         Some(kind @ ("task" | "supplement" | "approval")) => kind,
         _ => "task",
-    }
-}
-
-fn rollback_stored_sessions(
-    store: &SessionStore,
-    previous_sessions: &[StoredSession],
-) -> Result<(), String> {
-    let mut errors = Vec::new();
-    for previous in previous_sessions.iter().rev() {
-        if let Err(error) = store.upsert_session(previous) {
-            errors.push(format!("{}:{error}", previous.session_id));
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "session_group_rollback_failed:{}",
-            errors.join(",")
-        ))
     }
 }
 

@@ -176,7 +176,7 @@ It must not contain:
   rule decides whether a Turn exists, accepts input, stops, finishes, or owns an
   outcome, it belongs in Core. This module only adapts that rule to reliable Web
   delivery and browser-facing projection.
-- Model API wire formatting, curl calls, prompt assembly, memory semantics,
+- Model API wire formatting or HTTP execution, prompt assembly, memory semantics,
   tool argument parsing, MCP protocol execution, or other tool execution.
 - React layout, CSS, browser state reducers, or user-facing visual policy. Those
   belong in `interfaces/web`.
