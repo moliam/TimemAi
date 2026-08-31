@@ -163,6 +163,15 @@ impl Drop for TemporaryDebugRoot {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PromptRecordMetrics {
+    pub(crate) request_sequence: u64,
+    pub(crate) state_ms: f64,
+    pub(crate) prompt_render_write_ms: f64,
+    pub(crate) statistics_render_write_ms: f64,
+    pub(crate) total_ms: f64,
+}
+
 impl DebugStore {
     #[cfg(test)]
     pub(crate) fn create() -> Result<Self, String> {
@@ -231,9 +240,11 @@ impl DebugStore {
         _prompt: &str,
         interaction_request: Option<&agent_core::ModelInteractionRequest>,
         api_payload: Option<&serde_json::Value>,
-    ) -> Result<(), String> {
+    ) -> Result<PromptRecordMetrics, String> {
+        let started = std::time::Instant::now();
         self.session_dir(session_id)?;
-        {
+        let state_started = std::time::Instant::now();
+        let request_sequence = {
             let mut sessions = self
                 .sessions
                 .lock()
@@ -268,9 +279,21 @@ impl DebugStore {
                 api_payload: api_payload.cloned(),
             });
             stats.updated_at_ms = generated_at_ms;
-        }
+            stats.request_sequence
+        };
+        let state_ms = state_started.elapsed().as_secs_f64() * 1000.0;
+        let prompt_render_started = std::time::Instant::now();
         self.render_llm_prompts(session_id)?;
-        self.render_statistics(session_id)
+        let prompt_render_write_ms = prompt_render_started.elapsed().as_secs_f64() * 1000.0;
+        let statistics_started = std::time::Instant::now();
+        self.render_statistics(session_id)?;
+        Ok(PromptRecordMetrics {
+            request_sequence,
+            state_ms,
+            prompt_render_write_ms,
+            statistics_render_write_ms: statistics_started.elapsed().as_secs_f64() * 1000.0,
+            total_ms: started.elapsed().as_secs_f64() * 1000.0,
+        })
     }
 
     pub(crate) fn record_llm_response(

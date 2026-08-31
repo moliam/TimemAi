@@ -761,6 +761,7 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
                 interaction_profile,
                 interaction_request,
                 api_payload,
+                ..
             } => {
                 assert_eq!(round, 1);
                 let profile = interaction_profile

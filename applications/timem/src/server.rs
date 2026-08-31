@@ -6803,6 +6803,15 @@ fn submit_turn_with_selected_attachments(
         },
     );
     let attachments = turn.user_entries[0].attachments.clone();
+    state.runtime_log.record(
+        "turn_core_enqueue_start",
+        json!({
+            "session_id": session_id,
+            "turn_id": turn.turn_id,
+            "command_id": command_id,
+        }),
+    );
+    let enqueue_started = std::time::Instant::now();
     if let Err(error) = primary_worker_handle(state, session_id)?.run_turn_with_command_id(
         text,
         session_context_with_roles(state, session_id, &attachments, &worker_roles)?,
@@ -6811,6 +6820,15 @@ fn submit_turn_with_selected_attachments(
         rollback_web_turn(state, session_id, &turn.turn_id, attachments);
         return Err(error);
     }
+    state.runtime_log.record(
+        "turn_core_enqueue_finish",
+        json!({
+            "session_id": session_id,
+            "turn_id": turn.turn_id,
+            "command_id": command_id,
+            "elapsed_ms": enqueue_started.elapsed().as_secs_f64() * 1000.0,
+        }),
+    );
     Ok(turn)
 }
 
@@ -9332,6 +9350,15 @@ fn handle_scoped_worker_event(
             mark_core_command_accepted(state, session_id, &command_id);
         }
         CoreSessionWorkerEvent::TurnStarted { command_id } => {
+            state.runtime_log.record(
+                "core_turn_started_consumed",
+                json!({
+                    "session_id": session_id,
+                    "context_id": context_id,
+                    "worker_id": worker_id,
+                    "command_id": command_id,
+                }),
+            );
             if let Some((turn, materialized_payload)) =
                 activate_core_started_turn(state, session_id, worker_id, command_id.as_deref())
             {
@@ -9688,11 +9715,31 @@ fn handle_scoped_worker_event(
         }
         CoreSessionWorkerEvent::ModelRequest {
             round,
+            emitted_at_ms,
             prompt,
             interaction_profile,
             interaction_request,
             api_payload,
         } => {
+            let consumed_at_ms = now_ms();
+            let event_delay_ms = consumed_at_ms.saturating_sub(emitted_at_ms);
+            let api_payload_bytes = api_payload
+                .as_deref()
+                .and_then(|payload| serde_json::to_vec(payload).ok())
+                .map(|payload| payload.len());
+            state.runtime_log.record(
+                "core_model_request_consumed",
+                json!({
+                    "session_id": session_id,
+                    "context_id": context_id,
+                    "worker_id": worker_id,
+                    "round": round,
+                    "emitted_at_ms": emitted_at_ms,
+                    "event_delay_ms": event_delay_ms,
+                    "prompt_bytes": prompt.len(),
+                    "api_payload_bytes": api_payload_bytes,
+                }),
+            );
             if let Some(debug) = state.debug.as_ref() {
                 if let Some(profile) = interaction_profile.as_ref() {
                     if let Err(error) =
@@ -9703,7 +9750,7 @@ fn handle_scoped_worker_event(
                         );
                     }
                 }
-                if let Err(error) = debug.record_prompt(
+                match debug.record_prompt(
                     session_id,
                     worker_id,
                     round,
@@ -9711,7 +9758,38 @@ fn handle_scoped_worker_event(
                     interaction_request.as_deref(),
                     api_payload.as_deref(),
                 ) {
-                    eprintln!("[timem_web_debug_error] session_id={session_id:?} reason={error}");
+                    Ok(metrics) => state.runtime_log.record(
+                        "debug_prompt_persisted",
+                        json!({
+                            "session_id": session_id,
+                            "context_id": context_id,
+                            "worker_id": worker_id,
+                            "round": round,
+                            "request_sequence": metrics.request_sequence,
+                            "event_delay_ms": event_delay_ms,
+                            "state_ms": metrics.state_ms,
+                            "prompt_render_write_ms": metrics.prompt_render_write_ms,
+                            "statistics_render_write_ms": metrics.statistics_render_write_ms,
+                            "record_total_ms": metrics.total_ms,
+                            "emitted_to_persisted_ms": now_ms().saturating_sub(emitted_at_ms),
+                        }),
+                    ),
+                    Err(error) => {
+                        eprintln!(
+                            "[timem_web_debug_error] session_id={session_id:?} reason={error}"
+                        );
+                        state.runtime_log.record(
+                            "debug_prompt_persist_failed",
+                            json!({
+                                "session_id": session_id,
+                                "context_id": context_id,
+                                "worker_id": worker_id,
+                                "round": round,
+                                "event_delay_ms": event_delay_ms,
+                                "reason": error,
+                            }),
+                        );
+                    }
                 }
             }
             set_worker_state(state, session_id, worker_id, "working");
