@@ -21,6 +21,8 @@ The product Web host is split by internal responsibility under `src/server/`:
 - `command_dedup.rs` owns bounded process-local command correlation records, including in-flight
   retention, terminal-record eviction, capacity exhaustion, and explicit reservation removal. It is
   not a durable command ledger and does not infer Session/Turn lifecycle.
+- `desktop_launch.rs` owns direct, shell-free browser and terminal process launching plus the
+  local graphical-session auto-open check. It does not own Web or Agent lifecycle decisions.
 - `websocket_delivery.rs` owns authenticated browser command delivery after generic WebSocket
   framing.
 - `mem_maintenance.rs` owns bounded memory-space maintenance.

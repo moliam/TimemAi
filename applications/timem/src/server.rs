@@ -1,5 +1,6 @@
 mod command_dedup;
 mod command_lane;
+mod desktop_launch;
 mod mem_maintenance;
 mod websocket_delivery;
 
@@ -7,6 +8,9 @@ mod websocket_delivery;
 use command_dedup::COMMAND_DEDUP_CAPACITY;
 use command_dedup::{CommandDedupCache, CommandDedupState, MAX_COMMAND_DEDUP_RESULT_BYTES};
 use command_lane::TicketCommandLane;
+#[cfg(test)]
+use desktop_launch::{browser_auto_open_allowed_for, browser_command};
+use desktop_launch::{open_browser, open_directory_in_terminal, should_auto_open_browser};
 use mem_maintenance::*;
 use websocket_delivery::{command_ack, finish_command_dedup};
 #[cfg(test)]
@@ -69,11 +73,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    ffi::OsString,
     io::{IsTerminal, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, RwLock,
@@ -11181,50 +11183,6 @@ impl WebLaunchOptions {
             .map(|key| key.api_key),
         }
     }
-}
-
-fn browser_command(url: &str) -> Result<(OsString, Vec<OsString>), String> {
-    agent_core::os::browser_command(url).ok_or_else(|| "browser_open_unsupported".to_string())
-}
-
-fn open_browser(url: &str) -> Result<(), String> {
-    let (program, args) = browser_command(url)?;
-    let mut child = Command::new(program)
-        .args(args)
-        .spawn()
-        .map_err(|error| error.to_string())?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
-}
-
-fn should_auto_open_browser() -> bool {
-    let is_ssh = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
-        .into_iter()
-        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));
-
-    browser_auto_open_allowed_for(is_ssh, agent_core::os::graphical_session_available())
-}
-
-fn browser_auto_open_allowed_for(is_ssh: bool, has_graphical_session: bool) -> bool {
-    !is_ssh && has_graphical_session
-}
-
-fn open_directory_in_terminal(path: &Path) -> Result<(), String> {
-    if !path.is_dir() {
-        return Err("tool_directory_not_found".to_string());
-    }
-    let (program, args) = agent_core::os::terminal_command(path)
-        .ok_or_else(|| "terminal_open_unsupported".to_string())?;
-    let mut child = Command::new(program)
-        .args(args)
-        .spawn()
-        .map_err(|error| format!("terminal_open_failed:{error}"))?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
 }
 
 fn uses_system_default_mem(memory_dir: &str) -> bool {
