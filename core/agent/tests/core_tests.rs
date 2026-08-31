@@ -599,8 +599,12 @@ fn startup_stamp_is_fixed_for_one_core_instance_across_static_prompt_refreshes()
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
+    // The checked-out Markdown template may use CRLF on Windows. Parse a
+    // normalized view so this test verifies the rendered semantic section rather
+    // than Git's platform-specific working-tree line endings.
+    let first_normalized = first.replace("\r\n", "\n");
     let timestamp_section = "## STARTUP_TIMESTAMP\nTimem restarted at:\n";
-    let stamp = first
+    let stamp = first_normalized
         .rsplit_once(timestamp_section)
         .and_then(|(_, rest)| rest.lines().next())
         .expect("startup stamp should be rendered")
@@ -613,7 +617,8 @@ fn startup_stamp_is_fixed_for_one_core_instance_across_static_prompt_refreshes()
 
     core.set_assistant_speaker_name("Ai2");
     let refreshed = core.build_next_prompt();
-    assert!(refreshed.contains(&format!("{timestamp_section}{stamp}")));
+    let refreshed_normalized = refreshed.replace("\r\n", "\n");
+    assert!(refreshed_normalized.contains(&format!("{timestamp_section}{stamp}")));
     assert!(!refreshed.contains("{{STARTUP_STAMP}}"));
 }
 
