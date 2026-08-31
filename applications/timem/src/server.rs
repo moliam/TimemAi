@@ -1418,6 +1418,12 @@ struct RuntimeSettings {
     max_rounds: u32,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct RestartCwdDecision {
+    runtime_cwd: String,
+    session_cwd: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct WebSession {
     session_id: String,
@@ -1426,6 +1432,8 @@ struct WebSession {
     ordinal: u32,
     state: String,
     current_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    restart_cwd_decision: Option<RestartCwdDecision>,
     #[serde(skip_serializing_if = "Option::is_none")]
     debug_dir: Option<String>,
     max_llm_input_tokens: u32,
@@ -1642,6 +1650,9 @@ enum WireEvent {
     SessionRenamed {
         session_id: String,
         display_name: String,
+    },
+    SessionRestartCwdResolved {
+        session: Box<WebSession>,
     },
     SessionDeleted {
         session_id: String,
@@ -1974,6 +1985,10 @@ enum ClientCommand {
         session_id: String,
         display_name: String,
     },
+    SessionRestartCwdResolve {
+        session_id: String,
+        decision: String,
+    },
     SessionGroupCreate {
         name: String,
     },
@@ -2224,6 +2239,7 @@ impl ClientCommand {
             Self::SessionCreate { .. } => Some("session:create".to_string()),
             Self::McpServerUpsert { config, .. } => Some(format!("mcp:{}", config.id)),
             Self::SessionRename { session_id, .. }
+            | Self::SessionRestartCwdResolve { session_id, .. }
             | Self::SessionApiKeyUpdate { session_id, .. }
             | Self::SessionStop { session_id }
             | Self::SessionDelete { session_id }
@@ -2721,6 +2737,9 @@ async fn upload_file(
 ) -> Response {
     if !authorized_api_request(&state, query.token.as_deref(), &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Err(error) = ensure_restart_cwd_resolved(&state, &query.session_id) {
+        return (StatusCode::CONFLICT, Json(json!({ "error": error }))).into_response();
     }
     let result = async {
         let field = multipart
@@ -4081,6 +4100,24 @@ fn handle_command_with_id(
                 publish_semantic(state, event);
             }
             let event = WireEvent::SessionCreated {
+                session: Box::new(session),
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::SessionRestartCwdResolve {
+            session_id,
+            decision,
+        } => {
+            resolve_restart_cwd_decision(state, &session_id, &decision)?;
+            let session = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned")?
+                .get(&session_id)
+                .cloned()
+                .ok_or_else(|| "session_not_found".to_string())?;
+            let event = WireEvent::SessionRestartCwdResolved {
                 session: Box::new(session),
             };
             publish_semantic(state, event.clone());
@@ -6014,6 +6051,7 @@ fn create_session(
                 ordinal,
                 state: "ready".to_string(),
                 current_dir: current_dir.display().to_string(),
+                restart_cwd_decision: None,
                 debug_dir: state
                     .debug
                     .as_ref()
@@ -6218,6 +6256,119 @@ fn sync_state_parent_directory(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn restart_cwd_decision(
+    state: &AppState,
+    session_cwd: &Path,
+    record_runtime_restart: bool,
+) -> Option<RestartCwdDecision> {
+    if !record_runtime_restart {
+        return None;
+    }
+    let runtime_cwd = std::fs::canonicalize(&state.template.current_dir).ok()?;
+    let session_cwd = std::fs::canonicalize(session_cwd).ok()?;
+    (runtime_cwd != session_cwd).then(|| RestartCwdDecision {
+        runtime_cwd: runtime_cwd.display().to_string(),
+        session_cwd: session_cwd.display().to_string(),
+    })
+}
+
+fn ensure_restart_cwd_resolved(state: &AppState, session_id: &str) -> Result<(), String> {
+    let pending = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .get(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?
+        .restart_cwd_decision
+        .is_some();
+    if pending {
+        Err("session_restart_cwd_decision_required".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn resolve_restart_cwd_decision(
+    state: &AppState,
+    session_id: &str,
+    decision: &str,
+) -> Result<(), String> {
+    let pending = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .get(session_id)
+        .ok_or_else(|| "session_not_found".to_string())?
+        .restart_cwd_decision
+        .clone()
+        .ok_or_else(|| "session_restart_cwd_decision_not_pending".to_string())?;
+
+    match decision {
+        "keep_session" => {
+            state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?
+                .get_mut(session_id)
+                .ok_or_else(|| "session_not_found".to_string())?
+                .restart_cwd_decision = None;
+            Ok(())
+        }
+        "use_runtime" => {
+            let worker_ids = {
+                let sessions = state
+                    .sessions
+                    .lock()
+                    .map_err(|_| "session_store_poisoned".to_string())?;
+                let session = sessions
+                    .get(session_id)
+                    .ok_or_else(|| "session_not_found".to_string())?;
+                if current_turn_id(session).is_some()
+                    || session.pending_turn_id.is_some()
+                    || session
+                        .workers
+                        .iter()
+                        .any(|worker| worker.state == "working")
+                {
+                    return Err("session_restart_cwd_change_requires_idle_session".to_string());
+                }
+                session
+                    .workers
+                    .iter()
+                    .map(|worker| worker.worker_id.clone())
+                    .collect::<Vec<_>>()
+            };
+            let runtime_cwd = PathBuf::from(&pending.runtime_cwd);
+            let manager = state
+                .manager
+                .lock()
+                .map_err(|_| "worker_manager_poisoned".to_string())?;
+            for worker_id in &worker_ids {
+                manager
+                    .handle(worker_id)
+                    .ok_or_else(|| "session_worker_not_found".to_string())?
+                    .change_cwd(runtime_cwd.clone())?;
+            }
+            drop(manager);
+            let mut sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or_else(|| "session_not_found".to_string())?;
+            for context in &mut session.contexts {
+                context.current_dir = pending.runtime_cwd.clone();
+            }
+            session.current_dir = pending.runtime_cwd;
+            session.restart_cwd_decision = None;
+            drop(sessions);
+            persist_web_session(state, session_id)
+        }
+        _ => Err("session_restart_cwd_decision_invalid".to_string()),
+    }
+}
+
 fn restore_stored_session(
     state: &AppState,
     stored: StoredSession,
@@ -6368,6 +6519,11 @@ fn restore_stored_session(
                 }
                 .to_string(),
                 current_dir: current_dir.display().to_string(),
+                restart_cwd_decision: restart_cwd_decision(
+                    state,
+                    &current_dir,
+                    record_runtime_restart,
+                ),
                 debug_dir,
                 max_llm_input_tokens,
                 tools,
@@ -9010,6 +9166,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
     command_id: Option<&str>,
     worker_roles: Vec<WorkerRole>,
 ) -> Result<WebTurn, String> {
+    ensure_restart_cwd_resolved(state, session_id)?;
     let mut sessions = state
         .sessions
         .lock()
@@ -9101,6 +9258,7 @@ fn submit_toolgen_turn(
     user_instruction: Option<String>,
     command_id: Option<&str>,
 ) -> Result<WebTurn, String> {
+    ensure_restart_cwd_resolved(state, session_id)?;
     validate_session_model_service_config(state, session_id)?;
     {
         let sessions = state

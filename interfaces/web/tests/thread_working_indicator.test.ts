@@ -12,13 +12,21 @@ function rule(selector: string) {
 }
 
 describe("thread working indicator", () => {
-  it("uses one circular button without a second orbit ring", () => {
+  it("removes every solid or shadow-drawn working button border", () => {
     const button = rule(".thread-working-away");
     const active = rule(".thread-working-away.is-working");
+    const lightActive = rule(':root[data-theme="light"] .thread-working-away.is-working');
 
     expect(button).toContain("border-radius: 50%");
     expect(button).toContain("box-shadow: 0 1px 2px");
+    expect(active).toContain("border: 0");
     expect(active).toContain("box-shadow: 0 1px 3px");
+    expect(active).not.toContain("0 0 0 1px");
+    expect(lightActive).toContain("border: 0");
+    expect(lightActive).toContain("box-shadow: 0 1px 3px");
+    expect(lightActive).not.toContain("0 0 0 1px");
+    expect(styles).not.toContain("has-working-session");
+    expect(source).not.toContain("has-working-session");
     expect(styles).not.toContain("thread-working-orbit");
     expect(source).not.toContain("thread-working-orbit");
   });

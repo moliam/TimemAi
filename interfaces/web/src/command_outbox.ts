@@ -27,6 +27,7 @@ const BEST_EFFORT_COMMANDS = new Set<ClientCommand["type"]>([
 const CLIENT_COMMAND_TYPES = new Set<ClientCommand["type"]>([
   "session_create",
   "session_rename",
+  "session_restart_cwd_resolve",
   "session_group_create",
   "session_group_update",
   "session_group_delete",

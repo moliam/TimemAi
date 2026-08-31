@@ -119,6 +119,10 @@ export type Session = {
   ordinal: number;
   state: "ready" | "working" | "interrupted" | "error" | "stopped" | string;
   current_dir: string;
+  restart_cwd_decision?: {
+    runtime_cwd: string;
+    session_cwd: string;
+  } | null;
   debug_dir?: string | null;
   max_llm_input_tokens: number;
   tools: ToolSummary[];
@@ -417,6 +421,7 @@ export type WireEvent =
     }
   | { type: "session_created"; session: Session }
   | { type: "session_renamed"; session_id: string; display_name: string }
+  | { type: "session_restart_cwd_resolved"; session: Session }
   | { type: "session_deleted"; session_id: string }
   | { type: "session_groups_updated"; groups: SessionGroup[] }
   | {
@@ -639,6 +644,11 @@ export type ClientCommand =
       text: string;
       attachment_ids?: string[];
       role_ids?: string[];
+    }
+  | {
+      type: "session_restart_cwd_resolve";
+      session_id: string;
+      decision: "use_runtime" | "keep_session";
     }
   | { type: "turn_cancel"; session_id: string; target_command_id?: string }
   | { type: "attachment_remove"; session_id: string; attachment_id: string }
