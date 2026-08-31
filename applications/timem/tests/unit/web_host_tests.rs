@@ -1969,6 +1969,10 @@ fn core_runtime_process_restart_marks_running_session_and_latest_unfinished_turn
         assert_eq!(restored.state, "interrupted");
         assert_eq!(restored.active_turn_id, None);
         assert_eq!(restored.pending_turn_id, None);
+        assert!(
+            restored.restart_cwd_decision.is_none(),
+            "a real restart on the same canonical cwd must not ask for a choice"
+        );
         assert!(restored
             .workers
             .iter()
@@ -4628,6 +4632,107 @@ fn legacy_session_roles_migrate_into_the_mem_scoped_global_library() {
 }
 
 #[test]
+fn runtime_restart_requires_each_restored_session_to_resolve_cwd_before_work() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_restart_cwd"));
+    let previous_cwd = root.join("previous");
+    let runtime_cwd = root.join("runtime");
+    std::fs::create_dir_all(&previous_cwd).unwrap();
+    std::fs::create_dir_all(&runtime_cwd).unwrap();
+    let data_dir = root.join("data");
+    let space = "restart_cwd_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = previous_cwd.clone();
+    template.workspace_dirs = vec![previous_cwd.clone(), runtime_cwd.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    state.sessions.lock().unwrap().clear();
+
+    let keep_id = create_session(
+        &state,
+        Some("Keep old cwd".to_string()),
+        Some(previous_cwd.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let switch_id = create_session(
+        &state,
+        Some("Use runtime cwd".to_string()),
+        Some(previous_cwd.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+
+    template.current_dir = runtime_cwd.clone();
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+    assert_eq!(
+        restore_stored_sessions_after_runtime_restart(&restarted).unwrap(),
+        2
+    );
+
+    {
+        let sessions = restarted.sessions.lock().unwrap();
+        for session_id in [&keep_id, &switch_id] {
+            let pending = sessions
+                .get(session_id)
+                .unwrap()
+                .restart_cwd_decision
+                .as_ref()
+                .expect("every unvisited restored session must retain its decision");
+            assert_eq!(
+                std::fs::canonicalize(&pending.runtime_cwd).unwrap(),
+                std::fs::canonicalize(&runtime_cwd).unwrap()
+            );
+            assert_eq!(
+                std::fs::canonicalize(&pending.session_cwd).unwrap(),
+                std::fs::canonicalize(&previous_cwd).unwrap()
+            );
+        }
+    }
+
+    assert_eq!(
+        start_web_turn(&restarted, &switch_id, "must not start").unwrap_err(),
+        "session_restart_cwd_decision_required"
+    );
+
+    resolve_restart_cwd_decision(&restarted, &keep_id, "keep_session").unwrap();
+    {
+        let sessions = restarted.sessions.lock().unwrap();
+        let kept = sessions.get(&keep_id).unwrap();
+        assert!(kept.restart_cwd_decision.is_none());
+        assert_eq!(
+            std::fs::canonicalize(&kept.current_dir).unwrap(),
+            std::fs::canonicalize(&previous_cwd).unwrap()
+        );
+        assert!(sessions
+            .get(&switch_id)
+            .unwrap()
+            .restart_cwd_decision
+            .is_some());
+    }
+
+    resolve_restart_cwd_decision(&restarted, &switch_id, "use_runtime").unwrap();
+    let sessions = restarted.sessions.lock().unwrap();
+    let switched = sessions.get(&switch_id).unwrap();
+    assert!(switched.restart_cwd_decision.is_none());
+    assert_eq!(
+        std::fs::canonicalize(&switched.current_dir).unwrap(),
+        std::fs::canonicalize(&runtime_cwd).unwrap()
+    );
+    assert!(switched.contexts.iter().all(|context| {
+        std::fs::canonicalize(&context.current_dir).unwrap()
+            == std::fs::canonicalize(&runtime_cwd).unwrap()
+    }));
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_restore_session"));
@@ -4695,6 +4800,10 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
         "remember this after restart"
     );
     assert!(restored_session.active_turn_id.is_none());
+    assert!(
+        restored_session.restart_cwd_decision.is_none(),
+        "same-process restore paths such as a MEM switch are not runtime restarts"
+    );
     assert!(restored_session.resume_notice_pending);
     assert_eq!(restored_session.runtime_profile.model, "stale-model");
     drop(sessions);
@@ -6960,6 +7069,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         ordinal,
         state: "ready".to_string(),
         current_dir: "/work".to_string(),
+        restart_cwd_decision: None,
         debug_dir: None,
         max_llm_input_tokens: 10_000,
         tools: Vec::new(),

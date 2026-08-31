@@ -1879,6 +1879,10 @@ function TimemApp() {
         setActiveSessionId(event.session.session_id);
         return;
       }
+      if (event.type === "session_restart_cwd_resolved") {
+        setSessions((current) => upsertSession(current, event.session));
+        return;
+      }
       if (event.type === "session_renamed") {
         removePendingKey(
           pendingRenameSessionIdsRef,
@@ -3130,6 +3134,11 @@ function TimemApp() {
   );
   const runtimeReady = connected && snapshotReady;
   const runtimeLocked = pendingMemSwitch || !runtimeReady;
+  const restartCwdDecision = activeSession?.restart_cwd_decision ?? null;
+  const sessionWorkLocked = runtimeLocked || restartCwdDecision !== null;
+  const sessionWorkLockReason = restartCwdDecision
+    ? "请先选择本 Session 在 Timem 重启后的工作目录"
+    : sessionInteractionLockReason;
   const connectionLabel = runtimeConnectionLabel(
     connected,
     snapshotReady,
@@ -3245,7 +3254,7 @@ function TimemApp() {
         !toolGenEnabled ||
         !activeSessionKey ||
         activeSession?.state === "working" ||
-        runtimeLocked ||
+        sessionWorkLocked ||
         activeToolGenBusy
       )
         return;
@@ -3255,7 +3264,7 @@ function TimemApp() {
       activeSession?.state,
       activeSessionKey,
       activeToolGenBusy,
-      runtimeLocked,
+      sessionWorkLocked,
       toolGenEnabled,
     ],
   );
@@ -4507,8 +4516,18 @@ function TimemApp() {
                 : ""
             }
             sessionIds={sessions.map((session) => session.session_id)}
-            sessionInteractionLocked={runtimeLocked}
-            sessionInteractionLockReason={sessionInteractionLockReason}
+            sessionInteractionLocked={sessionWorkLocked}
+            sessionInteractionLockReason={sessionWorkLockReason}
+            restartCwdDecision={restartCwdDecision}
+            restartCwdResolutionEnabled={runtimeReady}
+            onResolveRestartCwd={(decision) => {
+              if (!activeSession || !runtimeReady) return;
+              sendCommand({
+                type: "session_restart_cwd_resolve",
+                session_id: activeSession.session_id,
+                decision,
+              });
+            }}
             decisions={sessionDecisions}
             fileInput={fileInput}
             isCancelling={sessionCancellationApplies(activeSession)}
@@ -4547,7 +4566,11 @@ function TimemApp() {
             }
             pendingToolGenTurnIds={activePendingToolGenTurnIds}
             toolGenSessionBusy={activeToolGenBusy}
-            onRequestToolGen={toolGenEnabled ? requestActiveToolGen : undefined}
+            onRequestToolGen={
+              toolGenEnabled && !sessionWorkLocked
+                ? requestActiveToolGen
+                : undefined
+            }
             favoriteBySource={
               new Map(
                 favorites.map((favorite) => [favorite.source_key, favorite]),
@@ -7274,6 +7297,9 @@ function TimemThread({
   sessionIds,
   sessionInteractionLocked,
   sessionInteractionLockReason,
+  restartCwdDecision,
+  restartCwdResolutionEnabled,
+  onResolveRestartCwd,
   decisions,
   fileInput,
   isCancelling,
@@ -7312,6 +7338,9 @@ function TimemThread({
   sessionIds: string[];
   sessionInteractionLocked: boolean;
   sessionInteractionLockReason: string;
+  restartCwdDecision: NonNullable<Session["restart_cwd_decision"]> | null;
+  restartCwdResolutionEnabled: boolean;
+  onResolveRestartCwd: (decision: "use_runtime" | "keep_session") => void;
   decisions: Decision[];
   fileInput: React.RefObject<HTMLInputElement | null>;
   isCancelling: boolean;
@@ -9413,215 +9442,262 @@ function TimemThread({
                 })}
               </div>
             )}
-          <form
-            className="composer"
-            onSubmit={(event) => {
-              event.preventDefault();
-              submitDraft();
-            }}
-          >
-            <div className="expandable-text-field composer-text-field">
-              <textarea
-                ref={composerTextareaRef}
-                value={draft}
-                placeholder={
-                  !activeSession
-                    ? "Create a session to start…"
-                    : sessionInteractionLocked
-                      ? sessionInteractionLockReason
-                      : activeSession.state === "working"
-                        ? "继续输入…"
-                        : "Ask Timem to investigate, write, or work with you."
-                }
-                aria-label="Message Timem"
-                aria-describedby={composerHintId}
-                title={composerHint}
-                disabled={!activeSession || sessionInteractionLocked}
-                onChange={(event) =>
-                  setDraftsBySession((current) =>
-                    setSessionDraft(
-                      current,
-                      activeSessionId,
-                      event.target.value,
-                    ),
-                  )
-                }
-                onKeyDown={(event) => {
-                  if (event.key !== "Enter" || event.nativeEvent.isComposing)
-                    return;
-                  if (event.metaKey || event.ctrlKey) {
-                    event.preventDefault();
-                    submitDraftAsSupplement();
-                    return;
-                  }
-                  if (!event.shiftKey) {
-                    event.preventDefault();
-                    submitDraft();
-                  }
-                }}
-              />
-              <button
-                type="button"
-                className="text-field-expand"
-                title="展开编辑用户信息"
-                aria-label="展开编辑用户信息"
-                disabled={!activeSession || sessionInteractionLocked}
-                onClick={() => setComposerExpanded(true)}
-              >
-                <Maximize2 size={14} />
-              </button>
-            </div>
-            {composerExpanded && activeSession && (
-              <ExpandedTextEditor
-                eyebrow="MESSAGE"
-                title="编辑用户信息"
-                value={draft}
-                disabled={sessionInteractionLocked}
-                placeholder={
-                  activeSession.state === "working"
-                    ? "继续输入…"
-                    : "Ask Timem to investigate, write, or work with you."
-                }
-                onCommit={(value) =>
-                  setDraftsBySession((current) =>
-                    setSessionDraft(current, activeSessionId, value),
-                  )
-                }
-                onClose={() => setComposerExpanded(false)}
-              />
-            )}
-            {selectedRoles.length > 0 && activeSession && (
-              <div
-                className="composer-role"
-                title={selectedRoles
-                  .map((role) => `${role.name}: ${role.description}`)
-                  .join("\n")}
-              >
-                <BriefcaseBusiness size={14} />
-                <span>
-                  本条将使用{" "}
-                  <strong>
-                    {selectedRoles.map((role) => role.name).join("、")}
-                  </strong>
+          {activeSession && restartCwdDecision ? (
+            <section
+              className="restart-cwd-gate"
+              role="alertdialog"
+              aria-live="assertive"
+              aria-labelledby="restart-cwd-title"
+            >
+              <div className="restart-cwd-gate-copy">
+                <span className="restart-cwd-gate-icon" aria-hidden="true">
+                  <FolderOpen size={17} />
                 </span>
-                <button
-                  type="button"
-                  title="Clear roles for this message"
-                  aria-label="Clear selected roles"
-                  onClick={() => onRolesConsumed(activeSession.session_id)}
-                >
-                  <X size={13} />
-                </button>
+                <p id="restart-cwd-title">
+                  当前 Timem 的启动目录和 Session 上次工作的目录不同，您要将工作目录：
+                </p>
               </div>
-            )}
-            <div className="composer-actions">
-              <div className="composer-paths">
-                {activeSession && (
-                  <span
-                    className="composer-cwd-inline"
-                    title={activeSession.current_dir}
+              <div className="restart-cwd-options">
+                <div className="restart-cwd-option">
+                  <button
+                    type="button"
+                    disabled={!restartCwdResolutionEnabled}
+                    onClick={() => onResolveRestartCwd("use_runtime")}
                   >
-                    <b>CWD:</b>
-                    <span className="path-tail">
-                      {tailPath(activeSession.current_dir, 64)}
-                    </span>
-                  </span>
-                )}
-                {activeSession?.debug_dir && (
-                  <span
-                    className="composer-cwd-inline composer-debug-inline"
-                    title={activeSession.debug_dir}
+                    切换
+                  </button>
+                  <span>至新启动目录：</span>
+                  <code title={restartCwdDecision.runtime_cwd}>
+                    {restartCwdDecision.runtime_cwd}
+                  </code>
+                </div>
+                <div className="restart-cwd-option">
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={!restartCwdResolutionEnabled}
+                    onClick={() => onResolveRestartCwd("keep_session")}
                   >
-                    <b>DEBUG:</b>
-                    <span>{activeSession.debug_dir}</span>
-                  </span>
-                )}
+                    保持
+                  </button>
+                  <span>在旧工作目录：</span>
+                  <code title={restartCwdDecision.session_cwd}>
+                    {restartCwdDecision.session_cwd}
+                  </code>
+                </div>
               </div>
-              <span
-                id={composerHintId}
-                className="sr-only"
-                role="status"
-                aria-live="polite"
-              >
-                {composerHint}
-              </span>
-              <div className="composer-buttons">
-                <button
-                  className={`attach-button ${uploadingAttachment ? "uploading" : ""}`}
-                  type="button"
-                  title={attachTitle}
-                  aria-label={attachLabel}
-                  disabled={
-                    !activeSession ||
-                    uploadingAttachment ||
-                    sessionInteractionLocked
+            </section>
+          ) : (
+            <form
+              className="composer"
+              onSubmit={(event) => {
+                event.preventDefault();
+                submitDraft();
+              }}
+            >
+              <div className="expandable-text-field composer-text-field">
+                <textarea
+                  ref={composerTextareaRef}
+                  value={draft}
+                  placeholder={
+                    !activeSession
+                      ? "Create a session to start…"
+                      : sessionInteractionLocked
+                        ? sessionInteractionLockReason
+                        : activeSession.state === "working"
+                          ? "继续输入…"
+                          : "Ask Timem to investigate, write, or work with you."
                   }
-                  onClick={() => fileInput.current?.click()}
-                >
-                  {uploadingAttachment ? (
-                    <LoaderCircle size={17} />
-                  ) : (
-                    <Paperclip size={17} />
-                  )}
-                </button>
-                <input
-                  ref={fileInput}
-                  className="file-input"
-                  type="file"
-                  disabled={
-                    !activeSession ||
-                    uploadingAttachment ||
-                    sessionInteractionLocked
+                  aria-label="Message Timem"
+                  aria-describedby={composerHintId}
+                  title={composerHint}
+                  disabled={!activeSession || sessionInteractionLocked}
+                  onChange={(event) =>
+                    setDraftsBySession((current) =>
+                      setSessionDraft(
+                        current,
+                        activeSessionId,
+                        event.target.value,
+                      ),
+                    )
                   }
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    event.currentTarget.value = "";
-                    if (file) void onUpload(file);
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter" || event.nativeEvent.isComposing)
+                      return;
+                    if (event.metaKey || event.ctrlKey) {
+                      event.preventDefault();
+                      submitDraftAsSupplement();
+                      return;
+                    }
+                    if (!event.shiftKey) {
+                      event.preventDefault();
+                      submitDraft();
+                    }
                   }}
                 />
-                {showStopAction ? (
+                <button
+                  type="button"
+                  className="text-field-expand"
+                  title="展开编辑用户信息"
+                  aria-label="展开编辑用户信息"
+                  disabled={!activeSession || sessionInteractionLocked}
+                  onClick={() => setComposerExpanded(true)}
+                >
+                  <Maximize2 size={14} />
+                </button>
+              </div>
+              {composerExpanded && activeSession && (
+                <ExpandedTextEditor
+                  eyebrow="MESSAGE"
+                  title="编辑用户信息"
+                  value={draft}
+                  disabled={sessionInteractionLocked}
+                  placeholder={
+                    activeSession.state === "working"
+                      ? "继续输入…"
+                      : "Ask Timem to investigate, write, or work with you."
+                  }
+                  onCommit={(value) =>
+                    setDraftsBySession((current) =>
+                      setSessionDraft(current, activeSessionId, value),
+                    )
+                  }
+                  onClose={() => setComposerExpanded(false)}
+                />
+              )}
+              {selectedRoles.length > 0 && activeSession && (
+                <div
+                  className="composer-role"
+                  title={selectedRoles
+                    .map((role) => `${role.name}: ${role.description}`)
+                    .join("\n")}
+                >
+                  <BriefcaseBusiness size={14} />
+                  <span>
+                    本条将使用{" "}
+                    <strong>
+                      {selectedRoles.map((role) => role.name).join("、")}
+                    </strong>
+                  </span>
                   <button
-                    className={`stop-button ${isCancelling ? "sending" : ""}`}
                     type="button"
-                    title={
-                      isCancelling
-                        ? "Cancellation requested"
-                        : lockedControlHint || "Cancel current turn"
-                    }
-                    aria-label={
-                      isCancelling
-                        ? "Cancellation requested"
-                        : lockedControlHint || "Cancel current turn"
-                    }
-                    disabled={isCancelling || sessionInteractionLocked}
-                    onClick={() => void cancelActiveSessionTurn()}
+                    title="Clear roles for this message"
+                    aria-label="Clear selected roles"
+                    onClick={() => onRolesConsumed(activeSession.session_id)}
                   >
-                    <CircleStop size={17} /> Stop
+                    <X size={13} />
                   </button>
-                ) : (
+                </div>
+              )}
+              <div className="composer-actions">
+                <div className="composer-paths">
+                  {activeSession && (
+                    <span
+                      className="composer-cwd-inline"
+                      title={activeSession.current_dir}
+                    >
+                      <b>CWD:</b>
+                      <span className="path-tail">
+                        {tailPath(activeSession.current_dir, 64)}
+                      </span>
+                    </span>
+                  )}
+                  {activeSession?.debug_dir && (
+                    <span
+                      className="composer-cwd-inline composer-debug-inline"
+                      title={activeSession.debug_dir}
+                    >
+                      <b>DEBUG:</b>
+                      <span>{activeSession.debug_dir}</span>
+                    </span>
+                  )}
+                </div>
+                <span
+                  id={composerHintId}
+                  className="sr-only"
+                  role="status"
+                  aria-live="polite"
+                >
+                  {composerHint}
+                </span>
+                <div className="composer-buttons">
                   <button
-                    className={`send-button ${submittingDraft ? "sending" : ""}`}
-                    type="submit"
-                    title={effectiveSendLabel}
-                    aria-label={effectiveSendLabel}
+                    className={`attach-button ${uploadingAttachment ? "uploading" : ""}`}
+                    type="button"
+                    title={attachTitle}
+                    aria-label={attachLabel}
                     disabled={
                       !activeSession ||
-                      !hasDraftText ||
-                      submittingDraft ||
                       uploadingAttachment ||
                       sessionInteractionLocked
                     }
+                    onClick={() => fileInput.current?.click()}
                   >
-                    {submittingDraft ? (
+                    {uploadingAttachment ? (
                       <LoaderCircle size={17} />
                     ) : (
-                      <Send size={17} />
+                      <Paperclip size={17} />
                     )}
                   </button>
-                )}
+                  <input
+                    ref={fileInput}
+                    className="file-input"
+                    type="file"
+                    disabled={
+                      !activeSession ||
+                      uploadingAttachment ||
+                      sessionInteractionLocked
+                    }
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.currentTarget.value = "";
+                      if (file) void onUpload(file);
+                    }}
+                  />
+                  {showStopAction ? (
+                    <button
+                      className={`stop-button ${isCancelling ? "sending" : ""}`}
+                      type="button"
+                      title={
+                        isCancelling
+                          ? "Cancellation requested"
+                          : lockedControlHint || "Cancel current turn"
+                      }
+                      aria-label={
+                        isCancelling
+                          ? "Cancellation requested"
+                          : lockedControlHint || "Cancel current turn"
+                      }
+                      disabled={isCancelling || sessionInteractionLocked}
+                      onClick={() => void cancelActiveSessionTurn()}
+                    >
+                      <CircleStop size={17} /> Stop
+                    </button>
+                  ) : (
+                    <button
+                      className={`send-button ${submittingDraft ? "sending" : ""}`}
+                      type="submit"
+                      title={effectiveSendLabel}
+                      aria-label={effectiveSendLabel}
+                      disabled={
+                        !activeSession ||
+                        !hasDraftText ||
+                        submittingDraft ||
+                        uploadingAttachment ||
+                        sessionInteractionLocked
+                      }
+                    >
+                      {submittingDraft ? (
+                        <LoaderCircle size={17} />
+                      ) : (
+                        <Send size={17} />
+                      )}
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-          </form>
+            </form>
+          )}
         </ThreadPrimitive.ViewportFooter>
       </ThreadPrimitive.Viewport>
 
