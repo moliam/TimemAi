@@ -14,10 +14,12 @@ Before changing this module, read `docs/turn-state-projection-architecture.md` f
 
 It may contain:
 
-- Product HTTP lifecycle, local port selection, route composition, explicit public-bind policy,
-  per-process access tokens, authenticated snapshot construction, and mapping decoded browser
-  commands to Session/Core operations. Generic WebSocket framing, bounded JSON wire I/O,
-  same-origin validation, and browser-safe transport headers live in `bridges/http_websocket`.
+- Product HTTP lifecycle, local port selection, explicit public-bind policy, per-process access
+  tokens, authenticated product handlers, snapshot construction, and mapping decoded browser
+  commands to Session/Core operations. Fixed HTTP/WebSocket paths and method placement, request
+  bounds, static fallback routing, generic WebSocket framing, bounded JSON wire I/O, same-origin
+  validation, and browser-safe transport headers live in `bridges/http_websocket`. The Application
+  injects handlers and state into that route composition; it must not recreate the route table.
 - Target-specific host-process lifecycle adapters under `src/os/`: Unix owns
   SIGINT/SIGTERM/SIGHUP streams and parent-shell detection; Windows owns
   Ctrl+C monitoring and PID-reuse-safe launcher-process detection through the

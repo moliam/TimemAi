@@ -7,7 +7,9 @@
 use serde::{Deserialize, Serialize, Serializer};
 use timem_ui_contract::projections::{TurnProjection, TurnToken};
 
+pub mod routes;
 pub mod transport;
+pub use routes::{build_browser_router, BrowserRouteHandlers};
 pub use transport::{
     apply_browser_security_headers, request_origin_allowed, split_json_websocket, InboundJson,
     JsonWebSocketReceiver, JsonWebSocketSender,

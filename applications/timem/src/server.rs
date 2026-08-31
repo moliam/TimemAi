@@ -50,7 +50,6 @@ use agent_core::{
     tool_jobs::FileToolJobStore,
 };
 use axum::{
-    extract::DefaultBodyLimit,
     extract::{
         ws::{WebSocket, WebSocketUpgrade},
         Multipart, Query, State,
@@ -75,10 +74,12 @@ use std::{
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+#[cfg(test)]
+use timem_http_websocket::apply_browser_security_headers;
 use timem_http_websocket::{
-    apply_browser_security_headers, request_origin_allowed, split_json_websocket, InboundJson,
-    JsonWebSocketSender, NextTurnIntentQueue, ProjectionApplyResult, TurnProjectionCache,
-    VersionedTurnProjection,
+    build_browser_router, request_origin_allowed, split_json_websocket, BrowserRouteHandlers,
+    InboundJson, JsonWebSocketSender, NextTurnIntentQueue, ProjectionApplyResult,
+    TurnProjectionCache, VersionedTurnProjection,
 };
 use timem_session::{
     message_queue::{
@@ -1879,24 +1880,19 @@ fn client_command_trace_fields(command: &ClientCommand) -> (&'static str, Option
 }
 
 fn build_router(state: AppState, port: u16) -> Router {
-    Router::new()
-        .route("/api/health", get(health))
-        .route("/api/snapshot", get(snapshot))
-        .route("/api/upload", post(upload_file))
-        .route(
-            "/api/performance-trace",
-            post(performance_trace).layer(DefaultBodyLimit::max(4 * 1024)),
-        )
-        .route("/ws", get(websocket))
-        .fallback(get(static_asset))
-        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES + 64 * 1024))
-        .layer(axum::middleware::map_response(
-            |mut response: Response| async move {
-                apply_browser_security_headers(&mut response);
-                response
-            },
-        ))
-        .with_state((state, port))
+    build_browser_router(
+        (state, port),
+        BrowserRouteHandlers {
+            health: get(health),
+            snapshot: get(snapshot),
+            upload: post(upload_file),
+            performance_trace: post(performance_trace),
+            websocket: get(websocket),
+            static_assets: get(static_asset),
+        },
+        MAX_UPLOAD_BYTES + 64 * 1024,
+        4 * 1024,
+    )
 }
 
 async fn upload_file(

@@ -209,6 +209,19 @@ def violations(root: Path) -> list[str]:
             errors.append(
                 f"HTTP/WebSocket Bridge source must not depend outward on an Interface/Application: {forbidden}"
             )
+    http_routes = text(root, "bridges/http_websocket/src/routes.rs")
+    for required in (
+        "pub fn build_browser_router",
+        'Router::new()',
+        '.route("/api/health"',
+        '.route("/api/snapshot"',
+        '.route("/api/upload"',
+        '.route("/ws"',
+        "DefaultBodyLimit::max",
+        "apply_browser_security_headers",
+    ):
+        if required not in http_routes:
+            errors.append(f"HTTP/WebSocket Bridge route composition missing: {required}")
 
     interfaces_root = root / "interfaces"
     if interfaces_root.is_dir():
@@ -221,6 +234,20 @@ def violations(root: Path) -> list[str]:
                         errors.append(
                             f"Interface must not depend on another Interface: {manifest_path.relative_to(root)}"
                         )
+
+    application_server = text(root, "applications/timem/src/server.rs")
+    if "build_browser_router(" not in application_server:
+        errors.append("Timem Application must inject product handlers into the HTTP/WebSocket Bridge")
+    for forbidden in (
+        "Router::new()",
+        '.route("/api/',
+        '.route("/ws"',
+        "DefaultBodyLimit::max",
+    ):
+        if forbidden in application_server:
+            errors.append(
+                f"Timem Application must not reclaim HTTP/WebSocket route composition: {forbidden}"
+            )
 
     application_manifest = text(root, "applications/timem/Cargo.toml")
     if 'name = "timem"' not in application_manifest:
@@ -336,7 +363,8 @@ def write_fixture(root: Path) -> None:
         "bridges/in_process/tests/turn_bridge_tests.rs": "#[test] fn bridge() {}\n",
         "bridges/http_websocket/Cargo.toml": '[package]\nname = "timem_http_websocket"\n[dependencies]\ntimem_ui_contract = { path = "../../core/ui_contract" }\n',
         "bridges/http_websocket/module_boundary.md": "http websocket boundary\n",
-        "bridges/http_websocket/src/lib.rs": "use timem_ui_contract::projections::TurnProjection;\npub struct DeliveryRevision;\n",
+        "bridges/http_websocket/src/lib.rs": "use timem_ui_contract::projections::TurnProjection;\npub mod routes;\npub struct DeliveryRevision;\n",
+        "bridges/http_websocket/src/routes.rs": 'use axum::{extract::DefaultBodyLimit, Router};\nuse crate::apply_browser_security_headers;\npub fn build_browser_router() { Router::new().route("/api/health", health).route("/api/snapshot", snapshot).route("/api/upload", upload).route("/ws", websocket); let _ = DefaultBodyLimit::max(1); apply_browser_security_headers(); }\n',
         "interfaces/shell/Cargo.toml": '[package]\nname = "timem_shell"\n[dependencies]\ntimem_in_process = { path = "../../bridges/in_process" }\ntimem_ui_contract = { path = "../../core/ui_contract" }\n',
         "interfaces/shell/src/app.rs": "fn main() { run_in_process_turn(); }\n",
         "interfaces/shell/module_boundary.md": "shell boundary\n",
@@ -349,6 +377,7 @@ def write_fixture(root: Path) -> None:
         "applications/timem/Cargo.toml": '[package]\nname = "timem"\n[[bin]]\nname = "timem"\n',
         "applications/timem/module_boundary.md": "application boundary\n",
         "applications/timem/src/lib.rs": "pub fn run() {}\n",
+        "applications/timem/src/server.rs": "fn build_router() { build_browser_router(); }\n",
         "applications/timem/src/main.rs": "fn main() {}\n",
         "applications/timem/src/os/mod.rs": "#[cfg(unix)] mod unix; #[cfg(windows)] mod windows;\n",
         "applications/timem/src/os/unix.rs": "pub fn lifecycle() {}\n",
@@ -390,6 +419,7 @@ def self_test() -> None:
         ("Bridge to Interface reverse dependency", lambda root: (root / "bridges/in_process/Cargo.toml").write_text('[package]\nname = "timem_in_process"\n[dependencies]\ntimem_session = { path = "../../core/session" }\ntimem_ui_contract = { path = "../../core/ui_contract" }\ntimem_shell = { path = "../../interfaces/shell" }\n')),
         ("HTTP Bridge to Web Interface reverse dependency", lambda root: (root / "bridges/http_websocket/Cargo.toml").write_text('[package]\nname = "timem_http_websocket"\n[dependencies]\ntimem_ui_contract = { path = "../../core/ui_contract" }\ntimem_web = { path = "../../timem_web" }\n')),
         ("HTTP Bridge bypasses UI contract semantic owner", lambda root: ((root / "bridges/http_websocket/Cargo.toml").write_text('[package]\nname = "timem_http_websocket"\n[dependencies]\nagent_core = { path = "../../core/agent" }\n'), (root / "bridges/http_websocket/src/lib.rs").write_text("use agent_core::TurnProjection;\n"))),
+        ("Application reclaims HTTP route composition", lambda root: (root / "applications/timem/src/server.rs").write_text('fn build_router() { Router::new().route("/api/health", health); }\n')),
         ("in-process Bridge adds serialization", lambda root: (root / "bridges/in_process/Cargo.toml").write_text('[package]\nname = "timem_in_process"\n[dependencies]\ntimem_session = { path = "../../core/session" }\ntimem_ui_contract = { path = "../../core/ui_contract" }\nserde_json = "1"\n')),
         ("in-process Bridge adds network transport", lambda root: (root / "bridges/in_process/src/lib.rs").write_text("fn run_turn() { let _transport: Option<TcpStream> = None; }\n")),
         ("Session absorbs terminal UI", lambda root: (root / "core/session/Cargo.toml").write_text('[package]\nname = "timem_session"\n[dependencies]\nagent_core = { path = "../agent" }\ntimem_ui_contract = { path = "../ui_contract" }\ncrossterm = "0.29"\n')),

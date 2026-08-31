@@ -8,10 +8,14 @@ UI layer or a second owner of Agent, Session, or Turn semantics.
 
 - `src/lib.rs`: revisioned delivery of authoritative Core Turn projections and a bounded,
   deduplicated FIFO for future-turn command delivery.
+- `src/routes.rs`: fixed browser HTTP/WebSocket paths, HTTP method placement, global and
+  endpoint-specific request-body bounds, static fallback routing, and the browser-wide security
+  response layer. Product hosts inject authenticated handlers and state; the Bridge does not build
+  snapshots, authorize users, dispatch commands, or own Session/Turn state.
 - `src/transport.rs`: Axum WebSocket frame splitting, bounded JSON text decoding/encoding,
   same-origin request validation, and browser-safe response headers. It does not authenticate a
   product, build snapshots, dispatch commands, or own Session/Turn state.
-- Unit tests prove monotonic revisions, duplicate/stale rejection, queue bounds, ordering,
+- Unit tests prove route/method ownership, request bounds, monotonic revisions, monotonic revisions, duplicate/stale rejection, queue bounds, ordering,
   serialization round trips, bounded frame decoding, same-origin validation, and response-header
   policy used by reconnectable clients.
 
