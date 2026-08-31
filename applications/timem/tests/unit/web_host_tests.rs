@@ -4366,26 +4366,29 @@ fn session_create_command_returns_session_with_runtime_overrides_applied() {
 }
 
 #[test]
-fn missing_workspace_session_is_detached_once_without_deleting_history() {
+fn missing_workspace_session_uses_locked_fallback_without_losing_metadata_or_history() {
     let mut state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("missing_workspace_restore"));
     let data_dir = root.join("data");
     let space = "missing_workspace_mem";
     let missing_workspace = root.join("removed-workspace");
-    let template_workspace = root.join("fallback-workspace");
-    std::fs::create_dir_all(&template_workspace).unwrap();
+    let runtime_workspace = root.join("fallback-workspace");
+    let runtime_log_path = root.join("runtime.log");
+    std::fs::create_dir_all(&runtime_workspace).unwrap();
 
     set_test_mem(&state, data_dir.clone(), space);
     let mut template = (*state.template).clone();
-    template.current_dir = template_workspace.clone();
-    template.workspace_dirs = vec![template_workspace];
+    template.current_dir = runtime_workspace.clone();
+    template.workspace_dirs = vec![runtime_workspace.clone()];
     template.data_dir = data_dir.clone();
     template.initial_space = space.to_string();
     state.template = Arc::new(template);
+    state.runtime_log = RuntimeLog::with_path_and_limit(runtime_log_path.clone(), 64 * 1024);
     state.sessions.lock().unwrap().clear();
 
     let store = current_session_store(&state).unwrap();
     let session_id = "session_missing_workspace";
+    let original_display_name = "Original user session name";
     let history_path = store.history_path_for_session(session_id);
     store
         .append_history_record(
@@ -4404,7 +4407,7 @@ fn missing_workspace_session_is_detached_once_without_deleting_history() {
     store
         .upsert_session(&StoredSession {
             session_id: session_id.to_string(),
-            display_name: "Missing workspace".to_string(),
+            display_name: original_display_name.to_string(),
             created_at_ms: 1,
             updated_at_ms: 2,
             current_dir: missing_workspace.display().to_string(),
@@ -4419,16 +4422,62 @@ fn missing_workspace_session_is_detached_once_without_deleting_history() {
         })
         .unwrap();
 
-    assert_eq!(restore_stored_sessions(&state).unwrap(), 0);
-    assert!(store.load_session(session_id).unwrap().is_none());
+    assert_eq!(restore_stored_sessions(&state).unwrap(), 1);
+    let diagnostic = std::fs::read_to_string(&runtime_log_path).unwrap();
+    assert!(diagnostic.contains("session_restore_workspace_fallback"));
+    assert!(diagnostic.contains("stored_session_workspace_not_found"));
+    assert!(diagnostic.contains(session_id));
+    let stored_before_confirmation = store.load_session(session_id).unwrap().unwrap();
+    assert_eq!(
+        stored_before_confirmation.current_dir,
+        missing_workspace.display().to_string()
+    );
+    assert_eq!(
+        stored_before_confirmation.display_name,
+        original_display_name
+    );
     assert!(history_path.exists());
     assert!(std::fs::read_to_string(&history_path)
         .unwrap()
         .contains("preserve this history"));
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let restored = &sessions[session_id];
+        assert_eq!(restored.display_name, original_display_name);
+        assert_eq!(
+            std::fs::canonicalize(&restored.current_dir).unwrap(),
+            std::fs::canonicalize(&runtime_workspace).unwrap()
+        );
+        let pending = restored.restart_cwd_decision.as_ref().unwrap();
+        assert!(!pending.session_cwd_available);
+        assert_eq!(pending.session_cwd, missing_workspace.display().to_string());
+    }
+    assert_eq!(
+        start_web_turn(&state, session_id, "must remain locked").unwrap_err(),
+        "session_restart_cwd_decision_required"
+    );
+    assert_eq!(
+        resolve_restart_cwd_decision(&state, session_id, "keep_session").unwrap_err(),
+        "session_restart_cwd_unavailable"
+    );
 
-    // The repair is persistent: a later startup no longer retries this record.
-    assert_eq!(restore_stored_sessions(&state).unwrap(), 0);
-    assert!(history_path.exists());
+    resolve_restart_cwd_decision(&state, session_id, "use_runtime").unwrap();
+    let repaired = store.load_session(session_id).unwrap().unwrap();
+    assert_eq!(repaired.display_name, original_display_name);
+    assert_eq!(
+        std::fs::canonicalize(&repaired.current_dir).unwrap(),
+        std::fs::canonicalize(&runtime_workspace).unwrap()
+    );
+
+    // Confirmation persists the fallback, so a later restart restores normally.
+    state.sessions.lock().unwrap().clear();
+    assert_eq!(
+        restore_stored_sessions_after_runtime_restart(&state).unwrap(),
+        1
+    );
+    let sessions = state.sessions.lock().unwrap();
+    assert!(sessions[session_id].restart_cwd_decision.is_none());
+    assert_eq!(sessions[session_id].display_name, original_display_name);
 
     let _ = std::fs::remove_dir_all(root);
 }
@@ -4599,6 +4648,7 @@ fn runtime_restart_requires_each_restored_session_to_resolve_cwd_before_work() {
                 std::fs::canonicalize(&pending.session_cwd).unwrap(),
                 std::fs::canonicalize(&previous_cwd).unwrap()
             );
+            assert!(pending.session_cwd_available);
         }
     }
 

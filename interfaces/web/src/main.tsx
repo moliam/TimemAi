@@ -8680,7 +8680,9 @@ function TimemThread({
                   <FolderOpen size={17} />
                 </span>
                 <p id="restart-cwd-title">
-                  当前 Timem 的启动目录和 Session 上次工作的目录不同，您要将工作目录：
+                  {restartCwdDecision.session_cwd_available
+                    ? "当前 Timem 的启动目录和 Session 上次工作的目录不同，您要将工作目录："
+                    : "原工作目录已不可用。聊天记录已保留，请切换到当前启动目录后继续："}
                 </p>
               </div>
               <div className="restart-cwd-options">
@@ -8690,27 +8692,33 @@ function TimemThread({
                     disabled={!restartCwdResolutionEnabled}
                     onClick={() => onResolveRestartCwd("use_runtime")}
                   >
-                    切换
+                    {restartCwdDecision.session_cwd_available ? "切换" : "使用当前工作目录"}
                   </button>
-                  <span>至新启动目录：</span>
-                  <code title={restartCwdDecision.runtime_cwd}>
-                    {restartCwdDecision.runtime_cwd}
-                  </code>
+                  {restartCwdDecision.session_cwd_available && (
+                    <>
+                      <span>至新启动目录：</span>
+                      <code title={restartCwdDecision.runtime_cwd}>
+                        {restartCwdDecision.runtime_cwd}
+                      </code>
+                    </>
+                  )}
                 </div>
-                <div className="restart-cwd-option">
-                  <button
-                    type="button"
-                    className="secondary"
-                    disabled={!restartCwdResolutionEnabled}
-                    onClick={() => onResolveRestartCwd("keep_session")}
-                  >
-                    保持
-                  </button>
-                  <span>在旧工作目录：</span>
-                  <code title={restartCwdDecision.session_cwd}>
-                    {restartCwdDecision.session_cwd}
-                  </code>
-                </div>
+                {restartCwdDecision.session_cwd_available && (
+                  <div className="restart-cwd-option">
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={!restartCwdResolutionEnabled}
+                      onClick={() => onResolveRestartCwd("keep_session")}
+                    >
+                      保持
+                    </button>
+                    <span>在旧工作目录：</span>
+                    <code title={restartCwdDecision.session_cwd}>
+                      {restartCwdDecision.session_cwd}
+                    </code>
+                  </div>
+                )}
               </div>
             </section>
           ) : (
@@ -9194,6 +9202,7 @@ const TurnInteraction = memo(function TurnInteraction({
   const hasVisibleProcess =
     scrollItems.some((item) => item.activity !== null) || decisions.length > 0;
   const isWorking = turn.state === "working" && !isCancelling;
+  const hasLiveUsage = isWorking && turnLiveUsage(turn) !== undefined;
   const showWorkFrame = shouldRenderTurnWorkFrame(
     turn.state,
     isCancelling,
@@ -9462,7 +9471,9 @@ const TurnInteraction = memo(function TurnInteraction({
             </div>
           )}
           {workStreamVisible && (
-            <div className="turn-work-panel">
+            <div
+              className={`turn-work-panel${hasLiveUsage ? " has-live-usage" : ""}`}
+            >
               <div
                 className={`turn-work-scroll has-content${workEdgeFades.top ? " fade-top" : ""}${workEdgeFades.bottom ? " fade-bottom" : ""}${pendingUpdates > 0 ? " has-pending-updates" : ""}`}
                 role="region"
@@ -9511,9 +9522,9 @@ const TurnInteraction = memo(function TurnInteraction({
                       onReply={(reply) => onDecisionReply(decision, reply)}
                     />
                   ))}
-                  {isWorking && <LiveTurnUsage turn={turn} />}
                 </div>
               </div>
+              {hasLiveUsage && <LiveTurnUsage turn={turn} />}
               {pendingUpdates > 0 && (
                 <button
                   type="button"
