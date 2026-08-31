@@ -27,7 +27,7 @@ def iter_files(root: pathlib.Path):
     if not root.exists():
         return
     for path in root.rglob("*"):
-        if path.is_file() and path.suffix in {".rs", ".ts", ".tsx", ".sh", ".md"}:
+        if path.is_file() and path.suffix in {".rs", ".ts", ".tsx", ".mjs", ".sh", ".md"}:
             yield path
 
 
@@ -42,7 +42,7 @@ def search_roots(needle: str, roots: list[pathlib.Path]) -> bool:
 def file_exists_token(token: str) -> bool:
     if "/" in token:
         return (ROOT / token).exists()
-    if token.endswith((".ts", ".tsx", ".rs", ".sh", ".md")):
+    if token.endswith((".ts", ".tsx", ".mjs", ".rs", ".sh", ".md")):
         for base in [
             ROOT,
             ROOT / "interfaces" / "web" / "tests",
@@ -74,7 +74,7 @@ def evidence_in_roots(token: str, roots: list[pathlib.Path]) -> bool:
         return search_roots(token.removesuffix(" tests"), roots)
     if token == "host_error handling in frontend contract tests":
         return search_roots("host_error", roots)
-    if "/" not in token and token.endswith((".ts", ".tsx", ".rs", ".sh", ".md")):
+    if "/" not in token and token.endswith((".ts", ".tsx", ".mjs", ".rs", ".sh", ".md")):
         for root in roots:
             for path in iter_files(root):
                 if path.name == token:
