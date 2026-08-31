@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyEventSequence } from "../src/event_cursor";
+import { classifyEventSequence, snapshotEventBaseline } from "../src/event_cursor";
 
 describe("semantic event cursor", () => {
   it("accepts only the next live sequence and detects duplicates and gaps", () => {
@@ -18,5 +18,21 @@ describe("semantic event cursor", () => {
     expect(classifyEventSequence(cursor, 8)).toBe("gap");
     expect(cursor).toBe(6);
     expect(classifyEventSequence(cursor, 7)).toBe("next");
+  });
+});
+describe("snapshot event baseline", () => {
+  it("adopts an exact non-zero Host cursor for a fresh or reconnected browser", () => {
+    expect(snapshotEventBaseline(40)).toBe(40);
+    expect(classifyEventSequence(snapshotEventBaseline(40), 41)).toBe("next");
+  });
+
+  it.each([
+    undefined,
+    -1,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    Number.MAX_SAFE_INTEGER + 1,
+  ])("fails closed for an invalid protocol cursor %s", (cursor) => {
+    expect(snapshotEventBaseline(cursor)).toBe(0);
   });
 });

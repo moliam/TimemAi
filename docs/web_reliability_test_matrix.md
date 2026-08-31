@@ -4,40 +4,58 @@ This matrix defines the observable invariants for commands crossing the browser,
 web host, and agent core boundary.  It deliberately distinguishes a browser
 socket write from an accepted command and from a durable committed effect.
 
-## Delivery stages
+## Live delivery stages
 
 | Stage | Meaning | UI behavior after disconnect |
 | --- | --- | --- |
-| `pending` | Command exists in the browser outbox but has not been acknowledged. | Retain and retry with the same `command_id`. |
-| `accepted` | Host owns the command and promises either a terminal `committed` or `rejected` result. | Retain; reconnect and query/retry with the same `command_id`. |
-| `committed` | The non-idempotent effect is durable and recoverable by snapshot/event replay. | Remove from the outbox. |
-| `rejected` | No effect will be applied for this `command_id`. | Retain user content and expose a retry/edit action. |
+| socket write | The browser called `WebSocket.send()` once on an open, snapshot-ready connection. This does not prove Host receipt. | Do not persist, retry, or display a per-command waiting state. |
+| `accepted` | The current Host process reserved the correlation ID and queued/started handling it. This is transport control, not business success. | Do not replay. Reconnect from a fresh authoritative snapshot. |
+| `committed` | Host completed command handling and the corresponding authoritative state/event, when any, is available. | Update business UI only from the projection/event, not from the ACK. |
+| `rejected` | Host explicitly rejected this live command. | Show the explicit error and let the user choose whether to act again. |
 
-`WebSocket.send()` is not evidence for either `accepted` or `committed`.
+`WebSocket.send()` is not evidence for either Host receipt or a committed Core/Session effect. An ACK is correlated live control data; it does not replace the authoritative projection.
+
+## UI continuity and disconnect baseline
+
+A live browser connection is part of the product experience contract, not an implementation detail. While the Host process remains alive and the transport/protocol is valid, ordinary UI and runtime activity must preserve one WebSocket connection. The browser must not close or rebuild it merely because React rerendered, a user clicked or switched Sessions, a queue projection changed, or Thought/Action/tool progress arrived in a burst.
+
+An automatic disconnect is justified only by observable transport failure, Host shutdown, authentication failure, malformed/incompatible protocol data, or a sequence condition that cannot be recovered by an authoritative snapshot baseline. Broadcast lag is recoverable and must first establish a fresh baseline without showing a false runtime failure.
+
+The executable browser baseline must assert all of the following:
+
+- initial and reconnect `hello` snapshots adopt the Host's exact non-zero `event_cursor`;
+- the next semantic event is accepted as `event_cursor + 1`, without a gap report or reconnect;
+- at least 32 consecutive Thought/Action-style progress events stay on the same socket;
+- ordinary commands, queue updates, Session state updates, rerenders, and Session switching do not increase the WebSocket connection count;
+- no `Runtime event gap`, `Runtime error`, `Runtime disconnected`, or connection-lost banner appears during valid traffic;
+- one genuine failure produces one bounded notice per disconnect episode rather than a notification storm;
+- reconnect restores authoritative working/terminal/queue state without browser command replay.
+
+A test that checks only the eventual DOM state is insufficient: it must also observe connection count, close/reconnect behavior, and user-visible error notices.
 
 ## Required executable cases
 
 | Case | Fault injection point | Required invariant |
 | --- | --- | --- |
-| Disconnect before accept | Close the socket after the browser write but before host dequeue. | UI retains the command and a reconnect retry applies it once. |
-| Disconnect after accept | Close after `accepted`, before the handler finishes. | Host finishes the owned command; retry returns its terminal result without re-execution. |
-| Disconnect after commit | Drop the terminal ack. | Retry with the same ID returns `committed`; effect count remains one. |
-| Queue full | Fill the bounded command queue, then send one more command. | A correlated `rejected` ack names the rejected `command_id`; no unrelated command is cleared. |
-| Duplicate command | Submit the same `command_id` concurrently on one and two sockets. | Handler invocation and durable effect count are exactly one; all callers receive the same terminal result. |
-| Distinct commands | Submit distinct IDs with identical payloads. | Both commands execute in the server-defined order; payload equality must not deduplicate user intent. |
-| Snapshot handshake | Mutate state while a connection is taking its initial snapshot. | Client observes the mutation either in the snapshot or in a sequenced event, never neither. |
-| Command/event ordering | Make Core emit immediately while `turn_submit` is committing. | The turn-creation state precedes any event referencing that turn, or the client buffers it until the turn exists. |
-| Broadcast lag | Overrun the live channel and reconnect from the last acknowledged sequence. | Every semantic event after that sequence is replayed exactly once. |
-| Pending decision reconnect | Disconnect while Core is waiting for a request reply. | The reconnect snapshot/replay recreates the same decision and `request_id`; Core remains answerable. |
-| Duplicate decision click | Send the same reply command twice and lose the first ack. | Core resolves the request once; retry reports the recorded terminal result. |
-| Cancel then supplement | Race cancellation with a new user message on separate sockets and independent Host/Core threads under seeded jitter. | The message is PromptCut-consumed by the active turn or committed as the next task; it is never inferred from arrival order and never silently cleared. |
-| Supplement then final | Seal the model request PromptCut, then accept a supplement while that independent model thread sleeps/finalizes. | The current response cannot claim the unconsumed supplement; terminal commit atomically hands it back as a queued next task with the same command ownership. |
-| Final then immediate | Click **immediate** after final state is committed but before UI receives it. | Host classifies by its authoritative turn generation, creating a new task rather than writing to a finished turn. |
-| Process crash | Crash after command persistence and before Core handoff. | Recovery replays the durable host outbox into Core without duplicating the user entry. |
-| Multi-Session restore | Restore four Sessions concurrently, each with one task and ordered supplements. | All four Sessions enter Core in parallel as isolated atomic batches; no prompt, command ID, completion, or delivery state crosses Session scope. |
-| Persistence failure | Fail history/session persistence after validation. | No `committed` ack is emitted and no irreversible Core effect is started. |
-| Two browser tabs | Issue mutations against one session from separate sockets. | Per-session revision/order is authoritative at the host; stale mutations are rejected or serialized. |
-| Memory-space switch | Accept work on another socket while switching memory spaces. | The switch is an epoch barrier: it rejects active work, prevents new acceptance, and no old-epoch command can execute against the new space. |
+| Disconnect before Host receipt | Close the socket after the browser write while preventing Host dequeue. | No browser replay occurs. If Host did not receive the command, no effect occurs; reconnect restores the current snapshot. |
+| Disconnect after Host acceptance | Close after `accepted`, before handler completion. | Host handling already owned by the live process may finish independently of the socket; reconnect observes only the resulting authoritative snapshot. |
+| Disconnect after commit | Drop the terminal ACK. | The ACK loss does not roll back the domain effect and does not trigger browser retry; reconnect snapshot/event state remains authoritative. |
+| Queue full | Fill the bounded command queue, then send one more command. | A correlated `rejected` ACK names the rejected ID; queue memory stays within its configured capacity. |
+| Duplicate command in one process | Submit the same `command_id` concurrently while its dedup record remains resident. | Handler invocation is one; callers receive the resident result/control response. This guarantee does not cross Host restart or cache eviction. |
+| Distinct commands | Submit distinct IDs with identical payloads. | Both are distinct user actions; payload equality must not deduplicate them. |
+| Dedup capacity | Fill the process-local cache with accepted records. | New IDs are explicitly rejected, record count stays at `COMMAND_DEDUP_CAPACITY`, and no disk ledger/file is created. Terminal records are evictable. |
+| Snapshot handshake | Mutate authoritative state while a connection is taking its initial snapshot. | Client observes the mutation either in the snapshot or in a sequenced event, never neither. |
+| Command/event ordering | Make Core emit immediately while `turn_submit` is committing. | The turn-creation state precedes an event referencing it, or the reducer waits for an authoritative state that can own it; timestamp order alone is not treated as causality. |
+| Broadcast lag | Overrun the bounded live channel. | Host supplies a new full snapshot baseline; it does not grow or replay a disk event log. |
+| Pending decision reconnect | Disconnect while Core is waiting for a request reply. | The reconnect snapshot recreates the authoritative decision and `request_id`; Core remains answerable. |
+| Duplicate decision click | Trigger two synchronous clicks. | The browser event guard suppresses the duplicate in that event window; later explicit actions are new commands. |
+| Cancel then supplement | Race cancellation with a new user message under seeded jitter. | Core/Host ownership fields decide whether the message belongs to the active Turn or a distinct next task; arrival timestamps do not decide it. |
+| Supplement then final | Seal the model request PromptCut, then accept a supplement while finalization proceeds independently. | PromptCut and terminal ownership decide whether the supplement was consumed or becomes a next task; visible final timing does not. |
+| Final then immediate | Click **immediate** after authoritative final commit but before UI receives it. | Host classifies against its authoritative Turn generation, not the stale browser picture. |
+| Process restart | Restart after persisted Session state exists. | Running/unfinished work restores according to Session interruption rules; browser commands and generic dedup records are not redriven. |
+| Persistence failure | Fail authoritative Session/history persistence after validation. | No successful projection is published for state that was not persisted; explicit errors remain visible. |
+| Two browser tabs | Issue mutations against one Session from separate sockets. | Host lane/revision rules serialize or reject them; browser cross-tab storage is not a command bus. |
+| Memory-space switch | Accept work while switching memory spaces. | The MEM epoch barrier prevents old-epoch execution in the new space and resets process-local dedup state without creating per-MEM command fragments. |
 
 ### Pressure profile
 
@@ -45,51 +63,28 @@ The cases above are requirements, but the high-risk Turn boundary is certified b
 
 Every run asserts exact command/attachment ownership, bounded queues, immutable outcomes, no revived working state, and resource convergence. A failure must print its seed and named stage trace. Increasing sleeps or timeouts, lowering iterations, or checking only the final ready state is not acceptable remediation.
 
-### Durable Core handoff
+### Authoritative Core handoff
 
-Persisting a user entry is not proof that Core received it. A task or
-supplement therefore needs a durable handoff state separate from its visible
-history entry:
+Persisting a visible user entry and handing work to Core are distinct facts. Their relationship must be represented by the existing bounded Session/Turn ownership model, not inferred from write order and not duplicated into a generic ever-growing command ledger.
 
-- `recorded`: user text and `command_id` are durable, but Core delivery is not
-  yet proven;
-- `core_accepted`: the current Core worker has accepted the item, keyed by the
-  same stable ID. This is a process-local delivery fact, not proof that an
-  external tool side effect completed.
+- Browser delivery is one-shot and has no durable outbox.
+- `core_accepted` is an authoritative, bounded Session/Turn handoff field for work already owned by Core. It is not a browser delivery state, generic command ledger, or instruction to redrive after reconnect/restart.
+- Host command queues, accepted ownership sets, event channels, and dedup records are hard-bounded.
+- Generic command dedup is process-local only; it neither loads nor writes `web_command_dedup.json`.
+- Durable user-visible work uses the existing authoritative Session store and its bounded next-turn FIFO. Do not create one fragment file per command/event.
+- A Host/Core restart is a hard execution boundary: unfinished running work restores as interrupted and generic browser commands are not automatically redriven.
+- Strict exactly-once behavior cannot be promised for irreversible external effects across process or machine failure. Such effects require command-specific idempotency or reconciliation; generic transport ACKs cannot prove execution ownership.
+- Reconnect and restore tests cover four Sessions concurrently and assert bounded, isolated Session/Turn state without browser command replay or cross-talk.
 
-After a process crash, unfinished `recorded` and `core_accepted` items must be
-redelivered with the same ID. A restored task and its ordered supplements are
-redelivered as one atomic initial batch so an immediately final model response
-cannot close the mailbox between task and supplement recovery. Core deduplicates
-IDs within one process; recovery intentionally favors not losing the user's
-work.
-Finding `command_id` in chat history alone must not turn a retry into
-`committed`, because a crash can occur after the history write and before the
-mailbox enqueue (or after turn creation and before `run_turn`).
+## Browser one-shot command cases
 
-Strict exactly-once behavior cannot be promised for an irreversible external
-tool side effect across a process or machine crash. Such tools must provide
-their own idempotency key or reconciliation contract. Timem's recoverable turn
-delivery is at-least-once at that boundary.
-
-A terminal dedup-record write failure after a domain effect is also not a
-`rejected` command: rejection promises that no effect happened. Keep ownership
-non-terminal and retry the commit record, or atomically transact domain state
-and the terminal command record.
-
-## UI outbox cases
-
-- Automatic queued dispatch must claim a message without removing it.  Only a
-  matching `committed(command_id)` removes it.
-- `accepted` leaves the row visible as sending; reconnect does not release it
-  into a second distinct command ID.
-- `rejected` and connection loss leave text, attachments, editing state, and
-  queue position recoverable.
-- Ack for command A must never release, delete, or change command B.
-- Reordering or deleting an unsent row cannot change the identity of an
-  already accepted row.
-- Refresh/reload restores pending and accepted commands from durable browser
-  storage, not React component state.
+- Send only when the socket is open and the initial snapshot is ready.
+- Do not enqueue in localStorage/sessionStorage, retry on reconnect, synchronize through `storage`, or restore pending commands after refresh.
+- Do not show `Sending…`, `Waiting for confirmation…`, or `Retrying…` for an individual command.
+- Keep the previous authoritative business UI until a Host projection/event changes it.
+- Ignore `accepted` as a business-state transition. A correlated `rejected` response may show an explicit error.
+- A short synchronous event guard may suppress one accidental duplicate click, but it must not become persistent business state or unbounded memory.
+- If a command did not reach Host, it did not happen; the user may explicitly perform a new action.
 
 ## Core-to-UI cases
 
@@ -147,10 +142,10 @@ already committed mutation into a rejection.
 
 ## Historical failures protected by regression tests
 
-The suite keeps explicit regressions for the earlier snapshot/subscription gap,
-socket-disconnect command loss, uncorrelated command results, premature UI queue
-deletion, missing reconnect decisions, discarded late supplements, cross-socket
-Session reordering, history-before-Core crash windows, and memory-switch races.
-Removing the durable outbox, correlated acknowledgements, Core delivery state,
-ordered semantic delivery, snapshot-baseline recovery, FIFO Session lanes, or
-memory epoch barrier requires a replacement that passes the same cases.
+The suite keeps explicit regressions for the snapshot/subscription gap,
+uncorrelated command errors, missing reconnect decisions, discarded late
+supplements, cross-socket Session ordering, unbounded caches/queues, accidental
+command-state files, and memory-switch races. Correlated live acknowledgements,
+ordered semantic delivery, snapshot-baseline recovery, bounded FIFO Session
+lanes, bounded process-local deduplication, and the memory epoch barrier remain
+required. Browser persistence/replay is intentionally prohibited.

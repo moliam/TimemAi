@@ -14,6 +14,15 @@
   that legacy directories, reverse dependencies, and escaped process primitives
   are rejected.
 
+### Fixed
+
+- Move ordinary next-task delivery from the browser-local completion loop into a
+  bounded Host-owned FIFO. Multiple tasks submitted during active work now keep
+  running in order in the same live runtime even if the browser locks, disconnects,
+  refreshes, or closes; legacy local rows migrate in order, while explicit pause
+  remains respected. Stop still preserves queued next tasks, and a runtime process
+  restart remains the hard Stop boundary that discards persisted next-turn intent.
+
 ### Changed
 
 - Complete the runtime-root migration by moving the former top-level `timem_web/`

@@ -4,4 +4,5 @@
 //! transport metadata, and presentation remain in their respective layers.
 
 pub mod commands;
+pub mod message_fifo;
 pub mod projections;

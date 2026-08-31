@@ -106,14 +106,18 @@ checks. If a dimension is not applicable, record that residual decision in
   cross-session token isolation, and Session-creation profile overrides. A live
   Aliyun browser smoke submits turns to two Sessions with different models and
   verifies that both complete in their own conversation.
-- Web delivery reliability: deterministic Host and frontend tests cover stable
-  command IDs, accepted/committed/rejected acknowledgement reordering, lost-ack
-  replay, disconnect recovery, bounded durable browser outboxes, strictly ordered
-  in-memory semantic delivery, snapshot recovery after gaps or lag, cross-tab coordination,
-  same-Session FIFO, global mutation exclusion, memory epoch barriers, atomic
-  restored task/supplement batches, and four Sessions restoring concurrently
-  without cross-talk. The normative case list is
-  `docs/web_reliability_test_matrix.md`.
+- Web delivery reliability: deterministic Host and frontend tests cover one-shot
+  socket delivery, correlated accepted/committed/rejected control responses,
+  no browser persistence/replay, reconnect snapshot recovery, hard-bounded
+  process-local command deduplication and command/event queues, absence of
+  per-command state files, strictly ordered in-memory semantic delivery,
+  snapshot recovery after gaps or lag, same-Session FIFO, global mutation
+  exclusion, and memory epoch barriers. Real-Chrome acceptance starts from a
+  non-zero Host cursor, counts WebSocket connections, sends bursty
+  Thought/Action-style progress, and fails on any unjustified reconnect or
+  runtime-error/reconnect notice. Valid UI activity and rerenders must retain a
+  single connection while the Host and protocol remain healthy. The normative
+  case list is `docs/web_reliability_test_matrix.md`.
 - Turn concurrency stress: a focused stress entry runs the four real concurrent
   Turn scenarios with seeded replay, resource convergence checks, and latency
   percentiles. It uses hundreds/thousands of iterations per scenario rather than

@@ -242,48 +242,14 @@ import {
   ToolActivitySummary,
 } from "./activity_groups";
 import {
-  applyQueuedMessagesAck,
-  claimQueuedMessage,
-  clearQueuedMessagesPause,
   COLLAPSED_QUEUE_LIMIT,
-  loadQueuedMessages,
-  loadQueuedMessagesPause,
   QueuedMessage,
-  queuedMessageKey,
-  QueuedMessagesPauseSource,
-  QueuedMessagesPauseState,
-  queuedMessagesPauseSessionId,
-  queuedMessagesPauseStorageKey,
-  queuedMessagesStorageKey,
-  releaseQueuedMessageClaim,
-  releaseSessionQueuedMessageClaims,
-  removeQueuedMessage,
   reorderQueuedMessages,
   reservedQueuedAttachmentIds,
-  saveQueuedMessages,
-  saveQueuedMessagesPause,
-  selectQueuedDispatches,
-  shouldDirectManualMessage,
-  stopQueuedAutoSend,
-  unclaimedQueuedMessages,
 } from "./queued_messages";
-import {
-  acceptOutboxCommand,
-  addCommandToOutbox,
-  commandMayPersist,
-  commandNeedsReliableDelivery,
-  CommandOutboxItem,
-  commandOutboxStorageKey,
-  finishOutboxCommand,
-  loadCommandOutbox,
-  orderCommandOutbox,
-  pendingTurnCancelTargetCommandIds,
-  pendingTurnSubmitCommandIds,
-  reliableStorageScope,
-  removeCommandOutboxItem,
-  saveCommandOutboxItem,
-} from "./command_outbox";
-import { classifyEventSequence } from "./event_cursor";
+
+import { commandNeedsReliableDelivery } from "./command_outbox";
+import { classifyEventSequence, snapshotEventBaseline } from "./event_cursor";
 import {
   enablesSemanticDelivery,
   shouldReduceTopLevelWireEvent,
@@ -695,6 +661,9 @@ function TimemApp() {
   const selectedToolRef = useRef<ToolDetail | null>(null);
   const toolCountBySessionRef = useRef<Map<string, number>>(new Map());
   const cancellingSessionIds = useRef<Set<string>>(new Set());
+  const [stopClickLockedSessionIds, setStopClickLockedSessionIds] = useState<
+    Set<string>
+  >(() => new Set());
   const cancellingSessionCommandIds = useRef<Map<string, string>>(new Map());
   const cancellingSessionTimeouts = useRef<Map<string, number>>(new Map());
   const [creatingSession, setCreatingSession] = useState(false);
@@ -742,31 +711,20 @@ function TimemApp() {
   const [pendingMemRetention, setPendingMemRetention] = useState(false);
   const [pendingMemConversationCapacity, setPendingMemConversationCapacity] =
     useState(false);
-  const [completedTurnsBySession, setCompletedTurnsBySession] = useState<
-    Record<
-      string,
-      { key: string; continuation: "normal" | "cancelled" | "blocked" }
-    >
-  >({});
-  const [commandAcks, setCommandAcks] = useState<
-    Record<string, Extract<WireEvent, { type: "command_ack" }>>
-  >({});
-  const consumeCommandAcks = useCallback((commandIds: ReadonlySet<string>) => {
-    setCommandAcks((current) =>
-      Object.fromEntries(
-        Object.entries(current).filter(
-          ([commandId]) => !commandIds.has(commandId),
-        ),
-      ),
-    );
-  }, []);
-  const commandOutboxRef = useRef<CommandOutboxItem[]>([]);
-  const [persistedSubmitCommandIds, setPersistedSubmitCommandIds] = useState<
-    Record<string, string>
-  >({});
-  const [persistedCancelTargetCommandIds, setPersistedCancelTargetCommandIds] =
-    useState<Record<string, string>>({});
-  const commandOutboxScopeRef = useRef("");
+  const [rejectedSubmitCommandIds, setRejectedSubmitCommandIds] = useState<
+    Set<string>
+  >(() => new Set());
+  const consumeRejectedSubmitCommandIds = useCallback(
+    (commandIds: ReadonlySet<string>) => {
+      setRejectedSubmitCommandIds((current) => {
+        const next = new Set(current);
+        for (const commandId of commandIds) next.delete(commandId);
+        return next.size === current.size ? current : next;
+      });
+    },
+    [],
+  );
+  const sentCommandsRef = useRef<Map<string, ClientCommand>>(new Map());
   const eventCursorRef = useRef(0);
   const semanticDeliveryRef = useRef(false);
   const creatingSessionRef = useRef(false);
@@ -1056,44 +1014,22 @@ function TimemApp() {
 
   const sendCommand = useCallback(
     (command: ClientCommand, requestedCommandId?: string) => {
-      const reliable = commandNeedsReliableDelivery(command);
-      let wireCommand: ClientCommand | CommandWithId = command;
-      if (reliable) {
-        const commandId = requestedCommandId ?? clientId("command");
-        const next = addCommandToOutbox(
-          commandOutboxRef.current,
-          command,
-          commandId,
-        );
-        const item = next.find(
-          (candidate) => candidate.commandId === commandId,
-        );
-        if (
-          !item ||
-          (commandMayPersist(command) &&
-            !saveCommandOutboxItem(
-              window.localStorage,
-              commandOutboxScopeRef.current,
-              item,
-            ))
-        )
-          return false;
-        commandOutboxRef.current = next;
-        setPersistedSubmitCommandIds(pendingTurnSubmitCommandIds(next));
-        setPersistedCancelTargetCommandIds(
-          pendingTurnCancelTargetCommandIds(next),
-        );
-        wireCommand = { ...command, command_id: commandId };
-      }
       if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady)
-        return reliable;
+        return false;
+      const commandId =
+        requestedCommandId ??
+        (commandNeedsReliableDelivery(command) ? clientId("command") : undefined);
+      const wireCommand: ClientCommand | CommandWithId = commandId
+        ? { ...command, command_id: commandId }
+        : command;
       const tracedCommand =
         performanceTraceRef.current.instrumentCommand(wireCommand);
       try {
         socket.current.send(JSON.stringify(tracedCommand));
+        if (commandId) sentCommandsRef.current.set(commandId, command);
         return true;
       } catch {
-        return reliable;
+        return false;
       }
     },
     [snapshotReady],
@@ -1246,56 +1182,6 @@ function TimemApp() {
     [sendCommand],
   );
 
-  useEffect(() => {
-    if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady) return;
-    for (const item of commandOutboxRef.current) {
-      try {
-        socket.current.send(JSON.stringify(item.command));
-      } catch {
-        break;
-      }
-    }
-  }, [snapshotReady]);
-
-  useEffect(() => {
-    const syncCrossTabOutbox = (event: StorageEvent) => {
-      const scope = commandOutboxScopeRef.current;
-      if (
-        !scope ||
-        !event.key?.startsWith(`${commandOutboxStorageKey(scope)}:`)
-      )
-        return;
-      const stored = loadCommandOutbox(window.localStorage, scope);
-      const memoryOnly = commandOutboxRef.current.filter(
-        (item) => !commandMayPersist(item.command),
-      );
-      commandOutboxRef.current = orderCommandOutbox([
-        ...stored,
-        ...memoryOnly.filter(
-          (item) =>
-            !stored.some((candidate) => candidate.commandId === item.commandId),
-        ),
-      ]);
-      setPersistedSubmitCommandIds(
-        pendingTurnSubmitCommandIds(commandOutboxRef.current),
-      );
-      setPersistedCancelTargetCommandIds(
-        pendingTurnCancelTargetCommandIds(commandOutboxRef.current),
-      );
-      if (socket.current?.readyState !== WebSocket.OPEN || !snapshotReady)
-        return;
-      for (const item of stored) {
-        try {
-          socket.current.send(JSON.stringify(item.command));
-        } catch {
-          break;
-        }
-      }
-    };
-    window.addEventListener("storage", syncCrossTabOutbox);
-    return () => window.removeEventListener("storage", syncCrossTabOutbox);
-  }, [snapshotReady]);
-
   const addPendingKey = useCallback(
     (
       ref: MutableRefObject<Set<string>>,
@@ -1337,21 +1223,6 @@ function TimemApp() {
         if (pending) window.clearTimeout(pending.timeoutId);
         pendingSessionApiKeyCommandsRef.current.delete(activeCommandId);
         pendingSessionApiKeyCommandIdsRef.current.delete(sessionId);
-        commandOutboxRef.current = finishOutboxCommand(
-          commandOutboxRef.current,
-          activeCommandId,
-        );
-        setPersistedSubmitCommandIds(
-          pendingTurnSubmitCommandIds(commandOutboxRef.current),
-        );
-        setPersistedCancelTargetCommandIds(
-          pendingTurnCancelTargetCommandIds(commandOutboxRef.current),
-        );
-        removeCommandOutboxItem(
-          window.localStorage,
-          commandOutboxScopeRef.current,
-          activeCommandId,
-        );
       }
       const savedApiKey = pendingSessionApiKeyValuesRef.current.get(sessionId);
       pendingSessionApiKeyValuesRef.current.delete(sessionId);
@@ -1400,6 +1271,7 @@ function TimemApp() {
   const clearAllPendingCommands = useCallback(() => {
     creatingSessionRef.current = false;
     cancellingSessionIds.current.clear();
+    setStopClickLockedSessionIds(new Set());
     cancellingSessionCommandIds.current.clear();
     for (const timeoutId of cancellingSessionTimeouts.current.values())
       window.clearTimeout(timeoutId);
@@ -1448,6 +1320,12 @@ function TimemApp() {
     const liveSessionIds = new Set(
       sessions.map((session) => session.session_id),
     );
+    setStopClickLockedSessionIds((current) => {
+      const next = new Set(
+        Array.from(current).filter((sessionId) => liveSessionIds.has(sessionId)),
+      );
+      return next.size === current.size ? current : next;
+    });
     for (const sessionId of Array.from(cancellingSessionIds.current)) {
       if (!liveSessionIds.has(sessionId)) {
         cancellingSessionIds.current.delete(sessionId);
@@ -1634,161 +1512,121 @@ function TimemApp() {
         return;
       }
       if (event.type === "command_ack") {
-        if (
-          event.command_id.startsWith("queued-") ||
-          (event.command_id.startsWith("submit-") &&
-            event.status === "rejected")
-        ) {
-          setCommandAcks((current) => ({
-            ...current,
-            [event.command_id]: event,
-          }));
+        if (event.status === "accepted") return;
+        const completed = sentCommandsRef.current.get(event.command_id);
+        sentCommandsRef.current.delete(event.command_id);
+        const pendingCredential = pendingSessionApiKeyCommandsRef.current.get(
+          event.command_id,
+        );
+        if (pendingCredential) {
+          finishPendingSessionApiKeyCommand(
+            pendingCredential.sessionId,
+            event.command_id,
+            event.status === "committed",
+          );
         }
-        if (event.status === "accepted") {
-          commandOutboxRef.current = acceptOutboxCommand(
-            commandOutboxRef.current,
-            event.command_id,
-          );
-          const accepted = commandOutboxRef.current.find(
-            (item) => item.commandId === event.command_id,
-          );
-          if (accepted && commandMayPersist(accepted.command))
-            saveCommandOutboxItem(
-              window.localStorage,
-              commandOutboxScopeRef.current,
-              accepted,
+        if (event.status === "rejected") {
+          if (completed?.type === "turn_submit") {
+            setRejectedSubmitCommandIds((current) => {
+              const next = new Set(current);
+              next.add(event.command_id);
+              return next;
+            });
+          }
+          if (pendingWorkerRoleMutationsRef.current.delete(event.command_id)) {
+            const visibleLibrary = replayWorkerRoleMutations(
+              authoritativeRoleLibraryRef.current,
+              pendingWorkerRoleMutationsRef.current.values(),
             );
-        } else {
-          const completed = commandOutboxRef.current.find(
-            (item) => item.commandId === event.command_id,
-          );
-          const pendingCredential = pendingSessionApiKeyCommandsRef.current.get(
-            event.command_id,
-          );
-          commandOutboxRef.current = finishOutboxCommand(
-            commandOutboxRef.current,
-            event.command_id,
-          );
-          setPersistedSubmitCommandIds(
-            pendingTurnSubmitCommandIds(commandOutboxRef.current),
-          );
-          setPersistedCancelTargetCommandIds(
-            pendingTurnCancelTargetCommandIds(commandOutboxRef.current),
-          );
-          removeCommandOutboxItem(
-            window.localStorage,
-            commandOutboxScopeRef.current,
-            event.command_id,
-          );
-          if (pendingCredential) {
-            finishPendingSessionApiKeyCommand(
-              pendingCredential.sessionId,
-              event.command_id,
-              event.status === "committed",
+            setRoleLibrary(visibleLibrary);
+            setSessions((current) =>
+              current.map((session) => ({
+                ...session,
+                roles: visibleLibrary.roles,
+              })),
             );
           }
-          if (event.status === "rejected") {
-            if (
-              pendingWorkerRoleMutationsRef.current.delete(event.command_id)
-            ) {
-              const visibleLibrary = replayWorkerRoleMutations(
-                authoritativeRoleLibraryRef.current,
-                pendingWorkerRoleMutationsRef.current.values(),
-              );
-              setRoleLibrary(visibleLibrary);
-              setSessions((current) =>
-                current.map((session) => ({
-                  ...session,
-                  roles: visibleLibrary.roles,
-                })),
-              );
-            }
-            const sessionId =
-              pendingCredential?.sessionId ??
-              commandSessionId(completed?.command) ??
-              (activeSessionIdRef.current || "system");
-            if (
-              completed?.command.type === "turn_cancel" &&
-              sessionId !== "system" &&
-              cancellingSessionCommandIds.current.get(sessionId) ===
-                event.command_id
-            ) {
-              cancellingSessionIds.current.delete(sessionId);
-              cancellingSessionCommandIds.current.delete(sessionId);
-              const timeoutId =
-                cancellingSessionTimeouts.current.get(sessionId);
-              if (timeoutId !== undefined) window.clearTimeout(timeoutId);
-              cancellingSessionTimeouts.current.delete(sessionId);
-            }
-            if (completed?.command.type === "mem_temporary_retention_update") {
-              setPendingMemRetention(false);
-            }
-            if (
-              completed?.command.type === "mem_conversation_capacity_update"
-            ) {
-              setPendingMemConversationCapacity(false);
-            }
-            const memSwitchNeedsConfirmation =
-              completed?.command.type === "mem_switch" &&
-              !completed.command.stop_running &&
-              event.error ===
-                "mem_switch_active_sessions_confirmation_required";
-            if (completed?.command.type === "mem_switch") {
-              setPendingMemSwitch(false);
-              if (memSwitchNeedsConfirmation) {
-                setMemSwitchCandidate({
-                  path: completed.command.path,
-                  runningSessionCount: Math.max(
-                    1,
-                    memSwitchRunningSessionCount(sessionsRef.current),
-                  ),
-                });
-              } else {
-                setMemSwitchCandidate(null);
-              }
-            }
-            if (completed?.command.type === "mem_temporary_items_list") {
-              setMemTemporaryItemsLoading(false);
-            }
-            if (completed?.command.type === "mem_temporary_items_delete") {
-              setMemTemporaryItemsDeleting(false);
-            }
+          const sessionId =
+            pendingCredential?.sessionId ??
+            commandSessionId(completed) ??
+            (activeSessionIdRef.current || "system");
+          if (
+            completed?.type === "turn_cancel" &&
+            sessionId !== "system" &&
+            cancellingSessionCommandIds.current.get(sessionId) ===
+              event.command_id
+          ) {
+            cancellingSessionIds.current.delete(sessionId);
+            setStopClickLockedSessionIds((current) => {
+              const next = new Set(current);
+              next.delete(sessionId);
+              return next;
+            });
+            cancellingSessionCommandIds.current.delete(sessionId);
+            const timeoutId = cancellingSessionTimeouts.current.get(sessionId);
+            if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+            cancellingSessionTimeouts.current.delete(sessionId);
+          }
+          if (completed?.type === "mem_temporary_retention_update")
+            setPendingMemRetention(false);
+          if (completed?.type === "mem_conversation_capacity_update")
+            setPendingMemConversationCapacity(false);
+          const memSwitchNeedsConfirmation =
+            completed?.type === "mem_switch" &&
+            !completed.stop_running &&
+            event.error === "mem_switch_active_sessions_confirmation_required";
+          if (completed?.type === "mem_switch") {
+            setPendingMemSwitch(false);
             if (memSwitchNeedsConfirmation) {
-              // The authoritative runtime found live work after the latest browser snapshot.
-              // The confirmation dialog is the actionable response; avoid a redundant error toast.
-            } else if (pendingCredential) {
-              reportUiError(
-                "API key update rejected",
-                event.error ||
-                  "The runtime rejected this Session credential. Check the value and try again.",
-                sessionId,
-              );
-            } else if (isModelSubmissionCommand(completed?.command)) {
-              const issue = modelServiceIssue(
-                event.error || "The runtime rejected this model request.",
-              );
-              reportUiError(issue.title, issue.detail, sessionId);
-            } else if (completed?.command.type === "favorite_capacity_update") {
-              setFavoriteCapacityUpdating(false);
-              reportUiError("无法调整收藏夹空间", "请稍后重试。", sessionId);
-            } else if (
-              completed?.command.type === "favorite_create" ||
-              completed?.command.type === "favorite_delete" ||
-              completed?.command.type === "favorites_list"
-            ) {
-              setFavoritesLoading(false);
-              setPendingFavoriteSourceKeys(new Set());
-              reportUiError("收藏夹暂时不可用", "请稍后重试。", sessionId);
-            } else if (completed?.command.type === "chat_search") {
-              setChatSearchPending(false);
-              reportUiError("搜索暂时不可用", "请稍后重试。", sessionId);
+              setMemSwitchCandidate({
+                path: completed.path,
+                runningSessionCount: Math.max(
+                  1,
+                  memSwitchRunningSessionCount(sessionsRef.current),
+                ),
+              });
             } else {
-              reportUiError(
-                "Command rejected",
-                event.error || "The runtime rejected this command.",
-                sessionId,
-              );
+              setMemSwitchCandidate(null);
             }
+          }
+          if (completed?.type === "mem_temporary_items_list")
+            setMemTemporaryItemsLoading(false);
+          if (completed?.type === "mem_temporary_items_delete")
+            setMemTemporaryItemsDeleting(false);
+          if (memSwitchNeedsConfirmation) {
+            // The confirmation dialog is the actionable authoritative response.
+          } else if (pendingCredential) {
+            reportUiError(
+              "API key update rejected",
+              event.error ||
+                "The runtime rejected this Session credential. Check the value and try again.",
+              sessionId,
+            );
+          } else if (isModelSubmissionCommand(completed)) {
+            const issue = modelServiceIssue(
+              event.error || "The runtime rejected this model request.",
+            );
+            reportUiError(issue.title, issue.detail, sessionId);
+          } else if (completed?.type === "favorite_capacity_update") {
+            setFavoriteCapacityUpdating(false);
+            reportUiError("无法调整收藏夹空间", "请稍后重试。", sessionId);
+          } else if (
+            completed?.type === "favorite_create" ||
+            completed?.type === "favorite_delete" ||
+            completed?.type === "favorites_list"
+          ) {
+            setFavoritesLoading(false);
+            setPendingFavoriteSourceKeys(new Set());
+            reportUiError("收藏夹暂时不可用", "请稍后重试。", sessionId);
+          } else if (completed?.type === "chat_search") {
+            setChatSearchPending(false);
+            reportUiError("搜索暂时不可用", "请稍后重试。", sessionId);
+          } else {
+            reportUiError(
+              "Command rejected",
+              event.error || "The runtime rejected this command.",
+              sessionId,
+            );
           }
         }
         return;
@@ -1820,39 +1658,12 @@ function TimemApp() {
         return;
       }
       if (event.type === "hello") {
-        const scope = reliableStorageScope(
-          window.location.origin,
-          event.snapshot.server.mem.space_dir,
-        );
-        // Hello always carries a complete authoritative snapshot. Its cursor is
-        // the baseline for this connection; old browser cursors are deliberately
-        // not persisted or replayed across reconnects.
-        eventCursorRef.current =
-          Number.isSafeInteger(event.event_cursor) &&
-          (event.event_cursor ?? 0) >= 0
-            ? (event.event_cursor ?? 0)
-            : 0;
-        if (commandOutboxScopeRef.current !== scope) {
-          commandOutboxScopeRef.current = scope;
-          commandOutboxRef.current = loadCommandOutbox(
-            window.localStorage,
-            scope,
-          );
-          setPersistedSubmitCommandIds(
-            pendingTurnSubmitCommandIds(commandOutboxRef.current),
-          );
-          setPersistedCancelTargetCommandIds(
-            pendingTurnCancelTargetCommandIds(commandOutboxRef.current),
-          );
-          setCommandAcks({});
-        }
-        const durableCommandIds = new Set(
-          commandOutboxRef.current.map((item) => item.commandId),
-        );
-        for (const commandId of pendingWorkerRoleMutationsRef.current.keys()) {
-          if (!durableCommandIds.has(commandId))
-            pendingWorkerRoleMutationsRef.current.delete(commandId);
-        }
+        // Hello carries the complete authoritative baseline. Adopt its exact
+        // sequence before any later semantic event is reduced; reconnecting to
+        // a Host that has already emitted events must not look like a gap from
+        // the browser's previous (or initial zero) cursor.
+        eventCursorRef.current = snapshotEventBaseline(event.event_cursor);
+        // Browser commands are never restored or replayed across connections.
         clearAllPendingCommands();
         setDecisions(decisionsFromSessions(event.snapshot.sessions));
         applySnapshot(event.snapshot);
@@ -2174,6 +1985,16 @@ function TimemApp() {
               event.turn.turn_id,
             );
           }),
+        );
+        return;
+      }
+      if (event.type === "message_queue_updated") {
+        setSessions((current) =>
+          current.map((session) =>
+            session.session_id === event.session_id
+              ? { ...session, message_queue: event.message_queue }
+              : session,
+          ),
         );
         return;
       }
@@ -2505,6 +2326,11 @@ function TimemApp() {
         );
         setPendingToolgenRequests(new Set(pendingToolgenRequestsRef.current));
         cancellingSessionIds.current.delete(event.session_id);
+        setStopClickLockedSessionIds((current) => {
+          const next = new Set(current);
+          next.delete(event.session_id);
+          return next;
+        });
         cancellingSessionCommandIds.current.delete(event.session_id);
         const cancellationTimeoutId = cancellingSessionTimeouts.current.get(
           event.session_id,
@@ -2527,20 +2353,6 @@ function TimemApp() {
               : session,
           ),
         );
-        const completedKey = event.turn_id
-          ? `${event.session_id}:${event.turn_id}`
-          : clientId(`turn-finished-${event.session_id}`);
-        setCompletedTurnsBySession((current) => ({
-          ...current,
-          [event.session_id]: {
-            key: completedKey,
-            continuation: !event.outcome.completion?.stop_reason
-              ? "normal"
-              : event.outcome.completion.stop_reason === "CancelledByUser"
-                ? "cancelled"
-                : "blocked",
-          },
-        }));
         return;
       }
       if (event.type !== "core_topic") return;
@@ -2637,6 +2449,13 @@ function TimemApp() {
                     history_before_cursor: null,
                     history_has_more: false,
                     active_turn_id: null,
+                    message_queue: {
+                      revision: 0,
+                      items: [],
+                      auto_send_enabled: true,
+                      continuation: { state: "awaiting_normal_completion" },
+                      dispatching_command_id: null,
+                    },
                   },
                 ],
           );
@@ -3051,6 +2870,7 @@ function TimemApp() {
       const sessionId = activeSession.session_id;
       const commandId = clientId("turn-cancel");
       cancellingSessionIds.current.add(sessionId);
+      setStopClickLockedSessionIds((current) => new Set(current).add(sessionId));
       cancellingSessionCommandIds.current.set(sessionId, commandId);
       const previousTimeoutId =
         cancellingSessionTimeouts.current.get(sessionId);
@@ -3060,7 +2880,14 @@ function TimemApp() {
         if (cancellingSessionCommandIds.current.get(sessionId) !== commandId)
           return;
         cancellingSessionTimeouts.current.delete(sessionId);
-        // This timer is transport bookkeeping only. It must not change the
+        cancellingSessionCommandIds.current.delete(sessionId);
+        cancellingSessionIds.current.delete(sessionId);
+        setStopClickLockedSessionIds((current) => {
+          const next = new Set(current);
+          next.delete(sessionId);
+          return next;
+        });
+        // This timeout only releases the duplicate-click guard. It never changes
         // Session or Turn presentation; only a Host projection may do that.
       }, TURN_CANCEL_UI_TIMEOUT_MS);
       cancellingSessionTimeouts.current.set(sessionId, timeoutId);
@@ -3080,6 +2907,11 @@ function TimemApp() {
         cancellingSessionTimeouts.current.delete(sessionId);
         cancellingSessionCommandIds.current.delete(sessionId);
         cancellingSessionIds.current.delete(sessionId);
+        setStopClickLockedSessionIds((current) => {
+          const next = new Set(current);
+          next.delete(sessionId);
+          return next;
+        });
         const activity: Activity = {
           id: clientId(),
           sessionId,
@@ -3211,28 +3043,23 @@ function TimemApp() {
     ) => {
       if (runtimeLocked) return;
       const key = decisionKey(decision);
-      if (!addPendingKey(pendingDecisionKeysRef, setPendingDecisionKeys, key))
-        return;
+      if (pendingDecisionKeysRef.current.has(key)) return;
+      pendingDecisionKeysRef.current.add(key);
       const event = decision.event;
-      if (
-        sendCommand({
-          type: "topic_reply",
-          session_id: event.session_id,
-          worker_id: event.worker_id ?? undefined,
-          topic_name: event.topic.name,
-          request_id:
-            typeof event.payload.request_id === "string"
-              ? event.payload.request_id
-              : undefined,
-          decision: decisionValue,
-          payload: { summary: decision.detail },
-        })
-      ) {
-        setDecisions((current) =>
-          current.filter((candidate) => candidate !== decision),
-        );
-      } else {
-        removePendingKey(pendingDecisionKeysRef, setPendingDecisionKeys, key);
+      const sent = sendCommand({
+        type: "topic_reply",
+        session_id: event.session_id,
+        worker_id: event.worker_id ?? undefined,
+        topic_name: event.topic.name,
+        request_id:
+          typeof event.payload.request_id === "string"
+            ? event.payload.request_id
+            : undefined,
+        decision: decisionValue,
+        payload: { summary: decision.detail },
+      });
+      queueMicrotask(() => pendingDecisionKeysRef.current.delete(key));
+      if (!sent) {
         reportUiError(
           "Decision reply failed",
           "Reconnect to Timem Web before replying to this runtime request.",
@@ -3240,13 +3067,7 @@ function TimemApp() {
         );
       }
     },
-    [
-      addPendingKey,
-      removePendingKey,
-      reportUiError,
-      runtimeLocked,
-      sendCommand,
-    ],
+    [reportUiError, runtimeLocked, sendCommand],
   );
   const requestActiveToolGen = useCallback(
     (turnId: string) => {
@@ -4499,22 +4320,8 @@ function TimemApp() {
           <TimemThread
             activeSession={activeSession}
             sessions={sessions}
-            completedTurnsBySession={completedTurnsBySession}
-            commandAcks={commandAcks}
-            onConsumeCommandAcks={consumeCommandAcks}
-            persistedSubmitCommandId={
-              activeSession
-                ? persistedSubmitCommandIds[activeSession.session_id]
-                : undefined
-            }
-            reliableStorageScope={
-              server
-                ? reliableStorageScope(
-                    window.location.origin,
-                    server.mem.space_dir,
-                  )
-                : ""
-            }
+            rejectedSubmitCommandIds={rejectedSubmitCommandIds}
+            onConsumeRejectedSubmitCommandIds={consumeRejectedSubmitCommandIds}
             sessionIds={sessions.map((session) => session.session_id)}
             sessionInteractionLocked={sessionWorkLocked}
             sessionInteractionLockReason={sessionWorkLockReason}
@@ -4531,6 +4338,10 @@ function TimemApp() {
             decisions={sessionDecisions}
             fileInput={fileInput}
             isCancelling={sessionCancellationApplies(activeSession)}
+            stopClickLocked={
+              !!activeSession &&
+              stopClickLockedSessionIds.has(activeSession.session_id)
+            }
             pendingAttachmentRemoveIds={pendingAttachmentRemoveIds}
             pendingDecisionKeys={pendingDecisionKeys}
             uploadingAttachment={
@@ -4550,6 +4361,7 @@ function TimemApp() {
             onLoadMoreHistory={loadMoreHistory}
             onSend={sendText}
             onSendForSession={sendTextForSession}
+            onMessageQueueCommand={(command) => sendCommand(command)}
             selectedRoleIds={selectedRoleIdsForSession}
             onRolesConsumed={(sessionId, expectedRoleIds) =>
               setSelectedRoleIds((current) => {
@@ -7289,11 +7101,8 @@ function SortableQueuedMessage({
 function TimemThread({
   activeSession,
   sessions,
-  completedTurnsBySession,
-  commandAcks,
-  onConsumeCommandAcks,
-  persistedSubmitCommandId,
-  reliableStorageScope,
+  rejectedSubmitCommandIds,
+  onConsumeRejectedSubmitCommandIds,
   sessionIds,
   sessionInteractionLocked,
   sessionInteractionLockReason,
@@ -7303,6 +7112,7 @@ function TimemThread({
   decisions,
   fileInput,
   isCancelling,
+  stopClickLocked,
   pendingAttachmentRemoveIds,
   pendingDecisionKeys,
   uploadingAttachment,
@@ -7315,6 +7125,7 @@ function TimemThread({
   onLoadMoreHistory,
   onSend,
   onSendForSession,
+  onMessageQueueCommand,
   onCancel,
   onUpload,
   onRemoveAttachment,
@@ -7327,14 +7138,8 @@ function TimemThread({
 }: {
   activeSession: Session | undefined;
   sessions: Session[];
-  completedTurnsBySession: Record<
-    string,
-    { key: string; continuation: "normal" | "cancelled" | "blocked" }
-  >;
-  commandAcks: Record<string, Extract<WireEvent, { type: "command_ack" }>>;
-  onConsumeCommandAcks: (commandIds: ReadonlySet<string>) => void;
-  persistedSubmitCommandId?: string;
-  reliableStorageScope: string;
+  rejectedSubmitCommandIds: ReadonlySet<string>;
+  onConsumeRejectedSubmitCommandIds: (commandIds: ReadonlySet<string>) => void;
   sessionIds: string[];
   sessionInteractionLocked: boolean;
   sessionInteractionLockReason: string;
@@ -7344,6 +7149,7 @@ function TimemThread({
   decisions: Decision[];
   fileInput: React.RefObject<HTMLInputElement | null>;
   isCancelling: boolean;
+  stopClickLocked: boolean;
   pendingAttachmentRemoveIds: Set<string>;
   pendingDecisionKeys: Set<string>;
   uploadingAttachment: boolean;
@@ -7369,6 +7175,7 @@ function TimemThread({
     roleIds?: readonly string[],
     forceNewTurn?: boolean,
   ) => boolean;
+  onMessageQueueCommand: (command: ClientCommand) => boolean;
   selectedRoleIds: readonly string[];
   onRolesConsumed: (
     sessionId: string,
@@ -7398,12 +7205,6 @@ function TimemThread({
     Record<string, string>
   >({});
   const [composerExpanded, setComposerExpanded] = useState(false);
-  const [queuedMessagesBySession, setQueuedMessagesBySession] = useState<
-    Record<string, QueuedMessage[]>
-  >({});
-  const queuedMessagesBySessionRef = useRef<Record<string, QueuedMessage[]>>(
-    queuedMessagesBySession,
-  );
   const [expandedQueueSessionIds, setExpandedQueueSessionIds] = useState<
     Set<string>
   >(() => new Set());
@@ -7422,21 +7223,7 @@ function TimemThread({
     id: string;
     text: string;
   }>();
-  const queuedDispatchSessionIdsRef = useRef<Set<string>>(new Set());
-  const queuedMessageClaimsRef = useRef<Set<string>>(new Set());
-  const [queuedMessageClaims, setQueuedMessageClaims] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const [queuedMessagesPauseBySession, setQueuedMessagesPauseBySession] =
-    useState<Record<string, QueuedMessagesPauseState>>({});
-  const queuedMessagesPauseBySessionRef = useRef<
-    Record<string, QueuedMessagesPauseState>
-  >({});
-  const queuedAutoContinueSessionIdsRef = useRef<Set<string>>(new Set());
-  const processedCompletedTurnKeysRef = useRef<Map<string, string>>(new Map());
-  const [queuedAutoContinueVersion, setQueuedAutoContinueVersion] = useState(0);
   const submittingDraftSessionIdsRef = useRef<Set<string>>(new Set());
-  const submittingDraftStartedAtRef = useRef<Map<string, number>>(new Map());
   const directSubmissionsRef = useRef<
     Map<
       string,
@@ -7447,109 +7234,31 @@ function TimemThread({
       }
     >
   >(new Map());
-  const [submittingDraftSessionIds, setSubmittingDraftSessionIds] = useState<
-    Set<string>
-  >(() => new Set());
-  const updateQueuedMessages = useCallback(
-    (
-      update: (
-        current: Record<string, QueuedMessage[]>,
-      ) => Record<string, QueuedMessage[]>,
-    ) => {
-      const previous = queuedMessagesBySessionRef.current;
-      const next = update(previous);
-      if (
-        !reliableStorageScope ||
-        !saveQueuedMessages(
-          window.localStorage,
-          reliableStorageScope,
-          next,
-          previous,
-        )
-      )
-        return;
-      queuedMessagesBySessionRef.current = next;
-      setQueuedMessagesBySession(next);
-    },
-    [reliableStorageScope],
-  );
-  const releaseAllQueuedDispatches = useCallback(() => {
-    queuedDispatchSessionIdsRef.current.clear();
-    queuedMessageClaimsRef.current.clear();
-    setQueuedMessageClaims(new Set());
-    setDraggedQueueMessageId(undefined);
-    setQueuedMessageOverId(undefined);
-  }, []);
-  const pauseQueuedMessages = useCallback(
-    (sessionId: string, reason: string, source: QueuedMessagesPauseSource) => {
-      const current =
-        queuedMessagesPauseBySessionRef.current[sessionId] ?? null;
-      const pause = stopQueuedAutoSend(current, reason, source, Date.now());
-      if (pause === current) return false;
-      if (
-        reliableStorageScope &&
-        !saveQueuedMessagesPause(
-          window.localStorage,
-          reliableStorageScope,
-          sessionId,
-          pause,
-        )
-      )
-        return false;
-      const next = {
-        ...queuedMessagesPauseBySessionRef.current,
-        [sessionId]: pause,
-      };
-      queuedMessagesPauseBySessionRef.current = next;
-      queuedDispatchSessionIdsRef.current.delete(sessionId);
-      if (
-        releaseSessionQueuedMessageClaims(
-          queuedMessageClaimsRef.current,
-          sessionId,
-        ) > 0
-      ) {
-        setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-      }
-      setQueuedMessagesPauseBySession(next);
-      return true;
-    },
-    [reliableStorageScope],
-  );
-  const resumeQueuedMessages = useCallback(
-    (sessionId: string) => {
-      if (
-        reliableStorageScope &&
-        !clearQueuedMessagesPause(
-          window.localStorage,
-          reliableStorageScope,
-          sessionId,
-        )
-      )
-        return false;
-      const next = { ...queuedMessagesPauseBySessionRef.current };
-      delete next[sessionId];
-      queuedMessagesPauseBySessionRef.current = next;
-      setQueuedMessagesPauseBySession(next);
-      return true;
-    },
-    [reliableStorageScope],
-  );
   const turns = activeSession?.turns ?? [];
   const activeSessionId = activeSession?.session_id;
-  const queuedMessagesPause = activeSessionId
-    ? (queuedMessagesPauseBySession[activeSessionId] ?? null)
-    : null;
+  const queuedMessagesPause =
+    activeSession && !activeSession.message_queue.auto_send_enabled
+      ? {
+          paused: true as const,
+          reason:
+            activeSession.message_queue.continuation.state === "blocked"
+              ? activeSession.message_queue.continuation.reason
+              : "用户关闭了自动发送",
+          stoppedAtMs: 0,
+        }
+      : null;
   const draft = draftForSession(draftsBySession, activeSessionId);
-  const queuedMessages = activeSessionId
-    ? (queuedMessagesBySession[activeSessionId] ?? [])
-    : [];
-  const displayQueuedMessages = activeSessionId
-    ? unclaimedQueuedMessages(
-        queuedMessages,
-        queuedMessageClaims,
-        activeSessionId,
-      )
-    : [];
+  const queuedMessages: QueuedMessage[] =
+    activeSession?.message_queue.items.map((item) => ({
+      id: item.command_id,
+      text: item.payload.text,
+      createdAtMs: item.payload.created_at_ms,
+      attachmentIds: item.payload.attachments.map(
+        (attachment) => attachment.id,
+      ),
+      roleIds: item.payload.worker_roles.map((role) => role.id),
+    })) ?? [];
+  const displayQueuedMessages = queuedMessages;
   const queueExpanded =
     !!activeSessionId && expandedQueueSessionIds.has(activeSessionId);
   const queuePanelCollapsed =
@@ -7588,21 +7297,16 @@ function TimemThread({
   const selectedRoles =
     activeSession?.roles.filter((role) => selectedRoleIds.includes(role.id)) ??
     [];
-  const submittingDraft =
-    !!activeSessionId && submittingDraftSessionIds.has(activeSessionId);
-  const pendingDirectSubmission = activeSessionId
-    ? directSubmissionsRef.current.get(activeSessionId)
-    : undefined;
   const interactionPhase = turnInteractionPhase(
     activeSession,
-    pendingDirectSubmission?.commandId ?? persistedSubmitCommandId,
+    undefined,
     isCancelling,
   );
   const hasDraftText = !!draft.trim();
   const showStopAction =
     composerPrimaryAction(interactionPhase, draft) === "stop";
   const sendLabel =
-    activeSession?.state === "working" ? "Queue message" : "Send message";
+    activeSession?.state === "working" ? "Queue next task" : "Send message";
   const lockedControlHint = sessionInteractionLocked
     ? sessionInteractionLockReason
     : "";
@@ -7618,7 +7322,7 @@ function TimemThread({
     (uploadingAttachment
       ? `${uploadingAttachmentText} · send is paused until it finishes`
       : activeSession?.state === "working"
-        ? "Enter to queue · use 立即 to send during this turn"
+        ? "Enter to queue safely in Timem · use 立即 to supplement this turn"
         : "Enter to send · Shift+Enter for newline");
   const attachTitle =
     missingSessionHint ||
@@ -7631,11 +7335,7 @@ function TimemThread({
   const effectiveSendLabel =
     missingSessionHint ||
     lockedControlHint ||
-    (submittingDraft
-      ? "Sending…"
-      : uploadingAttachment
-        ? "Wait for file upload"
-        : sendLabel);
+    (uploadingAttachment ? "Wait for file upload" : sendLabel);
   const attachedFileCount = activeSession?.attachments.length ?? 0;
   const attachmentSummary =
     attachedFileCount === 1
@@ -8159,103 +7859,8 @@ function TimemThread({
   }, [activeSessionId]);
 
   useEffect(() => {
-    if (!reliableStorageScope) return;
-    const restored = loadQueuedMessages(
-      window.localStorage,
-      reliableStorageScope,
-    );
-    const restoredPauses = Object.fromEntries(
-      sessionIds.flatMap((sessionId) => {
-        const pause = loadQueuedMessagesPause(
-          window.localStorage,
-          reliableStorageScope,
-          sessionId,
-        );
-        return pause ? [[sessionId, pause] as const] : [];
-      }),
-    );
-    queuedMessagesBySessionRef.current = restored;
-    releaseAllQueuedDispatches();
-    setQueuedMessagesBySession(restored);
-    queuedMessagesPauseBySessionRef.current = restoredPauses;
-    setQueuedMessagesPauseBySession(restoredPauses);
-  }, [liveSessionKey, releaseAllQueuedDispatches, reliableStorageScope]);
-
-  useEffect(() => {
-    const syncCrossTabQueues = (event: StorageEvent) => {
-      if (!reliableStorageScope || !event.key) return;
-      const pauseSessionId = queuedMessagesPauseSessionId(
-        reliableStorageScope,
-        event.key,
-      );
-      if (pauseSessionId && liveSessionIds.has(pauseSessionId)) {
-        const restoredPause = loadQueuedMessagesPause(
-          window.localStorage,
-          reliableStorageScope,
-          pauseSessionId,
-        );
-        const next = { ...queuedMessagesPauseBySessionRef.current };
-        if (restoredPause) {
-          next[pauseSessionId] = restoredPause;
-          queuedDispatchSessionIdsRef.current.delete(pauseSessionId);
-          if (
-            releaseSessionQueuedMessageClaims(
-              queuedMessageClaimsRef.current,
-              pauseSessionId,
-            ) > 0
-          ) {
-            setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-          }
-        } else {
-          delete next[pauseSessionId];
-        }
-        queuedMessagesPauseBySessionRef.current = next;
-        setQueuedMessagesPauseBySession(next);
-        return;
-      }
-      if (
-        !event.key.startsWith(
-          `${queuedMessagesStorageKey(reliableStorageScope)}:`,
-        )
-      )
-        return;
-      const restored = loadQueuedMessages(
-        window.localStorage,
-        reliableStorageScope,
-      );
-      queuedMessagesBySessionRef.current = restored;
-      for (const [sessionId, messages] of Object.entries(restored)) {
-        if (messages.some((message) => message.deliveryError))
-          queuedDispatchSessionIdsRef.current.delete(sessionId);
-      }
-      for (const key of Array.from(queuedMessageClaimsRef.current)) {
-        if (
-          !Object.entries(restored).some(([sessionId, messages]) =>
-            messages.some(
-              (message) => queuedMessageKey(sessionId, message.id) === key,
-            ),
-          )
-        ) {
-          queuedMessageClaimsRef.current.delete(key);
-        }
-      }
-      setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-      setQueuedMessagesBySession(restored);
-    };
-    window.addEventListener("storage", syncCrossTabQueues);
-    return () => window.removeEventListener("storage", syncCrossTabQueues);
-  }, [liveSessionIds, reliableStorageScope]);
-
-  useEffect(() => {
     if (sessionIds.length === 0) return;
     setDraftsBySession((current) => pruneSessionDrafts(current, sessionIds));
-    updateQueuedMessages((current) =>
-      Object.fromEntries(
-        Object.entries(current).filter(([sessionId]) =>
-          liveSessionIds.has(sessionId),
-        ),
-      ),
-    );
     setExpandedQueueSessionIds(
       (current) =>
         new Set(
@@ -8272,297 +7877,64 @@ function TimemThread({
           ),
         ),
     );
-    const retainedPauses = Object.fromEntries(
-      Object.entries(queuedMessagesPauseBySessionRef.current).filter(
-        ([sessionId]) => liveSessionIds.has(sessionId),
-      ),
-    );
-    queuedMessagesPauseBySessionRef.current = retainedPauses;
-    for (const sessionId of Array.from(
-      processedCompletedTurnKeysRef.current.keys(),
-    )) {
-      if (!liveSessionIds.has(sessionId))
-        processedCompletedTurnKeysRef.current.delete(sessionId);
-    }
-    for (const sessionId of Array.from(
-      queuedAutoContinueSessionIdsRef.current,
-    )) {
-      if (!liveSessionIds.has(sessionId))
-        queuedAutoContinueSessionIdsRef.current.delete(sessionId);
-    }
-    setQueuedMessagesPauseBySession(retainedPauses);
     setEditingQueuedMessage((current) =>
       current && liveSessionIds.has(current.sessionId) ? current : undefined,
     );
-    for (const sessionId of Array.from(queuedDispatchSessionIdsRef.current)) {
-      if (!liveSessionIds.has(sessionId))
-        queuedDispatchSessionIdsRef.current.delete(sessionId);
-    }
-    for (const key of Array.from(queuedMessageClaimsRef.current)) {
-      if (!liveSessionIds.has(key.slice(0, key.indexOf("\u0000"))))
-        queuedMessageClaimsRef.current.delete(key);
-    }
-    setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
     for (const sessionId of Array.from(directSubmissionsRef.current.keys())) {
       if (!liveSessionIds.has(sessionId))
         directSubmissionsRef.current.delete(sessionId);
     }
-    if (pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds)) {
-      setSubmittingDraftSessionIds(
-        new Set(submittingDraftSessionIdsRef.current),
-      );
-    }
-  }, [liveSessionIds, updateQueuedMessages]);
+    pruneSessionSubmissionLocks(submittingDraftSessionIdsRef, sessionIds);
+  }, [liveSessionIds]);
 
   useEffect(() => {
-    let nextQueues = queuedMessagesBySessionRef.current;
-    const appliedCommandIds = new Set<string>();
-    const matchedSessionByCommand = new Map<string, string>();
-    const rejectedSessionIds = new Set<string>();
-    let directSubmissionReleased = false;
-    const rejectedDirectDrafts = new Map<string, string>();
-    for (const ack of Object.values(commandAcks)) {
-      if (ack.command_id.startsWith("submit-")) {
-        appliedCommandIds.add(ack.command_id);
-        for (const [sessionId, submission] of directSubmissionsRef.current) {
-          if (submission.commandId !== ack.command_id) continue;
-          directSubmissionsRef.current.delete(sessionId);
-          submittingDraftStartedAtRef.current.delete(sessionId);
-          rejectedDirectDrafts.set(sessionId, submission.text);
-          directSubmissionReleased =
-            releaseSessionDraftSubmission(
-              submittingDraftSessionIdsRef,
-              sessionId,
-            ) || directSubmissionReleased;
-          break;
-        }
-        continue;
-      }
-      if (ack.status === "accepted") continue;
-      const result = applyQueuedMessagesAck(
-        nextQueues,
-        ack.command_id,
-        ack.status,
-        ack.error,
-        clientId("queued"),
-      );
-      if (!result.matchedSessionId) continue;
-      appliedCommandIds.add(ack.command_id);
-      matchedSessionByCommand.set(ack.command_id, result.matchedSessionId);
-      if (ack.status === "rejected")
-        rejectedSessionIds.add(result.matchedSessionId);
-      nextQueues = result.queues;
+    if (rejectedSubmitCommandIds.size === 0) return;
+    const consumed = new Set<string>();
+    const rejectedDrafts = new Map<string, string>();
+    for (const [sessionId, submission] of directSubmissionsRef.current) {
+      if (!rejectedSubmitCommandIds.has(submission.commandId)) continue;
+      consumed.add(submission.commandId);
+      rejectedDrafts.set(sessionId, submission.text);
+      directSubmissionsRef.current.delete(sessionId);
+      releaseSessionDraftSubmission(submittingDraftSessionIdsRef, sessionId);
     }
-    if (appliedCommandIds.size === 0) return;
-    const queuesChanged = matchedSessionByCommand.size > 0;
-    if (
-      queuesChanged &&
-      (!reliableStorageScope ||
-        !saveQueuedMessages(
-          window.localStorage,
-          reliableStorageScope,
-          nextQueues,
-          queuedMessagesBySessionRef.current,
-        ))
-    )
-      return;
-    if (queuesChanged) {
-      queuedMessagesBySessionRef.current = nextQueues;
-      setQueuedMessagesBySession(nextQueues);
-    }
-    if (rejectedDirectDrafts.size > 0) {
+    if (rejectedDrafts.size > 0) {
       setDraftsBySession((current) => {
         let next = current;
-        for (const [sessionId, rejectedText] of rejectedDirectDrafts) {
+        for (const [sessionId, rejectedText] of rejectedDrafts) {
           const newerDraft = draftForSession(next, sessionId);
-          const restored = newerDraft.trim()
-            ? `${rejectedText}\n\n${newerDraft}`
-            : rejectedText;
-          next = setSessionDraft(next, sessionId, restored);
+          next = setSessionDraft(
+            next,
+            sessionId,
+            newerDraft.trim()
+              ? `${rejectedText}\n\n${newerDraft}`
+              : rejectedText,
+          );
         }
         return next;
       });
     }
-    if (directSubmissionReleased) {
-      setSubmittingDraftSessionIds(
-        new Set(submittingDraftSessionIdsRef.current),
-      );
-    }
-    for (const [commandId, sessionId] of matchedSessionByCommand) {
-      releaseQueuedMessageClaim(
-        queuedMessageClaimsRef.current,
-        sessionId,
-        commandId,
-      );
-    }
-    setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-    for (const sessionId of rejectedSessionIds)
-      queuedDispatchSessionIdsRef.current.delete(sessionId);
-    for (const sessionId of new Set([
-      ...rejectedSessionIds,
-      ...rejectedDirectDrafts.keys(),
-    ])) {
-      queuedAutoContinueSessionIdsRef.current.delete(sessionId);
-    }
-    onConsumeCommandAcks(appliedCommandIds);
-  }, [commandAcks, onConsumeCommandAcks, reliableStorageScope]);
+    // Consume unmatched ids too: they may belong to another mounted Thread.
+    for (const commandId of rejectedSubmitCommandIds) consumed.add(commandId);
+    onConsumeRejectedSubmitCommandIds(consumed);
+  }, [onConsumeRejectedSubmitCommandIds, rejectedSubmitCommandIds]);
+
 
   useEffect(() => {
-    let completionChanged = false;
-    let claimsChanged = false;
-    let draftLocksChanged = false;
-    for (const [sessionId, completion] of Object.entries(
-      completedTurnsBySession,
-    )) {
-      if (
-        processedCompletedTurnKeysRef.current.get(sessionId) === completion.key
-      )
-        continue;
-      processedCompletedTurnKeysRef.current.set(sessionId, completion.key);
-      if (completion.continuation !== "blocked")
-        queuedAutoContinueSessionIdsRef.current.add(sessionId);
-      else queuedAutoContinueSessionIdsRef.current.delete(sessionId);
-      claimsChanged =
-        queuedDispatchSessionIdsRef.current.delete(sessionId) || claimsChanged;
-      if (
-        releaseSessionDraftSubmission(submittingDraftSessionIdsRef, sessionId)
-      ) {
-        submittingDraftStartedAtRef.current.delete(sessionId);
-        draftLocksChanged = true;
-      }
-      completionChanged = true;
-    }
-    if (claimsChanged)
-      setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-    if (draftLocksChanged)
-      setSubmittingDraftSessionIds(
-        new Set(submittingDraftSessionIdsRef.current),
-      );
-    if (completionChanged)
-      setQueuedAutoContinueVersion((version) => version + 1);
-  }, [completedTurnsBySession]);
-
-  useEffect(() => {
-    if (sessionInteractionLocked) return;
     for (const session of sessions) {
-      if (session.state === "working") {
-        queuedDispatchSessionIdsRef.current.delete(session.session_id);
-        queuedAutoContinueSessionIdsRef.current.delete(session.session_id);
-      }
-    }
-    const dispatches = selectQueuedDispatches(
-      sessions,
-      queuedMessagesBySessionRef.current,
-      queuedDispatchSessionIdsRef.current,
-      editingQueuedMessage?.sessionId,
-      new Set(Object.keys(queuedMessagesPauseBySessionRef.current)),
-      queuedAutoContinueSessionIdsRef.current,
-    );
-    for (const { sessionId, message: next } of dispatches) {
-      if (
-        !claimQueuedMessage(
-          queuedMessageClaimsRef.current,
-          sessionId,
-          queuedMessagesBySessionRef.current[sessionId] ?? [],
-          next.id,
-        )
-      )
-        continue;
-      // One authoritative normal or user-cancelled completion permits exactly one
-      // continuation. Runtime/system failures remain blocked. Consume it before delivery so failure cannot cascade.
-      queuedAutoContinueSessionIdsRef.current.delete(sessionId);
-      queuedDispatchSessionIdsRef.current.add(sessionId);
-      if (
-        !onSendForSession(
-          sessionId,
-          next.text,
-          next.id,
-          next.attachmentIds,
-          false,
-          next.roleIds ?? (next.roleId ? [next.roleId] : []),
-        )
-      ) {
-        queuedDispatchSessionIdsRef.current.delete(sessionId);
-        releaseQueuedMessageClaim(
-          queuedMessageClaimsRef.current,
-          sessionId,
-          next.id,
-        );
-        updateQueuedMessages((current) => ({
-          ...current,
-          [sessionId]: (current[sessionId] ?? []).map((message) =>
-            message.id === next.id
-              ? {
-                  ...message,
-                  deliveryError: "消息尚未安全保存，请检查浏览器存储后重试",
-                }
-              : message,
-          ),
-        }));
-      }
-    }
-    setQueuedMessageClaims(new Set(queuedMessageClaimsRef.current));
-  }, [
-    editingQueuedMessage?.sessionId,
-    onSendForSession,
-    queuedAutoContinueVersion,
-    queuedMessagesBySession,
-    queuedMessagesPauseBySession,
-    sessionInteractionLocked,
-    sessions,
-    updateQueuedMessages,
-  ]);
-
-  useEffect(() => {
-    let changed = false;
-    for (const session of sessions) {
-      if (session.state !== "working") continue;
       const submission = directSubmissionsRef.current.get(session.session_id);
       if (!submission) continue;
+      const projected =
+        session.state === "working" ||
+        session.message_queue.items.some(
+          (item) => item.command_id === submission.commandId,
+        );
+      if (!projected) continue;
       directSubmissionsRef.current.delete(session.session_id);
-      submittingDraftStartedAtRef.current.delete(session.session_id);
-      if (submission.roleIds.length > 0) {
+      if (submission.roleIds.length > 0)
         onRolesConsumed(session.session_id, submission.roleIds);
-      }
-      changed =
-        releaseSessionDraftSubmission(
-          submittingDraftSessionIdsRef,
-          session.session_id,
-        ) || changed;
     }
-    if (changed)
-      setSubmittingDraftSessionIds(
-        new Set(submittingDraftSessionIdsRef.current),
-      );
   }, [onRolesConsumed, sessions]);
-
-  const latestActiveTurn = activeSession?.turns.at(-1);
-  useEffect(() => {
-    if (
-      !activeSessionId ||
-      !latestActiveTurn ||
-      latestActiveTurn.state === "working"
-    )
-      return;
-    const startedAt = submittingDraftStartedAtRef.current.get(activeSessionId);
-    if (startedAt === undefined || latestActiveTurn.created_at_ms < startedAt)
-      return;
-    if (
-      releaseSessionDraftSubmission(
-        submittingDraftSessionIdsRef,
-        activeSessionId,
-      )
-    ) {
-      submittingDraftStartedAtRef.current.delete(activeSessionId);
-      setSubmittingDraftSessionIds(
-        new Set(submittingDraftSessionIdsRef.current),
-      );
-    }
-  }, [
-    activeSessionId,
-    latestActiveTurn?.created_at_ms,
-    latestActiveTurn?.state,
-  ]);
 
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
@@ -8621,66 +7993,19 @@ function TimemThread({
       draftsBySession,
     );
     if (reserved === null) return;
-    setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
     const attachmentIds = availableAttachments.map(
       (attachment) => attachment.id,
     );
-    const existingQueue =
-      queuedMessagesBySessionRef.current[reserved.sessionId] ?? [];
-    const direct =
-      activeSession?.session_id === reserved.sessionId &&
-      shouldDirectManualMessage(
-        activeSession.state,
-        existingQueue.length,
-        !!queuedMessagesPause,
-        isCancelling || !!activeSession.cancelling_turn_id,
-      );
-    let sent: boolean;
-    let directCommandId: string | undefined;
-    if (direct) {
-      queuedAutoContinueSessionIdsRef.current.delete(reserved.sessionId);
-      directCommandId = clientId("submit");
-      sent = onSendForSession(
-        reserved.sessionId,
-        reserved.text,
-        directCommandId,
-        attachmentIds,
-        false,
-        selectedRoleIds,
-      );
-    } else {
-      const nextQueues = {
-        ...queuedMessagesBySessionRef.current,
-        [reserved.sessionId]: [
-          ...existingQueue,
-          {
-            id: clientId("queued"),
-            text: reserved.text,
-            createdAtMs: Date.now(),
-            attachmentIds,
-            roleIds: [...selectedRoleIds],
-          },
-        ],
-      };
-      sent =
-        !!reliableStorageScope &&
-        saveQueuedMessages(
-          window.localStorage,
-          reliableStorageScope,
-          nextQueues,
-          queuedMessagesBySessionRef.current,
-        );
-      if (sent) {
-        // Busy, paused, and already-backed-up sessions retain durable FIFO ordering.
-        updateQueuedMessages(() => nextQueues);
-      }
-    }
-    if (sent && !directCommandId && selectedRoleIds.length > 0) {
-      onRolesConsumed(reserved.sessionId);
-    }
-    // Release the synchronous deduplication lock before publishing the React state
-    // snapshot. Calling the mutating helper inside a deferred state updater would
-    // leave the next lock snapshot stale and keep the composer stuck on Sending.
+    const directCommandId = clientId("submit");
+    const sent = onSendForSession(
+      reserved.sessionId,
+      reserved.text,
+      directCommandId,
+      attachmentIds,
+      false,
+      selectedRoleIds,
+    );
+    // Release the synchronous event guard before publishing the next draft.
     const nextDrafts = finishSessionDraftSubmission(
       submittingDraftSessionIdsRef,
       draftsBySession,
@@ -8689,20 +8014,15 @@ function TimemThread({
       sent,
     );
     if (sent && directCommandId) {
-      // Keep this Session occupied until Core authoritatively starts the turn.
-      // A rejected command ACK releases the same lock so the user can retry.
+      // Keep only rejection correlation. Sending success is not business success,
+      // and the synchronous duplicate-click guard is released below.
       directSubmissionsRef.current.set(reserved.sessionId, {
         commandId: directCommandId,
         text: reserved.text,
         roleIds: [...selectedRoleIds],
       });
-      submittingDraftStartedAtRef.current.set(reserved.sessionId, Date.now());
-      submittingDraftSessionIdsRef.current.add(reserved.sessionId);
     }
     setDraftsBySession(nextDrafts);
-    if (!submittingDraftSessionIdsRef.current.has(reserved.sessionId))
-      submittingDraftStartedAtRef.current.delete(reserved.sessionId);
-    setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
   };
 
   const submitDraftAsSupplement = () => {
@@ -8713,7 +8033,6 @@ function TimemThread({
       draftsBySession,
     );
     if (reserved === null) return;
-    setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
     const sent = onSendForSession(
       reserved.sessionId,
       reserved.text,
@@ -8731,9 +8050,6 @@ function TimemThread({
       sent,
     );
     setDraftsBySession(nextDrafts);
-    if (!submittingDraftSessionIdsRef.current.has(reserved.sessionId))
-      submittingDraftStartedAtRef.current.delete(reserved.sessionId);
-    setSubmittingDraftSessionIds(new Set(submittingDraftSessionIdsRef.current));
   };
 
   const toggleQueuedMessages = () => {
@@ -8764,40 +8080,34 @@ function TimemThread({
     setDraggedQueueMessageId(undefined);
     setQueuedMessageOverId(undefined);
     if (!activeSessionId || !over || active.id === over.id) return;
-    updateQueuedMessages((current) => ({
-      ...current,
-      [activeSessionId]: reorderQueuedMessages(
-        current[activeSessionId] ?? [],
-        String(active.id),
-        String(over.id),
-        queuedMessageClaimsRef.current,
-        activeSessionId,
-      ),
-    }));
+    const reordered = reorderQueuedMessages(
+      queuedMessages,
+      String(active.id),
+      String(over.id),
+    );
+    onMessageQueueCommand({
+      type: "message_queue_reorder",
+      session_id: activeSessionId,
+      command_ids: reordered.map((message) => message.id),
+    });
   };
 
   const saveQueuedMessageEdit = () => {
     const edit = editingQueuedMessage;
     const text = edit?.text.trim();
     if (!edit || !text) return;
-    updateQueuedMessages((current) => ({
-      ...current,
-      [edit.sessionId]: queuedMessageClaimsRef.current.has(
-        queuedMessageKey(edit.sessionId, edit.id),
-      )
-        ? (current[edit.sessionId] ?? [])
-        : (current[edit.sessionId] ?? []).map((message) =>
-            message.id === edit.id
-              ? { ...message, text, deliveryError: undefined }
-              : message,
-          ),
-    }));
-    setEditingQueuedMessage(undefined);
+    if (
+      onMessageQueueCommand({
+        type: "message_queue_update",
+        session_id: edit.sessionId,
+        queued_command_id: edit.id,
+        text,
+      })
+    )
+      setEditingQueuedMessage(undefined);
   };
 
   const cancelActiveSessionTurn = async () => {
-    if (activeSessionId)
-      queuedAutoContinueSessionIdsRef.current.delete(activeSessionId);
     setEditingQueuedMessage(undefined);
     await onCancel(
       interactionPhase.kind === "idle" ? undefined : interactionPhase.commandId,
@@ -8912,7 +8222,7 @@ function TimemThread({
                   <small title={queuedMessagesPause?.reason}>
                     {queuedMessagesPause
                       ? `自动发送已停止${queuedMessagesPause.reason ? `：${queuedMessagesPause.reason}` : ""}`
-                      : "上一条正常完成后自动发送"}
+                      : "正在迁移到 Timem 运行时队列"}
                   </small>
                 )}
                 <div className="queued-message-header-actions">
@@ -8931,14 +8241,11 @@ function TimemThread({
                       }
                       onClick={() => {
                         if (!activeSessionId) return;
-                        if (queuedMessagesPause)
-                          resumeQueuedMessages(activeSessionId);
-                        else
-                          pauseQueuedMessages(
-                            activeSessionId,
-                            "用户关闭了自动发送",
-                            "user",
-                          );
+                        onMessageQueueCommand({
+                          type: "message_queue_auto_send_set",
+                          session_id: activeSessionId,
+                          enabled: !!queuedMessagesPause,
+                        });
                       }}
                     >
                       <span className="queued-auto-send-thumb" />
@@ -9020,12 +8327,9 @@ function TimemThread({
                           editingQueuedMessage?.sessionId ===
                             activeSession.session_id &&
                           editingQueuedMessage.id === message.id;
-                        const claimed = queuedMessageClaims.has(
-                          queuedMessageKey(
-                            activeSession.session_id,
-                            message.id,
-                          ),
-                        );
+                        const claimed =
+                          activeSession.message_queue.dispatching_command_id ===
+                          message.id;
                         const messageRoleIds =
                           message.roleIds ??
                           (message.roleId ? [message.roleId] : []);
@@ -9217,87 +8521,15 @@ function TimemThread({
                                           isCancelling
                                         }
                                         onClick={() => {
-                                          if (
-                                            !claimQueuedMessage(
-                                              queuedMessageClaimsRef.current,
+                                          onMessageQueueCommand({
+                                            type: "message_queue_send_now",
+                                            session_id:
                                               activeSession.session_id,
-                                              queuedMessagesBySession[
-                                                activeSession.session_id
-                                              ] ?? [],
-                                              message.id,
-                                            )
-                                          )
-                                            return;
-                                          queuedAutoContinueSessionIdsRef.current.delete(
-                                            activeSession.session_id,
-                                          );
-                                          setQueuedMessageClaims(
-                                            new Set(
-                                              queuedMessageClaimsRef.current,
-                                            ),
-                                          );
-                                          if (
-                                            !onSendForSession(
-                                              activeSession.session_id,
-                                              message.text,
-                                              message.id,
-                                              message.attachmentIds,
-                                              !sendAsNewTurn,
-                                              messageRoleIds,
-                                              sendAsNewTurn,
-                                            )
-                                          ) {
-                                            releaseQueuedMessageClaim(
-                                              queuedMessageClaimsRef.current,
-                                              activeSession.session_id,
-                                              message.id,
-                                            );
-                                            setQueuedMessageClaims(
-                                              new Set(
-                                                queuedMessageClaimsRef.current,
-                                              ),
-                                            );
-                                            updateQueuedMessages((current) => ({
-                                              ...current,
-                                              [activeSession.session_id]: (
-                                                current[
-                                                  activeSession.session_id
-                                                ] ?? []
-                                              ).map((candidate) =>
-                                                candidate.id === message.id
-                                                  ? {
-                                                      ...candidate,
-                                                      deliveryError:
-                                                        "消息尚未安全保存，请检查浏览器存储后重试",
-                                                    }
-                                                  : candidate,
-                                              ),
-                                            }));
-                                            return;
-                                          }
-                                          if (message.deliveryError)
-                                            updateQueuedMessages((current) => ({
-                                              ...current,
-                                              [activeSession.session_id]: (
-                                                current[
-                                                  activeSession.session_id
-                                                ] ?? []
-                                              ).map((candidate) =>
-                                                candidate.id === message.id
-                                                  ? {
-                                                      ...candidate,
-                                                      deliveryError: undefined,
-                                                    }
-                                                  : candidate,
-                                              ),
-                                            }));
+                                            queued_command_id: message.id,
+                                          });
                                         }}
                                       >
-                                        {claimed
-                                          ? "发送中…"
-                                          : message.deliveryError
-                                            ? "重试"
-                                            : "立即"}
+                                        立即
                                       </button>
                                       <button
                                         type="button"
@@ -9306,18 +8538,12 @@ function TimemThread({
                                         aria-label={`Remove queued message ${index + 1}`}
                                         disabled={claimed}
                                         onClick={() =>
-                                          updateQueuedMessages((current) => ({
-                                            ...current,
-                                            [activeSession.session_id]:
-                                              removeQueuedMessage(
-                                                current[
-                                                  activeSession.session_id
-                                                ] ?? [],
-                                                message.id,
-                                                queuedMessageClaimsRef.current,
-                                                activeSession.session_id,
-                                              ),
-                                          }))
+                                          onMessageQueueCommand({
+                                            type: "message_queue_remove",
+                                            session_id:
+                                              activeSession.session_id,
+                                            queued_command_id: message.id,
+                                          })
                                         }
                                       >
                                         <X size={13} />
@@ -9668,30 +8894,27 @@ function TimemThread({
                           ? "Cancellation requested"
                           : lockedControlHint || "Cancel current turn"
                       }
-                      disabled={isCancelling || sessionInteractionLocked}
+                      disabled={
+                        stopClickLocked || isCancelling || sessionInteractionLocked
+                      }
                       onClick={() => void cancelActiveSessionTurn()}
                     >
                       <CircleStop size={17} /> Stop
                     </button>
                   ) : (
                     <button
-                      className={`send-button ${submittingDraft ? "sending" : ""}`}
+                      className="send-button"
                       type="submit"
                       title={effectiveSendLabel}
                       aria-label={effectiveSendLabel}
                       disabled={
                         !activeSession ||
                         !hasDraftText ||
-                        submittingDraft ||
                         uploadingAttachment ||
                         sessionInteractionLocked
                       }
                     >
-                      {submittingDraft ? (
-                        <LoaderCircle size={17} />
-                      ) : (
-                        <Send size={17} />
-                      )}
+                      <Send size={17} />
                     </button>
                   )}
                 </div>
@@ -10963,11 +10186,7 @@ function FinalAnswerContent({ text }: { text: string }) {
                   title="Show table of contents"
                   onClick={() => setOutlineCollapsed(false)}
                 >
-                  <BookText
-                    size={19}
-                    strokeWidth={1.8}
-                    aria-hidden="true"
-                  />
+                  <BookText size={19} strokeWidth={1.8} aria-hidden="true" />
                   <ChevronRight
                     className="final-answer-outline-toggle-arrow"
                     size={14}
@@ -10993,7 +10212,11 @@ function FinalAnswerContent({ text }: { text: string }) {
                       />
                     </button>
                     <span>
-                      <BookText size={13} strokeWidth={1.8} aria-hidden="true" />
+                      <BookText
+                        size={13}
+                        strokeWidth={1.8}
+                        aria-hidden="true"
+                      />
                       Contents
                     </span>
                   </header>
@@ -15109,9 +14332,7 @@ function MemSwitchConfirmDialog({
         <p className="mem-switch-alternative">
           To keep the current work running, start a separate instance for the
           destination MEM instead:{" "}
-          <code>
-            timem --space {shellQuoteCommandArgument(candidate.path)}
-          </code>
+          <code>timem --space {shellQuoteCommandArgument(candidate.path)}</code>
         </p>
         <code className="mem-switch-confirm-path" title={candidate.path}>
           {candidate.path}
@@ -15588,34 +14809,23 @@ function InlineDecision({
   total: number;
   onReply: (decision: "accept" | "decline" | "always_allow") => void;
 }) {
-  const disabled = pending || locked;
-  const status = pending
-    ? "Sending decision…"
-    : locked
-      ? "Session interaction is temporarily locked."
-      : "";
+  const disabled = locked;
+  const status = locked ? "Session interaction is temporarily locked." : "";
   const canAlwaysAllow =
     decision.event.topic.name === "core.user.approval.request";
-  const denyLabel = pending
-    ? "Waiting for the current reply to finish"
-    : locked
-      ? "Decision is locked while the session changes"
-      : "Deny this runtime request";
-  const allowLabel = pending
-    ? "Sending decision"
-    : locked
-      ? "Decision is locked while the session changes"
-      : "Allow this runtime request";
-  const alwaysAllowLabel = pending
-    ? "Sending decision"
-    : locked
-      ? "Decision is locked while the session changes"
-      : "Allow and stop asking for this session";
+  const denyLabel = locked
+    ? "Decision is locked while the session changes"
+    : "Deny this runtime request";
+  const allowLabel = locked
+    ? "Decision is locked while the session changes"
+    : "Allow this runtime request";
+  const alwaysAllowLabel = locked
+    ? "Decision is locked while the session changes"
+    : "Allow and stop asking for this session";
   return (
     <section
       className="inline-decision"
       aria-label="Decision required"
-      aria-busy={pending}
     >
       <div className="inline-decision-heading">
         <span className="eyebrow">
