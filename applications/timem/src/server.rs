@@ -1,6 +1,8 @@
+mod command_lane;
 mod mem_maintenance;
 mod websocket_delivery;
 
+use command_lane::TicketCommandLane;
 use mem_maintenance::*;
 use websocket_delivery::{command_ack, finish_command_dedup};
 #[cfg(test)]
@@ -157,88 +159,6 @@ struct AppState {
     mem_epoch: Arc<RwLock<u64>>,
     debug: Option<Arc<DebugStore>>,
     runtime_log: RuntimeLog,
-}
-
-#[derive(Debug, Default)]
-struct TicketCommandLane {
-    state: Mutex<TicketCommandLaneState>,
-    ready: std::sync::Condvar,
-}
-
-#[derive(Debug, Default)]
-struct TicketCommandLaneState {
-    next_ticket: u64,
-    serving_ticket: u64,
-    skipped_tickets: BTreeSet<u64>,
-    active: bool,
-}
-
-impl TicketCommandLane {
-    fn issue(&self) -> Result<u64, String> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "command_lane_poisoned".to_string())?;
-        let ticket = state.next_ticket;
-        state.next_ticket = state
-            .next_ticket
-            .checked_add(1)
-            .ok_or_else(|| "command_lane_ticket_exhausted".to_string())?;
-        Ok(ticket)
-    }
-
-    fn enter(&self, ticket: u64) -> Result<TicketCommandLaneGuard<'_>, String> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "command_lane_poisoned".to_string())?;
-        while state.serving_ticket != ticket {
-            state = self
-                .ready
-                .wait(state)
-                .map_err(|_| "command_lane_poisoned".to_string())?;
-        }
-        state.active = true;
-        Ok(TicketCommandLaneGuard { lane: self })
-    }
-
-    fn skip(&self, ticket: u64) -> Result<(), String> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "command_lane_poisoned".to_string())?;
-        state.skipped_tickets.insert(ticket);
-        if !state.active {
-            skip_cancelled_tickets(&mut state);
-        }
-        self.ready.notify_all();
-        Ok(())
-    }
-}
-
-fn advance_ticket_lane(state: &mut TicketCommandLaneState) {
-    state.active = false;
-    state.serving_ticket = state.serving_ticket.saturating_add(1);
-    skip_cancelled_tickets(state);
-}
-
-fn skip_cancelled_tickets(state: &mut TicketCommandLaneState) {
-    while state.skipped_tickets.remove(&state.serving_ticket) {
-        state.serving_ticket = state.serving_ticket.saturating_add(1);
-    }
-}
-
-struct TicketCommandLaneGuard<'a> {
-    lane: &'a TicketCommandLane,
-}
-
-impl Drop for TicketCommandLaneGuard<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut state) = self.lane.state.lock() {
-            advance_ticket_lane(&mut state);
-            self.lane.ready.notify_all();
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1114,16 +1034,7 @@ impl Drop for AcceptedCommandLane {
         if !Arc::ptr_eq(mapped, &self.lane) || Arc::strong_count(&self.lane) != 2 {
             return;
         }
-        let idle = self
-            .lane
-            .state
-            .lock()
-            .map(|state| {
-                !state.active
-                    && state.serving_ticket == state.next_ticket
-                    && state.skipped_tickets.is_empty()
-            })
-            .unwrap_or(false);
+        let idle = self.lane.is_idle();
         if idle {
             lanes.remove(&self.key);
         }
