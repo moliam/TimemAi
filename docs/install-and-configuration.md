@@ -190,6 +190,44 @@ export TIMEM_WORK_INSTRUCTIONS=silent
 - `ask`: prompt before risky/local command execution
 - `approve`: approve by policy for the current host; this is the default when unset
 
+## Reminder tips
+
+Timem loads reminder schedules for both Web and Shell at startup. The shipped
+default is `resources/reminder_tips.json`. A user override named
+`reminder_tips.json` takes precedence and is never overwritten or removed by
+install, update, or uninstall.
+
+User override locations:
+
+- macOS: `~/Library/Application Support/TimemAi/reminder_tips.json`
+- Linux: `${XDG_CONFIG_HOME:-~/.config}/timem/reminder_tips.json`
+- Windows: `%APPDATA%\TimemAi\reminder_tips.json`
+- `TIMEM_CONFIG_DIR`: directory containing the user override
+- `TIMEM_RESOURCES_DIR`: directory containing an alternate shipped resource
+
+Each schedule sets exactly one positive interval and a non-empty list of tips:
+
+```json
+{
+  "schedules": [
+    {
+      "every_minutes": 10,
+      "tips": ["TIPS: Review the goal.", "NONE"]
+    },
+    {
+      "every_rounds": 8,
+      "tips": ["TIPS: Check the deduction chain.", "NONE"]
+    }
+  ]
+}
+```
+
+Selecting `NONE` consumes that period without adding text to the prompt. Invalid,
+oversized, or unreadable configuration produces a warning and falls through to
+the next valid source or the embedded default; it does not prevent startup.
+Restart Timem after changing the file. Reminder configuration is program-level
+and does not live inside a MEM or project-local data directory.
+
 ## Runtime Data
 
 By default, Timem stores MEM data in the user's home directory:

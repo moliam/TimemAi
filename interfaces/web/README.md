@@ -1,54 +1,68 @@
-# Timem Web UI
+# Timem Web Interface
 
-`interfaces/web` is Timem's browser Interface. It uses assistant-ui primitives
-for the chat surface and consumes the authenticated HTTP/WebSocket command,
-event, and projection contract assembled by `applications/timem`. It does not
-import or call Rust Session/Agent crates directly.
+`interfaces/web` is Timem's browser Interface. It is a TypeScript application
+built on assistant-ui primitives and consumes the authenticated HTTP/WebSocket
+contract exposed by the Host. It does not import or call Rust Session or Agent
+crates.
 
-The UI owns:
+## Ownership
 
-- session list, rename, mem-space display, and session switching
-- composer behavior, attachments, queued next-turn questions, explicit active-turn supplements, and inline decisions
-- process frames for free talk, actions, repairs, context compaction, and
-  runtime requests
-- final answer Markdown rendering, code highlighting, token/time telemetry,
-  themes, fonts, and responsive layout
+The browser owns:
 
-The UI must not implement model calls, prompt parsing, memory/tool execution,
-or command approval policy. Those belong to Core and the HTTP/WebSocket Bridge/Application boundary.
+- Session navigation and presentation;
+- composer behavior, attachments, next-turn queue input, active-turn supplements,
+  and inline decisions;
+- rendering of free talk, actions, repairs, context compaction, runtime requests,
+  and final answers;
+- Markdown, syntax highlighting, telemetry presentation, themes, fonts,
+  responsive layout, and accessibility;
+- transient UI state such as drafts, panel state, and drag previews.
+
+The browser does not own model calls, prompt parsing, memory, tools, command
+approval policy, Session scheduling, or Turn lifecycle. It does not persist a
+command outbox or replay business commands after refresh.
+
+## Authoritative state contract
+
+Every WebSocket event is scoped by `session_id`; Context- and Worker-scoped topics
+must also match their target scope. The Host's snapshots, projections, and
+semantic events are authoritative. Command ACKs report delivery or handling and
+do not substitute for business state.
+
+Once the Host accepts work, browser disconnect, refresh, closure, or device lock
+does not cancel or transfer that work. Reconnect restores the view from the Host
+snapshot baseline and bounded subsequent events.
+
+The reducer and tests cover queued turns, supplements, duplicate pressure,
+concurrent Sessions, decisions, attachments, bounded event windows, rendering,
+and long-history behavior. Read [`module_boundary.md`](module_boundary.md) and
+[Web reliability test matrix](../../docs/web_reliability_test_matrix.md) before
+changing this contract.
+
+## Model endpoints
+
+The model label opens a MEM-scoped endpoint library shared by Sessions. Selecting
+an endpoint applies its model, API and response protocols, Base URL, API key,
+context limit, and output limit to the current idle Session. API keys remain in
+the Host MEM with private permissions and are redacted from browser snapshots
+and browser-persistent data.
 
 ## Development
 
-Install dependencies once:
+Install dependencies:
 
 ```bash
 pnpm --dir interfaces/web install --frozen-lockfile
 ```
 
-Run checks after UI changes:
+Validate changes:
 
 ```bash
-pnpm --dir interfaces/web test --run
+pnpm --dir interfaces/web test
 pnpm --dir interfaces/web build
+git diff --exit-code -- interfaces/web/dist
 cargo test -p timem
 ```
 
-Commit application source, tests, lockfile updates, and rebuilt `dist` assets
-together. Do not commit `node_modules` or the optional upstream source checkout
-under `interfaces/web/vendor`.
-
-## Design Contract
-
-The browser reducer is deliberately session-aware. Every WebSocket event must be
-scoped by `session_id`, and worker/context scoped core topics must be rejected
-when they do not belong to the target Session. Tests in
-`interfaces/web/tests` cover queued next-turn questions, explicit active-turn supplements, duplicate cancel/submit
-pressure, concurrent sessions, inline decisions, attachments, bounded event
-windows, rendering contracts, and long-history behavior.
-
-Read [`module_boundary.md`](module_boundary.md) before changing Web/core
-responsibilities.
-
-## Shared model endpoints
-
-The model label in the chat header opens a mem-scoped endpoint list shared by all Sessions. Users can add, edit, delete, and select endpoints. Selecting one applies its model, API/response protocols, Base URL, API key, maximum context window, and maximum output to the current idle Session. Endpoint editors offer context windows of `100K`, `200K`, or `1M`, and output limits of `10K`, `20K`, or `50K`; older saved endpoints load as `100K` / `10K`. Endpoint API keys are stored in the host memory directory with private file permissions and are redacted from snapshots and browser-persistent command queues.
+Commit source, tests, applicable lockfile changes, and rebuilt `dist` assets
+together. Do not commit `node_modules` or optional vendor checkouts.

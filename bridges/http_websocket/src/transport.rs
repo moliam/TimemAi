@@ -10,6 +10,7 @@ use axum::{
 };
 use futures_util::{stream::SplitSink, stream::SplitStream, SinkExt, StreamExt};
 use serde::{de::DeserializeOwned, Serialize};
+use std::fmt;
 
 /// Applies cache, referrer, content-type, and active-content protections.
 ///
@@ -90,6 +91,23 @@ pub struct JsonWebSocketReceiver {
     receiver: SplitStream<WebSocket>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsonWebSocketSendError {
+    Serialize(String),
+    Socket(String),
+}
+
+impl fmt::Display for JsonWebSocketSendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Serialize(error) => write!(formatter, "websocket_json_serialize_failed:{error}"),
+            Self::Socket(error) => write!(formatter, "websocket_send_failed:{error}"),
+        }
+    }
+}
+
+impl std::error::Error for JsonWebSocketSendError {}
+
 /// Splits transport halves so Hosts can concurrently select inbound commands,
 /// worker results, and broadcasts without adding a mutex.
 pub fn split_json_websocket(socket: WebSocket) -> (JsonWebSocketSender, JsonWebSocketReceiver) {
@@ -117,13 +135,20 @@ impl JsonWebSocketReceiver {
 
 impl JsonWebSocketSender {
     /// Serializes and sends one wire value exactly once.
-    pub async fn send<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), ()> {
-        let text = serde_json::to_string(value).map_err(|_| ())?;
+    pub async fn send<T: Serialize + ?Sized>(
+        &mut self,
+        value: &T,
+    ) -> Result<(), JsonWebSocketSendError> {
+        let text = serde_json::to_string(value)
+            .map_err(|error| JsonWebSocketSendError::Serialize(error.to_string()))?;
         self.send_serialized_text(text).await
     }
 
-    async fn send_serialized_text(&mut self, text: String) -> Result<(), ()> {
-        self.sender.send(Message::Text(text)).await.map_err(|_| ())
+    async fn send_serialized_text(&mut self, text: String) -> Result<(), JsonWebSocketSendError> {
+        self.sender
+            .send(Message::Text(text))
+            .await
+            .map_err(|error| JsonWebSocketSendError::Socket(error.to_string()))
     }
 }
 

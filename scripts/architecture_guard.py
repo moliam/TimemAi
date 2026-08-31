@@ -96,7 +96,7 @@ ARCHITECTURE_CONTRACT_MARKERS = (
     "  web/",
     "applications/",
     "  timem/",
-    "Migration complete",
+    "## Current architecture contract",
     "all same-process Rust Interfaces",
 )
 
