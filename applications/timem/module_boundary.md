@@ -14,6 +14,17 @@ Before changing this module, read `docs/turn-state-projection-architecture.md` f
 
 It may contain:
 
+The product Web host is split by internal responsibility under `src/server/`:
+
+- `command_lane.rs` owns the process-local FIFO ticket primitive used to serialize accepted
+  mutations per scope. It has no Session/Turn semantics and advances tickets through an RAII guard.
+- `websocket_delivery.rs` owns authenticated browser command delivery after generic WebSocket
+  framing.
+- `mem_maintenance.rs` owns bounded memory-space maintenance.
+- `server.rs` remains the parent composition module while further behavior-preserving extraction is
+  performed incrementally. New code should enter the narrowest existing submodule rather than
+  rebuilding these responsibilities in the parent.
+
 - Product HTTP lifecycle, local port selection, explicit public-bind policy, per-process access
   tokens, authenticated product handlers, snapshot construction, and mapping decoded browser
   commands to Session/Core operations. Fixed HTTP/WebSocket paths and method placement, request

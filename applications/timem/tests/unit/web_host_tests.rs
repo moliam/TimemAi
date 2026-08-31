@@ -905,7 +905,7 @@ fn command_lanes_serialize_one_session_without_globally_serializing_other_sessio
     let held_a = session_a_first
         .enter(session_a_first.issue().unwrap())
         .unwrap();
-    assert_eq!(session_a_second.state.lock().unwrap().serving_ticket, 0);
+    assert_eq!(session_a_second.serving_ticket(), 0);
     let held_b = session_b.enter(session_b.issue().unwrap()).unwrap();
     drop(held_b);
     drop(held_a);
@@ -989,7 +989,7 @@ fn ticket_lane_is_fifo_even_when_a_later_waiter_is_scheduled_aggressively() {
             order_tx.send("first").unwrap();
         })
     };
-    while lane.state.lock().unwrap().next_ticket < 2 {
+    while lane.next_ticket() < 2 {
         thread::yield_now();
     }
     let second = {
@@ -1000,7 +1000,7 @@ fn ticket_lane_is_fifo_even_when_a_later_waiter_is_scheduled_aggressively() {
             order_tx.send("second").unwrap();
         })
     };
-    while lane.state.lock().unwrap().next_ticket < 3 {
+    while lane.next_ticket() < 3 {
         thread::yield_now();
     }
     drop(held);
