@@ -103,7 +103,7 @@ runtime_io_guard_required=(
   "mem_temporary_items_list"
 )
 for pattern in "${runtime_io_guard_required[@]}"; do
-  if ! search_fixed "$pattern" scripts/runtime_io_guard.py scripts/real_tty_stress.expect applications/timem/src/server.rs interfaces/web/src/main.tsx; then
+  if ! search_fixed "$pattern" scripts/runtime_io_guard.py scripts/real_tty_stress.expect applications/timem/src/server.rs applications/timem/src/server/mem_maintenance.rs interfaces/web/src/main.tsx; then
     echo "missing Timem runtime I/O guard contract: $pattern" >&2
     exit 1
   fi
