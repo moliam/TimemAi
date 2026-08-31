@@ -454,7 +454,16 @@ export function turnCommandId(
 export function sessionCancellationApplies(
   session: Session | undefined,
 ): boolean {
-  return !!session?.cancelling_turn_id;
+  const cancellingTurnId = session?.cancelling_turn_id;
+  if (!cancellingTurnId) return false;
+  const cancellingTurn = session.turns.find(
+    (turn) => turn.turn_id === cancellingTurnId,
+  );
+  // A terminal Turn projection is authoritative for composer admission. Host
+  // fields such as cancelling_turn_id may be cleared by a later projection,
+  // but must not keep the browser in the Stop state after the chat is terminal.
+  return !cancellingTurn ||
+    (cancellingTurn.state !== "finished" && !cancellingTurn.completion);
 }
 
 export function shouldRenderTurnWorkFrame(
@@ -482,12 +491,17 @@ export function turnInteractionPhase(
   const activeTurnId = session?.active_turn_id ?? undefined;
   const turnId = pendingTurnId ?? activeTurnId;
   const commandId = session ? turnCommandId(session, turnId) : undefined;
-  if (isCancelling || !!session?.cancelling_turn_id)
+  if (isCancelling || sessionCancellationApplies(session))
     return {
       kind: "cancelling",
       turnId,
       commandId: commandId ?? localSubmitCommandId,
     };
+  const projectedTurn = session?.turns.find(
+    (turn) => turn.turn_id === turnId,
+  );
+  if (projectedTurn?.state === "finished" || projectedTurn?.completion)
+    return { kind: "idle" };
   if (pendingTurnId)
     return { kind: "host_pending", turnId: pendingTurnId, commandId };
   if (activeTurnId || session?.state === "working") {
@@ -499,7 +513,13 @@ export function turnInteractionPhase(
         (entry) => entry.command_id === localSubmitCommandId,
       ),
     );
-    if (!alreadyRecorded)
+    const acceptedForFutureTurn = session?.message_queue?.items.some(
+      (item) => item.command_id === localSubmitCommandId,
+    );
+    // Once Host projects the command in its Session-owned future-message FIFO,
+    // it is accepted queued input, not an active/pending Turn that can be
+    // stopped. The queue panel renders it and Host decides when it may start.
+    if (!alreadyRecorded && !acceptedForFutureTurn)
       return { kind: "submit_persisted", commandId: localSubmitCommandId };
   }
   return { kind: "idle" };

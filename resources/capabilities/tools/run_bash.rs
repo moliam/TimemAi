@@ -25,6 +25,7 @@ fn configure_run_bash_environment(command: &mut Command) {
 }
 
 const SHELL_OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
+const LONG_RUNNING_ACTION_GUIDANCE: &str = "The command has not finished. Decide whether to wait, inspect, terminate, or take another appropriate action. Reflect and avoid long running ineffective actions if possible. Save time.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningShellJob {
@@ -678,7 +679,8 @@ impl ShellJobManager {
                 job.elapsed_ms()
             ));
         }
-        out.push_str("\nContinue the task by deciding whether to wait, inspect, terminate, or take another appropriate action. Do not ask the user merely because a command is still running.");
+        out.push('\n');
+        out.push_str(LONG_RUNNING_ACTION_GUIDANCE);
         Some(out)
     }
 
@@ -2077,8 +2079,8 @@ impl BashCommandOutput {
             if let Some(details) = error.strip_prefix("long_running_still_running:") {
                 let (pid, elapsed_ms) = details.split_once(':').unwrap_or((details, "unknown"));
                 let mut out = format!(
-                    "Action result: {}\nLONG_RUNNING_COMMAND_STATUS:\nPID: {}\nElapsed: {} ms\nStatus: still running\nThe command has not finished. Continue the task by deciding whether to wait, inspect, terminate, or take another appropriate action. Do not ask the user merely because this command is still running.",
-                    action_name, pid, elapsed_ms
+                    "Action result: {}\nLONG_RUNNING_COMMAND_STATUS:\nPID: {}\nElapsed: {} ms\nStatus: still running\n{}",
+                    action_name, pid, elapsed_ms, LONG_RUNNING_ACTION_GUIDANCE
                 );
                 if !self.output.trim().is_empty() {
                     out.push_str("\nPartial return:\n");

@@ -5,7 +5,7 @@
 exists. The application assembles Core, Bridges, and Interfaces; its current binary combines
 local-first Web hosting with Shell entry points. It binds a loopback HTTP/WebSocket
 server by default, allows an explicit authenticated `--public` bind, owns
-browser authentication and reliable delivery, maps browser commands to
+browser authentication and bounded live command delivery, maps browser commands to
 Session/Core worker handles, and projects the UI-neutral authoritative
 Core Turn contract for a reconnectable browser. Its Pod/projection layer is not
 a second agent runtime and is not required by synchronous or in-process Interfaces.
@@ -29,8 +29,9 @@ It may contain:
   revisioned, self-sufficient browser snapshots/updates while preserving Core
   Turn identity, input admission, activity, and immutable outcome exactly. The
   Bridge may add transport metadata but may not reinterpret lifecycle.
-- Web-specific reliable command delivery, bounded NextTurnIntent FIFO,
-  projection revision, event sequence, reconnect baseline, and MEM barrier.
+- Web-specific one-shot command correlation, bounded process-local command
+  deduplication, bounded NextTurnIntent FIFO, projection revision, event
+  sequence, reconnect baseline, and MEM barrier.
   These are reusable adapter patterns for future asynchronous Interfaces, but they
   are not Core business state and must not be required by a direct Shell/native
   binding.
@@ -51,13 +52,15 @@ It may contain:
   pool; filesystem/session work must never stop the WebSocket loop from
   forwarding core topics. Queue overflow is rejected explicitly rather than
   growing memory without bound.
-- Reliable mutation ownership. Browser mutations carry a stable `command_id`;
-  the Host durably reserves it and returns correlated `accepted`, `committed`,
-  or `rejected` acknowledgements. A lost terminal acknowledgement must replay
-  the recorded result without repeating the domain effect. Same-Session
-  mutations are FIFO across sockets, independent Sessions may execute in
-  parallel, and global mutations exclude Session mutations through the global
-  barrier.
+- Bounded live mutation handling. Browser mutations may carry a correlation
+  `command_id`; the Host keeps only a fixed-capacity process-local dedup cache
+  and returns correlated `accepted`, `committed`, or `rejected`
+  acknowledgements on the live connection. Terminal records may be evicted;
+  if every slot is still accepted, new IDs are explicitly rejected rather than
+  growing memory. The Host does not create a per-command ledger or
+  `web_command_dedup.json`. Same-Session mutations are FIFO across sockets,
+  independent Sessions may execute in parallel, and global mutations exclude
+  Session mutations through the global barrier.
 - Ordered semantic event delivery. After authoritative state is persisted,
   mutations and Core topics enter one in-memory linearization point that assigns
   `event_seq` and broadcasts the envelope without filesystem I/O. WebSocket
@@ -65,9 +68,9 @@ It may contain:
   snapshot baseline. A sequence gap or broadcast lag reloads a full snapshot
   instead of replaying disk history. Request-scoped queries, acknowledgements,
   validation errors, and secret reveals remain direct. Memory-space switching
-  changes Session state, command deduplication, and the per-MEM Web instance
-  lease under one epoch barrier so old accepted work cannot execute in the new
-  space.
+  changes Session state and the per-MEM Web instance lease under one epoch
+  barrier, resets the bounded process-local dedup cache, and prevents old
+  accepted work from executing in the new space.
 - Per-session browser upload storage and attachment metadata. Uploaded bytes
   remain host-local; the host only contributes their paths as session context.
 - Memory-space-scoped Worker Role library ownership. Roles and Role groups are
@@ -147,13 +150,14 @@ over every accepted-but-unconsumed task command, including its attachments, as
 a next-turn intent under the same command ownership rather than dropping it,
 asking the browser to issue a second command, or appending it after the final
 answer. Per Session, these intents form a bounded FIFO ordered by Host `enqueue_seq`
-and deduplicated by `command_id`; only its head may enter Core. The Host may
-atomically persist the FIFO for same-process delivery integrity and restart
-reconciliation, but a Host/Core process restart is a hard Stop boundary: queued
-execution ownership is discarded, unfinished queued Turns restore only as
-`interrupted`, and redelivery of an old `command_id` must not call Core. Continuing
-after restart requires a new command ID and a new Turn. Each online-dispatched
-intent receives a fresh token and starts at model round one. Decision replies,
+and deduplicated by `command_id`; only its head may enter Core. The Host
+atomically persists the Session-owned FIFO. A Host/Core process restart is a
+hard execution boundary: queued items and the user's auto-send preference remain
+visible, but any in-flight dispatch reservation and continuation grant are
+cleared. Startup must not automatically redrive a queued item or call Core from
+an old interrupted Turn record; later execution requires a new authoritative
+continuation grant or an explicit queue command. Each dispatched intent receives
+a fresh token and starts at model round one. Decision replies,
 ToolGen guidance, and settings mutations retain their own typed commands and
 must never be silently converted as late supplements.
 
@@ -161,7 +165,9 @@ It must not contain:
 
 - A second Turn lifecycle state machine. The Host/Pod may manage command delivery,
   MEM barriers, projection revisions, snapshots, and timeline assembly, but only
-  Core may create/stop/finish the authoritative Active Turn.
+  Core may create/stop/finish the authoritative Active Turn. Transport caches,
+  command queues, event channels, and pending ownership collections must remain
+  hard-bounded; exhaustion is an explicit error, never silent growth.
 - Web-only lifecycle semantics that another host would have to duplicate. If a
   rule decides whether a Turn exists, accepts input, stops, finishes, or owns an
   outcome, it belongs in Core. This module only adapts that rule to reliable Web

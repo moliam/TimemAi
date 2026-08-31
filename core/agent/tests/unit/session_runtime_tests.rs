@@ -2161,7 +2161,13 @@ fn session_turn_long_running_command_hands_status_to_next_model_round() {
     assert!(follow_up.contains("Elapsed:"), "{follow_up}");
     assert!(follow_up.contains("Status: still running"), "{follow_up}");
     assert!(
-        follow_up.contains("Continue the task by deciding whether to wait, inspect, terminate"),
+        follow_up.contains(
+            "Decide whether to wait, inspect, terminate, or take another appropriate action"
+        ),
+        "{follow_up}"
+    );
+    assert!(
+        follow_up.contains("Reflect and avoid long running ineffective actions if possible"),
         "{follow_up}"
     );
     assert!(

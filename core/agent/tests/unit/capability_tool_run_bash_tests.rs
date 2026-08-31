@@ -449,6 +449,16 @@ fn bash_command_outcomes_keep_lifecycle_separate_from_result_metadata() {
     }
     .to_action_outcome("run_bash");
     assert_eq!(running.status, ActionStatus::BackgroundRunning);
+    assert!(
+        running.text.contains(LONG_RUNNING_ACTION_GUIDANCE),
+        "{}",
+        running.text
+    );
+    assert!(
+        !running.text.contains("Continue the task by deciding"),
+        "{}",
+        running.text
+    );
     let evidence = running.bash_result.expect("running Bash evidence");
     assert_eq!(evidence.pid, Some(9876));
     assert!(!evidence.timed_out);
@@ -1381,6 +1391,11 @@ fn running_job_list_context_uses_pid_kind_and_command() {
     assert!(context.starts_with("RUNNING JOB LIST:"), "{context}");
     assert!(context.contains("background job"), "{context}");
     assert!(context.contains("cmd=sleep 10"), "{context}");
+    assert!(context.contains(LONG_RUNNING_ACTION_GUIDANCE), "{context}");
+    assert!(
+        !context.contains("Continue the task by deciding"),
+        "{context}"
+    );
     assert!(!context.contains("session_other"), "{context}");
     for job in store.running_for_session("session_owned") {
         terminate_process(job.pid);

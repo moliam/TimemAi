@@ -609,6 +609,34 @@ describe("web topic view model", () => {
         typed: "send",
       },
       {
+        name: "Host queued submit is not a stoppable Turn",
+        phase: turnInteractionPhase(
+          {
+            ...session("queued"),
+            message_queue: {
+              ...session("queued").message_queue,
+              items: [
+                {
+                  command_id: "submit-queued",
+                  enqueue_seq: 0,
+                  payload: {
+                    turn_id: "future-turn",
+                    text: "queued work",
+                    created_at_ms: 2,
+                    attachments: [],
+                    worker_roles: [],
+                  },
+                },
+              ],
+            },
+          },
+          "submit-queued",
+          false,
+        ),
+        empty: "send",
+        typed: "send",
+      },
+      {
         name: "Core working",
         phase: turnInteractionPhase(working, undefined, false),
         empty: "stop",
@@ -626,6 +654,20 @@ describe("web topic view model", () => {
         empty: "send",
         typed: "send",
       },
+      {
+        name: "terminal chat beats stale active and cancelling ids",
+        phase: turnInteractionPhase(
+          {
+            ...finished,
+            active_turn_id: pendingTurn.turn_id,
+            cancelling_turn_id: pendingTurn.turn_id,
+          },
+          undefined,
+          false,
+        ),
+        empty: "send",
+        typed: "send",
+      },
     ] as const;
 
     for (const current of cases) {
@@ -634,8 +676,10 @@ describe("web topic view model", () => {
           ? "idle"
           : current.name === "submit persisted before Host records the turn"
             ? "submit_persisted"
-            : current.name === "Host pending before Core TurnStarted"
-              ? "host_pending"
+            : current.name === "Host queued submit is not a stoppable Turn"
+              ? "idle"
+              : current.name === "Host pending before Core TurnStarted"
+                ? "host_pending"
               : current.name === "Core working"
                 ? "working"
                 : "cancelling",

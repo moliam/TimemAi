@@ -1,3 +1,5 @@
+pub mod message_queue;
+
 use agent_core::{
     core_initialized_topic_event_with_worker, run_session_turn_with_model_client, AgentCore,
     CoreGlobalWorkerStatus, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopicEvent,
@@ -2305,3 +2307,7 @@ impl WorkerTurnUi {
 #[cfg(test)]
 #[path = "../tests/unit/session_worker_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/message_queue_tests.rs"]
+mod message_queue_tests;
