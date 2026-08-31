@@ -1650,9 +1650,8 @@ impl CoreSessionWorker {
                     } => {
                         let result = core
                             .change_prompt_cwd(current_dir.display().to_string())
-                            .map(|canonical| {
+                            .inspect(|canonical| {
                                 workspace.current_dir = Some(canonical.clone());
-                                canonical
                             });
                         if let Err(error) = &result {
                             let _ = event_tx.send(CoreSessionWorkerEvent::ModelError {
