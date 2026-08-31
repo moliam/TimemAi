@@ -7,6 +7,7 @@ use crate::{
     ReadfileResultEvidence, SelfToolResultEvidence, ToolCallMode,
 };
 use std::hash::{DefaultHasher, Hash, Hasher};
+use timem_ui_contract::preferences::{AssistantResponseFormat, InterfacePreferences};
 
 pub(crate) const RESPONSE_TRAILER: &str =
     "Please continue the work and respond as protocol requires in user's language:";
@@ -671,13 +672,39 @@ pub(crate) fn render_static_prompt_for_mode(
     startup_stamp: &str,
     tool_call_mode: ToolCallMode,
 ) -> String {
+    render_static_prompt_for_mode_with_preferences(
+        static_prompt,
+        capabilities,
+        protocol_suite,
+        assistant_heading,
+        startup_stamp,
+        tool_call_mode,
+        InterfacePreferences::default(),
+    )
+}
+
+pub(crate) fn render_static_prompt_for_mode_with_preferences(
+    static_prompt: &str,
+    capabilities: &CapabilityRegistry,
+    protocol_suite: &dyn ResponseProtocolSuite,
+    assistant_heading: &str,
+    startup_stamp: &str,
+    tool_call_mode: ToolCallMode,
+    interface_preferences: InterfacePreferences,
+) -> String {
     // 1. Fill {{RESPONSE_PROTOCOL_SECTION}} from protocol suite
     let protocol_section = if tool_call_mode == ToolCallMode::Native {
         NATIVE_PROTOCOL_SECTION.to_string()
     } else {
         protocol_suite.protocol_prompt_section()
     };
-    let with_protocol = static_prompt.replace("{{RESPONSE_PROTOCOL_SECTION}}", &protocol_section);
+    let ui_preference = match interface_preferences.assistant_response_format {
+        AssistantResponseFormat::Unspecified => "a format compatible with the active interface",
+        AssistantResponseFormat::Markdown => "Markdown",
+        AssistantResponseFormat::PlainText => "plain-text",
+    };
+    let with_protocol = static_prompt.replace("{{UI_PREFERENCE}}", ui_preference);
+    let with_protocol = with_protocol.replace("{{RESPONSE_PROTOCOL_SECTION}}", &protocol_section);
     let response_mode_instruction = if tool_call_mode == ToolCallMode::Native {
         NATIVE_RESPONSE_MODE_INSTRUCTION
     } else {

@@ -19,6 +19,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
+use timem_ui_contract::preferences::InterfacePreferences;
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -7444,6 +7445,47 @@ fn rendered_static_prompt_preserves_source_rule_order() {
         role_pos < style_pos && style_pos < memory_pos,
         "static prompt should keep source section order"
     );
+}
+
+#[test]
+fn interface_response_format_survives_static_prompt_refresh_and_context_fork() {
+    let template = include_str!("../../../resources/system_prompt/system_prompt.md");
+    let mut core = AgentCore::new_with_interface_preferences(
+        template,
+        profile("qwen-plus"),
+        tmp_dir("interface_response_format"),
+        InterfacePreferences::markdown(),
+    );
+
+    let initial = match core.begin_turn("hello", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    assert!(initial.contains("Answer in Markdown style."));
+    assert!(!initial.contains("{{UI_PREFERENCE}}"));
+
+    core.set_capability_registry(test_registry());
+    let refreshed = core.build_next_prompt();
+    assert!(refreshed.contains("Answer in Markdown style."));
+
+    let mut fork = core.fork_ephemeral_context(tmp_dir("interface_response_format_fork"));
+    let forked = fork.build_next_prompt();
+    assert!(forked.contains("Answer in Markdown style."));
+}
+
+#[test]
+fn default_core_keeps_interface_response_format_unspecified() {
+    let mut core = AgentCore::new(
+        include_str!("../../../resources/system_prompt/system_prompt.md"),
+        profile("qwen-plus"),
+        tmp_dir("interface_response_format_default"),
+    );
+    let prompt = match core.begin_turn("hello", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    assert!(prompt.contains("Answer in a format compatible with the active interface style."));
+    assert!(!prompt.contains("Answer in Markdown style."));
 }
 
 #[test]

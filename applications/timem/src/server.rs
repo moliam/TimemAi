@@ -38,12 +38,12 @@ use agent_core::{
     load_workspace_dirs_from_path, model_service_config_from_sources_allow_missing_api_key,
     resolve_memory_dir, runtime_config_menu_report, validate_api_key, work_instruction_load_report,
     work_instruction_load_request, work_instruction_mode_from_sources, AgentCore, BashApprovalMode,
-    CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest, ModelServiceConfig,
-    ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout, SessionToolRepo, ToolDetail,
-    ToolSummary, TopicReply, TurnProjection, WorkInstructionLoadMode, CORE_TOPIC_ACTION,
-    CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP,
-    CORE_TOPIC_SUB_ANSWER, CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST,
-    CORE_TOPIC_WORK_INSTRUCTION_LOAD,
+    CoreSessionWorkerWorkspace, HostDecision, HostDecisionRequest, InterfacePreferences,
+    ModelServiceConfig, ModelServiceConfigSource, ResponseProtocolKind, RuntimeDataLayout,
+    SessionToolRepo, ToolDetail, ToolSummary, TopicReply, TurnProjection, WorkInstructionLoadMode,
+    CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_REPAIR, CORE_TOPIC_MODEL_RESPONSE,
+    CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_SUB_ANSWER, CORE_TOPIC_TOOLGEN,
+    CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
 };
 use agent_core::{
     capability::CapabilityRegistry, rolling_file_store::RollingCapacity, self_tool::SelfToolPaths,
@@ -10217,7 +10217,12 @@ impl WorkerTemplate {
         let memory_dir = mem.layout.memory_dir();
         let audit_file = mem.layout.api_audit_file();
         std::fs::create_dir_all(&memory_dir).map_err(|error| error.to_string())?;
-        let mut core = AgentCore::new(STATIC_PROMPT, settings.config.core_profile(), &memory_dir);
+        let mut core = AgentCore::new_with_interface_preferences(
+            STATIC_PROMPT,
+            settings.config.core_profile(),
+            &memory_dir,
+            InterfacePreferences::markdown(),
+        );
         core.change_prompt_cwd(current_dir.display().to_string())?;
         core.set_response_protocol(settings.config.response_protocol);
         core.configure_runtime_from_host(&settings.config, settings.bash_approval_mode);

@@ -5,6 +5,7 @@ It contains no presentation, transport, persistence, model execution, or Session
 
 ## Current layout
 
+- `src/preferences`: Interface-declared, UI-neutral startup preferences. Core maps these typed values to safe model instructions; arbitrary prompt text is not part of the contract.
 - `src/commands`: UI-neutral Session requests. It currently owns the ToolGen request contract.
 - `src/projections`: authoritative UI-readable state shapes. It currently owns the Turn projection
   wire contract plus Session/Context/Worker identity, lifecycle, workspace, and aggregate activity

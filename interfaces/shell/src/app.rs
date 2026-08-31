@@ -48,6 +48,7 @@ use timem_in_process::agent_api::{
     AgentCore, ApprovalRequest, BashApprovalMode, ResponseProtocolKind, TurnProjection,
     TurnProjectionOutcome, TurnToken, UsageStats,
 };
+use timem_ui_contract::preferences::InterfacePreferences;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 #[path = "os/mod.rs"]
@@ -180,7 +181,12 @@ pub fn run(args: Vec<String>) {
         bash_approval_mode,
         work_instruction_mode,
     ));
-    let mut core = AgentCore::new(STATIC_PROMPT, config.core_profile(), &memory_dir);
+    let mut core = AgentCore::new_with_interface_preferences(
+        STATIC_PROMPT,
+        config.core_profile(),
+        &memory_dir,
+        InterfacePreferences::markdown(),
+    );
     core.set_reminder_tips_config(load_reminder_tips_config(&default_config_root()));
     core.set_response_protocol(response_protocol);
     core.configure_self_tool_runtime(
