@@ -2,9 +2,9 @@ kind: tool
 id: sub_answer
 binding_type: builtin
 binding_name: sub_answer
-summary: Show a complete answer to one or more current-turn questions while continuing the task.
+summary: Show an answer to one or more current-turn questions while continuing the task.
 prompt_synopsis: |
-  {"sub_answer":{"task":"Concise summary of the addressed question or concern","answer":"Complete user-facing Markdown answer"}}
+  {"sub_answer":{"task":"Concise summary of the addressed question or concern","answer":"user-facing answer"}}
 description: |
   Optionally answer one or more questions or concerns from the current user turn before
   the overall task is finished. Use this only for a substantive, complete answer that is
@@ -15,7 +15,7 @@ description: |
   include relevant sub-answers, explicitly correcting any contradiction.
 prompt_input: |
   Provide a non-empty task summarizing one or more current-turn questions or concerns,
-  and a non-empty user-facing Markdown answer. Use separate calls when independently
+  and a non-empty user-facing answer. Use separate calls when independently
   useful answers should be shown before the overall task is finished.
 prompt_result: |
   Success returns `Shown to user successfully.` The answer is visible immediately but
@@ -26,7 +26,7 @@ input_schema: |
     "additionalProperties": false,
     "properties": {
       "task": {"type":"string","minLength":1,"pattern":"\\S","description":"Concise model-written summary of the current-turn question(s) or concern(s) answered. Do not use input IDs."},
-      "answer": {"type":"string","minLength":1,"pattern":"\\S","description":"Complete user-facing Markdown answer to show immediately."}
+      "answer": {"type":"string","minLength":1,"pattern":"\\S","description":"user-facing answer to show immediately."}
     },
     "required": ["task", "answer"]
   }
