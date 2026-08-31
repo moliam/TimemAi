@@ -18,6 +18,9 @@ The product Web host is split by internal responsibility under `src/server/`:
 
 - `command_lane.rs` owns the process-local FIFO ticket primitive used to serialize accepted
   mutations per scope. It has no Session/Turn semantics and advances tickets through an RAII guard.
+- `command_dedup.rs` owns bounded process-local command correlation records, including in-flight
+  retention, terminal-record eviction, capacity exhaustion, and explicit reservation removal. It is
+  not a durable command ledger and does not infer Session/Turn lifecycle.
 - `websocket_delivery.rs` owns authenticated browser command delivery after generic WebSocket
   framing.
 - `mem_maintenance.rs` owns bounded memory-space maintenance.

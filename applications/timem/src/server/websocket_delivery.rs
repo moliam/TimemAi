@@ -388,9 +388,7 @@ pub(super) fn execute_browser_command(
             let direct_event = direct_result.then(|| event.clone()).flatten();
             if let Some(command_id) = command_id.as_deref() {
                 if sensitive_result {
-                    if let Ok(mut cache) = state.command_dedup.lock() {
-                        cache.unreserve(command_id);
-                    }
+                    unreserve_command_dedup(state, command_id);
                     return BrowserCommandCompletion {
                         event: direct_event,
                         ack: Some(command_ack(command_id, CommandAckStatus::Committed, None)),
@@ -540,19 +538,13 @@ pub(super) fn reserve_command_dedup(
         .command_dedup
         .lock()
         .map_err(|_| "command_dedup_poisoned".to_string())?;
-    if !cache.records.contains_key(command_id)
-        && cache.records.len() >= COMMAND_DEDUP_CAPACITY
-        && cache
-            .records
-            .values()
-            .all(|record| matches!(record, CommandDedupState::Accepted))
-    {
-        // Accepted entries cannot be evicted safely while this Host process is
-        // still handling them. Reject new correlation ids instead of growing
-        // the in-memory cache without bound.
-        return Err("command_dedup_capacity_exhausted".to_string());
+    cache.reserve(command_id)
+}
+
+fn unreserve_command_dedup(state: &AppState, command_id: &str) {
+    if let Ok(mut cache) = state.command_dedup.lock() {
+        cache.unreserve(command_id);
     }
-    Ok(cache.reserve(command_id))
 }
 
 /// Finalizes the bounded process-local command correlation record.

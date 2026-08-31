@@ -1,7 +1,11 @@
+mod command_dedup;
 mod command_lane;
 mod mem_maintenance;
 mod websocket_delivery;
 
+#[cfg(test)]
+use command_dedup::COMMAND_DEDUP_CAPACITY;
+use command_dedup::{CommandDedupCache, CommandDedupState, MAX_COMMAND_DEDUP_RESULT_BYTES};
 use command_lane::TicketCommandLane;
 use mem_maintenance::*;
 use websocket_delivery::{command_ack, finish_command_dedup};
@@ -64,7 +68,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap},
     ffi::OsString,
     io::{IsTerminal, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
@@ -130,8 +134,6 @@ const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SESSION_UPLOADS: usize = 20;
 const MAX_BROWSER_COMMAND_BYTES: usize = 1024 * 1024;
 const BROWSER_COMMAND_QUEUE_CAPACITY: usize = 32;
-const COMMAND_DEDUP_CAPACITY: usize = 4_096;
-const MAX_COMMAND_DEDUP_RESULT_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_ID_BYTES: usize = 256;
 const WORK_INSTRUCTION_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTANCE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(3);
@@ -159,62 +161,6 @@ struct AppState {
     mem_epoch: Arc<RwLock<u64>>,
     debug: Option<Arc<DebugStore>>,
     runtime_log: RuntimeLog,
-}
-
-#[derive(Debug, Clone)]
-enum CommandDedupState {
-    Accepted,
-    Committed {
-        event: Option<Box<WireEvent>>,
-        serialized_event: Option<Value>,
-    },
-    Rejected {
-        error: String,
-    },
-}
-
-#[derive(Debug, Default)]
-struct CommandDedupCache {
-    records: HashMap<String, CommandDedupState>,
-    insertion_order: VecDeque<String>,
-}
-
-impl CommandDedupCache {
-    fn reserve(&mut self, command_id: &str) -> Option<CommandDedupState> {
-        if let Some(existing) = self.records.get(command_id) {
-            return Some(existing.clone());
-        }
-        while self.records.len() >= COMMAND_DEDUP_CAPACITY {
-            let Some(oldest) = self.insertion_order.pop_front() else {
-                break;
-            };
-            if matches!(self.records.get(&oldest), Some(CommandDedupState::Accepted)) {
-                self.insertion_order.push_back(oldest);
-                if self
-                    .insertion_order
-                    .iter()
-                    .all(|id| matches!(self.records.get(id), Some(CommandDedupState::Accepted)))
-                {
-                    break;
-                }
-                continue;
-            }
-            self.records.remove(&oldest);
-        }
-        self.records
-            .insert(command_id.to_string(), CommandDedupState::Accepted);
-        self.insertion_order.push_back(command_id.to_string());
-        None
-    }
-
-    fn finish(&mut self, command_id: &str, state: CommandDedupState) {
-        self.records.insert(command_id.to_string(), state);
-    }
-
-    fn unreserve(&mut self, command_id: &str) {
-        self.records.remove(command_id);
-        self.insertion_order.retain(|id| id != command_id);
-    }
 }
 
 #[derive(Clone)]
@@ -4106,13 +4052,11 @@ fn switch_mem_space(
         next_mem.temporary_maintenance.checkpoint_started_at = switched_at;
         *mem = next_mem;
     }
-    {
-        let mut cache = state
-            .command_dedup
-            .lock()
-            .map_err(|_| "command_dedup_poisoned".to_string())?;
-        *cache = CommandDedupCache::default();
-    }
+    state
+        .command_dedup
+        .lock()
+        .map_err(|_| "command_dedup_poisoned".to_string())?
+        .clear();
     {
         let mut lease = state
             .web_instance
