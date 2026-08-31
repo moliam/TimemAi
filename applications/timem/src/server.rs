@@ -1283,6 +1283,7 @@ struct RuntimeSettings {
 struct RestartCwdDecision {
     runtime_cwd: String,
     session_cwd: String,
+    session_cwd_available: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -6098,16 +6099,6 @@ fn restore_stored_sessions_with_runtime_restart_marker(
         let session_id = stored.session_id.clone();
         match restore_stored_session(state, stored, record_runtime_restart) {
             Ok(()) => restored += 1,
-            Err(error) if error == "stored_session_workspace_not_found" => {
-                match store.detach_session(&session_id) {
-                    Ok(()) => eprintln!(
-                        "[timem_web_session_restore_repaired] session_id={session_id:?} reason={error} action=detached_from_restore_index history_preserved=true"
-                    ),
-                    Err(detach_error) => eprintln!(
-                        "[timem_web_session_restore_error] session_id={session_id:?} reason={error} repair_error={detach_error}"
-                    ),
-                }
-            }
             Err(error) => eprintln!(
                 "[timem_web_session_restore_error] session_id={session_id:?} reason={error}"
             ),
@@ -6245,6 +6236,19 @@ fn restart_cwd_decision(
     (runtime_cwd != session_cwd).then(|| RestartCwdDecision {
         runtime_cwd: runtime_cwd.display().to_string(),
         session_cwd: session_cwd.display().to_string(),
+        session_cwd_available: true,
+    })
+}
+
+fn missing_session_cwd_decision(
+    state: &AppState,
+    session_cwd: &Path,
+) -> Option<RestartCwdDecision> {
+    let runtime_cwd = std::fs::canonicalize(&state.template.current_dir).ok()?;
+    Some(RestartCwdDecision {
+        runtime_cwd: runtime_cwd.display().to_string(),
+        session_cwd: session_cwd.display().to_string(),
+        session_cwd_available: false,
     })
 }
 
@@ -6281,6 +6285,9 @@ fn resolve_restart_cwd_decision(
 
     match decision {
         "keep_session" => {
+            if !pending.session_cwd_available {
+                return Err("session_restart_cwd_unavailable".to_string());
+            }
             state
                 .sessions
                 .lock()
@@ -6350,10 +6357,17 @@ fn restore_stored_session(
     stored: StoredSession,
     record_runtime_restart: bool,
 ) -> Result<(), String> {
-    let current_dir = PathBuf::from(&stored.current_dir);
-    if !current_dir.is_dir() {
-        return Err("stored_session_workspace_not_found".to_string());
-    }
+    let stored_current_dir = PathBuf::from(&stored.current_dir);
+    let stored_workspace_available = stored_current_dir.is_dir();
+    let current_dir = if stored_workspace_available {
+        stored_current_dir.clone()
+    } else {
+        let runtime_current_dir = state.template.current_dir.clone();
+        if !runtime_current_dir.is_dir() {
+            return Err("stored_session_and_runtime_workspace_not_found".to_string());
+        }
+        runtime_current_dir
+    };
     if record_runtime_restart {
         append_runtime_restart_history_marker(state, &stored.session_id)?;
     }
@@ -6494,11 +6508,11 @@ fn restore_stored_session(
                 }
                 .to_string(),
                 current_dir: current_dir.display().to_string(),
-                restart_cwd_decision: restart_cwd_decision(
-                    state,
-                    &current_dir,
-                    record_runtime_restart,
-                ),
+                restart_cwd_decision: if stored_workspace_available {
+                    restart_cwd_decision(state, &current_dir, record_runtime_restart)
+                } else {
+                    missing_session_cwd_decision(state, &stored_current_dir)
+                },
                 debug_dir,
                 max_llm_input_tokens,
                 tools,
@@ -6542,12 +6556,25 @@ fn restore_stored_session(
     create_context_with_worker(
         state,
         &stored.session_id,
-        current_dir,
+        current_dir.clone(),
         Some(stored.display_name.clone()),
         None,
         true,
     )?;
     persist_restored_session_runtime_cache(state, &stored)?;
+    if !stored_workspace_available {
+        state.runtime_log.record(
+            "session_restore_workspace_fallback",
+            json!({
+                "session_id": stored.session_id,
+                "reason": "stored_session_workspace_not_found",
+                "action": "awaiting_user_switch",
+                "previous_workspace": stored_current_dir,
+                "runtime_workspace": current_dir,
+                "history_preserved": true,
+            }),
+        );
+    }
     Ok(())
 }
 

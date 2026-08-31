@@ -592,28 +592,6 @@ impl SessionStore {
             .find(|session| session.session_id == session_id))
     }
 
-    /// Removes a Session from the active restore index while preserving its
-    /// history and Session-scoped files for manual recovery or inspection.
-    pub fn detach_session(&self, session_id: &str) -> Result<(), String> {
-        self.ensure_metadata_v2()?;
-        validate_session_id(session_id)?;
-        let path = self.metadata_path_for_session(session_id);
-        let guard = MemGuard::for_memory_domain(
-            &self.root,
-            format!(
-                "session-data-{}",
-                sanitize_session_path_component(session_id)
-            ),
-        );
-        guard.with_write(|| match fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Err("session_not_found".to_string())
-            }
-            Err(_) => Err("session_metadata_remove_failed".to_string()),
-        })?
-    }
-
     pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
         self.ensure_metadata_v2()?;
         validate_session_id(session_id)?;

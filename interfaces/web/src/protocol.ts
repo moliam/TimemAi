@@ -153,6 +153,7 @@ export type Session = {
   restart_cwd_decision?: {
     runtime_cwd: string;
     session_cwd: string;
+    session_cwd_available: boolean;
   } | null;
   debug_dir?: string | null;
   max_llm_input_tokens: number;

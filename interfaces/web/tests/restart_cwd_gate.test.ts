@@ -17,9 +17,9 @@ describe("restart working-directory gate", () => {
     );
   });
 
-  it("keeps the notice concise and makes only the two actions buttons", () => {
+  it("keeps the normal mismatch notice concise and offers both valid actions", () => {
     expect(source).toContain("当前 Timem 的启动目录和 Session 上次工作的目录不同");
-    expect(source).toMatch(/<button[\s\S]*>\s*切换\s*<\/button>/);
+    expect(source).toContain('restartCwdDecision.session_cwd_available ? "切换" : "使用当前工作目录"');
     expect(source).toMatch(/<button[\s\S]*>\s*保持\s*<\/button>/);
     expect(source).not.toContain('className="restart-cwd-choice');
   });
@@ -35,5 +35,13 @@ describe("restart working-directory gate", () => {
     expect(styles).toMatch(/\.restart-cwd-option button \{[\s\S]*min-width: 42px;[\s\S]*height: 25px;[\s\S]*background: #315f52;/);
     expect(styles).toContain(':root[data-theme="light"] .restart-cwd-gate');
     expect(styles).toMatch(/@media \(max-width: 720px\) \{[\s\S]*\.restart-cwd-option code \{ flex-basis: 100%; padding-left: 47px; \}/);
+  });
+
+  it("gracefully falls back to a single switch action when the old directory is gone", () => {
+    expect(source).toContain("原工作目录已不可用。聊天记录已保留");
+    expect(source).toMatch(/restartCwdDecision\.session_cwd_available\s*&&\s*\([\s\S]*保持/);
+    expect(source).toContain('restartCwdDecision.session_cwd_available ? "切换" : "使用当前工作目录"');
+    expect(source).toMatch(/restartCwdDecision\.session_cwd_available\s*&&\s*\([\s\S]*至新启动目录/);
+    expect(source).toMatch(/onResolveRestartCwd\("use_runtime"\)/);
   });
 });
