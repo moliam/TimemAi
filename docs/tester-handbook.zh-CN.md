@@ -375,27 +375,26 @@ TIMEM_EDGE_ITERATIONS=5 scripts/edge_regression.sh
 - 重复 Stop 幂等；取消覆盖当前 Session 的主/子 worker、模型请求、前台工具和已注册后台任务，不影响其他 Session。
 - Stop 后的新任务只在权威取消完成后按 FIFO 启动；模型/系统错误不触发自动续发，也不以 `ready` 状态代替完成。
 
-### 8.4 可靠性交付与重连
+### 8.4 一次投递与重连
 
 严格按 `docs/web_reliability_test_matrix.md` 注入故障：
 
-- 写 socket 后、Host accept 前断开。
-- accept 后、commit 前断开。
-- commit 后丢最终 ack。
-- 重复 `command_id`、相同 payload 不同 ID、队列满。
+- 写 socket 后、Host 收到前断开；不得自动重试。
+- Host accept 后断开；Host 可独立完成，浏览器靠重连 Snapshot 恢复。
+- commit 后丢最终 ACK；不得因 ACK 丢失重发命令。
+- 当前进程内重复 `command_id`、相同 payload 不同 ID、队列/去重容量满。
 - snapshot 构建期间发生 mutation。
-- live broadcast lag 后按 cursor replay。
+- bounded live broadcast lag 后请求完整 Snapshot baseline。
 - 等待人工决策时断线重连。
-- Host 在 history 写入与 Core handoff 之间崩溃。
-- 四 Session 同时恢复，task 与 ordered supplements 原子交付。
+- Host/Core 进程重启后，unfinished Turn 按权威 Session 规则恢复为 interrupted，不重驱浏览器命令。
 
 核心判定：
 
-- 同一 ID 不产生重复领域效果。
-- 不同 ID 即使 payload 相同，也代表两次用户意图。
-- `accepted` 之前不能从浏览器 outbox 删除。
-- ack A 不能改变命令 B。
-- 刷新后 pending/accepted 命令从持久化浏览器存储恢复。
+- 浏览器不持久化 Outbox，不跨断线、刷新或 tab 重放命令。
+- `accepted` ACK 不修改业务成功状态；ACK A 不能改变命令 B。
+- 同一 ID 只在当前进程且记录仍驻留时防重；不同 ID 即使 payload 相同也代表两次操作。
+- command dedup、命令队列、事件通道都有硬上限；满时明确拒绝而非增长。
+- 不生成 `web_command_dedup.json`、逐命令 ledger 或持续累积碎片文件。
 
 ### 8.5 附件、MCP、Role 与决策
 

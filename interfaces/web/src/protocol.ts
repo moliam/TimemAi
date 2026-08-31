@@ -112,6 +112,37 @@ export type VersionedTurnProjection = {
   projection: TurnProjection;
 };
 
+export type MessageQueueBlockReason =
+  | "user_cancelled"
+  | "turn_failed"
+  | "turn_interrupted"
+  | "session_stopped";
+
+export type MessageQueueContinuation =
+  | { state: "awaiting_normal_completion" }
+  | { state: "granted" }
+  | { state: "blocked"; reason: MessageQueueBlockReason };
+
+export type MessageQueuePayload = {
+  turn_id: string;
+  created_at_ms: number;
+  text: string;
+  attachments: Attachment[];
+  worker_roles: WorkerRole[];
+};
+
+export type MessageQueueProjection = {
+  revision: number;
+  items: Array<{
+    command_id: string;
+    enqueue_seq: number;
+    payload: MessageQueuePayload;
+  }>;
+  auto_send_enabled: boolean;
+  continuation: MessageQueueContinuation;
+  dispatching_command_id?: string | null;
+};
+
 export type Session = {
   session_id: string;
   display_name: string;
@@ -154,6 +185,8 @@ export type Session = {
   pending_turn_id?: string | null;
   /** Exact Core lifecycle projection plus HTTP/WebSocket delivery revision. */
   turn_projection?: VersionedTurnProjection | null;
+  /** Authoritative Session-owned future-message queue. */
+  message_queue: MessageQueueProjection;
 };
 
 export type McpTransport =
@@ -508,6 +541,11 @@ export type WireEvent =
       turn: WebTurn;
     }
   | { type: "turn_updated"; session_id: string; turn: WebTurn }
+  | {
+      type: "message_queue_updated";
+      session_id: string;
+      message_queue: MessageQueueProjection;
+    }
   | { type: "host_error"; message: string }
   | {
       type: "runtime_notice";
@@ -641,6 +679,32 @@ export type ClientCommand =
       role_ids?: string[];
     }
   | { type: "turn_cancel"; session_id: string; target_command_id?: string }
+  | {
+      type: "message_queue_update";
+      session_id: string;
+      queued_command_id: string;
+      text: string;
+    }
+  | {
+      type: "message_queue_remove";
+      session_id: string;
+      queued_command_id: string;
+    }
+  | {
+      type: "message_queue_reorder";
+      session_id: string;
+      command_ids: string[];
+    }
+  | {
+      type: "message_queue_auto_send_set";
+      session_id: string;
+      enabled: boolean;
+    }
+  | {
+      type: "message_queue_send_now";
+      session_id: string;
+      queued_command_id: string;
+    }
   | { type: "attachment_remove"; session_id: string; attachment_id: string }
   | {
       type: "history_page";

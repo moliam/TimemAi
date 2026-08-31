@@ -33,27 +33,23 @@ It may contain:
 - Frame-budgeted, order-preserving inbound event batching; memoized turn
   subtrees; and browser layout/paint containment for completed offscreen turns.
   These presentation optimizations must not drop or reorder semantic events.
-- A durable browser command outbox for non-idempotent mutations. The UI assigns
-  one stable `command_id`, keeps user content until the matching committed
-  acknowledgement, and retries the same ID after reconnect. Ordinary Send while
-  a Turn is active must be submitted to the Host immediately as a distinct next
-  task; browser lifecycle, visibility, and completion callbacks must not own its
-  execution. Accepted commands
-  remain owned and cannot be silently replaced by editing, deleting, reordering,
-  switching Session, or another tab. The UI may render Pod-projected input as
-  waiting for the next Turn, but it must not decide this from whether a final
-  answer is visible: Core's input-admission result is authoritative.
+- Live one-shot browser command delivery. The UI may assign a correlation
+  `command_id`, but sends only while the WebSocket is open and the initial Host
+  snapshot is ready. It does not persist an outbox, replay commands after
+  reconnect/refresh, or treat `accepted` ACKs as business success. If a command
+  never reaches Host, it did not happen and the user may explicitly try again.
+  Host projections/events remain the only source of visible business changes.
 - Per-tab semantic event cursors and strict sequenced delivery. In cursor mode,
   authoritative state is reduced only from `semantic_event` envelopes; raw
   legacy duplicates are ignored. The cursor advances only after the reducer
   applies the event, and a gap forces replay instead of speculative skipping.
-  Browser storage records are bounded, scoped by origin/memory space/Session,
-  and must never persist API keys or MCP secrets.
+  Delivery cursors and projection caches are bounded and tab-local; command
+  payloads, API keys, and MCP secrets must not be persisted for replay.
 
 It must not contain:
 
-- A second Agent lifecycle state machine. Browser-local command delivery may show
-  Sending/Retrying, but it must not create, cancel, finish, or revive a Turn.
+- A second Agent lifecycle state machine, a persistent/cross-reconnect command
+  outbox, or visible per-command Sending/Waiting/Retrying business state.
 - Browser-specific semantics that a Swift, desktop, or terminal UI would need to
   copy. Shared Turn behavior must be added to Core; shared asynchronous delivery
   behavior belongs in the HTTP/WebSocket Bridge; only visual and browser-local

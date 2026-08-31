@@ -104,6 +104,7 @@ describe("Stop feature acceptance", () => {
     });
     expect(acknowledged.state).toBe("ready");
     expect(acknowledged.workers.every((worker) => worker.state !== "working")).toBe(true);
+    expect(sessionCancellationApplies(acknowledged)).toBe(false);
     expect(sessionVisuallyWorking(acknowledged)).toBe(false);
   });
 
@@ -126,7 +127,7 @@ describe("Stop feature acceptance", () => {
     expect(afterLateWorker.workers[0].state).toBe("ready");
   });
 
-  it("does not let a browser outbox override a stale Host snapshot", () => {
+  it("does not let live command correlation override a stale Host snapshot", () => {
     const staleSnapshot = runningSession();
     expect(sessionCancellationApplies(staleSnapshot)).toBe(false);
     expect(sessionVisuallyWorking(staleSnapshot)).toBe(true);

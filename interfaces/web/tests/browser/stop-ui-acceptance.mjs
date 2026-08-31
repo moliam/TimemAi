@@ -55,6 +55,11 @@ const makeSession = (extra = {}) => ({
   attachments: [], roles: [], messages: [], turns: [turn("turn-1")],
   history_before_cursor: null, history_has_more: false,
   active_turn_id: "turn-1", cancelling_turn_id: null, pending_turn_id: null,
+  message_queue: {
+    revision: 0, items: [], auto_send_enabled: true,
+    continuation: { state: "awaiting_normal_completion" },
+    dispatching_command_id: null,
+  },
   ...extra,
 });
 const makeCancelledSession = (base = makeSession()) => ({
@@ -127,7 +132,10 @@ function makePeer(socket, onJson) {
 
 async function startHost() {
   let authoritativeSession = makeSession();
-  let eventSequence = 0;
+  // A real Host normally has emitted events before a browser connects. A
+  // reconnect baseline must therefore work from a non-zero sequence.
+  let eventSequence = 40;
+  let connectionCount = 0;
   const peers = new Set();
   const commands = [];
   const mime = {
@@ -148,6 +156,7 @@ async function startHost() {
     }
   });
   server.on("upgrade", (request, socket) => {
+    connectionCount += 1;
     const accept = createHash("sha1")
       .update(`${request.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
       .digest("base64");
@@ -158,14 +167,50 @@ async function startHost() {
     let peer;
     peer = makePeer(socket, (command) => {
       commands.push(command);
-      if (command.command_id) {
-        peer.send({ type: "command_ack", command_id: command.command_id, status: "accepted" });
-        // Keep turn_cancel durable until authoritative TurnFinished. This
-        // reproduces a reload that receives an older working snapshot while
-        // cancellation is already accepted by Host.
-        if (command.type !== "turn_cancel")
-          peer.send({ type: "command_ack", command_id: command.command_id, status: "committed" });
+      if (!command.command_id) return;
+      peer.send({ type: "command_ack", command_id: command.command_id, status: "accepted" });
+      if (command.type === "turn_submit" && authoritativeSession.state === "working") {
+        authoritativeSession = {
+          ...authoritativeSession,
+          message_queue: {
+            ...authoritativeSession.message_queue,
+            revision: authoritativeSession.message_queue.revision + 1,
+            items: [
+              ...authoritativeSession.message_queue.items,
+              {
+                command_id: command.command_id,
+                enqueue_seq: authoritativeSession.message_queue.items.length,
+                payload: {
+                  turn_id: `queued-${command.command_id}`,
+                  text: command.text,
+                  created_at_ms: Date.now(),
+                  attachments: [],
+                  worker_roles: [],
+                },
+              },
+            ],
+          },
+        };
+        eventSequence += 1;
+        peer.send({
+          type: "semantic_event",
+          event_seq: eventSequence,
+          event: {
+            type: "message_queue_updated",
+            session_id: authoritativeSession.session_id,
+            message_queue: authoritativeSession.message_queue,
+          },
+        });
+        // Transport acceptance is not business completion. The authoritative
+        // Session queue projection nevertheless makes this future task visible
+        // immediately, without browser-owned persistence or replay.
+        return;
       }
+      // Keep turn_cancel durable until authoritative TurnFinished. This
+      // reproduces a reload that receives an older working snapshot while
+      // cancellation is already accepted by Host.
+      if (command.type !== "turn_cancel")
+        peer.send({ type: "command_ack", command_id: command.command_id, status: "committed" });
     });
     peers.add(peer);
     socket.on("close", () => peers.delete(peer));
@@ -182,6 +227,8 @@ async function startHost() {
       const envelope = { type: "semantic_event", event_seq: eventSequence, event };
       for (const peer of peers) peer.send(envelope);
     },
+    getSession() { return authoritativeSession; },
+    getConnectionCount() { return connectionCount; },
     setSession(session) { authoritativeSession = session; },
     close() { return new Promise((resolve) => server.close(resolve)); },
   };
@@ -338,11 +385,50 @@ async function main() {
       () => exists('.turn-assistant-frame.working .turn-work-item'),
       "first process event did not populate the formal working frame",
     );
+    assert(host.getConnectionCount() === 1, "non-zero event baseline forced a WebSocket reconnect");
+    assert(
+      !(await contains('body', "Runtime event gap")),
+      "non-zero event baseline surfaced a runtime sequence error",
+    );
+
+    // Thought/action-style progress is intentionally bursty. It must remain on
+    // the same transport connection instead of turning sequence progress into
+    // a reconnect/error-notice storm.
+    for (let round = 1; round <= 32; round += 1) {
+      host.send({
+        type: "worker_activity", session_id: "session-1", context_id: "context-1",
+        worker_id: "worker-1", turn_id: "turn-1",
+        event: { kind: "model_request", round },
+      });
+    }
+    await sleep(750);
+    assert(host.getConnectionCount() === 1, "progress burst rebuilt the WebSocket connection");
+    assert(
+      !(await contains('body', "Runtime event gap")) &&
+        !(await contains('body', "Runtime disconnected")) &&
+        !(await contains('body', "Runtime error")) &&
+        !(await contains('body', "Connection lost")),
+      "progress burst surfaced runtime gap or reconnect notices",
+    );
     assert(
       await exists('.turn-assistant-frame.working[data-acceptance-working-frame="stable"]'),
       "first process event replaced the formal working frame",
     );
     assert(!(await exists('.turn-starting-status')), "obsolete placeholder working returned after the first process event");
+
+    // Queue multiple future tasks through the real composer and WebSocket. Host
+    // projects them as Session-owned FIFO items while the original Turn remains active.
+    await enterMessage("Queued task two");
+    await enterMessage("Queued task three");
+    await waitFor(
+      () => sent("turn_submit").filter((command) => command.text?.startsWith("Queued task")).length === 2,
+      "composer did not submit both future tasks",
+    );
+    await waitFor(
+      () => contains(".queued-message-list", "Queued task two") && contains(".queued-message-list", "Queued task three"),
+      "Host queue projection did not render both future tasks",
+    );
+    assert(await exists('button[aria-label="Cancel current turn"]'), "active original Turn lost Stop before cancellation");
 
     // Irregular action: two immediate clicks must still emit one targeted cancellation.
     await browser.evaluate(`(() => {
@@ -360,7 +446,7 @@ async function main() {
       "Stop click rendered Cancelled before Host state arrived",
     );
 
-    const cancelledSession = makeCancelledSession();
+    const cancelledSession = makeCancelledSession(host.getSession());
     host.setSession(cancelledSession);
     host.send({
       type: "turn_cancelling", session: cancelledSession,
@@ -372,6 +458,22 @@ async function main() {
       () => contains('.completion-card[aria-label="Turn completion statistics"]', "Cancelled"),
       "Host-confirmed Session did not render Cancelled",
     );
+    await waitFor(
+      async () => !(await exists('button.stop-button')),
+      "terminal chat left the composer in Stop state",
+    );
+    assert(
+      await exists('textarea[aria-label="Message Timem"]:not(:disabled)'),
+      "terminal chat did not restore the editable composer",
+    );
+    assert(
+      await contains(".queued-message-list", "Queued task two") &&
+        await contains(".queued-message-list", "Queued task three"),
+      "Stop removed or hid Host-owned future tasks",
+    );
+    await sleep(600);
+    assert(!(await exists('button.stop-button')), "queued future tasks changed Send back to Stop");
+    assert(await exists('button.send-button'), "Send button was not stable after Stop with queued tasks");
 
     // A new message is a normal direct submit. The runtime may still hold Core
     // execution behind its private terminal barrier, but the browser must not
@@ -416,8 +518,19 @@ async function main() {
     await sleep(180);
     assert(!(await exists('.session-working-icon[aria-label="Session working"]')), "late Core event revived spinner");
 
-    // Refresh/reconnect derives presentation only from Host snapshot. The
-    // browser outbox must not synthesize or override cancellation state.
+    // Every valid operation above must preserve the original transport. A page
+    // reload below is the first action allowed to create another connection.
+    assert(host.getConnectionCount() === 1, "valid UI operations rebuilt the WebSocket connection");
+    assert(
+      !(await contains('body', "Runtime event gap")) &&
+        !(await contains('body', "Runtime disconnected")) &&
+        !(await contains('body', "Runtime error")) &&
+        !(await contains('body', "Connection lost")),
+      "valid UI operations surfaced runtime disconnect UX",
+    );
+
+    // Refresh/reconnect derives presentation only from the Host snapshot.
+    // Live command correlation must not synthesize or override cancellation state.
     host.setSession(cancelledSession);
     await browser.call("Page.reload", { ignoreCache: true });
     await waitFor(
@@ -473,6 +586,8 @@ async function main() {
     console.log("- obsolete placeholder working never renders");
     console.log("- double Stop -> one targeted turn_cancel");
     console.log("- Stop click does not change business UI before Host state arrives");
+    console.log("- two Host-projected queued tasks remain queued and cannot turn Send back into Stop");
+    console.log("- Host-confirmed terminal chat immediately restores the editable Send composer");
     console.log("- Host-confirmed and reconnect Session state render Cancelled");
     console.log("- post-confirmation late Core events cannot revive spinner");
     console.log("- the next task submits directly and never appears in the waiting queue");
