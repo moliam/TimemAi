@@ -562,6 +562,19 @@ fn resolve_path(cwd: &Path, path: &str) -> PathBuf {
 }
 
 fn open_regular_file(path: &Path) -> Result<(File, fs::Metadata), ReadfileError> {
+    // On Windows, opening a directory for ordinary file reads commonly fails
+    // with AccessDenied before a handle is returned. Classify the path from
+    // metadata first so directories and special files consistently report the
+    // platform-neutral `not_regular_file` error. Recheck the opened handle
+    // below to remain safe if the path changes between these operations.
+    let path_metadata = fs::metadata(path).map_err(|error| map_open_error(path, error))?;
+    if !path_metadata.is_file() {
+        return Err(ReadfileError::new(
+            "not_regular_file",
+            "The path is a directory or special file. readfile accepts regular files only.",
+        ));
+    }
+
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -901,5 +914,5 @@ fn quote(value: &str) -> String {
 }
 
 #[cfg(test)]
-#[path = "../../../agent_core/tests/unit/capability_tool_readfile_tests.rs"]
+#[path = "../../../core/agent/tests/unit/capability_tool_readfile_tests.rs"]
 mod tests;

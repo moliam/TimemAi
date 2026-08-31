@@ -1,8 +1,8 @@
 [workspace]
-members = ["agent_core", "host_projection", "timem_shell", "timem_web"]
+members = ["bridges/in_process", "core/agent", "core/platform", "core/session", "core/ui_contract", "bridges/http_websocket", "interfaces/shell", "applications/timem"]
 resolver = "2"
 
 [workspace.package]
 edition = "2021"
-version = "1.3.0"
+version = "2.0.0"
 license = "Apache-2.0"

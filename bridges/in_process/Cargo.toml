@@ -1,0 +1,9 @@
+[package]
+name = "timem_in_process"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+timem_session = { path = "../../core/session" }
+timem_ui_contract = { path = "../../core/ui_contract" }

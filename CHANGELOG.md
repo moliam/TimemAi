@@ -2,6 +2,56 @@
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-08-31
+
+### Added
+
+- Add a repository-level `AGENTS.md` development constitution covering durable
+  architecture, coding-quality, testing, performance, compatibility,
+  documentation, and delivery requirements.
+- Add `core/platform` as the `timem_platform` crate, with a public platform API,
+  shared Unix primitives, target-gated macOS/Linux implementations, and migrated
+  behavioral tests.
+- Add a semantic-layout architecture guard with negative fixture tests proving
+  that legacy directories, reverse dependencies, and escaped process primitives
+  are rejected.
+
+### Fixed
+
+- Move ordinary next-task delivery from the browser-local completion loop into a
+  bounded Host-owned FIFO. Multiple tasks submitted during active work now keep
+  running in order in the same live runtime even if the browser locks, disconnects,
+  refreshes, or closes; legacy local rows migrate in order, while explicit pause
+  remains respected. Stop still preserves queued next tasks, and a runtime process
+  restart remains the hard Stop boundary that discards persisted next-turn intent.
+
+### Changed
+
+- Remove the transitional `timem_web` Cargo package identity. The unified Application package
+  and executable are now both `timem`; Cargo commands use `-p timem`, while installers may
+  retain `timem-web` only as a symlink or forwarding command shim.
+- Complete the runtime-root migration by moving the former top-level `timem_web/`
+  source tree to `applications/timem/`, then unifying its Cargo package and binary as
+  `timem` while making the Application a product composition
+  root rather than an architectural dependency layer.
+- Route the Shell's synchronous Turn access through the reusable
+  `bridges/in_process` boundary, which now depends on `core/session` and
+  `core/ui_contract` instead of directly on Agent. The Bridge is the shared path
+  for all same-process Rust Interfaces; desktop, FFI, and IPC modules remain
+  absent until a real consumer and executable tests exist.
+- Update the repository README, development constitution, architecture diagrams,
+  module boundaries, test strategy/handbook, semantic-layout migration record,
+  scripts, CI, installers, and local documentation links to the completed layout.
+- Move the terminal Interface to `interfaces/shell` and the browser Interface to
+  `interfaces/web` while preserving the reusable `timem_shell` package contract and using
+  `timem` for the unified Application package.
+- Deliver one real `timem` executable: Web launches by default and `timem --shell`
+  launches the terminal Interface. Installers migrate old independent binaries in
+  place and retain `timem-web` only as a symlink or forwarding compatibility shim.
+- Update build, install, CI, documentation, Web evidence-matrix, dependency-license,
+  and performance gates to use the semantic project layout. License validation
+  now fails closed if no dependency packages are actually scanned.
+
 ## [1.3.0] - 2026-08-30
 
 ### Added

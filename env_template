@@ -6,6 +6,7 @@
 #   cp env_template env
 #   $EDITOR env
 #   source /absolute/path/to/env
+# Windows PowerShell sets values with: $env:TIMEM_API_KEY = '...'
 #
 # Keep the copied env file private. Do not commit API keys.
 
@@ -32,8 +33,10 @@
 # Model name.
 # export TIMEM_MODEL=qwen-plus
 
-# Absolute MEM directory path. If unset, Timem uses ~/.timem/mem and creates it.
+# Absolute MEM directory path. Defaults to ~/.timem/mem on macOS/Linux and
+# %USERPROFILE%\.timem\mem on Windows.
 # export TIMEM_SPACE=/absolute/path/to/mem
+# Windows: $env:TIMEM_SPACE = 'C:\Users\you\timem-mem'
 
 # Model API request timeout in seconds.
 # export TIMEM_TIMEOUT=120

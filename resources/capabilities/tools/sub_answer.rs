@@ -45,5 +45,5 @@ fn failed(error: &str) -> ActionExecution {
 }
 
 #[cfg(test)]
-#[path = "../../../agent_core/tests/unit/capability_tool_sub_answer_tests.rs"]
+#[path = "../../../core/agent/tests/unit/capability_tool_sub_answer_tests.rs"]
 mod tests;
