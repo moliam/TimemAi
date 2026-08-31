@@ -355,11 +355,18 @@ per-turn process events are bounded independently. Concurrent workers never
 share a turn envelope. Model calls, prompt construction, memory, protocol
 parsing, and tool execution remain in `agent_core`.
 
-The WebSocket receive loop never executes host commands inline. Each connection
-uses one bounded FIFO command queue whose worker runs synchronous filesystem and
-Session operations on Tokio's blocking pool. Core topics continue flowing while
-such a command is pending, command order is preserved, and a click flood receives
-an explicit queue-full error instead of creating unbounded work.
+Generic WebSocket frame splitting, one-pass JSON wire encoding/decoding, same-origin validation,
+and browser-safe response headers live in `bridges/http_websocket`. Product authentication,
+route composition, authoritative snapshot construction, command admission, ACK correlation, and
+Session/Core dispatch remain in `applications/timem`. The Cargo package identity `timem_web` is
+compatibility-only and does not denote a separate architecture module.
+
+The product-side WebSocket delivery loop never executes host commands inline. Each connection
+uses one bounded FIFO command queue whose worker runs synchronous filesystem and Session
+operations on Tokio's blocking pool. Core topics continue flowing while such a command is pending,
+command order is preserved, and a click flood receives an explicit queue-full error instead of
+creating unbounded work. Disconnecting a socket does not revoke Host ownership of commands already
+accepted into that bounded queue.
 
 Web host availability is independent from model-model service readiness. Startup may
 construct an incomplete model service draft with an empty API key so the browser can

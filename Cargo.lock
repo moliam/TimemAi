@@ -1429,6 +1429,8 @@ dependencies = [
 name = "timem_http_websocket"
 version = "1.3.0"
 dependencies = [
+ "axum",
+ "futures-util",
  "serde",
  "serde_json",
  "timem_ui_contract",
