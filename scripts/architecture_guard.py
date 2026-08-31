@@ -12,6 +12,7 @@ REQUIRED = (
     "docs/semantic-project-layout.md",
     "core/agent/Cargo.toml",
     "core/agent/src/lib.rs",
+    "core/agent/src/model_transport.rs",
     "core/session/Cargo.toml",
     "core/session/module_boundary.md",
     "core/session/src/lib.rs",
@@ -154,6 +155,16 @@ def violations(root: Path) -> list[str]:
         errors.append("agent_core must preserve its public os facade through timem_platform")
     if "pub mod os;" in agent_lib:
         errors.append("agent_core must not restore its legacy embedded os module")
+    if "reqwest" not in agent_manifest:
+        errors.append("agent_core must own model HTTP through a native Rust HTTP dependency")
+    model_transport = text(root, "core/agent/src/model_transport.rs")
+    if "reqwest::Client" not in model_transport:
+        errors.append("agent_core model transport must use the native Rust HTTP client")
+    for forbidden in ('Command::new("curl")', "CurlConfigFile", "build_curl_command"):
+        if forbidden in model_transport:
+            errors.append(
+                f"agent_core model transport must not spawn curl or restore curl config plumbing: {forbidden}"
+            )
 
     session_manifest = text(root, "core/session/Cargo.toml")
     if 'name = "timem_session"' not in session_manifest:
@@ -332,8 +343,9 @@ def write_fixture(root: Path) -> None:
         "Cargo.toml": '[workspace]\nmembers = ["bridges/in_process", "bridges/http_websocket", "core/agent", "core/platform", "core/session", "core/ui_contract", "interfaces/shell", "applications/timem"]\n',
         "docs/semantic-project-layout.md": "\n".join(ARCHITECTURE_CONTRACT_MARKERS),
         "docs/windows-support-matrix.md": "platform implemented; upper layers not yet supported\n",
-        "core/agent/Cargo.toml": '[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\n',
+        "core/agent/Cargo.toml": '[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\nreqwest = "0.11"\n',
         "core/agent/src/lib.rs": "pub use timem_platform as os;\n",
+        "core/agent/src/model_transport.rs": "fn send() { let _client: Option<reqwest::Client> = None; }\n",
         "core/session/Cargo.toml": '[package]\nname = "timem_session"\n[dependencies]\nagent_core = { path = "../agent" }\ntimem_ui_contract = { path = "../ui_contract" }\n',
         "core/session/module_boundary.md": "session boundary\n",
         "core/session/src/lib.rs": "pub struct CoreSessionWorker;\n",
@@ -428,7 +440,8 @@ def self_test() -> None:
         ("Shell Unix primitive outside OS adapter", lambda root: (root / "interfaces/shell/src/app.rs").write_text("fn main() { run_in_process_turn(); libc::fcntl(0, 0); }\n")),
         ("missing Windows Shell console adapter", lambda root: (root / "interfaces/shell/src/os/windows/console.rs").unlink()),
         ("missing Windows Web lifecycle adapter", lambda root: (root / "applications/timem/src/os/windows/lifecycle.rs").unlink()),
-        ("Agent to Session reverse dependency", lambda root: (root / "core/agent/Cargo.toml").write_text('[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\ntimem_session = { path = "../session" }\n')),
+        ("Agent to Session reverse dependency", lambda root: (root / "core/agent/Cargo.toml").write_text('[dependencies]\ntimem_platform = { path = "../platform" }\ntimem_ui_contract = { path = "../ui_contract" }\nreqwest = "0.11"\ntimem_session = { path = "../session" }\n')),
+        ("model transport restores curl subprocess", lambda root: (root / "core/agent/src/model_transport.rs").write_text('fn send() { let _client: Option<reqwest::Client> = None; let _ = Command::new("curl"); }\n')),
         ("reverse dependency", lambda root: (root / "core/platform/Cargo.toml").write_text('[package]\nname = "timem_platform"\n[dependencies]\ntimem_shell = { path = "../../interfaces/shell" }\n')),
         ("UI contract reverse dependency", lambda root: (root / "core/ui_contract/Cargo.toml").write_text('[package]\nname = "timem_ui_contract"\n[dependencies]\nagent_core = { path = "../agent" }\n')),
         ("escaped process primitive", lambda root: (root / "core/agent/src/leak.rs").write_text("fn leak() { libc::waitpid(0, std::ptr::null_mut(), 0); }\n")),

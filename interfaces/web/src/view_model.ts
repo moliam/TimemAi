@@ -612,6 +612,7 @@ export function sessionCreateDecision(
   displayNameDraft: string,
   workspaceDirDraft: string,
   envDraft: Record<string, string>,
+  groupId: string | null,
   creating: boolean,
   isMemSwitching = false,
 ): SessionCreateDecision {
@@ -634,6 +635,7 @@ export function sessionCreateDecision(
       type: "session_create",
       ...(displayName ? { display_name: displayName } : {}),
       workspace_dir: workspaceDir,
+      group_id: groupId,
       env,
     },
   };

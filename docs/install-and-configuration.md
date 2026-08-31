@@ -325,8 +325,8 @@ Writes use narrow lock domains: each Session owns one data lock for its metadata
 and history; Session groups, Roles, tool jobs, and audit data use separate locks.
 Independent Sessions therefore do not wait on each other's metadata or chat
 writes. Cross-collection group changes release in-memory locks before filesystem or
-worker operations. Group moves persist a candidate Session snapshot before
-committing memory. Group deletion persists affected Session metadata first,
+worker operations. Session creation validates and persists its selected group as
+part of the same Host operation. Group deletion persists affected Session metadata first,
 rolls those writes back if a later write fails, and removes the group definition
 only after all Session writes succeed.
 
@@ -448,9 +448,15 @@ Web:
   Session's CWD.
 - Sessions can use different model/API/runtime settings.
 - The sidebar supports persistent Session groups. Groups can be created,
-  renamed, reordered, collapsed, and deleted; deleting a group moves its
-  Sessions to **Unsorted** without deleting them. A Session can be moved between
-  groups while other Sessions continue working.
+  renamed, collapsed, and deleted only while empty. Group order is fixed by
+  creation order and cannot be dragged or otherwise reordered. A Group that
+  contains Sessions cannot be deleted. **Unsorted** is a permanent built-in
+  group: it can be collapsed and used to create Sessions, but cannot be renamed,
+  reordered, or deleted. Each group heading has its own New Session button; the
+  selected group is fixed when
+  the Session is created and Sessions cannot later be moved between groups.
+  Sessions restored from older metadata without a `group_id` appear in
+  **Unsorted** without any migration prompt.
 - Attachments are stored under the active MEM and passed to the active
   turn.
 - Stop cancels all workers in the active Session; the next send starts from the

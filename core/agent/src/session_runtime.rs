@@ -195,7 +195,7 @@ pub fn run_session_turn(
     ui: &mut dyn TurnUi,
     profiler: Option<&mut RuntimeProfiler>,
 ) -> TurnOutcome {
-    let mut model_client = HttpModelClient;
+    let mut model_client = HttpModelClient::default();
     run_session_turn_with_model_client(core, config, request, ui, profiler, &mut model_client)
 }
 

@@ -584,6 +584,12 @@ fn api_payload_message_entries(payload: &serde_json::Value) -> Vec<serde_json::V
     if let Some(system) = payload.get("system") {
         entries.push(serde_json::json!({"role": "system", "content": system}));
     }
+    if let Some(instructions) = payload.get("instructions") {
+        entries.push(serde_json::json!({
+            "role": "system",
+            "content": instructions
+        }));
+    }
     if let Some(messages) = payload
         .get("messages")
         .and_then(serde_json::Value::as_array)
@@ -2306,6 +2312,7 @@ mod tests {
             interaction_request: None,
             api_payload: Some(serde_json::json!({
                 "model": "ignored-model",
+                "instructions": "responses system instructions",
                 "input": [
                     {"role": "user", "content": [{"type": "input_text", "text": "first", "cache_control": {"type": "ephemeral"}}]},
                     {"type": "function_call", "call_id": "call_1", "name": "readfile", "arguments": "{\"path\":\"README.md\"}", "status": "completed"},
@@ -2318,10 +2325,12 @@ mod tests {
         };
 
         let html = render_llm_prompt_html("session_responses_input", Some(&request));
+        let instructions = html.find("responses system instructions").unwrap();
         let first = html.find("first").unwrap();
         let call = html.find("call_1").unwrap();
         let second = html.find("second").unwrap();
         let third = html.find("third").unwrap();
+        assert!(instructions < first);
         assert!(first < call && call < second && second < third);
         assert!(html.contains("function_call"));
         assert!(html.contains("function_call_output"));

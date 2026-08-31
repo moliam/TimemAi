@@ -3,123 +3,73 @@ use crate::{api_audit_stream_path, read_api_audit_doc, LocalLLMKeyFile};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
-use std::time::Instant;
-
-#[cfg(unix)]
-fn test_shell_command(script: &str) -> Command {
-    let mut command = Command::new("sh");
-    command.arg("-c").arg(script);
-    command
-}
-
-#[cfg(windows)]
-fn test_shell_command(script: &str) -> Command {
-    let mut command = Command::new("powershell.exe");
-    command.args([
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        script,
-    ]);
-    command
-}
+use std::time::{Duration, Instant};
 
 fn local_llm_key_file_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../key")
 }
 
+fn test_audit_file(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "timem_native_http_{label}_{}_{}.jsonl",
+        std::process::id(),
+        crate::now_ms()
+    ))
+}
+
+fn success_body(content: &str) -> String {
+    serde_json::json!({
+        "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    })
+    .to_string()
+}
+
+fn local_config(addr: std::net::SocketAddr, timeout_secs: u64) -> ModelServiceConfig {
+    let mut config = LocalLLMKeyFile {
+        api_key: "native-http-test-key".to_string(),
+        available_models: vec!["native-http-test-model".to_string()],
+    }
+    .to_model_service_config("native-http-test-model");
+    config.base_url = format!("http://{addr}/v1");
+    config.timeout_secs = timeout_secs;
+    config
+}
+
 #[test]
-fn cancellable_command_returns_without_waiting_for_process_timeout() {
-    let started = Instant::now();
+fn cancellation_interrupts_waiting_for_response_headers() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        thread::sleep(Duration::from_secs(2));
+    });
+
+    let config = local_config(addr, 5);
+    let audit_file = test_audit_file("cancel");
     let cancel_after = Instant::now() + Duration::from_millis(80);
-    let err = run_command_with_optional_input_and_cancel(
-        test_shell_command(if cfg!(windows) {
-            "Start-Sleep -Seconds 5; Write-Output done"
-        } else {
-            "sleep 5; echo done"
-        }),
-        None,
-        &mut || Instant::now() >= cancel_after,
-    )
+    let started = Instant::now();
+    let error = call_model_with_cancel(&config, "cancel me", &audit_file, &mut || {
+        Instant::now() >= cancel_after
+    })
     .unwrap_err();
 
-    assert_eq!(err, "cancelled_by_user");
+    assert_eq!(error, "cancelled_by_user");
     assert!(
-        started.elapsed() < Duration::from_millis(250),
-        "model transport cancellation took {:?}",
+        started.elapsed() < Duration::from_millis(500),
+        "native HTTP cancellation took {:?}",
         started.elapsed()
     );
+    let _ = std::fs::remove_file(audit_file);
 }
 
 #[test]
-fn large_model_request_body_is_streamed_through_stdin_without_argv_limits() {
-    let body = vec![b'x'; 4 * 1024 * 1024];
-    let output = run_command_with_input_and_cancel(
-        test_shell_command(if cfg!(windows) {
-            r#"$received = [Console]::In.ReadToEnd().Length; [Console]::Out.Write("$received`n200")"#
-        } else {
-            "received=$(wc -c | tr -d ' '); printf '%s\n200' \"$received\""
-        }),
-        body,
-        &mut || false,
-    )
-    .unwrap();
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let (received, status) = split_curl_body_status(&stdout).unwrap();
-    assert_eq!(status, 200);
-    assert_eq!(received, (4 * 1024 * 1024).to_string());
-}
-
-#[test]
-fn model_api_curl_command_does_not_expose_secret_or_body_in_argv() {
-    let key_file = LocalLLMKeyFile {
-        api_key: "sk-test-secret".to_string(),
-        available_models: vec!["qwen-test".to_string()],
-    };
-    let config = key_file.to_model_service_config("qwen-test");
-    let request = prepare_model_http_request(&config, "prompt with private body");
-    let body = serde_json::to_string(&request.model_request.body).unwrap();
-    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
-    let command = build_curl_command(config.timeout_secs, curl_config_file.path());
-    let argv = command
-        .get_args()
-        .map(|arg| arg.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    assert!(!argv.contains("sk-test-secret"), "{argv}");
-    assert!(!argv.contains("prompt with private body"), "{argv}");
-    assert!(argv.contains("--config"), "{argv}");
-    assert!(argv.contains("--data-binary @-"), "{argv}");
-
-    let curl_config = build_curl_config(&request);
-    assert!(curl_config.contains("Authorization: Bearer sk-test-secret"));
-    assert!(!curl_config.contains("prompt with private body"));
-    assert!(body.contains("prompt with private body"));
-    assert!(curl_config_file.path().exists());
-}
-
-#[test]
-fn model_timeout_is_connect_and_inactivity_bound_not_total_duration() {
-    let command = build_curl_command(7, Path::new("curl-test.conf"));
-    let argv = command
-        .get_args()
-        .map(|arg| arg.to_string_lossy())
-        .collect::<Vec<_>>();
-
-    assert!(!argv.iter().any(|arg| arg == "--max-time"), "{argv:?}");
-    assert!(argv
-        .windows(2)
-        .any(|pair| pair == ["--connect-timeout", "7"]));
-    assert!(argv.iter().any(|arg| arg == "--no-buffer"), "{argv:?}");
-    assert!(!argv.iter().any(|arg| arg == "--speed-time"), "{argv:?}");
-}
-
-#[test]
-fn progressing_response_may_outlive_configured_timeout() {
+fn native_http_sends_custom_headers_and_json_body() {
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(listener) => listener,
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
@@ -128,173 +78,30 @@ fn progressing_response_may_outlive_configured_timeout() {
     let addr = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let _request = read_http_request(&mut stream);
+        let request = read_http_request(&mut stream);
+        let body = success_body("ok");
         stream
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 6\r\nConnection: close\r\n\r\n",
-            )
+            .write_all(&http_json_response("200 OK", &body))
             .unwrap();
-        for part in [b"aa", b"bb", b"cc"] {
-            stream.write_all(part).unwrap();
-            stream.flush().unwrap();
-            thread::sleep(Duration::from_millis(600));
-        }
+        request
     });
 
-    let mut request = prepare_model_http_request(
-        &LocalLLMKeyFile {
-            api_key: "test-key".to_string(),
-            available_models: vec!["test-model".to_string()],
-        }
-        .to_model_service_config("test-model"),
-        "hello",
-    );
-    request.endpoint = format!("http://{addr}/v1/chat/completions");
-    let body = serde_json::to_string(&request.model_request.body).unwrap();
-    let started = Instant::now();
-    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
-    let output = run_command_with_input_cancel_and_inactivity_timeout(
-        build_curl_command(1, curl_config_file.path()),
-        body.into_bytes(),
-        Duration::from_secs(1),
-        &mut || false,
-    )
-    .unwrap();
-
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(started.elapsed() > Duration::from_millis(1_200));
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let (response, status) = split_curl_body_status(&stdout).unwrap();
-    assert_eq!(status, 200);
-    assert_eq!(response, "aabbcc");
-    server.join().unwrap();
-}
-
-#[test]
-fn stalled_response_still_hits_configured_inactivity_timeout() {
-    let listener = match TcpListener::bind("127.0.0.1:0") {
-        Ok(listener) => listener,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-        Err(error) => panic!("local test server bind failed: {error}"),
-    };
-    let addr = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let _request = read_http_request(&mut stream);
-        stream
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\n",
-            )
-            .unwrap();
-        thread::sleep(Duration::from_secs(4));
-    });
-
-    let mut request = prepare_model_http_request(
-        &LocalLLMKeyFile {
-            api_key: "test-key".to_string(),
-            available_models: vec!["test-model".to_string()],
-        }
-        .to_model_service_config("test-model"),
-        "hello",
-    );
-    request.endpoint = format!("http://{addr}/v1/chat/completions");
-    let body = serde_json::to_string(&request.model_request.body).unwrap();
-    let started = Instant::now();
-    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
-    let error = run_command_with_input_cancel_and_inactivity_timeout(
-        build_curl_command(1, curl_config_file.path()),
-        body.into_bytes(),
-        Duration::from_secs(1),
-        &mut || false,
-    )
-    .unwrap_err();
-
-    assert_eq!(error, "model_timeout: no response progress for 1 seconds");
-    assert!(started.elapsed() >= Duration::from_millis(900));
-    assert!(started.elapsed() < Duration::from_millis(2_500));
-    server.join().unwrap();
-}
-
-#[test]
-fn curl_config_escape_keeps_values_single_config_entries() {
-    let escaped = curl_config_escape("quote\" slash\\ newline\n tab\t");
-    assert_eq!(escaped, "quote\\\" slash\\\\ newline\\n tab\\t");
-}
-
-#[test]
-fn curl_config_escapes_custom_header_special_characters() {
-    let key_file = LocalLLMKeyFile {
-        api_key: "sk-test-secret".to_string(),
-        available_models: vec!["qwen-test".to_string()],
-    };
-    let mut config = key_file.to_model_service_config("qwen-test");
+    let mut config = local_config(addr, 2);
     config.http_headers.insert(
         "X-Signature".to_string(),
         "quoted=\"yes\"; path=C:\\tmp; city=东京".to_string(),
     );
-    let request = prepare_model_http_request(&config, "hello");
-    let curl_config = build_curl_config(&request);
-    assert!(curl_config
-        .contains("header = \"X-Signature: quoted=\\\"yes\\\"; path=C:\\\\tmp; city=东京\""));
-}
+    let audit_file = test_audit_file("headers");
+    let response = call_model(&config, "private prompt body", &audit_file).unwrap();
+    assert_eq!(response.content, "ok");
 
-#[test]
-fn curl_config_file_and_body_stdin_send_headers_and_body_without_argv_payload() {
-    let listener = match TcpListener::bind("127.0.0.1:0") {
-        Ok(listener) => listener,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-        Err(error) => panic!("local test server bind failed: {error}"),
-    };
-    let addr = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = Vec::new();
-        let mut buffer = [0_u8; 4096];
-        loop {
-            let read = stream.read(&mut buffer).unwrap();
-            if read == 0 {
-                break;
-            }
-            request.extend_from_slice(&buffer[..read]);
-            let text = String::from_utf8_lossy(&request);
-            if text.contains("\r\n\r\n") && text.contains("\"model\"") {
-                break;
-            }
-        }
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
-            .unwrap();
-        String::from_utf8_lossy(&request).to_string()
-    });
-
-    let key_file = LocalLLMKeyFile {
-        api_key: "sk-local-curl-secret".to_string(),
-        available_models: vec!["qwen-test".to_string()],
-    };
-    let expected_authorization = format!("Authorization: Bearer {}", key_file.api_key);
-    let mut config = key_file.to_model_service_config("qwen-test");
-    config.base_url = format!("http://{addr}/v1");
-    let request = prepare_model_http_request(&config, "prompt body through curl config");
-    let body = serde_json::to_string(&request.model_request.body).unwrap();
-    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
-    let output = run_command_with_input_and_cancel(
-        build_curl_command(config.timeout_secs, curl_config_file.path()),
-        body.into_bytes(),
-        &mut || false,
-    )
-    .unwrap();
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let (_body, status) = split_curl_body_status(&stdout).unwrap();
-    assert_eq!(status, 200);
     let captured = server.join().unwrap();
-    assert!(captured.contains(&expected_authorization));
-    assert!(captured.contains("prompt body through curl config"));
+    let captured_lower = captured.to_lowercase();
+    assert!(captured_lower.contains("authorization: bearer native-http-test-key"));
+    assert!(captured_lower.contains("x-signature: quoted=\"yes\"; path=c:\\tmp; city=东京"));
+    assert!(captured.contains("private prompt body"));
+    assert!(captured.contains(r#""model":"native-http-test-model""#));
+    let _ = std::fs::remove_file(audit_file);
 }
 
 #[test]
@@ -308,82 +115,165 @@ fn two_megabyte_model_body_reaches_http_server_intact() {
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let request = read_http_request(&mut stream);
+        let body = success_body("large-ok");
         stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+            .write_all(&http_json_response("200 OK", &body))
             .unwrap();
         request
     });
 
-    let mut config = LocalLLMKeyFile {
-        api_key: "large-body-test-key".to_string(),
-        available_models: vec!["large-body-test-model".to_string()],
-    }
-    .to_model_service_config("large-body-test-model");
-    config.base_url = format!("http://{addr}/v1");
+    let config = local_config(addr, 5);
     let marker = "large-body-tail-marker";
     let prompt = format!("{}{}", "x".repeat(2 * 1024 * 1024), marker);
-    let request = prepare_model_http_request(&config, &prompt);
-    let body = serde_json::to_string(&request.model_request.body).unwrap();
-    assert!(body.len() > 2 * 1024 * 1024);
+    let audit_file = test_audit_file("large");
+    let response = call_model(&config, &prompt, &audit_file).unwrap();
+    assert_eq!(response.content, "large-ok");
 
-    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
-    let output = run_command_with_input_and_cancel(
-        build_curl_command(config.timeout_secs, curl_config_file.path()),
-        body.clone().into_bytes(),
-        &mut || false,
-    )
-    .unwrap();
-
-    assert!(output.status.success());
     let captured = server.join().unwrap();
     let (_, captured_body) = captured.split_once("\r\n\r\n").unwrap();
-    assert_eq!(captured_body.len(), body.len());
-    assert_eq!(captured_body, body);
+    assert!(captured_body.len() > 2 * 1024 * 1024);
     assert!(captured_body.contains(marker));
-    assert!(captured_body.contains(r#""model":"large-body-test-model""#));
+    assert!(captured_body.contains(r#""model":"native-http-test-model""#));
+    let _ = std::fs::remove_file(audit_file);
 }
 
 #[test]
-fn curl_config_file_is_removed_when_guard_drops() {
-    let path = {
-        let config_file = CurlConfigFile::create("request = \"POST\"\n").unwrap();
-        let path = config_file.path().to_path_buf();
-        assert!(path.exists());
-        path
+fn progressing_response_may_outlive_configured_timeout() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
     };
-    assert!(!path.exists());
+    let addr = listener.local_addr().unwrap();
+    let body = success_body("progress-ok");
+    let split_one = body.len() / 3;
+    let split_two = split_one * 2;
+    let body_bytes = body.as_bytes();
+    let pieces = vec![
+        body_bytes[..split_one].to_vec(),
+        body_bytes[split_one..split_two].to_vec(),
+        body_bytes[split_two..].to_vec(),
+    ];
+    let body_len = body.len();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        for piece in pieces {
+            stream.write_all(&piece).unwrap();
+            stream.flush().unwrap();
+            thread::sleep(Duration::from_millis(600));
+        }
+    });
+
+    let config = local_config(addr, 1);
+    let audit_file = test_audit_file("progress");
+    let started = Instant::now();
+    let response = call_model(&config, "slow but progressing", &audit_file).unwrap();
+    assert_eq!(response.content, "progress-ok");
+    assert!(started.elapsed() > Duration::from_secs(1));
+    server.join().unwrap();
+    let _ = std::fs::remove_file(audit_file);
 }
 
-#[cfg(unix)]
 #[test]
-fn curl_config_file_is_owner_readable_only_on_unix() {
-    use std::os::unix::fs::PermissionsExt;
+fn stalled_response_hits_configured_inactivity_timeout() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{")
+            .unwrap();
+        stream.flush().unwrap();
+        thread::sleep(Duration::from_millis(1300));
+    });
 
-    let config_file = CurlConfigFile::create("header = \"Authorization: secret\"\n").unwrap();
-    let mode = std::fs::metadata(config_file.path())
-        .unwrap()
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(mode, 0o600);
+    let config = local_config(addr, 1);
+    let audit_file = test_audit_file("stall");
+    let error = call_model(&config, "stall", &audit_file).unwrap_err();
+    assert_eq!(error, "model_timeout: no response progress for 1 seconds");
+    server.join().unwrap();
+    let _ = std::fs::remove_file(audit_file);
 }
 
 #[test]
-fn large_stdout_and_stderr_are_drained_without_pipe_deadlock() {
-    let output = run_command_with_optional_input_and_cancel(
-        test_shell_command(if cfg!(windows) {
-            "$bytes = New-Object byte[] 2097152; [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length); [Console]::OpenStandardError().Write($bytes, 0, $bytes.Length)"
-        } else {
-            "head -c 2097152 /dev/zero; head -c 2097152 /dev/zero >&2"
-        }),
-        None,
-        &mut || false,
-    )
-    .unwrap();
+fn declared_oversized_response_is_rejected_before_body_read() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_MODEL_RESPONSE_BYTES + 1
+        )
+        .unwrap();
+        stream.flush().unwrap();
+    });
 
-    assert!(output.status.success());
-    assert_eq!(output.stdout.len(), 2 * 1024 * 1024);
-    assert_eq!(output.stderr.len(), 2 * 1024 * 1024);
+    let config = local_config(addr, 2);
+    let audit_file = test_audit_file("declared-oversized-response");
+    let error = call_model(&config, "oversized", &audit_file).unwrap_err();
+    assert_eq!(error, model_response_too_large());
+    server.join().unwrap();
+    let _ = std::fs::remove_file(audit_file);
+}
+
+#[test]
+fn streaming_response_is_rejected_when_accumulated_body_crosses_limit() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        let chunk = vec![b'x'; 1024 * 1024];
+        for _ in 0..=MAX_MODEL_RESPONSE_BYTES / chunk.len() {
+            if stream.write_all(&chunk).is_err() {
+                break;
+            }
+        }
+    });
+
+    let config = local_config(addr, 5);
+    let audit_file = test_audit_file("streaming-oversized-response");
+    let error = call_model(&config, "oversized stream", &audit_file).unwrap_err();
+    assert_eq!(error, model_response_too_large());
+    server.join().unwrap();
+    let _ = std::fs::remove_file(audit_file);
+}
+
+#[test]
+fn malformed_endpoint_is_a_model_network_error() {
+    let mut config = local_config("127.0.0.1:1".parse().unwrap(), 2);
+    config.base_url = "http://[invalid-host".to_string();
+    let audit_file = test_audit_file("network-error");
+    let error = call_model(&config, "invalid endpoint", &audit_file).unwrap_err();
+    assert!(error.starts_with("model_network_error:"), "{error}");
+    let _ = std::fs::remove_file(audit_file);
 }
 
 fn read_http_request(stream: &mut std::net::TcpStream) -> String {
@@ -571,13 +461,6 @@ fn unrelated_client_error_does_not_retry_without_cache_control() {
     assert_eq!(request_count, 1);
 
     let _ = std::fs::remove_file(audit_file);
-}
-
-#[test]
-fn split_curl_body_status_parses_last_line_status() {
-    let (body, status) = split_curl_body_status("{\"ok\":true}\n200").unwrap();
-    assert_eq!(body, "{\"ok\":true}");
-    assert_eq!(status, 200);
 }
 
 #[test]

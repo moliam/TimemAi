@@ -74,6 +74,7 @@ import {
   createContext,
   CSSProperties,
   Dispatch,
+  Fragment,
   memo,
   MutableRefObject,
   ReactNode,
@@ -398,68 +399,6 @@ function makeMessage(
   };
 }
 
-type SortableSessionRenderState = {
-  setNodeRef: (node: HTMLElement | null) => void;
-  style: CSSProperties;
-  attributes: ReturnType<typeof useSortable>["attributes"];
-  listeners: ReturnType<typeof useSortable>["listeners"];
-  isDragging: boolean;
-};
-
-function SortableSession({
-  id,
-  disabled,
-  children,
-}: {
-  id: string;
-  disabled: boolean;
-  children: (state: SortableSessionRenderState) => ReactNode;
-}) {
-  const sortable = useSortable({
-    id: `session:${id}`,
-    disabled,
-    transition: { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" },
-  });
-  return children({
-    setNodeRef: sortable.setNodeRef,
-    style: {
-      transform: CSS.Transform.toString(sortable.transform),
-      transition: sortable.transition,
-      zIndex: sortable.isDragging ? 4 : undefined,
-    },
-    attributes: sortable.attributes,
-    listeners: sortable.listeners,
-    isDragging: sortable.isDragging,
-  });
-}
-
-function SessionDropGroup({
-  id,
-  sessionIds,
-  className,
-  children,
-}: {
-  id: string;
-  sessionIds: string[];
-  className: string;
-  children: ReactNode;
-}) {
-  const droppable = useDroppable({ id: `session-group:${id}` });
-  return (
-    <section
-      ref={droppable.setNodeRef}
-      className={`${className} ${droppable.isOver ? "drop-target" : ""}`}
-    >
-      <SortableContext
-        items={sessionIds.map((sessionId) => `session:${sessionId}`)}
-        strategy={verticalListSortingStrategy}
-      >
-        {children}
-      </SortableContext>
-    </section>
-  );
-}
-
 const SIDEBAR_LAYOUT_STORAGE_KEY = "timem.sidebar-layout.v1";
 const LEFT_SIDEBAR_MIN_WIDTH = 180;
 const LEFT_SIDEBAR_MAX_WIDTH = 380;
@@ -537,7 +476,6 @@ function TimemApp() {
   } | null>(null);
   const [sessionGroupDeleteConfirmId, setSessionGroupDeleteConfirmId] =
     useState("");
-  const [draggedSessionId, setDraggedSessionId] = useState("");
   const authoritativeRoleLibraryRef = useRef<WorkerRoleLibrary>({
     roles: [],
     groups: [],
@@ -633,7 +571,10 @@ function TimemApp() {
     useState(false);
   const [memTemporaryItemsError, setMemTemporaryItemsError] = useState("");
   const [showMcp, setShowMcp] = useState(false);
-  const [showNewSession, setShowNewSession] = useState(false);
+  const [newSessionTarget, setNewSessionTarget] = useState<{
+    groupId: string | null;
+    groupName: string;
+  } | null>(null);
   const [deleteSessionCandidate, setDeleteSessionCandidate] =
     useState<Session | null>(null);
   const [sessionDeleteMode, setSessionDeleteMode] = useState(false);
@@ -832,7 +773,7 @@ function TimemApp() {
       mobileSessionButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeNewSessionDialog = useCallback((restoreFocus = true) => {
-    setShowNewSession(false);
+    setNewSessionTarget(null);
     if (!restoreFocus) return;
     const newSessionButton = newSessionButtonRef.current;
     if (
@@ -2980,9 +2921,6 @@ function TimemApp() {
     : pendingMemSwitch
       ? "Memory switch is in progress"
       : "Open settings";
-  const newSessionLabel = runtimeLocked
-    ? "Session controls are temporarily locked"
-    : "New session";
   const modelEndpointsUnavailable =
     !!server && server.model_endpoints.length === 0;
   const headerModelLabel =
@@ -3109,12 +3047,6 @@ function TimemApp() {
     })),
     { id: "__ungrouped", group: undefined, sessions: ungroupedSessions },
   ];
-  const sessionDragSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    }),
-  );
   useEffect(() => {
     if (
       selectedDeleteSessionId &&
@@ -3126,43 +3058,6 @@ function TimemApp() {
     }
     if (sessionDeleteMode && sessions.length === 0) setSessionDeleteMode(false);
   }, [selectedDeleteSessionId, sessionDeleteMode, sessions]);
-  const draggedSession = sessions.find(
-    (session) => session.session_id === draggedSessionId,
-  );
-  const finishSessionDrag = (event: DragEndEvent) => {
-    setDraggedSessionId("");
-    const sessionId = String(event.active.id).replace(/^session:/, "");
-    const overId = event.over ? String(event.over.id) : "";
-    if (!overId) return;
-    let targetGroupId: string | null | undefined;
-    if (overId.startsWith("session-group:")) {
-      const bucketId = overId.slice("session-group:".length);
-      targetGroupId = bucketId === "__ungrouped" ? null : bucketId;
-    } else if (overId.startsWith("session:")) {
-      const targetSession = sessions.find(
-        (session) => session.session_id === overId.slice("session:".length),
-      );
-      if (targetSession)
-        targetGroupId =
-          sessionBucketId(targetSession) === "__ungrouped"
-            ? null
-            : sessionBucketId(targetSession);
-    }
-    const session = sessions.find(
-      (candidate) => candidate.session_id === sessionId,
-    );
-    if (
-      !session ||
-      targetGroupId === undefined ||
-      (session.group_id ?? null) === targetGroupId
-    )
-      return;
-    sendCommand({
-      type: "session_group_move",
-      session_id: sessionId,
-      group_id: targetGroupId,
-    });
-  };
   const saveSessionGroup = (editor = sessionGroupEditor) => {
     const name = editor?.name.trim();
     if (!editor || !name || runtimeLocked) return;
@@ -3170,16 +3065,6 @@ function TimemApp() {
       ? { type: "session_group_update", group_id: editor.id, name }
       : { type: "session_group_create", name };
     if (sendCommand(command)) setSessionGroupEditor(null);
-  };
-  const moveSessionGroup = (groupId: string, offset: number) => {
-    const index = sessionGroups.findIndex((group) => group.id === groupId);
-    const target = index + offset;
-    if (index < 0 || target < 0 || target >= sessionGroups.length) return;
-    const groups = [...sessionGroups];
-    [groups[index], groups[target]] = [groups[target], groups[index]];
-    setSessionGroups(groups);
-    if (!sendCommand({ type: "session_groups_reorder", groups }))
-      setSessionGroups(sessionGroups);
   };
   const cancelSessionDeleteMode = () => {
     setSessionDeleteMode(false);
@@ -3366,20 +3251,6 @@ function TimemApp() {
               >
                 <FolderPlus size={16} />
               </button>
-              <button
-                type="button"
-                ref={newSessionButtonRef}
-                className="new-session"
-                title={newSessionLabel}
-                aria-label={newSessionLabel}
-                disabled={runtimeLocked || sessionDeleteMode}
-                onClick={() => {
-                  setShowNewSession(true);
-                  closeMobileSidebar(false);
-                }}
-              >
-                <Plus size={16} />
-              </button>
             </div>
             <div className="session-delete-actions">
               {sessionDeleteMode && (
@@ -3464,23 +3335,12 @@ function TimemApp() {
               </button>
             </form>
           )}
-          <DndContext
-            sensors={sessionDragSensors}
-            collisionDetection={closestCenter}
-            onDragStart={(event) =>
-              setDraggedSessionId(
-                String(event.active.id).replace(/^session:/, ""),
-              )
-            }
-            onDragCancel={() => setDraggedSessionId("")}
-            onDragEnd={finishSessionDrag}
+          <nav
+            className="session-list"
+            aria-label="Sessions"
+            aria-busy={!snapshotReady}
           >
-            <nav
-              className="session-list"
-              aria-label="Sessions"
-              aria-busy={!snapshotReady}
-            >
-              {!snapshotReady ? (
+            {!snapshotReady ? (
                 <div
                   className="session-list-loading"
                   role="status"
@@ -3498,161 +3358,140 @@ function TimemApp() {
                   }) => {
                     const collapsed = collapsedSessionGroupIds.has(bucketId);
                     return (
-                      <SessionDropGroup
-                        id={bucketId}
-                        sessionIds={bucketSessions.map(
-                          (session) => session.session_id,
-                        )}
-                        className="session-group"
-                        key={bucketId}
-                      >
+                      <section className="session-group" key={bucketId}>
                         <div className="session-group-heading">
+                          {bucket && sessionGroupEditor?.id === bucket.id ? (
+                            <form
+                              className="session-group-name-editor"
+                              onSubmit={(event) => {
+                                event.preventDefault();
+                                saveSessionGroup();
+                              }}
+                            >
+                              <input
+                                autoFocus
+                                value={sessionGroupEditor.name}
+                                aria-label={`Rename ${bucket.name}`}
+                                onChange={(event) =>
+                                  setSessionGroupEditor({
+                                    id: bucket.id,
+                                    name: event.target.value,
+                                  })
+                                }
+                                disabled={runtimeLocked}
+                                onBlur={(event) => {
+                                  if (event.currentTarget.dataset.cancelled === "true")
+                                    return;
+                                  if (sessionGroupEditor.name.trim())
+                                    saveSessionGroup();
+                                  else setSessionGroupEditor(null);
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Escape") {
+                                    event.preventDefault();
+                                    event.currentTarget.dataset.cancelled = "true";
+                                    setSessionGroupEditor(null);
+                                  }
+                                }}
+                              />
+                            </form>
+                          ) : (
+                            <button
+                              type="button"
+                              className="session-group-toggle"
+                              title={bucket?.name ?? "Unsorted"}
+                              aria-expanded={!collapsed}
+                              onClick={() =>
+                                setCollapsedSessionGroupIds((current) => {
+                                  const next = new Set(current);
+                                  if (next.has(bucketId)) next.delete(bucketId);
+                                  else next.add(bucketId);
+                                  return next;
+                                })
+                              }
+                            >
+                              {collapsed ? (
+                                <Folder
+                                  className="session-group-folder"
+                                  size={14}
+                                />
+                              ) : (
+                                <FolderOpen
+                                  className="session-group-folder"
+                                  size={14}
+                                />
+                              )}
+                              <span>{bucket?.name ?? "Unsorted"}</span>
+                            </button>
+                          )}
                           <button
                             type="button"
-                            className="session-group-toggle"
-                            title={bucket?.name ?? "Unsorted"}
-                            aria-expanded={!collapsed}
-                            onClick={() =>
-                              setCollapsedSessionGroupIds((current) => {
-                                const next = new Set(current);
-                                if (next.has(bucketId)) next.delete(bucketId);
-                                else next.add(bucketId);
-                                return next;
-                              })
-                            }
+                            className="session-group-new"
+                            title={`New session in ${bucket?.name ?? "Unsorted"}`}
+                            aria-label={`New session in ${bucket?.name ?? "Unsorted"}`}
+                            disabled={runtimeLocked || sessionDeleteMode}
+                            onClick={(event) => {
+                              newSessionButtonRef.current = event.currentTarget;
+                              setNewSessionTarget({
+                                groupId: bucket?.id ?? null,
+                                groupName: bucket?.name ?? "Unsorted",
+                              });
+                              closeMobileSidebar(false);
+                            }}
                           >
-                            {collapsed ? (
-                              <Folder
-                                className="session-group-folder"
-                                size={14}
-                              />
-                            ) : (
-                              <FolderOpen
-                                className="session-group-folder"
-                                size={14}
-                              />
-                            )}
-                            <span>{bucket?.name ?? "Unsorted"}</span>
-                            <small>{bucketSessions.length}</small>
+                            <Plus size={14} />
                           </button>
-                          {bucket && (
+                          {bucket && sessionGroupEditor?.id !== bucket.id && (
                             <div className="session-group-actions">
-                              {sessionGroupEditor?.id === bucket.id ? (
-                                <form
-                                  className="session-group-editor inline"
-                                  onSubmit={(event) => {
-                                    event.preventDefault();
-                                    saveSessionGroup();
-                                  }}
-                                >
-                                  <input
-                                    autoFocus
-                                    value={sessionGroupEditor.name}
-                                    aria-label={`Rename ${bucket.name}`}
-                                    onChange={(event) =>
-                                      setSessionGroupEditor({
-                                        id: bucket.id,
-                                        name: event.target.value,
-                                      })
-                                    }
-                                    onKeyDown={(event) => {
-                                      if (event.key === "Escape") {
-                                        event.preventDefault();
-                                        setSessionGroupEditor(null);
-                                      }
-                                    }}
-                                  />
-                                  <button
-                                    type="submit"
-                                    disabled={!sessionGroupEditor.name.trim()}
-                                  >
-                                    <Check size={12} />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setSessionGroupEditor(null)}
-                                  >
-                                    <X size={12} />
-                                  </button>
-                                </form>
-                              ) : (
-                                <>
-                                  <button
-                                    type="button"
-                                    title="Move group up"
-                                    aria-label={`Move ${bucket.name} up`}
-                                    disabled={
-                                      sessionDeleteMode ||
-                                      sessionGroups[0]?.id === bucket.id
-                                    }
-                                    onClick={() =>
-                                      moveSessionGroup(bucket.id, -1)
-                                    }
-                                  >
-                                    <ChevronUp size={12} />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    title="Move group down"
-                                    aria-label={`Move ${bucket.name} down`}
-                                    disabled={
-                                      sessionDeleteMode ||
-                                      sessionGroups.at(-1)?.id === bucket.id
-                                    }
-                                    onClick={() =>
-                                      moveSessionGroup(bucket.id, 1)
-                                    }
-                                  >
-                                    <ChevronDown size={12} />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    title={`Rename ${bucket.name}`}
-                                    aria-label={`Rename ${bucket.name}`}
-                                    disabled={sessionDeleteMode}
-                                    onClick={() =>
-                                      setSessionGroupEditor({
-                                        id: bucket.id,
-                                        name: bucket.name,
-                                      })
-                                    }
-                                  >
-                                    <Pencil size={12} />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className={
-                                      sessionGroupDeleteConfirmId === bucket.id
-                                        ? "confirming"
-                                        : ""
-                                    }
-                                    disabled={sessionDeleteMode}
-                                    title={
-                                      sessionGroupDeleteConfirmId === bucket.id
-                                        ? "Click again to delete; sessions become unsorted"
-                                        : `Delete ${bucket.name}`
-                                    }
-                                    aria-label={`Delete ${bucket.name}`}
-                                    onClick={() => {
-                                      if (
-                                        sessionGroupDeleteConfirmId ===
-                                        bucket.id
-                                      ) {
-                                        sendCommand({
-                                          type: "session_group_delete",
-                                          group_id: bucket.id,
-                                        });
-                                        setSessionGroupDeleteConfirmId("");
-                                      } else
-                                        setSessionGroupDeleteConfirmId(
-                                          bucket.id,
-                                        );
-                                    }}
-                                  >
-                                    <Trash2 size={12} />
-                                  </button>
-                                </>
-                              )}
+                              <button
+                                type="button"
+                                title={`Rename ${bucket.name}`}
+                                aria-label={`Rename ${bucket.name}`}
+                                disabled={runtimeLocked || sessionDeleteMode}
+                                onClick={() =>
+                                  setSessionGroupEditor({
+                                    id: bucket.id,
+                                    name: bucket.name,
+                                  })
+                                }
+                              >
+                                <Pencil size={12} />
+                              </button>
+                              <button
+                                type="button"
+                                className={
+                                  sessionGroupDeleteConfirmId === bucket.id
+                                    ? "confirming"
+                                    : ""
+                                }
+                                disabled={
+                                  runtimeLocked ||
+                                  sessionDeleteMode ||
+                                  bucketSessions.length > 0
+                                }
+                                title={
+                                  bucketSessions.length > 0
+                                    ? "Delete every session in this group before deleting the group"
+                                    : sessionGroupDeleteConfirmId === bucket.id
+                                      ? "Click again to delete this empty group"
+                                      : `Delete ${bucket.name}`
+                                }
+                                aria-label={`Delete ${bucket.name}`}
+                                onClick={() => {
+                                  if (
+                                    sessionGroupDeleteConfirmId === bucket.id
+                                  ) {
+                                    sendCommand({
+                                      type: "session_group_delete",
+                                      group_id: bucket.id,
+                                    });
+                                    setSessionGroupDeleteConfirmId("");
+                                  } else
+                                    setSessionGroupDeleteConfirmId(bucket.id);
+                                }}
+                              >
+                                <Trash2 size={12} />
+                              </button>
                             </div>
                           )}
                         </div>
@@ -3671,45 +3510,15 @@ function TimemApp() {
                                   session.runtime_profile,
                                 ) ?? UNCONFIGURED_MODEL_LABEL;
                               return (
-                                <SortableSession
-                                  id={session.session_id}
-                                  disabled={runtimeLocked || sessionDeleteMode}
-                                  key={session.session_id}
-                                >
-                                  {({
-                                    setNodeRef,
-                                    style,
-                                    attributes,
-                                    listeners,
-                                    isDragging,
-                                  }) => (
-                                    <>
+                                <Fragment key={session.session_id}>
                                       <div
-                                        ref={setNodeRef}
-                                        style={style}
-                                        className={`session-row ${server?.debug_mode && session.workers.length > 0 ? "has-workers" : ""} ${session.session_id === activeSession?.session_id ? "active" : ""} ${visuallyWorking ? "working" : ""} ${unreadCompletedSessionIds.has(session.session_id) ? "has-unread-completion" : ""} ${renamingSession ? "renaming-session" : ""} ${renamingSessionId === session.session_id || runtimeLocked || isDragging ? "controls-suppressed" : ""} ${sessionDeleteMode ? "delete-selecting" : ""} ${selectedDeleteSessionId === session.session_id ? "delete-selected" : ""} ${isDragging ? "dragging" : ""}`}
+                                        className={`session-row ${server?.debug_mode && session.workers.length > 0 ? "has-workers" : ""} ${session.session_id === activeSession?.session_id ? "active" : ""} ${visuallyWorking ? "working" : ""} ${unreadCompletedSessionIds.has(session.session_id) ? "has-unread-completion" : ""} ${renamingSession ? "renaming-session" : ""} ${renamingSessionId === session.session_id || runtimeLocked ? "controls-suppressed" : ""} ${sessionDeleteMode ? "delete-selecting" : ""} ${selectedDeleteSessionId === session.session_id ? "delete-selected" : ""}`}
                                         aria-busy={
                                           renamingSession ||
                                           deletingSession ||
                                           undefined
                                         }
                                       >
-                                        <button
-                                          type="button"
-                                          className="session-drag"
-                                          disabled={
-                                            runtimeLocked ||
-                                            sessionDeleteMode ||
-                                            renamingSessionId ===
-                                              session.session_id
-                                          }
-                                          title={`拖动 ${session.display_name} 到其他分组`}
-                                          aria-label={`拖动 ${session.display_name} 到其他分组`}
-                                          {...attributes}
-                                          {...listeners}
-                                        >
-                                          <GripVertical size={13} />
-                                        </button>
                                         {server?.debug_mode && (
                                           <button
                                             type="button"
@@ -3774,9 +3583,14 @@ function TimemApp() {
                                             onChange={(event) =>
                                               setRenameDraft(event.target.value)
                                             }
-                                            onBlur={() =>
-                                              finishRename(session.session_id)
-                                            }
+                                            onBlur={(event) => {
+                                              if (
+                                                event.currentTarget.dataset
+                                                  .cancelled === "true"
+                                              )
+                                                return;
+                                              finishRename(session.session_id);
+                                            }}
                                             onKeyDown={(event) => {
                                               if (
                                                 event.key === "Enter" &&
@@ -3789,6 +3603,8 @@ function TimemApp() {
                                               }
                                               if (event.key === "Escape") {
                                                 event.preventDefault();
+                                                event.currentTarget.dataset.cancelled =
+                                                  "true";
                                                 setRenamingSessionId("");
                                                 setRenameDraft("");
                                               }
@@ -3905,6 +3721,22 @@ function TimemApp() {
                                             </span>
                                           </button>
                                         )}
+                                        {!sessionDeleteMode &&
+                                          renamingSessionId !==
+                                            session.session_id && (
+                                            <button
+                                              type="button"
+                                              className="session-rename-button"
+                                              title={`Rename ${session.display_name}`}
+                                              aria-label={`Rename ${session.display_name}`}
+                                              disabled={
+                                                runtimeLocked || renamingSession
+                                              }
+                                              onClick={() => beginRename(session)}
+                                            >
+                                              <Pencil size={12} />
+                                            </button>
+                                          )}
                                         {sessionDeleteMode && (
                                           <button
                                             type="button"
@@ -3997,43 +3829,17 @@ function TimemApp() {
                                             )}
                                           </div>
                                         )}
-                                    </>
-                                  )}
-                                </SortableSession>
+                                </Fragment>
                               );
                             })}
-                            {bucketSessions.length === 0 && (
-                              <div className="session-group-drop-hint">
-                                拖动Session以归组
-                              </div>
-                            )}
                           </div>
                         )}
-                      </SessionDropGroup>
+                      </section>
                     );
                   },
                 )
               )}
             </nav>
-            <DragOverlay
-              dropAnimation={
-                prefersReducedMotion()
-                  ? null
-                  : { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" }
-              }
-            >
-              {draggedSession && (
-                <div className="session-row session-overlay" aria-hidden="true">
-                  <span className="session-drag">
-                    <GripVertical size={13} />
-                  </span>
-                  <span className="session-name">
-                    {draggedSession.display_name}
-                  </span>
-                </div>
-              )}
-            </DragOverlay>
-          </DndContext>
           <div className="sidebar-footer">
             <button
               type="button"
@@ -4710,10 +4516,12 @@ function TimemApp() {
             }}
           />
         )}
-        {showNewSession && (
+        {newSessionTarget && (
           <NewSessionDialog
             workspaces={server?.workspace_dirs ?? []}
             runtimeDefaults={server?.session_env_defaults ?? {}}
+            groupId={newSessionTarget.groupId}
+            groupName={newSessionTarget.groupName}
             creating={creatingSession}
             memSwitching={runtimeLocked}
             onClose={() => {
@@ -13955,6 +13763,8 @@ function RuntimeUnavailableDialog({
 function NewSessionDialog({
   workspaces,
   runtimeDefaults,
+  groupId,
+  groupName,
   creating,
   memSwitching,
   onClose,
@@ -13962,6 +13772,8 @@ function NewSessionDialog({
 }: {
   workspaces: string[];
   runtimeDefaults: Snapshot["server"]["session_env_defaults"];
+  groupId: string | null;
+  groupName: string;
   creating: boolean;
   memSwitching: boolean;
   onClose: () => void;
@@ -13983,6 +13795,7 @@ function NewSessionDialog({
     displayName,
     workspaceDir,
     env,
+    groupId,
     creating,
     memSwitching,
   );
@@ -14035,8 +13848,8 @@ function NewSessionDialog({
           </button>
         </div>
         <p id={descriptionId}>
-          Select a known workspace or enter an existing absolute directory for
-          this session.
+          Create this session in <strong>{groupName}</strong>, then select a
+          known workspace or enter an existing absolute directory.
         </p>
         {creating && (
           <p

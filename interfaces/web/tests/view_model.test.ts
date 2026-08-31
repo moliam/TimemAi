@@ -1175,6 +1175,7 @@ describe("web topic view model", () => {
           TIMEM_API_KEY: "   ",
           TIMEM_STREAM: " true ",
         },
+        "group-research",
         false,
       ),
     ).toEqual({
@@ -1186,11 +1187,12 @@ describe("web topic view model", () => {
         type: "session_create",
         display_name: "Research",
         workspace_dir: "/work/project",
+        group_id: "group-research",
         env: { TIMEM_MODEL: "qwen-plus", TIMEM_STREAM: "true" },
       },
     });
     expect(
-      sessionCreateDecision("   ", "/work/project", {}, false),
+      sessionCreateDecision("   ", "/work/project", {}, null, false),
     ).toMatchObject({
       kind: "send",
       command: {
@@ -1202,15 +1204,15 @@ describe("web topic view model", () => {
   });
 
   it("blocks session creation while creating, mem switching, or missing a workspace", () => {
-    expect(sessionCreateDecision("name", "   ", {}, false)).toEqual({
+    expect(sessionCreateDecision("name", "   ", {}, null, false)).toEqual({
       kind: "skip",
       reason: "empty_workspace",
     });
-    expect(sessionCreateDecision("name", "/work", {}, true)).toEqual({
+    expect(sessionCreateDecision("name", "/work", {}, null, true)).toEqual({
       kind: "skip",
       reason: "creating",
     });
-    expect(sessionCreateDecision("name", "/work", {}, false, true)).toEqual({
+    expect(sessionCreateDecision("name", "/work", {}, null, false, true)).toEqual({
       kind: "skip",
       reason: "mem_switching",
     });

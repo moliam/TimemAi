@@ -976,7 +976,7 @@ impl CoreSessionWorkerManager {
             workspace,
             display_name,
             parent_worker_id,
-            HttpModelClient,
+            HttpModelClient::default(),
         )
     }
 
@@ -1025,7 +1025,7 @@ impl CoreSessionWorkerManager {
             parent_worker_id,
             assistant_speaker_name,
             false,
-            HttpModelClient,
+            HttpModelClient::default(),
         )
     }
 
@@ -1050,7 +1050,7 @@ impl CoreSessionWorkerManager {
             display_name,
             parent_worker_id,
             assistant_speaker_name,
-            HttpModelClient,
+            HttpModelClient::default(),
         )
     }
 
@@ -1306,7 +1306,7 @@ impl CoreSessionWorker {
             config,
             worker_config,
             CoreSessionWorkerRuntime::new(),
-            HttpModelClient,
+            HttpModelClient::default(),
         )
     }
 

@@ -514,7 +514,7 @@ button:disabled { cursor: not-allowed; }
 @keyframes working-frame-breathe { 50% { border-left-color: #e4bc72; box-shadow: inset 3px 0 12px #d0a75f12; } }
 
 @media (max-width: 720px) { .user-message-navigation { left: 6px; }.user-message-navigation button { width: 30px; height: 30px; border-radius: 8px; } }
-@media (prefers-reduced-motion: reduce) { .chat-scroll { scroll-behavior: auto; }.live-turn-usage, .pulse, .connection.offline, .session-row.working, .session-working-icon, .load-history.loading svg, .send-button.sending svg, .stop-button.sending svg, .decision-actions .primary.sending svg, .completion-toolgen.sending svg, .context-compact-notice, .compact-before, .compact-after, .turn-assistant-frame.working, .working-chip.toolgen-working svg, .turn-work-item, .toolrepo-header-button.count-pulse .toolrepo-header-count, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot { animation: none; }.mcp-session-toggle-thumb { transition: none; }.user-message-navigation, .user-message-navigation button, .session-row .session, .session-drag, .session-expand { transition: none; } }
+@media (prefers-reduced-motion: reduce) { .chat-scroll { scroll-behavior: auto; }.live-turn-usage, .pulse, .connection.offline, .session-row.working, .session-working-icon, .load-history.loading svg, .send-button.sending svg, .stop-button.sending svg, .decision-actions .primary.sending svg, .completion-toolgen.sending svg, .context-compact-notice, .compact-before, .compact-after, .turn-assistant-frame.working, .working-chip.toolgen-working svg, .turn-work-item, .toolrepo-header-button.count-pulse .toolrepo-header-count, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot { animation: none; }.mcp-session-toggle-thumb { transition: none; }.user-message-navigation, .user-message-navigation button, .session-row .session, .session-expand { transition: none; } }
 @media (max-width: 1050px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 214px minmax(0, 1fr); }.side-panel-backdrop { display: block; position: fixed; z-index: 3; inset: 0; width: 100%; border: 0; background: #02060973; }.toolrepo-side-panel { position: fixed; z-index: 4; right: 0; top: 0; bottom: 0; width: min(360px, 88vw); } }
 @media (max-width: 720px) { .app-shell, .app-shell:has(.toolrepo-side-panel) { grid-template-columns: 1fr; }.context-compact-notice { max-width: calc(100% - 10px); margin-left: 0; grid-template-columns: 22px minmax(0, auto) minmax(42px, 64px); }.compact-copy span { overflow: hidden; text-overflow: ellipsis; }.compact-copy small { display: none; }.compact-meter { width: 100%; } }
 @media (max-width: 720px) { .session-runtime-grid { grid-template-columns: 1fr; } }
@@ -2126,36 +2126,37 @@ body {
 .session-group-folder { width: 14px; height: 14px; flex: none; color: #929292; transition: color .15s ease; }
 .session-group-toggle:hover .session-group-folder { color: #c0c0c0; }
 .session-group-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-group-toggle small { margin-left: auto; min-width: 18px; padding: 1px 5px; border-radius: 99px; background: #2c2c2c; color: #818181; text-align: center; font-size: 9px; }
+.session-group-name-editor { min-width: 0; flex: 1; display: flex; align-items: center; }
+.session-group-name-editor input { min-width: 0; width: 100%; height: 25px; border: 0; border-radius: 5px; padding: 3px 6px; outline: 0; background: #101513; color: #f0f5f3; box-shadow: inset 0 0 0 1px #548f80; font: inherit; font-size: 13px; font-weight: 720; }
+.session-group-name-editor input:focus { box-shadow: inset 0 0 0 1px #70b6a4, 0 0 0 2px #70b6a426; }
+.session-group-new { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border: 0; border-radius: 6px; padding: 0; background: transparent; color: #7f918c; }
+.session-group-new:hover:not(:disabled) { background: #26312e; color: #d8e4e0; }
+.session-group-new:focus-visible { outline: 2px solid #60877b; outline-offset: 1px; }
 .session-group-actions { position: relative; display: flex; align-items: center; opacity: 0; transition: opacity .15s ease; }
 .session-group-heading:hover .session-group-actions, .session-group-actions:focus-within { opacity: 1; }
 .session-group-actions > button { width: 22px; height: 22px; display: grid; place-items: center; border: 0; border-radius: 5px; background: transparent; color: #777; }
 .session-group-actions > button:hover:not(:disabled) { background: #303030; color: #ddd; }
 .session-group-actions > button.confirming { background: #542c2c; color: #ffb4ab; opacity: 1; }
 .session-group-list { min-height: 10px; display: grid; gap: 2px; padding: 1px 0 4px; border-radius: 7px; transition: background-color .15s, box-shadow .15s; }
-.session-group.drop-target .session-group-list { background: #20302f; box-shadow: inset 0 0 0 1px #4d8177; }
-.session-group-drop-hint { min-height: 28px; display: grid; place-items: center; box-sizing: border-box; margin: 1px 6px 3px; border: 1px dashed #3a4545; border-radius: 5px; padding: 0 8px; color: #687574; font-size: 10px; }
-.session-group.drop-target .session-group-drop-hint { border-color: #70a99d; color: #a7d3ca; }
-.session-row.dragging { opacity: .35; }
 .session-row.delete-selecting { cursor: pointer; }
 .session-row.delete-selecting .session { padding-right: 34px; }
 .session-row.delete-selecting:not(.delete-selected) { background: #202323; }
 .session-row.delete-selected { background: #332625; box-shadow: inset 2px 0 #c77872; }
+.session-rename-button { position: absolute; z-index: 3; right: 5px; top: 50%; width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: 5px; padding: 0; background: transparent; color: #7d8985; opacity: 0; visibility: hidden; transform: translateY(-50%); transition: opacity .15s ease, visibility 0s linear .15s, background-color .15s ease, color .15s ease; }
+.session-row.has-workers .session-rename-button { right: 31px; }
+.session-row:hover .session-rename-button, .session-row:has(:focus-visible) .session-rename-button, .session-rename-button:focus-visible { opacity: 1; visibility: visible; transition-delay: 0s; }
+.session-rename-button:hover:not(:disabled) { background: #303936; color: #e2ece8; }
+.session-rename-button:focus-visible { outline: 2px solid #60877b; outline-offset: 1px; }
+.session-rename-button:disabled { opacity: .45; }
 .session-delete-select { position: absolute; z-index: 2; right: 5px; top: 50%; width: 25px; height: 25px; display: grid; place-items: center; border: 1px solid #56605e; border-radius: 6px; padding: 0; background: #202525; color: transparent; transform: translateY(-50%); }
 .session-delete-select:hover:not(:disabled) { border-color: #9a6a66; background: #302524; }
 .session-delete-select.selected { border-color: #b86e68; background: #6b3834; color: #ffe4e1; }
-.session-drag { width: 22px; height: 30px; flex: none; display: grid; place-items: center; border: 0; padding: 0; background: transparent; color: #646d6d; cursor: grab; touch-action: none; }
-.session-group-list .session-row > .session-drag { margin-left: 0; }
-.session-drag:hover:not(:disabled) { color: #b2bcbc; }
-.session-drag:active { cursor: grabbing; }
 .session-row .session { padding-right: 2px; }
 .session-endpoint-reveal { min-width: 0; max-width: calc(100% - 48px); flex: 0 1 auto; display: none; align-items: center; margin-left: auto; overflow: hidden; border: 1px solid #40504c; border-radius: 999px; padding: 2px 6px; background: #222a28; color: #899b96; font-size: 9px; line-height: 1.2; white-space: nowrap; opacity: 0; visibility: hidden; transform: translateX(3px); transition: opacity .15s ease, visibility .15s ease, transform .15s ease; pointer-events: none; }
 .session-endpoint-reveal > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .session-row:hover .session-endpoint-reveal, .session-row:has(:focus-visible) .session-endpoint-reveal, .session-endpoint-reveal.pending { display: inline-flex; opacity: 1; visibility: visible; transform: translateX(0); }
 .session-endpoint-reveal.pending { color: #8fb9d5; }
 .session-row.delete-selecting .session-endpoint-reveal { display: none; }
-.session-overlay { width: 220px; min-height: 42px; padding: 6px 34px 6px 3px; border: 1px solid #526967; background: #292f2f; color: #ededed; box-shadow: 0 12px 28px #0008; }
-.session-overlay .session-name { min-width: 0; font-size: 12px; font-weight: 400; }
 
 :root[data-theme="light"] :is(.new-session-group, .session-delete-manage) { color: #66716e; }
 :root[data-theme="light"] .new-session-group:hover:not(:disabled) { background: #ecefee; color: #202826; }
@@ -2165,6 +2166,7 @@ body {
 :root[data-theme="light"] .session-delete-cancel:hover:not(:disabled) { border-color: #aeb9be; background: #fff; color: #000; }
 :root[data-theme="light"] .session-row.delete-selecting:not(.delete-selected) { background: #f4f6f5; }
 :root[data-theme="light"] .session-row.delete-selected { background: #f8e9e7; box-shadow: inset 2px 0 #c46b65; }
+:root[data-theme="light"] .session-rename-button:hover:not(:disabled) { background: #dfe8e5; color: #29483f; }
 :root[data-theme="light"] .session-delete-select { border-color: #aab5b2; background: #fff; }
 :root[data-theme="light"] .session-delete-select.selected { border-color: #b55f59; background: #d9827b; color: #fff; }
 :root[data-theme="light"] .session-group-editor { border-color: #d4d4d4; background: #fff; box-shadow: 0 8px 22px #0001; }
@@ -2172,17 +2174,12 @@ body {
 :root[data-theme="light"] .session-group-editor button:hover:not(:disabled) { background: #ededed; color: #111; }
 :root[data-theme="light"] .session-group-heading { background: color-mix(in srgb, #f7f7f7 92%, transparent); }
 :root[data-theme="light"] .session-group-toggle { color: #666; }
-:root[data-theme="light"] .session-group-toggle small { background: #e6e6e6; color: #777; }
+:root[data-theme="light"] .session-group-name-editor input { background: #fff; color: #24302c; box-shadow: inset 0 0 0 1px #6da898; }
+:root[data-theme="light"] .session-group-new:hover:not(:disabled),
 :root[data-theme="light"] .session-group-actions > button:hover:not(:disabled) { background: #e7e7e7; color: #333; }
 :root[data-theme="light"] .session-group-actions > button.confirming { background: #f8d8d5; color: #9d2520; }
-:root[data-theme="light"] .session-group.drop-target .session-group-list { background: #e8f3f0; box-shadow: inset 0 0 0 1px #83aaa1; }
-:root[data-theme="light"] .session-group-drop-hint { border-color: #c8d2d0; color: #899593; }
-:root[data-theme="light"] .session-group.drop-target .session-group-drop-hint { border-color: #6d9c92; color: #46776d; }
-:root[data-theme="light"] .session-drag { color: #929c9b; }
-:root[data-theme="light"] .session-drag:hover:not(:disabled) { color: #4d6460; }
 :root[data-theme="light"] .session-endpoint-reveal { border-color: #cbd6d2; background: #eef3f1; color: #64756f; }
 :root[data-theme="light"] .session-endpoint-reveal.pending { color: #587d91; }
-:root[data-theme="light"] .session-overlay { border-color: #9aafaa; background: #fff; color: #222; box-shadow: 0 12px 28px #4564; }
 
 @media (max-width: 720px) {
   .session-group-actions { opacity: 1; }
@@ -2223,14 +2220,11 @@ body {
 .session-group-heading { background: color-mix(in srgb, var(--management-panel) 92%, transparent); }
 .session-group-toggle { color: #a9b7b2; }
 .session-group-folder { color: #6f9f92; }
-.session-group-toggle small { background: #26312e; color: #82928d; }
 .session-group-actions > button:hover:not(:disabled) { background: #26312e; color: #d8e4e0; }
 .session-row:hover { background: var(--management-card-hover); }
 .session-row.active { background: #243530; box-shadow: inset 0 0 0 1px #4b6d64, 0 2px 7px #05080738; }
 .session-row.active .session { color: #f1faf7; }
 .session-row.renaming-session { background: #22302d; }
-.session-drag { color: #667873; }
-.session-drag:hover:not(:disabled) { color: #a7bbb5; }
 .session-detail::before, .session-detail::after { border-color: #35423f; }
 .session-row.active .session-detail::before, .session-row.active .session-detail::after { border-color: #54766e; }
 
@@ -2303,7 +2297,6 @@ body {
 :root[data-theme="light"] .session-group-heading { background: color-mix(in srgb, var(--management-panel) 92%, transparent); }
 :root[data-theme="light"] .session-group-toggle { color: #596b65; }
 :root[data-theme="light"] .session-group-folder { color: #568f80; }
-:root[data-theme="light"] .session-group-toggle small { background: #e7eeeb; color: #71817b; }
 :root[data-theme="light"] .session-row:hover { background: var(--management-card-hover); }
 :root[data-theme="light"] .session-row.active { background: #e0efeb; box-shadow: inset 0 0 0 1px #a5c9bf, 0 2px 7px #31564b1c; }
 :root[data-theme="light"] .session-row.active .session { color: #20312c; }
@@ -2370,7 +2363,7 @@ body {
 .session-group-actions {
   position: absolute;
   z-index: 3;
-  right: 3px;
+  right: 30px;
   top: 50%;
   visibility: hidden;
   opacity: 0;
@@ -2398,6 +2391,7 @@ body {
 @media (hover: none) {
   .session-group-actions { position: static; visibility: visible; opacity: 1; border: 0; padding: 0; background: transparent; box-shadow: none; transform: none; }
   .session-group-heading .session-group-toggle { padding-right: 4px; }
+  .session-row:not(.delete-selecting, .controls-suppressed) .session-rename-button { opacity: 1; visibility: visible; }
 }
 
 /* Shared compact create/delete management controls for model endpoints. */
@@ -2839,7 +2833,6 @@ body {
   gap: 6px;
   transition: padding-left .18s ease, color .15s ease, background-color .15s ease;
 }
-.session-drag,
 .session-expand {
   position: absolute;
   z-index: 3;
@@ -2852,11 +2845,10 @@ body {
   transform: translate(-4px, -50%);
   transition: opacity .15s ease, transform .18s ease, color .15s ease;
 }
-.session-drag { left: 4px; }
 .session-expand { left: 27px; }
-.session-row:hover > :is(.session-drag, .session-expand.available),
-.session-row:has(:focus-visible) > :is(.session-drag, .session-expand.available),
-.session-row > :is(.session-drag, .session-expand.available):focus-visible {
+.session-row:hover > .session-expand.available,
+.session-row:has(:focus-visible) > .session-expand.available,
+.session-row > .session-expand.available:focus-visible {
   opacity: 1;
   pointer-events: auto;
   transform: translate(0, -50%);
@@ -2865,8 +2857,7 @@ body {
 .session-row:hover .session,
 .session-row:has(:focus-visible) .session { padding-left: 56px; }
 .session-row:is(.delete-selecting, .controls-suppressed) .session { padding-left: 34px; }
-.session-row:is(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand) { display: none; }
-.session-row.dragging .session { transition: none; }
+.session-row:is(.delete-selecting, .controls-suppressed) > .session-expand { display: none; }
 .session-working-icon { width: 15px; height: 15px; flex: none; }
 .session-identity { flex: 1 1 48px; min-width: 40px; }
 .session-endpoint-reveal {
@@ -2878,7 +2869,7 @@ body {
   background: linear-gradient(90deg, transparent, #24342e14 12%, #24342e14 88%, transparent);
 }
 @media (hover: none), (pointer: coarse) {
-  .session-row:not(.delete-selecting, .controls-suppressed) > :is(.session-drag, .session-expand.available) {
+  .session-row:not(.delete-selecting, .controls-suppressed) > .session-expand.available {
     opacity: 1;
     pointer-events: auto;
     transform: translate(0, -50%);
@@ -3722,14 +3713,11 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   padding-right: 5px;
 }
 .session-row .session-identity { margin-left: 3px; }
-.session-drag,
 .session-expand {
   left: auto;
   transform: translate(4px, -50%);
 }
 .session-expand { right: 4px; width: 22px; color: #75818b; }
-.session-drag { right: 27px; }
-.session-row:not(.has-workers) .session-drag { right: 4px; }
 .session-expand:hover { color: #c4d0d8; }
 .session-row:hover .session,
 .session-row:has(:focus-visible) .session { padding-left: 7px; padding-right: 58px; }
