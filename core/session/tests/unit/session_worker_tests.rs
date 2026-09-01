@@ -157,6 +157,7 @@ fn test_config() -> ModelServiceConfig {
         api_protocol: ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     }
 }
 

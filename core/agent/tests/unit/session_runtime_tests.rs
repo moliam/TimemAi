@@ -53,6 +53,7 @@ fn test_config() -> ModelServiceConfig {
         max_llm_output_tokens: 10_000,
         response_protocol: crate::ResponseProtocolKind::Json,
         openai_compatible: crate::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     }
 }
 

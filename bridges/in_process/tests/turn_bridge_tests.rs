@@ -83,6 +83,7 @@ fn config() -> ModelServiceConfig {
         response_protocol: ResponseProtocolKind::Json,
         interaction: Default::default(),
         openai_compatible: OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     }
 }
 

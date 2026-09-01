@@ -340,6 +340,9 @@ enum CoreSessionWorkerCommand {
     UpdateRequestFields {
         request_fields: BTreeMap<String, serde_json::Value>,
     },
+    UpdateModelHttpTransport {
+        options: agent_core::ModelHttpTransportOptions,
+    },
     UpdateMcp {
         base_capabilities: agent_core::capability::CapabilityRegistry,
         runtime: agent_core::mcp::McpRuntime,
@@ -817,6 +820,18 @@ impl CoreSessionWorkerHandle {
         }
         self.command_tx
             .send(CoreSessionWorkerCommand::UpdateHttpHeaders { http_headers })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn update_model_http_transport(
+        &self,
+        options: agent_core::ModelHttpTransportOptions,
+    ) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.command_tx
+            .send(CoreSessionWorkerCommand::UpdateModelHttpTransport { options })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
@@ -1452,6 +1467,7 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::UpdateApiKey { .. }
                     | CoreSessionWorkerCommand::UpdateHttpHeaders { .. }
                     | CoreSessionWorkerCommand::UpdateRequestFields { .. }
+                    | CoreSessionWorkerCommand::UpdateModelHttpTransport { .. }
                     | CoreSessionWorkerCommand::UpdateMcp { .. }
                         if shutdown_requested.load(Ordering::SeqCst) =>
                     {
@@ -1704,6 +1720,10 @@ impl CoreSessionWorker {
                     }
                     CoreSessionWorkerCommand::UpdateRequestFields { request_fields } => {
                         config.request_fields = request_fields;
+                        core.notify_runtime_config_changed();
+                    }
+                    CoreSessionWorkerCommand::UpdateModelHttpTransport { options } => {
+                        config.http_transport = options;
                         core.notify_runtime_config_changed();
                     }
                     CoreSessionWorkerCommand::UpdateMcp {

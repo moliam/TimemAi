@@ -1386,6 +1386,7 @@ fn output_expansion_resolution_is_core_owned() {
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
 
     let resolution = core.resolve_output_expansion_with_audit(
@@ -1430,6 +1431,7 @@ fn output_expansion_decline_returns_core_stop_summary() {
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let usage = UsageStats {
         prompt_tokens: 80,
@@ -1478,6 +1480,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let mut bash = BashApprovalMode::Ask;
     let mut work = agent_core::WorkInstructionLoadMode::Silent;
@@ -1557,6 +1560,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
 
     core.configure_runtime_from_host(&config, BashApprovalMode::Approve);

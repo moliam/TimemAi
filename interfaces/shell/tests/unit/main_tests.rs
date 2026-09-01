@@ -597,6 +597,7 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let mut core = AgentCore::new(
         "STATIC",
@@ -685,6 +686,7 @@ fn config_response_protocol_update_is_supported_by_terminal_host() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let mut core = AgentCore::new(
         "STATIC",
@@ -731,6 +733,7 @@ fn config_protocol_update_keeps_endpoint_defaults_consistent() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let mut core = AgentCore::new(
         "STATIC",
@@ -792,6 +795,7 @@ fn config_protocol_update_preserves_explicit_endpoint() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let mut core = AgentCore::new(
         "STATIC",
@@ -858,6 +862,7 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let banner = render_startup_banner(
         ".xxx_mem",
@@ -998,6 +1003,7 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let default_banner = render_startup_banner(
         ".test_mem",
@@ -1022,6 +1028,7 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let override_banner = render_startup_banner(
         ".test_mem",
@@ -1059,6 +1066,7 @@ fn startup_banner_highlights_custom_model_and_base_url() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let banner = render_startup_banner(
         ".test_mem",
@@ -2182,6 +2190,7 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let stored = StoredSession {
         session_id: "web_session_1".to_string(),
@@ -2257,6 +2266,7 @@ fn shell_start_recovers_valid_session_from_partially_corrupt_index() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let stored = StoredSession {
         session_id: "shell_recovered".to_string(),
@@ -2324,6 +2334,7 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     store
         .upsert_session(&StoredSession {
@@ -2515,6 +2526,7 @@ fn shell_resume_selects_the_most_recent_valid_session() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let mut older = new_shell_session(
         &store,
@@ -2571,6 +2583,7 @@ fn shell_runtime_config_changes_are_cached_before_another_turn_runs() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let mut bash = BashApprovalMode::Approve;
     let mut work = WorkInstructionLoadMode::Silent;
@@ -2622,6 +2635,7 @@ fn shell_can_resume_web_style_session_history() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     store
         .upsert_session(&StoredSession {

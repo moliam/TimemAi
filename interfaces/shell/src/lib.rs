@@ -684,6 +684,8 @@ pub fn model_service_config_from_env(
             api_key: options.api_key.clone(),
             http_headers: None,
             request_fields: None,
+            allow_cross_origin_redirects: None,
+            private_ca_pem: None,
             model: options.model.clone(),
             base_url: options.base_url.clone(),
             timeout_secs: options.timeout_secs,
