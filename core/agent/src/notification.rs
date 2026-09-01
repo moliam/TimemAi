@@ -71,7 +71,7 @@ fn action_memory_activity(action: &ParsedAction) -> CoreMemoryActivity {
 }
 
 fn action_active(action: &ParsedAction) -> bool {
-    action.action == "run_bash"
+    crate::shell_exec::is_local_shell_action(&action.action)
         || (action.action == "capmgr" && action.input_lower("op") == "job_status")
 }
 
@@ -114,7 +114,7 @@ pub fn notification_from_action(action: &ParsedAction) -> CoreNotification {
 
 fn action_kind(action: &ParsedAction) -> CoreActionKind {
     match action.action.as_str() {
-        "run_bash" => {
+        "run_bash" | "run_powershell" => {
             let interval_ms = action.input_u64("interval_ms");
             let loop_command = action.input_str("loop_cmd");
             let command = if loop_command.is_empty() {

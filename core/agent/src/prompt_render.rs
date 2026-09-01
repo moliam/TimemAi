@@ -206,7 +206,7 @@ pub(crate) fn render_xml_bash_result_with_retention(
     let task = action_name
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .unwrap_or("run_bash");
+        .unwrap_or(crate::os::local_shell_tool_name());
     let escaped_task = escape_xml_attribute(task);
     let status = action_lifecycle_status(status);
     let exit_code = evidence

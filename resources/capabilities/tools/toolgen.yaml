@@ -5,7 +5,7 @@ binding_name: toolgen
 requires_host: local_command_execution
 summary: Validate and publish a reusable Session tool draft.
 prompt_synopsis: |
-  {"toolgen":{"op":"publish","draft_path":"/absolute/draft/directory"}}
+  {"toolgen":{"op":"publish","draft_path":"{{PLATFORM_ABSOLUTE_DRAFT_PATH_JSON}}"}}
 description: |
   `toolgen` is used only while Timem asks you to retrospect and preserve a
   reusable script. Build the candidate folder in the provided draft path, then
@@ -32,13 +32,13 @@ input_schema: |
     "additionalProperties": false,
     "properties": {
       "op": {"type": "string", "enum": ["publish"], "description": "Publish a validated ToolGen draft."},
-      "draft_path": {"type": "string", "minLength": 1, "pattern": "^/", "description": "Absolute session draft directory supplied by runtime; arbitrary directories are rejected."}
+      "draft_path": {"type": "string", "minLength": 1, "description": "Absolute session draft directory supplied by runtime; arbitrary directories are rejected."}
     }
   }
 example_json: |
   {
     "toolgen": {
       "op": "publish",
-      "draft_path": "/path/provided/by/runtime"
+      "draft_path": "{{PLATFORM_ABSOLUTE_DRAFT_PATH}}"
     }
   }

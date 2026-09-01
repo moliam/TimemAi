@@ -462,8 +462,10 @@ export function sessionCancellationApplies(
   // A terminal Turn projection is authoritative for composer admission. Host
   // fields such as cancelling_turn_id may be cleared by a later projection,
   // but must not keep the browser in the Stop state after the chat is terminal.
-  return !cancellingTurn ||
-    (cancellingTurn.state !== "finished" && !cancellingTurn.completion);
+  return (
+    !cancellingTurn ||
+    (cancellingTurn.state !== "finished" && !cancellingTurn.completion)
+  );
 }
 
 export function shouldRenderTurnWorkFrame(
@@ -497,9 +499,7 @@ export function turnInteractionPhase(
       turnId,
       commandId: commandId ?? localSubmitCommandId,
     };
-  const projectedTurn = session?.turns.find(
-    (turn) => turn.turn_id === turnId,
-  );
+  const projectedTurn = session?.turns.find((turn) => turn.turn_id === turnId);
   if (projectedTurn?.state === "finished" || projectedTurn?.completion)
     return { kind: "idle" };
   if (pendingTurnId)
@@ -1196,7 +1196,6 @@ export function sessionVisuallyWorking(session: Session): boolean {
   return session.state === "working" && !sessionCancellationApplies(session);
 }
 
-
 export function finishTurn(
   session: Session,
   turnId: string | null | undefined,
@@ -1887,13 +1886,14 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
           : typeof input?.loop_cmd === "string"
             ? "poll"
             : undefined;
-      const command =
-        action === "run_bash"
-          ? [input?.cmd, input?.loop_cmd, kind?.command].find(
-              (value): value is string =>
-                typeof value === "string" && value.trim().length > 0,
-            )
-          : undefined;
+      const localShellAction =
+        action === "run_bash" || action === "run_powershell";
+      const command = localShellAction
+        ? [input?.cmd, input?.loop_cmd, kind?.command].find(
+            (value): value is string =>
+              typeof value === "string" && value.trim().length > 0,
+          )
+        : undefined;
       const numericKindValue = (name: string) =>
         typeof kind?.[name] === "number" && Number.isFinite(kind[name])
           ? (kind[name] as number)
@@ -1922,7 +1922,11 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
           payload.event === "execution_start" || payload.event === "finish",
         detail,
         code: command ? redactSensitiveDisplayText(command) : undefined,
-        code_language: command ? "bash" : undefined,
+        code_language: command
+          ? action === "run_powershell"
+            ? "powershell"
+            : "bash"
+          : undefined,
         createdAt: Date.now(),
       };
     }
@@ -2013,12 +2017,14 @@ export function hasOnlyFreeTalkActivity(
 }
 
 export function toolActivityDisplayName(name: string, mode?: string) {
-  if (name === "run_bash" && mode === "poll") return "Poll";
+  if ((name === "run_bash" || name === "run_powershell") && mode === "poll")
+    return "Poll";
   return toolDisplayName(name);
 }
 
 export function toolDisplayName(name: string) {
   if (name === "run_bash") return "Bash";
+  if (name === "run_powershell") return "PowerShell";
   if (name === "memmgr") return "MemMgr";
   if (name === "capmgr") return "CapMgr";
   if (name === "self_tool") return "Self Tool";

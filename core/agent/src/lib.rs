@@ -4070,7 +4070,9 @@ impl AgentCore {
 
         let mut action_handles = Vec::new();
         for (idx, action) in actions.iter().cloned().enumerate() {
-            if results.get(idx).is_some_and(Option::is_some) || action.action == "run_bash" {
+            if results.get(idx).is_some_and(Option::is_some)
+                || shell_exec::is_local_shell_action(&action.action)
+            {
                 continue;
             }
             if self.can_spawn_parallel_readfile_action(&action) {
@@ -4148,7 +4150,7 @@ impl AgentCore {
 
         for next_index in (current_index + 1)..actions.len() {
             let action = actions[next_index].clone();
-            if action.action != "run_bash" {
+            if !shell_exec::is_local_shell_action(&action.action) {
                 continue;
             }
             match self.execute_action(action.clone(), runtime) {
@@ -5033,7 +5035,7 @@ Runtime tool_call ids:",
         let retention = tool_result_gate::Retention::from_tail_out(action.input_bool("tail_out"));
         if self.response_protocol == ResponseProtocolKind::Xml {
             let output_time_ms = now_ms();
-            if action.action == "run_bash" {
+            if shell_exec::is_local_shell_action(&action.action) {
                 if let Some(bash_result) = outcome.bash_result.as_ref() {
                     return prompt_render::render_xml_bash_result_with_retention(
                         action.name.as_deref(),
@@ -5149,7 +5151,8 @@ Runtime tool_call ids:",
     }
 
     fn can_spawn_parallel_bash_action(&self, action: &ParsedAction) -> bool {
-        self.bash_approval_mode == BashApprovalMode::Approve && action.action == "run_bash"
+        self.bash_approval_mode == BashApprovalMode::Approve
+            && shell_exec::is_local_shell_action(&action.action)
     }
 
     fn can_spawn_parallel_readfile_action(&self, action: &ParsedAction) -> bool {
@@ -5303,7 +5306,10 @@ Runtime tool_call ids:",
             };
             let result = if !loop_command.is_empty() && !cmd_command.is_empty() {
                 ActionExecution::Completed(ActionOutcome::failed(
-                    "Action result: run_bash\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.",
+                    format!(
+                        "Action result: {}\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.",
+                        action.action
+                    ),
                 ))
             } else {
                 let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
@@ -5332,8 +5338,8 @@ Runtime tool_call ids:",
             let outcome = match result {
                 ActionExecution::Completed(outcome) => outcome,
                 ActionExecution::NeedsApproval(_) => ActionOutcome::failed(format!(
-                    "Action result: run_bash\ncommand: {}\nerror: unexpected_parallel_approval_request",
-                    command,
+                    "Action result: {}\ncommand: {}\nerror: unexpected_parallel_approval_request",
+                    action.action, command,
                 )),
             };
             (idx, action_for_audit, outcome, None)
@@ -5400,8 +5406,10 @@ Runtime tool_call ids:",
                     }
                 }
                 Err(_) => {
-                    let result =
-                        "Action result: run_bash\nerror: parallel_action_panicked".to_string();
+                    let result = format!(
+                        "Action result: {}\nerror: parallel_action_panicked",
+                        crate::os::local_shell_tool_name()
+                    );
                     if let Some(slot) = results.iter_mut().find(|slot| slot.is_none()) {
                         *slot = Some(result);
                     }
@@ -5589,7 +5597,9 @@ Runtime tool_call ids:",
         };
 
         self.current_stats.tool_calls += 1;
-        if action.action == "run_bash" && self.bash_approval_mode == BashApprovalMode::Approve {
+        if shell_exec::is_local_shell_action(&action.action)
+            && self.bash_approval_mode == BashApprovalMode::Approve
+        {
             self.emit_action_execution_start_topic(&action, runtime);
         }
         let execution = match tool_registry::execute_builtin_tool(
@@ -5626,7 +5636,7 @@ Runtime tool_call ids:",
                     outcome.status.as_str(),
                     Some(&outcome.text),
                 );
-                let cpu_time = if action_for_audit.action == "run_bash" {
+                let cpu_time = if shell_exec::is_local_shell_action(&action_for_audit.action) {
                     None
                 } else {
                     elapsed_thread_cpu(action_cpu_start)
