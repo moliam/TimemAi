@@ -113,10 +113,7 @@ export type VersionedTurnProjection = {
 };
 
 export type MessageQueueBlockReason =
-  | "user_cancelled"
-  | "turn_failed"
-  | "turn_interrupted"
-  | "session_stopped";
+  "user_cancelled" | "turn_failed" | "turn_interrupted" | "session_stopped";
 
 export type MessageQueueContinuation =
   | { state: "awaiting_normal_completion" }
@@ -459,6 +456,11 @@ export type WireEvent =
   | { type: "session_deleted"; session_id: string }
   | { type: "session_groups_updated"; groups: SessionGroup[] }
   | {
+      type: "session_order_updated";
+      group_id?: string | null;
+      session_ids: string[];
+    }
+  | {
       type: "session_group_changed";
       session_id: string;
       group_id?: string | null;
@@ -623,6 +625,11 @@ export type ClientCommand =
   | { type: "session_group_update"; group_id: string; name: string }
   | { type: "session_group_delete"; group_id: string }
   | { type: "session_groups_reorder"; groups: SessionGroup[] }
+  | {
+      type: "session_reorder";
+      group_id?: string | null;
+      session_ids: string[];
+    }
   | { type: "session_group_move"; session_id: string; group_id?: string | null }
   | { type: "session_api_key_update"; session_id: string; api_key: string }
   | { type: "session_api_key_reveal"; session_id: string }

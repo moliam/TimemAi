@@ -822,6 +822,10 @@ enum WireEvent {
     SessionGroupsUpdated {
         groups: Vec<SessionGroup>,
     },
+    SessionOrderUpdated {
+        group_id: Option<String>,
+        session_ids: Vec<String>,
+    },
     WorkerRoleLibraryUpdated {
         library: WorkerRoleLibrary,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1170,6 +1174,11 @@ enum ClientCommand {
         session_id: String,
         group_id: Option<String>,
     },
+    SessionReorder {
+        #[serde(default)]
+        group_id: Option<String>,
+        session_ids: Vec<String>,
+    },
     SessionApiKeyUpdate {
         session_id: String,
         api_key: String,
@@ -1420,7 +1429,8 @@ impl ClientCommand {
             | Self::SessionGroupUpdate { .. }
             | Self::SessionGroupDelete { .. }
             | Self::SessionGroupsReorder { .. }
-            | Self::SessionGroupMove { .. } => Some("session-groups".to_string()),
+            | Self::SessionGroupMove { .. }
+            | Self::SessionReorder { .. } => Some("session-groups".to_string()),
             Self::SessionCreate {
                 group_id: Some(_), ..
             } => Some("session-groups".to_string()),
@@ -2740,8 +2750,35 @@ fn handle_command_with_id(
             return Ok(Some(event));
         }
         ClientCommand::SessionGroupsReorder { groups } => {
-            let _legacy_reorder_request = groups;
-            return Err("session_group_order_fixed".to_string());
+            let existing = current_mem_state(state)?.session_groups;
+            let existing_ids = existing
+                .iter()
+                .map(|group| group.id.as_str())
+                .collect::<BTreeSet<_>>();
+            let supplied_ids = groups
+                .iter()
+                .map(|group| group.id.as_str())
+                .collect::<BTreeSet<_>>();
+            if existing_ids != supplied_ids || existing.len() != groups.len() {
+                return Err("session_group_reorder_membership_changed".to_string());
+            }
+            let existing_by_id = existing
+                .into_iter()
+                .map(|group| (group.id.clone(), group))
+                .collect::<BTreeMap<_, _>>();
+            if groups
+                .iter()
+                .any(|group| existing_by_id.get(&group.id) != Some(group))
+            {
+                return Err("session_group_reorder_content_changed".to_string());
+            }
+            let groups = mutate_session_groups(state, |current| {
+                *current = groups;
+                Ok(())
+            })?;
+            let event = WireEvent::SessionGroupsUpdated { groups };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
         }
         ClientCommand::SessionGroupMove {
             session_id,
@@ -2749,6 +2786,62 @@ fn handle_command_with_id(
         } => {
             let _legacy_move_request = (session_id, group_id);
             return Err("session_group_assignment_fixed".to_string());
+        }
+        ClientCommand::SessionReorder {
+            group_id,
+            session_ids,
+        } => {
+            if let Some(group_id) = group_id.as_deref() {
+                if !current_mem_state(state)?
+                    .session_groups
+                    .iter()
+                    .any(|group| group.id == group_id)
+                {
+                    return Err("session_group_not_found".to_string());
+                }
+            }
+            let mut sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            let existing_ids = sessions
+                .values()
+                .filter(|session| session.group_id == group_id)
+                .map(|session| session.session_id.as_str())
+                .collect::<BTreeSet<_>>();
+            let supplied_ids = session_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            if existing_ids != supplied_ids || existing_ids.len() != session_ids.len() {
+                return Err("session_reorder_membership_changed".to_string());
+            }
+            let mut updated = Vec::with_capacity(session_ids.len());
+            for (ordinal, session_id) in session_ids.iter().enumerate() {
+                let session = sessions
+                    .get(session_id)
+                    .ok_or_else(|| "session_not_found".to_string())?;
+                let mut stored = stored_session_from_web_session(state, session);
+                stored.ordinal =
+                    u32::try_from(ordinal).map_err(|_| "session_ordinal_overflow".to_string())?;
+                updated.push(stored);
+            }
+            let store = current_session_store(state)?;
+            for stored in &updated {
+                store.upsert_session(stored)?;
+            }
+            for stored in updated {
+                if let Some(session) = sessions.get_mut(&stored.session_id) {
+                    session.ordinal = stored.ordinal;
+                }
+            }
+            drop(sessions);
+            let event = WireEvent::SessionOrderUpdated {
+                group_id,
+                session_ids,
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
         }
         ClientCommand::SessionApiKeyUpdate {
             session_id,
@@ -5178,12 +5271,7 @@ fn restore_stored_session(
         for session in sessions.values_mut() {
             session.roles = roles.clone();
         }
-        let ordinal = sessions
-            .values()
-            .map(|session| session.ordinal)
-            .max()
-            .map(|value| value.saturating_add(1))
-            .unwrap_or(0);
+        let ordinal = stored.ordinal;
         sessions.insert(
             stored.session_id.clone(),
             WebSession {
@@ -6141,6 +6229,7 @@ fn stored_session_from_web_session_with_store(
             .display()
             .to_string(),
         group_id: session.group_id.clone(),
+        ordinal: session.ordinal,
     }
 }
 
@@ -10063,11 +10152,16 @@ fn set_worker_state(state: &AppState, session_id: &str, worker_id: &str, worker_
 }
 
 fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
-    let sessions = state
+    let mut sessions: Vec<_> = state
         .sessions
         .lock()
         .map(|sessions| sessions.values().cloned().collect())
         .unwrap_or_default();
+    sessions.sort_by(|left, right| {
+        left.ordinal
+            .cmp(&right.ordinal)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
     let runtime_options = state
         .template
         .settings

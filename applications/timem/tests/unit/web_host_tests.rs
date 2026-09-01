@@ -836,6 +836,7 @@ fn corrupt_session_index_record_is_backed_up_while_valid_sessions_remain_usable(
             .display()
             .to_string(),
         group_id: None,
+        ordinal: 0,
     };
     let valid_line = serde_json::to_string(&valid).unwrap();
     let original = format!("{valid_line}\nnot-json\n");
@@ -4423,6 +4424,7 @@ fn missing_workspace_session_uses_locked_fallback_without_losing_metadata_or_his
             last_turn_id: Some("turn_before_workspace_removal".to_string()),
             raw_chat_history_path: history_path.display().to_string(),
             group_id: None,
+            ordinal: 0,
         })
         .unwrap();
 
@@ -5693,16 +5695,108 @@ fn session_create_rejects_unknown_group_without_leaving_a_session() {
 }
 
 #[test]
-fn session_group_reorder_is_rejected_to_keep_creation_order_fixed() {
+fn session_group_reorder_updates_and_persists_exact_existing_groups() {
+    let state = routing_test_state();
+    for name in ["First", "Second"] {
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SessionGroupCreate {
+                name: name.to_string(),
+            },
+        )
+        .unwrap();
+    }
+    let mut reordered = current_mem_state(&state).unwrap().session_groups;
+    reordered.reverse();
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupsReorder {
+            groups: reordered.clone(),
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(
+        event,
+        Some(WireEvent::SessionGroupsUpdated { groups }) if groups == reordered
+    ));
+    assert_eq!(current_mem_state(&state).unwrap().session_groups, reordered);
+    let persisted = load_session_groups(&state.mem.lock().unwrap().layout.memory_dir()).unwrap();
+    assert_eq!(persisted, reordered);
+}
+
+#[test]
+fn session_group_reorder_rejects_changed_membership() {
     let state = routing_test_state();
     let error = handle_command(
         &state,
         TEST_PORT,
-        ClientCommand::SessionGroupsReorder { groups: Vec::new() },
+        ClientCommand::SessionGroupsReorder {
+            groups: vec![SessionGroup {
+                id: "unknown".to_string(),
+                name: "Unknown".to_string(),
+            }],
+        },
     )
     .unwrap_err();
 
-    assert_eq!(error, "session_group_order_fixed");
+    assert_eq!(error, "session_group_reorder_membership_changed");
+}
+
+#[test]
+fn session_reorder_updates_same_group_ordinals_and_persists_them() {
+    let state = routing_test_state();
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionReorder {
+            group_id: None,
+            session_ids: vec!["session_b".to_string(), "session_a".to_string()],
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(
+        event,
+        Some(WireEvent::SessionOrderUpdated { group_id: None, session_ids })
+            if session_ids == ["session_b", "session_a"]
+    ));
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(sessions["session_b"].ordinal, 0);
+    assert_eq!(sessions["session_a"].ordinal, 1);
+    drop(sessions);
+    let store = current_session_store(&state).unwrap();
+    assert_eq!(store.load_session("session_b").unwrap().unwrap().ordinal, 0);
+    assert_eq!(store.load_session("session_a").unwrap().unwrap().ordinal, 1);
+}
+
+#[test]
+fn session_reorder_rejects_cross_group_membership() {
+    let state = routing_test_state();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .group_id = Some("other-group".to_string());
+
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionReorder {
+            group_id: None,
+            session_ids: vec!["session_b".to_string(), "session_a".to_string()],
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "session_reorder_membership_changed");
+    assert_eq!(state.sessions.lock().unwrap()["session_a"].ordinal, 0);
+    assert_eq!(state.sessions.lock().unwrap()["session_b"].ordinal, 1);
 }
 
 #[test]

@@ -31,6 +31,8 @@ pub struct StoredSession {
     pub raw_chat_history_path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
+    #[serde(default)]
+    pub ordinal: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1504,6 +1506,7 @@ pub fn new_stored_session(
         last_turn_id: None,
         raw_chat_history_path: history_path.as_ref().display().to_string(),
         group_id: None,
+        ordinal: 0,
     }
 }
 

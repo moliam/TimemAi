@@ -626,6 +626,7 @@ fn new_shell_session(
         session_id: session_id.clone(),
         display_name: "ShellSession".to_string(),
         group_id: None,
+        ordinal: 0,
         created_at_ms: now_ms_i64(),
         updated_at_ms: now_ms_i64(),
         current_dir: current_dir.display().to_string(),

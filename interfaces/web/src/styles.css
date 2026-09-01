@@ -2120,12 +2120,16 @@ body {
 .session-group-editor button { width: 25px; height: 25px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: #aaa; }
 .session-group-editor button:hover:not(:disabled) { background: #343434; color: #fff; }
 .session-group-editor.inline { position: absolute; z-index: 4; inset: -5px 0 auto auto; width: min(188px, calc(100vw - 72px)); margin: 0; }
-.session-group-heading { position: sticky; top: 0; z-index: 2; min-width: 0; display: flex; align-items: center; gap: 3px; margin: 12px 2px 4px; padding: 4px 3px; border-radius: 7px; background: color-mix(in srgb, #171717 92%, transparent); backdrop-filter: blur(8px); }
-.session-group-toggle { min-width: 0; flex: 1; display: flex; align-items: center; gap: 6px; border: 0; padding: 3px 2px; background: transparent; color: #a8a8a8; text-align: left; font: inherit; font-size: 13px; font-weight: 720; letter-spacing: .025em; }
+.session-group-heading { position: sticky; top: 0; z-index: 2; min-width: 0; display: flex; align-items: center; gap: 3px; margin: 3px 2px 1px; padding: 3px; border-radius: 7px; background: color-mix(in srgb, #171717 92%, transparent); backdrop-filter: blur(8px); }
+.session-group:first-child .session-group-heading { margin-top: 2px; }
+.session-group-toggle { min-width: 0; flex: 1; display: flex; align-items: center; gap: 4px; border: 0; padding: 3px 2px; background: transparent; color: #a8a8a8; text-align: left; font: inherit; font-size: 13px; font-weight: 720; letter-spacing: .025em; }
 .session-group-toggle svg { flex: none; }
+.session-group-chevron { color: #64716d; transition: color .15s ease, transform .15s ease; }
 .session-group-folder { width: 14px; height: 14px; flex: none; color: #929292; transition: color .15s ease; }
+.session-group-toggle:hover .session-group-chevron { color: #9bb0aa; }
 .session-group-toggle:hover .session-group-folder { color: #c0c0c0; }
-.session-group-toggle span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-group-unread-dot { width: 6px; height: 6px; flex: none; margin-left: 2px; border-radius: 50%; background: #4aa3ff; box-shadow: 0 0 0 2px #4aa3ff18, 0 0 8px #4aa3ff38; }
 .session-group-name-editor { min-width: 0; flex: 1; display: flex; align-items: center; }
 .session-group-name-editor input { min-width: 0; width: 100%; height: 25px; border: 0; border-radius: 5px; padding: 3px 6px; outline: 0; background: #101513; color: #f0f5f3; box-shadow: inset 0 0 0 1px #548f80; font: inherit; font-size: 13px; font-weight: 720; }
 .session-group-name-editor input:focus { box-shadow: inset 0 0 0 1px #70b6a4, 0 0 0 2px #70b6a426; }
@@ -2137,9 +2141,9 @@ body {
 .session-group-actions > button { width: 22px; height: 22px; display: grid; place-items: center; border: 0; border-radius: 5px; background: transparent; color: #777; }
 .session-group-actions > button:hover:not(:disabled) { background: #303030; color: #ddd; }
 .session-group-actions > button.confirming { background: #542c2c; color: #ffb4ab; opacity: 1; }
-.session-group-list { min-height: 10px; display: grid; gap: 2px; padding: 1px 0 4px; border-radius: 7px; transition: background-color .15s, box-shadow .15s; }
+.session-group-list { min-height: 8px; display: grid; gap: 2px; padding: 0 0 2px; border-radius: 7px; transition: background-color .15s, box-shadow .15s; }
 .session-row.delete-selecting { cursor: pointer; }
-.session-row.delete-selecting .session { padding-right: 34px; }
+.session-row.delete-selecting .session { padding-right: 28px; }
 .session-row.delete-selecting:not(.delete-selected) { background: #202323; }
 .session-row.delete-selected { background: #332625; box-shadow: inset 2px 0 #c77872; }
 .session-rename-button { position: absolute; z-index: 3; right: 5px; top: 50%; width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: 5px; padding: 0; background: transparent; color: #7d8985; opacity: 0; visibility: hidden; transform: translateY(-50%); transition: opacity .15s ease, visibility 0s linear .15s, background-color .15s ease, color .15s ease; }
@@ -2148,7 +2152,8 @@ body {
 .session-rename-button:hover:not(:disabled) { background: #303936; color: #e2ece8; }
 .session-rename-button:focus-visible { outline: 2px solid #60877b; outline-offset: 1px; }
 .session-rename-button:disabled { opacity: .45; }
-.session-delete-select { position: absolute; z-index: 2; right: 5px; top: 50%; width: 25px; height: 25px; display: grid; place-items: center; border: 1px solid #56605e; border-radius: 6px; padding: 0; background: #202525; color: transparent; transform: translateY(-50%); }
+.session-delete-select { position: absolute; z-index: 2; right: 5px; top: 50%; width: 18px; height: 18px; display: grid; place-items: center; border: 1px solid #56605e; border-radius: 5px; padding: 0; background: #202525; color: transparent; transform: translateY(-50%); }
+.session-delete-select svg { width: 11px; height: 11px; stroke-width: 3; }
 .session-delete-select:hover:not(:disabled) { border-color: #9a6a66; background: #302524; }
 .session-delete-select.selected { border-color: #b86e68; background: #6b3834; color: #ffe4e1; }
 .session-row .session { padding-right: 2px; }
@@ -2174,6 +2179,9 @@ body {
 :root[data-theme="light"] .session-group-editor button:hover:not(:disabled) { background: #ededed; color: #111; }
 :root[data-theme="light"] .session-group-heading { background: color-mix(in srgb, #f7f7f7 92%, transparent); }
 :root[data-theme="light"] .session-group-toggle { color: #666; }
+:root[data-theme="light"] .session-group-chevron { color: #81908b; }
+:root[data-theme="light"] .session-group-toggle:hover .session-group-chevron { color: #527f72; }
+:root[data-theme="light"] .session-group-unread-dot { background: #2784df; box-shadow: 0 0 0 2px #2784df16, 0 0 8px #2784df38; }
 :root[data-theme="light"] .session-group-name-editor input { background: #fff; color: #24302c; box-shadow: inset 0 0 0 1px #6da898; }
 :root[data-theme="light"] .session-group-new:hover:not(:disabled),
 :root[data-theme="light"] .session-group-actions > button:hover:not(:disabled) { background: #e7e7e7; color: #333; }
@@ -2815,7 +2823,7 @@ body {
 
 /* Compact Session rows: hidden endpoint labels never reserve name width. */
 .session-group-list { gap: 0; }
-.session-row { min-height: 28px; border-radius: 4px; }
+.session-row { min-height: 26px; border-radius: 4px; }
 .session-row::after {
   content: "";
   position: absolute;
@@ -2828,8 +2836,8 @@ body {
   pointer-events: none;
 }
 .session-row .session {
-  min-height: 28px;
-  padding: 1px 2px 1px 34px;
+  min-height: 26px;
+  padding: 0 2px 0 34px;
   gap: 6px;
   transition: padding-left .18s ease, color .15s ease, background-color .15s ease;
 }
@@ -2838,7 +2846,7 @@ body {
   z-index: 3;
   top: 50%;
   width: 24px;
-  height: 28px;
+  height: 26px;
   margin: 0;
   opacity: 0;
   pointer-events: none;
@@ -2858,8 +2866,9 @@ body {
 .session-row:has(:focus-visible) .session { padding-left: 56px; }
 .session-row:is(.delete-selecting, .controls-suppressed) .session { padding-left: 34px; }
 .session-row:is(.delete-selecting, .controls-suppressed) > .session-expand { display: none; }
-.session-working-icon { width: 15px; height: 15px; flex: none; }
+.session-working-icon { width: 14px; height: 14px; flex: none; }
 .session-identity { flex: 1 1 48px; min-width: 40px; }
+.session-name { line-height: 1.15; }
 .session-endpoint-reveal {
   position: static;
   z-index: auto;
@@ -3131,6 +3140,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   min-height: 92px;
   max-height: min(190px, 34vh);
   margin-top: 8px;
+  position: relative;
   display: grid;
   place-items: center;
   overflow: hidden;
@@ -3148,7 +3158,11 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   color: #fff;
 }
 .collapsed-session-card span {
-  max-height: 100%;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: max-content;
+  max-width: calc(min(190px, 34vh) - 18px);
   overflow: hidden;
   font-size: 11px;
   font-weight: 650;
@@ -3156,8 +3170,8 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
-  writing-mode: vertical-rl;
-  text-orientation: mixed;
+  transform: translate(-50%, -50%) rotate(90deg);
+  transform-origin: center;
 }
 .sidebar.collapsed .sidebar-footer { width: 100%; margin-top: auto; padding: 0; }
 .collapsed-memory { display: grid; place-items: center; width: 38px; height: 38px; margin: 0 auto; border: 0; border-radius: 11px; background: transparent; color: #71827c; }
@@ -3866,7 +3880,10 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 :root[data-theme="light"] .worker-row.child-worker .worker-relation > span { background: #879ba7; }
 
 /* Chat Library: search and favorites use a settings-style full-screen center. */
-.sidebar-footer { gap: 2px; }
+/* Keep library/settings actions visible while a long Session list scrolls independently. */
+.sidebar { min-height: 0; overflow: hidden; }
+.session-list { flex: 1 1 auto; min-height: 0; overscroll-behavior: contain; }
+.sidebar-footer { flex: none; gap: 2px; }
 .sidebar-library-button,
 .sidebar-settings-button { width: 100%; min-width: 0; min-height: 38px; display: flex; align-items: center; justify-content: flex-start; gap: 9px; border: 0; border-radius: 9px; padding: 8px 10px; background: transparent; color: #87958f; font-size: 11px; font-weight: 650; text-align: left; transition: background-color .15s, color .15s, box-shadow .15s; }
 .sidebar-library-button:hover:not(:disabled),
@@ -4964,4 +4981,20 @@ body.workspace-modal-open .app-shell { user-select: none; }
   .restart-cwd-gate { width: 100%; margin: 0; padding: 12px; }
   .restart-cwd-options { padding-left: 0; }
   .restart-cwd-option code { flex-basis: 100%; padding-left: 47px; }
+}
+
+
+/* Long-press sorting for Session navigation. */
+.session-group:not(.dragging),
+.session-row:not(.dragging) { touch-action: pan-y; }
+.session-group:not(.dragging) > .session-group-heading,
+.session-row:not(.dragging) { cursor: grab; }
+.session-group.dragging,
+.session-row.dragging { cursor: grabbing; opacity: .78; }
+.session-group.dragging > .session-group-heading { box-shadow: 0 8px 20px #0007, inset 0 0 0 1px #62998a66; }
+.session-row.dragging { background: #26332f; box-shadow: 0 8px 18px #0007, inset 0 0 0 1px #62998a66; }
+:root[data-theme="light"] .session-group.dragging > .session-group-heading,
+:root[data-theme="light"] .session-row.dragging { box-shadow: 0 8px 18px #29443b2e, inset 0 0 0 1px #6fa59688; }
+@media (prefers-reduced-motion: reduce) {
+  .session-group, .session-row { transition: none !important; }
 }
