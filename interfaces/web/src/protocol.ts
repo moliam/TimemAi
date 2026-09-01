@@ -359,6 +359,8 @@ export type ModelEndpoint = {
   api_key_configured: boolean;
   http_headers: Record<string, string>;
   request_fields: Record<string, unknown>;
+  allow_cross_origin_redirects: boolean;
+  private_ca_configured: boolean;
 };
 
 export type MemTemporaryItem = {
@@ -612,6 +614,7 @@ export type WireEvent =
       api_key: string;
       http_headers: Record<string, string>;
       request_fields: Record<string, unknown>;
+      private_ca_pem: string;
     };
 
 export type ClientCommand =
@@ -769,6 +772,8 @@ export type ClientCommand =
         api_key?: string;
         http_headers: Record<string, string>;
         request_fields: Record<string, unknown>;
+        allow_cross_origin_redirects: boolean;
+        private_ca_pem?: string;
       };
     }
   | { type: "model_endpoint_delete"; endpoint_id: string }

@@ -524,3 +524,11 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
 The uninstaller removes installed binaries, the shipped reminder resource, and
 the installer-added user PATH entry. It does not remove MEM workspaces,
 Sessions, credentials, user configuration, Rust, or Visual C++ Build Tools.
+
+### 模型 HTTP 重定向与私有 CA
+
+模型接入点默认只跟随同 Origin（相同协议、主机和有效端口）的 HTTP 重定向。跨 Origin 或跨协议重定向默认拒绝；可在接入点编辑器中显式开启。开启后 Timem 会继续请求新地址，但不会把 API Key、协议认证 Header 或自定义 Header 转发到新的 Origin，只保留 JSON `Content-Type`。
+
+企业网关使用私有 CA 时，可在对应模型接入点填写 PEM 编码的 CA 证书链。该 CA 仅加入该接入点的模型 HTTP 客户端，不替换系统根证书。PEM 明文保存在 owner-only 的本地 Session/接入点配置中；普通浏览器快照和广播只显示“已配置”，只有用户显式打开接入点编辑器时才通过认证的请求级回复读取明文。无效、空证书束或超过 256 KiB 的 PEM 会在保存时拒绝。
+
+模型请求 JSON 序列化后上限为 32 MiB，响应上限为 16 MiB。网络错误会区分 DNS、连接、TLS、代理、请求和响应 Body；超时错误包含 `response_headers` 或 `response_body` 阶段。模型响应审计记录脱敏且有界的网关 request ID、TTFB、总耗时、响应字节数和重定向次数，不记录 API Key、自定义 Header 值或私有 CA。

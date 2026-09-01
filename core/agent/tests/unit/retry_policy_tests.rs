@@ -11,6 +11,10 @@ fn retry_policy_defaults_match_user_visible_contract() {
 fn retryable_model_system_errors_cover_network_and_transient_http() {
     for error in [
         "model_network_error: curl: (16) Error in the HTTP2 framing layer",
+        "model_dns_error: stage=response_headers lookup failed",
+        "model_connect_error: stage=response_headers connection refused",
+        "model_proxy_error: stage=response_headers proxy unavailable",
+        "model_body_error: stage=response_body connection reset",
         "model_timeout: request exceeded timeout",
         "curl_failed",
         "curl: (28) operation timed out",
@@ -35,6 +39,11 @@ fn non_retryable_model_errors_do_not_waste_rounds() {
         "model_http_401: unauthorized",
         "model_http_403: forbidden",
         "model_http_404: model not found",
+        "model_tls_error: invalid peer certificate",
+        "model_request_url_error: relative URL without a base",
+        "model_request_error: invalid request configuration",
+        "model_request_too_large: request body exceeds limit",
+        "model_redirect_blocked: cross-origin redirect",
         "invalid_json",
         "status_required",
         "next_actions[0].args_required",

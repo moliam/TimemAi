@@ -3612,6 +3612,7 @@ fn workspace_snapshot_deduplicates_registered_current_directory() {
                 api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
                 response_protocol: ResponseProtocolKind::default(),
                 openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+                http_transport: Default::default(),
             },
             bash_approval_mode: BashApprovalMode::Ask,
             work_instruction_mode: WorkInstructionLoadMode::Off,
@@ -5189,6 +5190,15 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
     template.workspace_dirs = vec![root.clone()];
     template.data_dir = data_dir.clone();
     template.initial_space = space.to_string();
+    let private_ca_pem = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .unwrap()
+        .serialize_pem()
+        .unwrap();
+    {
+        let mut settings = template.settings.lock().unwrap();
+        settings.config.http_transport.allow_cross_origin_redirects = true;
+        settings.config.http_transport.private_ca_pem = Some(private_ca_pem.clone());
+    }
     state.template = Arc::new(template.clone());
     state.sessions.lock().unwrap().clear();
 
@@ -5231,9 +5241,27 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
         stored.env.get("TIMEM_API_KEY").map(String::as_str),
         Some("session-only-secret")
     );
+    assert_eq!(
+        stored
+            .env
+            .get("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        stored.env.get("TIMEM_PRIVATE_CA_PEM").map(String::as_str),
+        Some(private_ca_pem.as_str())
+    );
+    assert!(!persisted_overrides.contains_key("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"));
+    assert!(!persisted_overrides.contains_key("TIMEM_PRIVATE_CA_PEM"));
 
-    template.settings.lock().unwrap().config.model = "model-from-new-env".to_string();
-    template.settings.lock().unwrap().config.api_key = "new-process-secret".to_string();
+    {
+        let mut settings = template.settings.lock().unwrap();
+        settings.config.model = "model-from-new-env".to_string();
+        settings.config.api_key = "new-process-secret".to_string();
+        settings.config.http_transport.allow_cross_origin_redirects = false;
+        settings.config.http_transport.private_ca_pem = None;
+    }
     let mut restarted = routing_test_state();
     restarted.sessions.lock().unwrap().clear();
     restarted.template = Arc::new(template);
@@ -5257,9 +5285,27 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
             .cache_mode,
         agent_core::OpenAiCompatibleCacheMode::Off
     );
-    assert!(!serde_json::to_string(restored)
-        .unwrap()
-        .contains("session-only-secret"));
+    assert!(
+        restored
+            .runtime
+            .settings
+            .config
+            .http_transport
+            .allow_cross_origin_redirects
+    );
+    assert_eq!(
+        restored
+            .runtime
+            .settings
+            .config
+            .http_transport
+            .private_ca_pem
+            .as_deref(),
+        Some(private_ca_pem.as_str())
+    );
+    let serialized = serde_json::to_string(restored).unwrap();
+    assert!(!serialized.contains("session-only-secret"));
+    assert!(!serialized.contains("BEGIN CERTIFICATE"));
 }
 
 #[test]
@@ -6941,6 +6987,33 @@ fn session_runtime_env_rejects_unknown_empty_and_invalid_values() {
             .unwrap(),
         "unsupported_session_env_key:PATH"
     );
+    for key in ["TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS", "TIMEM_PRIVATE_CA_PEM"] {
+        assert_eq!(
+            state
+                .template
+                .session_settings(&BTreeMap::from([(key.to_string(), "true".to_string())]))
+                .unwrap_err(),
+            format!("unsupported_session_env_key:{key}")
+        );
+    }
+    assert_eq!(
+        state
+            .template
+            .restored_session_settings(&BTreeMap::from([(
+                "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS".to_string(),
+                "TRUE".to_string(),
+            )]))
+            .unwrap_err(),
+        "invalid_cached_session_env:TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"
+    );
+    assert!(state
+        .template
+        .restored_session_settings(&BTreeMap::from([(
+            "TIMEM_PRIVATE_CA_PEM".to_string(),
+            "not a certificate".to_string(),
+        )]))
+        .unwrap_err()
+        .starts_with("invalid_cached_model_private_ca:model_tls_error:"));
     assert_eq!(
         state
             .template
@@ -7063,6 +7136,7 @@ fn routing_test_state() -> AppState {
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let template = WorkerTemplate {
         settings: Arc::new(Mutex::new(RuntimeSettings {
@@ -7284,6 +7358,7 @@ fn test_runtime_settings() -> RuntimeSettings {
             api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
             response_protocol: ResponseProtocolKind::Xml,
             openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+            http_transport: Default::default(),
         },
         bash_approval_mode: BashApprovalMode::Ask,
         work_instruction_mode: WorkInstructionLoadMode::Off,
@@ -12897,6 +12972,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
             max_llm_input_tokens: 100_000,
             max_llm_output_tokens: 10_000,
             stream: false,
+            allow_cross_origin_redirects: false,
+            private_ca_pem: String::new(),
             api_key: format!("secret-{index:05}"),
             http_headers: Default::default(),
             request_fields: Default::default(),
@@ -12954,6 +13031,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                 max_llm_input_tokens: 100_000,
                 max_llm_output_tokens: 10_000,
                 stream: true,
+                allow_cross_origin_redirects: false,
+                private_ca_pem: None,
                 api_key: None,
                 http_headers: BTreeMap::from([
                     ("Authorization".to_string(), "****".to_string()),
@@ -13009,6 +13088,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                         max_llm_input_tokens: 100_000,
                         max_llm_output_tokens: 10_000,
                         stream: false,
+                        allow_cross_origin_redirects: false,
+                        private_ca_pem: None,
                         api_key: None,
                         http_headers: Default::default(),
                         request_fields: Default::default(),
@@ -13046,6 +13127,8 @@ fn legacy_model_endpoints_load_with_default_token_limits() {
     assert_eq!(endpoints[0].max_llm_input_tokens, 100_000);
     assert_eq!(endpoints[0].max_llm_output_tokens, 10_000);
     assert!(!endpoints[0].stream);
+    assert!(!endpoints[0].allow_cross_origin_redirects);
+    assert!(endpoints[0].private_ca_pem.is_empty());
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -13088,6 +13171,8 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         max_llm_input_tokens: 128_000,
         max_llm_output_tokens: 10_000,
         stream: false,
+        allow_cross_origin_redirects: false,
+        private_ca_pem: None,
         api_key: None,
         http_headers: Default::default(),
         request_fields: Default::default(),
@@ -13107,6 +13192,8 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         max_llm_input_tokens: 200_000,
         max_llm_output_tokens: 8_000,
         stream: false,
+        allow_cross_origin_redirects: false,
+        private_ca_pem: None,
         api_key: None,
         http_headers: Default::default(),
         request_fields: Default::default(),
@@ -13114,6 +13201,31 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
     assert_eq!(
         normalize_model_endpoint_input(None, invalid_output).unwrap_err(),
         "invalid_model_endpoint_max_output_tokens"
+    );
+}
+
+#[test]
+fn model_endpoint_rejects_invalid_private_ca_before_persisting() {
+    let input = ModelEndpointInput {
+        id: None,
+        name: "Invalid private CA".to_string(),
+        model: "gpt".to_string(),
+        api_protocol: "openai-compatible".to_string(),
+        response_protocol: "xml".to_string(),
+        base_url: "https://api.example.test/v1".to_string(),
+        max_llm_input_tokens: 100_000,
+        max_llm_output_tokens: 10_000,
+        stream: false,
+        allow_cross_origin_redirects: true,
+        private_ca_pem: Some("not a PEM certificate".to_string()),
+        api_key: None,
+        http_headers: Default::default(),
+        request_fields: Default::default(),
+    };
+    let error = normalize_model_endpoint_input(None, input).unwrap_err();
+    assert!(
+        error.starts_with("invalid_model_endpoint_private_ca:model_tls_error:"),
+        "{error}"
     );
 }
 
@@ -13129,6 +13241,8 @@ fn model_endpoint_stream_requires_openai_compatible_protocol() {
         max_llm_input_tokens: 200_000,
         max_llm_output_tokens: 20_000,
         stream: true,
+        allow_cross_origin_redirects: false,
+        private_ca_pem: None,
         api_key: None,
         http_headers: Default::default(),
         request_fields: Default::default(),
@@ -13160,6 +13274,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 max_llm_input_tokens: 100_000,
                 max_llm_output_tokens: 10_000,
                 stream: false,
+                allow_cross_origin_redirects: false,
+                private_ca_pem: None,
                 api_key: Some("secret-endpoint-key".to_string()),
                 http_headers: BTreeMap::from([
                     ("X-Tenant".to_string(), "tenant\"one\\东京".to_string()),
@@ -13180,7 +13296,9 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     let serialized = serde_json::to_string(&created).unwrap();
     assert!(serialized.contains("Production"));
     assert!(serialized.contains("api_key_configured"));
+    assert!(serialized.contains("private_ca_configured"));
     assert!(!serialized.contains("secret-endpoint-key"));
+    assert!(!serialized.contains("BEGIN CERTIFICATE"));
     assert!(!serialized.contains("tenant\"one"));
     assert!(serialized.contains("\"X-Tenant\":\"****\""));
     assert!(serialized.contains("\"service_tier\":\"****\""));
@@ -13254,6 +13372,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
             ref api_key,
             ref http_headers,
             ref request_fields,
+            ..
         }) if endpoint_id == "endpoint-one" && api_key == "secret-endpoint-key"
             && http_headers.get("X-Tenant").map(String::as_str) == Some("tenant\"one\\东京")
             && request_fields.get("service_tier") == Some(&json!("fast"))
@@ -13274,6 +13393,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 max_llm_input_tokens: 1_000_000,
                 max_llm_output_tokens: 50_000,
                 stream: true,
+                allow_cross_origin_redirects: false,
+                private_ca_pem: None,
                 api_key: None,
                 http_headers: Default::default(),
                 request_fields: Default::default(),
@@ -13320,6 +13441,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 max_llm_input_tokens: 1_000_000,
                 max_llm_output_tokens: 50_000,
                 stream: false,
+                allow_cross_origin_redirects: false,
+                private_ca_pem: None,
                 api_key: None,
                 http_headers: Default::default(),
                 request_fields: Default::default(),

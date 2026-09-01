@@ -410,6 +410,10 @@ struct ModelEndpointConfig {
     http_headers: BTreeMap<String, String>,
     #[serde(default)]
     request_fields: BTreeMap<String, Value>,
+    #[serde(default)]
+    allow_cross_origin_redirects: bool,
+    #[serde(default)]
+    private_ca_pem: String,
 }
 
 fn default_endpoint_max_input_tokens() -> u32 {
@@ -434,6 +438,8 @@ struct ModelEndpointReport {
     api_key_configured: bool,
     http_headers: BTreeMap<String, String>,
     request_fields: BTreeMap<String, Value>,
+    allow_cross_origin_redirects: bool,
+    private_ca_configured: bool,
 }
 
 impl From<&ModelEndpointConfig> for ModelEndpointReport {
@@ -459,6 +465,8 @@ impl From<&ModelEndpointConfig> for ModelEndpointReport {
                 .keys()
                 .map(|name| (name.clone(), Value::String("****".to_string())))
                 .collect(),
+            allow_cross_origin_redirects: endpoint.allow_cross_origin_redirects,
+            private_ca_configured: !endpoint.private_ca_pem.is_empty(),
         }
     }
 }
@@ -990,6 +998,7 @@ enum WireEvent {
         api_key: String,
         http_headers: BTreeMap<String, String>,
         request_fields: BTreeMap<String, Value>,
+        private_ca_pem: String,
     },
 }
 
@@ -1139,6 +1148,10 @@ struct ModelEndpointInput {
     http_headers: BTreeMap<String, String>,
     #[serde(default)]
     request_fields: BTreeMap<String, Value>,
+    #[serde(default)]
+    allow_cross_origin_redirects: bool,
+    #[serde(default)]
+    private_ca_pem: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3774,6 +3787,7 @@ fn handle_command_with_id(
                 api_key: secrets.api_key,
                 http_headers: secrets.http_headers,
                 request_fields: secrets.request_fields,
+                private_ca_pem: secrets.private_ca_pem,
             }));
         }
         ClientCommand::McpServerUpsert { session_id, config } => {
@@ -5188,7 +5202,7 @@ fn restore_stored_session(
         },
         &explicit_overrides,
     );
-    let settings = state.template.session_settings(&cached_env)?;
+    let settings = state.template.restored_session_settings(&cached_env)?;
     let session_env = state.template.session_env(&settings, &cached_env);
     let runtime = WebSessionRuntime {
         settings,
@@ -5482,7 +5496,11 @@ fn persist_restored_session_runtime_cache(
                 .filter(|(key, _)| {
                     !matches!(
                         key.as_str(),
-                        "TIMEM_API_KEY" | "TIMEM_HTTP_HEADERS" | "TIMEM_REQUEST_FIELDS"
+                        "TIMEM_API_KEY"
+                            | "TIMEM_HTTP_HEADERS"
+                            | "TIMEM_REQUEST_FIELDS"
+                            | "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"
+                            | "TIMEM_PRIVATE_CA_PEM"
                     )
                 })
                 .map(|(key, value)| (key.clone(), value.clone()))
@@ -6242,7 +6260,11 @@ fn stored_session_from_web_session_with_store(
                 .filter(|(key, _)| {
                     !matches!(
                         key.as_str(),
-                        "TIMEM_API_KEY" | "TIMEM_HTTP_HEADERS" | "TIMEM_REQUEST_FIELDS"
+                        "TIMEM_API_KEY"
+                            | "TIMEM_HTTP_HEADERS"
+                            | "TIMEM_REQUEST_FIELDS"
+                            | "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"
+                            | "TIMEM_PRIVATE_CA_PEM"
                     )
                 })
                 .map(|(key, value)| (key.clone(), value.clone()))
@@ -7150,6 +7172,15 @@ fn normalize_model_endpoint_input(
     }
     agent_core::validate_model_request_fields(&request_fields)
         .map_err(|error| format!("invalid_model_endpoint_request_fields:{error}"))?;
+    let private_ca_pem = input.private_ca_pem.unwrap_or_else(|| {
+        existing
+            .map(|item| item.private_ca_pem.clone())
+            .unwrap_or_default()
+    });
+    if !private_ca_pem.is_empty() {
+        agent_core::validate_model_private_ca_pem(&private_ca_pem)
+            .map_err(|error| format!("invalid_model_endpoint_private_ca:{error}"))?;
+    }
     if input.stream && api_protocol != "openai-compatible" {
         return Err("model_endpoint_stream_requires_openai_compatible".to_string());
     }
@@ -7199,6 +7230,8 @@ fn normalize_model_endpoint_input(
         api_key,
         http_headers,
         request_fields,
+        allow_cross_origin_redirects: input.allow_cross_origin_redirects,
+        private_ca_pem,
     })
 }
 
@@ -7217,6 +7250,7 @@ fn testable_endpoint_validation_settings() -> RuntimeSettings {
             api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
             response_protocol: ResponseProtocolKind::Xml,
             openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+            http_transport: Default::default(),
         },
         bash_approval_mode: BashApprovalMode::Ask,
         work_instruction_mode: WorkInstructionLoadMode::Silent,
@@ -7310,6 +7344,10 @@ fn session_uses_model_endpoint(session: &WebSession, endpoint: &ModelEndpointCon
         && config.api_key == endpoint.api_key
         && config.http_headers == endpoint.http_headers
         && config.request_fields == endpoint.request_fields
+        && config.http_transport.allow_cross_origin_redirects
+            == endpoint.allow_cross_origin_redirects
+        && config.http_transport.private_ca_pem.as_deref()
+            == (!endpoint.private_ca_pem.is_empty()).then_some(endpoint.private_ca_pem.as_str())
 }
 
 fn sync_endpoint_runtime_fields(
@@ -7321,6 +7359,8 @@ fn sync_endpoint_runtime_fields(
         && previous.max_llm_output_tokens == updated.max_llm_output_tokens
         && previous.stream == updated.stream
         && previous.request_fields == updated.request_fields
+        && previous.allow_cross_origin_redirects == updated.allow_cross_origin_redirects
+        && previous.private_ca_pem == updated.private_ca_pem
     {
         return Ok(Vec::new());
     }
@@ -7378,6 +7418,19 @@ fn sync_endpoint_runtime_fields(
                 updated.request_fields.clone(),
             )?);
         }
+        if previous.allow_cross_origin_redirects != updated.allow_cross_origin_redirects
+            || previous.private_ca_pem != updated.private_ca_pem
+        {
+            runtime_profile = Some(update_session_model_http_transport(
+                state,
+                &session_id,
+                agent_core::ModelHttpTransportOptions {
+                    allow_cross_origin_redirects: updated.allow_cross_origin_redirects,
+                    private_ca_pem: (!updated.private_ca_pem.is_empty())
+                        .then(|| updated.private_ca_pem.clone()),
+                },
+            )?);
+        }
         if let Some(runtime_profile) = runtime_profile {
             updates.push((session_id, runtime_profile));
         }
@@ -7402,6 +7455,7 @@ struct ModelEndpointSecrets {
     api_key: String,
     http_headers: BTreeMap<String, String>,
     request_fields: BTreeMap<String, Value>,
+    private_ca_pem: String,
 }
 
 fn model_endpoint_secrets(
@@ -7419,6 +7473,7 @@ fn model_endpoint_secrets(
             api_key: item.api_key.clone(),
             http_headers: item.http_headers.clone(),
             request_fields: item.request_fields.clone(),
+            private_ca_pem: item.private_ca_pem.clone(),
         })
         .ok_or_else(|| "model_endpoint_not_found".to_string())
 }
@@ -7460,7 +7515,59 @@ fn apply_model_endpoint(
     }
     update_session_http_headers(state, session_id, endpoint.http_headers)?;
     update_session_request_fields(state, session_id, endpoint.request_fields)?;
+    update_session_model_http_transport(
+        state,
+        session_id,
+        agent_core::ModelHttpTransportOptions {
+            allow_cross_origin_redirects: endpoint.allow_cross_origin_redirects,
+            private_ca_pem: (!endpoint.private_ca_pem.is_empty())
+                .then_some(endpoint.private_ca_pem),
+        },
+    )?;
     update_session_api_key(state, session_id, endpoint.api_key)
+}
+
+fn update_session_model_http_transport(
+    state: &AppState,
+    session_id: &str,
+    options: agent_core::ModelHttpTransportOptions,
+) -> Result<WebSessionRuntimeProfile, String> {
+    if let Some(pem) = &options.private_ca_pem {
+        agent_core::validate_model_private_ca_pem(pem)
+            .map_err(|error| format!("invalid_model_endpoint_private_ca:{error}"))?;
+    }
+    if session_has_active_turn(state, session_id)? {
+        return Err("session_model_http_transport_update_while_working".to_string());
+    }
+    let worker_ids = session_worker_ids(state, session_id)?;
+    {
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        for worker_id in &worker_ids {
+            manager
+                .handle(worker_id)
+                .ok_or_else(|| "session_worker_not_found".to_string())?
+                .update_model_http_transport(options.clone())?;
+        }
+    }
+    let runtime_profile = {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        session.runtime.settings.config.http_transport = options;
+        session.runtime.env = session_cached_env_values(&session.runtime.settings);
+        session.runtime_profile =
+            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile.clone()
+    };
+    persist_web_session(state, session_id)?;
+    Ok(runtime_profile)
 }
 
 fn update_session_http_headers(
@@ -10556,16 +10663,36 @@ impl WorkerTemplate {
         &self,
         env_overrides: &BTreeMap<String, String>,
     ) -> Result<RuntimeSettings, String> {
+        self.session_settings_with_transport_cache(env_overrides, false)
+    }
+
+    fn restored_session_settings(
+        &self,
+        cached_env: &BTreeMap<String, String>,
+    ) -> Result<RuntimeSettings, String> {
+        self.session_settings_with_transport_cache(cached_env, true)
+    }
+
+    fn session_settings_with_transport_cache(
+        &self,
+        env_overrides: &BTreeMap<String, String>,
+        allow_transport_cache: bool,
+    ) -> Result<RuntimeSettings, String> {
         let mut settings = self
             .settings
             .lock()
             .map_err(|_| "runtime_settings_poisoned")?
             .clone();
         for (key, value) in env_overrides {
-            if value.trim().is_empty() && key != "TIMEM_API_KEY" {
+            let trusted_transport_key = allow_transport_cache
+                && CACHED_MODEL_HTTP_TRANSPORT_ENV_KEYS.contains(&key.as_str());
+            if value.trim().is_empty()
+                && key != "TIMEM_API_KEY"
+                && !(trusted_transport_key && key == "TIMEM_PRIVATE_CA_PEM")
+            {
                 return Err(format!("empty_session_env_value:{key}"));
             }
-            if !SESSION_ENV_KEYS.contains(&key.as_str()) {
+            if !SESSION_ENV_KEYS.contains(&key.as_str()) && !trusted_transport_key {
                 return Err(format!("unsupported_session_env_key:{key}"));
             }
         }
@@ -10631,6 +10758,21 @@ impl WorkerTemplate {
         if let Some(value) = env_overrides.get("TIMEM_PARALLEL_TOOL_CALLS") {
             settings.config.interaction.parallel_tool_calls =
                 agent_core::parse_parallel_tool_calls(value)?;
+        }
+        if allow_transport_cache {
+            if let Some(value) = env_overrides.get("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS") {
+                settings.config.http_transport.allow_cross_origin_redirects =
+                    parse_cached_bool("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS", value)?;
+            }
+            if let Some(value) = env_overrides.get("TIMEM_PRIVATE_CA_PEM") {
+                settings.config.http_transport.private_ca_pem = if value.trim().is_empty() {
+                    None
+                } else {
+                    agent_core::validate_model_private_ca_pem(value)
+                        .map_err(|error| format!("invalid_cached_model_private_ca:{error}"))?;
+                    Some(value.clone())
+                };
+            }
         }
         for key in [
             "TIMEM_ENABLE_THINKING",
@@ -10752,6 +10894,9 @@ fn model_service_config_for_web_launch(
     model_service_config_from_sources_allow_missing_api_key(&launch.model_service_source(), env)
 }
 
+const CACHED_MODEL_HTTP_TRANSPORT_ENV_KEYS: &[&str] =
+    &["TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS", "TIMEM_PRIVATE_CA_PEM"];
+
 const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_MODEL",
     "TIMEM_API_PROTOCOL",
@@ -10773,6 +10918,14 @@ const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_TOOL_CALL_MODE",
     "TIMEM_PARALLEL_TOOL_CALLS",
 ];
+
+fn parse_cached_bool(key: &str, value: &str) -> Result<bool, String> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!("invalid_cached_session_env:{key}")),
+    }
+}
 
 fn parse_round_budget(value: &str) -> Result<u32, String> {
     let value = value.trim();
@@ -10947,6 +11100,23 @@ fn session_cached_env_values(settings: &RuntimeSettings) -> BTreeMap<String, Str
         "TIMEM_REQUEST_FIELDS".to_string(),
         serde_json::to_string(&settings.config.request_fields).unwrap_or_else(|_| "{}".to_string()),
     );
+    env.insert(
+        "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS".to_string(),
+        settings
+            .config
+            .http_transport
+            .allow_cross_origin_redirects
+            .to_string(),
+    );
+    env.insert(
+        "TIMEM_PRIVATE_CA_PEM".to_string(),
+        settings
+            .config
+            .http_transport
+            .private_ca_pem
+            .clone()
+            .unwrap_or_default(),
+    );
     env
 }
 
@@ -11102,6 +11272,8 @@ impl WebLaunchOptions {
             api_key: self.api_key.clone(),
             http_headers: None,
             request_fields: None,
+            allow_cross_origin_redirects: None,
+            private_ca_pem: None,
             model: self.model.clone(),
             base_url: self.base_url.clone(),
             timeout_secs: self.timeout_secs,

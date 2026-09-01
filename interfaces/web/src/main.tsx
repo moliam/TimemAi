@@ -560,6 +560,9 @@ function TimemApp() {
   >({});
   const [revealedEndpointRequestFields, setRevealedEndpointRequestFields] =
     useState<Record<string, Record<string, unknown>>>({});
+  const [revealedEndpointPrivateCas, setRevealedEndpointPrivateCas] = useState<
+    Record<string, string>
+  >({});
   const [showAppearance, setShowAppearance] = useState(false);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSection>("appearance");
@@ -2117,6 +2120,7 @@ function TimemApp() {
         setRevealedEndpointApiKeys({});
         setRevealedEndpointHeaders({});
         setRevealedEndpointRequestFields({});
+        setRevealedEndpointPrivateCas({});
         return;
       }
       if (event.type === "model_endpoint_secret_revealed") {
@@ -2131,6 +2135,10 @@ function TimemApp() {
         setRevealedEndpointRequestFields((current) => ({
           ...current,
           [event.endpoint_id]: event.request_fields,
+        }));
+        setRevealedEndpointPrivateCas((current) => ({
+          ...current,
+          [event.endpoint_id]: event.private_ca_pem,
         }));
         return;
       }
@@ -4327,6 +4335,7 @@ function TimemApp() {
               revealedEndpointApiKeys={revealedEndpointApiKeys}
               revealedEndpointHeaders={revealedEndpointHeaders}
               revealedEndpointRequestFields={revealedEndpointRequestFields}
+              revealedEndpointPrivateCas={revealedEndpointPrivateCas}
               onClose={closeSettingsCenter}
               onRefreshTemporaryItems={refreshMemTemporaryItems}
               onDeleteTemporaryItems={deleteMemTemporaryItems}
@@ -11707,6 +11716,7 @@ type SettingsCenterProps = {
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
   revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
+  revealedEndpointPrivateCas: Record<string, string>;
   onClose: () => void;
   onSaveTemporaryPolicy: (
     days: 1 | 5 | 10 | null,
@@ -11758,6 +11768,7 @@ const SettingsCenter = memo(function SettingsCenter(
     revealedEndpointApiKeys,
     revealedEndpointHeaders,
     revealedEndpointRequestFields,
+    revealedEndpointPrivateCas,
     onClose,
     onSaveTemporaryPolicy,
     onSaveConversationCapacity,
@@ -12128,6 +12139,7 @@ const SettingsCenter = memo(function SettingsCenter(
                 revealedEndpointApiKeys={revealedEndpointApiKeys}
                 revealedEndpointHeaders={revealedEndpointHeaders}
                 revealedEndpointRequestFields={revealedEndpointRequestFields}
+                revealedEndpointPrivateCas={revealedEndpointPrivateCas}
                 onEdit={onEditEndpoint}
                 onDelete={onDeleteEndpoint}
                 onReveal={onRevealEndpoint}
@@ -12804,6 +12816,7 @@ function EndpointSettingsPane({
   revealedEndpointApiKeys,
   revealedEndpointHeaders,
   revealedEndpointRequestFields,
+  revealedEndpointPrivateCas,
   onEdit,
   onDelete,
   onReveal,
@@ -12814,6 +12827,7 @@ function EndpointSettingsPane({
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
   revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
+  revealedEndpointPrivateCas: Record<string, string>;
   onEdit: (endpoint: ModelEndpoint | "new" | null) => void;
   onDelete: (endpoint: ModelEndpoint) => void;
   onReveal: (endpointId: string) => void;
@@ -12851,6 +12865,11 @@ function EndpointSettingsPane({
             endpointEditor === "new"
               ? {}
               : revealedEndpointRequestFields[endpointEditor.id]
+          }
+          revealedPrivateCaPem={
+            endpointEditor === "new"
+              ? ""
+              : revealedEndpointPrivateCas[endpointEditor.id]
           }
           onClose={() => onEdit(null)}
           onSave={onSave}
@@ -13271,6 +13290,7 @@ function ModelEndpointEditor({
   revealedApiKey,
   revealedHeaders,
   revealedRequestFields,
+  revealedPrivateCaPem,
   onClose,
   onSave,
 }: {
@@ -13278,6 +13298,7 @@ function ModelEndpointEditor({
   revealedApiKey?: string;
   revealedHeaders?: Record<string, string>;
   revealedRequestFields?: Record<string, unknown>;
+  revealedPrivateCaPem?: string;
   onClose: () => void;
   onSave: (endpoint: ModelEndpointDraft) => void;
 }) {
@@ -13294,6 +13315,9 @@ function ModelEndpointEditor({
     api_key: revealedApiKey,
     http_headers: endpoint?.http_headers ?? {},
     request_fields: endpoint?.request_fields ?? {},
+    allow_cross_origin_redirects:
+      endpoint?.allow_cross_origin_redirects ?? false,
+    private_ca_pem: revealedPrivateCaPem,
   }));
   const [headerRows, setHeaderRows] = useState<StructuredRow[]>(() =>
     structuredRows(endpoint?.http_headers ?? {}),
@@ -13317,6 +13341,13 @@ function ModelEndpointEditor({
       })),
     );
   }, [revealedHeaders]);
+  useEffect(() => {
+    if (revealedPrivateCaPem !== undefined)
+      setDraft((current) => ({
+        ...current,
+        private_ca_pem: revealedPrivateCaPem,
+      }));
+  }, [revealedPrivateCaPem]);
   useEffect(() => {
     if (!revealedRequestFields) return;
     setRequestRows((rows) =>
@@ -13449,6 +13480,42 @@ function ModelEndpointEditor({
               setDraft({ ...draft, base_url: event.target.value })
             }
           />
+        </label>
+        <label className="wide endpoint-transport-toggle">
+          <span>
+            <input
+              type="checkbox"
+              checked={draft.allow_cross_origin_redirects}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  allow_cross_origin_redirects: event.target.checked,
+                })
+              }
+            />
+            允许跨 Origin / 跨协议重定向
+          </span>
+          <small>
+            默认关闭。开启后会跟随跳转，但跨 Origin 时不会转发 API Key 或自定义 Headers。
+          </small>
+        </label>
+        <label className="wide">
+          私有 CA（PEM）
+          <textarea
+            className="endpoint-private-ca"
+            spellCheck={false}
+            value={draft.private_ca_pem ?? ""}
+            placeholder={
+              endpoint?.private_ca_configured &&
+              revealedPrivateCaPem === undefined
+                ? "正在读取…"
+                : "可选：-----BEGIN CERTIFICATE-----"
+            }
+            onChange={(event) =>
+              setDraft({ ...draft, private_ca_pem: event.target.value })
+            }
+          />
+          <small>仅用于此接入点的模型 HTTPS 连接，不替换系统根证书。</small>
         </label>
         <label>
           最大上下文窗口

@@ -11,6 +11,8 @@ export type ModelEndpoint = {
   api_key_configured: boolean;
   http_headers: Record<string, string>;
   request_fields: Record<string, unknown>;
+  allow_cross_origin_redirects: boolean;
+  private_ca_configured: boolean;
 };
 
 export type ModelEndpointDraft = {
@@ -26,6 +28,8 @@ export type ModelEndpointDraft = {
   api_key?: string;
   http_headers: Record<string, string>;
   request_fields: Record<string, unknown>;
+  allow_cross_origin_redirects: boolean;
+  private_ca_pem?: string;
 };
 
 type ModelEndpointProfile = {

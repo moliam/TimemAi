@@ -152,16 +152,18 @@ pub use model_api::{
     prepare_model_http_request, prepare_model_interaction_http_request, prepare_model_request,
     prompt_cache_plan_audit, validate_model_http_headers, validate_model_request_fields,
     without_openai_compatible_cache_control, ApiProtocol, ModelCacheControl,
-    ModelHttpResponseInterpretation, ModelPromptBlock, ModelPromptRole, ModelServiceConfig,
-    OpenAiCompatibleCacheMode, OpenAiCompatibleOptions, PreparedModelHttpRequest,
-    PreparedModelRequest, StructuredOutputHint,
+    ModelHttpResponseInterpretation, ModelHttpTransportOptions, ModelPromptBlock, ModelPromptRole,
+    ModelServiceConfig, OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
+    PreparedModelHttpRequest, PreparedModelRequest, StructuredOutputHint,
 };
 pub use model_service_config::{
     apply_openai_compatible_env_value, model_service_config_from_sources,
     model_service_config_from_sources_allow_missing_api_key, validate_api_key, LocalLLMKeyFile,
     ModelServiceConfigSource,
 };
-pub use model_transport::{call_model, call_model_with_cancel, HttpModelClient};
+pub use model_transport::{
+    call_model, call_model_with_cancel, validate_model_private_ca_pem, HttpModelClient,
+};
 pub use negotiation::negotiate_interaction;
 use notification::CoreNotification;
 pub use notification::{CoreActionKind, CoreMemoryActivity};

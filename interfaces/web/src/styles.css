@@ -1947,6 +1947,13 @@ body {
 .endpoint-api-protocol .endpoint-stream-toggle { display: inline-flex; min-height: 32px; align-items: center; gap: 4px; padding: 0 2px; white-space: nowrap; font-size: 10px; font-weight: 700; }
 .endpoint-api-protocol .endpoint-stream-toggle input { width: 13px; height: 13px; margin: 0; padding: 0; accent-color: #64bbaa; }
 .endpoint-api-protocol .endpoint-stream-toggle input:disabled + span { opacity: .45; }
+
+.endpoint-transport-toggle > span { display: flex; align-items: center; gap: 7px; }
+.endpoint-transport-toggle input { width: 14px; height: 14px; margin: 0; accent-color: #64bbaa; }
+.endpoint-editor-grid small { color: #7f929c; font-size: 10px; font-weight: 500; line-height: 1.45; }
+.endpoint-editor-grid .endpoint-private-ca { min-height: 112px; resize: vertical; border: 1px solid #38515e; border-radius: 4px; padding: 8px; background: #091319; color: #e1edf2; outline: none; font: 10px/1.45 "SFMono-Regular", Consolas, monospace; }
+.endpoint-editor-grid .endpoint-private-ca:focus { border-color: #64bbaa; }
+:root[data-theme="light"] .endpoint-editor-grid .endpoint-private-ca { border-color: #b8cbd2; background: #fff; color: #172229; }
 .endpoint-editor-grid input, .endpoint-editor-grid select { min-width: 0; width: 100%; border: 1px solid #38515e; border-radius: 4px; padding: 7px 8px; background: #091319; color: #e1edf2; outline: none; }
 .endpoint-editor-grid input:focus, .endpoint-editor-grid select:focus { border-color: #64bbaa; }
 .endpoint-api-key { position: relative; }

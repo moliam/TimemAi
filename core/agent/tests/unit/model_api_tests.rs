@@ -15,6 +15,7 @@ fn config(api_protocol: ApiProtocol) -> ModelServiceConfig {
         api_protocol,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: crate::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     }
 }
 

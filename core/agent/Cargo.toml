@@ -18,3 +18,8 @@ libc = "0.2"
 encoding_rs = "0.8"
 reqwest = { version = "=0.11.27", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
+
+[dev-dependencies]
+rcgen = "0.12"
+rustls = "0.21"
+time = "=0.3.36"

@@ -58,6 +58,10 @@ pub fn is_retryable_model_system_error(error: &str) -> bool {
         return false;
     }
     if lower.starts_with("model_network_error")
+        || lower.starts_with("model_dns_error")
+        || lower.starts_with("model_connect_error")
+        || lower.starts_with("model_proxy_error")
+        || lower.starts_with("model_body_error")
         || lower.starts_with("model_timeout")
         || lower.starts_with("curl_failed")
         || lower.contains("curl:")
