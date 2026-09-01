@@ -13,7 +13,10 @@ const CAPMGR_MANIFEST: &str = include_str!("../../../resources/capabilities/tool
 const CONTEXT_COMPACT_MANIFEST: &str =
     include_str!("../../../resources/capabilities/tools/context_compact.yaml");
 const READFILE_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/readfile.yaml");
-const RUN_BASH_MANIFEST: &str = include_str!("../../../resources/capabilities/tools/run_bash.yaml");
+const RUN_BASH_MANIFEST: &str =
+    include_str!("../../../resources/capabilities/tools/platform/unix/run_bash.yaml");
+const RUN_POWERSHELL_MANIFEST: &str =
+    include_str!("../../../resources/capabilities/tools/platform/windows/run_powershell.yaml");
 const SELF_TOOL_MANIFEST: &str =
     include_str!("../../../resources/capabilities/tools/self_tool.yaml");
 const SUB_ANSWER_MANIFEST: &str =
@@ -89,37 +92,80 @@ pub struct CapabilityRegistry {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityPlatform {
+    Unix,
+    Windows,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapabilityHostProfile {
+    pub platform: CapabilityPlatform,
     pub local_command_execution: bool,
     pub bash_execution: bool,
+    pub powershell_execution: bool,
 }
 
 impl CapabilityHostProfile {
     pub fn detect() -> Self {
         Self {
+            platform: if cfg!(windows) {
+                CapabilityPlatform::Windows
+            } else if cfg!(unix) {
+                CapabilityPlatform::Unix
+            } else {
+                CapabilityPlatform::Other
+            },
             local_command_execution: local_command_execution_available(),
             bash_execution: bash_execution_available(),
+            powershell_execution: powershell_execution_available(),
         }
     }
 
+    /// Test/helper profile matching the historical Unix local-command host.
     pub fn with_local_command_execution() -> Self {
+        Self::unix_with_local_command_execution()
+    }
+
+    pub fn unix_with_local_command_execution() -> Self {
         Self {
+            platform: CapabilityPlatform::Unix,
             local_command_execution: true,
             bash_execution: true,
+            powershell_execution: false,
+        }
+    }
+
+    pub fn windows_with_local_command_execution() -> Self {
+        Self {
+            platform: CapabilityPlatform::Windows,
+            local_command_execution: true,
+            bash_execution: false,
+            powershell_execution: true,
         }
     }
 
     pub fn with_local_command_execution_without_bash() -> Self {
         Self {
+            platform: CapabilityPlatform::Unix,
             local_command_execution: true,
             bash_execution: false,
+            powershell_execution: false,
         }
     }
 
     pub fn without_local_command_execution() -> Self {
         Self {
+            platform: if cfg!(windows) {
+                CapabilityPlatform::Windows
+            } else if cfg!(unix) {
+                CapabilityPlatform::Unix
+            } else {
+                CapabilityPlatform::Other
+            },
             local_command_execution: false,
             bash_execution: false,
+            powershell_execution: false,
         }
     }
 
@@ -127,7 +173,12 @@ impl CapabilityHostProfile {
         match requirement.map(str::trim).filter(|value| !value.is_empty()) {
             None => true,
             Some("local_command_execution") => self.local_command_execution,
-            Some("bash_execution") => self.bash_execution,
+            Some("bash_execution") => {
+                self.platform == CapabilityPlatform::Unix && self.bash_execution
+            }
+            Some("powershell_execution") => {
+                self.platform == CapabilityPlatform::Windows && self.powershell_execution
+            }
             Some(_) => false,
         }
     }
@@ -139,8 +190,19 @@ impl CapabilityHostProfile {
         if manifest.binding.binding_type == "command" {
             return self.local_command_execution;
         }
-        if manifest.binding.binding_type == "builtin" && manifest.binding.name == "run_bash" {
-            return self.bash_execution;
+        if manifest.binding.binding_type == "builtin"
+            && matches!(
+                manifest.binding.name.as_str(),
+                "run_bash" | "run_powershell"
+            )
+        {
+            return match manifest.binding.name.as_str() {
+                "run_bash" => self.platform == CapabilityPlatform::Unix && self.bash_execution,
+                "run_powershell" => {
+                    self.platform == CapabilityPlatform::Windows && self.powershell_execution
+                }
+                _ => false,
+            };
         }
         true
     }
@@ -154,16 +216,84 @@ fn bash_execution_available() -> bool {
     crate::os::bash_execution_available()
 }
 
-const RUN_BASH_HOST_ENVIRONMENT_PLACEHOLDER: &str = "{{RUN_BASH_HOST_ENVIRONMENT}}";
+fn powershell_execution_available() -> bool {
+    crate::os::powershell_execution_available()
+}
 
-fn inject_run_bash_host_environment(manifest: &mut ToolManifest) {
-    if manifest.id != "run_bash" || manifest.binding.name != "run_bash" {
-        return;
+const RUN_BASH_HOST_ENVIRONMENT_PLACEHOLDER: &str = "{{RUN_BASH_HOST_ENVIRONMENT}}";
+const RUN_POWERSHELL_HOST_ENVIRONMENT_PLACEHOLDER: &str = "{{RUN_POWERSHELL_HOST_ENVIRONMENT}}";
+
+fn inject_platform_prompt_values(manifest: &mut ToolManifest, profile: CapabilityHostProfile) {
+    match (manifest.id.as_str(), manifest.binding.name.as_str()) {
+        ("run_bash", "run_bash") => {
+            let environment = if profile.platform == CapabilityPlatform::Unix && cfg!(unix) {
+                crate::os::host_environment()
+            } else {
+                "Unix host with Bash"
+            };
+            manifest.prompt.description =
+                replace_run_bash_host_environment(&manifest.prompt.description, environment);
+        }
+        ("run_powershell", "run_powershell") => {
+            let environment = if profile.platform == CapabilityPlatform::Windows && cfg!(windows) {
+                crate::os::powershell_host_environment()
+            } else {
+                "Windows host with PowerShell"
+            };
+            manifest.prompt.description = manifest
+                .prompt
+                .description
+                .replace(RUN_POWERSHELL_HOST_ENVIRONMENT_PLACEHOLDER, environment);
+        }
+        _ => {}
     }
-    manifest.prompt.description = replace_run_bash_host_environment(
-        &manifest.prompt.description,
-        crate::os::host_environment(),
+
+    let (path, json_path) = match profile.platform {
+        CapabilityPlatform::Windows => (
+            r"C:\Timem\session\toolrepo\.drafts\draft_123",
+            r"C:\\Timem\\session\\toolrepo\\.drafts\\draft_123",
+        ),
+        CapabilityPlatform::Unix => (
+            "/tmp/timem/session/toolrepo/.drafts/draft_123",
+            "/tmp/timem/session/toolrepo/.drafts/draft_123",
+        ),
+        CapabilityPlatform::Other => (
+            "absolute/path/to/session/toolrepo/.drafts/draft_123",
+            "absolute/path/to/session/toolrepo/.drafts/draft_123",
+        ),
+    };
+    for field in [
+        &mut manifest.prompt.description,
+        &mut manifest.prompt.synopsis,
+        &mut manifest.prompt.input,
+        &mut manifest.prompt.result,
+    ] {
+        *field = field
+            .replace("{{PLATFORM_ABSOLUTE_DRAFT_PATH_JSON}}", json_path)
+            .replace("{{PLATFORM_ABSOLUTE_DRAFT_PATH}}", path);
+    }
+    replace_value_string_placeholder(
+        &mut manifest.example,
+        "{{PLATFORM_ABSOLUTE_DRAFT_PATH}}",
+        path,
     );
+}
+
+fn replace_value_string_placeholder(value: &mut Value, placeholder: &str, replacement: &str) {
+    match value {
+        Value::String(text) => *text = text.replace(placeholder, replacement),
+        Value::Array(items) => {
+            for item in items {
+                replace_value_string_placeholder(item, placeholder, replacement);
+            }
+        }
+        Value::Object(fields) => {
+            for item in fields.values_mut() {
+                replace_value_string_placeholder(item, placeholder, replacement);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn replace_run_bash_host_environment(description: &str, environment: &str) -> String {
@@ -224,7 +354,7 @@ impl CapabilityRegistry {
         let mut tools = BTreeMap::new();
         for raw in tool_manifests {
             let mut manifest = parse_tool_manifest(raw)?;
-            inject_run_bash_host_environment(&mut manifest);
+            inject_platform_prompt_values(&mut manifest, profile);
             validate_manifest(&manifest)?;
             if !profile.supports_tool(&manifest) {
                 continue;
@@ -260,6 +390,7 @@ impl CapabilityRegistry {
                 CONTEXT_COMPACT_MANIFEST,
                 READFILE_MANIFEST,
                 RUN_BASH_MANIFEST,
+                RUN_POWERSHELL_MANIFEST,
                 SELF_TOOL_MANIFEST,
                 SUB_ANSWER_MANIFEST,
                 TOOLGEN_MANIFEST,
@@ -358,7 +489,8 @@ impl CapabilityRegistry {
     }
 
     pub(crate) fn enable_toolgen(&mut self) -> Result<(), String> {
-        let manifest = parse_tool_manifest(TOOLGEN_MANIFEST)?;
+        let mut manifest = parse_tool_manifest(TOOLGEN_MANIFEST)?;
+        inject_platform_prompt_values(&mut manifest, self.host_profile);
         validate_manifest(&manifest)?;
         if !self.host_profile.supports_tool(&manifest) {
             return Err("toolgen_requires_local_command_execution".to_string());
@@ -396,6 +528,7 @@ impl CapabilityRegistry {
                 .map_err(|err| format!("read_tool_manifest_failed:{}:{err}", path.display()))?;
             let mut manifest = parse_tool_manifest(&raw)
                 .map_err(|err| format!("parse_tool_manifest_failed:{}:{err}", path.display()))?;
+            inject_platform_prompt_values(&mut manifest, self.host_profile);
             validate_overlay_manifest(&mut manifest, dir)?;
             if !self.host_profile.supports_tool(&manifest) {
                 continue;
@@ -2219,7 +2352,10 @@ fn input_property_declared(properties: &BTreeMap<String, Value>, key: &str) -> b
 
 fn validate_host_requirement(manifest: &ToolManifest) -> Result<(), String> {
     match manifest.requires_host.as_deref() {
-        None | Some("local_command_execution") | Some("bash_execution") => Ok(()),
+        None
+        | Some("local_command_execution")
+        | Some("bash_execution")
+        | Some("powershell_execution") => Ok(()),
         Some(requirement) => Err(format!(
             "{}:unsupported_requires_host:{requirement}",
             manifest.id

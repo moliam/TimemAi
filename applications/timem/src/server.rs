@@ -8791,8 +8791,9 @@ fn session_context_with_roles(
         None
     } else {
         Some(format!(
-            "Previously accumulated reusable scripts are available at: {}\nThe tool directories have semantic names. When one may help with the current task, inspect the directory and run the script's --help through run_bash as needed.",
-            tool_repo.root().display()
+            "Previously accumulated reusable scripts are available at: {}\nThe tool directories have semantic names. When one may help with the current task, inspect the directory and run the script's --help through {} as needed.",
+            tool_repo.root().display(),
+            agent_core::os::local_shell_tool_name()
         ))
     };
     let instructions = match session.work_instruction_mode {

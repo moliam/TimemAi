@@ -206,8 +206,12 @@ describe("authoritative turn projection", () => {
       turn_projection: activeProjection(3, 2, true),
     };
 
-    expect(applyTurnProjection(current, activeProjection(3, 2, false))).toBe(current);
-    expect(applyTurnProjection(current, activeProjection(2, 1, false))).toBe(current);
+    expect(applyTurnProjection(current, activeProjection(3, 2, false))).toBe(
+      current,
+    );
+    expect(applyTurnProjection(current, activeProjection(2, 1, false))).toBe(
+      current,
+    );
   });
 });
 
@@ -680,9 +684,9 @@ describe("web topic view model", () => {
               ? "idle"
               : current.name === "Host pending before Core TurnStarted"
                 ? "host_pending"
-              : current.name === "Core working"
-                ? "working"
-                : "cancelling",
+                : current.name === "Core working"
+                  ? "working"
+                  : "cancelling",
       );
       expect(composerPrimaryAction(current.phase, ""), current.name).toBe(
         current.empty,
@@ -1212,7 +1216,9 @@ describe("web topic view model", () => {
       kind: "skip",
       reason: "creating",
     });
-    expect(sessionCreateDecision("name", "/work", {}, null, false, true)).toEqual({
+    expect(
+      sessionCreateDecision("name", "/work", {}, null, false, true),
+    ).toEqual({
       kind: "skip",
       reason: "mem_switching",
     });
@@ -3053,6 +3059,55 @@ describe("web topic view model", () => {
     });
   });
 
+  it("renders run_powershell commands with PowerShell language and polling labels", () => {
+    const normal = activityFromTopic(
+      topic("core.action", {
+        action: "run_powershell",
+        status: "running",
+        input: { cmd: 'Set-Content "$HOME\\Desktop\\a.txt" "abc"' },
+        kind: {
+          kind: "bash",
+          command: 'Set-Content "$HOME\\Desktop\\a.txt" "abc"',
+          mode: "normal",
+          timeout_ms: 5000,
+        },
+      }),
+    );
+    expect(normal).toMatchObject({
+      tone: "action",
+      title: "PowerShell · running",
+      tool_name: "run_powershell",
+      tool_mode: "normal",
+      code_language: "powershell",
+      timeout_ms: 5000,
+    });
+
+    const poll = activityFromTopic(
+      topic("core.action", {
+        action: "run_powershell",
+        status: "running",
+        input: {
+          loop_cmd: "if (Test-Path done) { exit 0 } else { exit 1 }",
+        },
+        kind: {
+          kind: "bash",
+          command: "if (Test-Path done) { exit 0 } else { exit 1 }",
+          mode: "poll",
+          interval_ms: 1000,
+          loop_timeout_ms: 600000,
+        },
+      }),
+    );
+    expect(poll).toMatchObject({
+      title: "Poll · running",
+      tool_name: "run_powershell",
+      tool_mode: "poll",
+      code_language: "powershell",
+      interval_ms: 1000,
+      loop_timeout_ms: 600000,
+    });
+  });
+
   it("preserves effective Bash wait budgets for live UI countdowns", () => {
     const normal = activityFromTopic(
       topic("core.action", {
@@ -3192,7 +3247,13 @@ describe("web topic view model", () => {
   });
 
   it("uses execution_start as the authoritative countdown and elapsed-time origin", () => {
-    const proposed = actionEvent("1000", "start", "running", { cmd: "sleep 10" }, "slow");
+    const proposed = actionEvent(
+      "1000",
+      "start",
+      "running",
+      { cmd: "sleep 10" },
+      "slow",
+    );
     const executionStart = actionEvent(
       "6000",
       "execution_start",
@@ -3209,7 +3270,9 @@ describe("web topic view model", () => {
     };
     const [visible] = coalesceActionLifecycle([proposed, executionStart]);
     expect(visible.event_id).toBe("6000");
-    expect(activityFromTopic(visible.payload as unknown as CoreTopicEvent)).toMatchObject({
+    expect(
+      activityFromTopic(visible.payload as unknown as CoreTopicEvent),
+    ).toMatchObject({
       execution_started: true,
       timeout_ms: 5000,
     });

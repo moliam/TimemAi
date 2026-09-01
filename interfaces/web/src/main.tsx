@@ -10533,7 +10533,8 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
   const singleActivity =
     summary.activities.length === 1 ? summary.activities[0] : undefined;
   if (
-    singleActivity?.tool_name === "run_bash" &&
+    (singleActivity?.tool_name === "run_bash" ||
+      singleActivity?.tool_name === "run_powershell") &&
     singleActivity.tool_mode === "poll"
   )
     return <ToolActivity activity={singleActivity} />;
@@ -10579,7 +10580,9 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
 function ToolActivity({ activity }: { activity: Activity }) {
   const status = activity.tool_status || TOOL_STATUS_RUNNING;
   const running = isToolActivityRunning(status);
-  const bashActivity = activity.tool_name === "run_bash";
+  const bashActivity =
+    activity.tool_name === "run_bash" ||
+    activity.tool_name === "run_powershell";
   const pollingActivity = bashActivity && activity.tool_mode === "poll";
   const [open, setOpen] = useState(false);
   const waitBudgetMs = pollingActivity

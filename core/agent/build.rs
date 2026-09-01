@@ -8,7 +8,8 @@ fn main() {
         "../../resources/capabilities/tools/capmgr.yaml",
         "../../resources/capabilities/tools/memmgr.yaml",
         "../../resources/capabilities/tools/readfile.yaml",
-        "../../resources/capabilities/tools/run_bash.yaml",
+        "../../resources/capabilities/tools/platform/unix/run_bash.yaml",
+        "../../resources/capabilities/tools/platform/windows/run_powershell.yaml",
         "../../resources/capabilities/tools/self_tool.yaml",
         "../../resources/capabilities/tools/toolgen.yaml",
     ];
