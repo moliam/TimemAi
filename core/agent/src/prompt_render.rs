@@ -797,7 +797,32 @@ pub(crate) fn render_prompt_with_rendered_static_for_mode(
     tool_call_mode: ToolCallMode,
 ) -> String {
     let mut out = rendered_static_prompt.to_string();
+    append_rendered_deltas_for_mode(
+        &mut out,
+        deltas,
+        assistant_heading,
+        protocol_suite,
+        tool_call_mode,
+    );
+    out.push_str("\n\n");
+    if tool_call_mode == ToolCallMode::Native {
+        out.push_str(NATIVE_RESPONSE_TRAILER);
+    } else {
+        out.push_str(&formatted_response_trailer(
+            protocol_suite.response_shape_hint(),
+            assistant_heading,
+        ));
+    }
+    out
+}
 
+pub(crate) fn append_rendered_deltas_for_mode(
+    out: &mut String,
+    deltas: &[PromptDelta],
+    assistant_heading: &str,
+    protocol_suite: &dyn ResponseProtocolSuite,
+    tool_call_mode: ToolCallMode,
+) {
     for delta in deltas {
         let slices = render_delta_slices_for_mode(delta, tool_call_mode);
         if slices.is_empty() {
@@ -828,7 +853,6 @@ pub(crate) fn render_prompt_with_rendered_static_for_mode(
                 last_was_action_result = false;
                 continue;
             }
-
             if last_was_raw_xml {
                 out.push('\n');
                 last_was_raw_xml = false;
@@ -883,17 +907,6 @@ pub(crate) fn render_prompt_with_rendered_static_for_mode(
         out.push('\n');
         out.push_str(boundaries.delta_close());
     }
-
-    out.push_str("\n\n");
-    if tool_call_mode == ToolCallMode::Native {
-        out.push_str(NATIVE_RESPONSE_TRAILER);
-    } else {
-        out.push_str(&formatted_response_trailer(
-            protocol_suite.response_shape_hint(),
-            assistant_heading,
-        ));
-    }
-    out
 }
 
 pub(crate) fn render_prompt_slices(deltas: &[PromptDelta]) -> Vec<PromptSlice> {

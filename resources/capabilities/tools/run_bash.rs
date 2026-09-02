@@ -149,6 +149,7 @@ enum ShellJobDelivery {
 
 #[derive(Debug, Clone)]
 struct FinishedShellJob {
+    completion_sequence: u64,
     status: String,
     stdout: String,
     stderr: String,
@@ -182,6 +183,7 @@ struct ManagedShellJob {
     state: Mutex<ShellJobState>,
     changed: Condvar,
     supervisor: Mutex<Option<thread::JoinHandle<()>>>,
+    completion_publication: Arc<Mutex<u64>>,
 }
 
 impl ManagedShellJob {
@@ -242,6 +244,7 @@ impl ManagedShellJob {
 #[derive(Debug)]
 struct ShellJobManagerState {
     jobs: Mutex<HashMap<u32, Arc<ManagedShellJob>>>,
+    completion_publication: Arc<Mutex<u64>>,
 }
 
 impl Drop for ShellJobManagerState {
@@ -274,6 +277,7 @@ impl ShellJobManager {
         Self {
             state: Arc::new(ShellJobManagerState {
                 jobs: Mutex::new(HashMap::new()),
+                completion_publication: Arc::new(Mutex::new(0)),
             }),
             long_running_prompt_after: LONG_RUNNING_COMMAND_PROMPT_AFTER,
         }
@@ -415,6 +419,7 @@ impl ShellJobManager {
             }),
             changed: Condvar::new(),
             supervisor: Mutex::new(None),
+            completion_publication: Arc::clone(&self.state.completion_publication),
         });
         let supervised = Arc::clone(&job);
         let supervisor = thread::spawn(move || {
@@ -614,7 +619,29 @@ impl ShellJobManager {
     }
 
     pub fn running_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
-        self.refresh_for_session(session_id).0
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return Vec::new();
+        }
+        let jobs = self
+            .state
+            .jobs
+            .lock()
+            .ok()
+            .map(|jobs| jobs.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut running = jobs
+            .into_iter()
+            .filter_map(|job| {
+                let state = job.state.lock().ok()?;
+                (job.session_id == session_id
+                    && state.delivery != ShellJobDelivery::Delivered
+                    && matches!(state.lifecycle, ShellJobLifecycle::Running))
+                .then(|| job.running())
+            })
+            .collect::<Vec<_>>();
+        running.sort_by_key(|job| (job.created_at_ms, job.pid));
+        running
     }
 
     pub fn refresh_for_session(
@@ -625,6 +652,9 @@ impl ShellJobManager {
         if session_id.is_empty() {
             return (Vec::new(), Vec::new());
         }
+        let Ok(_publication) = self.state.completion_publication.lock() else {
+            return (Vec::new(), Vec::new());
+        };
         let jobs = self
             .state
             .jobs
@@ -652,9 +682,10 @@ impl ShellJobManager {
                     running.push(job.running());
                 }
                 (ShellJobDelivery::Background, ShellJobLifecycle::Finished(finished)) => {
+                    let completion_sequence = finished.completion_sequence;
                     let update = job.exit_update(finished);
                     state.delivery = ShellJobDelivery::Delivered;
-                    exited.push(update);
+                    exited.push((completion_sequence, update));
                     remove.push(Arc::clone(&job));
                 }
                 _ => {}
@@ -664,7 +695,12 @@ impl ShellJobManager {
             self.remove_job(job.pid);
             job.join_supervisor();
         }
-        (running, exited)
+        running.sort_by_key(|job| (job.created_at_ms, job.pid));
+        exited.sort_by_key(|(completion_sequence, _)| *completion_sequence);
+        (
+            running,
+            exited.into_iter().map(|(_, update)| update).collect(),
+        )
     }
 
     pub fn running_job_list_context(&self, session_id: &str) -> Option<String> {
@@ -885,7 +921,12 @@ fn supervise_shell_job(
     }
     let stdout = shell_output_text(&job.stdout);
     let stderr = shell_output_text(&job.stderr);
+    let Ok(mut publication_sequence) = job.completion_publication.lock() else {
+        return;
+    };
+    *publication_sequence = publication_sequence.saturating_add(1);
     let finished = FinishedShellJob {
+        completion_sequence: *publication_sequence,
         status,
         output: normalized_shell_output(&combined_shell_output(&stdout, &stderr)),
         stdout,
