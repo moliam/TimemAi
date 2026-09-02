@@ -5909,6 +5909,7 @@ fn snapshot_reports_the_active_mem_space_and_paths() {
         snapshot.server.mem.conversation_capacity_bytes,
         Some(MEM_CAPACITY_128_MB)
     );
+    assert!(!snapshot.server.mem.claude_codex_tool_discovery);
 }
 
 #[test]
@@ -5923,6 +5924,7 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
         normal.conversation_capacity_bytes,
         Some(MEM_CAPACITY_128_MB)
     );
+    assert!(!normal.claude_codex_tool_discovery);
 
     let debug = load_web_mem_settings(&root, true).unwrap();
     assert_eq!(debug.temporary_retention_days, Some(5));
@@ -5938,6 +5940,7 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
     assert_eq!(saved.temporary_retention_days, None);
     assert_eq!(saved.temporary_capacity_bytes, None);
     assert_eq!(saved.conversation_capacity_bytes, Some(MEM_CAPACITY_512_MB));
+    assert!(!saved.claude_codex_tool_discovery);
 
     std::fs::write(
         web_mem_settings_path(&root),
@@ -5965,6 +5968,52 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
     );
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn claude_codex_tool_discovery_setting_is_authoritative_and_mem_persistent() {
+    let state = routing_test_state();
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::BetaClaudeCodexToolDiscoveryUpdate { enabled: true },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::MemSettingsUpdated {
+        claude_codex_tool_discovery,
+        ..
+    } = event
+    else {
+        panic!("expected authoritative MEM settings event")
+    };
+    assert!(claude_codex_tool_discovery);
+    assert!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .claude_codex_tool_discovery
+    );
+
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    assert!(
+        load_web_mem_settings(&memory_dir, false)
+            .unwrap()
+            .claude_codex_tool_discovery
+    );
+
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::BetaClaudeCodexToolDiscoveryUpdate { enabled: false },
+    )
+    .unwrap();
+    assert!(
+        !load_web_mem_settings(&memory_dir, false)
+            .unwrap()
+            .claude_codex_tool_discovery
+    );
 }
 
 #[test]
@@ -6089,6 +6138,7 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
         temporary_retention_days,
         temporary_capacity_bytes,
         conversation_capacity_bytes,
+        claude_codex_tool_discovery,
     } = event
     else {
         panic!("expected authoritative MEM settings event")
@@ -6096,6 +6146,7 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
     assert_eq!(temporary_retention_days, Some(5));
     assert_eq!(temporary_capacity_bytes, None);
     assert_eq!(conversation_capacity_bytes, Some(MEM_CAPACITY_128_MB));
+    assert!(!claude_codex_tool_discovery);
 
     let retained = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
     assert!(retained.iter().any(|record| matches!(

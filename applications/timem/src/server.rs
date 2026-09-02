@@ -386,6 +386,7 @@ impl WebMemState {
             temporary_retention_days: self.settings.temporary_retention_days,
             temporary_capacity_bytes: self.settings.temporary_capacity_bytes,
             conversation_capacity_bytes: self.settings.conversation_capacity_bytes,
+            claude_codex_tool_discovery: self.settings.claude_codex_tool_discovery,
         }
     }
 }
@@ -938,6 +939,7 @@ enum WireEvent {
         temporary_retention_days: Option<u16>,
         temporary_capacity_bytes: Option<u64>,
         conversation_capacity_bytes: Option<u64>,
+        claude_codex_tool_discovery: bool,
     },
     MemTemporaryItems {
         items: Vec<MemTemporaryItem>,
@@ -1033,6 +1035,7 @@ struct WebMemInfo {
     temporary_retention_days: Option<u16>,
     temporary_capacity_bytes: Option<u64>,
     conversation_capacity_bytes: Option<u64>,
+    claude_codex_tool_discovery: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1389,6 +1392,9 @@ enum ClientCommand {
     MemConversationCapacityUpdate {
         max_bytes: Option<u64>,
     },
+    BetaClaudeCodexToolDiscoveryUpdate {
+        enabled: bool,
+    },
     MemTemporaryItemsList,
     MemTemporaryItemsDelete {
         ids: Vec<String>,
@@ -1411,6 +1417,7 @@ impl ClientCommand {
             | Self::MemSwitch { .. }
             | Self::MemTemporaryRetentionUpdate { .. }
             | Self::MemConversationCapacityUpdate { .. }
+            | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
             | Self::MemTemporaryItemsDelete { .. }
             | Self::McpServerDelete { .. }
             | Self::ModelEndpointUpsert { .. }
@@ -1468,6 +1475,7 @@ impl ClientCommand {
                 | Self::MemSwitch { .. }
                 | Self::MemTemporaryRetentionUpdate { .. }
                 | Self::MemConversationCapacityUpdate { .. }
+                | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
                 | Self::MemTemporaryItemsDelete { .. }
                 | Self::McpServerDelete { .. }
                 | Self::ModelEndpointUpsert { .. }
@@ -3877,6 +3885,7 @@ fn handle_command_with_id(
                 temporary_retention_days: days,
                 temporary_capacity_bytes: max_bytes,
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -3903,6 +3912,33 @@ fn handle_command_with_id(
                 temporary_retention_days: settings.temporary_retention_days,
                 temporary_capacity_bytes: settings.temporary_capacity_bytes,
                 conversation_capacity_bytes: max_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::BetaClaudeCodexToolDiscoveryUpdate { enabled } => {
+            let (memory_dir, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.claude_codex_tool_discovery = enabled;
+                (mem.layout.memory_dir(), settings)
+            };
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            update_all_worker_tool_discovery_preferences(state, enabled)?;
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                claude_codex_tool_discovery: enabled,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -6962,6 +6998,38 @@ fn resolve_work_instruction_decision(
         pending.command_id,
     )?;
     Ok(true)
+}
+
+fn update_all_worker_tool_discovery_preferences(
+    state: &AppState,
+    enabled: bool,
+) -> Result<(), String> {
+    let worker_ids = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .values()
+        .flat_map(|session| {
+            session
+                .workers
+                .iter()
+                .map(|worker| worker.worker_id.clone())
+        })
+        .collect::<Vec<_>>();
+    let manager = state
+        .manager
+        .lock()
+        .map_err(|_| "worker_manager_poisoned".to_string())?;
+    for worker_id in worker_ids {
+        if let Some(handle) = manager.handle(&worker_id) {
+            match handle.update_claude_codex_tool_discovery(enabled) {
+                Ok(()) => {}
+                Err(error) if error == "core_session_worker_stopped" => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn primary_worker_handle(
@@ -10209,6 +10277,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
                 MEM_CAPACITY_128_MB
             }),
             conversation_capacity_bytes: Some(MEM_CAPACITY_128_MB),
+            claude_codex_tool_discovery: false,
         });
     let (role_library, session_groups) = current_mem_state(state)
         .map(|mem| (mem.role_library, mem.session_groups))
@@ -10438,7 +10507,8 @@ impl WorkerTemplate {
             STATIC_PROMPT,
             settings.config.core_profile(),
             &memory_dir,
-            InterfacePreferences::markdown(),
+            InterfacePreferences::markdown()
+                .with_claude_codex_tool_discovery(mem.settings.claude_codex_tool_discovery),
         );
         core.change_prompt_cwd(current_dir.display().to_string())?;
         core.set_response_protocol(settings.config.response_protocol);

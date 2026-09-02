@@ -1,7 +1,7 @@
 use super::*;
 use agent_core::{
-    ApiProtocol, ApprovalRequest, BashApprovalMode, CoreProfile, LlmResponse, ResponseProtocolKind,
-    SessionToolRepo, UsageStats,
+    ApiProtocol, ApprovalRequest, BashApprovalMode, CoreProfile, InterfacePreferences, LlmResponse,
+    ResponseProtocolKind, SessionToolRepo, UsageStats,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier, Mutex};
@@ -3972,6 +3972,148 @@ fn wait_for_stress_turn_finished(
             other => panic!("{label} unexpected worker event: {other:?}"),
         }
     }
+}
+
+#[test]
+fn claude_codex_tool_discovery_updates_before_next_model_request_of_active_turn() {
+    use std::sync::mpsc;
+
+    struct BlockingPromptCapturingModel {
+        captured: Arc<Mutex<Vec<String>>>,
+        first_call_entered: mpsc::Sender<()>,
+        release_first_call: mpsc::Receiver<()>,
+        second_call_entered: mpsc::Sender<()>,
+        release_second_call: mpsc::Receiver<()>,
+        calls: usize,
+    }
+
+    impl ModelClient for BlockingPromptCapturingModel {
+        fn call_model(
+            &mut self,
+            config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.captured.lock().unwrap().push(prompt.to_string());
+            self.calls += 1;
+            match self.calls {
+                1 => {
+                    self.first_call_entered.send(()).unwrap();
+                    self.release_first_call
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("test should release the first model request");
+                }
+                2 => {
+                    self.second_call_entered.send(()).unwrap();
+                    self.release_second_call
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("test should release the second model request");
+                }
+                _ => {
+                    return Ok(LlmResponse {
+                        tool_calls: Vec::new(),
+                        content: r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#.to_string(),
+                        model_name: config.model.clone(),
+                        usage: UsageStats::zero(),
+                        truncated: false,
+                    });
+                }
+            }
+            Ok(LlmResponse {
+                tool_calls: Vec::new(),
+                content:
+                    r#"{"status":"working","working_still_action":{"self_tool":{"type":"params"}}}"#
+                        .to_string(),
+                model_name: config.model.clone(),
+                usage: UsageStats::zero(),
+                truncated: false,
+            })
+        }
+    }
+
+    let dir = tmp_dir("active_turn_claude_codex_tool_discovery_update");
+    let core = AgentCore::new_with_interface_preferences(
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+        InterfacePreferences::markdown(),
+    );
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (first_call_entered_tx, first_call_entered_rx) = mpsc::channel();
+    let (release_first_call_tx, release_first_call_rx) = mpsc::channel();
+    let (second_call_entered_tx, second_call_entered_rx) = mpsc::channel();
+    let (release_second_call_tx, release_second_call_rx) = mpsc::channel();
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "active_turn_claude_codex_tool_discovery_update", 1),
+        BlockingPromptCapturingModel {
+            captured: Arc::clone(&captured),
+            first_call_entered: first_call_entered_tx,
+            release_first_call: release_first_call_rx,
+            second_call_entered: second_call_entered_tx,
+            release_second_call: release_second_call_rx,
+            calls: 0,
+        },
+    );
+    let handle = worker.handle();
+
+    handle.run_turn("hello", None).expect("turn should start");
+    first_call_entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first model request should start");
+    handle
+        .update_claude_codex_tool_discovery(true)
+        .expect("active-turn discovery enable should succeed");
+    release_first_call_tx
+        .send(())
+        .expect("first model request should be released");
+
+    second_call_entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("second model request should start");
+    handle
+        .update_claude_codex_tool_discovery(false)
+        .expect("active-turn discovery disable should succeed");
+    release_second_call_tx
+        .send(())
+        .expect("second model request should be released");
+
+    loop {
+        match worker.events().recv_timeout(Duration::from_secs(5)) {
+            Ok(CoreSessionWorkerEvent::TurnFinished { .. }) => break,
+            Ok(_) => {}
+            Err(error) => panic!("timed out waiting for turn finish: {error}"),
+        }
+    }
+
+    let instruction = "If a task appears to be in third-party agent's reusable skill or tool, search the built-in skill and tool directories used by Claude and Codex, identify an applicable tool, and use it when appropriate. Promptly report to user your usage of third-party's skill.";
+    let captured = captured.lock().unwrap();
+    assert_eq!(
+        captured.len(),
+        3,
+        "test model should receive three requests"
+    );
+    assert!(
+        !captured[0].contains(instruction),
+        "the already in-flight request must keep the disabled prompt"
+    );
+    assert!(
+        captured[1].contains(instruction),
+        "enabling must affect the next model request"
+    );
+    assert!(
+        !captured[2].contains(instruction),
+        "disabling must remove the instruction from the next model request"
+    );
+    assert!(captured
+        .iter()
+        .all(|prompt| { !prompt.contains("{{CLAUDE_CODEX_TOOL_DISCOVERY_INSTRUCTION}}") }));
+
+    worker.shutdown().unwrap();
 }
 
 #[test]

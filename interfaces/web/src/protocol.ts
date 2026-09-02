@@ -420,6 +420,7 @@ export type Snapshot = {
       temporary_retention_days: 1 | 5 | 10 | null;
       temporary_capacity_bytes: number | null;
       conversation_capacity_bytes: number | null;
+      claude_codex_tool_discovery: boolean;
     };
     runtime_options: Array<{
       key: string;
@@ -573,6 +574,7 @@ export type WireEvent =
       temporary_retention_days: 1 | 5 | 10 | null;
       temporary_capacity_bytes: number | null;
       conversation_capacity_bytes: number | null;
+      claude_codex_tool_discovery: boolean;
     }
   | { type: "mem_temporary_items"; items: MemTemporaryItem[]; error?: string }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
@@ -789,6 +791,7 @@ export type ClientCommand =
       max_bytes: number | null;
     }
   | { type: "mem_conversation_capacity_update"; max_bytes: number | null }
+  | { type: "beta_claude_codex_tool_discovery_update"; enabled: boolean }
   | { type: "mem_temporary_items_list" }
   | { type: "mem_temporary_items_delete"; ids: string[] }
   | {

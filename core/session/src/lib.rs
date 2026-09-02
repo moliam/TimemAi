@@ -330,6 +330,7 @@ enum CoreSessionWorkerCommand {
     },
     RuntimeConfigUpdated,
     MaxRoundsUpdated,
+    InterfacePreferencesUpdated,
     UpdateApiKey {
         api_key: String,
     },
@@ -371,6 +372,7 @@ enum PendingRuntimeUpdate {
         value: String,
     },
     MaxRounds(u32),
+    ClaudeCodexToolDiscovery(bool),
 }
 
 #[derive(Clone)]
@@ -767,6 +769,16 @@ impl CoreSessionWorkerHandle {
         self.enqueue_runtime_update(
             PendingRuntimeUpdate::MaxRounds(max_rounds),
             CoreSessionWorkerCommand::MaxRoundsUpdated,
+        )
+    }
+
+    pub fn update_claude_codex_tool_discovery(&self, enabled: bool) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.enqueue_runtime_update(
+            PendingRuntimeUpdate::ClaudeCodexToolDiscovery(enabled),
+            CoreSessionWorkerCommand::InterfacePreferencesUpdated,
         )
     }
 
@@ -1436,6 +1448,7 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::ChangeCwd { .. }
                     | CoreSessionWorkerCommand::RuntimeConfigUpdated
                     | CoreSessionWorkerCommand::MaxRoundsUpdated
+                    | CoreSessionWorkerCommand::InterfacePreferencesUpdated
                     | CoreSessionWorkerCommand::UpdateApiKey { .. }
                     | CoreSessionWorkerCommand::UpdateHttpHeaders { .. }
                     | CoreSessionWorkerCommand::UpdateRequestFields { .. }
@@ -1677,7 +1690,8 @@ impl CoreSessionWorker {
                         core.notify_runtime_config_changed();
                     }
                     CoreSessionWorkerCommand::RuntimeConfigUpdated
-                    | CoreSessionWorkerCommand::MaxRoundsUpdated => {
+                    | CoreSessionWorkerCommand::MaxRoundsUpdated
+                    | CoreSessionWorkerCommand::InterfacePreferencesUpdated => {
                         ui.apply_pending_runtime_updates(&mut core, &mut config);
                     }
                     CoreSessionWorkerCommand::UpdateApiKey { api_key } => {
@@ -2013,6 +2027,9 @@ fn apply_worker_runtime_update(
             }
         }
         PendingRuntimeUpdate::MaxRounds(max_rounds) => core.set_max_rounds(max_rounds),
+        PendingRuntimeUpdate::ClaudeCodexToolDiscovery(enabled) => {
+            core.set_claude_codex_tool_discovery(enabled);
+        }
     }
     core.notify_runtime_config_changed();
 }

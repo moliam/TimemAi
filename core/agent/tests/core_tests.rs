@@ -7479,6 +7479,33 @@ fn interface_response_format_survives_static_prompt_refresh_and_context_fork() {
 }
 
 #[test]
+fn claude_codex_tool_discovery_can_be_added_and_removed_from_static_prompt() {
+    let template = include_str!("../../../resources/system_prompt/system_prompt.md");
+    let mut core = AgentCore::new_with_interface_preferences(
+        template,
+        profile("qwen-plus"),
+        tmp_dir("claude_codex_tool_discovery"),
+        InterfacePreferences::markdown().with_claude_codex_tool_discovery(true),
+    );
+
+    let enabled = match core.begin_turn("hello", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    let instruction = "If a task appears to be in third-party agent's reusable skill or tool, search the built-in skill and tool directories used by Claude and Codex, identify an applicable tool, and use it when appropriate. Promptly report to user your usage of third-party's skill.";
+    assert!(enabled.contains(instruction));
+    assert!(!enabled.contains("{{CLAUDE_CODEX_TOOL_DISCOVERY_INSTRUCTION}}"));
+
+    core.set_claude_codex_tool_discovery(false);
+    let disabled = core.build_next_prompt();
+    assert!(!disabled.contains(instruction));
+    assert!(!disabled.contains("{{CLAUDE_CODEX_TOOL_DISCOVERY_INSTRUCTION}}"));
+
+    core.set_claude_codex_tool_discovery(true);
+    assert!(core.build_next_prompt().contains(instruction));
+}
+
+#[test]
 fn default_core_keeps_interface_response_format_unspecified() {
     let mut core = AgentCore::new(
         include_str!("../../../resources/system_prompt/system_prompt.md"),
