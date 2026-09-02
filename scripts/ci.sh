@@ -66,7 +66,12 @@ if [[ "$(uname -s)" == "Linux" ]]; then
     timeout_job_reports_pid_and_later_exit_update \
     timed_out_job_remains_cancellable_after_launcher_exits \
     supervisor_waits_for_managed_process_group_after_launcher_exits \
-    normal_bash_cancel_terminates_the_entire_process_group
+    normal_bash_cancel_terminates_the_entire_process_group \
+    one_refresh_orders_multiple_exits_by_completion_publication \
+    read_only_running_query_never_consumes_a_terminal_update \
+    concurrent_refresh_delivers_each_terminal_update_exactly_once \
+    concurrent_session_refreshes_never_cross_deliver_updates \
+    repeated_refresh_across_completion_windows_loses_no_jobs
   do
     exact_test_name="shell_exec::tests::$test_name"
     if ! grep -Fxq "$exact_test_name: test" <<<"$agent_test_list"; then
