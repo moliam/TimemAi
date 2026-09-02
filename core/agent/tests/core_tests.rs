@@ -1604,7 +1604,10 @@ fn runtime_host_configuration_sync_is_core_owned() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains(&format!(
+        "Action result: {}",
+        agent_core::os::local_shell_tool_name()
+    )));
     assert!(prompt.contains("configured"));
 }
 
@@ -2751,7 +2754,10 @@ fn canonical_tools_accept_json_object_args() {
     };
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("测试代号是 ALPHA-42"));
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains(&format!(
+        "Action result: {}",
+        agent_core::os::local_shell_tool_name()
+    )));
     assert!(prompt.contains("kv-ok"));
     assert!(prompt.contains("Action result: self_tool"));
     assert!(prompt.contains("TimemAi"));
@@ -2972,7 +2978,10 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     };
     assert!(prompt.contains("并行查询记忆和本地文件数量。"));
     assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains(&format!(
+        "Action result: {}",
+        agent_core::os::local_shell_tool_name()
+    )));
 
     let _ = core.begin_turn("最终确认发布包", None);
     let final_turn = match core.apply_model_response(LlmResponse {
@@ -5977,6 +5986,7 @@ fn run_bash_rejects_old_timeout_sec_field() {
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
+#[cfg(unix)]
 #[test]
 fn run_bash_unmanaged_background_is_rejected_and_reported_to_the_model() {
     let dir = tmp_dir("bash_unmanaged_background");
@@ -6574,9 +6584,15 @@ fn run_bash_requires_approval_for_mutating_commands() {
         CoreStep::NeedsUserApproval { request } => request,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert_eq!(request.action, "run_bash");
+    assert_eq!(request.action, agent_core::os::local_shell_tool_name());
     assert_eq!(request.command, "rm not_allowed");
-    assert_eq!(request.reason, "run_bash_requires_user_approval");
+    assert_eq!(
+        request.reason,
+        format!(
+            "{}_requires_user_approval",
+            agent_core::os::local_shell_tool_name()
+        )
+    );
     assert_eq!(request.risk, "local_command_execution");
 
     let turn_audit = dir.join("audit/turn_audit.json");
@@ -6611,7 +6627,10 @@ fn run_bash_requires_approval_for_mutating_commands() {
         serde_json::from_slice(&fs::read(active_files[0].path()).unwrap()).unwrap();
     let actions = audit["interactions"][0]["actions"].as_array().unwrap();
     assert_eq!(actions.len(), 2);
-    assert_eq!(actions[0]["action"], "run_bash");
+    assert_eq!(
+        actions[0]["action"],
+        agent_core::os::local_shell_tool_name()
+    );
     assert!(actions[0].get("intent").is_none());
     assert_eq!(actions[0]["status"], "needs_user_approval");
     assert_eq!(actions[0]["input"]["cmd"], "rm not_allowed");
@@ -6731,7 +6750,13 @@ fn run_bash_requires_approval_for_high_risk_command_inside_compound_command() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert_eq!(request.command, "pwd && rm not_allowed");
-    assert_eq!(request.reason, "run_bash_requires_user_approval");
+    assert_eq!(
+        request.reason,
+        format!(
+            "{}_requires_user_approval",
+            agent_core::os::local_shell_tool_name()
+        )
+    );
     assert_eq!(request.risk, "local_command_execution");
 }
 
@@ -6832,6 +6857,7 @@ fn run_bash_missing_command_returns_tool_input_error() {
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
+#[cfg(unix)]
 #[test]
 fn run_bash_requires_approval_for_absolute_paths() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("bash_path_reject"));
@@ -8510,7 +8536,13 @@ fn self_tool_cwd_changes_relative_context_and_emits_structured_state() {
         prompt.contains(&format!("CWD changed to: {}", nested_dir.display())),
         "{prompt}"
     );
-    assert!(prompt.contains("Action result: run_bash"), "{prompt}");
+    assert!(
+        prompt.contains(&format!(
+            "Action result: {}",
+            agent_core::os::local_shell_tool_name()
+        )),
+        "{prompt}"
+    );
     assert!(
         prompt.contains(&nested_dir.display().to_string()),
         "{prompt}"
