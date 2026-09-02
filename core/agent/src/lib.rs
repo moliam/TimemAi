@@ -844,6 +844,20 @@ impl MemGuard {
                     }
                     thread::sleep(MEM_GUARD_WAIT_STEP);
                 }
+                // Windows may transiently report PermissionDenied or NotFound while
+                // another writer removes and recreates the lock directory. Treat
+                // that hand-off window as contention rather than a lock failure.
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+                    ) =>
+                {
+                    if started.elapsed() >= MEM_GUARD_TIMEOUT {
+                        return Err("mem_guard_timeout".to_string());
+                    }
+                    thread::sleep(MEM_GUARD_WAIT_STEP);
+                }
                 Err(_) => return Err("mem_guard_lock_failed".to_string()),
             }
         }
