@@ -2171,13 +2171,26 @@ impl AgentCore {
     ) -> String {
         let session_id = self.current_session_id();
         let (running, updates) = self.shell_jobs.refresh_for_session(&session_id);
+        let first_new_delta = self.deltas.len();
         self.submit_running_job_updates_with_runtime(updates, runtime);
+        self.flush_pending_prompt_components();
+
         let still_running = self.still_running_cmds_context_from(running);
-        if still_running.is_none() && !self.context_compact_required {
-            return current_prompt.to_string();
-        }
         let (body, trailer) = prompt_render::split_formatted_response_trailer(current_prompt);
         let mut prompt = body.trim_end().to_string();
+        prompt_render::append_rendered_deltas_for_mode(
+            &mut prompt,
+            &self.deltas[first_new_delta..],
+            &self.assistant_speaker_name,
+            self.response_protocol.suite(),
+            self.resolved_tool_call_mode,
+        );
+        if still_running.is_none()
+            && first_new_delta == self.deltas.len()
+            && !self.context_compact_required
+        {
+            return current_prompt.to_string();
+        }
         if let Some(still_running) = still_running {
             prompt.push_str("\n\n");
             prompt.push_str(&still_running);

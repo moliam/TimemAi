@@ -6050,6 +6050,47 @@ fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
 
 #[cfg(unix)]
 #[test]
+fn model_request_refresh_includes_a_just_finished_background_jobs_exit_status() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("bash_exit_update_at_request_boundary"),
+    );
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let _ = core.begin_turn("run a short background task", None);
+    let prompt = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"working_still_action":[{"run_bash":{"cmd":"sleep 0.1; printf boundary-ok","background":true}}]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(!prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
+
+    // Request-local history is not persisted in Core. Terminal events must be
+    // appended to this prompt rather than replacing it with a rebuilt prompt.
+    let request_local_event = "REQUEST_LOCAL_REPAIR_EVENT";
+    let trailer = "Please continue the work and respond as protocol requires in user's language:";
+    let body = prompt.strip_suffix(trailer).expect("response trailer");
+    let prompt = format!("{}{}\n\n{}", body, request_local_event, trailer);
+
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let prompt = core.build_model_request_prompt(&prompt);
+
+    assert!(prompt.contains(request_local_event), "{prompt}");
+    assert!(prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
+    assert!(prompt.contains("Exit status: 0"), "{prompt}");
+    assert!(prompt.contains("boundary-ok"), "{prompt}");
+    assert!(!prompt.contains("### STILL RUNNING"), "{prompt}");
+}
+
+#[cfg(unix)]
+#[test]
 fn still_running_table_survives_discard_of_the_original_action_delta() {
     let mut core = test_core(
         "STATIC",

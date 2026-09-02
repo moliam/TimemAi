@@ -159,6 +159,7 @@ fn synthetic_managed_job(delivery: ShellJobDelivery) -> ManagedShellJob {
         }),
         changed: Condvar::new(),
         supervisor: Mutex::new(None),
+        completion_publication: Arc::new(Mutex::new(0)),
     }
 }
 
@@ -176,6 +177,7 @@ fn completion_and_timeout_handoff_have_one_state_lock_winner() {
 
     let finished = synthetic_managed_job(ShellJobDelivery::Direct);
     finished.state.lock().unwrap().lifecycle = ShellJobLifecycle::Finished(FinishedShellJob {
+        completion_sequence: 1,
         status: "0".to_string(),
         stdout: "done".to_string(),
         stderr: String::new(),
@@ -246,6 +248,175 @@ fn consumed_background_completion_is_removed_from_the_manager_index() {
     assert_eq!(update.stdout, "background_done");
     assert_eq!(store.tracked_job_count_for_tests(), 0);
     assert!(store.refresh_for_session("bg-session").1.is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn one_refresh_orders_multiple_exits_by_completion_publication() {
+    let dir = tmp_memory_dir("ordered_background_results");
+    let store = ShellJobManager::new(&dir);
+    let _ = store.spawn_background(
+        "sleep 0.05; printf first-finished",
+        &dir,
+        "ordered-session",
+        "ordered-turn",
+    );
+    let _ = store.spawn_background(
+        "sleep 0.2; printf second-finished",
+        &dir,
+        "ordered-session",
+        "ordered-turn",
+    );
+
+    // Delay observation until both terminal states can be collected together.
+    thread::sleep(Duration::from_millis(500));
+    let (running, updates) = store.refresh_for_session("ordered-session");
+
+    assert!(running.is_empty());
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[0].stdout, "first-finished");
+    assert_eq!(updates[1].stdout, "second-finished");
+    assert!(store.refresh_for_session("ordered-session").1.is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn read_only_running_query_never_consumes_a_terminal_update() {
+    let dir = tmp_memory_dir("running_query_preserves_exit");
+    let store = ShellJobManager::new(&dir);
+    let _ = store.spawn_background("printf query-safe", &dir, "query-session", "query-turn");
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !store.running_for_session("query-session").is_empty() {
+        assert!(Instant::now() < deadline, "job did not finish");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let (_, updates) = store.refresh_for_session("query-session");
+
+    assert_eq!(updates.len(), 1);
+    assert_eq!(updates[0].stdout, "query-safe");
+    assert!(store.refresh_for_session("query-session").1.is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn concurrent_refresh_delivers_each_terminal_update_exactly_once() {
+    let dir = tmp_memory_dir("concurrent_refresh_exactly_once");
+    let store = ShellJobManager::new(&dir);
+    let job_count = 12;
+    for index in 0..job_count {
+        let _ = store.spawn_background(
+            &format!("sleep 0.05; printf concurrent-{index}"),
+            &dir,
+            "race-session",
+            "race-turn",
+        );
+    }
+
+    thread::sleep(Duration::from_millis(300));
+    let barrier = Arc::new(std::sync::Barrier::new(9));
+    let mut readers = Vec::new();
+    for _ in 0..8 {
+        let store = store.clone();
+        let barrier = Arc::clone(&barrier);
+        readers.push(thread::spawn(move || {
+            barrier.wait();
+            store.refresh_for_session("race-session").1
+        }));
+    }
+    barrier.wait();
+    let updates = readers
+        .into_iter()
+        .flat_map(|reader| reader.join().expect("refresh thread"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(updates.len(), job_count);
+    let mut pids = updates.iter().map(|update| update.pid).collect::<Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+    assert_eq!(pids.len(), job_count);
+    assert!(store.refresh_for_session("race-session").1.is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn concurrent_session_refreshes_never_cross_deliver_updates() {
+    let dir = tmp_memory_dir("concurrent_session_isolation");
+    let store = ShellJobManager::new(&dir);
+    for index in 0..6 {
+        let _ = store.spawn_background(
+            &format!("sleep 0.05; printf alpha-{index}"),
+            &dir,
+            "session-alpha",
+            "turn-alpha",
+        );
+        let _ = store.spawn_background(
+            &format!("sleep 0.05; printf beta-{index}"),
+            &dir,
+            "session-beta",
+            "turn-beta",
+        );
+    }
+
+    thread::sleep(Duration::from_millis(300));
+    let alpha_store = store.clone();
+    let beta_store = store.clone();
+    let alpha = thread::spawn(move || alpha_store.refresh_for_session("session-alpha").1)
+        .join()
+        .expect("alpha refresh");
+    let beta = thread::spawn(move || beta_store.refresh_for_session("session-beta").1)
+        .join()
+        .expect("beta refresh");
+
+    assert_eq!(alpha.len(), 6);
+    assert_eq!(beta.len(), 6);
+    assert!(alpha
+        .iter()
+        .all(|update| update.session_id == "session-alpha"));
+    assert!(beta
+        .iter()
+        .all(|update| update.session_id == "session-beta"));
+    assert!(store.refresh_for_session("session-alpha").1.is_empty());
+    assert!(store.refresh_for_session("session-beta").1.is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repeated_refresh_across_completion_windows_loses_no_jobs() {
+    let dir = tmp_memory_dir("refresh_completion_windows");
+    let store = ShellJobManager::new(&dir);
+    let job_count = 20;
+    for index in 0..job_count {
+        let delay = 10 + (index % 5) * 10;
+        let _ = store.spawn_background(
+            &format!("sleep 0.{delay:02}; printf window-{index}"),
+            &dir,
+            "window-session",
+            "window-turn",
+        );
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut delivered = Vec::new();
+    loop {
+        let (running, updates) = store.refresh_for_session("window-session");
+        delivered.extend(updates);
+        if running.is_empty() && delivered.len() == job_count {
+            break;
+        }
+        assert!(Instant::now() < deadline, "jobs did not converge");
+        thread::yield_now();
+    }
+
+    assert_eq!(delivered.len(), job_count);
+    let mut pids = delivered
+        .iter()
+        .map(|update| update.pid)
+        .collect::<Vec<_>>();
+    pids.sort_unstable();
+    pids.dedup();
+    assert_eq!(pids.len(), job_count);
+    assert!(store.refresh_for_session("window-session").1.is_empty());
     let _ = fs::remove_dir_all(dir);
 }
 
