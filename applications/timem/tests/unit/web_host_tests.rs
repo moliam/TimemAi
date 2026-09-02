@@ -5218,10 +5218,22 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
         overrides,
     )
     .unwrap();
-    let stored = current_session_store(&state)
+    let mut stored = current_session_store(&state)
         .unwrap()
         .load_session(&session_id)
         .unwrap()
+        .unwrap();
+    stored.env.insert(
+        "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS".to_string(),
+        "true".to_string(),
+    );
+    stored.env.insert(
+        "TIMEM_PRIVATE_CA_PEM".to_string(),
+        "future-host-private-ca".to_string(),
+    );
+    current_session_store(&state)
+        .unwrap()
+        .upsert_session(&stored)
         .unwrap();
     let persisted_overrides = stored.env_overrides.as_ref().unwrap();
     assert_eq!(
@@ -5250,7 +5262,7 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
     );
     assert_eq!(
         stored.env.get("TIMEM_PRIVATE_CA_PEM").map(String::as_str),
-        Some(private_ca_pem.as_str())
+        Some("future-host-private-ca")
     );
     assert!(!persisted_overrides.contains_key("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"));
     assert!(!persisted_overrides.contains_key("TIMEM_PRIVATE_CA_PEM"));
@@ -5267,6 +5279,30 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
     restarted.template = Arc::new(template);
     set_test_mem(&restarted, data_dir, space);
     assert_eq!(restore_stored_sessions(&restarted).unwrap(), 1);
+    let repersisted = current_session_store(&restarted)
+        .unwrap()
+        .load_session(&session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        repersisted
+            .env
+            .get("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        repersisted
+            .env
+            .get("TIMEM_PRIVATE_CA_PEM")
+            .map(String::as_str),
+        Some("future-host-private-ca")
+    );
+    assert!(!repersisted
+        .env_overrides
+        .as_ref()
+        .unwrap()
+        .contains_key("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"));
 
     let sessions = restarted.sessions.lock().unwrap();
     let restored = sessions.get(&session_id).unwrap();
@@ -5286,7 +5322,7 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
         agent_core::OpenAiCompatibleCacheMode::Off
     );
     assert!(
-        restored
+        !restored
             .runtime
             .settings
             .config
@@ -5301,7 +5337,7 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
             .http_transport
             .private_ca_pem
             .as_deref(),
-        Some(private_ca_pem.as_str())
+        None
     );
     let serialized = serde_json::to_string(restored).unwrap();
     assert!(!serialized.contains("session-only-secret"));
@@ -7058,6 +7094,49 @@ fn session_runtime_env_rejects_unknown_empty_and_invalid_values() {
 }
 
 #[test]
+fn restored_session_env_ignores_newer_host_transport_cache_but_not_explicit_overrides() {
+    let cached = BTreeMap::from([
+        (
+            "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS".to_string(),
+            "true".to_string(),
+        ),
+        (
+            "TIMEM_PRIVATE_CA_PEM".to_string(),
+            "-----BEGIN CERTIFICATE-----\ncache-only\n-----END CERTIFICATE-----".to_string(),
+        ),
+        ("TIMEM_MODEL".to_string(), "cached-model".to_string()),
+    ]);
+    let compatible_cache = forward_compatible_session_cache(&cached, &BTreeMap::new());
+    assert_eq!(compatible_cache.len(), 2);
+    let sanitized = sanitize_restored_session_env(cached.clone(), &BTreeMap::new());
+    assert_eq!(
+        sanitized.get("TIMEM_MODEL").map(String::as_str),
+        Some("cached-model")
+    );
+    assert!(!sanitized.contains_key("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"));
+    assert!(!sanitized.contains_key("TIMEM_PRIVATE_CA_PEM"));
+
+    let explicit = BTreeMap::from([(
+        "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS".to_string(),
+        "true".to_string(),
+    )]);
+    let sanitized = sanitize_restored_session_env(cached, &explicit);
+    assert_eq!(
+        sanitized
+            .get("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        routing_test_state()
+            .template
+            .session_settings(&sanitized)
+            .unwrap_err(),
+        "unsupported_session_env_key:TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"
+    );
+}
+
+#[test]
 fn session_runtime_env_accepts_an_explicitly_unconfigured_api_key_draft() {
     let state = routing_test_state();
     let settings = state
@@ -7331,6 +7410,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
             settings,
             env: BTreeMap::new(),
             env_overrides: BTreeMap::new(),
+            forward_compatible_cache: BTreeMap::new(),
         },
     }
 }

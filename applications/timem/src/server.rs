@@ -702,6 +702,7 @@ struct WebSessionRuntime {
     settings: RuntimeSettings,
     env: BTreeMap<String, String>,
     env_overrides: BTreeMap<String, String>,
+    forward_compatible_cache: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -4739,6 +4740,7 @@ fn create_session_in_group(
         settings,
         env: session_env,
         env_overrides,
+        forward_compatible_cache: BTreeMap::new(),
     };
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
     let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
@@ -5194,20 +5196,21 @@ fn restore_stored_session(
         append_runtime_restart_history_marker(state, &stored.session_id)?;
     }
     let explicit_overrides = stored.env_overrides.clone().unwrap_or_default();
-    let cached_env = sanitize_restored_session_env(
-        if stored.env.is_empty() {
-            explicit_overrides.clone()
-        } else {
-            stored.env.clone()
-        },
-        &explicit_overrides,
-    );
+    let stored_env = if stored.env.is_empty() {
+        explicit_overrides.clone()
+    } else {
+        stored.env.clone()
+    };
+    let forward_compatible_cache =
+        forward_compatible_session_cache(&stored_env, &explicit_overrides);
+    let cached_env = sanitize_restored_session_env(stored_env, &explicit_overrides);
     let settings = state.template.restored_session_settings(&cached_env)?;
     let session_env = state.template.session_env(&settings, &cached_env);
     let runtime = WebSessionRuntime {
         settings,
         env: session_env,
         env_overrides: stored.env_overrides.clone().unwrap_or_default(),
+        forward_compatible_cache,
     };
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
     let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
@@ -5488,7 +5491,7 @@ fn persist_restored_session_runtime_cache(
                     .name()
                     .to_string(),
             },
-            session_cached_env_values(&session.runtime.settings),
+            session_cached_env_values_with_forward_compatible_cache(&session.runtime),
             session
                 .runtime
                 .env_overrides
@@ -6251,7 +6254,7 @@ fn stored_session_from_web_session_with_store(
                 .name()
                 .to_string(),
         },
-        env: session_cached_env_values(&session.runtime.settings),
+        env: session_cached_env_values_with_forward_compatible_cache(&session.runtime),
         env_overrides: Some(
             session
                 .runtime
@@ -10950,6 +10953,26 @@ fn round_budget_value(max_rounds: u32) -> String {
 const RETIRED_SESSION_ENV_KEYS: &[&str] = &["TIMEM_GATEWAY_PROVIDER"];
 const DERIVED_INTERACTION_ENV_KEYS: &[&str] =
     &["TIMEM_TOOL_CALL_MODE", "TIMEM_PARALLEL_TOOL_CALLS"];
+// Newer hosts may persist these as effective runtime cache fields. They are not
+// user-editable Session environment overrides, and older hosts cannot apply
+// their transport semantics. Ignore them only when they came from the cached
+// effective environment so a downgrade does not make the whole Session vanish.
+const FORWARD_COMPATIBLE_SESSION_CACHE_KEYS: &[&str] =
+    &["TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS", "TIMEM_PRIVATE_CA_PEM"];
+
+fn forward_compatible_session_cache(
+    env: &BTreeMap<String, String>,
+    explicit_overrides: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    FORWARD_COMPATIBLE_SESSION_CACHE_KEYS
+        .iter()
+        .filter(|key| !explicit_overrides.contains_key(**key))
+        .filter_map(|key| {
+            env.get(*key)
+                .map(|value| ((*key).to_string(), value.clone()))
+        })
+        .collect()
+}
 
 fn sanitize_restored_session_env(
     mut env: BTreeMap<String, String>,
@@ -10963,6 +10986,11 @@ fn sanitize_restored_session_env(
     // only explicit per-Session overrides. The template supplies the current
     // host default (`auto` for a normal Web launch).
     for key in DERIVED_INTERACTION_ENV_KEYS {
+        if !explicit_overrides.contains_key(*key) {
+            env.remove(*key);
+        }
+    }
+    for key in FORWARD_COMPATIBLE_SESSION_CACHE_KEYS {
         if !explicit_overrides.contains_key(*key) {
             env.remove(*key);
         }
@@ -11117,6 +11145,14 @@ fn session_cached_env_values(settings: &RuntimeSettings) -> BTreeMap<String, Str
             .clone()
             .unwrap_or_default(),
     );
+    env
+}
+
+fn session_cached_env_values_with_forward_compatible_cache(
+    runtime: &WebSessionRuntime,
+) -> BTreeMap<String, String> {
+    let mut env = session_cached_env_values(&runtime.settings);
+    env.extend(runtime.forward_compatible_cache.clone());
     env
 }
 
