@@ -1072,6 +1072,7 @@ fn validate_bash_safety(command: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn validate_bash_lifecycle(command: &str, background: bool) -> Result<(), String> {
     if !background && contains_unmanaged_shell_background(command) && !contains_shell_wait(command)
     {
@@ -1086,6 +1087,7 @@ fn validate_bash_lifecycle(command: &str, background: bool) -> Result<(), String
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn contains_unmanaged_shell_background(command: &str) -> bool {
     let chars = command.chars().collect::<Vec<_>>();
     let mut in_single = false;
@@ -1135,6 +1137,7 @@ fn contains_unmanaged_shell_background(command: &str) -> bool {
     false
 }
 
+#[cfg(not(windows))]
 fn contains_shell_wait(command: &str) -> bool {
     let words = shell_words_for_safety_scan(command);
     let mut index = 0;
@@ -1153,6 +1156,7 @@ fn contains_shell_wait(command: &str) -> bool {
     false
 }
 
+#[cfg(not(windows))]
 fn contains_explicit_process_detach(command: &str) -> bool {
     let words = shell_words_for_safety_scan(command);
     let mut index = 0;
@@ -1183,6 +1187,7 @@ fn contains_explicit_process_detach(command: &str) -> bool {
     false
 }
 
+#[cfg(not(windows))]
 fn nested_shell_scripts(command: &str) -> Vec<String> {
     let words = shell_words_for_safety_scan(command);
     let mut scripts = Vec::new();
@@ -1206,14 +1211,17 @@ fn nested_shell_scripts(command: &str) -> Vec<String> {
     scripts
 }
 
+#[cfg(not(windows))]
 fn shell_command_basename(command: &str) -> &str {
     command.rsplit('/').next().unwrap_or(command)
 }
 
+#[cfg(not(windows))]
 fn is_shell_interpreter(command: &str) -> bool {
     matches!(command, "sh" | "bash" | "dash" | "ksh" | "zsh")
 }
 
+#[cfg(not(windows))]
 fn nested_shell_script(words: &[String], mut index: usize) -> Option<&str> {
     while index < words.len() && !is_command_separator(&words[index]) {
         let word = words[index].as_str();
@@ -1229,6 +1237,7 @@ fn nested_shell_script(words: &[String], mut index: usize) -> Option<&str> {
     None
 }
 
+#[cfg(not(windows))]
 fn shell_executable_index(words: &[String], mut index: usize) -> Option<usize> {
     while index < words.len() && !is_command_separator(&words[index]) {
         if is_assignment_word(&words[index])
@@ -2119,6 +2128,7 @@ fn contains_long_powershell_sleep(command: &str) -> bool {
     })
 }
 
+#[cfg(not(windows))]
 fn contains_long_normal_sleep(command: &str) -> bool {
     let tokens = shell_words_for_sleep_scan(command);
     tokens.windows(2).any(|pair| {
@@ -2126,6 +2136,7 @@ fn contains_long_normal_sleep(command: &str) -> bool {
     })
 }
 
+#[cfg(not(windows))]
 fn shell_words_for_sleep_scan(command: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
@@ -2149,6 +2160,7 @@ fn shell_words_for_sleep_scan(command: &str) -> Vec<String> {
     words
 }
 
+#[cfg(not(windows))]
 fn sleep_arg_seconds(arg: &str) -> Option<f64> {
     let clean = arg.trim();
     let (number, multiplier) = if let Some(number) = clean.strip_suffix('s') {
