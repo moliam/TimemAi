@@ -105,7 +105,7 @@ pub(super) struct WebMemSettings {
     pub(super) temporary_capacity_bytes: Option<u64>,
     #[serde(default)]
     pub(super) conversation_capacity_bytes: Option<u64>,
-    #[serde(default)]
+    #[serde(default = "default_claude_codex_tool_discovery")]
     pub(super) claude_codex_tool_discovery: bool,
 }
 
@@ -125,9 +125,13 @@ impl WebMemSettings {
                 MEM_CAPACITY_128_MB
             }),
             conversation_capacity_bytes: Some(MEM_CAPACITY_128_MB),
-            claude_codex_tool_discovery: false,
+            claude_codex_tool_discovery: default_claude_codex_tool_discovery(),
         }
     }
+}
+
+const fn default_claude_codex_tool_discovery() -> bool {
+    true
 }
 
 pub(super) fn default_mem_temporary_retention_days() -> Option<u16> {
