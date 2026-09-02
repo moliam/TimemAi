@@ -3070,7 +3070,10 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected bash action result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains(&format!(
+        "Action result: {}",
+        agent_core::os::local_shell_tool_name()
+    )));
     assert!(prompt.contains("ERROR"));
 
     let _ = core.begin_turn("最小动作", None);
@@ -5699,8 +5702,15 @@ fn memory_update_concurrent_same_version_conflicts_allow_only_one_winner() {
         .iter()
         .filter(|prompt| prompt.contains("memory_conflict"))
         .count();
-    assert_eq!(success_count, 1);
-    assert_eq!(conflict_count, contenders - 1);
+    assert_eq!(
+        success_count, 1,
+        "unexpected concurrent results: {prompts:#?}"
+    );
+    assert_eq!(
+        conflict_count,
+        contenders - 1,
+        "unexpected concurrent results: {prompts:#?}"
+    );
 
     let stored = fs::read_to_string(dir.join("memory.jsonl")).unwrap();
     let rows = stored
@@ -6627,10 +6637,7 @@ fn run_bash_requires_approval_for_mutating_commands() {
         serde_json::from_slice(&fs::read(active_files[0].path()).unwrap()).unwrap();
     let actions = audit["interactions"][0]["actions"].as_array().unwrap();
     assert_eq!(actions.len(), 2);
-    assert_eq!(
-        actions[0]["action"],
-        agent_core::os::local_shell_tool_name()
-    );
+    assert_eq!(actions[0]["action"], "run_bash");
     assert!(actions[0].get("intent").is_none());
     assert_eq!(actions[0]["status"], "needs_user_approval");
     assert_eq!(actions[0]["input"]["cmd"], "rm not_allowed");
