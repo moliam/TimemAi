@@ -7496,7 +7496,15 @@ fn claude_codex_tool_discovery_can_be_added_and_removed_from_static_prompt() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected NeedModel, got {other:?}"),
     };
-    let instruction = "If a task appears to be in third-party agent's reusable skill or tool, search the built-in skill and tool directories used by Claude and Codex, identify an applicable tool, and use it when appropriate. Promptly report to user your usage of third-party's skill.";
+    let instruction = r#"If a task appears to involve some specific skill out of your scope, maybe in third-party agent's reusable skill or tool, search:
+1. Infer the required capability from intent, not a named skill.
+2. Inspect exposed tools, project/user Claude and Codex skill directories, and enabled plugin paths.
+3. Cover Linux, macOS, and Windows locations, including symlinks and junctions.
+4. Use available platform-native tools to enumerate files. Follow linked directories safely, prevent cycles, and do not use methods that may omit them.
+5. Match SKILL.md frontmatter (name, description, requires) or head part to the task.
+6. Read only matched instructions and required references.
+7. Verify dependencies, authentication, permissions, and a minimal read-only call when possible.
+8. Report candidate, loaded, or usable based only on verified evidence; disclose incomplete discovery."#;
     assert!(enabled.contains(instruction));
     assert!(!enabled.contains("{{CLAUDE_CODEX_TOOL_DISCOVERY_INSTRUCTION}}"));
 
