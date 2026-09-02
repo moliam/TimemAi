@@ -1,5 +1,7 @@
 use super::*;
-use crate::{api_audit_stream_path, read_api_audit_doc, LocalLLMKeyFile};
+use crate::{
+    api_audit_stream_path, is_retryable_model_system_error, read_api_audit_doc, LocalLLMKeyFile,
+};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
@@ -66,6 +68,88 @@ fn cancellation_interrupts_waiting_for_response_headers() {
         started.elapsed()
     );
     let _ = std::fs::remove_file(audit_file);
+}
+
+#[test]
+fn connection_closed_before_response_headers_is_retryable_network_error() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        assert!(!request.is_empty());
+        // Drop the socket without sending an HTTP status line or headers.
+    });
+
+    let config = local_config(addr, 2);
+    let audit_file = test_audit_file("closed-before-headers");
+    let error = call_model(&config, "retry this transport failure", &audit_file).unwrap_err();
+    assert!(
+        error.starts_with("model_network_error: stage=response_headers"),
+        "{error}"
+    );
+    assert!(is_retryable_model_system_error(&error), "{error}");
+    server.join().unwrap();
+    let _ = std::fs::remove_file(audit_file);
+}
+
+#[test]
+fn response_body_connection_close_is_retryable_body_error() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+    });
+
+    let config = local_config(addr, 2);
+    let audit_file = test_audit_file("closed-response-body");
+    let error = call_model(&config, "retry truncated body", &audit_file).unwrap_err();
+    assert!(
+        error.starts_with("model_body_error: stage=response_body"),
+        "{error}"
+    );
+    assert!(is_retryable_model_system_error(&error), "{error}");
+    server.join().unwrap();
+    let _ = std::fs::remove_file(audit_file);
+}
+
+#[test]
+fn transport_failure_markers_exclude_permanent_request_and_tls_errors() {
+    for transient in [
+        "connection closed before message completed",
+        "connection reset by peer",
+        "broken pipe",
+        "unexpected eof while reading response",
+        "incomplete message",
+        "http2 framing layer failure",
+        "h2 protocol error",
+    ] {
+        assert!(is_transient_connection_failure(transient), "{transient}");
+    }
+    for permanent in [
+        "builder error: invalid header value",
+        "relative url without a base",
+        "invalid peer certificate: unknown issuer",
+        "dns lookup failed",
+        "proxy authentication required",
+    ] {
+        assert!(!is_transient_connection_failure(permanent), "{permanent}");
+    }
 }
 
 #[test]
