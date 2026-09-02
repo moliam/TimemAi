@@ -99,12 +99,18 @@ describe("sortable Session group UI", () => {
     expect(source).toContain('title="Favorite answers"');
     expect(source).toContain("title={settingsTitle}");
     expect(styles).toMatch(
+      /\.app-shell \{[^}]*height: 100%;[^}]*grid-template-rows: minmax\(0, 1fr\);[^}]*overflow: hidden;/,
+    );
+    expect(styles).toMatch(
       /\.sidebar \{[^}]*min-height: 0;[^}]*overflow: hidden;/,
     );
     expect(styles).toMatch(
       /\.session-list \{[^}]*flex: 1 1 auto;[^}]*min-height: 0;[^}]*overscroll-behavior: contain;/,
     );
     expect(styles).toMatch(/\.sidebar-footer \{[^}]*flex: none;/);
+    expect(source).toContain(
+      '<ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">',
+    );
     expect(styles).toMatch(
       /\.session-row \{[^}]*min-height: 26px;[^}]*border-radius: 4px;/,
     );
