@@ -59,7 +59,7 @@ impl NativeHttpTransport {
             .enable_time()
             .build()
             .map_err(|error| {
-                format!("model_network_error: runtime initialization failed: {error}")
+                format!("model_internal_error: runtime initialization failed: {error}")
             })?;
         Ok(Self {
             runtime,
@@ -85,7 +85,7 @@ impl NativeHttpTransport {
             }
         }
         let client = builder.build().map_err(|error| {
-            format!("model_network_error: client initialization failed: {error}")
+            format!("model_internal_error: client initialization failed: {error}")
         })?;
         self.client = Some((key, client.clone()));
         Ok(client)
@@ -403,11 +403,32 @@ fn map_reqwest_error(error: reqwest::Error, stage: &str) -> String {
         format!("model_connect_error: stage={stage} {detail}")
     } else if error.is_body() || error.is_decode() {
         format!("model_body_error: stage={stage} {detail}")
+    } else if is_transient_connection_failure(&lower) {
+        // reqwest/hyper can mark a connection failure while sending a request as
+        // is_request(). Preserve non-retryable request-construction errors, but
+        // normalize known peer and transport failures as retryable network I/O.
+        format!("model_network_error: stage={stage} {detail}")
     } else if error.is_request() {
         format!("model_request_error: stage={stage} {detail}")
     } else {
         format!("model_network_error: stage={stage} {detail}")
     }
+}
+
+fn is_transient_connection_failure(lower_error_chain: &str) -> bool {
+    [
+        "connection closed before message completed",
+        "connection reset",
+        "connection was closed",
+        "peer closed connection",
+        "broken pipe",
+        "unexpected eof",
+        "incomplete message",
+        "http2 framing",
+        "h2 protocol error",
+    ]
+    .iter()
+    .any(|marker| lower_error_chain.contains(marker))
 }
 
 fn error_chain_text(error: &(dyn std::error::Error + 'static)) -> String {
@@ -427,7 +448,7 @@ impl HttpModelClient {
         }
         self.transport
             .as_mut()
-            .ok_or_else(|| "model_network_error: transport initialization failed".to_string())
+            .ok_or_else(|| "model_internal_error: transport initialization failed".to_string())
     }
 
     fn execute_prepared_request_with_cache_fallback(
@@ -537,7 +558,7 @@ pub fn call_model_with_cancel(
     THREAD_HTTP_MODEL_CLIENT.with(|client| {
         client
             .try_borrow_mut()
-            .map_err(|_| "model_network_error: reentrant model HTTP call".to_string())?
+            .map_err(|_| "model_internal_error: reentrant model HTTP call".to_string())?
             .call_model(config, prompt, audit_file, should_cancel)
     })
 }
