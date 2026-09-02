@@ -5996,7 +5996,7 @@ fn run_bash_unmanaged_background_is_rejected_and_reported_to_the_model() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("检测到命令可能创建脱离 Runtime 管理的后台进程"));
-    assert!(prompt.contains("run_bash(background=true)"));
+    assert!(prompt.contains("当前平台命令工具的 background=true"));
     assert!(!marker.exists());
     assert!(core.running_shell_jobs_for_session("default").is_empty());
 }
