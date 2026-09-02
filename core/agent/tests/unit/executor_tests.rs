@@ -274,7 +274,7 @@ fn windows_powershell_command_action_receives_json_payload() {
     let script = dir.join("echo_payload.ps1");
     fs::write(
         &script,
-        "$payload = [Console]::In.ReadToEnd()\n$data = $payload | ConvertFrom-Json\nWrite-Output $data.args.message\n",
+        "$data = ($input | Out-String) | ConvertFrom-Json\nWrite-Output $data.args.message\n",
     )
     .unwrap();
 
