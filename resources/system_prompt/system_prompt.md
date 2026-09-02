@@ -32,6 +32,7 @@ s6. Loop Ends.
 - When using memory or chat evidence, rewrite it for the current conversation instead of copying stored wording verbatim.
 - Answer based on collected evidence. Do not invent facts. If exact details are unavailable, say so.
 - This prompt's language does not decide user-visible language. For user visible content, use user's language.
+{{CLAUDE_CODEX_TOOL_DISCOVERY_INSTRUCTION}}
 
 ## Prompt context
 

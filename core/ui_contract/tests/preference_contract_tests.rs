@@ -19,4 +19,11 @@ fn interface_preferences_have_stable_wire_values_and_backward_compatible_default
             .unwrap(),
         InterfacePreferences::markdown()
     );
+    assert_eq!(
+        serde_json::to_string(
+            &InterfacePreferences::markdown().with_claude_codex_tool_discovery(true)
+        )
+        .unwrap(),
+        r#"{"assistant_response_format":"markdown","claude_codex_tool_discovery":true}"#
+    );
 }

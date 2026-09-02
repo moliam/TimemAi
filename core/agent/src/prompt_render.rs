@@ -704,6 +704,15 @@ pub(crate) fn render_static_prompt_for_mode_with_preferences(
         AssistantResponseFormat::PlainText => "plain-text",
     };
     let with_protocol = static_prompt.replace("{{UI_PREFERENCE}}", ui_preference);
+    let tool_discovery_instruction = if interface_preferences.claude_codex_tool_discovery {
+        "- If a task appears to be in third-party agent's reusable skill or tool, search the built-in skill and tool directories used by Claude and Codex, identify an applicable tool, and use it when appropriate. Promptly report to user your usage of third-party's skill."
+    } else {
+        ""
+    };
+    let with_protocol = with_protocol.replace(
+        "{{CLAUDE_CODEX_TOOL_DISCOVERY_INSTRUCTION}}",
+        tool_discovery_instruction,
+    );
     let with_protocol = with_protocol.replace("{{RESPONSE_PROTOCOL_SECTION}}", &protocol_section);
     let response_mode_instruction = if tool_call_mode == ToolCallMode::Native {
         NATIVE_RESPONSE_MODE_INSTRUCTION

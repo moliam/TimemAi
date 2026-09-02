@@ -1936,6 +1936,14 @@ impl AgentCore {
         self.assistant_replay_mode = mode;
     }
 
+    pub fn set_claude_codex_tool_discovery(&mut self, enabled: bool) {
+        if self.interface_preferences.claude_codex_tool_discovery == enabled {
+            return;
+        }
+        self.interface_preferences.claude_codex_tool_discovery = enabled;
+        self.refresh_rendered_static_prompt();
+    }
+
     pub fn assistant_replay_mode(&self) -> AssistantReplayMode {
         self.assistant_replay_mode
     }

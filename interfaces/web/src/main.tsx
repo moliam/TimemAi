@@ -651,6 +651,8 @@ function TimemApp() {
   const [pendingMemRetention, setPendingMemRetention] = useState(false);
   const [pendingMemConversationCapacity, setPendingMemConversationCapacity] =
     useState(false);
+  const [pendingClaudeCodexToolDiscovery, setPendingClaudeCodexToolDiscovery] =
+    useState(false);
   const [rejectedSubmitCommandIds, setRejectedSubmitCommandIds] = useState<
     Set<string>
   >(() => new Set());
@@ -981,6 +983,7 @@ function TimemApp() {
     if (
       !pendingMemRetention &&
       !pendingMemConversationCapacity &&
+      !pendingClaudeCodexToolDiscovery &&
       !favoriteCapacityUpdating &&
       !pendingMemSwitch &&
       !memTemporaryItemsDeleting
@@ -990,6 +993,7 @@ function TimemApp() {
     closeAppearancePanel,
     favoriteCapacityUpdating,
     memTemporaryItemsDeleting,
+    pendingClaudeCodexToolDiscovery,
     pendingMemConversationCapacity,
     pendingMemRetention,
     pendingMemSwitch,
@@ -1062,6 +1066,26 @@ function TimemApp() {
     },
     [reportUiError, sendCommand],
   );
+  const saveClaudeCodexToolDiscovery = useCallback(
+    (enabled: boolean) => {
+      setPendingClaudeCodexToolDiscovery(true);
+      if (
+        !sendCommand({
+          type: "beta_claude_codex_tool_discovery_update",
+          enabled,
+        })
+      ) {
+        setPendingClaudeCodexToolDiscovery(false);
+        reportUiError(
+          "Beta setting failed",
+          "Reconnect to Timem Web before changing Claude/Codex tool discovery.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
+
   const saveMemFavoriteCapacity = useCallback(
     (maxBytes: number | null) => {
       setFavoriteCapacityUpdating(true);
@@ -1255,6 +1279,7 @@ function TimemApp() {
     setSelectedTool(null);
     setPendingToolgenRequests(new Set());
     setPendingMemSwitch(false);
+    setPendingClaudeCodexToolDiscovery(false);
     setMemSwitchCandidate(null);
   }, []);
 
@@ -1515,6 +1540,8 @@ function TimemApp() {
             setPendingMemRetention(false);
           if (completed?.type === "mem_conversation_capacity_update")
             setPendingMemConversationCapacity(false);
+          if (completed?.type === "beta_claude_codex_tool_discovery_update")
+            setPendingClaudeCodexToolDiscovery(false);
           const memSwitchNeedsConfirmation =
             completed?.type === "mem_switch" &&
             !completed.stop_running &&
@@ -1578,6 +1605,7 @@ function TimemApp() {
       if (event.type === "mem_settings_updated") {
         setPendingMemRetention(false);
         setPendingMemConversationCapacity(false);
+        setPendingClaudeCodexToolDiscovery(false);
         setServer((current) =>
           current
             ? {
@@ -1588,6 +1616,8 @@ function TimemApp() {
                   temporary_capacity_bytes: event.temporary_capacity_bytes,
                   conversation_capacity_bytes:
                     event.conversation_capacity_bytes,
+                  claude_codex_tool_discovery:
+                    event.claude_codex_tool_discovery,
                 },
               }
             : current,
@@ -4268,6 +4298,11 @@ function TimemApp() {
               toolGenEnabled={toolGenEnabled}
               toolGenToggleDisabled={pendingToolgenRequests.size > 0}
               onToolGenEnabledChange={setToolGenEnabled}
+              claudeCodexToolDiscoveryEnabled={
+                server?.mem?.claude_codex_tool_discovery ?? false
+              }
+              claudeCodexToolDiscoveryPending={pendingClaudeCodexToolDiscovery}
+              onClaudeCodexToolDiscoveryChange={saveClaudeCodexToolDiscovery}
               memPath={server?.mem?.space_dir ?? ""}
               connected={connected}
               connectionLabel={connectionLabel}
@@ -11638,7 +11673,7 @@ function McpEditor({
   );
 }
 
-type SettingsSection = "appearance" | "endpoints" | "memory" | "toolgen";
+type SettingsSection = "appearance" | "endpoints" | "memory" | "beta";
 
 type SettingsCenterProps = {
   panelRef: MutableRefObject<HTMLElement | null>;
@@ -11649,6 +11684,9 @@ type SettingsCenterProps = {
   toolGenEnabled: boolean;
   toolGenToggleDisabled: boolean;
   onToolGenEnabledChange: (enabled: boolean) => void;
+  claudeCodexToolDiscoveryEnabled: boolean;
+  claudeCodexToolDiscoveryPending: boolean;
+  onClaudeCodexToolDiscoveryChange: (enabled: boolean) => void;
   memPath: string;
   connected: boolean;
   connectionLabel: string;
@@ -11697,6 +11735,9 @@ const SettingsCenter = memo(function SettingsCenter(
     toolGenEnabled,
     toolGenToggleDisabled,
     onToolGenEnabledChange,
+    claudeCodexToolDiscoveryEnabled,
+    claudeCodexToolDiscoveryPending,
+    onClaudeCodexToolDiscoveryChange,
     memPath,
     connected,
     connectionLabel,
@@ -11750,6 +11791,7 @@ const SettingsCenter = memo(function SettingsCenter(
   const busy =
     retentionPending ||
     conversationCapacityPending ||
+    claudeCodexToolDiscoveryPending ||
     favoriteCapacityPending ||
     switchPending ||
     temporaryItemsDeleting;
@@ -11905,14 +11947,14 @@ const SettingsCenter = memo(function SettingsCenter(
             </button>
             <button
               type="button"
-              className={section === "toolgen" ? "active" : ""}
-              aria-current={section === "toolgen" ? "page" : undefined}
+              className={section === "beta" ? "active" : ""}
+              aria-current={section === "beta" ? "page" : undefined}
               disabled={switchPending}
-              onClick={() => selectSettingsSection("toolgen")}
+              onClick={() => selectSettingsSection("beta")}
             >
-              <Wrench size={16} />
+              <TriangleAlert size={16} />
               <span>
-                <strong>ToolGen</strong>
+                <strong>Beta</strong>
               </span>
             </button>
           </nav>
@@ -12092,14 +12134,14 @@ const SettingsCenter = memo(function SettingsCenter(
                 onSave={onSaveEndpoint}
               />
             )}
-            {section === "toolgen" && (
+            {section === "beta" && (
               <section
                 className="settings-pane toolgen-settings-pane"
-                aria-labelledby="toolgen-settings-title"
+                aria-labelledby="beta-settings-title"
               >
                 <div className="settings-pane-heading">
-                  <h3 id="toolgen-settings-title">ToolGen</h3>
-                  <Wrench size={19} aria-hidden="true" />
+                  <h3 id="beta-settings-title">Beta</h3>
+                  <TriangleAlert size={19} aria-hidden="true" />
                 </div>
                 <section className="settings-group toolgen-beta-card">
                   <div className="settings-group-heading">
@@ -12138,6 +12180,58 @@ const SettingsCenter = memo(function SettingsCenter(
                         : toolGenEnabled
                           ? "ToolGen actions and generation UI are available."
                           : "ToolGen actions and generation UI are hidden."}
+                    </small>
+                  </div>
+                </section>
+                <section className="settings-group toolgen-beta-card">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>Claude/Codex 工具发现</strong>
+                      <p>
+                        引导模型在任务适合本地 Skill 或工具时，搜索 Claude 和
+                        Codex 的内置 Skill、工具目录，并采用合适的现有工具。
+                        设置由当前 MEM 保存，并从下一次模型 API 请求开始生效。
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      className="settings-feature-switch"
+                      aria-checked={claudeCodexToolDiscoveryEnabled}
+                      aria-label="Enable Claude Codex tool discovery Beta"
+                      disabled={claudeCodexToolDiscoveryPending || !connected}
+                      onClick={() =>
+                        onClaudeCodexToolDiscoveryChange(
+                          !claudeCodexToolDiscoveryEnabled,
+                        )
+                      }
+                    >
+                      <span className="settings-feature-switch-thumb" />
+                    </button>
+                  </div>
+                  <div
+                    className="toolgen-beta-status"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <span
+                      className={
+                        claudeCodexToolDiscoveryEnabled ? "enabled" : "disabled"
+                      }
+                    />
+                    <strong>
+                      {claudeCodexToolDiscoveryPending
+                        ? "Saving…"
+                        : claudeCodexToolDiscoveryEnabled
+                          ? "Enabled"
+                          : "Disabled by default"}
+                    </strong>
+                    <small>
+                      {claudeCodexToolDiscoveryPending
+                        ? "Waiting for the Host to persist and apply this setting."
+                        : claudeCodexToolDiscoveryEnabled
+                          ? "The discovery instruction is present in the System Prompt."
+                          : "The discovery instruction is absent from the System Prompt."}
                     </small>
                   </div>
                 </section>

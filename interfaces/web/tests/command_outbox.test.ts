@@ -15,6 +15,12 @@ describe("live command correlation", () => {
     ).toBe(true);
     expect(
       commandNeedsReliableDelivery({
+        type: "beta_claude_codex_tool_discovery_update",
+        enabled: true,
+      }),
+    ).toBe(true);
+    expect(
+      commandNeedsReliableDelivery({
         type: "model_endpoint_upsert",
         endpoint: {
           name: "prod",
