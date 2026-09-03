@@ -21,6 +21,7 @@ fn retryable_model_system_errors_cover_network_and_transient_http() {
         "connection reset by peer",
         "model_network_error: stage=response_headers connection closed before message completed",
         "model_network_error: stage=response_headers incomplete message",
+        "model_network_error: stage=response_headers error sending request: Can't assign requested address (os error 49)",
         "could not resolve host: example.invalid",
         "model_http_408: timeout",
         "model_http_409: conflict",

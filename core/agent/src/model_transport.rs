@@ -403,10 +403,10 @@ fn map_reqwest_error(error: reqwest::Error, stage: &str) -> String {
         format!("model_connect_error: stage={stage} {detail}")
     } else if error.is_body() || error.is_decode() {
         format!("model_body_error: stage={stage} {detail}")
-    } else if is_transient_connection_failure(&lower) {
-        // reqwest/hyper can mark a connection failure while sending a request as
+    } else if has_retryable_socket_error(&error) || is_transient_connection_failure(&lower) {
+        // reqwest/hyper can mark a socket failure while sending a request as
         // is_request(). Preserve non-retryable request-construction errors, but
-        // normalize known peer and transport failures as retryable network I/O.
+        // normalize known local/peer transport failures as retryable network I/O.
         format!("model_network_error: stage={stage} {detail}")
     } else if error.is_request() {
         format!("model_request_error: stage={stage} {detail}")
@@ -415,8 +415,26 @@ fn map_reqwest_error(error: reqwest::Error, stage: &str) -> String {
     }
 }
 
-fn is_transient_connection_failure(lower_error_chain: &str) -> bool {
+fn has_retryable_socket_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(item) = current {
+        if let Some(io_error) = item.downcast_ref::<std::io::Error>() {
+            if matches!(io_error.kind(), std::io::ErrorKind::AddrNotAvailable) {
+                return true;
+            }
+        }
+        current = item.source();
+    }
+    false
+}
+
+fn is_transient_connection_failure(error_chain: &str) -> bool {
+    let lower_error_chain = error_chain.to_ascii_lowercase();
     [
+        "can't assign requested address",
+        "cannot assign requested address",
+        "address not available",
+        "eaddrnotavail",
         "connection closed before message completed",
         "connection reset",
         "connection was closed",

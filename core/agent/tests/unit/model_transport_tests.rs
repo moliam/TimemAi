@@ -131,6 +131,10 @@ fn response_body_connection_close_is_retryable_body_error() {
 #[test]
 fn transport_failure_markers_exclude_permanent_request_and_tls_errors() {
     for transient in [
+        "can't assign requested address (os error 49)",
+        "cannot assign requested address (os error 99)",
+        "address not available (os error 10049)",
+        "EADDRNOTAVAIL while opening socket",
         "connection closed before message completed",
         "connection reset by peer",
         "broken pipe",
@@ -141,6 +145,11 @@ fn transport_failure_markers_exclude_permanent_request_and_tls_errors() {
     ] {
         assert!(is_transient_connection_failure(transient), "{transient}");
     }
+    let addr_not_available = std::io::Error::from(std::io::ErrorKind::AddrNotAvailable);
+    assert!(has_retryable_socket_error(&addr_not_available));
+    let invalid_input = std::io::Error::from(std::io::ErrorKind::InvalidInput);
+    assert!(!has_retryable_socket_error(&invalid_input));
+
     for permanent in [
         "builder error: invalid header value",
         "relative url without a base",
