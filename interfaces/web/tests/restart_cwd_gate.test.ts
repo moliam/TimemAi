@@ -14,7 +14,7 @@ const styles = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8
 describe("restart working-directory gate", () => {
   it("replaces the composer in the sticky input area until a choice is made", () => {
     expect(mainSource).toMatch(
-      /<ThreadPrimitive\.ViewportFooter className="composer-wrap aui-thread-footer">[\s\S]*{activeSession && restartCwdDecision \? \([\s\S]*<RestartCwdGate[\s\S]*\) : \([\s\S]*<form[\s\S]*className="composer"/,
+      /<div className="composer-wrap aui-thread-footer">[\s\S]*{activeSession && restartCwdDecision \? \([\s\S]*<RestartCwdGate[\s\S]*\) : \([\s\S]*<form[\s\S]*className="composer"/,
     );
     expect(mainSource).not.toMatch(
       /{activeSession && restartCwdDecision && \([\s\S]*<TimemThread/,

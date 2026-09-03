@@ -7348,6 +7348,30 @@ function TimemThread({
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const attachComposerTextarea = useCallback(
+    (textarea: HTMLTextAreaElement | null) => {
+      composerTextareaRef.current = textarea;
+      if (!textarea) return;
+      const prioritizeComposerScroll = (event: WheelEvent) => {
+        if (document.activeElement !== textarea) return;
+        const deltaY = wheelDeltaPixels(
+          event.deltaY,
+          event.deltaMode,
+          textarea.clientHeight,
+        );
+        if (!canScrollInDirection(textarea, deltaY)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        textarea.scrollTop += deltaY;
+      };
+      textarea.addEventListener("wheel", prioritizeComposerScroll, {
+        passive: false,
+      });
+      return () =>
+        textarea.removeEventListener("wheel", prioritizeComposerScroll);
+    },
+    [],
+  );
   const previousScrollMetrics = useRef<ScrollMetrics | null>(null);
   const sessionScrollPositionsRef = useRef<Map<string, SessionScrollPosition>>(
     new Map(),
@@ -7966,28 +7990,6 @@ function TimemThread({
     };
   }, [activeSessionId]);
 
-  useEffect(() => {
-    const textarea = composerTextareaRef.current;
-    if (!textarea) return;
-    const prioritizeComposerScroll = (event: WheelEvent) => {
-      if (document.activeElement !== textarea) return;
-      const deltaY = wheelDeltaPixels(
-        event.deltaY,
-        event.deltaMode,
-        textarea.clientHeight,
-      );
-      if (!canScrollInDirection(textarea, deltaY)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      textarea.scrollTop += deltaY;
-    };
-    textarea.addEventListener("wheel", prioritizeComposerScroll, {
-      passive: false,
-    });
-    return () =>
-      textarea.removeEventListener("wheel", prioritizeComposerScroll);
-  }, []);
-
   useLayoutEffect(() => {
     window.dispatchEvent(new Event("session-timeline-activation-change"));
   }, [activeSessionId]);
@@ -8343,7 +8345,9 @@ function TimemThread({
             onRequestMessageDelete={onRequestMessageDelete}
           />
         ))}
-        <ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">
+      </ThreadPrimitive.Viewport>
+
+      <div className="composer-wrap aui-thread-footer">
           {!!activeSession && displayQueuedMessages.length > 0 && (
             <section
               className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`}
@@ -8838,7 +8842,7 @@ function TimemThread({
             >
               <div className="expandable-text-field composer-text-field">
                 <textarea
-                  ref={composerTextareaRef}
+                  ref={attachComposerTextarea}
                   value={draft}
                   placeholder={
                     !activeSession
@@ -9038,8 +9042,7 @@ function TimemThread({
               </div>
             </form>
           )}
-        </ThreadPrimitive.ViewportFooter>
-      </ThreadPrimitive.Viewport>
+      </div>
 
       <nav
         ref={userMessageNavigationRef}
