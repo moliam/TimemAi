@@ -169,7 +169,7 @@ pub struct SessionResumeNotice {
 impl SessionResumeNotice {
     pub fn render(&self) -> String {
         format!(
-            "Runtime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them.\n\n{}\n\nCurrent cwd: {}",
+            "Runtime just restarted. Previous runtime/job state may be stale. If the user asks to continue or recover prior work, first inspect this Session's recent history below; use raw_chat search when more transcript context is needed, and scratch search/read when a prior checkpoint may exist. Before acting, verify the current cwd, files, and processes instead of assuming old runtime state is still valid.\n\n{}\n\nCurrent cwd: {}",
             chat_history_prompt_format_hint(&self.history_path),
             self.current_dir.display()
         )
