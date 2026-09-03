@@ -1322,10 +1322,18 @@ impl Default for CoreSessionWorkerManager {
     }
 }
 
-fn session_runtime_identity_context(identity: &agent_core::CoreSessionWorkerIdentity) -> String {
+fn session_runtime_identity_context(
+    identity: &agent_core::CoreSessionWorkerIdentity,
+    workspace: &CoreSessionWorkerWorkspace,
+) -> String {
     format!(
-        "Current session_id: {}\nCurrent session name: {}\nCurrent context_id: {}\nCurrent worker_id: {}",
-        identity.session_id, identity.display_name, identity.context_id, identity.worker_id
+        "Current session_id: {}\nCurrent session name: {}\nCurrent context_id: {}\nCurrent worker_id: {}\nCurrent runtime surface: {}\nCurrent command target: {}",
+        identity.session_id,
+        identity.display_name,
+        identity.context_id,
+        identity.worker_id,
+        workspace.runtime,
+        workspace.run_bash_target,
     )
 }
 
@@ -1488,7 +1496,7 @@ impl CoreSessionWorker {
                         cancel_generation: command_generation,
                     } => {
                         additional_context = agent_core::combine_additional_contexts([
-                            Some(session_runtime_identity_context(&identity).as_str()),
+                            Some(session_runtime_identity_context(&identity, &workspace).as_str()),
                             additional_context.as_deref(),
                         ]);
                         if command_generation < cancel_generation.load(Ordering::SeqCst) {
@@ -1869,7 +1877,7 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
         );
         ui.begin_toolgen_run(before.len());
         let mut input = request.user_instruction.clone().unwrap_or_default();
-        let mut additional_context = Some(session_runtime_identity_context(identity));
+        let mut additional_context = Some(session_runtime_identity_context(identity, workspace));
         let mut outcome = loop {
             let current = run_session_turn_with_model_client(
                 core,
