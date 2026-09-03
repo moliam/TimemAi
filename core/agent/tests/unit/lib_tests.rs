@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn direct_resume_prompt_follows_the_interruption_note_in_component_order() {
+    let mut core = test_core("direct_resume_after_interruption");
+    let _ = core.begin_turn("old interrupted work", None);
+    core.mark_user_interrupted_work();
+
+    let prompt = match core.begin_turn(DIRECT_RESUME_USER_INPUT, None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let interruption = prompt
+        .find("NOTE: User interrupted the above work.")
+        .expect("interruption note");
+    let resume = prompt
+        .find(DIRECT_RESUME_USER_INPUT)
+        .expect("direct resume input");
+    assert!(interruption < resume, "{prompt}");
+}
+
+#[test]
 fn native_interruption_note_is_not_rendered_as_an_action_result() {
     let mut core = test_core("native_interruption_runtime_note");
     core.set_interaction_profile(&InteractionProfile {

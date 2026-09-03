@@ -194,7 +194,8 @@ pub use retry_policy::{
 pub use runtime_context::{local_time_label, runtime_time_context, LocalTimeParts};
 use self_tool::{SelfToolAbout, SelfToolPaths, SelfToolProcess, SelfToolState};
 pub use session_runtime::{
-    cancelled_turn_result, run_session_turn, run_session_turn_with_model_client, ModelClient,
+    cancelled_turn_result, run_direct_resume_turn, run_direct_resume_turn_with_model_client,
+    run_session_turn, run_session_turn_with_model_client, ModelClient,
 };
 use shell_exec::ShellJobManager;
 pub use shell_exec::{RunningShellJob, ShellJobExitUpdate};
@@ -425,6 +426,8 @@ pub struct ModelInputOverflowRecovery {
     pub removed_action_output_bytes: usize,
 }
 pub const WORKER_ROLE_CONTEXT_PREFIX: &str = "TIMEM_WORKER_ROLE_CONTEXT: ";
+
+pub const DIRECT_RESUME_USER_INPUT: &str = "user resume directly";
 
 pub fn worker_role_supporting_context(name: &str, description: &str) -> String {
     format!(
@@ -2979,6 +2982,10 @@ impl AgentCore {
     pub(crate) fn record_sub_answer(&mut self) -> u64 {
         self.sub_answer_count = self.sub_answer_count.saturating_add(1);
         self.sub_answer_count
+    }
+
+    pub fn begin_direct_resume_turn(&mut self, supporting_context: Option<&str>) -> CoreStep {
+        self.begin_turn(DIRECT_RESUME_USER_INPUT, supporting_context)
     }
 
     pub fn begin_turn(&mut self, user_input: &str, supporting_context: Option<&str>) -> CoreStep {

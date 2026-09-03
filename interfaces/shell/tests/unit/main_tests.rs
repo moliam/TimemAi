@@ -10,17 +10,17 @@ use super::{
     raw_multiline_paste_needs_confirmation, read_approval_key, read_approval_key_until,
     read_menu_key, read_paste_recovery_key, reedline_keyboard_protocol_enter_sequence,
     reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_apply_report,
-    render_config_menu, render_expand_output_choices, render_expand_output_prompt,
-    render_note_box_at_width, render_paste_recovery_choices, render_paste_recovery_prompt,
-    render_queued_user_line, render_raw_multiline_paste_submit_choices,
-    render_raw_multiline_paste_submit_prompt, render_round_limit_choices,
-    render_round_limit_prompt, render_stale_context_choices, render_stale_context_prompt,
-    render_startup_banner, render_startup_status_block, render_submitted_user_line_rewrite,
-    render_user_approval_prompt, render_user_input_prompt, render_work_instructions_load_choices,
-    render_work_instructions_load_prompt, render_workspace_command_report,
-    render_workspace_delete_choices, render_workspace_menu, rendered_terminal_rows,
-    resolve_paste_markers, resolve_work_instruction_context_for_turn, runtime_help_text,
-    sanitize_user_input, shell_session_effective_env, shell_session_env_values,
+    render_config_menu, render_direct_resume_choices, render_direct_resume_prompt,
+    render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
+    render_paste_recovery_choices, render_paste_recovery_prompt, render_queued_user_line,
+    render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
+    render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
+    render_stale_context_prompt, render_startup_banner, render_startup_status_block,
+    render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
+    render_work_instructions_load_choices, render_work_instructions_load_prompt,
+    render_workspace_command_report, render_workspace_delete_choices, render_workspace_menu,
+    rendered_terminal_rows, resolve_paste_markers, resolve_work_instruction_context_for_turn,
+    runtime_help_text, sanitize_user_input, shell_session_effective_env, shell_session_env_values,
     shell_session_profile, shell_session_work_dir, startup_control_hint, strip_ansi,
     strip_paste_markers, submitted_input_rows, take_shell_resume_notice,
     timem_reedline_keybindings, utf8_expected_len, work_instruction_shell_load_result,
@@ -74,6 +74,17 @@ use timem_shell::{
     workspace_menu_report, ApiProtocol, HostStatusLevel, ModelServiceConfig, SPINNER_ICONS,
 };
 use unicode_width::UnicodeWidthChar;
+
+#[test]
+fn direct_resume_confirmation_is_explicit_and_defaults_to_cancel() {
+    let prompt = render_direct_resume_prompt();
+    assert!(prompt.contains("未输入内容，是否让Timem强制继续？"));
+    assert!(prompt.contains("回车确认"));
+
+    let choices = render_direct_resume_choices(ApprovalChoice::Deny);
+    assert!(choices.contains("直接继续"));
+    assert!(choices.contains("\x1b[7m[ 取消 ]\x1b[0m"));
+}
 
 #[test]
 fn static_prompt_uses_full_shared_v1_resource() {

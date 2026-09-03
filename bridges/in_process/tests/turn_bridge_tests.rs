@@ -148,6 +148,46 @@ fn direct_turn_forwards_input_projection_topics_and_outcome_without_transport() 
 }
 
 #[test]
+fn direct_resume_bridge_uses_shared_hidden_input() {
+    let root = temp_dir("direct_resume");
+    let mut core = timem_in_process::agent_api::AgentCore::new(
+        "STATIC {{ response_protocol }} {{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &root,
+    );
+    let mut config = config();
+    let mut model = FinalAnswerModel {
+        prompts: Vec::new(),
+    };
+    let mut ui = RecordingUi::default();
+
+    let outcome = timem_in_process::resume_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "",
+            session: "session_resume",
+            audit_file: &root.join("resume-audit.json"),
+            runtime: "test-interface",
+            run_bash_target: "test-host",
+            additional_context: Some("resume context"),
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "bridge complete");
+    assert_eq!(model.prompts.len(), 1);
+    let prompt = &model.prompts[0];
+    assert!(prompt.contains(timem_in_process::agent_api::DIRECT_RESUME_USER_INPUT));
+    assert!(prompt.contains("resume context"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn direct_turn_accepts_the_core_noop_ui_contract() {
     let root = temp_dir("noop");
     let mut model = FinalAnswerModel {

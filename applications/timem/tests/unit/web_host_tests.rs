@@ -312,6 +312,7 @@ fn worker_role_snapshots_survive_raw_history_reconstruction() {
         None,
         Some("role_history_command"),
         selected_roles.clone(),
+        "task",
     )
     .unwrap();
     let records = read_all_history_records(
@@ -462,6 +463,25 @@ fn turn_submit_wire_accepts_multiple_worker_role_ids_and_legacy_single_id() {
     };
     assert!(role_ids.is_empty());
     assert_eq!(role_id.as_deref(), Some("role_reviewer"));
+}
+
+#[test]
+fn turn_submit_wire_accepts_explicit_direct_resume_without_text() {
+    let command: ClientCommand = serde_json::from_value(json!({
+        "type": "turn_submit",
+        "session_id": "session_a",
+        "text": "",
+        "input_kind": "resume_directly"
+    }))
+    .unwrap();
+    let ClientCommand::TurnSubmit {
+        text, input_kind, ..
+    } = command
+    else {
+        panic!("expected turn_submit")
+    };
+    assert!(text.is_empty());
+    assert_eq!(input_kind.as_deref(), Some("resume_directly"));
 }
 
 #[test]

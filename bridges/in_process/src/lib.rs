@@ -20,6 +20,34 @@ pub fn run_turn(
     timem_session::run_synchronous_turn(core, config, input, ui, profiler)
 }
 
+pub fn resume_turn(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    input: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+) -> TurnOutcome {
+    timem_session::resume_synchronous_turn(core, config, input, ui, profiler)
+}
+
+pub fn resume_turn_with_model_client(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    input: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+    model_client: &mut dyn ModelClient,
+) -> TurnOutcome {
+    timem_session::resume_synchronous_turn_with_model_client(
+        core,
+        config,
+        input,
+        ui,
+        profiler,
+        model_client,
+    )
+}
+
 pub fn run_turn_with_model_client(
     core: &mut AgentCore,
     config: &mut ModelServiceConfig,

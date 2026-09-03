@@ -687,7 +687,7 @@ export type ClientCommand =
       text: string;
       attachment_ids?: string[];
       role_ids?: string[];
-      input_kind?: "toolgen";
+      input_kind?: "toolgen" | "resume_directly";
       source_turn_id?: string;
     }
   | {
