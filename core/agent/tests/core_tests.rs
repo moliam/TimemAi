@@ -3213,7 +3213,7 @@ fn memmgr_raw_chat_search_reads_persisted_chat_records() {
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","scope":"global","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5208,7 +5208,7 @@ fn chat_history_query_reads_persisted_chat_records() {
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","scope":"global","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5219,7 +5219,7 @@ fn chat_history_query_reads_persisted_chat_records() {
     };
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("chat_records"));
-    assert!(prompt.contains("source=chat_record"));
+    assert!(prompt.contains("source=chat_history"));
     assert!(prompt.contains("shell_old"));
     assert!(prompt.contains("测试物品 BLUE-17"));
     assert!(prompt.contains("我记下了测试物品 BLUE-17这个说法"));
@@ -5242,7 +5242,7 @@ fn chat_history_query_reads_legacy_jsonl_audit_records() {
     let _ = core.begin_turn("旧格式里说过什么", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 GREEN-29","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","scope":"global","search_text":"测试物品 GREEN-29","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5252,7 +5252,7 @@ fn chat_history_query_reads_legacy_jsonl_audit_records() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("source=chat_record"));
+    assert!(prompt.contains("source=chat_history"));
     assert!(prompt.contains("legacy_shell"));
     assert!(prompt.contains("测试物品 GREEN-29"));
 }
@@ -5271,7 +5271,7 @@ fn chat_history_query_keeps_current_prompt_delta_fallback() {
     let _ = core.begin_turn("我刚才说了什么物品", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","scope":"global","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5305,7 +5305,7 @@ fn chat_history_search_empty_text_lists_recent_records() {
     let _ = core.begin_turn("列最近聊天", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"","limit":1}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","scope":"global","search_text":"","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5314,7 +5314,7 @@ fn chat_history_search_empty_text_lists_recent_records() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("source=chat_record"));
+    assert!(prompt.contains("source=chat_history"));
     assert!(prompt.contains("第二条历史"));
     assert!(!prompt.contains("第一条历史"));
 }
@@ -6022,7 +6022,9 @@ fn run_bash_unmanaged_background_is_rejected_and_reported_to_the_model() {
     assert!(prompt.contains("检测到命令可能创建脱离 Runtime 管理的后台进程"));
     assert!(prompt.contains("当前平台命令工具的 background=true"));
     assert!(!marker.exists());
-    assert!(core.running_shell_jobs_for_session("default").is_empty());
+    assert!(core
+        .query_running_shell_jobs_for_session("default")
+        .is_empty());
 }
 
 #[cfg(unix)]
@@ -6496,7 +6498,7 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while core
-        .refresh_running_shell_jobs_for_session("default")
+        .consume_completed_shell_jobs_for_session("default")
         .iter()
         .any(|job| job.pid.to_string() == pid)
     {
@@ -7169,7 +7171,7 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
     let prompt = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(
-            r#"{"status":"working","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}},{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试时段 发布检查 CI TTY","limit":5}}]}"#,
+            r#"{"status":"working","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}},{"memmgr":{"type":"raw_chat","op":"search","scope":"global","search_text":"测试时段 发布检查 CI TTY","limit":5}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
