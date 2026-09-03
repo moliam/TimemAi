@@ -109,7 +109,7 @@ describe("sortable Session group UI", () => {
     );
     expect(styles).toMatch(/\.sidebar-footer \{[^}]*flex: none;/);
     expect(source).toContain(
-      '<ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">',
+      '<div className="composer-wrap aui-thread-footer">',
     );
     expect(styles).toMatch(
       /\.session-row \{[^}]*min-height: 26px;[^}]*border-radius: 4px;/,
