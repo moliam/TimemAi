@@ -22,12 +22,7 @@ executable; it does **not** prove that every possible user workflow is bug-free.
 The broader release claim also requires the complete production CI gate on
 Linux, macOS, and Windows.
 
-The following stronger certification remains open and must not be described as implemented until executable gates exist: four seeded heavy concurrency
-scenarios (PromptCut/terminal ownership, Stop/Start storm, WebSocket/FIFO
-ownership, and real-Chrome interaction latency) at 300 PR, 1,000 release, and
-10,000 soak iterations with replayable seeds and named stage traces. Existing
-focused deterministic tests and two-pass edge regression provide useful
-coverage, but are not substitutes for that certification.
+The stronger four-scenario certification remains open and must not be described as complete. `scripts/turn_concurrency_stress.sh` now runs the first implemented PR-profile slice: 300 seeded iterations of a real `CoreSessionWorker` against an independent user producer, with deterministic PromptCut/model-in-flight/terminal-parsed mailbox boundaries, stable command IDs, TurnToken uniqueness, final-answer/stat ownership, deadlines, named failure stages, and bounded Core command-ID tracking. The Host attachment/FIFO half of that scenario, the Stop/Start storm, real WebSocket/FIFO ownership, real-Chrome latency percentiles, 1,000-iteration release profiles, and 10,000-iteration soak profiles remain release blockers for any claim of complete concurrency certification.
 
 Safari, Firefox, distribution-specific desktop launchers, and live external
 model/MCP services remain manual or opt-in checks documented in

@@ -188,7 +188,7 @@ Latency evidence follows the same rule as Web performance tracing: use monotonic
 | User scenario replay | focused core replay tests for coding, memory QA, self QA/env update, and file-writing output | `scenario_coding_inspects_project_and_reports_from_shell_evidence`, `scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering`, `scenario_self_qa_and_runtime_env_update_stays_bounded`, `scenario_file_writing_outputs_artifact_and_verifies_content` | full CI |
 | Background jobs | `run_bash` pid start, timeout-to-running, exit update, per-model-request running table with tool-call attribution, PID-reuse identity rejection, and registered command-tool job tests | realistic story where applicable | shell/tool job groups |
 | Multi-turn replay story | protocol parsing, memory/scratch/shrink primitives | `session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rendering` | full CI |
-| Session worker lifecycle | lifecycle topic/accessor, worker channel tests | `session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement`, `worker_option_returns_late_supplement_after_preserving_the_first_final_answer`, `session_worker_rename_emits_updated_identity_topic`, `session_worker_shutdown_cancels_pending_host_decision`, `core_lifecycle_topic_round_trips_worker_identity_workspace_and_context` | full CI |
+| Session worker lifecycle | lifecycle topic/accessor, worker channel tests, bounded pending/recent command-ID tracker | `session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement`, `worker_option_returns_late_supplement_after_preserving_the_first_final_answer`, `prompt_cut_terminal_ownership_stress_is_seeded_and_bounded`, `session_worker_rename_emits_updated_identity_topic`, `session_worker_shutdown_cancels_pending_host_decision`, `core_lifecycle_topic_round_trips_worker_identity_workspace_and_context` | `scripts/turn_concurrency_stress.sh` runs the implemented Core/Worker PromptCut slice for 300 seeded PR iterations; remaining heavy scenarios stay open |
 | Round limit continuation | core continuation tests | `session_turn_round_limit_continue_recharges_and_finishes_same_task` | session group |
 | Cancellation | cancel before model call, command cancellation tests | real TTY Ctrl+C smoke | real TTY smoke |
 | Interactive input | CJK width, paste placeholder, Shift+Enter, control stripping, true multiline submitted-line redraw row counts, thinking-time next-question queue capture | real TTY multiline/paste/config/workspace smokes plus local fake-model-server supplement smoke and stress smoke | real TTY smoke/stress in CI |
@@ -213,12 +213,13 @@ Latency evidence follows the same rule as Web performance tracing: use monotonic
 8. clippy warning gate via `scripts/clippy_check.sh`
 9. `cargo test --workspace`
 10. Web dependency license scan, frontend functional tests, reproducible production build, and Linux real-Chrome acceptance
-11. dedicated performance guard via `scripts/performance_guard.sh`
-12. repeated edge regression via `scripts/edge_regression.sh`
-13. CLI and Web release builds
-14. cross-host resume smoke
-15. real TTY smoke through `expect`, including the 500,000 B/s average runtime I/O gate
-16. whitespace check
+11. `scripts/turn_concurrency_stress.sh` with the implemented 300-iteration PromptCut Core/Worker PR profile
+12. dedicated performance guard via `scripts/performance_guard.sh`
+13. repeated edge regression via `scripts/edge_regression.sh`
+14. CLI and Web release builds
+15. cross-host resume smoke
+16. real TTY smoke through `expect`, including the 500,000 B/s average runtime I/O gate
+17. whitespace check
 
 `scripts/edge_regression.sh` defaults to two iterations. Increase pressure with:
 

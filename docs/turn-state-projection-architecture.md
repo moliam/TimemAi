@@ -850,6 +850,8 @@ old_state != new_projection.derived_state
 
 ## 14. 并发压测与用户体验验收
 
+实施状态（2026-09）：`scripts/turn_concurrency_stress.sh` 已实现 14.2 的 Core/Worker PR 子场景，默认运行 300 个 seeded iteration；它使用真实 `CoreSessionWorker`、独立 producer、mailbox 锁边界、deadline、TurnToken/command/final/stats/resource 断言。14.2 的 Host 附件/FIFO 半场景，以及 14.3、14.4、14.5、1,000 release 与 10,000 soak 仍未实现，不能据此宣称本章完成。
+
 本架构不能依靠几个同步 reducer case 宣称竞态已解决。测试策略采用**少而重**：保留必要的纯不变量单元测试，但发布门槛集中在以下 4 个真实并发压测。每个压测都必须运行真实 `CoreSessionWorker`、Turn Gate/Reducer、Pod command/projection 路径和权威 Session/Turn ownership；只允许用可控 fake model 替代外部模型服务。
 
 ### 14.1 统一压测 harness
