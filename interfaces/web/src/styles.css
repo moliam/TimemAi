@@ -1720,8 +1720,8 @@ body {
 }
 
 /* Per-session worker roles */
-.app-shell { grid-template-columns: 220px minmax(0, 1fr) 286px; }
-.app-shell:has(.toolrepo-side-panel) { grid-template-columns: 220px minmax(0, 1fr) 340px; }
+.app-shell { grid-template-columns: 200px minmax(0, 1fr) 200px; }
+.app-shell:has(.toolrepo-side-panel) { grid-template-columns: 200px minmax(0, 1fr) 340px; }
 .sidebar { padding-inline: 10px; }
 .worker-role-panel { --worker-role-title-size: 13px; --worker-role-control-size: 12px; --worker-role-meta-size: 10.5px; min-width: 0; display: flex; flex-direction: column; gap: 12px; overflow: hidden; padding: 18px 14px; border-left: 1px solid #2b2b2b; background: #171717; font-size: var(--worker-role-control-size); }
 .worker-role-panel > header { display: flex; align-items: center; justify-content: space-between; min-height: 30px; }
@@ -3107,11 +3107,11 @@ body {
 @media (min-width: 1051px) {
   .app-shell,
   .app-shell:has(.toolrepo-side-panel) {
-    grid-template-columns: var(--left-sidebar-width, 220px) minmax(0, 1fr) var(--right-sidebar-width, 286px);
+    grid-template-columns: var(--left-sidebar-width, 200px) minmax(0, 1fr) var(--right-sidebar-width, 200px);
   }
   .app-shell.left-sidebar-collapsed,
-  .app-shell.left-sidebar-collapsed:has(.toolrepo-side-panel) { grid-template-columns: 58px minmax(0, 1fr) var(--right-sidebar-width, 286px); }
-  .app-shell.right-sidebar-collapsed { grid-template-columns: var(--left-sidebar-width, 220px) minmax(0, 1fr) 44px; }
+  .app-shell.left-sidebar-collapsed:has(.toolrepo-side-panel) { grid-template-columns: 58px minmax(0, 1fr) var(--right-sidebar-width, 200px); }
+  .app-shell.right-sidebar-collapsed { grid-template-columns: var(--left-sidebar-width, 200px) minmax(0, 1fr) 44px; }
   .app-shell.left-sidebar-collapsed.right-sidebar-collapsed { grid-template-columns: 58px minmax(0, 1fr) 44px; }
 }
 .sidebar,
