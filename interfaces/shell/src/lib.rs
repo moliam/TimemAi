@@ -60,7 +60,9 @@ pub use timem_in_process::agent_api::{
     CORE_TOPIC_ACTION, CORE_TOPIC_MODEL_RESPONSE, DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
     DEFAULT_STALE_CONTEXT_IDLE, DEFAULT_STALE_CONTEXT_TOKEN_THRESHOLD, RUNTIME_CONFIG_FIELDS,
 };
-pub use timem_in_process::run_turn as run_in_process_turn;
+pub use timem_in_process::{
+    resume_turn as resume_in_process_turn, run_turn as run_in_process_turn,
+};
 
 pub const TIMEM_LOGO: &str = "𝓣𝓲𝓶𝓮𝓶";
 pub const ANSI_RESET: &str = "\x1b[0m";
@@ -684,6 +686,8 @@ pub fn model_service_config_from_env(
             api_key: options.api_key.clone(),
             http_headers: None,
             request_fields: None,
+            allow_cross_origin_redirects: None,
+            private_ca_pem: None,
             model: options.model.clone(),
             base_url: options.base_url.clone(),
             timeout_secs: options.timeout_secs,

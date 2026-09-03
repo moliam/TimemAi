@@ -134,6 +134,7 @@ fn auto_config(model: &str) -> ModelServiceConfig {
         api_protocol: ApiProtocol::OpenAiCompatible,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     }
 }
 

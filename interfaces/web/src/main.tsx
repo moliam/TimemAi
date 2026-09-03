@@ -17,6 +17,7 @@ import {
   useSensors,
 } from "@dnd-kit/core";
 import {
+  arrayMove,
   SortableContext,
   sortableKeyboardCoordinates,
   useSortable,
@@ -74,6 +75,7 @@ import {
   createContext,
   CSSProperties,
   Dispatch,
+  Fragment,
   memo,
   MutableRefObject,
   ReactNode,
@@ -398,68 +400,6 @@ function makeMessage(
   };
 }
 
-type SortableSessionRenderState = {
-  setNodeRef: (node: HTMLElement | null) => void;
-  style: CSSProperties;
-  attributes: ReturnType<typeof useSortable>["attributes"];
-  listeners: ReturnType<typeof useSortable>["listeners"];
-  isDragging: boolean;
-};
-
-function SortableSession({
-  id,
-  disabled,
-  children,
-}: {
-  id: string;
-  disabled: boolean;
-  children: (state: SortableSessionRenderState) => ReactNode;
-}) {
-  const sortable = useSortable({
-    id: `session:${id}`,
-    disabled,
-    transition: { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" },
-  });
-  return children({
-    setNodeRef: sortable.setNodeRef,
-    style: {
-      transform: CSS.Transform.toString(sortable.transform),
-      transition: sortable.transition,
-      zIndex: sortable.isDragging ? 4 : undefined,
-    },
-    attributes: sortable.attributes,
-    listeners: sortable.listeners,
-    isDragging: sortable.isDragging,
-  });
-}
-
-function SessionDropGroup({
-  id,
-  sessionIds,
-  className,
-  children,
-}: {
-  id: string;
-  sessionIds: string[];
-  className: string;
-  children: ReactNode;
-}) {
-  const droppable = useDroppable({ id: `session-group:${id}` });
-  return (
-    <section
-      ref={droppable.setNodeRef}
-      className={`${className} ${droppable.isOver ? "drop-target" : ""}`}
-    >
-      <SortableContext
-        items={sessionIds.map((sessionId) => `session:${sessionId}`)}
-        strategy={verticalListSortingStrategy}
-      >
-        {children}
-      </SortableContext>
-    </section>
-  );
-}
-
 const SIDEBAR_LAYOUT_STORAGE_KEY = "timem.sidebar-layout.v1";
 const LEFT_SIDEBAR_MIN_WIDTH = 180;
 const LEFT_SIDEBAR_MAX_WIDTH = 380;
@@ -537,7 +477,6 @@ function TimemApp() {
   } | null>(null);
   const [sessionGroupDeleteConfirmId, setSessionGroupDeleteConfirmId] =
     useState("");
-  const [draggedSessionId, setDraggedSessionId] = useState("");
   const authoritativeRoleLibraryRef = useRef<WorkerRoleLibrary>({
     roles: [],
     groups: [],
@@ -621,6 +560,9 @@ function TimemApp() {
   >({});
   const [revealedEndpointRequestFields, setRevealedEndpointRequestFields] =
     useState<Record<string, Record<string, unknown>>>({});
+  const [revealedEndpointPrivateCas, setRevealedEndpointPrivateCas] = useState<
+    Record<string, string>
+  >({});
   const [showAppearance, setShowAppearance] = useState(false);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSection>("appearance");
@@ -633,7 +575,10 @@ function TimemApp() {
     useState(false);
   const [memTemporaryItemsError, setMemTemporaryItemsError] = useState("");
   const [showMcp, setShowMcp] = useState(false);
-  const [showNewSession, setShowNewSession] = useState(false);
+  const [newSessionTarget, setNewSessionTarget] = useState<{
+    groupId: string | null;
+    groupName: string;
+  } | null>(null);
   const [deleteSessionCandidate, setDeleteSessionCandidate] =
     useState<Session | null>(null);
   const [sessionDeleteMode, setSessionDeleteMode] = useState(false);
@@ -708,6 +653,8 @@ function TimemApp() {
     useState<MemSwitchCandidate | null>(null);
   const [pendingMemRetention, setPendingMemRetention] = useState(false);
   const [pendingMemConversationCapacity, setPendingMemConversationCapacity] =
+    useState(false);
+  const [pendingClaudeCodexToolDiscovery, setPendingClaudeCodexToolDiscovery] =
     useState(false);
   const [rejectedSubmitCommandIds, setRejectedSubmitCommandIds] = useState<
     Set<string>
@@ -832,7 +779,7 @@ function TimemApp() {
       mobileSessionButtonRef.current?.focus({ preventScroll: true });
   }, []);
   const closeNewSessionDialog = useCallback((restoreFocus = true) => {
-    setShowNewSession(false);
+    setNewSessionTarget(null);
     if (!restoreFocus) return;
     const newSessionButton = newSessionButtonRef.current;
     if (
@@ -1016,7 +963,9 @@ function TimemApp() {
         return false;
       const commandId =
         requestedCommandId ??
-        (commandNeedsReliableDelivery(command) ? clientId("command") : undefined);
+        (commandNeedsReliableDelivery(command)
+          ? clientId("command")
+          : undefined);
       const wireCommand: ClientCommand | CommandWithId = commandId
         ? { ...command, command_id: commandId }
         : command;
@@ -1037,6 +986,7 @@ function TimemApp() {
     if (
       !pendingMemRetention &&
       !pendingMemConversationCapacity &&
+      !pendingClaudeCodexToolDiscovery &&
       !favoriteCapacityUpdating &&
       !pendingMemSwitch &&
       !memTemporaryItemsDeleting
@@ -1046,6 +996,7 @@ function TimemApp() {
     closeAppearancePanel,
     favoriteCapacityUpdating,
     memTemporaryItemsDeleting,
+    pendingClaudeCodexToolDiscovery,
     pendingMemConversationCapacity,
     pendingMemRetention,
     pendingMemSwitch,
@@ -1118,6 +1069,26 @@ function TimemApp() {
     },
     [reportUiError, sendCommand],
   );
+  const saveClaudeCodexToolDiscovery = useCallback(
+    (enabled: boolean) => {
+      setPendingClaudeCodexToolDiscovery(true);
+      if (
+        !sendCommand({
+          type: "beta_claude_codex_tool_discovery_update",
+          enabled,
+        })
+      ) {
+        setPendingClaudeCodexToolDiscovery(false);
+        reportUiError(
+          "Beta setting failed",
+          "Reconnect to Timem Web before changing Claude/Codex tool discovery.",
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand],
+  );
+
   const saveMemFavoriteCapacity = useCallback(
     (maxBytes: number | null) => {
       setFavoriteCapacityUpdating(true);
@@ -1311,6 +1282,7 @@ function TimemApp() {
     setSelectedTool(null);
     setPendingToolgenRequests(new Set());
     setPendingMemSwitch(false);
+    setPendingClaudeCodexToolDiscovery(false);
     setMemSwitchCandidate(null);
   }, []);
 
@@ -1320,7 +1292,9 @@ function TimemApp() {
     );
     setStopClickLockedSessionIds((current) => {
       const next = new Set(
-        Array.from(current).filter((sessionId) => liveSessionIds.has(sessionId)),
+        Array.from(current).filter((sessionId) =>
+          liveSessionIds.has(sessionId),
+        ),
       );
       return next.size === current.size ? current : next;
     });
@@ -1569,6 +1543,8 @@ function TimemApp() {
             setPendingMemRetention(false);
           if (completed?.type === "mem_conversation_capacity_update")
             setPendingMemConversationCapacity(false);
+          if (completed?.type === "beta_claude_codex_tool_discovery_update")
+            setPendingClaudeCodexToolDiscovery(false);
           const memSwitchNeedsConfirmation =
             completed?.type === "mem_switch" &&
             !completed.stop_running &&
@@ -1632,6 +1608,7 @@ function TimemApp() {
       if (event.type === "mem_settings_updated") {
         setPendingMemRetention(false);
         setPendingMemConversationCapacity(false);
+        setPendingClaudeCodexToolDiscovery(false);
         setServer((current) =>
           current
             ? {
@@ -1642,6 +1619,8 @@ function TimemApp() {
                   temporary_capacity_bytes: event.temporary_capacity_bytes,
                   conversation_capacity_bytes:
                     event.conversation_capacity_bytes,
+                  claude_codex_tool_discovery:
+                    event.claude_codex_tool_discovery,
                 },
               }
             : current,
@@ -1742,6 +1721,18 @@ function TimemApp() {
         setSessionGroups(event.groups);
         setSessionGroupEditor(null);
         setSessionGroupDeleteConfirmId("");
+        return;
+      }
+      if (event.type === "session_order_updated") {
+        const ordinalById = new Map(
+          event.session_ids.map((sessionId, ordinal) => [sessionId, ordinal]),
+        );
+        setSessions((current) =>
+          current.map((session) => {
+            const ordinal = ordinalById.get(session.session_id);
+            return ordinal === undefined ? session : { ...session, ordinal };
+          }),
+        );
         return;
       }
       if (event.type === "session_group_changed") {
@@ -2129,6 +2120,7 @@ function TimemApp() {
         setRevealedEndpointApiKeys({});
         setRevealedEndpointHeaders({});
         setRevealedEndpointRequestFields({});
+        setRevealedEndpointPrivateCas({});
         return;
       }
       if (event.type === "model_endpoint_secret_revealed") {
@@ -2143,6 +2135,10 @@ function TimemApp() {
         setRevealedEndpointRequestFields((current) => ({
           ...current,
           [event.endpoint_id]: event.request_fields,
+        }));
+        setRevealedEndpointPrivateCas((current) => ({
+          ...current,
+          [event.endpoint_id]: event.private_ca_pem,
         }));
         return;
       }
@@ -2611,6 +2607,7 @@ function TimemApp() {
       forceSupplement = false,
       roleIds: readonly string[] = [],
       forceNewTurn = false,
+      resumeDirectly = false,
     ): boolean => {
       const targetSession = sessionsRef.current.find(
         (session) => session.session_id === sessionId,
@@ -2637,6 +2634,7 @@ function TimemApp() {
         attachmentIds,
         forceSupplement,
         forceNewTurn,
+        resumeDirectly,
       );
       if (decision.kind === "skip") {
         if (decision.reason === "cancelling" && targetSession) {
@@ -2868,7 +2866,9 @@ function TimemApp() {
       const sessionId = activeSession.session_id;
       const commandId = clientId("turn-cancel");
       cancellingSessionIds.current.add(sessionId);
-      setStopClickLockedSessionIds((current) => new Set(current).add(sessionId));
+      setStopClickLockedSessionIds((current) =>
+        new Set(current).add(sessionId),
+      );
       cancellingSessionCommandIds.current.set(sessionId, commandId);
       const previousTimeoutId =
         cancellingSessionTimeouts.current.get(sessionId);
@@ -2980,9 +2980,6 @@ function TimemApp() {
     : pendingMemSwitch
       ? "Memory switch is in progress"
       : "Open settings";
-  const newSessionLabel = runtimeLocked
-    ? "Session controls are temporarily locked"
-    : "New session";
   const modelEndpointsUnavailable =
     !!server && server.model_endpoints.length === 0;
   const headerModelLabel =
@@ -3101,20 +3098,108 @@ function TimemApp() {
   const ungroupedSessions = sessions.filter(
     (session) => sessionBucketId(session) === "__ungrouped",
   );
+  const orderedSessions = (items: Session[]) =>
+    [...items].sort(
+      (left, right) =>
+        left.ordinal - right.ordinal ||
+        left.session_id.localeCompare(right.session_id),
+    );
   const sessionBuckets = [
     ...sessionGroups.map((group) => ({
       id: group.id,
       group,
-      sessions: sessions.filter((session) => session.group_id === group.id),
+      sessions: orderedSessions(
+        sessions.filter((session) => session.group_id === group.id),
+      ),
     })),
-    { id: "__ungrouped", group: undefined, sessions: ungroupedSessions },
+    {
+      id: "__ungrouped",
+      group: undefined,
+      sessions: orderedSessions(ungroupedSessions),
+    },
   ];
-  const sessionDragSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  const sessionNavigationSensors = useSensors(
+    useSensor(PointerSensor, {
+      activationConstraint: { delay: 200, tolerance: 5 },
+    }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
     }),
   );
+  const handleSessionNavigationDragEnd = (event: DragEndEvent) => {
+    const activeId = String(event.active.id);
+    const overId = event.over ? String(event.over.id) : "";
+    if (!overId || activeId === overId || runtimeLocked || sessionDeleteMode)
+      return;
+    if (activeId.startsWith("group:") && overId.startsWith("group:")) {
+      const activeGroupId = activeId.slice("group:".length);
+      const overGroupId = overId.slice("group:".length);
+      if (activeGroupId === "__ungrouped" || overGroupId === "__ungrouped")
+        return;
+      const oldIndex = sessionGroups.findIndex(
+        (group) => group.id === activeGroupId,
+      );
+      const newIndex = sessionGroups.findIndex(
+        (group) => group.id === overGroupId,
+      );
+      if (oldIndex < 0 || newIndex < 0) return;
+      const reorderedGroups = arrayMove(sessionGroups, oldIndex, newIndex);
+      if (
+        sendCommand({
+          type: "session_groups_reorder",
+          groups: reorderedGroups,
+        })
+      )
+        setSessionGroups(reorderedGroups);
+      return;
+    }
+    if (!activeId.startsWith("session:") || !overId.startsWith("session:"))
+      return;
+    const activeSessionId = activeId.slice("session:".length);
+    const overSessionId = overId.slice("session:".length);
+    const activeSession = sessions.find(
+      (session) => session.session_id === activeSessionId,
+    );
+    const overSession = sessions.find(
+      (session) => session.session_id === overSessionId,
+    );
+    if (!activeSession || !overSession) return;
+    const activeGroupId = activeSession.group_id ?? null;
+    if (activeGroupId !== (overSession.group_id ?? null)) return;
+    const bucket = sessionBuckets.find(
+      ({ group }) => (group?.id ?? null) === activeGroupId,
+    );
+    if (!bucket) return;
+    const oldIndex = bucket.sessions.findIndex(
+      (session) => session.session_id === activeSessionId,
+    );
+    const newIndex = bucket.sessions.findIndex(
+      (session) => session.session_id === overSessionId,
+    );
+    if (oldIndex < 0 || newIndex < 0) return;
+    const reorderedSessionIds = arrayMove(
+      bucket.sessions,
+      oldIndex,
+      newIndex,
+    ).map((session) => session.session_id);
+    if (
+      sendCommand({
+        type: "session_reorder",
+        group_id: activeGroupId,
+        session_ids: reorderedSessionIds,
+      })
+    ) {
+      const ordinalById = new Map(
+        reorderedSessionIds.map((sessionId, ordinal) => [sessionId, ordinal]),
+      );
+      setSessions((current) =>
+        current.map((session) => {
+          const ordinal = ordinalById.get(session.session_id);
+          return ordinal === undefined ? session : { ...session, ordinal };
+        }),
+      );
+    }
+  };
   useEffect(() => {
     if (
       selectedDeleteSessionId &&
@@ -3126,43 +3211,6 @@ function TimemApp() {
     }
     if (sessionDeleteMode && sessions.length === 0) setSessionDeleteMode(false);
   }, [selectedDeleteSessionId, sessionDeleteMode, sessions]);
-  const draggedSession = sessions.find(
-    (session) => session.session_id === draggedSessionId,
-  );
-  const finishSessionDrag = (event: DragEndEvent) => {
-    setDraggedSessionId("");
-    const sessionId = String(event.active.id).replace(/^session:/, "");
-    const overId = event.over ? String(event.over.id) : "";
-    if (!overId) return;
-    let targetGroupId: string | null | undefined;
-    if (overId.startsWith("session-group:")) {
-      const bucketId = overId.slice("session-group:".length);
-      targetGroupId = bucketId === "__ungrouped" ? null : bucketId;
-    } else if (overId.startsWith("session:")) {
-      const targetSession = sessions.find(
-        (session) => session.session_id === overId.slice("session:".length),
-      );
-      if (targetSession)
-        targetGroupId =
-          sessionBucketId(targetSession) === "__ungrouped"
-            ? null
-            : sessionBucketId(targetSession);
-    }
-    const session = sessions.find(
-      (candidate) => candidate.session_id === sessionId,
-    );
-    if (
-      !session ||
-      targetGroupId === undefined ||
-      (session.group_id ?? null) === targetGroupId
-    )
-      return;
-    sendCommand({
-      type: "session_group_move",
-      session_id: sessionId,
-      group_id: targetGroupId,
-    });
-  };
   const saveSessionGroup = (editor = sessionGroupEditor) => {
     const name = editor?.name.trim();
     if (!editor || !name || runtimeLocked) return;
@@ -3170,16 +3218,6 @@ function TimemApp() {
       ? { type: "session_group_update", group_id: editor.id, name }
       : { type: "session_group_create", name };
     if (sendCommand(command)) setSessionGroupEditor(null);
-  };
-  const moveSessionGroup = (groupId: string, offset: number) => {
-    const index = sessionGroups.findIndex((group) => group.id === groupId);
-    const target = index + offset;
-    if (index < 0 || target < 0 || target >= sessionGroups.length) return;
-    const groups = [...sessionGroups];
-    [groups[index], groups[target]] = [groups[target], groups[index]];
-    setSessionGroups(groups);
-    if (!sendCommand({ type: "session_groups_reorder", groups }))
-      setSessionGroups(sessionGroups);
   };
   const cancelSessionDeleteMode = () => {
     setSessionDeleteMode(false);
@@ -3366,20 +3404,6 @@ function TimemApp() {
               >
                 <FolderPlus size={16} />
               </button>
-              <button
-                type="button"
-                ref={newSessionButtonRef}
-                className="new-session"
-                title={newSessionLabel}
-                aria-label={newSessionLabel}
-                disabled={runtimeLocked || sessionDeleteMode}
-                onClick={() => {
-                  setShowNewSession(true);
-                  closeMobileSidebar(false);
-                }}
-              >
-                <Plus size={16} />
-              </button>
             </div>
             <div className="session-delete-actions">
               {sessionDeleteMode && (
@@ -3464,576 +3488,624 @@ function TimemApp() {
               </button>
             </form>
           )}
-          <DndContext
-            sensors={sessionDragSensors}
-            collisionDetection={closestCenter}
-            onDragStart={(event) =>
-              setDraggedSessionId(
-                String(event.active.id).replace(/^session:/, ""),
-              )
-            }
-            onDragCancel={() => setDraggedSessionId("")}
-            onDragEnd={finishSessionDrag}
+          <nav
+            className="session-list"
+            aria-label="Sessions"
+            aria-busy={!snapshotReady}
           >
-            <nav
-              className="session-list"
-              aria-label="Sessions"
-              aria-busy={!snapshotReady}
+            <DndContext
+              sensors={sessionNavigationSensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleSessionNavigationDragEnd}
             >
-              {!snapshotReady ? (
-                <div
-                  className="session-list-loading"
-                  role="status"
-                  aria-live="polite"
-                >
-                  <LoaderCircle size={18} aria-hidden="true" />
-                  <span>Loading sessions…</span>
-                </div>
-              ) : (
-                sessionBuckets.map(
-                  ({
-                    id: bucketId,
-                    group: bucket,
-                    sessions: bucketSessions,
-                  }) => {
-                    const collapsed = collapsedSessionGroupIds.has(bucketId);
-                    return (
-                      <SessionDropGroup
-                        id={bucketId}
-                        sessionIds={bucketSessions.map(
-                          (session) => session.session_id,
-                        )}
-                        className="session-group"
-                        key={bucketId}
-                      >
-                        <div className="session-group-heading">
-                          <button
-                            type="button"
-                            className="session-group-toggle"
-                            title={bucket?.name ?? "Unsorted"}
-                            aria-expanded={!collapsed}
-                            onClick={() =>
-                              setCollapsedSessionGroupIds((current) => {
-                                const next = new Set(current);
-                                if (next.has(bucketId)) next.delete(bucketId);
-                                else next.add(bucketId);
-                                return next;
-                              })
-                            }
-                          >
-                            {collapsed ? (
-                              <Folder
-                                className="session-group-folder"
-                                size={14}
-                              />
-                            ) : (
-                              <FolderOpen
-                                className="session-group-folder"
-                                size={14}
-                              />
-                            )}
-                            <span>{bucket?.name ?? "Unsorted"}</span>
-                            <small>{bucketSessions.length}</small>
-                          </button>
-                          {bucket && (
-                            <div className="session-group-actions">
-                              {sessionGroupEditor?.id === bucket.id ? (
-                                <form
-                                  className="session-group-editor inline"
-                                  onSubmit={(event) => {
-                                    event.preventDefault();
-                                    saveSessionGroup();
+              <SortableContext
+                items={sessionBuckets.map(({ id }) => `group:${id}`)}
+                strategy={verticalListSortingStrategy}
+              >
+                {!snapshotReady ? (
+                  <div
+                    className="session-list-loading"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <LoaderCircle size={18} aria-hidden="true" />
+                    <span>Loading sessions…</span>
+                  </div>
+                ) : (
+                  sessionBuckets.map(
+                    ({
+                      id: bucketId,
+                      group: bucket,
+                      sessions: bucketSessions,
+                    }) => {
+                      const collapsed = collapsedSessionGroupIds.has(bucketId);
+                      const hasUnreadCompletion = bucketSessions.some(
+                        (session) =>
+                          unreadCompletedSessionIds.has(session.session_id),
+                      );
+                      return (
+                        <SortableSessionGroup
+                          id={`group:${bucketId}`}
+                          disabled={
+                            runtimeLocked ||
+                            sessionDeleteMode ||
+                            !bucket ||
+                            sessionGroupEditor?.id === bucket.id
+                          }
+                          className={`session-group ${collapsed ? "collapsed" : ""} ${hasUnreadCompletion ? "has-unread-completion" : ""}`}
+                          key={bucketId}
+                        >
+                          {({ attributes, listeners }) => (
+                            <>
+                              <div
+                                className="session-group-heading"
+                                {...attributes}
+                                {...listeners}
+                              >
+                                {bucket &&
+                                sessionGroupEditor?.id === bucket.id ? (
+                                  <form
+                                    className="session-group-name-editor"
+                                    onSubmit={(event) => {
+                                      event.preventDefault();
+                                      saveSessionGroup();
+                                    }}
+                                  >
+                                    <input
+                                      autoFocus
+                                      value={sessionGroupEditor.name}
+                                      aria-label={`Rename ${bucket.name}`}
+                                      onChange={(event) =>
+                                        setSessionGroupEditor({
+                                          id: bucket.id,
+                                          name: event.target.value,
+                                        })
+                                      }
+                                      disabled={runtimeLocked}
+                                      onBlur={(event) => {
+                                        if (
+                                          event.currentTarget.dataset
+                                            .cancelled === "true"
+                                        )
+                                          return;
+                                        if (sessionGroupEditor.name.trim())
+                                          saveSessionGroup();
+                                        else setSessionGroupEditor(null);
+                                      }}
+                                      onKeyDown={(event) => {
+                                        if (event.key === "Escape") {
+                                          event.preventDefault();
+                                          event.currentTarget.dataset.cancelled =
+                                            "true";
+                                          setSessionGroupEditor(null);
+                                        }
+                                      }}
+                                    />
+                                  </form>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="session-group-toggle"
+                                    title={`${collapsed ? "Expand" : "Collapse"} ${bucket?.name ?? "Unsorted"}${collapsed && hasUnreadCompletion ? "; contains unread completed work" : ""}`}
+                                    aria-label={`${collapsed ? "Expand" : "Collapse"} ${bucket?.name ?? "Unsorted"}${collapsed && hasUnreadCompletion ? ", contains unread completed work" : ""}`}
+                                    aria-expanded={!collapsed}
+                                    onClick={() =>
+                                      setCollapsedSessionGroupIds((current) => {
+                                        const next = new Set(current);
+                                        if (next.has(bucketId))
+                                          next.delete(bucketId);
+                                        else next.add(bucketId);
+                                        return next;
+                                      })
+                                    }
+                                  >
+                                    {collapsed ? (
+                                      <ChevronRight
+                                        className="session-group-chevron"
+                                        size={13}
+                                        aria-hidden="true"
+                                      />
+                                    ) : (
+                                      <ChevronDown
+                                        className="session-group-chevron"
+                                        size={13}
+                                        aria-hidden="true"
+                                      />
+                                    )}
+                                    {collapsed ? (
+                                      <Folder
+                                        className="session-group-folder"
+                                        size={14}
+                                        aria-hidden="true"
+                                      />
+                                    ) : (
+                                      <FolderOpen
+                                        className="session-group-folder"
+                                        size={14}
+                                        aria-hidden="true"
+                                      />
+                                    )}
+                                    <span className="session-group-name">
+                                      {bucket?.name ?? "Unsorted"}
+                                    </span>
+                                    {collapsed && hasUnreadCompletion && (
+                                      <span
+                                        className="session-group-unread-dot"
+                                        aria-label="Group contains unread completed work"
+                                      />
+                                    )}
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  className="session-group-new"
+                                  title={`New session in ${bucket?.name ?? "Unsorted"}`}
+                                  aria-label={`New session in ${bucket?.name ?? "Unsorted"}`}
+                                  disabled={runtimeLocked || sessionDeleteMode}
+                                  onClick={(event) => {
+                                    newSessionButtonRef.current =
+                                      event.currentTarget;
+                                    setNewSessionTarget({
+                                      groupId: bucket?.id ?? null,
+                                      groupName: bucket?.name ?? "Unsorted",
+                                    });
+                                    closeMobileSidebar(false);
                                   }}
                                 >
-                                  <input
-                                    autoFocus
-                                    value={sessionGroupEditor.name}
-                                    aria-label={`Rename ${bucket.name}`}
-                                    onChange={(event) =>
-                                      setSessionGroupEditor({
-                                        id: bucket.id,
-                                        name: event.target.value,
-                                      })
-                                    }
-                                    onKeyDown={(event) => {
-                                      if (event.key === "Escape") {
-                                        event.preventDefault();
-                                        setSessionGroupEditor(null);
-                                      }
-                                    }}
-                                  />
-                                  <button
-                                    type="submit"
-                                    disabled={!sessionGroupEditor.name.trim()}
-                                  >
-                                    <Check size={12} />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => setSessionGroupEditor(null)}
-                                  >
-                                    <X size={12} />
-                                  </button>
-                                </form>
-                              ) : (
-                                <>
-                                  <button
-                                    type="button"
-                                    title="Move group up"
-                                    aria-label={`Move ${bucket.name} up`}
-                                    disabled={
-                                      sessionDeleteMode ||
-                                      sessionGroups[0]?.id === bucket.id
-                                    }
-                                    onClick={() =>
-                                      moveSessionGroup(bucket.id, -1)
-                                    }
-                                  >
-                                    <ChevronUp size={12} />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    title="Move group down"
-                                    aria-label={`Move ${bucket.name} down`}
-                                    disabled={
-                                      sessionDeleteMode ||
-                                      sessionGroups.at(-1)?.id === bucket.id
-                                    }
-                                    onClick={() =>
-                                      moveSessionGroup(bucket.id, 1)
-                                    }
-                                  >
-                                    <ChevronDown size={12} />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    title={`Rename ${bucket.name}`}
-                                    aria-label={`Rename ${bucket.name}`}
-                                    disabled={sessionDeleteMode}
-                                    onClick={() =>
-                                      setSessionGroupEditor({
-                                        id: bucket.id,
-                                        name: bucket.name,
-                                      })
-                                    }
-                                  >
-                                    <Pencil size={12} />
-                                  </button>
-                                  <button
-                                    type="button"
-                                    className={
-                                      sessionGroupDeleteConfirmId === bucket.id
-                                        ? "confirming"
-                                        : ""
-                                    }
-                                    disabled={sessionDeleteMode}
-                                    title={
-                                      sessionGroupDeleteConfirmId === bucket.id
-                                        ? "Click again to delete; sessions become unsorted"
-                                        : `Delete ${bucket.name}`
-                                    }
-                                    aria-label={`Delete ${bucket.name}`}
-                                    onClick={() => {
-                                      if (
-                                        sessionGroupDeleteConfirmId ===
-                                        bucket.id
-                                      ) {
-                                        sendCommand({
-                                          type: "session_group_delete",
-                                          group_id: bucket.id,
-                                        });
-                                        setSessionGroupDeleteConfirmId("");
-                                      } else
-                                        setSessionGroupDeleteConfirmId(
-                                          bucket.id,
-                                        );
-                                    }}
-                                  >
-                                    <Trash2 size={12} />
-                                  </button>
-                                </>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                        {!collapsed && (
-                          <div className="session-group-list">
-                            {bucketSessions.map((session) => {
-                              const renamingSession =
-                                pendingRenameSessionIds.has(session.session_id);
-                              const deletingSession =
-                                pendingDeleteSessionIds.has(session.session_id);
-                              const visuallyWorking =
-                                sessionVisuallyWorking(session);
-                              const sessionEndpointName =
-                                endpointNameForProfile(
-                                  server?.model_endpoints ?? [],
-                                  session.runtime_profile,
-                                ) ?? UNCONFIGURED_MODEL_LABEL;
-                              return (
-                                <SortableSession
-                                  id={session.session_id}
-                                  disabled={runtimeLocked || sessionDeleteMode}
-                                  key={session.session_id}
-                                >
-                                  {({
-                                    setNodeRef,
-                                    style,
-                                    attributes,
-                                    listeners,
-                                    isDragging,
-                                  }) => (
-                                    <>
-                                      <div
-                                        ref={setNodeRef}
-                                        style={style}
-                                        className={`session-row ${server?.debug_mode && session.workers.length > 0 ? "has-workers" : ""} ${session.session_id === activeSession?.session_id ? "active" : ""} ${visuallyWorking ? "working" : ""} ${unreadCompletedSessionIds.has(session.session_id) ? "has-unread-completion" : ""} ${renamingSession ? "renaming-session" : ""} ${renamingSessionId === session.session_id || runtimeLocked || isDragging ? "controls-suppressed" : ""} ${sessionDeleteMode ? "delete-selecting" : ""} ${selectedDeleteSessionId === session.session_id ? "delete-selected" : ""} ${isDragging ? "dragging" : ""}`}
-                                        aria-busy={
-                                          renamingSession ||
-                                          deletingSession ||
-                                          undefined
+                                  <Plus size={14} />
+                                </button>
+                                {bucket &&
+                                  sessionGroupEditor?.id !== bucket.id && (
+                                    <div className="session-group-actions">
+                                      <button
+                                        type="button"
+                                        title={`Rename ${bucket.name}`}
+                                        aria-label={`Rename ${bucket.name}`}
+                                        disabled={
+                                          runtimeLocked || sessionDeleteMode
+                                        }
+                                        onClick={() =>
+                                          setSessionGroupEditor({
+                                            id: bucket.id,
+                                            name: bucket.name,
+                                          })
                                         }
                                       >
-                                        <button
-                                          type="button"
-                                          className="session-drag"
-                                          disabled={
-                                            runtimeLocked ||
-                                            sessionDeleteMode ||
-                                            renamingSessionId ===
-                                              session.session_id
-                                          }
-                                          title={`拖动 ${session.display_name} 到其他分组`}
-                                          aria-label={`拖动 ${session.display_name} 到其他分组`}
-                                          {...attributes}
-                                          {...listeners}
-                                        >
-                                          <GripVertical size={13} />
-                                        </button>
-                                        {server?.debug_mode && (
-                                          <button
-                                            type="button"
-                                            className={`session-expand ${session.workers.length > 0 ? "available" : ""} ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`}
-                                            title={
-                                              runtimeLocked
-                                                ? "Session controls are temporarily locked"
-                                                : session.workers.length === 0
-                                                  ? "No workers in this session"
-                                                  : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`
-                                            }
-                                            aria-label={
-                                              runtimeLocked
-                                                ? `Workers locked while the runtime synchronizes for ${session.display_name}`
-                                                : session.workers.length === 0
-                                                  ? `No workers for ${session.display_name}`
-                                                  : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`
-                                            }
-                                            aria-expanded={
-                                              session.workers.length > 0 &&
-                                              expandedSessionIds.has(
-                                                session.session_id,
-                                              )
-                                            }
+                                        <Pencil size={12} />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className={
+                                          sessionGroupDeleteConfirmId ===
+                                          bucket.id
+                                            ? "confirming"
+                                            : ""
+                                        }
+                                        disabled={
+                                          runtimeLocked ||
+                                          sessionDeleteMode ||
+                                          bucketSessions.length > 0
+                                        }
+                                        title={
+                                          bucketSessions.length > 0
+                                            ? "Delete every session in this group before deleting the group"
+                                            : sessionGroupDeleteConfirmId ===
+                                                bucket.id
+                                              ? "Click again to delete this empty group"
+                                              : `Delete ${bucket.name}`
+                                        }
+                                        aria-label={`Delete ${bucket.name}`}
+                                        onClick={() => {
+                                          if (
+                                            sessionGroupDeleteConfirmId ===
+                                            bucket.id
+                                          ) {
+                                            sendCommand({
+                                              type: "session_group_delete",
+                                              group_id: bucket.id,
+                                            });
+                                            setSessionGroupDeleteConfirmId("");
+                                          } else
+                                            setSessionGroupDeleteConfirmId(
+                                              bucket.id,
+                                            );
+                                        }}
+                                      >
+                                        <Trash2 size={12} />
+                                      </button>
+                                    </div>
+                                  )}
+                              </div>
+                              {!collapsed && (
+                                <div className="session-group-list">
+                                  <SortableContext
+                                    items={bucketSessions.map(
+                                      (session) =>
+                                        `session:${session.session_id}`,
+                                    )}
+                                    strategy={verticalListSortingStrategy}
+                                  >
+                                    {bucketSessions.map((session) => {
+                                      const renamingSession =
+                                        pendingRenameSessionIds.has(
+                                          session.session_id,
+                                        );
+                                      const deletingSession =
+                                        pendingDeleteSessionIds.has(
+                                          session.session_id,
+                                        );
+                                      const visuallyWorking =
+                                        sessionVisuallyWorking(session);
+                                      const sessionEndpointName =
+                                        endpointNameForProfile(
+                                          server?.model_endpoints ?? [],
+                                          session.runtime_profile,
+                                        ) ?? UNCONFIGURED_MODEL_LABEL;
+                                      return (
+                                        <Fragment key={session.session_id}>
+                                          <SortableSessionRow
+                                            id={`session:${session.session_id}`}
                                             disabled={
                                               runtimeLocked ||
                                               sessionDeleteMode ||
                                               renamingSessionId ===
                                                 session.session_id ||
-                                              session.workers.length === 0
+                                              renamingSession
                                             }
-                                            onClick={() =>
-                                              setExpandedSessionIds(
-                                                (current) => {
-                                                  const next = new Set(current);
-                                                  if (
-                                                    next.has(session.session_id)
-                                                  )
-                                                    next.delete(
-                                                      session.session_id,
-                                                    );
-                                                  else
-                                                    next.add(
-                                                      session.session_id,
-                                                    );
-                                                  return next;
-                                                },
-                                              )
+                                            className={`session-row ${server?.debug_mode && session.workers.length > 0 ? "has-workers" : ""} ${session.session_id === activeSession?.session_id ? "active" : ""} ${visuallyWorking ? "working" : ""} ${unreadCompletedSessionIds.has(session.session_id) ? "has-unread-completion" : ""} ${renamingSession ? "renaming-session" : ""} ${renamingSessionId === session.session_id || runtimeLocked ? "controls-suppressed" : ""} ${sessionDeleteMode ? "delete-selecting" : ""} ${selectedDeleteSessionId === session.session_id ? "delete-selected" : ""}`}
+                                            aria-busy={
+                                              renamingSession ||
+                                              deletingSession ||
+                                              undefined
                                             }
                                           >
-                                            <ChevronRight size={13} />
-                                          </button>
-                                        )}
-                                        {renamingSessionId ===
-                                        session.session_id ? (
-                                          <input
-                                            className="session-rename-input"
-                                            autoFocus
-                                            value={renameDraft}
-                                            aria-label={`Rename ${session.display_name}`}
-                                            disabled={runtimeLocked}
-                                            onChange={(event) =>
-                                              setRenameDraft(event.target.value)
-                                            }
-                                            onBlur={() =>
-                                              finishRename(session.session_id)
-                                            }
-                                            onKeyDown={(event) => {
-                                              if (
-                                                event.key === "Enter" &&
-                                                !event.nativeEvent.isComposing
-                                              ) {
-                                                event.preventDefault();
-                                                finishRename(
-                                                  session.session_id,
-                                                );
-                                              }
-                                              if (event.key === "Escape") {
-                                                event.preventDefault();
-                                                setRenamingSessionId("");
-                                                setRenameDraft("");
-                                              }
-                                            }}
-                                          />
-                                        ) : (
-                                          <button
-                                            type="button"
-                                            className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`}
-                                            title={
-                                              runtimeLocked
-                                                ? "Session controls are temporarily locked"
-                                                : session.display_name
-                                            }
-                                            aria-label={
-                                              runtimeLocked
-                                                ? `${session.display_name} locked while the runtime synchronizes`
-                                                : renamingSession
-                                                  ? `${session.display_name} rename is being saved`
-                                                  : undefined
-                                            }
-                                            aria-current={
-                                              session.session_id ===
-                                              activeSession?.session_id
-                                                ? "page"
-                                                : undefined
-                                            }
-                                            disabled={runtimeLocked}
-                                            onClick={() => {
-                                              if (sessionDeleteMode) {
-                                                setSelectedDeleteSessionId(
-                                                  (current) =>
-                                                    current ===
-                                                    session.session_id
-                                                      ? ""
-                                                      : session.session_id,
-                                                );
-                                                return;
-                                              }
-                                              performanceTraceRef.current.beginSessionSelection(
-                                                session.session_id,
-                                              );
-                                              if (
-                                                session.session_id ===
-                                                activeSessionIdRef.current
-                                              )
-                                                performanceTraceRef.current.observeSessionPainted(
-                                                  session.session_id,
-                                                );
-                                              setActiveSessionId(
-                                                session.session_id,
-                                              );
-                                              closeMobileSidebar();
-                                            }}
-                                          >
-                                            {visuallyWorking ? (
-                                              <LoaderCircle
-                                                className="session-working-icon"
-                                                size={15}
-                                                aria-label="Session working"
-                                              />
-                                            ) : session.state ===
-                                              "interrupted" ? (
-                                              <CircleStop
-                                                className="session-interrupted-icon"
-                                                size={15}
-                                                aria-label="Session interrupted by runtime restart"
-                                              />
-                                            ) : unreadCompletedSessionIds.has(
-                                                session.session_id,
-                                              ) ? (
-                                              <span
-                                                className="session-unread-dot"
-                                                aria-label="Session has new completed work"
-                                              />
-                                            ) : null}
-                                            <span className="session-identity">
-                                              <span
-                                                className="session-name"
-                                                title={session.display_name}
-                                                onDoubleClick={() => {
-                                                  if (
-                                                    !runtimeLocked &&
-                                                    !sessionDeleteMode &&
-                                                    renamingSessionId !==
-                                                      session.session_id
+                                            {server?.debug_mode && (
+                                              <button
+                                                type="button"
+                                                className={`session-expand ${session.workers.length > 0 ? "available" : ""} ${expandedSessionIds.has(session.session_id) ? "expanded" : ""}`}
+                                                title={
+                                                  runtimeLocked
+                                                    ? "Session controls are temporarily locked"
+                                                    : session.workers.length ===
+                                                        0
+                                                      ? "No workers in this session"
+                                                      : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers`
+                                                }
+                                                aria-label={
+                                                  runtimeLocked
+                                                    ? `Workers locked while the runtime synchronizes for ${session.display_name}`
+                                                    : session.workers.length ===
+                                                        0
+                                                      ? `No workers for ${session.display_name}`
+                                                      : `${expandedSessionIds.has(session.session_id) ? "Hide" : "Show"} workers for ${session.display_name}`
+                                                }
+                                                aria-expanded={
+                                                  session.workers.length > 0 &&
+                                                  expandedSessionIds.has(
+                                                    session.session_id,
                                                   )
-                                                    beginRename(session);
+                                                }
+                                                disabled={
+                                                  runtimeLocked ||
+                                                  sessionDeleteMode ||
+                                                  renamingSessionId ===
+                                                    session.session_id ||
+                                                  session.workers.length === 0
+                                                }
+                                                onClick={() =>
+                                                  setExpandedSessionIds(
+                                                    (current) => {
+                                                      const next = new Set(
+                                                        current,
+                                                      );
+                                                      if (
+                                                        next.has(
+                                                          session.session_id,
+                                                        )
+                                                      )
+                                                        next.delete(
+                                                          session.session_id,
+                                                        );
+                                                      else
+                                                        next.add(
+                                                          session.session_id,
+                                                        );
+                                                      return next;
+                                                    },
+                                                  )
+                                                }
+                                              >
+                                                <ChevronRight size={13} />
+                                              </button>
+                                            )}
+                                            {renamingSessionId ===
+                                            session.session_id ? (
+                                              <input
+                                                className="session-rename-input"
+                                                autoFocus
+                                                value={renameDraft}
+                                                aria-label={`Rename ${session.display_name}`}
+                                                disabled={runtimeLocked}
+                                                onChange={(event) =>
+                                                  setRenameDraft(
+                                                    event.target.value,
+                                                  )
+                                                }
+                                                onBlur={(event) => {
+                                                  if (
+                                                    event.currentTarget.dataset
+                                                      .cancelled === "true"
+                                                  )
+                                                    return;
+                                                  finishRename(
+                                                    session.session_id,
+                                                  );
+                                                }}
+                                                onKeyDown={(event) => {
+                                                  if (
+                                                    event.key === "Enter" &&
+                                                    !event.nativeEvent
+                                                      .isComposing
+                                                  ) {
+                                                    event.preventDefault();
+                                                    finishRename(
+                                                      session.session_id,
+                                                    );
+                                                  }
+                                                  if (event.key === "Escape") {
+                                                    event.preventDefault();
+                                                    event.currentTarget.dataset.cancelled =
+                                                      "true";
+                                                    setRenamingSessionId("");
+                                                    setRenameDraft("");
+                                                  }
+                                                }}
+                                              />
+                                            ) : (
+                                              <button
+                                                type="button"
+                                                className={`session ${session.session_id === activeSession?.session_id ? "active" : ""}`}
+                                                title={
+                                                  runtimeLocked
+                                                    ? "Session controls are temporarily locked"
+                                                    : session.display_name
+                                                }
+                                                aria-label={
+                                                  runtimeLocked
+                                                    ? `${session.display_name} locked while the runtime synchronizes`
+                                                    : renamingSession
+                                                      ? `${session.display_name} rename is being saved`
+                                                      : undefined
+                                                }
+                                                aria-current={
+                                                  session.session_id ===
+                                                  activeSession?.session_id
+                                                    ? "page"
+                                                    : undefined
+                                                }
+                                                disabled={runtimeLocked}
+                                                onClick={() => {
+                                                  if (sessionDeleteMode) {
+                                                    setSelectedDeleteSessionId(
+                                                      (current) =>
+                                                        current ===
+                                                        session.session_id
+                                                          ? ""
+                                                          : session.session_id,
+                                                    );
+                                                    return;
+                                                  }
+                                                  performanceTraceRef.current.beginSessionSelection(
+                                                    session.session_id,
+                                                  );
+                                                  if (
+                                                    session.session_id ===
+                                                    activeSessionIdRef.current
+                                                  )
+                                                    performanceTraceRef.current.observeSessionPainted(
+                                                      session.session_id,
+                                                    );
+                                                  setActiveSessionId(
+                                                    session.session_id,
+                                                  );
+                                                  closeMobileSidebar();
                                                 }}
                                               >
-                                                {session.display_name}
-                                              </span>
-                                            </span>
-                                            <span
-                                              className={`session-endpoint-reveal ${renamingSession ? "pending" : ""}`}
-                                              title={
-                                                renamingSession
-                                                  ? "Saving name"
-                                                  : sessionEndpointName
-                                              }
-                                            >
-                                              {renamingSession ? (
-                                                <span className="session-pending">
-                                                  Saving name...
-                                                </span>
-                                              ) : (
-                                                <span>
-                                                  {sessionEndpointName}
-                                                </span>
-                                              )}
-                                            </span>
-                                            <span className="sr-only">
-                                              Session state: {session.state}
-                                            </span>
-                                          </button>
-                                        )}
-                                        {sessionDeleteMode && (
-                                          <button
-                                            type="button"
-                                            className={`session-delete-select ${selectedDeleteSessionId === session.session_id ? "selected" : ""}`}
-                                            title={`选择删除 ${session.display_name}`}
-                                            aria-label={`选择删除 ${session.display_name}`}
-                                            aria-pressed={
-                                              selectedDeleteSessionId ===
-                                              session.session_id
-                                            }
-                                            disabled={
-                                              runtimeLocked || deletingSession
-                                            }
-                                            onClick={() =>
-                                              setSelectedDeleteSessionId(
-                                                (current) =>
-                                                  current === session.session_id
-                                                    ? ""
-                                                    : session.session_id,
-                                              )
-                                            }
-                                          >
-                                            {deletingSession ? (
-                                              <LoaderCircle size={14} />
-                                            ) : selectedDeleteSessionId ===
-                                              session.session_id ? (
-                                              <Check size={14} />
-                                            ) : null}
-                                          </button>
-                                        )}
-                                      </div>
-                                      {server?.debug_mode &&
-                                        session.workers.length > 0 &&
-                                        expandedSessionIds.has(
-                                          session.session_id,
-                                        ) && (
-                                          <div
-                                            className="worker-list"
-                                            role="tree"
-                                            aria-label={`Workers for ${session.display_name}: ${session.workers.length} worker${session.workers.length === 1 ? "" : "s"}`}
-                                          >
-                                            {sessionWorkerTreeRows(
-                                              session.workers,
-                                            ).map(
-                                              ({ worker, depth, isLast }) => {
-                                                const workerName =
-                                                  worker.display_name ||
-                                                  `ID${worker.ordinal}`;
-                                                return (
-                                                  <div
-                                                    className={`worker-row ${depth > 0 ? "child-worker" : "root-worker"} ${isLast ? "last-child" : ""}`}
-                                                    role="treeitem"
-                                                    aria-level={depth + 1}
-                                                    key={worker.worker_id}
-                                                    title={`${workerName} · level ${depth + 1} · ${worker.worker_id} · ${worker.context_id}`}
-                                                    style={
-                                                      {
-                                                        "--worker-depth": depth,
-                                                      } as CSSProperties
-                                                    }
+                                                {visuallyWorking ? (
+                                                  <LoaderCircle
+                                                    className="session-working-icon"
+                                                    size={15}
+                                                    aria-label="Session working"
+                                                  />
+                                                ) : session.state ===
+                                                  "interrupted" ? (
+                                                  <CircleStop
+                                                    className="session-interrupted-icon"
+                                                    size={15}
+                                                    aria-label="Session interrupted by runtime restart"
+                                                  />
+                                                ) : unreadCompletedSessionIds.has(
+                                                    session.session_id,
+                                                  ) ? (
+                                                  <span
+                                                    className="session-unread-dot"
+                                                    aria-label="Session has new completed work"
+                                                  />
+                                                ) : null}
+                                                <span className="session-identity">
+                                                  <span
+                                                    className="session-name"
+                                                    title={session.display_name}
+                                                    onDoubleClick={() => {
+                                                      if (
+                                                        !runtimeLocked &&
+                                                        !sessionDeleteMode &&
+                                                        renamingSessionId !==
+                                                          session.session_id
+                                                      )
+                                                        beginRename(session);
+                                                    }}
                                                   >
-                                                    <span
-                                                      className="worker-relation"
-                                                      aria-hidden="true"
-                                                    >
-                                                      <span />
+                                                    {session.display_name}
+                                                  </span>
+                                                </span>
+                                                <span
+                                                  className={`session-endpoint-reveal ${renamingSession ? "pending" : ""}`}
+                                                  title={
+                                                    renamingSession
+                                                      ? "Saving name"
+                                                      : sessionEndpointName
+                                                  }
+                                                >
+                                                  {renamingSession ? (
+                                                    <span className="session-pending">
+                                                      Saving name...
                                                     </span>
-                                                    {worker.state ===
-                                                    "working" ? (
-                                                      <LoaderCircle
-                                                        className="worker-working-icon"
-                                                        size={12}
-                                                        aria-label={`${workerName} working`}
-                                                      />
-                                                    ) : (
-                                                      <span
-                                                        className="worker-idle-spacer"
-                                                        aria-hidden="true"
-                                                      />
-                                                    )}
-                                                    <span
-                                                      className="worker-name"
-                                                      title={workerName}
-                                                    >
-                                                      {workerName}
+                                                  ) : (
+                                                    <span>
+                                                      {sessionEndpointName}
                                                     </span>
-                                                  </div>
-                                                );
-                                              },
+                                                  )}
+                                                </span>
+                                                <span className="sr-only">
+                                                  Session state: {session.state}
+                                                </span>
+                                              </button>
                                             )}
-                                          </div>
-                                        )}
-                                    </>
-                                  )}
-                                </SortableSession>
-                              );
-                            })}
-                            {bucketSessions.length === 0 && (
-                              <div className="session-group-drop-hint">
-                                拖动Session以归组
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </SessionDropGroup>
-                    );
-                  },
-                )
-              )}
-            </nav>
-            <DragOverlay
-              dropAnimation={
-                prefersReducedMotion()
-                  ? null
-                  : { duration: 180, easing: "cubic-bezier(.2, .8, .2, 1)" }
-              }
-            >
-              {draggedSession && (
-                <div className="session-row session-overlay" aria-hidden="true">
-                  <span className="session-drag">
-                    <GripVertical size={13} />
-                  </span>
-                  <span className="session-name">
-                    {draggedSession.display_name}
-                  </span>
-                </div>
-              )}
-            </DragOverlay>
-          </DndContext>
+                                            {!sessionDeleteMode &&
+                                              renamingSessionId !==
+                                                session.session_id && (
+                                                <button
+                                                  type="button"
+                                                  className="session-rename-button"
+                                                  title={`Rename ${session.display_name}`}
+                                                  aria-label={`Rename ${session.display_name}`}
+                                                  disabled={
+                                                    runtimeLocked ||
+                                                    renamingSession
+                                                  }
+                                                  onClick={() =>
+                                                    beginRename(session)
+                                                  }
+                                                >
+                                                  <Pencil size={12} />
+                                                </button>
+                                              )}
+                                            {sessionDeleteMode && (
+                                              <button
+                                                type="button"
+                                                className={`session-delete-select ${selectedDeleteSessionId === session.session_id ? "selected" : ""}`}
+                                                title={`选择删除 ${session.display_name}`}
+                                                aria-label={`选择删除 ${session.display_name}`}
+                                                aria-pressed={
+                                                  selectedDeleteSessionId ===
+                                                  session.session_id
+                                                }
+                                                disabled={
+                                                  runtimeLocked ||
+                                                  deletingSession
+                                                }
+                                                onClick={() =>
+                                                  setSelectedDeleteSessionId(
+                                                    (current) =>
+                                                      current ===
+                                                      session.session_id
+                                                        ? ""
+                                                        : session.session_id,
+                                                  )
+                                                }
+                                              >
+                                                {deletingSession ? (
+                                                  <LoaderCircle size={14} />
+                                                ) : selectedDeleteSessionId ===
+                                                  session.session_id ? (
+                                                  <Check size={14} />
+                                                ) : null}
+                                              </button>
+                                            )}
+                                          </SortableSessionRow>
+                                          {server?.debug_mode &&
+                                            session.workers.length > 0 &&
+                                            expandedSessionIds.has(
+                                              session.session_id,
+                                            ) && (
+                                              <div
+                                                className="worker-list"
+                                                role="tree"
+                                                aria-label={`Workers for ${session.display_name}: ${session.workers.length} worker${session.workers.length === 1 ? "" : "s"}`}
+                                              >
+                                                {sessionWorkerTreeRows(
+                                                  session.workers,
+                                                ).map(
+                                                  ({
+                                                    worker,
+                                                    depth,
+                                                    isLast,
+                                                  }) => {
+                                                    const workerName =
+                                                      worker.display_name ||
+                                                      `ID${worker.ordinal}`;
+                                                    return (
+                                                      <div
+                                                        className={`worker-row ${depth > 0 ? "child-worker" : "root-worker"} ${isLast ? "last-child" : ""}`}
+                                                        role="treeitem"
+                                                        aria-level={depth + 1}
+                                                        key={worker.worker_id}
+                                                        title={`${workerName} · level ${depth + 1} · ${worker.worker_id} · ${worker.context_id}`}
+                                                        style={
+                                                          {
+                                                            "--worker-depth":
+                                                              depth,
+                                                          } as CSSProperties
+                                                        }
+                                                      >
+                                                        <span
+                                                          className="worker-relation"
+                                                          aria-hidden="true"
+                                                        >
+                                                          <span />
+                                                        </span>
+                                                        {worker.state ===
+                                                        "working" ? (
+                                                          <LoaderCircle
+                                                            className="worker-working-icon"
+                                                            size={12}
+                                                            aria-label={`${workerName} working`}
+                                                          />
+                                                        ) : (
+                                                          <span
+                                                            className="worker-idle-spacer"
+                                                            aria-hidden="true"
+                                                          />
+                                                        )}
+                                                        <span
+                                                          className="worker-name"
+                                                          title={workerName}
+                                                        >
+                                                          {workerName}
+                                                        </span>
+                                                      </div>
+                                                    );
+                                                  },
+                                                )}
+                                              </div>
+                                            )}
+                                        </Fragment>
+                                      );
+                                    })}
+                                  </SortableContext>
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </SortableSessionGroup>
+                      );
+                    },
+                  )
+                )}
+              </SortableContext>
+            </DndContext>
+          </nav>
           <div className="sidebar-footer">
             <button
               type="button"
@@ -4236,6 +4308,11 @@ function TimemApp() {
               toolGenEnabled={toolGenEnabled}
               toolGenToggleDisabled={pendingToolgenRequests.size > 0}
               onToolGenEnabledChange={setToolGenEnabled}
+              claudeCodexToolDiscoveryEnabled={
+                server?.mem?.claude_codex_tool_discovery ?? false
+              }
+              claudeCodexToolDiscoveryPending={pendingClaudeCodexToolDiscovery}
+              onClaudeCodexToolDiscoveryChange={saveClaudeCodexToolDiscovery}
               memPath={server?.mem?.space_dir ?? ""}
               connected={connected}
               connectionLabel={connectionLabel}
@@ -4260,6 +4337,7 @@ function TimemApp() {
               revealedEndpointApiKeys={revealedEndpointApiKeys}
               revealedEndpointHeaders={revealedEndpointHeaders}
               revealedEndpointRequestFields={revealedEndpointRequestFields}
+              revealedEndpointPrivateCas={revealedEndpointPrivateCas}
               onClose={closeSettingsCenter}
               onRefreshTemporaryItems={refreshMemTemporaryItems}
               onDeleteTemporaryItems={deleteMemTemporaryItems}
@@ -4710,10 +4788,12 @@ function TimemApp() {
             }}
           />
         )}
-        {showNewSession && (
+        {newSessionTarget && (
           <NewSessionDialog
             workspaces={server?.workspace_dirs ?? []}
             runtimeDefaults={server?.session_env_defaults ?? {}}
+            groupId={newSessionTarget.groupId}
+            groupName={newSessionTarget.groupName}
             creating={creatingSession}
             memSwitching={runtimeLocked}
             onClose={() => {
@@ -4960,6 +5040,85 @@ function TimemApp() {
           )}
       </div>
     </AssistantRuntimeProvider>
+  );
+}
+
+function SortableSessionGroup({
+  id,
+  disabled,
+  className,
+  children,
+}: {
+  id: string;
+  disabled: boolean;
+  className: string;
+  children: (dragHandleProps: {
+    attributes: ReturnType<typeof useSortable>["attributes"];
+    listeners: ReturnType<typeof useSortable>["listeners"];
+  }) => ReactNode;
+}) {
+  const sortable = useSortable({
+    id,
+    disabled,
+    transition: {
+      duration: 180,
+      easing: "cubic-bezier(.2, .8, .2, 1)",
+    },
+  });
+  return (
+    <section
+      ref={sortable.setNodeRef}
+      className={`${className} ${sortable.isDragging ? "dragging" : ""}`}
+      style={{
+        transform: CSS.Transform.toString(sortable.transform),
+        transition: sortable.transition,
+        zIndex: sortable.isDragging ? 5 : undefined,
+      }}
+    >
+      {children({
+        attributes: sortable.attributes,
+        listeners: sortable.listeners,
+      })}
+    </section>
+  );
+}
+
+function SortableSessionRow({
+  id,
+  disabled,
+  className,
+  children,
+  ...props
+}: {
+  id: string;
+  disabled: boolean;
+  className: string;
+  children: ReactNode;
+  "aria-busy"?: boolean;
+}) {
+  const sortable = useSortable({
+    id,
+    disabled,
+    transition: {
+      duration: 180,
+      easing: "cubic-bezier(.2, .8, .2, 1)",
+    },
+  });
+  return (
+    <div
+      ref={sortable.setNodeRef}
+      className={`${className} ${sortable.isDragging ? "dragging" : ""}`}
+      style={{
+        transform: CSS.Transform.toString(sortable.transform),
+        transition: sortable.transition,
+        zIndex: sortable.isDragging ? 5 : undefined,
+      }}
+      {...props}
+      {...sortable.attributes}
+      {...sortable.listeners}
+    >
+      {children}
+    </div>
   );
 }
 
@@ -7172,6 +7331,7 @@ function TimemThread({
     forceSupplement?: boolean,
     roleIds?: readonly string[],
     forceNewTurn?: boolean,
+    resumeDirectly?: boolean,
   ) => boolean;
   onMessageQueueCommand: (command: ClientCommand) => boolean;
   selectedRoleIds: readonly string[];
@@ -7191,6 +7351,30 @@ function TimemThread({
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const attachComposerTextarea = useCallback(
+    (textarea: HTMLTextAreaElement | null) => {
+      composerTextareaRef.current = textarea;
+      if (!textarea) return;
+      const prioritizeComposerScroll = (event: WheelEvent) => {
+        if (document.activeElement !== textarea) return;
+        const deltaY = wheelDeltaPixels(
+          event.deltaY,
+          event.deltaMode,
+          textarea.clientHeight,
+        );
+        if (!canScrollInDirection(textarea, deltaY)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        textarea.scrollTop += deltaY;
+      };
+      textarea.addEventListener("wheel", prioritizeComposerScroll, {
+        passive: false,
+      });
+      return () =>
+        textarea.removeEventListener("wheel", prioritizeComposerScroll);
+    },
+    [],
+  );
   const previousScrollMetrics = useRef<ScrollMetrics | null>(null);
   const sessionScrollPositionsRef = useRef<Map<string, SessionScrollPosition>>(
     new Map(),
@@ -7300,7 +7484,6 @@ function TimemThread({
     undefined,
     isCancelling,
   );
-  const hasDraftText = !!draft.trim();
   const showStopAction =
     composerPrimaryAction(interactionPhase, draft) === "stop";
   const sendLabel =
@@ -7809,28 +7992,6 @@ function TimemThread({
     };
   }, [activeSessionId]);
 
-  useEffect(() => {
-    const textarea = composerTextareaRef.current;
-    if (!textarea) return;
-    const prioritizeComposerScroll = (event: WheelEvent) => {
-      if (document.activeElement !== textarea) return;
-      const deltaY = wheelDeltaPixels(
-        event.deltaY,
-        event.deltaMode,
-        textarea.clientHeight,
-      );
-      if (!canScrollInDirection(textarea, deltaY)) return;
-      event.preventDefault();
-      event.stopPropagation();
-      textarea.scrollTop += deltaY;
-    };
-    textarea.addEventListener("wheel", prioritizeComposerScroll, {
-      passive: false,
-    });
-    return () =>
-      textarea.removeEventListener("wheel", prioritizeComposerScroll);
-  }, []);
-
   useLayoutEffect(() => {
     window.dispatchEvent(new Event("session-timeline-activation-change"));
   }, [activeSessionId]);
@@ -7917,7 +8078,6 @@ function TimemThread({
     onConsumeRejectedSubmitCommandIds(consumed);
   }, [onConsumeRejectedSubmitCommandIds, rejectedSubmitCommandIds]);
 
-
   useEffect(() => {
     for (const session of sessions) {
       const submission = directSubmissionsRef.current.get(session.session_id);
@@ -7985,6 +8145,20 @@ function TimemThread({
   };
   const submitDraft = () => {
     if (uploadingAttachment || sessionInteractionLocked) return;
+    if (activeSession && activeSession.state !== "working" && !draft.trim()) {
+      if (!window.confirm("未输入内容，是否让Timem直接继续")) return;
+      onSendForSession(
+        activeSession.session_id,
+        "",
+        clientId("resume"),
+        [],
+        false,
+        [],
+        true,
+        true,
+      );
+      return;
+    }
     const reserved = reserveSessionDraftSubmission(
       submittingDraftSessionIdsRef,
       activeSessionId,
@@ -8187,7 +8361,9 @@ function TimemThread({
             onRequestMessageDelete={onRequestMessageDelete}
           />
         ))}
-        <ThreadPrimitive.ViewportFooter className="composer-wrap aui-thread-footer">
+      </ThreadPrimitive.Viewport>
+
+      <div className="composer-wrap aui-thread-footer">
           {!!activeSession && displayQueuedMessages.length > 0 && (
             <section
               className={`queued-message-list ${queueExpanded ? "expanded" : "collapsed"} ${queuePanelCollapsed ? "summary-only" : ""} ${queuedMessagesPause ? "paused" : ""}`}
@@ -8682,7 +8858,7 @@ function TimemThread({
             >
               <div className="expandable-text-field composer-text-field">
                 <textarea
-                  ref={composerTextareaRef}
+                  ref={attachComposerTextarea}
                   value={draft}
                   placeholder={
                     !activeSession
@@ -8690,8 +8866,8 @@ function TimemThread({
                       : sessionInteractionLocked
                         ? sessionInteractionLockReason
                         : activeSession.state === "working"
-                          ? "继续输入…"
-                          : "Ask Timem to investigate, write, or work with you."
+                          ? "在 Timem思考时继续输入补充对话..."
+                          : "输入问题，或按发送直接继续..."
                   }
                   aria-label="Message Timem"
                   aria-describedby={composerHintId}
@@ -8739,8 +8915,8 @@ function TimemThread({
                   disabled={sessionInteractionLocked}
                   placeholder={
                     activeSession.state === "working"
-                      ? "继续输入…"
-                      : "Ask Timem to investigate, write, or work with you."
+                      ? "在 Timem思考时继续输入补充对话..."
+                      : "输入问题，或按发送直接继续..."
                   }
                   onCommit={(value) =>
                     setDraftsBySession((current) =>
@@ -8854,7 +9030,9 @@ function TimemThread({
                           : lockedControlHint || "Cancel current turn"
                       }
                       disabled={
-                        stopClickLocked || isCancelling || sessionInteractionLocked
+                        stopClickLocked ||
+                        isCancelling ||
+                        sessionInteractionLocked
                       }
                       onClick={() => void cancelActiveSessionTurn()}
                     >
@@ -8868,7 +9046,6 @@ function TimemThread({
                       aria-label={effectiveSendLabel}
                       disabled={
                         !activeSession ||
-                        !hasDraftText ||
                         uploadingAttachment ||
                         sessionInteractionLocked
                       }
@@ -8880,8 +9057,7 @@ function TimemThread({
               </div>
             </form>
           )}
-        </ThreadPrimitive.ViewportFooter>
-      </ThreadPrimitive.Viewport>
+      </div>
 
       <nav
         ref={userMessageNavigationRef}
@@ -9259,12 +9435,17 @@ const TurnInteraction = memo(function TurnInteraction({
       className={`turn-interaction ${isWorking ? "active" : "completed"}`}
       data-turn-id={turn.turn_id}
     >
-      {!!turn.user_entries.filter((e) => e.kind !== "approval").length && (
+      {!!turn.user_entries.filter(
+        (entry) => entry.kind !== "approval" && entry.kind !== "resume_directly",
+      ).length && (
         <section className="turn-user-frame" data-user-message-anchor>
           <div className="turn-user-content">
             {turn.user_entries
               .map((entry, roleIndex) => ({ entry, roleIndex }))
-              .filter(({ entry }) => entry.kind !== "approval")
+              .filter(
+                ({ entry }) =>
+                  entry.kind !== "approval" && entry.kind !== "resume_directly",
+              )
               .map(({ entry, roleIndex }) => (
                 <div
                   className={`turn-user-entry ${entry.kind}`}
@@ -10419,7 +10600,8 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
   const singleActivity =
     summary.activities.length === 1 ? summary.activities[0] : undefined;
   if (
-    singleActivity?.tool_name === "run_bash" &&
+    (singleActivity?.tool_name === "run_bash" ||
+      singleActivity?.tool_name === "run_powershell") &&
     singleActivity.tool_mode === "poll"
   )
     return <ToolActivity activity={singleActivity} />;
@@ -10465,7 +10647,9 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
 function ToolActivity({ activity }: { activity: Activity }) {
   const status = activity.tool_status || TOOL_STATUS_RUNNING;
   const running = isToolActivityRunning(status);
-  const bashActivity = activity.tool_name === "run_bash";
+  const bashActivity =
+    activity.tool_name === "run_bash" ||
+    activity.tool_name === "run_powershell";
   const pollingActivity = bashActivity && activity.tool_mode === "poll";
   const [open, setOpen] = useState(false);
   const waitBudgetMs = pollingActivity
@@ -11521,7 +11705,7 @@ function McpEditor({
   );
 }
 
-type SettingsSection = "appearance" | "endpoints" | "memory" | "toolgen";
+type SettingsSection = "appearance" | "endpoints" | "memory" | "beta";
 
 type SettingsCenterProps = {
   panelRef: MutableRefObject<HTMLElement | null>;
@@ -11532,6 +11716,9 @@ type SettingsCenterProps = {
   toolGenEnabled: boolean;
   toolGenToggleDisabled: boolean;
   onToolGenEnabledChange: (enabled: boolean) => void;
+  claudeCodexToolDiscoveryEnabled: boolean;
+  claudeCodexToolDiscoveryPending: boolean;
+  onClaudeCodexToolDiscoveryChange: (enabled: boolean) => void;
   memPath: string;
   connected: boolean;
   connectionLabel: string;
@@ -11552,6 +11739,7 @@ type SettingsCenterProps = {
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
   revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
+  revealedEndpointPrivateCas: Record<string, string>;
   onClose: () => void;
   onSaveTemporaryPolicy: (
     days: 1 | 5 | 10 | null,
@@ -11580,6 +11768,9 @@ const SettingsCenter = memo(function SettingsCenter(
     toolGenEnabled,
     toolGenToggleDisabled,
     onToolGenEnabledChange,
+    claudeCodexToolDiscoveryEnabled,
+    claudeCodexToolDiscoveryPending,
+    onClaudeCodexToolDiscoveryChange,
     memPath,
     connected,
     connectionLabel,
@@ -11600,6 +11791,7 @@ const SettingsCenter = memo(function SettingsCenter(
     revealedEndpointApiKeys,
     revealedEndpointHeaders,
     revealedEndpointRequestFields,
+    revealedEndpointPrivateCas,
     onClose,
     onSaveTemporaryPolicy,
     onSaveConversationCapacity,
@@ -11633,6 +11825,7 @@ const SettingsCenter = memo(function SettingsCenter(
   const busy =
     retentionPending ||
     conversationCapacityPending ||
+    claudeCodexToolDiscoveryPending ||
     favoriteCapacityPending ||
     switchPending ||
     temporaryItemsDeleting;
@@ -11788,14 +11981,14 @@ const SettingsCenter = memo(function SettingsCenter(
             </button>
             <button
               type="button"
-              className={section === "toolgen" ? "active" : ""}
-              aria-current={section === "toolgen" ? "page" : undefined}
+              className={section === "beta" ? "active" : ""}
+              aria-current={section === "beta" ? "page" : undefined}
               disabled={switchPending}
-              onClick={() => selectSettingsSection("toolgen")}
+              onClick={() => selectSettingsSection("beta")}
             >
-              <Wrench size={16} />
+              <TriangleAlert size={16} />
               <span>
-                <strong>ToolGen</strong>
+                <strong>Beta</strong>
               </span>
             </button>
           </nav>
@@ -11969,20 +12162,21 @@ const SettingsCenter = memo(function SettingsCenter(
                 revealedEndpointApiKeys={revealedEndpointApiKeys}
                 revealedEndpointHeaders={revealedEndpointHeaders}
                 revealedEndpointRequestFields={revealedEndpointRequestFields}
+                revealedEndpointPrivateCas={revealedEndpointPrivateCas}
                 onEdit={onEditEndpoint}
                 onDelete={onDeleteEndpoint}
                 onReveal={onRevealEndpoint}
                 onSave={onSaveEndpoint}
               />
             )}
-            {section === "toolgen" && (
+            {section === "beta" && (
               <section
                 className="settings-pane toolgen-settings-pane"
-                aria-labelledby="toolgen-settings-title"
+                aria-labelledby="beta-settings-title"
               >
                 <div className="settings-pane-heading">
-                  <h3 id="toolgen-settings-title">ToolGen</h3>
-                  <Wrench size={19} aria-hidden="true" />
+                  <h3 id="beta-settings-title">Beta</h3>
+                  <TriangleAlert size={19} aria-hidden="true" />
                 </div>
                 <section className="settings-group toolgen-beta-card">
                   <div className="settings-group-heading">
@@ -12021,6 +12215,58 @@ const SettingsCenter = memo(function SettingsCenter(
                         : toolGenEnabled
                           ? "ToolGen actions and generation UI are available."
                           : "ToolGen actions and generation UI are hidden."}
+                    </small>
+                  </div>
+                </section>
+                <section className="settings-group toolgen-beta-card">
+                  <div className="settings-group-heading">
+                    <div>
+                      <strong>Claude/Codex 工具发现</strong>
+                      <p>
+                        引导模型在任务适合本地 Skill 或工具时，搜索 Claude 和
+                        Codex 的内置 Skill、工具目录，并采用合适的现有工具。
+                        设置由当前 MEM 保存，并从下一次模型 API 请求开始生效。
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      className="settings-feature-switch"
+                      aria-checked={claudeCodexToolDiscoveryEnabled}
+                      aria-label="Enable Claude Codex tool discovery Beta"
+                      disabled={claudeCodexToolDiscoveryPending || !connected}
+                      onClick={() =>
+                        onClaudeCodexToolDiscoveryChange(
+                          !claudeCodexToolDiscoveryEnabled,
+                        )
+                      }
+                    >
+                      <span className="settings-feature-switch-thumb" />
+                    </button>
+                  </div>
+                  <div
+                    className="toolgen-beta-status"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <span
+                      className={
+                        claudeCodexToolDiscoveryEnabled ? "enabled" : "disabled"
+                      }
+                    />
+                    <strong>
+                      {claudeCodexToolDiscoveryPending
+                        ? "Saving…"
+                        : claudeCodexToolDiscoveryEnabled
+                          ? "Enabled"
+                          : "Disabled by default"}
+                    </strong>
+                    <small>
+                      {claudeCodexToolDiscoveryPending
+                        ? "Waiting for the Host to persist and apply this setting."
+                        : claudeCodexToolDiscoveryEnabled
+                          ? "The discovery instruction is present in the System Prompt."
+                          : "The discovery instruction is absent from the System Prompt."}
                     </small>
                   </div>
                 </section>
@@ -12593,6 +12839,7 @@ function EndpointSettingsPane({
   revealedEndpointApiKeys,
   revealedEndpointHeaders,
   revealedEndpointRequestFields,
+  revealedEndpointPrivateCas,
   onEdit,
   onDelete,
   onReveal,
@@ -12603,6 +12850,7 @@ function EndpointSettingsPane({
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
   revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
+  revealedEndpointPrivateCas: Record<string, string>;
   onEdit: (endpoint: ModelEndpoint | "new" | null) => void;
   onDelete: (endpoint: ModelEndpoint) => void;
   onReveal: (endpointId: string) => void;
@@ -12640,6 +12888,11 @@ function EndpointSettingsPane({
             endpointEditor === "new"
               ? {}
               : revealedEndpointRequestFields[endpointEditor.id]
+          }
+          revealedPrivateCaPem={
+            endpointEditor === "new"
+              ? ""
+              : revealedEndpointPrivateCas[endpointEditor.id]
           }
           onClose={() => onEdit(null)}
           onSave={onSave}
@@ -13060,6 +13313,7 @@ function ModelEndpointEditor({
   revealedApiKey,
   revealedHeaders,
   revealedRequestFields,
+  revealedPrivateCaPem,
   onClose,
   onSave,
 }: {
@@ -13067,6 +13321,7 @@ function ModelEndpointEditor({
   revealedApiKey?: string;
   revealedHeaders?: Record<string, string>;
   revealedRequestFields?: Record<string, unknown>;
+  revealedPrivateCaPem?: string;
   onClose: () => void;
   onSave: (endpoint: ModelEndpointDraft) => void;
 }) {
@@ -13083,6 +13338,9 @@ function ModelEndpointEditor({
     api_key: revealedApiKey,
     http_headers: endpoint?.http_headers ?? {},
     request_fields: endpoint?.request_fields ?? {},
+    allow_cross_origin_redirects:
+      endpoint?.allow_cross_origin_redirects ?? false,
+    private_ca_pem: revealedPrivateCaPem,
   }));
   const [headerRows, setHeaderRows] = useState<StructuredRow[]>(() =>
     structuredRows(endpoint?.http_headers ?? {}),
@@ -13106,6 +13364,13 @@ function ModelEndpointEditor({
       })),
     );
   }, [revealedHeaders]);
+  useEffect(() => {
+    if (revealedPrivateCaPem !== undefined)
+      setDraft((current) => ({
+        ...current,
+        private_ca_pem: revealedPrivateCaPem,
+      }));
+  }, [revealedPrivateCaPem]);
   useEffect(() => {
     if (!revealedRequestFields) return;
     setRequestRows((rows) =>
@@ -13238,6 +13503,42 @@ function ModelEndpointEditor({
               setDraft({ ...draft, base_url: event.target.value })
             }
           />
+        </label>
+        <label className="wide endpoint-transport-toggle">
+          <span>
+            <input
+              type="checkbox"
+              checked={draft.allow_cross_origin_redirects}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  allow_cross_origin_redirects: event.target.checked,
+                })
+              }
+            />
+            允许跨 Origin / 跨协议重定向
+          </span>
+          <small>
+            默认关闭。开启后会跟随跳转，但跨 Origin 时不会转发 API Key 或自定义 Headers。
+          </small>
+        </label>
+        <label className="wide">
+          私有 CA（PEM）
+          <textarea
+            className="endpoint-private-ca"
+            spellCheck={false}
+            value={draft.private_ca_pem ?? ""}
+            placeholder={
+              endpoint?.private_ca_configured &&
+              revealedPrivateCaPem === undefined
+                ? "正在读取…"
+                : "可选：-----BEGIN CERTIFICATE-----"
+            }
+            onChange={(event) =>
+              setDraft({ ...draft, private_ca_pem: event.target.value })
+            }
+          />
+          <small>仅用于此接入点的模型 HTTPS 连接，不替换系统根证书。</small>
         </label>
         <label>
           最大上下文窗口
@@ -13955,6 +14256,8 @@ function RuntimeUnavailableDialog({
 function NewSessionDialog({
   workspaces,
   runtimeDefaults,
+  groupId,
+  groupName,
   creating,
   memSwitching,
   onClose,
@@ -13962,6 +14265,8 @@ function NewSessionDialog({
 }: {
   workspaces: string[];
   runtimeDefaults: Snapshot["server"]["session_env_defaults"];
+  groupId: string | null;
+  groupName: string;
   creating: boolean;
   memSwitching: boolean;
   onClose: () => void;
@@ -13983,6 +14288,7 @@ function NewSessionDialog({
     displayName,
     workspaceDir,
     env,
+    groupId,
     creating,
     memSwitching,
   );
@@ -14035,8 +14341,8 @@ function NewSessionDialog({
           </button>
         </div>
         <p id={descriptionId}>
-          Select a known workspace or enter an existing absolute directory for
-          this session.
+          Create this session in <strong>{groupName}</strong>, then select a
+          known workspace or enter an existing absolute directory.
         </p>
         {creating && (
           <p
@@ -14681,10 +14987,7 @@ function InlineDecision({
     ? "Decision is locked while the session changes"
     : "Allow and stop asking for this session";
   return (
-    <section
-      className="inline-decision"
-      aria-label="Decision required"
-    >
+    <section className="inline-decision" aria-label="Decision required">
       <div className="inline-decision-heading">
         <span className="eyebrow">
           RUNTIME REQUEST{total > 1 ? ` · ${position} OF ${total}` : ""}

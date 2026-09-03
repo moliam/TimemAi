@@ -59,9 +59,9 @@ A test that checks only the eventual DOM state is insufficient: it must also obs
 
 ### Pressure profile
 
-The cases above are requirements, but the high-risk Turn boundary is certified by four concentrated stress tests rather than one shallow test per row: PromptCut/final ownership, Stop/Start storm, reconnect/FIFO ownership, and release-Chrome latency. The first three use independent execution sides, barriers for exact windows, seeded jitter, and at least 300 PR / 1,000 release / 10,000 soak iterations. The Chrome scenario repeatedly drives the real WebSocket/Host/Core path and reports command-correlated p50/p95/p99/max latency.
+The cases above define the target certification, but the four concentrated stress gates are **not implemented yet**: PromptCut/final ownership, Stop/Start storm, reconnect/FIFO ownership, and release-Chrome latency. The intended first three gates use independent execution sides, barriers for exact windows, seeded jitter, and at least 300 PR / 1,000 release / 10,000 soak iterations. The intended Chrome gate repeatedly drives the real WebSocket/Host/Core path and reports command-correlated p50/p95/p99/max latency.
 
-Every run asserts exact command/attachment ownership, bounded queues, immutable outcomes, no revived working state, and resource convergence. A failure must print its seed and named stage trace. Increasing sleeps or timeouts, lowering iterations, or checking only the final ready state is not acceptable remediation.
+Until those executable gates exist, focused deterministic race tests, the two-pass edge regression, Web Host tests, TTY stories, and Chrome Stop acceptance are strong partial evidence, not the full pressure-profile certification. Future stress runs must assert exact command/attachment ownership, bounded queues, immutable outcomes, no revived working state, and resource convergence; failures must print a replayable seed and named stage trace. Increasing sleeps or timeouts, lowering iterations, or checking only the final ready state is not acceptable remediation.
 
 ### Authoritative Core handoff
 

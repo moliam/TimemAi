@@ -1,13 +1,14 @@
 pub mod message_queue;
 
 use agent_core::{
-    core_initialized_topic_event_with_worker, run_session_turn_with_model_client, AgentCore,
-    CoreGlobalWorkerStatus, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopicEvent,
-    HostDecision, HostDecisionRequest, HttpModelClient, ModelClient, ModelServiceConfig,
-    ResponseProtocolKind, RuntimeProfiler, TopicReply, TurnInput, TurnOutcome, TurnStopDetail,
-    TurnStopSummary, TurnUi, UsageStats,
+    core_initialized_topic_event_with_worker, run_direct_resume_turn_with_model_client,
+    run_session_turn_with_model_client, AgentCore, CoreGlobalWorkerStatus,
+    CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopicEvent, HostDecision,
+    HostDecisionRequest, HttpModelClient, ModelClient, ModelServiceConfig, ResponseProtocolKind,
+    RuntimeProfiler, TopicReply, TurnInput, TurnOutcome, TurnStopDetail, TurnStopSummary, TurnUi,
+    UsageStats,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -37,6 +38,27 @@ pub fn run_synchronous_turn(
     profiler: Option<&mut RuntimeProfiler>,
 ) -> TurnOutcome {
     agent_core::run_session_turn(core, config, input, ui, profiler)
+}
+
+pub fn resume_synchronous_turn(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    input: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+) -> TurnOutcome {
+    agent_core::run_direct_resume_turn(core, config, input, ui, profiler)
+}
+
+pub fn resume_synchronous_turn_with_model_client(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    input: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+    model_client: &mut dyn ModelClient,
+) -> TurnOutcome {
+    run_direct_resume_turn_with_model_client(core, config, input, ui, profiler, model_client)
 }
 
 pub fn run_synchronous_turn_with_model_client(
@@ -310,6 +332,7 @@ enum CoreSessionWorkerCommand {
         additional_context: Option<String>,
         command_id: Option<String>,
         initial_supplements: Vec<QueuedSupplement>,
+        direct_resume: bool,
         cancel_generation: u64,
     },
     RunToolGen {
@@ -330,6 +353,7 @@ enum CoreSessionWorkerCommand {
     },
     RuntimeConfigUpdated,
     MaxRoundsUpdated,
+    InterfacePreferencesUpdated,
     UpdateApiKey {
         api_key: String,
     },
@@ -338,6 +362,9 @@ enum CoreSessionWorkerCommand {
     },
     UpdateRequestFields {
         request_fields: BTreeMap<String, serde_json::Value>,
+    },
+    UpdateModelHttpTransport {
+        options: agent_core::ModelHttpTransportOptions,
     },
     UpdateMcp {
         base_capabilities: agent_core::capability::CapabilityRegistry,
@@ -371,17 +398,72 @@ enum PendingRuntimeUpdate {
         value: String,
     },
     MaxRounds(u32),
+    ClaudeCodexToolDiscovery(bool),
+}
+
+const CORE_COMMAND_ID_CAPACITY: usize = 1_024;
+
+#[derive(Default)]
+struct CoreCommandIdTracker {
+    pending: BTreeSet<String>,
+    recent_accepted: BTreeSet<String>,
+    recent_order: VecDeque<String>,
+}
+
+impl CoreCommandIdTracker {
+    fn contains(&self, command_id: &str) -> bool {
+        self.pending.contains(command_id) || self.recent_accepted.contains(command_id)
+    }
+
+    fn reserve(&mut self, command_id: String) -> Result<bool, String> {
+        if self.contains(&command_id) {
+            return Ok(false);
+        }
+        if self.pending.len() >= CORE_COMMAND_ID_CAPACITY {
+            return Err("core_command_pending_capacity_exhausted".to_string());
+        }
+        self.pending.insert(command_id);
+        Ok(true)
+    }
+
+    fn accept(&mut self, command_id: &str) {
+        self.pending.remove(command_id);
+        if self.recent_accepted.insert(command_id.to_string()) {
+            self.recent_order.push_back(command_id.to_string());
+        }
+        while self.recent_accepted.len() > CORE_COMMAND_ID_CAPACITY {
+            let Some(oldest) = self.recent_order.pop_front() else {
+                break;
+            };
+            self.recent_accepted.remove(&oldest);
+        }
+    }
+
+    fn rollback(&mut self, command_id: &str) {
+        self.pending.remove(command_id);
+    }
+}
+
+fn publish_command_accepted(
+    event_tx: &Sender<CoreSessionWorkerEvent>,
+    command_ids: &Arc<Mutex<CoreCommandIdTracker>>,
+    command_id: String,
+) {
+    if let Ok(mut command_ids) = command_ids.lock() {
+        command_ids.accept(&command_id);
+    }
+    let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted { command_id });
 }
 
 #[derive(Clone)]
 pub struct CoreSessionWorkerHandle {
     command_tx: Sender<CoreSessionWorkerCommand>,
     supplement_mailbox: Arc<Mutex<SupplementMailbox>>,
+    command_ids: Arc<Mutex<CoreCommandIdTracker>>,
     cancel_requested: Arc<AtomicBool>,
     cancel_generation: Arc<AtomicU64>,
     shutdown_requested: Arc<AtomicBool>,
     reply_tx: Sender<TopicReply>,
-    accepted_command_ids: Arc<Mutex<BTreeSet<String>>>,
     pending_runtime_updates: Arc<Mutex<Vec<PendingRuntimeUpdate>>>,
     background_cancel: Arc<dyn Fn() + Send + Sync>,
 }
@@ -393,6 +475,24 @@ impl CoreSessionWorkerHandle {
         additional_context: Option<String>,
     ) -> Result<(), String> {
         self.run_turn_with_command_id(input, additional_context, None)
+    }
+
+    pub fn resume_turn_directly(&self, additional_context: Option<String>) -> Result<(), String> {
+        self.resume_turn_directly_with_command_id(additional_context, None)
+    }
+
+    pub fn resume_turn_directly_with_command_id(
+        &self,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+    ) -> Result<(), String> {
+        self.run_turn_batch_with_supplements_kind(
+            String::new(),
+            additional_context,
+            command_id,
+            Vec::new(),
+            true,
+        )
     }
 
     pub fn run_turn_with_command_id(
@@ -429,6 +529,23 @@ impl CoreSessionWorkerHandle {
         command_id: Option<String>,
         supplements: Vec<(agent_core::UserSupplement, Option<String>)>,
     ) -> Result<(), String> {
+        self.run_turn_batch_with_supplements_kind(
+            input,
+            additional_context,
+            command_id,
+            supplements,
+            false,
+        )
+    }
+
+    fn run_turn_batch_with_supplements_kind(
+        &self,
+        input: impl Into<String>,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+        supplements: Vec<(agent_core::UserSupplement, Option<String>)>,
+        direct_resume: bool,
+    ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
         }
@@ -443,20 +560,32 @@ impl CoreSessionWorkerHandle {
             return Err("core_command_batch_duplicate_id".to_string());
         }
         {
-            let mut accepted = self
-                .accepted_command_ids
+            let mut command_ids = self
+                .command_ids
                 .lock()
                 .map_err(|_| "core_command_dedup_poisoned".to_string())?;
             if command_id
                 .as_ref()
-                .is_some_and(|command_id| accepted.contains(command_id))
+                .is_some_and(|command_id| command_ids.contains(command_id))
             {
                 return Ok(());
             }
-            if batch_command_ids.iter().any(|id| accepted.contains(id)) {
+            if batch_command_ids.iter().any(|id| command_ids.contains(id)) {
                 return Err("core_command_batch_id_conflict".to_string());
             }
-            accepted.extend(batch_command_ids.iter().cloned());
+            let mut reserved = Vec::new();
+            for command_id in &batch_command_ids {
+                match command_ids.reserve(command_id.clone()) {
+                    Ok(true) => reserved.push(command_id.clone()),
+                    Ok(false) => unreachable!("prechecked command id conflict"),
+                    Err(error) => {
+                        for command_id in reserved {
+                            command_ids.rollback(&command_id);
+                        }
+                        return Err(error);
+                    }
+                }
+            }
         }
         let cancel_generation = self.cancel_generation.load(Ordering::SeqCst);
         self.open_supplement_mailbox();
@@ -474,14 +603,15 @@ impl CoreSessionWorkerHandle {
                         command_id,
                     })
                     .collect(),
+                direct_resume,
                 cancel_generation,
             })
             .map_err(|_| "core_session_worker_stopped".to_string());
         if result.is_err() {
             self.close_supplement_mailbox();
-            if let Ok(mut accepted) = self.accepted_command_ids.lock() {
+            if let Ok(mut command_ids) = self.command_ids.lock() {
                 for command_id in &batch_command_ids {
-                    accepted.remove(command_id);
+                    command_ids.rollback(command_id);
                 }
             }
         }
@@ -501,11 +631,11 @@ impl CoreSessionWorkerHandle {
             return Err("core_session_worker_stopped".to_string());
         }
         if let Some(command_id) = command_id.as_ref() {
-            let mut accepted = self
-                .accepted_command_ids
+            let mut command_ids = self
+                .command_ids
                 .lock()
                 .map_err(|_| "core_command_dedup_poisoned".to_string())?;
-            if !accepted.insert(command_id.clone()) {
+            if !command_ids.reserve(command_id.clone())? {
                 return Ok(());
             }
         }
@@ -522,8 +652,8 @@ impl CoreSessionWorkerHandle {
         if result.is_err() {
             self.close_supplement_mailbox();
             if let Some(command_id) = command_id.as_ref() {
-                if let Ok(mut accepted) = self.accepted_command_ids.lock() {
-                    accepted.remove(command_id);
+                if let Ok(mut command_ids) = self.command_ids.lock() {
+                    command_ids.rollback(command_id);
                 }
             }
         }
@@ -609,18 +739,18 @@ impl CoreSessionWorkerHandle {
             return Ok(false);
         }
         if let Some(command_id) = command_id.as_ref() {
-            let mut accepted = self
-                .accepted_command_ids
+            let mut command_ids = self
+                .command_ids
                 .lock()
                 .map_err(|_| "core_command_dedup_poisoned".to_string())?;
-            if !accepted.insert(command_id.clone()) {
+            if !command_ids.reserve(command_id.clone())? {
                 return Ok(true);
             }
         }
         if let Err(error) = before_enqueue() {
             if let Some(command_id) = command_id.as_ref() {
-                if let Ok(mut accepted) = self.accepted_command_ids.lock() {
-                    accepted.remove(command_id);
+                if let Ok(mut command_ids) = self.command_ids.lock() {
+                    command_ids.rollback(command_id);
                 }
             }
             return Err(error);
@@ -770,6 +900,16 @@ impl CoreSessionWorkerHandle {
         )
     }
 
+    pub fn update_claude_codex_tool_discovery(&self, enabled: bool) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.enqueue_runtime_update(
+            PendingRuntimeUpdate::ClaudeCodexToolDiscovery(enabled),
+            CoreSessionWorkerCommand::InterfacePreferencesUpdated,
+        )
+    }
+
     fn enqueue_runtime_update(
         &self,
         update: PendingRuntimeUpdate,
@@ -805,6 +945,18 @@ impl CoreSessionWorkerHandle {
         }
         self.command_tx
             .send(CoreSessionWorkerCommand::UpdateHttpHeaders { http_headers })
+            .map_err(|_| "core_session_worker_stopped".to_string())
+    }
+
+    pub fn update_model_http_transport(
+        &self,
+        options: agent_core::ModelHttpTransportOptions,
+    ) -> Result<(), String> {
+        if self.shutdown_requested.load(Ordering::SeqCst) {
+            return Err("core_session_worker_stopped".to_string());
+        }
+        self.command_tx
+            .send(CoreSessionWorkerCommand::UpdateModelHttpTransport { options })
             .map_err(|_| "core_session_worker_stopped".to_string())
     }
 
@@ -976,7 +1128,7 @@ impl CoreSessionWorkerManager {
             workspace,
             display_name,
             parent_worker_id,
-            HttpModelClient,
+            HttpModelClient::default(),
         )
     }
 
@@ -1025,7 +1177,7 @@ impl CoreSessionWorkerManager {
             parent_worker_id,
             assistant_speaker_name,
             false,
-            HttpModelClient,
+            HttpModelClient::default(),
         )
     }
 
@@ -1050,7 +1202,7 @@ impl CoreSessionWorkerManager {
             display_name,
             parent_worker_id,
             assistant_speaker_name,
-            HttpModelClient,
+            HttpModelClient::default(),
         )
     }
 
@@ -1295,6 +1447,21 @@ impl Default for CoreSessionWorkerManager {
     }
 }
 
+fn session_runtime_identity_context(
+    identity: &agent_core::CoreSessionWorkerIdentity,
+    workspace: &CoreSessionWorkerWorkspace,
+) -> String {
+    format!(
+        "Current session_id: {}\nCurrent session name: {}\nCurrent context_id: {}\nCurrent worker_id: {}\nCurrent runtime surface: {}\nCurrent command target: {}",
+        identity.session_id,
+        identity.display_name,
+        identity.context_id,
+        identity.worker_id,
+        workspace.runtime,
+        workspace.run_bash_target,
+    )
+}
+
 impl CoreSessionWorker {
     pub fn spawn(
         core: AgentCore,
@@ -1306,7 +1473,7 @@ impl CoreSessionWorker {
             config,
             worker_config,
             CoreSessionWorkerRuntime::new(),
-            HttpModelClient,
+            HttpModelClient::default(),
         )
     }
 
@@ -1345,7 +1512,7 @@ impl CoreSessionWorker {
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let cancel_generation = Arc::new(AtomicU64::new(0));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
-        let accepted_command_ids = Arc::new(Mutex::new(BTreeSet::new()));
+        let command_ids = Arc::new(Mutex::new(CoreCommandIdTracker::default()));
         let pending_runtime_updates = Arc::new(Mutex::new(Vec::new()));
         let background_cancel =
             core.background_resource_cancel_callback(worker_config.identity.session_id.clone());
@@ -1356,7 +1523,7 @@ impl CoreSessionWorker {
             cancel_generation: Arc::clone(&cancel_generation),
             shutdown_requested: Arc::clone(&shutdown_requested),
             reply_tx,
-            accepted_command_ids,
+            command_ids: Arc::clone(&command_ids),
             pending_runtime_updates: Arc::clone(&pending_runtime_updates),
             background_cancel,
         };
@@ -1371,6 +1538,9 @@ impl CoreSessionWorker {
                 worker_config.continue_supplements_after_final_answer;
             core.set_response_protocol(config.response_protocol);
             core.set_assistant_speaker_name(&assistant_speaker_name);
+            core.set_runtime_system_context(session_runtime_identity_context(
+                &identity, &workspace,
+            ));
             core.set_tool_repo_session_id(&identity.session_id);
             let init_event = core_initialized_topic_event_with_worker(
                 &identity.session_id,
@@ -1393,6 +1563,7 @@ impl CoreSessionWorker {
                 context_id: identity.context_id.clone(),
                 worker_id: identity.worker_id.clone(),
                 supplement_mailbox,
+                command_ids: Arc::clone(&command_ids),
                 cancel_requested: Arc::clone(&cancel_requested),
                 reply_rx,
                 runtime: runtime.clone(),
@@ -1411,10 +1582,10 @@ impl CoreSessionWorker {
                     match command_rx.recv_timeout(Duration::from_millis(100)) {
                         Ok(command) => command,
                         Err(RecvTimeoutError::Timeout) => {
-                            let context_id = identity.context_id.clone();
+                            let session_id = identity.session_id.clone();
                             has_running_shell_jobs = !core
-                                .refresh_running_shell_jobs_for_session_with_runtime(
-                                    &context_id,
+                                .consume_completed_shell_jobs_for_session_with_runtime(
+                                    &session_id,
                                     Some(&mut ui),
                                 )
                                 .is_empty();
@@ -1436,9 +1607,11 @@ impl CoreSessionWorker {
                     | CoreSessionWorkerCommand::ChangeCwd { .. }
                     | CoreSessionWorkerCommand::RuntimeConfigUpdated
                     | CoreSessionWorkerCommand::MaxRoundsUpdated
+                    | CoreSessionWorkerCommand::InterfacePreferencesUpdated
                     | CoreSessionWorkerCommand::UpdateApiKey { .. }
                     | CoreSessionWorkerCommand::UpdateHttpHeaders { .. }
                     | CoreSessionWorkerCommand::UpdateRequestFields { .. }
+                    | CoreSessionWorkerCommand::UpdateModelHttpTransport { .. }
                     | CoreSessionWorkerCommand::UpdateMcp { .. }
                         if shutdown_requested.load(Ordering::SeqCst) =>
                     {
@@ -1449,20 +1622,20 @@ impl CoreSessionWorker {
                         mut additional_context,
                         command_id,
                         initial_supplements,
+                        direct_resume,
                         cancel_generation: command_generation,
                     } => {
                         if command_generation < cancel_generation.load(Ordering::SeqCst) {
                             if let Some(command_id) = command_id.as_ref() {
-                                let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
-                                    command_id: command_id.clone(),
-                                });
+                                publish_command_accepted(
+                                    &event_tx,
+                                    &command_ids,
+                                    command_id.clone(),
+                                );
                             }
                             for supplement in initial_supplements {
                                 if let Some(command_id) = supplement.command_id {
-                                    let _ =
-                                        event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
-                                            command_id,
-                                        });
+                                    publish_command_accepted(&event_tx, &command_ids, command_id);
                                 }
                             }
                             // The Host has already recorded a pending turn before enqueueing
@@ -1486,11 +1659,8 @@ impl CoreSessionWorker {
                             }
                         }
                         if let Some(command_id) = command_id.as_ref() {
-                            let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
-                                command_id: command_id.clone(),
-                            });
+                            publish_command_accepted(&event_tx, &command_ids, command_id.clone());
                         }
-                        let context_id = identity.context_id.clone();
                         let outcome = {
                             let working = runtime.begin_worker_turn(&identity.session_id);
                             let _ = event_tx.send(CoreSessionWorkerEvent::TurnStarted {
@@ -1498,12 +1668,17 @@ impl CoreSessionWorker {
                             });
                             ui.current_turn_active = Some(working.active_handle());
                             let outcome = loop {
-                                let main_outcome = run_session_turn_with_model_client(
+                                let run_turn = if direct_resume {
+                                    run_direct_resume_turn_with_model_client
+                                } else {
+                                    run_session_turn_with_model_client
+                                };
+                                let main_outcome = run_turn(
                                     &mut core,
                                     &mut config,
                                     TurnInput {
                                         input: &input,
-                                        session: &context_id,
+                                        session: &identity.session_id,
                                         audit_file: &workspace.audit_file,
                                         runtime: &workspace.runtime,
                                         run_bash_target: &workspace.run_bash_target,
@@ -1566,9 +1741,11 @@ impl CoreSessionWorker {
                     } => {
                         if command_generation < cancel_generation.load(Ordering::SeqCst) {
                             if let Some(command_id) = command_id.as_ref() {
-                                let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
-                                    command_id: command_id.clone(),
-                                });
+                                publish_command_accepted(
+                                    &event_tx,
+                                    &command_ids,
+                                    command_id.clone(),
+                                );
                             }
                             let _ = event_tx.send(CoreSessionWorkerEvent::TurnStarted {
                                 command_id: command_id.clone(),
@@ -1583,9 +1760,7 @@ impl CoreSessionWorker {
                         }
                         cancel_requested.store(false, Ordering::SeqCst);
                         if let Some(command_id) = command_id.as_ref() {
-                            let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
-                                command_id: command_id.clone(),
-                            });
+                            publish_command_accepted(&event_tx, &command_ids, command_id.clone());
                         }
                         let working = runtime.begin_worker_turn(&identity.session_id);
                         let _ = event_tx.send(CoreSessionWorkerEvent::TurnStarted {
@@ -1637,6 +1812,9 @@ impl CoreSessionWorker {
                         assistant_speaker_name = updated_assistant_speaker_name
                             .unwrap_or_else(|| identity.display_name.clone());
                         core.set_assistant_speaker_name(&assistant_speaker_name);
+                        core.set_runtime_system_context(session_runtime_identity_context(
+                            &identity, &workspace,
+                        ));
                         let event = core_initialized_topic_event_with_worker(
                             &identity.session_id,
                             core.profile(),
@@ -1677,7 +1855,8 @@ impl CoreSessionWorker {
                         core.notify_runtime_config_changed();
                     }
                     CoreSessionWorkerCommand::RuntimeConfigUpdated
-                    | CoreSessionWorkerCommand::MaxRoundsUpdated => {
+                    | CoreSessionWorkerCommand::MaxRoundsUpdated
+                    | CoreSessionWorkerCommand::InterfacePreferencesUpdated => {
                         ui.apply_pending_runtime_updates(&mut core, &mut config);
                     }
                     CoreSessionWorkerCommand::UpdateApiKey { api_key } => {
@@ -1690,6 +1869,10 @@ impl CoreSessionWorker {
                     }
                     CoreSessionWorkerCommand::UpdateRequestFields { request_fields } => {
                         config.request_fields = request_fields;
+                        core.notify_runtime_config_changed();
+                    }
+                    CoreSessionWorkerCommand::UpdateModelHttpTransport { options } => {
+                        config.http_transport = options;
                         core.notify_runtime_config_changed();
                     }
                     CoreSessionWorkerCommand::UpdateMcp {
@@ -1763,6 +1946,7 @@ struct WorkerTurnUi {
     context_id: String,
     worker_id: String,
     supplement_mailbox: Arc<Mutex<SupplementMailbox>>,
+    command_ids: Arc<Mutex<CoreCommandIdTracker>>,
     cancel_requested: Arc<AtomicBool>,
     reply_rx: Receiver<TopicReply>,
     runtime: CoreSessionWorkerRuntime,
@@ -1832,7 +2016,7 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
                 config,
                 TurnInput {
                     input: &input,
-                    session: &identity.context_id,
+                    session: &identity.session_id,
                     audit_file: &workspace.audit_file,
                     runtime: &workspace.runtime,
                     run_bash_target: &workspace.run_bash_target,
@@ -2013,6 +2197,9 @@ fn apply_worker_runtime_update(
             }
         }
         PendingRuntimeUpdate::MaxRounds(max_rounds) => core.set_max_rounds(max_rounds),
+        PendingRuntimeUpdate::ClaudeCodexToolDiscovery(enabled) => {
+            core.set_claude_codex_tool_discovery(enabled);
+        }
     }
     core.notify_runtime_config_changed();
 }
@@ -2221,9 +2408,7 @@ impl WorkerTurnUi {
             .into_iter()
             .map(|queued| {
                 if let Some(command_id) = queued.command_id {
-                    let _ = self
-                        .event_tx
-                        .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                    publish_command_accepted(&self.event_tx, &self.command_ids, command_id);
                 }
                 agent_core::UserSupplement::new(queued.text, queued.additional_context)
             })

@@ -195,8 +195,39 @@ pub fn run_session_turn(
     ui: &mut dyn TurnUi,
     profiler: Option<&mut RuntimeProfiler>,
 ) -> TurnOutcome {
-    let mut model_client = HttpModelClient;
+    let mut model_client = HttpModelClient::default();
     run_session_turn_with_model_client(core, config, request, ui, profiler, &mut model_client)
+}
+
+pub fn run_direct_resume_turn(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    request: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+) -> TurnOutcome {
+    let mut model_client = HttpModelClient::default();
+    run_direct_resume_turn_with_model_client(core, config, request, ui, profiler, &mut model_client)
+}
+
+pub fn run_direct_resume_turn_with_model_client(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    request: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+    model_client: &mut dyn ModelClient,
+) -> TurnOutcome {
+    run_session_turn_with_model_client_and_reminder_override(
+        core,
+        config,
+        request,
+        ui,
+        profiler,
+        model_client,
+        None,
+        true,
+    )
 }
 
 pub fn run_session_turn_with_model_client(
@@ -215,6 +246,7 @@ pub fn run_session_turn_with_model_client(
         profiler,
         model_client,
         None,
+        false,
     )
 }
 
@@ -236,6 +268,7 @@ fn run_session_turn_with_model_client_and_focus_interval(
         profiler,
         model_client,
         Some(focus_reminder_interval),
+        false,
     )
 }
 
@@ -247,6 +280,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
     mut profiler: Option<&mut RuntimeProfiler>,
     model_client: &mut dyn ModelClient,
     focus_reminder_interval: Option<Duration>,
+    direct_resume: bool,
 ) -> TurnOutcome {
     core.set_response_protocol(config.response_protocol);
     let turn_token = allocate_turn_token(request.session, epoch_millis());
@@ -258,7 +292,17 @@ fn run_session_turn_with_model_client_and_reminder_override(
     if let Some(interval) = focus_reminder_interval {
         reminders.override_first_time_interval(interval);
     }
-    core.record_turn_start_audit(request.audit_file, request.session, &turn_id, request.input);
+    let effective_input = if direct_resume {
+        crate::DIRECT_RESUME_USER_INPUT
+    } else {
+        request.input
+    };
+    core.record_turn_start_audit(
+        request.audit_file,
+        request.session,
+        &turn_id,
+        effective_input,
+    );
     let profile =
         crate::negotiate_interaction(model_client, config, request.audit_file, &mut || {
             ui.is_cancel_requested()
@@ -271,7 +315,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
         .additional_context
         .map(str::trim)
         .filter(|context| !context.is_empty());
-    let mut step = core.begin_turn(request.input, additional_context);
+    let mut step = if direct_resume {
+        core.begin_direct_resume_turn(additional_context)
+    } else {
+        core.begin_turn(request.input, additional_context)
+    };
     let mut rounds = 0u32;
     let mut model_wait_this_turn = Duration::ZERO;
     let mut latest_usage: Option<UsageStats> = None;
@@ -626,10 +674,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
         core.mark_user_interrupted_work();
     }
     let mut action_runtime = TurnActionRuntime::new(ui);
-    outcome = outcome.with_running_jobs(core.refresh_running_shell_jobs_for_session_with_runtime(
-        request.session,
-        Some(&mut action_runtime),
-    ));
+    outcome =
+        outcome.with_running_jobs(core.consume_completed_shell_jobs_for_session_with_runtime(
+            request.session,
+            Some(&mut action_runtime),
+        ));
     if let Some(profiler) = profiler {
         profiler.record_turn(elapsed, model_wait_this_turn);
     }

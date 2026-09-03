@@ -17,6 +17,57 @@ fn complete_test_registry_loads_manifest_tools() {
 }
 
 #[test]
+fn platform_profiles_select_only_the_matching_local_command_tool() {
+    let unix = CapabilityRegistry::builtin_for_host(
+        CapabilityHostProfile::unix_with_local_command_execution(),
+    );
+    assert!(unix.contains_tool("run_bash"));
+    assert!(!unix.contains_tool("run_powershell"));
+    assert_eq!(unix.binding_name("run_bash"), Some("run_bash"));
+
+    let windows = CapabilityRegistry::builtin_for_host(
+        CapabilityHostProfile::windows_with_local_command_execution(),
+    );
+    assert!(!windows.contains_tool("run_bash"));
+    assert!(windows.contains_tool("run_powershell"));
+    assert_eq!(
+        windows.binding_name("run_powershell"),
+        Some("run_powershell")
+    );
+}
+
+#[test]
+fn windows_local_command_catalog_is_powershell_specific() {
+    let registry = CapabilityRegistry::builtin_for_host(
+        CapabilityHostProfile::windows_with_local_command_execution(),
+    );
+    let rendered = registry.render_tool_catalog_markdown();
+    let section = rendered
+        .split("#### `run_powershell`")
+        .nth(1)
+        .and_then(|tail| tail.split("\n#### `").next())
+        .expect("run_powershell catalog section");
+
+    assert!(section.contains("PowerShell"), "{section}");
+    assert!(section.contains("Get-ChildItem -Force"), "{section}");
+    assert!(section.contains("Test-Path"), "{section}");
+    for unix_only_text in [
+        "run_bash",
+        "Bash",
+        "set -euo pipefail",
+        "test -f",
+        "/bin/bash",
+    ] {
+        assert!(
+            !rendered.contains(unix_only_text),
+            "{unix_only_text}: {rendered}"
+        );
+    }
+    assert!(!section.contains(RUN_POWERSHELL_HOST_ENVIRONMENT_PLACEHOLDER));
+    assert!(!rendered.contains("#### `run_bash`"), "{rendered}");
+}
+
+#[test]
 fn host_profile_filters_local_command_capabilities() {
     let registry = CapabilityRegistry::builtin_for_host(
         CapabilityHostProfile::without_local_command_execution(),
@@ -105,6 +156,43 @@ fn builtin_run_bash_description_includes_dynamic_os_and_bash_versions() {
         !run_bash.contains(RUN_BASH_HOST_ENVIRONMENT_PLACEHOLDER),
         "{run_bash}"
     );
+}
+
+#[test]
+fn toolgen_absolute_path_examples_render_for_each_platform_without_schema_lock_in() {
+    let unix = CapabilityRegistry::builtin_for_host(
+        CapabilityHostProfile::unix_with_local_command_execution(),
+    );
+    let unix_catalog = unix.render_tool_catalog_markdown();
+    let unix_toolgen = unix_catalog
+        .split("#### `toolgen`")
+        .nth(1)
+        .and_then(|tail| tail.split("\n#### `").next())
+        .expect("Unix toolgen section");
+    assert!(unix_toolgen.contains("/tmp/timem/session/toolrepo/.drafts/draft_123"));
+    assert!(!unix_toolgen.contains("C:\\Timem"));
+    assert!(!unix_toolgen.contains("{{PLATFORM_"));
+
+    let windows = CapabilityRegistry::builtin_for_host(
+        CapabilityHostProfile::windows_with_local_command_execution(),
+    );
+    let windows_catalog = windows.render_tool_catalog_markdown();
+    let windows_toolgen = windows_catalog
+        .split("#### `toolgen`")
+        .nth(1)
+        .and_then(|tail| tail.split("\n#### `").next())
+        .expect("Windows toolgen section");
+    assert!(
+        windows_toolgen.contains(r"C:\\Timem\\session\\toolrepo\\.drafts\\draft_123"),
+        "{windows_toolgen}"
+    );
+    assert!(!windows_toolgen.contains("/tmp/timem"));
+    assert!(!windows_toolgen.contains("{{PLATFORM_"));
+
+    let schema = windows
+        .tool_input_property_schema("toolgen", "draft_path")
+        .expect("draft_path schema");
+    assert!(schema.get("pattern").is_none(), "{schema}");
 }
 
 #[test]

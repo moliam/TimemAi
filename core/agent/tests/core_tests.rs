@@ -1386,6 +1386,7 @@ fn output_expansion_resolution_is_core_owned() {
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
 
     let resolution = core.resolve_output_expansion_with_audit(
@@ -1430,6 +1431,7 @@ fn output_expansion_decline_returns_core_stop_summary() {
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let usage = UsageStats {
         prompt_tokens: 80,
@@ -1478,6 +1480,7 @@ fn runtime_config_update_is_core_owned_and_updates_runtime_state() {
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let mut bash = BashApprovalMode::Ask;
     let mut work = agent_core::WorkInstructionLoadMode::Silent;
@@ -1557,6 +1560,7 @@ fn runtime_host_configuration_sync_is_core_owned() {
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
 
     core.configure_runtime_from_host(&config, BashApprovalMode::Approve);
@@ -1600,7 +1604,10 @@ fn runtime_host_configuration_sync_is_core_owned() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains(&format!(
+        "Action result: {}",
+        agent_core::os::local_shell_tool_name()
+    )));
     assert!(prompt.contains("configured"));
 }
 
@@ -2747,7 +2754,10 @@ fn canonical_tools_accept_json_object_args() {
     };
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("测试代号是 ALPHA-42"));
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains(&format!(
+        "Action result: {}",
+        agent_core::os::local_shell_tool_name()
+    )));
     assert!(prompt.contains("kv-ok"));
     assert!(prompt.contains("Action result: self_tool"));
     assert!(prompt.contains("TimemAi"));
@@ -2968,7 +2978,10 @@ fn protocol_examples_cover_normal_and_corner_flows() {
     };
     assert!(prompt.contains("并行查询记忆和本地文件数量。"));
     assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains(&format!(
+        "Action result: {}",
+        agent_core::os::local_shell_tool_name()
+    )));
 
     let _ = core.begin_turn("最终确认发布包", None);
     let final_turn = match core.apply_model_response(LlmResponse {
@@ -3057,7 +3070,10 @@ fn protocol_examples_cover_normal_and_corner_flows() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("expected bash action result, got {other:?}"),
     };
-    assert!(prompt.contains("Action result: run_bash"));
+    assert!(prompt.contains(&format!(
+        "Action result: {}",
+        agent_core::os::local_shell_tool_name()
+    )));
     assert!(prompt.contains("ERROR"));
 
     let _ = core.begin_turn("最小动作", None);
@@ -3197,7 +3213,7 @@ fn memmgr_raw_chat_search_reads_persisted_chat_records() {
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","scope":"global","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5030,7 +5046,7 @@ fn memory_sql_query_allows_pragma_table_info() {
 }
 
 #[test]
-fn memory_sql_query_allows_chat_messages_table_info() {
+fn memory_sql_query_rejects_chat_messages_table_info() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5049,9 +5065,7 @@ fn memory_sql_query_allows_chat_messages_table_info() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("name=content"));
-    assert!(prompt.contains("name=session_id"));
-    assert!(prompt.contains("name=created_at_ms"));
+    assert!(prompt.contains("error: only_declared_tables_are_allowed"));
 }
 
 #[test]
@@ -5192,7 +5206,7 @@ fn chat_history_query_reads_persisted_chat_records() {
     let _ = core.begin_turn("我之前说过什么物品", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","scope":"global","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5203,7 +5217,7 @@ fn chat_history_query_reads_persisted_chat_records() {
     };
     assert!(prompt.contains("Action result: memmgr"));
     assert!(prompt.contains("chat_records"));
-    assert!(prompt.contains("source=chat_record"));
+    assert!(prompt.contains("source=chat_history"));
     assert!(prompt.contains("shell_old"));
     assert!(prompt.contains("测试物品 BLUE-17"));
     assert!(prompt.contains("我记下了测试物品 BLUE-17这个说法"));
@@ -5226,7 +5240,7 @@ fn chat_history_query_reads_legacy_jsonl_audit_records() {
     let _ = core.begin_turn("旧格式里说过什么", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 GREEN-29","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","scope":"global","search_text":"测试物品 GREEN-29","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5236,7 +5250,7 @@ fn chat_history_query_reads_legacy_jsonl_audit_records() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("source=chat_record"));
+    assert!(prompt.contains("source=chat_history"));
     assert!(prompt.contains("legacy_shell"));
     assert!(prompt.contains("测试物品 GREEN-29"));
 }
@@ -5255,7 +5269,7 @@ fn chat_history_query_keeps_current_prompt_delta_fallback() {
     let _ = core.begin_turn("我刚才说了什么物品", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","scope":"global","search_text":"测试物品 BLUE-17","limit":5}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5289,7 +5303,7 @@ fn chat_history_search_empty_text_lists_recent_records() {
     let _ = core.begin_turn("列最近聊天", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","search_text":"","limit":1}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"raw_chat","op":"search","scope":"global","search_text":"","limit":1}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5298,31 +5312,22 @@ fn chat_history_search_empty_text_lists_recent_records() {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert!(prompt.contains("source=chat_record"));
+    assert!(prompt.contains("source=chat_history"));
     assert!(prompt.contains("第二条历史"));
     assert!(!prompt.contains("第一条历史"));
 }
 
 #[test]
-fn memory_sql_query_reads_chat_messages_with_time_window() {
-    let root = tmp_dir("chat_messages_sql");
-    let dir = root.join("memory");
-    fs::create_dir_all(&dir).unwrap();
-    let audit_file = root.join("audit").join("api_audit.json");
-    write_audit_doc(
-        &audit_file,
-        vec![
-            json!({"type":"turn_start","session":"shell_old","turn_id":"turn_1781760000000","user_input":"旧聊天"}),
-            json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"旧回复"}),
-            json!({"type":"turn_start","session":"shell_new","turn_id":"turn_1781846400000","user_input":"新聊天"}),
-            json!({"type":"turn_final","session":"shell_new","turn_id":"turn_1781846400000","assistant_output":"新回复"}),
-        ],
+fn memory_sql_query_rejects_chat_messages_reads() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("chat_messages_sql_rejected"),
     );
-    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
-    let _ = core.begin_turn("查最近窗口聊天", None);
+    let _ = core.begin_turn("查聊天 SQL", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT session_id, role, content, created_at_ms FROM chat_messages WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms DESC","params":["1781840000000","1781850000000"],"limit":20}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT content FROM chat_messages LIMIT 5"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5332,15 +5337,12 @@ fn memory_sql_query_reads_chat_messages_with_time_window() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("session_id=shell_new"));
-    assert!(prompt.contains("content=新聊天"));
-    assert!(prompt.contains("content=新回复"));
-    assert!(!prompt.contains("content=旧聊天"));
+    assert!(prompt.contains("error: only_declared_tables_are_allowed"));
 }
 
 #[test]
 fn memory_sql_query_accepts_common_llm_param_shapes() {
-    let sql = "SELECT role, content, created_at_ms FROM chat_messages WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms ASC";
+    let sql = "SELECT id, content, created_at_ms FROM memories WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms ASC";
     let sql_json = serde_json::to_string(sql).unwrap();
     let cases = [
         (
@@ -5370,14 +5372,6 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
         let root = tmp_dir(case_name);
         let dir = root.join("memory");
         fs::create_dir_all(&dir).unwrap();
-        let audit_file = root.join("audit").join("api_audit.json");
-        write_audit_doc(
-            &audit_file,
-            vec![
-                json!({"type":"turn_start","session":"shell_today","turn_id":"turn_1782203922467","user_input":"我今天和你聊过什么？"}),
-                json!({"type":"turn_final","session":"shell_today","turn_id":"turn_1782203922467","assistant_output":"今天聊过 shell 记忆查询。"}),
-            ],
-        );
         let mut core = test_core("STATIC", profile("aws-claude-sonnet-4-6"), &dir);
         let _ = core.begin_turn("我今天和你聊过什么？", None);
         let content = scored(format!(
@@ -5396,18 +5390,8 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
             other => panic!("{case_name} unexpected step: {other:?}"),
         };
         assert!(prompt.contains("Action result: memmgr"), "{case_name}");
-        assert!(
-            prompt.contains("content=我今天和你聊过什么？"),
-            "{case_name}"
-        );
-        assert!(
-            prompt.contains("content=今天聊过 shell 记忆查询。"),
-            "{case_name}"
-        );
-        assert!(
-            !prompt.contains("params_count_mismatch"),
-            "{case_name}: {prompt}"
-        );
+        assert!(prompt.contains("results: none"), "{case_name}: {prompt}");
+        assert!(!prompt.contains("error:"), "{case_name}: {prompt}");
     }
 }
 
@@ -5686,8 +5670,15 @@ fn memory_update_concurrent_same_version_conflicts_allow_only_one_winner() {
         .iter()
         .filter(|prompt| prompt.contains("memory_conflict"))
         .count();
-    assert_eq!(success_count, 1);
-    assert_eq!(conflict_count, contenders - 1);
+    assert_eq!(
+        success_count, 1,
+        "unexpected concurrent results: {prompts:#?}"
+    );
+    assert_eq!(
+        conflict_count,
+        contenders - 1,
+        "unexpected concurrent results: {prompts:#?}"
+    );
 
     let stored = fs::read_to_string(dir.join("memory.jsonl")).unwrap();
     let rows = stored
@@ -5973,6 +5964,7 @@ fn run_bash_rejects_old_timeout_sec_field() {
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
+#[cfg(unix)]
 #[test]
 fn run_bash_unmanaged_background_is_rejected_and_reported_to_the_model() {
     let dir = tmp_dir("bash_unmanaged_background");
@@ -5996,9 +5988,11 @@ fn run_bash_unmanaged_background_is_rejected_and_reported_to_the_model() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("检测到命令可能创建脱离 Runtime 管理的后台进程"));
-    assert!(prompt.contains("run_bash(background=true)"));
+    assert!(prompt.contains("当前平台命令工具的 background=true"));
     assert!(!marker.exists());
-    assert!(core.running_shell_jobs_for_session("default").is_empty());
+    assert!(core
+        .query_running_shell_jobs_for_session("default")
+        .is_empty());
 }
 
 #[cfg(unix)]
@@ -6042,6 +6036,60 @@ fn run_bash_background_job_enters_running_list_and_later_emits_exit_update() {
     assert!(prompt.contains("Exit status: 0"), "{prompt}");
     assert!(prompt.contains("Final output:"), "{prompt}");
     assert!(prompt.contains("background-ok"), "{prompt}");
+}
+
+#[cfg(unix)]
+#[test]
+fn model_request_refresh_includes_a_just_finished_background_jobs_exit_status() {
+    let dir = tmp_dir("bash_exit_update_at_request_boundary");
+    let mut core = test_core("STATIC", profile("qwen-plus"), dir.clone());
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let marker = dir.join("release-background-job");
+    let quoted_marker = format!("'{}'", marker.display().to_string().replace('\'', "'\\''"));
+    let command =
+        format!("while [ ! -f {quoted_marker} ]; do sleep 0.01; done; printf boundary-ok");
+    let _ = core.begin_turn("run a short background task", None);
+    let prompt = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(format!(
+            r#"{{"working_still_action":[{{"run_bash":{{"cmd":{},"background":true}}}}]}}"#,
+            serde_json::to_string(&command).unwrap()
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(!prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
+
+    // Request-local history is not persisted in Core. Terminal events must be
+    // appended to this prompt rather than replacing it with a rebuilt prompt.
+    let request_local_event = "REQUEST_LOCAL_REPAIR_EVENT";
+    let trailer = "Please continue the work and respond as protocol requires in user's language:";
+    let body = prompt.strip_suffix(trailer).expect("response trailer");
+    let prompt = format!("{}{}\n\n{}", body, request_local_event, trailer);
+
+    std::fs::write(&marker, b"release").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !core
+        .query_running_shell_jobs_for_session("default")
+        .is_empty()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "background job did not exit after explicit release"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let prompt = core.build_model_request_prompt(&prompt);
+
+    assert!(prompt.contains(request_local_event), "{prompt}");
+    assert!(prompt.contains("RUNNING_JOB_UPDATE"), "{prompt}");
+    assert!(prompt.contains("Exit status: 0"), "{prompt}");
+    assert!(prompt.contains("boundary-ok"), "{prompt}");
+    assert!(!prompt.contains("### STILL RUNNING"), "{prompt}");
 }
 
 #[cfg(unix)]
@@ -6431,7 +6479,7 @@ fn timeout_job_is_reported_running_and_model_can_kill_by_pid() {
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while core
-        .refresh_running_shell_jobs_for_session("default")
+        .consume_completed_shell_jobs_for_session("default")
         .iter()
         .any(|job| job.pid.to_string() == pid)
     {
@@ -6529,9 +6577,15 @@ fn run_bash_requires_approval_for_mutating_commands() {
         CoreStep::NeedsUserApproval { request } => request,
         other => panic!("unexpected step: {other:?}"),
     };
-    assert_eq!(request.action, "run_bash");
+    assert_eq!(request.action, agent_core::os::local_shell_tool_name());
     assert_eq!(request.command, "rm not_allowed");
-    assert_eq!(request.reason, "run_bash_requires_user_approval");
+    assert_eq!(
+        request.reason,
+        format!(
+            "{}_requires_user_approval",
+            agent_core::os::local_shell_tool_name()
+        )
+    );
     assert_eq!(request.risk, "local_command_execution");
 
     let turn_audit = dir.join("audit/turn_audit.json");
@@ -6686,7 +6740,13 @@ fn run_bash_requires_approval_for_high_risk_command_inside_compound_command() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert_eq!(request.command, "pwd && rm not_allowed");
-    assert_eq!(request.reason, "run_bash_requires_user_approval");
+    assert_eq!(
+        request.reason,
+        format!(
+            "{}_requires_user_approval",
+            agent_core::os::local_shell_tool_name()
+        )
+    );
     assert_eq!(request.risk, "local_command_execution");
 }
 
@@ -6787,6 +6847,7 @@ fn run_bash_missing_command_returns_tool_input_error() {
     assert!(!prompt.contains("Action result: run_bash"));
 }
 
+#[cfg(unix)]
 #[test]
 fn run_bash_requires_approval_for_absolute_paths() {
     let mut core = test_core("STATIC", profile("qwen-plus"), tmp_dir("bash_path_reject"));
@@ -7091,7 +7152,7 @@ fn scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering() {
     let prompt = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(
-            r#"{"status":"working","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}},{"memmgr":{"type":"raw_chat","op":"search","search_text":"测试时段 发布检查 CI TTY","limit":5}}]}"#,
+            r#"{"status":"working","working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories WHERE content LIKE ? LIMIT 5","params":["%测试代号%"],"limit":5}},{"memmgr":{"type":"raw_chat","op":"search","scope":"global","search_text":"测试时段 发布检查 CI TTY","limit":5}}]}"#,
         ),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
@@ -7453,6 +7514,67 @@ fn rendered_static_prompt_preserves_source_rule_order() {
 }
 
 #[test]
+fn runtime_system_context_is_part_of_the_api_system_block_and_survives_fork() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("runtime_system_context"),
+    );
+    core.set_runtime_system_context(
+        "Current session_id: session_7\nCurrent session name: Worker 7",
+    );
+
+    let prompt = match core.begin_turn("hello", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    let system_end = prompt
+        .find("[END SYSTEM PROMPT]")
+        .expect("system prompt boundary");
+    assert!(prompt[..system_end].contains("## Session Runtime Identity"));
+    assert!(prompt[..system_end].contains("Current session_id: session_7"));
+    assert!(!prompt[system_end..].contains("Current session_id: session_7"));
+
+    let config = ModelServiceConfig {
+        interaction: Default::default(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://example.test/v1".to_string(),
+        api_key: "test-key".to_string(),
+        http_headers: Default::default(),
+        request_fields: Default::default(),
+        timeout_secs: 30,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
+        response_protocol: agent_core::ResponseProtocolKind::Json,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
+    };
+    let prepared = agent_core::prepare_model_request(&config, &prompt);
+    let messages = prepared.body["messages"].as_array().unwrap();
+    let system_message = messages
+        .iter()
+        .find(|message| message["role"] == "system")
+        .expect("API request should contain a system-role message");
+    assert!(system_message["content"]
+        .as_str()
+        .unwrap()
+        .contains("Current session_id: session_7"));
+    assert!(messages
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .all(|message| !message["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Current session_id: session_7")));
+
+    let mut fork = core.fork_ephemeral_context(tmp_dir("runtime_system_context_fork"));
+    let forked = fork.build_next_prompt();
+    let forked_system_end = forked.find("[END SYSTEM PROMPT]").unwrap();
+    assert!(forked[..forked_system_end].contains("Current session_id: session_7"));
+}
+
+#[test]
 fn interface_response_format_survives_static_prompt_refresh_and_context_fork() {
     let template = include_str!("../../../resources/system_prompt/system_prompt.md");
     let mut core = AgentCore::new_with_interface_preferences(
@@ -7476,6 +7598,41 @@ fn interface_response_format_survives_static_prompt_refresh_and_context_fork() {
     let mut fork = core.fork_ephemeral_context(tmp_dir("interface_response_format_fork"));
     let forked = fork.build_next_prompt();
     assert!(forked.contains("Answer in Markdown style."));
+}
+
+#[test]
+fn claude_codex_tool_discovery_can_be_added_and_removed_from_static_prompt() {
+    let template = include_str!("../../../resources/system_prompt/system_prompt.md");
+    let mut core = AgentCore::new_with_interface_preferences(
+        template,
+        profile("qwen-plus"),
+        tmp_dir("claude_codex_tool_discovery"),
+        InterfacePreferences::markdown().with_claude_codex_tool_discovery(true),
+    );
+
+    let enabled = match core.begin_turn("hello", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    let instruction = r#"If a task appears to involve some specific skill out of your scope, maybe in third-party agent's reusable skill or tool, search:
+1. Infer the required capability from intent, not a named skill.
+2. Inspect exposed tools, project/user Claude and Codex skill directories, and enabled plugin paths.
+3. Cover Linux, macOS, and Windows locations, including symlinks and junctions.
+4. Use available platform-native tools to enumerate files. Follow linked directories safely, prevent cycles, and do not use methods that may omit them.
+5. Match SKILL.md frontmatter (name, description, requires) or head part to the task.
+6. Read only matched instructions and required references.
+7. Verify dependencies, authentication, permissions, and a minimal read-only call when possible.
+8. Report candidate, loaded, or usable based only on verified evidence; disclose incomplete discovery."#;
+    assert!(enabled.contains(instruction));
+    assert!(!enabled.contains("{{CLAUDE_CODEX_TOOL_DISCOVERY_INSTRUCTION}}"));
+
+    core.set_claude_codex_tool_discovery(false);
+    let disabled = core.build_next_prompt();
+    assert!(!disabled.contains(instruction));
+    assert!(!disabled.contains("{{CLAUDE_CODEX_TOOL_DISCOVERY_INSTRUCTION}}"));
+
+    core.set_claude_codex_tool_discovery(true);
+    assert!(core.build_next_prompt().contains(instruction));
 }
 
 #[test]
@@ -7933,7 +8090,8 @@ fn memmgr_tool_catalog_does_not_expose_legacy_query_surface() {
     assert!(memmgr.contains(r#"{"memmgr":{"type":"raw_chat","op":"search""#));
     assert!(memmgr.contains(r#"{"memmgr":{"type":"scratch","op":"read""#));
     assert!(memmgr.contains("durable: schema|sql|insert|update|upsert|delete"));
-    assert!(memmgr.contains("raw_chat: search|sql|delete"));
+    assert!(memmgr.contains("raw_chat: search|delete"));
+    assert!(!memmgr.contains("raw_chat: search|sql|delete"));
     assert!(memmgr.contains("scratch: search|write|read|delete"));
     assert!(memmgr.contains("search_text"));
     assert!(!memmgr.contains("op=<query"));
@@ -8430,7 +8588,13 @@ fn self_tool_cwd_changes_relative_context_and_emits_structured_state() {
         prompt.contains(&format!("CWD changed to: {}", nested_dir.display())),
         "{prompt}"
     );
-    assert!(prompt.contains("Action result: run_bash"), "{prompt}");
+    assert!(
+        prompt.contains(&format!(
+            "Action result: {}",
+            agent_core::os::local_shell_tool_name()
+        )),
+        "{prompt}"
+    );
     assert!(
         prompt.contains(&nested_dir.display().to_string()),
         "{prompt}"

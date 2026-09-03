@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add the first focused Turn-concurrency CI profile: 300 seeded iterations of a
+  real `CoreSessionWorker` PromptCut/terminal-ownership race with independent
+  model and user producers, explicit synchronization, bounded waits, replayable
+  failure evidence, and command/Turn ownership assertions. The remaining Host
+  attachment/FIFO, Stop/Start, WebSocket/FIFO, and Chrome-latency stress profiles
+  remain release blockers for complete concurrency certification.
+
+### Fixed
+
+- Replace a Linux-sensitive background-job prompt-refresh wall-clock assertion
+  with an explicit process marker and bounded synchronization, allowing either
+  legal prompt cut while still proving the eventual exit update.
+- Bound Core worker command-ID tracking to pending and recent accepted sets.
+  In-flight IDs are never evicted, pending exhaustion fails explicitly, accepted
+  history is FIFO-bounded, and failed delivery reservations remain retryable.
+
 ## [2.0.0] - 2026-08-31
 
 ### Added

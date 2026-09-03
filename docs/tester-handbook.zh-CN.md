@@ -357,7 +357,7 @@ TIMEM_EDGE_ITERATIONS=5 scripts/edge_regression.sh
 
 ### 8.2 Session 与配置隔离
 
-- 创建、重命名、删除、分组、拖动和恢复 Session。
+- 创建、重命名、删除、固定分组和恢复 Session；Session 与 Group 目录均不可拖动或改序，非空 Group 禁止删除，内置 Unsorted 不可编辑。
 - 不同 Session 使用不同模型、协议、URL、Header、API Key。
 - 一个 Session 更新配置不改变全局默认或其他 Session。
 - API Key 始终掩码；只在认证且请求专属的通道揭示。

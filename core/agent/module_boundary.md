@@ -218,8 +218,8 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   reason, status metadata, and request ids. Do not collapse those into a single
   untyped text field when the semantic distinction matters.
 - Model service/model transport belongs behind core's model service boundary. The current
-  implementation may use HTTP/curl internally, but that is a core/model service
-  responsibility, not a shell UI responsibility. The intended chain is
+  implementation uses a native Rust HTTP client with rustls, but transport choice remains a
+  core/model service responsibility, not a shell UI responsibility. The intended chain is
   `host UI -> agent_core -> model service -> LLM`.
 - Cross-language topic wire contracts. `CoreTopicEvent` payload field names are
   part of the shared core/UI boundary for Rust, Swift, web, and process IPC

@@ -76,6 +76,15 @@ pub struct ModelServiceConfig {
     pub response_protocol: ResponseProtocolKind,
     pub interaction: crate::InteractionConfig,
     pub openai_compatible: OpenAiCompatibleOptions,
+    pub http_transport: ModelHttpTransportOptions,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelHttpTransportOptions {
+    /// Follow redirects that change scheme, host, or effective port. Disabled by default.
+    pub allow_cross_origin_redirects: bool,
+    /// Optional PEM-encoded private CA certificate(s) trusted only by this model client.
+    pub private_ca_pem: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

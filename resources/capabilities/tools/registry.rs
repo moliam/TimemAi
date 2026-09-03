@@ -9,6 +9,7 @@ pub(crate) const BUILTIN_TOOL_BINDINGS: &[&str] = &[
     "context_compact",
     "readfile",
     "run_bash",
+    "run_powershell",
     "self_tool",
     "sub_answer",
     "toolgen",
@@ -47,7 +48,7 @@ fn builtin_tool_callback(binding_name: &str) -> Option<BuiltinToolCallback> {
         "readfile" => Some(execute_readfile),
         "self_tool" => Some(execute_self_tool),
         "sub_answer" => Some(execute_sub_answer),
-        "run_bash" => Some(execute_run_bash),
+        "run_bash" | "run_powershell" => Some(execute_local_shell),
         "toolgen" => Some(execute_toolgen),
         _ => None,
     }
@@ -114,7 +115,7 @@ fn execute_readfile(
     ActionExecution::Completed(readfile::execute_action_outcome(core, action))
 }
 
-fn execute_run_bash(
+fn execute_local_shell(
     core: &mut AgentCore,
     action: &ParsedAction,
     runtime: &mut dyn ActionRuntime,

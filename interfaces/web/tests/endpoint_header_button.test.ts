@@ -37,8 +37,9 @@ describe("header endpoint selector", () => {
       /\.collapsed-session-card \{[\s\S]*min-height: 92px;[\s\S]*border: 0;[\s\S]*background: linear-gradient\(180deg, #17372f[\s\S]*box-shadow:/,
     );
     expect(styles).toMatch(
-      /\.collapsed-session-card span \{[\s\S]*text-overflow: ellipsis;[\s\S]*writing-mode: vertical-rl;/,
+      /\.collapsed-session-card span \{[\s\S]*text-overflow: ellipsis;[\s\S]*transform: translate\(-50%, -50%\) rotate\(90deg\);/,
     );
+    expect(styles).not.toContain("writing-mode: vertical-rl");
     expect(styles).toMatch(
       /@media \(max-width: 1050px\) \{[\s\S]*\.collapsed-brand,[\s\S]*\.collapsed-session-card,[\s\S]*display: none;/,
     );

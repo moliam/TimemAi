@@ -594,3 +594,86 @@ fn audit_maintenance_hint_is_written_only_for_a_segment_rollover() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn api_audit_retention_repairs_stale_manifest_then_remains_idempotent_and_appendable() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_core_audit_stale_manifest_retention_{}_{}",
+        std::process::id(),
+        audit_now_ms()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let base = root.join("api_audit.json");
+    std::fs::write(&base, b"{\"version\":1,\"events\":[]}").unwrap();
+    let stream = audit_sidecar_path(&base);
+    let segments = segmented_directory(&stream);
+    std::fs::create_dir_all(&segments).unwrap();
+
+    let old = segments.join("segment-0000000000000007.jsonl");
+    let mixed = segments.join("segment-0000000000000008.jsonl");
+    let missing = "segment-0000000000000006.jsonl";
+    std::fs::write(
+        &old,
+        b"{\"type\":\"old_a\",\"time_ms\":10}\n{\"type\":\"old_b\",\"time_ms\":20}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &mixed,
+        b"{\"type\":\"expired\",\"time_ms\":30}\n{\"type\":\"kept\",\"time_ms\":200}\n",
+    )
+    .unwrap();
+    let stale_manifest = json!({
+        "version": 1,
+        "next_index": 9,
+        "segments": [
+            {"file_name": missing, "bytes": 999},
+            {"file_name": old.file_name().unwrap().to_str().unwrap(), "bytes": 999},
+            {"file_name": mixed.file_name().unwrap().to_str().unwrap(), "bytes": 999}
+        ]
+    });
+    std::fs::write(
+        segments.join("manifest.json"),
+        serde_json::to_vec(&stale_manifest).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(prune_api_audit_before(&base, 100, 300).unwrap(), 3);
+    assert!(!old.exists(), "a wholly expired segment must be removed");
+    assert_eq!(
+        std::fs::read_to_string(&mixed).unwrap(),
+        "{\"type\":\"kept\",\"time_ms\":200}\n",
+        "a mixed segment must be rewritten without expired records"
+    );
+
+    let repaired: Value =
+        serde_json::from_slice(&std::fs::read(segments.join("manifest.json")).unwrap()).unwrap();
+    let entries = repaired["segments"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["file_name"], "segment-0000000000000008.jsonl");
+    assert_eq!(
+        entries[0]["bytes"].as_u64().unwrap(),
+        std::fs::metadata(&mixed).unwrap().len()
+    );
+    assert_eq!(repaired["next_index"], 9);
+
+    assert_eq!(
+        prune_api_audit_before(&base, 100, 300).unwrap(),
+        0,
+        "the repaired stream must survive an immediate repeated pass"
+    );
+    append_audit_jsonl(&stream, &json!({"type":"after_repair", "time_ms":250})).unwrap();
+    let doc = read_api_audit_doc(&stream).unwrap();
+    let types = doc["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(types, vec!["kept", "after_repair"]);
+    assert!(
+        !segments.join(missing).exists(),
+        "later append must not recreate a manifest-only ghost segment"
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}

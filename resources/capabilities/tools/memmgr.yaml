@@ -8,7 +8,7 @@ description: |
   type=raw_chat for UI-visible chat transcript, type=scratch for temporary notes.
 prompt_synopsis: |
   {"memmgr":{"type":"durable","op":"sql","sql":"SELECT id, version, content FROM memories LIMIT 10","limit":10}}
-  {"memmgr":{"type":"raw_chat","op":"search","search_text":"text","limit":10}}
+  {"memmgr":{"type":"raw_chat","op":"search","scope":"current_session","search_text":"text","limit":10}}
   {"memmgr":{"type":"scratch","op":"read","id":"scratch_id"}}
 prompt_input: |
   Always include type and op. Choose one synopsis line above and fill only the
@@ -18,7 +18,7 @@ prompt_input: |
   content for durable writes and scratch notes, id for read/update/delete, and
   expected_version from a previous durable sql result before updating or
   deleting an existing durable row. SQL ops are read-only and limited to
-  memories/chat_messages table inspection/search.
+  memories table inspection/search.
 prompt_result: |
   Returns matching records, ids/versions for writes, conflict/error strings for
   unsafe writes, scratch ids for notes.
@@ -39,10 +39,12 @@ input_schema: |
       "op": {
         "type": "string",
         "enum": ["schema", "sql", "insert", "update", "upsert", "delete", "search", "write", "read"],
-        "description": "Operation. durable: schema|sql|insert|update|upsert|delete; raw_chat: search|sql|delete; scratch: search|write|read|delete"
+        "description": "Operation. durable: schema|sql|insert|update|upsert|delete; raw_chat: search|delete; scratch: search|write|read|delete"
       },
       "search_text": {"type": "string", "description": "Search text; empty is allowed for raw_chat/scratch recent listing."},
-      "sql": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty SELECT/WITH SELECT/PRAGMA table_info(memories|chat_messages) only."},
+      "scope": {"type": "string", "enum": ["current_session", "session", "global"], "description": "raw_chat search scope; defaults to current_session."},
+      "session_id": {"type": "string", "description": "Required only when scope=session."},
+      "sql": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty SELECT/WITH SELECT/PRAGMA table_info(memories) only."},
       "params": {"type": "array", "items": {"anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}, "description": "Array of string, number, or boolean values matching SQL ? placeholders exactly."},
       "id": {"type": "string", "minLength": 1, "pattern": "\\S", "description": "Non-empty memory id, chat turn_id, or scratch id depending on type/op."},
       "expected_version": {"type": "integer", "minimum": 0, "description": "Durable row version from sql results; required when modifying/deleting an existing durable row."},
@@ -69,7 +71,6 @@ input_schema: |
     ],
     "x-required-when": [
       {"when": {"type": "durable", "op": "sql"}, "required": ["sql"]},
-      {"when": {"type": "raw_chat", "op": "sql"}, "required": ["sql"]},
       {"when": {"type": "durable", "op": ["insert", "upsert"]}, "required": ["content"]},
       {"when": {"type": "durable", "op": "update"}, "required": ["id", "content"]},
       {"when": {"type": "durable", "op": "delete"}, "required": ["id"]},

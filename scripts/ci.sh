@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 echo "== shell scripts syntax =="
-bash -n install.sh uninstall.sh scripts/bootstrap_assistant_ui.sh scripts/clippy_check.sh scripts/install_logic_test.sh scripts/sensitive_scan.sh scripts/test_contract_check.sh scripts/edge_regression.sh scripts/update_static_prompt_snapshot.sh scripts/kvc_replay_test.sh scripts/performance_guard.sh scripts/module_boundary_check.sh scripts/cross_host_resume_smoke.sh scripts/web_runtime_lifecycle_smoke.sh scripts/web_public_runtime_smoke.sh scripts/linux_web_platform_smoke.sh scripts/macos_web_platform_smoke.sh scripts/web_license_check.sh scripts/version_consistency_check.sh scripts/ci.sh
+bash -n install.sh uninstall.sh scripts/bootstrap_assistant_ui.sh scripts/clippy_check.sh scripts/install_logic_test.sh scripts/sensitive_scan.sh scripts/test_contract_check.sh scripts/edge_regression.sh scripts/update_static_prompt_snapshot.sh scripts/kvc_replay_test.sh scripts/performance_guard.sh scripts/module_boundary_check.sh scripts/cross_host_resume_smoke.sh scripts/web_runtime_lifecycle_smoke.sh scripts/web_public_runtime_smoke.sh scripts/linux_web_platform_smoke.sh scripts/macos_web_platform_smoke.sh scripts/web_license_check.sh scripts/version_consistency_check.sh scripts/self_capability_check.sh scripts/turn_concurrency_stress.sh scripts/ci.sh
 python3 -m py_compile scripts/architecture_guard.py scripts/fake_openai_server.py scripts/web_ui_matrix_check.py scripts/runtime_io_guard.py
 python3 scripts/fake_openai_server.py --self-test
 
@@ -26,6 +26,9 @@ scripts/test_contract_check.sh
 
 echo "== Web UI feature/test matrix =="
 python3 scripts/web_ui_matrix_check.py
+
+echo "== Timem self-capability contract =="
+scripts/self_capability_check.sh
 
 echo "== static prompt snapshot =="
 scripts/update_static_prompt_snapshot.sh --check
@@ -50,20 +53,38 @@ cargo test --workspace --locked -- --test-threads=1
 
 if [[ "$(uname -s)" == "Linux" ]]; then
   echo "== Linux OS interface tests =="
-  cargo test -p agent_core --lib --locked 'os::tests::linux_' -- --test-threads=1
+  linux_test_filter='tests::linux_'
+  platform_test_list="$(cargo test -p timem_platform --lib --locked -- --list)"
+  if ! grep -Fq "$linux_test_filter" <<<"$platform_test_list"; then
+    echo "error: no Linux platform tests matched $linux_test_filter" >&2
+    exit 1
+  fi
+  cargo test -p timem_platform --lib --locked "$linux_test_filter" -- --test-threads=1
 
   echo "== Linux run_bash supervision tests =="
+  agent_test_list="$(cargo test -p agent_core --lib --locked -- --list)"
   for test_name in \
     shell_lifecycle_validation_rejects_unmanaged_background_without_wait \
     shell_lifecycle_validation_rejects_explicit_detach \
-    shutdown_and_session_cancel_refuse_pid_identity_mismatch \
     timeout_job_reports_pid_and_later_exit_update \
     timed_out_job_remains_cancellable_after_launcher_exits \
-    watcher_waits_for_managed_process_group_after_launcher_exits \
-    normal_bash_cancel_terminates_the_entire_process_group
+    supervisor_waits_for_managed_process_group_after_launcher_exits \
+    normal_bash_cancel_terminates_the_entire_process_group \
+    session_turn_stop_cancels_parallel_bash_after_approval \
+    one_refresh_orders_multiple_exits_by_completion_publication \
+    read_only_running_query_never_consumes_a_terminal_update \
+    concurrent_refresh_delivers_each_terminal_update_exactly_once \
+    concurrent_session_refreshes_never_cross_deliver_updates \
+    repeated_refresh_across_completion_windows_loses_no_jobs
   do
+    exact_test_name="$(sed -n 's/: test$//p' <<<"$agent_test_list" | grep -E "(^|::)${test_name}$" || true)"
+    exact_test_count="$(grep -c . <<<"$exact_test_name" || true)"
+    if [[ "$exact_test_count" -ne 1 ]]; then
+      echo "error: required Linux supervision test must exist exactly once: $test_name (found $exact_test_count)" >&2
+      exit 1
+    fi
     cargo test -p agent_core --lib --locked \
-      "shell_exec::tests::$test_name" -- --exact --test-threads=1
+      "$exact_test_name" -- --exact --test-threads=1
   done
 fi
 
@@ -88,6 +109,9 @@ pnpm --dir interfaces/web test:browser
 
 echo "== performance guard =="
 scripts/performance_guard.sh
+
+echo "== Turn concurrency stress =="
+scripts/turn_concurrency_stress.sh
 
 echo "== repeated edge regression =="
 scripts/edge_regression.sh

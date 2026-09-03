@@ -1,6 +1,16 @@
+mod command_dedup;
+mod command_lane;
+mod desktop_launch;
 mod mem_maintenance;
 mod websocket_delivery;
 
+#[cfg(test)]
+use command_dedup::COMMAND_DEDUP_CAPACITY;
+use command_dedup::{CommandDedupCache, CommandDedupState, MAX_COMMAND_DEDUP_RESULT_BYTES};
+use command_lane::TicketCommandLane;
+#[cfg(test)]
+use desktop_launch::{browser_auto_open_allowed_for, browser_command};
+use desktop_launch::{open_browser, open_directory_in_terminal, should_auto_open_browser};
 use mem_maintenance::*;
 use websocket_delivery::{command_ack, finish_command_dedup};
 #[cfg(test)]
@@ -62,12 +72,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
-    ffi::OsString,
+    collections::{BTreeMap, BTreeSet, HashMap},
     io::{IsTerminal, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket},
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, RwLock,
@@ -128,8 +136,6 @@ const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 const MAX_SESSION_UPLOADS: usize = 20;
 const MAX_BROWSER_COMMAND_BYTES: usize = 1024 * 1024;
 const BROWSER_COMMAND_QUEUE_CAPACITY: usize = 32;
-const COMMAND_DEDUP_CAPACITY: usize = 4_096;
-const MAX_COMMAND_DEDUP_RESULT_BYTES: usize = 64 * 1024;
 const MAX_COMMAND_ID_BYTES: usize = 256;
 const WORK_INSTRUCTION_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTANCE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(3);
@@ -157,144 +163,7 @@ struct AppState {
     mem_epoch: Arc<RwLock<u64>>,
     debug: Option<Arc<DebugStore>>,
     runtime_log: RuntimeLog,
-}
-
-#[derive(Debug, Default)]
-struct TicketCommandLane {
-    state: Mutex<TicketCommandLaneState>,
-    ready: std::sync::Condvar,
-}
-
-#[derive(Debug, Default)]
-struct TicketCommandLaneState {
-    next_ticket: u64,
-    serving_ticket: u64,
-    skipped_tickets: BTreeSet<u64>,
-    active: bool,
-}
-
-impl TicketCommandLane {
-    fn issue(&self) -> Result<u64, String> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "command_lane_poisoned".to_string())?;
-        let ticket = state.next_ticket;
-        state.next_ticket = state
-            .next_ticket
-            .checked_add(1)
-            .ok_or_else(|| "command_lane_ticket_exhausted".to_string())?;
-        Ok(ticket)
-    }
-
-    fn enter(&self, ticket: u64) -> Result<TicketCommandLaneGuard<'_>, String> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "command_lane_poisoned".to_string())?;
-        while state.serving_ticket != ticket {
-            state = self
-                .ready
-                .wait(state)
-                .map_err(|_| "command_lane_poisoned".to_string())?;
-        }
-        state.active = true;
-        Ok(TicketCommandLaneGuard { lane: self })
-    }
-
-    fn skip(&self, ticket: u64) -> Result<(), String> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "command_lane_poisoned".to_string())?;
-        state.skipped_tickets.insert(ticket);
-        if !state.active {
-            skip_cancelled_tickets(&mut state);
-        }
-        self.ready.notify_all();
-        Ok(())
-    }
-}
-
-fn advance_ticket_lane(state: &mut TicketCommandLaneState) {
-    state.active = false;
-    state.serving_ticket = state.serving_ticket.saturating_add(1);
-    skip_cancelled_tickets(state);
-}
-
-fn skip_cancelled_tickets(state: &mut TicketCommandLaneState) {
-    while state.skipped_tickets.remove(&state.serving_ticket) {
-        state.serving_ticket = state.serving_ticket.saturating_add(1);
-    }
-}
-
-struct TicketCommandLaneGuard<'a> {
-    lane: &'a TicketCommandLane,
-}
-
-impl Drop for TicketCommandLaneGuard<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut state) = self.lane.state.lock() {
-            advance_ticket_lane(&mut state);
-            self.lane.ready.notify_all();
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum CommandDedupState {
-    Accepted,
-    Committed {
-        event: Option<Box<WireEvent>>,
-        serialized_event: Option<Value>,
-    },
-    Rejected {
-        error: String,
-    },
-}
-
-#[derive(Debug, Default)]
-struct CommandDedupCache {
-    records: HashMap<String, CommandDedupState>,
-    insertion_order: VecDeque<String>,
-}
-
-impl CommandDedupCache {
-    fn reserve(&mut self, command_id: &str) -> Option<CommandDedupState> {
-        if let Some(existing) = self.records.get(command_id) {
-            return Some(existing.clone());
-        }
-        while self.records.len() >= COMMAND_DEDUP_CAPACITY {
-            let Some(oldest) = self.insertion_order.pop_front() else {
-                break;
-            };
-            if matches!(self.records.get(&oldest), Some(CommandDedupState::Accepted)) {
-                self.insertion_order.push_back(oldest);
-                if self
-                    .insertion_order
-                    .iter()
-                    .all(|id| matches!(self.records.get(id), Some(CommandDedupState::Accepted)))
-                {
-                    break;
-                }
-                continue;
-            }
-            self.records.remove(&oldest);
-        }
-        self.records
-            .insert(command_id.to_string(), CommandDedupState::Accepted);
-        self.insertion_order.push_back(command_id.to_string());
-        None
-    }
-
-    fn finish(&mut self, command_id: &str, state: CommandDedupState) {
-        self.records.insert(command_id.to_string(), state);
-    }
-
-    fn unreserve(&mut self, command_id: &str) {
-        self.records.remove(command_id);
-        self.insertion_order.retain(|id| id != command_id);
-    }
+    lifecycle_diagnostics: LifecycleDiagnostics,
 }
 
 #[derive(Clone)]
@@ -386,6 +255,7 @@ impl WebMemState {
             temporary_retention_days: self.settings.temporary_retention_days,
             temporary_capacity_bytes: self.settings.temporary_capacity_bytes,
             conversation_capacity_bytes: self.settings.conversation_capacity_bytes,
+            claude_codex_tool_discovery: self.settings.claude_codex_tool_discovery,
         }
     }
 }
@@ -409,6 +279,10 @@ struct ModelEndpointConfig {
     http_headers: BTreeMap<String, String>,
     #[serde(default)]
     request_fields: BTreeMap<String, Value>,
+    #[serde(default)]
+    allow_cross_origin_redirects: bool,
+    #[serde(default)]
+    private_ca_pem: String,
 }
 
 fn default_endpoint_max_input_tokens() -> u32 {
@@ -433,6 +307,8 @@ struct ModelEndpointReport {
     api_key_configured: bool,
     http_headers: BTreeMap<String, String>,
     request_fields: BTreeMap<String, Value>,
+    allow_cross_origin_redirects: bool,
+    private_ca_configured: bool,
 }
 
 impl From<&ModelEndpointConfig> for ModelEndpointReport {
@@ -458,6 +334,8 @@ impl From<&ModelEndpointConfig> for ModelEndpointReport {
                 .keys()
                 .map(|name| (name.clone(), Value::String("****".to_string())))
                 .collect(),
+            allow_cross_origin_redirects: endpoint.allow_cross_origin_redirects,
+            private_ca_configured: !endpoint.private_ca_pem.is_empty(),
         }
     }
 }
@@ -693,6 +571,7 @@ struct WebSessionRuntime {
     settings: RuntimeSettings,
     env: BTreeMap<String, String>,
     env_overrides: BTreeMap<String, String>,
+    forward_compatible_cache: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -772,6 +651,7 @@ struct PendingWorkInstructionTurn {
     attachments: Vec<WebAttachment>,
     command_id: Option<String>,
     worker_roles: Vec<WorkerRole>,
+    direct_resume: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -822,9 +702,9 @@ enum WireEvent {
     SessionGroupsUpdated {
         groups: Vec<SessionGroup>,
     },
-    SessionGroupChanged {
-        session_id: String,
+    SessionOrderUpdated {
         group_id: Option<String>,
+        session_ids: Vec<String>,
     },
     WorkerRoleLibraryUpdated {
         library: WorkerRoleLibrary,
@@ -938,6 +818,7 @@ enum WireEvent {
         temporary_retention_days: Option<u16>,
         temporary_capacity_bytes: Option<u64>,
         conversation_capacity_bytes: Option<u64>,
+        claude_codex_tool_discovery: bool,
     },
     MemTemporaryItems {
         items: Vec<MemTemporaryItem>,
@@ -988,6 +869,7 @@ enum WireEvent {
         api_key: String,
         http_headers: BTreeMap<String, String>,
         request_fields: BTreeMap<String, Value>,
+        private_ca_pem: String,
     },
 }
 
@@ -1033,6 +915,7 @@ struct WebMemInfo {
     temporary_retention_days: Option<u16>,
     temporary_capacity_bytes: Option<u64>,
     conversation_capacity_bytes: Option<u64>,
+    claude_codex_tool_discovery: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1101,16 +984,7 @@ impl Drop for AcceptedCommandLane {
         if !Arc::ptr_eq(mapped, &self.lane) || Arc::strong_count(&self.lane) != 2 {
             return;
         }
-        let idle = self
-            .lane
-            .state
-            .lock()
-            .map(|state| {
-                !state.active
-                    && state.serving_ticket == state.next_ticket
-                    && state.skipped_tickets.is_empty()
-            })
-            .unwrap_or(false);
+        let idle = self.lane.is_idle();
         if idle {
             lanes.remove(&self.key);
         }
@@ -1136,6 +1010,10 @@ struct ModelEndpointInput {
     http_headers: BTreeMap<String, String>,
     #[serde(default)]
     request_fields: BTreeMap<String, Value>,
+    #[serde(default)]
+    allow_cross_origin_redirects: bool,
+    #[serde(default)]
+    private_ca_pem: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1144,6 +1022,8 @@ enum ClientCommand {
     SessionCreate {
         display_name: Option<String>,
         workspace_dir: Option<String>,
+        #[serde(default)]
+        group_id: Option<String>,
         #[serde(default)]
         env: BTreeMap<String, String>,
     },
@@ -1171,6 +1051,11 @@ enum ClientCommand {
     SessionGroupMove {
         session_id: String,
         group_id: Option<String>,
+    },
+    SessionReorder {
+        #[serde(default)]
+        group_id: Option<String>,
+        session_ids: Vec<String>,
     },
     SessionApiKeyUpdate {
         session_id: String,
@@ -1382,6 +1267,9 @@ enum ClientCommand {
     MemConversationCapacityUpdate {
         max_bytes: Option<u64>,
     },
+    BetaClaudeCodexToolDiscoveryUpdate {
+        enabled: bool,
+    },
     MemTemporaryItemsList,
     MemTemporaryItemsDelete {
         ids: Vec<String>,
@@ -1404,6 +1292,7 @@ impl ClientCommand {
             | Self::MemSwitch { .. }
             | Self::MemTemporaryRetentionUpdate { .. }
             | Self::MemConversationCapacityUpdate { .. }
+            | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
             | Self::MemTemporaryItemsDelete { .. }
             | Self::McpServerDelete { .. }
             | Self::ModelEndpointUpsert { .. }
@@ -1422,7 +1311,11 @@ impl ClientCommand {
             | Self::SessionGroupUpdate { .. }
             | Self::SessionGroupDelete { .. }
             | Self::SessionGroupsReorder { .. }
-            | Self::SessionGroupMove { .. } => Some("session-groups".to_string()),
+            | Self::SessionGroupMove { .. }
+            | Self::SessionReorder { .. } => Some("session-groups".to_string()),
+            Self::SessionCreate {
+                group_id: Some(_), ..
+            } => Some("session-groups".to_string()),
             Self::SessionCreate { .. } => Some("session:create".to_string()),
             Self::McpServerUpsert { config, .. } => Some(format!("mcp:{}", config.id)),
             Self::SessionRename { session_id, .. }
@@ -1457,6 +1350,7 @@ impl ClientCommand {
                 | Self::MemSwitch { .. }
                 | Self::MemTemporaryRetentionUpdate { .. }
                 | Self::MemConversationCapacityUpdate { .. }
+                | Self::BetaClaudeCodexToolDiscoveryUpdate { .. }
                 | Self::MemTemporaryItemsDelete { .. }
                 | Self::McpServerDelete { .. }
                 | Self::ModelEndpointUpsert { .. }
@@ -1628,6 +1522,7 @@ pub async fn run(
         mem_epoch: Arc::new(RwLock::new(1)),
         debug,
         runtime_log,
+        lifecycle_diagnostics: diagnostics.clone(),
     };
     let cleanup_guard = WebRuntimeCleanupGuard::new(&state);
 
@@ -2117,6 +2012,9 @@ fn ensure_unique_session_group_name(
     name: &str,
     except_id: Option<&str>,
 ) -> Result<(), String> {
+    if name.eq_ignore_ascii_case("Unsorted") {
+        return Err("session_group_name_reserved".to_string());
+    }
     if groups
         .iter()
         .any(|group| Some(group.id.as_str()) != except_id && group.name.eq_ignore_ascii_case(name))
@@ -2582,9 +2480,11 @@ fn handle_command_with_id(
         ClientCommand::SessionCreate {
             display_name,
             workspace_dir,
+            group_id,
             env,
         } => {
-            let session_id = create_session(state, display_name, workspace_dir, env)?;
+            let session_id =
+                create_session_in_group(state, display_name, workspace_dir, group_id, env)?;
             let session = state
                 .sessions
                 .lock()
@@ -2702,98 +2602,65 @@ fn handle_command_with_id(
             return Ok(Some(event));
         }
         ClientCommand::SessionGroupDelete { group_id } => {
-            let (memory_dir, groups, store) = {
-                let mem = state
-                    .mem
+            if !current_mem_state(state)?
+                .session_groups
+                .iter()
+                .any(|group| group.id == group_id)
+            {
+                return Err("session_group_not_found".to_string());
+            }
+            {
+                let sessions = state
+                    .sessions
                     .lock()
-                    .map_err(|_| "mem_state_poisoned".to_string())?;
-                let mut groups = mem.session_groups.clone();
+                    .map_err(|_| "session_store_poisoned".to_string())?;
+                if sessions
+                    .values()
+                    .any(|session| session.group_id.as_deref() == Some(group_id.as_str()))
+                {
+                    return Err("session_group_not_empty".to_string());
+                }
+            }
+            let groups = mutate_session_groups(state, |groups| {
                 let before = groups.len();
                 groups.retain(|group| group.id != group_id);
                 if before == groups.len() {
                     return Err("session_group_not_found".to_string());
                 }
-                (mem.layout.memory_dir(), groups, mem.session_store.clone())
-            };
-            let affected = {
-                let sessions = state
-                    .sessions
-                    .lock()
-                    .map_err(|_| "session_store_poisoned".to_string())?;
-                sessions
-                    .values()
-                    .filter(|session| session.group_id.as_deref() == Some(group_id.as_str()))
-                    .map(|session| {
-                        let previous = stored_session_from_web_session_with_store(&store, session);
-                        let mut updated = previous.clone();
-                        updated.group_id = None;
-                        (session.session_id.clone(), previous, updated)
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let mut affected = affected;
-            affected.sort_by(|left, right| left.0.cmp(&right.0));
-            let mut persisted = Vec::new();
-            for (session_id, previous, updated) in &affected {
-                if let Err(error) = store.upsert_session(updated) {
-                    rollback_stored_sessions(&store, &persisted)?;
-                    return Err(format!(
-                        "session_group_delete_persist_failed:{session_id}:{error}"
-                    ));
-                }
-                persisted.push(previous.clone());
-            }
-            if let Err(error) = save_session_groups(&memory_dir, &groups) {
-                rollback_stored_sessions(&store, &persisted)?;
-                return Err(format!("session_group_delete_persist_failed:{error}"));
-            }
-            {
-                let mut mem = state
-                    .mem
-                    .lock()
-                    .map_err(|_| "mem_state_poisoned".to_string())?;
-                mem.session_groups = groups.clone();
-                let mut sessions = state
-                    .sessions
-                    .lock()
-                    .map_err(|_| "session_store_poisoned".to_string())?;
-                for (session_id, _, _) in &affected {
-                    sessions
-                        .get_mut(session_id)
-                        .ok_or_else(|| "session_not_found".to_string())?
-                        .group_id = None;
-                }
-            }
+                Ok(())
+            })?;
             let event = WireEvent::SessionGroupsUpdated { groups };
             publish_semantic(state, event.clone());
-            for (session_id, _, _) in affected {
-                publish_semantic(
-                    state,
-                    WireEvent::SessionGroupChanged {
-                        session_id,
-                        group_id: None,
-                    },
-                );
-            }
             return Ok(Some(event));
         }
         ClientCommand::SessionGroupsReorder { groups } => {
-            let updated = mutate_session_groups(state, |current| {
-                let current_ids = current
-                    .iter()
-                    .map(|group| group.id.as_str())
-                    .collect::<BTreeSet<_>>();
-                let supplied_ids = groups
-                    .iter()
-                    .map(|group| group.id.as_str())
-                    .collect::<BTreeSet<_>>();
-                if current_ids != supplied_ids || supplied_ids.len() != groups.len() {
-                    return Err("session_group_set_mismatch".to_string());
-                }
+            let existing = current_mem_state(state)?.session_groups;
+            let existing_ids = existing
+                .iter()
+                .map(|group| group.id.as_str())
+                .collect::<BTreeSet<_>>();
+            let supplied_ids = groups
+                .iter()
+                .map(|group| group.id.as_str())
+                .collect::<BTreeSet<_>>();
+            if existing_ids != supplied_ids || existing.len() != groups.len() {
+                return Err("session_group_reorder_membership_changed".to_string());
+            }
+            let existing_by_id = existing
+                .into_iter()
+                .map(|group| (group.id.clone(), group))
+                .collect::<BTreeMap<_, _>>();
+            if groups
+                .iter()
+                .any(|group| existing_by_id.get(&group.id) != Some(group))
+            {
+                return Err("session_group_reorder_content_changed".to_string());
+            }
+            let groups = mutate_session_groups(state, |current| {
                 *current = groups;
                 Ok(())
             })?;
-            let event = WireEvent::SessionGroupsUpdated { groups: updated };
+            let event = WireEvent::SessionGroupsUpdated { groups };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
@@ -2801,41 +2668,61 @@ fn handle_command_with_id(
             session_id,
             group_id,
         } => {
-            let store = {
-                let mem = state
-                    .mem
-                    .lock()
-                    .map_err(|_| "mem_state_poisoned".to_string())?;
-                if let Some(group_id) = group_id.as_deref() {
-                    if !mem.session_groups.iter().any(|group| group.id == group_id) {
-                        return Err("session_group_not_found".to_string());
-                    }
+            let _legacy_move_request = (session_id, group_id);
+            return Err("session_group_assignment_fixed".to_string());
+        }
+        ClientCommand::SessionReorder {
+            group_id,
+            session_ids,
+        } => {
+            if let Some(group_id) = group_id.as_deref() {
+                if !current_mem_state(state)?
+                    .session_groups
+                    .iter()
+                    .any(|group| group.id == group_id)
+                {
+                    return Err("session_group_not_found".to_string());
                 }
-                mem.session_store.clone()
-            };
-            let updated = {
-                let sessions = state
-                    .sessions
-                    .lock()
-                    .map_err(|_| "session_store_poisoned")?;
-                let session = sessions
-                    .get(&session_id)
-                    .ok_or_else(|| "session_not_found".to_string())?;
-                let mut updated = stored_session_from_web_session_with_store(&store, session);
-                updated.group_id = group_id.clone();
-                updated
-            };
-            store.upsert_session(&updated)?;
-            state
+            }
+            let mut sessions = state
                 .sessions
                 .lock()
-                .map_err(|_| "session_store_poisoned")?
-                .get_mut(&session_id)
-                .ok_or_else(|| "session_not_found".to_string())?
-                .group_id = group_id.clone();
-            let event = WireEvent::SessionGroupChanged {
-                session_id,
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            let existing_ids = sessions
+                .values()
+                .filter(|session| session.group_id == group_id)
+                .map(|session| session.session_id.as_str())
+                .collect::<BTreeSet<_>>();
+            let supplied_ids = session_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            if existing_ids != supplied_ids || existing_ids.len() != session_ids.len() {
+                return Err("session_reorder_membership_changed".to_string());
+            }
+            let mut updated = Vec::with_capacity(session_ids.len());
+            for (ordinal, session_id) in session_ids.iter().enumerate() {
+                let session = sessions
+                    .get(session_id)
+                    .ok_or_else(|| "session_not_found".to_string())?;
+                let mut stored = stored_session_from_web_session(state, session);
+                stored.ordinal =
+                    u32::try_from(ordinal).map_err(|_| "session_ordinal_overflow".to_string())?;
+                updated.push(stored);
+            }
+            let store = current_session_store(state)?;
+            for stored in &updated {
+                store.upsert_session(stored)?;
+            }
+            for stored in updated {
+                if let Some(session) = sessions.get_mut(&stored.session_id) {
+                    session.ordinal = stored.ordinal;
+                }
+            }
+            drop(sessions);
+            let event = WireEvent::SessionOrderUpdated {
                 group_id,
+                session_ids,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -3163,10 +3050,27 @@ fn handle_command_with_id(
                     command_id,
                 )?
             } else {
-                if input_kind.is_some() || source_turn_id.is_some() {
-                    return Err("unsupported_turn_input_kind".to_string());
-                }
-                let text = nonempty_text(text, "turn text")?;
+                let resume_directly = input_kind.as_deref() == Some("resume_directly");
+                let text = if resume_directly {
+                    if source_turn_id.is_some() {
+                        return Err("resume_directly_source_turn_not_supported".to_string());
+                    }
+                    if attachment_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+                        return Err("resume_directly_attachments_not_supported".to_string());
+                    }
+                    if role_id.is_some() || !role_ids.is_empty() {
+                        return Err("resume_directly_worker_role_not_supported".to_string());
+                    }
+                    if !text.trim().is_empty() {
+                        return Err("resume_directly_text_must_be_empty".to_string());
+                    }
+                    String::new()
+                } else {
+                    if input_kind.is_some() || source_turn_id.is_some() {
+                        return Err("unsupported_turn_input_kind".to_string());
+                    }
+                    nonempty_text(text, "turn text")?
+                };
                 let worker_roles =
                     resolve_worker_roles(state, &session_id, &role_ids, role_id.as_deref())?;
                 let must_queue = {
@@ -3180,6 +3084,9 @@ fn handle_command_with_id(
                     current_turn_id(session).is_some() || !session.message_queue.is_empty()
                 };
                 if must_queue {
+                    if resume_directly {
+                        return Err("resume_directly_requires_idle_session".to_string());
+                    }
                     let command_id = command_id
                         .ok_or_else(|| "message_queue_command_id_required".to_string())?;
                     let message_queue = enqueue_next_turn_intent(
@@ -3195,13 +3102,18 @@ fn handle_command_with_id(
                         message_queue,
                     }));
                 }
-                submit_turn_with_selected_attachments(
+                submit_turn_with_selected_attachments_and_kind(
                     state,
                     &session_id,
                     text,
                     attachment_ids.as_deref(),
                     command_id,
                     worker_roles,
+                    if resume_directly {
+                        "resume_directly"
+                    } else {
+                        "task"
+                    },
                 )?
             };
             return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
@@ -3763,6 +3675,7 @@ fn handle_command_with_id(
                 api_key: secrets.api_key,
                 http_headers: secrets.http_headers,
                 request_fields: secrets.request_fields,
+                private_ca_pem: secrets.private_ca_pem,
             }));
         }
         ClientCommand::McpServerUpsert { session_id, config } => {
@@ -3874,6 +3787,7 @@ fn handle_command_with_id(
                 temporary_retention_days: days,
                 temporary_capacity_bytes: max_bytes,
                 conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -3900,6 +3814,33 @@ fn handle_command_with_id(
                 temporary_retention_days: settings.temporary_retention_days,
                 temporary_capacity_bytes: settings.temporary_capacity_bytes,
                 conversation_capacity_bytes: max_bytes,
+                claude_codex_tool_discovery: settings.claude_codex_tool_discovery,
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::BetaClaudeCodexToolDiscoveryUpdate { enabled } => {
+            let (memory_dir, settings) = {
+                let mem = state
+                    .mem
+                    .lock()
+                    .map_err(|_| "mem_state_poisoned".to_string())?;
+                let mut settings = mem.settings.clone();
+                settings.claude_codex_tool_discovery = enabled;
+                (mem.layout.memory_dir(), settings)
+            };
+            save_web_mem_settings(&memory_dir, &settings)?;
+            state
+                .mem
+                .lock()
+                .map_err(|_| "mem_state_poisoned".to_string())?
+                .settings = settings.clone();
+            update_all_worker_tool_discovery_preferences(state, enabled)?;
+            let event = WireEvent::MemSettingsUpdated {
+                temporary_retention_days: settings.temporary_retention_days,
+                temporary_capacity_bytes: settings.temporary_capacity_bytes,
+                conversation_capacity_bytes: settings.conversation_capacity_bytes,
+                claude_codex_tool_discovery: enabled,
             };
             publish_semantic(state, event.clone());
             return Ok(Some(event));
@@ -4141,13 +4082,11 @@ fn switch_mem_space(
         next_mem.temporary_maintenance.checkpoint_started_at = switched_at;
         *mem = next_mem;
     }
-    {
-        let mut cache = state
-            .command_dedup
-            .lock()
-            .map_err(|_| "command_dedup_poisoned".to_string())?;
-        *cache = CommandDedupCache::default();
-    }
+    state
+        .command_dedup
+        .lock()
+        .map_err(|_| "command_dedup_poisoned".to_string())?
+        .clear();
     {
         let mut lease = state
             .web_instance
@@ -4650,6 +4589,31 @@ fn create_session(
     requested_workspace: Option<String>,
     env_overrides: BTreeMap<String, String>,
 ) -> Result<String, String> {
+    create_session_in_group(
+        state,
+        display_name,
+        requested_workspace,
+        None,
+        env_overrides,
+    )
+}
+
+fn create_session_in_group(
+    state: &AppState,
+    display_name: Option<String>,
+    requested_workspace: Option<String>,
+    group_id: Option<String>,
+    env_overrides: BTreeMap<String, String>,
+) -> Result<String, String> {
+    if let Some(group_id) = group_id.as_deref() {
+        if !current_mem_state(state)?
+            .session_groups
+            .iter()
+            .any(|group| group.id == group_id)
+        {
+            return Err("session_group_not_found".to_string());
+        }
+    }
     let session_id = unique_web_id("session");
     let tool_repo = session_tool_repo(state, &session_id)?;
     let current_dir = state
@@ -4661,6 +4625,7 @@ fn create_session(
         settings,
         env: session_env,
         env_overrides,
+        forward_compatible_cache: BTreeMap::new(),
     };
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
     let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
@@ -4697,7 +4662,7 @@ fn create_session(
             session_id.clone(),
             WebSession {
                 session_id: session_id.clone(),
-                group_id: None,
+                group_id,
                 display_name: session_display_name,
                 ordinal,
                 state: "ready".to_string(),
@@ -5116,20 +5081,21 @@ fn restore_stored_session(
         append_runtime_restart_history_marker(state, &stored.session_id)?;
     }
     let explicit_overrides = stored.env_overrides.clone().unwrap_or_default();
-    let cached_env = sanitize_restored_session_env(
-        if stored.env.is_empty() {
-            explicit_overrides.clone()
-        } else {
-            stored.env.clone()
-        },
-        &explicit_overrides,
-    );
-    let settings = state.template.session_settings(&cached_env)?;
+    let stored_env = if stored.env.is_empty() {
+        explicit_overrides.clone()
+    } else {
+        stored.env.clone()
+    };
+    let forward_compatible_cache =
+        forward_compatible_session_cache(&stored_env, &explicit_overrides);
+    let cached_env = sanitize_restored_session_env(stored_env, &explicit_overrides);
+    let settings = state.template.restored_session_settings(&cached_env)?;
     let session_env = state.template.session_env(&settings, &cached_env);
     let runtime = WebSessionRuntime {
         settings,
         env: session_env,
         env_overrides: stored.env_overrides.clone().unwrap_or_default(),
+        forward_compatible_cache,
     };
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
     let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
@@ -5243,12 +5209,7 @@ fn restore_stored_session(
         for session in sessions.values_mut() {
             session.roles = roles.clone();
         }
-        let ordinal = sessions
-            .values()
-            .map(|session| session.ordinal)
-            .max()
-            .map(|value| value.saturating_add(1))
-            .unwrap_or(0);
+        let ordinal = stored.ordinal;
         sessions.insert(
             stored.session_id.clone(),
             WebSession {
@@ -5415,7 +5376,7 @@ fn persist_restored_session_runtime_cache(
                     .name()
                     .to_string(),
             },
-            session_cached_env_values(&session.runtime.settings),
+            session_cached_env_values_with_forward_compatible_cache(&session.runtime),
             session
                 .runtime
                 .env_overrides
@@ -5423,7 +5384,11 @@ fn persist_restored_session_runtime_cache(
                 .filter(|(key, _)| {
                     !matches!(
                         key.as_str(),
-                        "TIMEM_API_KEY" | "TIMEM_HTTP_HEADERS" | "TIMEM_REQUEST_FIELDS"
+                        "TIMEM_API_KEY"
+                            | "TIMEM_HTTP_HEADERS"
+                            | "TIMEM_REQUEST_FIELDS"
+                            | "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"
+                            | "TIMEM_PRIVATE_CA_PEM"
                     )
                 })
                 .map(|(key, value)| (key.clone(), value.clone()))
@@ -5663,26 +5628,6 @@ fn history_user_entry_kind(kind: Option<&str>) -> &str {
     match kind {
         Some(kind @ ("task" | "supplement" | "approval")) => kind,
         _ => "task",
-    }
-}
-
-fn rollback_stored_sessions(
-    store: &SessionStore,
-    previous_sessions: &[StoredSession],
-) -> Result<(), String> {
-    let mut errors = Vec::new();
-    for previous in previous_sessions.iter().rev() {
-        if let Err(error) = store.upsert_session(previous) {
-            errors.push(format!("{}:{error}", previous.session_id));
-        }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "session_group_rollback_failed:{}",
-            errors.join(",")
-        ))
     }
 }
 
@@ -6194,7 +6139,7 @@ fn stored_session_from_web_session_with_store(
                 .name()
                 .to_string(),
         },
-        env: session_cached_env_values(&session.runtime.settings),
+        env: session_cached_env_values_with_forward_compatible_cache(&session.runtime),
         env_overrides: Some(
             session
                 .runtime
@@ -6203,7 +6148,11 @@ fn stored_session_from_web_session_with_store(
                 .filter(|(key, _)| {
                     !matches!(
                         key.as_str(),
-                        "TIMEM_API_KEY" | "TIMEM_HTTP_HEADERS" | "TIMEM_REQUEST_FIELDS"
+                        "TIMEM_API_KEY"
+                            | "TIMEM_HTTP_HEADERS"
+                            | "TIMEM_REQUEST_FIELDS"
+                            | "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"
+                            | "TIMEM_PRIVATE_CA_PEM"
                     )
                 })
                 .map(|(key, value)| (key.clone(), value.clone()))
@@ -6226,6 +6175,7 @@ fn stored_session_from_web_session_with_store(
             .display()
             .to_string(),
         group_id: session.group_id.clone(),
+        ordinal: session.ordinal,
     }
 }
 
@@ -6690,6 +6640,26 @@ fn submit_turn_with_selected_attachments(
     command_id: Option<&str>,
     worker_roles: Vec<WorkerRole>,
 ) -> Result<WebTurn, String> {
+    submit_turn_with_selected_attachments_and_kind(
+        state,
+        session_id,
+        text,
+        attachment_ids,
+        command_id,
+        worker_roles,
+        "task",
+    )
+}
+
+fn submit_turn_with_selected_attachments_and_kind(
+    state: &AppState,
+    session_id: &str,
+    text: String,
+    attachment_ids: Option<&[String]>,
+    command_id: Option<&str>,
+    worker_roles: Vec<WorkerRole>,
+    entry_kind: &str,
+) -> Result<WebTurn, String> {
     validate_session_model_service_config(state, session_id)?;
     apply_pending_session_mcp(state, session_id)?;
     let request = {
@@ -6716,6 +6686,7 @@ fn submit_turn_with_selected_attachments(
             attachment_ids,
             command_id,
             worker_roles.clone(),
+            entry_kind,
         )?;
         publish_semantic(
             state,
@@ -6745,6 +6716,7 @@ fn submit_turn_with_selected_attachments(
                 attachments,
                 command_id: command_id.map(str::to_string),
                 worker_roles,
+                direct_resume: entry_kind == "resume_directly",
             });
         }
         let wire_payload = event.wire_payload();
@@ -6792,6 +6764,7 @@ fn submit_turn_with_selected_attachments(
         attachment_ids,
         command_id,
         worker_roles.clone(),
+        entry_kind,
     )?;
     // Publish the authoritative turn before allowing Core to emit activity for
     // it. Otherwise a fast worker event can overtake the direct command reply.
@@ -6812,11 +6785,18 @@ fn submit_turn_with_selected_attachments(
         }),
     );
     let enqueue_started = std::time::Instant::now();
-    if let Err(error) = primary_worker_handle(state, session_id)?.run_turn_with_command_id(
-        text,
-        session_context_with_roles(state, session_id, &attachments, &worker_roles)?,
-        command_id.map(str::to_string),
-    ) {
+    let worker = primary_worker_handle(state, session_id)?;
+    let additional_context =
+        session_context_with_roles(state, session_id, &attachments, &worker_roles)?;
+    let enqueue_result = if entry_kind == "resume_directly" {
+        worker.resume_turn_directly_with_command_id(
+            additional_context,
+            command_id.map(str::to_string),
+        )
+    } else {
+        worker.run_turn_with_command_id(text, additional_context, command_id.map(str::to_string))
+    };
+    if let Err(error) = enqueue_result {
         rollback_web_turn(state, session_id, &turn.turn_id, attachments);
         return Err(error);
     }
@@ -6947,17 +6927,51 @@ fn resolve_work_instruction_decision(
             publish_semantic(state, event);
         }
     }
-    primary_worker_handle(state, session_id)?.run_turn_with_command_id(
-        pending.text,
-        session_context_with_roles(
-            state,
-            session_id,
-            &pending.attachments,
-            &pending.worker_roles,
-        )?,
-        pending.command_id,
+    let worker = primary_worker_handle(state, session_id)?;
+    let additional_context = session_context_with_roles(
+        state,
+        session_id,
+        &pending.attachments,
+        &pending.worker_roles,
     )?;
+    if pending.direct_resume {
+        worker.resume_turn_directly_with_command_id(additional_context, pending.command_id)?;
+    } else {
+        worker.run_turn_with_command_id(pending.text, additional_context, pending.command_id)?;
+    }
     Ok(true)
+}
+
+fn update_all_worker_tool_discovery_preferences(
+    state: &AppState,
+    enabled: bool,
+) -> Result<(), String> {
+    let worker_ids = state
+        .sessions
+        .lock()
+        .map_err(|_| "session_store_poisoned".to_string())?
+        .values()
+        .flat_map(|session| {
+            session
+                .workers
+                .iter()
+                .map(|worker| worker.worker_id.clone())
+        })
+        .collect::<Vec<_>>();
+    let manager = state
+        .manager
+        .lock()
+        .map_err(|_| "worker_manager_poisoned".to_string())?;
+    for worker_id in worker_ids {
+        if let Some(handle) = manager.handle(&worker_id) {
+            match handle.update_claude_codex_tool_discovery(enabled) {
+                Ok(()) => {}
+                Err(error) if error == "core_session_worker_stopped" => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn primary_worker_handle(
@@ -7078,6 +7092,15 @@ fn normalize_model_endpoint_input(
     }
     agent_core::validate_model_request_fields(&request_fields)
         .map_err(|error| format!("invalid_model_endpoint_request_fields:{error}"))?;
+    let private_ca_pem = input.private_ca_pem.unwrap_or_else(|| {
+        existing
+            .map(|item| item.private_ca_pem.clone())
+            .unwrap_or_default()
+    });
+    if !private_ca_pem.is_empty() {
+        agent_core::validate_model_private_ca_pem(&private_ca_pem)
+            .map_err(|error| format!("invalid_model_endpoint_private_ca:{error}"))?;
+    }
     if input.stream && api_protocol != "openai-compatible" {
         return Err("model_endpoint_stream_requires_openai_compatible".to_string());
     }
@@ -7127,6 +7150,8 @@ fn normalize_model_endpoint_input(
         api_key,
         http_headers,
         request_fields,
+        allow_cross_origin_redirects: input.allow_cross_origin_redirects,
+        private_ca_pem,
     })
 }
 
@@ -7145,6 +7170,7 @@ fn testable_endpoint_validation_settings() -> RuntimeSettings {
             api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
             response_protocol: ResponseProtocolKind::Xml,
             openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+            http_transport: Default::default(),
         },
         bash_approval_mode: BashApprovalMode::Ask,
         work_instruction_mode: WorkInstructionLoadMode::Silent,
@@ -7238,6 +7264,10 @@ fn session_uses_model_endpoint(session: &WebSession, endpoint: &ModelEndpointCon
         && config.api_key == endpoint.api_key
         && config.http_headers == endpoint.http_headers
         && config.request_fields == endpoint.request_fields
+        && config.http_transport.allow_cross_origin_redirects
+            == endpoint.allow_cross_origin_redirects
+        && config.http_transport.private_ca_pem.as_deref()
+            == (!endpoint.private_ca_pem.is_empty()).then_some(endpoint.private_ca_pem.as_str())
 }
 
 fn sync_endpoint_runtime_fields(
@@ -7249,6 +7279,8 @@ fn sync_endpoint_runtime_fields(
         && previous.max_llm_output_tokens == updated.max_llm_output_tokens
         && previous.stream == updated.stream
         && previous.request_fields == updated.request_fields
+        && previous.allow_cross_origin_redirects == updated.allow_cross_origin_redirects
+        && previous.private_ca_pem == updated.private_ca_pem
     {
         return Ok(Vec::new());
     }
@@ -7306,6 +7338,19 @@ fn sync_endpoint_runtime_fields(
                 updated.request_fields.clone(),
             )?);
         }
+        if previous.allow_cross_origin_redirects != updated.allow_cross_origin_redirects
+            || previous.private_ca_pem != updated.private_ca_pem
+        {
+            runtime_profile = Some(update_session_model_http_transport(
+                state,
+                &session_id,
+                agent_core::ModelHttpTransportOptions {
+                    allow_cross_origin_redirects: updated.allow_cross_origin_redirects,
+                    private_ca_pem: (!updated.private_ca_pem.is_empty())
+                        .then(|| updated.private_ca_pem.clone()),
+                },
+            )?);
+        }
         if let Some(runtime_profile) = runtime_profile {
             updates.push((session_id, runtime_profile));
         }
@@ -7330,6 +7375,7 @@ struct ModelEndpointSecrets {
     api_key: String,
     http_headers: BTreeMap<String, String>,
     request_fields: BTreeMap<String, Value>,
+    private_ca_pem: String,
 }
 
 fn model_endpoint_secrets(
@@ -7347,6 +7393,7 @@ fn model_endpoint_secrets(
             api_key: item.api_key.clone(),
             http_headers: item.http_headers.clone(),
             request_fields: item.request_fields.clone(),
+            private_ca_pem: item.private_ca_pem.clone(),
         })
         .ok_or_else(|| "model_endpoint_not_found".to_string())
 }
@@ -7388,7 +7435,59 @@ fn apply_model_endpoint(
     }
     update_session_http_headers(state, session_id, endpoint.http_headers)?;
     update_session_request_fields(state, session_id, endpoint.request_fields)?;
+    update_session_model_http_transport(
+        state,
+        session_id,
+        agent_core::ModelHttpTransportOptions {
+            allow_cross_origin_redirects: endpoint.allow_cross_origin_redirects,
+            private_ca_pem: (!endpoint.private_ca_pem.is_empty())
+                .then_some(endpoint.private_ca_pem),
+        },
+    )?;
     update_session_api_key(state, session_id, endpoint.api_key)
+}
+
+fn update_session_model_http_transport(
+    state: &AppState,
+    session_id: &str,
+    options: agent_core::ModelHttpTransportOptions,
+) -> Result<WebSessionRuntimeProfile, String> {
+    if let Some(pem) = &options.private_ca_pem {
+        agent_core::validate_model_private_ca_pem(pem)
+            .map_err(|error| format!("invalid_model_endpoint_private_ca:{error}"))?;
+    }
+    if session_has_active_turn(state, session_id)? {
+        return Err("session_model_http_transport_update_while_working".to_string());
+    }
+    let worker_ids = session_worker_ids(state, session_id)?;
+    {
+        let manager = state
+            .manager
+            .lock()
+            .map_err(|_| "worker_manager_poisoned".to_string())?;
+        for worker_id in &worker_ids {
+            manager
+                .handle(worker_id)
+                .ok_or_else(|| "session_worker_not_found".to_string())?
+                .update_model_http_transport(options.clone())?;
+        }
+    }
+    let runtime_profile = {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| "session_not_found".to_string())?;
+        session.runtime.settings.config.http_transport = options;
+        session.runtime.env = session_cached_env_values(&session.runtime.settings);
+        session.runtime_profile =
+            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile.clone()
+    };
+    persist_web_session(state, session_id)?;
+    Ok(runtime_profile)
 }
 
 fn update_session_http_headers(
@@ -8010,6 +8109,7 @@ fn start_web_turn_with_command_id(
         None,
         command_id,
         Vec::new(),
+        "task",
     )
 }
 
@@ -8028,6 +8128,7 @@ fn start_web_turn_with_selected_attachments(
         attachment_ids,
         command_id,
         Vec::new(),
+        "task",
     )
 }
 
@@ -8038,6 +8139,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
     attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
     worker_roles: Vec<WorkerRole>,
+    entry_kind: &str,
 ) -> Result<WebTurn, String> {
     ensure_restart_cwd_resolved(state, session_id)?;
     let mut sessions = state
@@ -8061,7 +8163,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
         created_at_ms: now_ms(),
         interrupted_at_ms: None,
         user_entries: vec![WebTurnUserEntry {
-            kind: "task".to_string(),
+            kind: entry_kind.to_string(),
             text: text.to_string(),
             attachments,
             created_at_ms: now_ms(),
@@ -8100,7 +8202,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
         session_id,
         &turn_id,
         "user",
-        Some("task"),
+        Some(entry_kind),
         command_id,
         created_at_ms,
         text.to_string(),
@@ -8787,8 +8889,9 @@ fn session_context_with_roles(
         None
     } else {
         Some(format!(
-            "Previously accumulated reusable scripts are available at: {}\nThe tool directories have semantic names. When one may help with the current task, inspect the directory and run the script's --help through run_bash as needed.",
-            tool_repo.root().display()
+            "Previously accumulated reusable scripts are available at: {}\nThe tool directories have semantic names. When one may help with the current task, inspect the directory and run the script's --help through {} as needed.",
+            tool_repo.root().display(),
+            agent_core::os::local_shell_tool_name()
         ))
     };
     let instructions = match session.work_instruction_mode {
@@ -10148,11 +10251,16 @@ fn set_worker_state(state: &AppState, session_id: &str, worker_id: &str, worker_
 }
 
 fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
-    let sessions = state
+    let mut sessions: Vec<_> = state
         .sessions
         .lock()
         .map(|sessions| sessions.values().cloned().collect())
         .unwrap_or_default();
+    sessions.sort_by(|left, right| {
+        left.ordinal
+            .cmp(&right.ordinal)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
     let runtime_options = state
         .template
         .settings
@@ -10199,6 +10307,7 @@ fn snapshot_for(state: &AppState, port: u16) -> WebSnapshot {
                 MEM_CAPACITY_128_MB
             }),
             conversation_capacity_bytes: Some(MEM_CAPACITY_128_MB),
+            claude_codex_tool_discovery: false,
         });
     let (role_library, session_groups) = current_mem_state(state)
         .map(|mem| (mem.role_library, mem.session_groups))
@@ -10428,7 +10537,8 @@ impl WorkerTemplate {
             STATIC_PROMPT,
             settings.config.core_profile(),
             &memory_dir,
-            InterfacePreferences::markdown(),
+            InterfacePreferences::markdown()
+                .with_claude_codex_tool_discovery(mem.settings.claude_codex_tool_discovery),
         );
         core.change_prompt_cwd(current_dir.display().to_string())?;
         core.set_response_protocol(settings.config.response_protocol);
@@ -10476,16 +10586,36 @@ impl WorkerTemplate {
         &self,
         env_overrides: &BTreeMap<String, String>,
     ) -> Result<RuntimeSettings, String> {
+        self.session_settings_with_transport_cache(env_overrides, false)
+    }
+
+    fn restored_session_settings(
+        &self,
+        cached_env: &BTreeMap<String, String>,
+    ) -> Result<RuntimeSettings, String> {
+        self.session_settings_with_transport_cache(cached_env, true)
+    }
+
+    fn session_settings_with_transport_cache(
+        &self,
+        env_overrides: &BTreeMap<String, String>,
+        allow_transport_cache: bool,
+    ) -> Result<RuntimeSettings, String> {
         let mut settings = self
             .settings
             .lock()
             .map_err(|_| "runtime_settings_poisoned")?
             .clone();
         for (key, value) in env_overrides {
-            if value.trim().is_empty() && key != "TIMEM_API_KEY" {
+            let trusted_transport_key = allow_transport_cache
+                && CACHED_MODEL_HTTP_TRANSPORT_ENV_KEYS.contains(&key.as_str());
+            if value.trim().is_empty()
+                && key != "TIMEM_API_KEY"
+                && !(trusted_transport_key && key == "TIMEM_PRIVATE_CA_PEM")
+            {
                 return Err(format!("empty_session_env_value:{key}"));
             }
-            if !SESSION_ENV_KEYS.contains(&key.as_str()) {
+            if !SESSION_ENV_KEYS.contains(&key.as_str()) && !trusted_transport_key {
                 return Err(format!("unsupported_session_env_key:{key}"));
             }
         }
@@ -10551,6 +10681,21 @@ impl WorkerTemplate {
         if let Some(value) = env_overrides.get("TIMEM_PARALLEL_TOOL_CALLS") {
             settings.config.interaction.parallel_tool_calls =
                 agent_core::parse_parallel_tool_calls(value)?;
+        }
+        if allow_transport_cache {
+            if let Some(value) = env_overrides.get("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS") {
+                settings.config.http_transport.allow_cross_origin_redirects =
+                    parse_cached_bool("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS", value)?;
+            }
+            if let Some(value) = env_overrides.get("TIMEM_PRIVATE_CA_PEM") {
+                settings.config.http_transport.private_ca_pem = if value.trim().is_empty() {
+                    None
+                } else {
+                    agent_core::validate_model_private_ca_pem(value)
+                        .map_err(|error| format!("invalid_cached_model_private_ca:{error}"))?;
+                    Some(value.clone())
+                };
+            }
         }
         for key in [
             "TIMEM_ENABLE_THINKING",
@@ -10672,6 +10817,9 @@ fn model_service_config_for_web_launch(
     model_service_config_from_sources_allow_missing_api_key(&launch.model_service_source(), env)
 }
 
+const CACHED_MODEL_HTTP_TRANSPORT_ENV_KEYS: &[&str] =
+    &["TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS", "TIMEM_PRIVATE_CA_PEM"];
+
 const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_MODEL",
     "TIMEM_API_PROTOCOL",
@@ -10693,6 +10841,14 @@ const SESSION_ENV_KEYS: &[&str] = &[
     "TIMEM_TOOL_CALL_MODE",
     "TIMEM_PARALLEL_TOOL_CALLS",
 ];
+
+fn parse_cached_bool(key: &str, value: &str) -> Result<bool, String> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!("invalid_cached_session_env:{key}")),
+    }
+}
 
 fn parse_round_budget(value: &str) -> Result<u32, String> {
     let value = value.trim();
@@ -10717,6 +10873,26 @@ fn round_budget_value(max_rounds: u32) -> String {
 const RETIRED_SESSION_ENV_KEYS: &[&str] = &["TIMEM_GATEWAY_PROVIDER"];
 const DERIVED_INTERACTION_ENV_KEYS: &[&str] =
     &["TIMEM_TOOL_CALL_MODE", "TIMEM_PARALLEL_TOOL_CALLS"];
+// Newer hosts may persist these as effective runtime cache fields. They are not
+// user-editable Session environment overrides, and older hosts cannot apply
+// their transport semantics. Ignore them only when they came from the cached
+// effective environment so a downgrade does not make the whole Session vanish.
+const FORWARD_COMPATIBLE_SESSION_CACHE_KEYS: &[&str] =
+    &["TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS", "TIMEM_PRIVATE_CA_PEM"];
+
+fn forward_compatible_session_cache(
+    env: &BTreeMap<String, String>,
+    explicit_overrides: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    FORWARD_COMPATIBLE_SESSION_CACHE_KEYS
+        .iter()
+        .filter(|key| !explicit_overrides.contains_key(**key))
+        .filter_map(|key| {
+            env.get(*key)
+                .map(|value| ((*key).to_string(), value.clone()))
+        })
+        .collect()
+}
 
 fn sanitize_restored_session_env(
     mut env: BTreeMap<String, String>,
@@ -10730,6 +10906,11 @@ fn sanitize_restored_session_env(
     // only explicit per-Session overrides. The template supplies the current
     // host default (`auto` for a normal Web launch).
     for key in DERIVED_INTERACTION_ENV_KEYS {
+        if !explicit_overrides.contains_key(*key) {
+            env.remove(*key);
+        }
+    }
+    for key in FORWARD_COMPATIBLE_SESSION_CACHE_KEYS {
         if !explicit_overrides.contains_key(*key) {
             env.remove(*key);
         }
@@ -10867,6 +11048,31 @@ fn session_cached_env_values(settings: &RuntimeSettings) -> BTreeMap<String, Str
         "TIMEM_REQUEST_FIELDS".to_string(),
         serde_json::to_string(&settings.config.request_fields).unwrap_or_else(|_| "{}".to_string()),
     );
+    env.insert(
+        "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS".to_string(),
+        settings
+            .config
+            .http_transport
+            .allow_cross_origin_redirects
+            .to_string(),
+    );
+    env.insert(
+        "TIMEM_PRIVATE_CA_PEM".to_string(),
+        settings
+            .config
+            .http_transport
+            .private_ca_pem
+            .clone()
+            .unwrap_or_default(),
+    );
+    env
+}
+
+fn session_cached_env_values_with_forward_compatible_cache(
+    runtime: &WebSessionRuntime,
+) -> BTreeMap<String, String> {
+    let mut env = session_cached_env_values(&runtime.settings);
+    env.extend(runtime.forward_compatible_cache.clone());
     env
 }
 
@@ -11022,6 +11228,8 @@ impl WebLaunchOptions {
             api_key: self.api_key.clone(),
             http_headers: None,
             request_fields: None,
+            allow_cross_origin_redirects: None,
+            private_ca_pem: None,
             model: self.model.clone(),
             base_url: self.base_url.clone(),
             timeout_secs: self.timeout_secs,
@@ -11038,50 +11246,6 @@ impl WebLaunchOptions {
             .map(|key| key.api_key),
         }
     }
-}
-
-fn browser_command(url: &str) -> Result<(OsString, Vec<OsString>), String> {
-    agent_core::os::browser_command(url).ok_or_else(|| "browser_open_unsupported".to_string())
-}
-
-fn open_browser(url: &str) -> Result<(), String> {
-    let (program, args) = browser_command(url)?;
-    let mut child = Command::new(program)
-        .args(args)
-        .spawn()
-        .map_err(|error| error.to_string())?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
-}
-
-fn should_auto_open_browser() -> bool {
-    let is_ssh = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
-        .into_iter()
-        .any(|key| std::env::var_os(key).is_some_and(|value| !value.is_empty()));
-
-    browser_auto_open_allowed_for(is_ssh, agent_core::os::graphical_session_available())
-}
-
-fn browser_auto_open_allowed_for(is_ssh: bool, has_graphical_session: bool) -> bool {
-    !is_ssh && has_graphical_session
-}
-
-fn open_directory_in_terminal(path: &Path) -> Result<(), String> {
-    if !path.is_dir() {
-        return Err("tool_directory_not_found".to_string());
-    }
-    let (program, args) = agent_core::os::terminal_command(path)
-        .ok_or_else(|| "terminal_open_unsupported".to_string())?;
-    let mut child = Command::new(program)
-        .args(args)
-        .spawn()
-        .map_err(|error| format!("terminal_open_failed:{error}"))?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
 }
 
 fn uses_system_default_mem(memory_dir: &str) -> bool {

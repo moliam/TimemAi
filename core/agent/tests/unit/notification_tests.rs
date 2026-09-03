@@ -165,3 +165,35 @@ fn run_bash_notifications_publish_effective_wait_budgets() {
         ]
     );
 }
+
+#[test]
+fn run_powershell_notification_is_an_active_local_command_with_polling_metadata() {
+    let suite = ResponseProtocolKind::Json.suite();
+    let envelope = suite.parse(
+        r#"{"working_still_action":[{"run_powershell":{"loop_cmd":"if (Test-Path done) { exit 0 } else { exit 1 }","interval_ms":750,"loop_timeout_ms":120000,"once_timeout_ms":4000}}]}"#,
+        &crate::capability::CapabilityRegistry::builtin_for_host(
+            crate::capability::CapabilityHostProfile::windows_with_local_command_execution(),
+        ),
+    );
+    let events = notifications_from_envelope(&envelope);
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            CoreNotification::Action {
+                action,
+                active: true,
+                kind: CoreActionKind::Bash {
+                    command,
+                    mode,
+                    interval_ms: Some(750),
+                    loop_timeout_ms: Some(120000),
+                    once_timeout_ms: Some(4000),
+                    ..
+                },
+                ..
+            } if action == "run_powershell"
+                && command.contains("Test-Path")
+                && mode == "poll"
+        )
+    }));
+}

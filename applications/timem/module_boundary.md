@@ -14,6 +14,22 @@ Before changing this module, read `docs/turn-state-projection-architecture.md` f
 
 It may contain:
 
+The product Web host is split by internal responsibility under `src/server/`:
+
+- `command_lane.rs` owns the process-local FIFO ticket primitive used to serialize accepted
+  mutations per scope. It has no Session/Turn semantics and advances tickets through an RAII guard.
+- `command_dedup.rs` owns bounded process-local command correlation records, including in-flight
+  retention, terminal-record eviction, capacity exhaustion, and explicit reservation removal. It is
+  not a durable command ledger and does not infer Session/Turn lifecycle.
+- `desktop_launch.rs` owns direct, shell-free browser and terminal process launching plus the
+  local graphical-session auto-open check. It does not own Web or Agent lifecycle decisions.
+- `websocket_delivery.rs` owns authenticated browser command delivery after generic WebSocket
+  framing.
+- `mem_maintenance.rs` owns bounded memory-space maintenance.
+- `server.rs` remains the parent composition module while further behavior-preserving extraction is
+  performed incrementally. New code should enter the narrowest existing submodule rather than
+  rebuilding these responsibilities in the parent.
+
 - Product HTTP lifecycle, local port selection, explicit public-bind policy, per-process access
   tokens, authenticated product handlers, snapshot construction, and mapping decoded browser
   commands to Session/Core operations. Fixed HTTP/WebSocket paths and method placement, request
@@ -176,7 +192,7 @@ It must not contain:
   rule decides whether a Turn exists, accepts input, stops, finishes, or owns an
   outcome, it belongs in Core. This module only adapts that rule to reliable Web
   delivery and browser-facing projection.
-- Model API wire formatting, curl calls, prompt assembly, memory semantics,
+- Model API wire formatting or HTTP execution, prompt assembly, memory semantics,
   tool argument parsing, MCP protocol execution, or other tool execution.
 - React layout, CSS, browser state reducers, or user-facing visual policy. Those
   belong in `interfaces/web`.

@@ -1,8 +1,8 @@
 use crate::{
     default_api_protocol, default_base_url, default_model, parse_api_protocol,
     parse_openai_compatible_cache_mode, parse_token_count, validate_model_http_headers,
-    validate_model_request_fields, ApiProtocol, ModelServiceConfig, OpenAiCompatibleCacheMode,
-    OpenAiCompatibleOptions, ParallelToolCalls, ToolCallMode,
+    validate_model_request_fields, ApiProtocol, ModelHttpTransportOptions, ModelServiceConfig,
+    OpenAiCompatibleCacheMode, OpenAiCompatibleOptions, ParallelToolCalls, ToolCallMode,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -27,6 +27,8 @@ pub struct ModelServiceConfigSource {
     pub openai_cache_mode: Option<String>,
     pub tool_call_mode: Option<ToolCallMode>,
     pub parallel_tool_calls: Option<ParallelToolCalls>,
+    pub allow_cross_origin_redirects: Option<bool>,
+    pub private_ca_pem: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +107,7 @@ impl LocalLLMKeyFile {
                 ..crate::InteractionConfig::default()
             },
             openai_compatible: OpenAiCompatibleOptions::default(),
+            http_transport: ModelHttpTransportOptions::default(),
         }
     }
 }
@@ -269,6 +272,21 @@ fn model_service_config_from_sources_with_key_policy(
             reasoning_effort,
             stream,
             cache_mode,
+        },
+        http_transport: ModelHttpTransportOptions {
+            allow_cross_origin_redirects: match source.allow_cross_origin_redirects {
+                Some(value) => value,
+                None => env
+                    .get("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS")
+                    .map(|value| parse_bool_env("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS", value))
+                    .transpose()?
+                    .unwrap_or(false),
+            },
+            private_ca_pem: source
+                .private_ca_pem
+                .clone()
+                .or_else(|| env.get("TIMEM_PRIVATE_CA_PEM").cloned())
+                .filter(|value| !value.trim().is_empty()),
         },
     })
 }

@@ -312,6 +312,7 @@ fn worker_role_snapshots_survive_raw_history_reconstruction() {
         None,
         Some("role_history_command"),
         selected_roles.clone(),
+        "task",
     )
     .unwrap();
     let records = read_all_history_records(
@@ -462,6 +463,25 @@ fn turn_submit_wire_accepts_multiple_worker_role_ids_and_legacy_single_id() {
     };
     assert!(role_ids.is_empty());
     assert_eq!(role_id.as_deref(), Some("role_reviewer"));
+}
+
+#[test]
+fn turn_submit_wire_accepts_explicit_direct_resume_without_text() {
+    let command: ClientCommand = serde_json::from_value(json!({
+        "type": "turn_submit",
+        "session_id": "session_a",
+        "text": "",
+        "input_kind": "resume_directly"
+    }))
+    .unwrap();
+    let ClientCommand::TurnSubmit {
+        text, input_kind, ..
+    } = command
+    else {
+        panic!("expected turn_submit")
+    };
+    assert!(text.is_empty());
+    assert_eq!(input_kind.as_deref(), Some("resume_directly"));
 }
 
 #[test]
@@ -698,7 +718,7 @@ fn command_dedup_is_process_local_and_does_not_write_workspace_state() {
         .exists());
 
     let mut restarted = CommandDedupCache::default();
-    assert!(restarted.reserve(command_id).is_none());
+    assert!(restarted.reserve(command_id).unwrap().is_none());
 }
 
 #[test]
@@ -836,6 +856,7 @@ fn corrupt_session_index_record_is_backed_up_while_valid_sessions_remain_usable(
             .display()
             .to_string(),
         group_id: None,
+        ordinal: 0,
     };
     let valid_line = serde_json::to_string(&valid).unwrap();
     let original = format!("{valid_line}\nnot-json\n");
@@ -874,7 +895,7 @@ fn concurrent_same_command_id_has_one_executor_but_distinct_ids_both_execute() {
             let executions = Arc::clone(&executions);
             thread::spawn(move || {
                 barrier.wait();
-                if cache.lock().unwrap().reserve("same_id").is_none() {
+                if cache.lock().unwrap().reserve("same_id").unwrap().is_none() {
                     executions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
             })
@@ -884,8 +905,18 @@ fn concurrent_same_command_id_has_one_executor_but_distinct_ids_both_execute() {
         thread.join().unwrap();
     }
     assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
-    assert!(cache.lock().unwrap().reserve("different_id_a").is_none());
-    assert!(cache.lock().unwrap().reserve("different_id_b").is_none());
+    assert!(cache
+        .lock()
+        .unwrap()
+        .reserve("different_id_a")
+        .unwrap()
+        .is_none());
+    assert!(cache
+        .lock()
+        .unwrap()
+        .reserve("different_id_b")
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -904,7 +935,7 @@ fn command_lanes_serialize_one_session_without_globally_serializing_other_sessio
     let held_a = session_a_first
         .enter(session_a_first.issue().unwrap())
         .unwrap();
-    assert_eq!(session_a_second.state.lock().unwrap().serving_ticket, 0);
+    assert_eq!(session_a_second.serving_ticket(), 0);
     let held_b = session_b.enter(session_b.issue().unwrap()).unwrap();
     drop(held_b);
     drop(held_a);
@@ -988,7 +1019,7 @@ fn ticket_lane_is_fifo_even_when_a_later_waiter_is_scheduled_aggressively() {
             order_tx.send("first").unwrap();
         })
     };
-    while lane.state.lock().unwrap().next_ticket < 2 {
+    while lane.next_ticket() < 2 {
         thread::yield_now();
     }
     let second = {
@@ -999,7 +1030,7 @@ fn ticket_lane_is_fifo_even_when_a_later_waiter_is_scheduled_aggressively() {
             order_tx.send("second").unwrap();
         })
     };
-    while lane.state.lock().unwrap().next_ticket < 3 {
+    while lane.next_ticket() < 3 {
         thread::yield_now();
     }
     drop(held);
@@ -1090,7 +1121,10 @@ fn all_accepted_command_cache_is_bounded_instead_of_evicting_ownership() {
     {
         let mut cache = state.command_dedup.lock().unwrap();
         for ordinal in 0..COMMAND_DEDUP_CAPACITY {
-            assert!(cache.reserve(&format!("accepted_{ordinal}")).is_none());
+            assert!(cache
+                .reserve(&format!("accepted_{ordinal}"))
+                .unwrap()
+                .is_none());
         }
     }
 
@@ -1099,9 +1133,9 @@ fn all_accepted_command_cache_is_bounded_instead_of_evicting_ownership() {
         Err(error) if error == "command_dedup_capacity_exhausted"
     ));
     let cache = state.command_dedup.lock().unwrap();
-    assert_eq!(cache.records.len(), COMMAND_DEDUP_CAPACITY);
-    assert!(cache.records.contains_key("accepted_0"));
-    assert!(!cache.records.contains_key("one_too_many"));
+    assert_eq!(cache.len(), COMMAND_DEDUP_CAPACITY);
+    assert!(cache.contains("accepted_0"));
+    assert!(!cache.contains("one_too_many"));
 }
 
 #[test]
@@ -2010,12 +2044,20 @@ fn same_id_racing_across_sockets_has_one_owner_and_distinct_ids_all_execute() {
             thread::spawn(move || {
                 barrier.wait();
                 let mut cache = cache.lock().unwrap();
-                if cache.reserve("same_command_from_every_socket").is_none() {
+                if cache
+                    .reserve("same_command_from_every_socket")
+                    .unwrap()
+                    .is_none()
+                {
                     same_id_owners.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
                 // Payload equality is irrelevant. A distinct command ID means
                 // a distinct user intent and must not be content-deduplicated.
-                if cache.reserve(&format!("distinct_{connection}")).is_none() {
+                if cache
+                    .reserve(&format!("distinct_{connection}"))
+                    .unwrap()
+                    .is_none()
+                {
                     distinct_id_owners.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
             })
@@ -3290,6 +3332,7 @@ fn runtime_update_propagates_to_existing_sessions_and_new_session_defaults() {
         ClientCommand::SessionCreate {
             display_name: Some("Future defaults".to_string()),
             workspace_dir: None,
+            group_id: None,
             env: BTreeMap::new(),
         },
     )
@@ -3610,6 +3653,7 @@ fn workspace_snapshot_deduplicates_registered_current_directory() {
                 api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
                 response_protocol: ResponseProtocolKind::default(),
                 openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+                http_transport: Default::default(),
             },
             bash_approval_mode: BashApprovalMode::Ask,
             work_instruction_mode: WorkInstructionLoadMode::Off,
@@ -3656,6 +3700,7 @@ fn session_create_returns_the_complete_session_to_the_requesting_browser() {
         TEST_PORT,
         ClientCommand::SessionCreate {
             display_name: Some("Review".to_string()),
+            group_id: None,
             workspace_dir: Some(root.display().to_string()),
             env: BTreeMap::new(),
         },
@@ -3794,6 +3839,7 @@ fn session_create_accepts_an_unregistered_absolute_workspace_directory() {
         TEST_PORT,
         ClientCommand::SessionCreate {
             display_name: Some("Selected workspace".to_string()),
+            group_id: None,
             workspace_dir: Some(selected.display().to_string()),
             env: BTreeMap::new(),
         },
@@ -3860,6 +3906,7 @@ fn session_delete_stops_workers_and_removes_persisted_session() {
         TEST_PORT,
         ClientCommand::SessionCreate {
             display_name: Some("Disposable".to_string()),
+            group_id: None,
             workspace_dir: Some(root.display().to_string()),
             env: BTreeMap::new(),
         },
@@ -4329,6 +4376,7 @@ fn session_create_command_returns_session_with_runtime_overrides_applied() {
         TEST_PORT,
         ClientCommand::SessionCreate {
             display_name: Some("Override session".to_string()),
+            group_id: None,
             workspace_dir: Some(root.display().to_string()),
             env: BTreeMap::from([
                 ("TIMEM_MODEL".to_string(), "model-from-dialog".to_string()),
@@ -4418,6 +4466,7 @@ fn missing_workspace_session_uses_locked_fallback_without_losing_metadata_or_his
             last_turn_id: Some("turn_before_workspace_removal".to_string()),
             raw_chat_history_path: history_path.display().to_string(),
             group_id: None,
+            ordinal: 0,
         })
         .unwrap();
 
@@ -4783,9 +4832,11 @@ fn stored_session_restores_after_web_host_restart_with_fresh_worker() {
     let context = session_context(&restarted, &session_id, &[])
         .unwrap()
         .expect("restored session should inject resume context");
-    assert!(context.contains(
-        "Runtime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them."
-    ));
+    assert!(context.contains("Runtime just restarted. Previous runtime/job state may be stale."));
+    assert!(context.contains("first inspect this Session's recent history below"));
+    assert!(context.contains("use raw_chat search when more transcript context is needed"));
+    assert!(context.contains("scratch search/read when a prior checkpoint may exist"));
+    assert!(context.contains("verify the current cwd, files, and processes"));
     assert!(!context.contains("Previous audit chat history's runtime info are valid."));
     assert!(!context.contains("This session was restored"));
     assert!(context.contains("raw_chat_history.jsonl"));
@@ -5182,6 +5233,15 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
     template.workspace_dirs = vec![root.clone()];
     template.data_dir = data_dir.clone();
     template.initial_space = space.to_string();
+    let private_ca_pem = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .unwrap()
+        .serialize_pem()
+        .unwrap();
+    {
+        let mut settings = template.settings.lock().unwrap();
+        settings.config.http_transport.allow_cross_origin_redirects = true;
+        settings.config.http_transport.private_ca_pem = Some(private_ca_pem.clone());
+    }
     state.template = Arc::new(template.clone());
     state.sessions.lock().unwrap().clear();
 
@@ -5201,10 +5261,22 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
         overrides,
     )
     .unwrap();
-    let stored = current_session_store(&state)
+    let mut stored = current_session_store(&state)
         .unwrap()
         .load_session(&session_id)
         .unwrap()
+        .unwrap();
+    stored.env.insert(
+        "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS".to_string(),
+        "true".to_string(),
+    );
+    stored.env.insert(
+        "TIMEM_PRIVATE_CA_PEM".to_string(),
+        "future-host-private-ca".to_string(),
+    );
+    current_session_store(&state)
+        .unwrap()
+        .upsert_session(&stored)
         .unwrap();
     let persisted_overrides = stored.env_overrides.as_ref().unwrap();
     assert_eq!(
@@ -5224,14 +5296,56 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
         stored.env.get("TIMEM_API_KEY").map(String::as_str),
         Some("session-only-secret")
     );
+    assert_eq!(
+        stored
+            .env
+            .get("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        stored.env.get("TIMEM_PRIVATE_CA_PEM").map(String::as_str),
+        Some("future-host-private-ca")
+    );
+    assert!(!persisted_overrides.contains_key("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"));
+    assert!(!persisted_overrides.contains_key("TIMEM_PRIVATE_CA_PEM"));
 
-    template.settings.lock().unwrap().config.model = "model-from-new-env".to_string();
-    template.settings.lock().unwrap().config.api_key = "new-process-secret".to_string();
+    {
+        let mut settings = template.settings.lock().unwrap();
+        settings.config.model = "model-from-new-env".to_string();
+        settings.config.api_key = "new-process-secret".to_string();
+        settings.config.http_transport.allow_cross_origin_redirects = false;
+        settings.config.http_transport.private_ca_pem = None;
+    }
     let mut restarted = routing_test_state();
     restarted.sessions.lock().unwrap().clear();
     restarted.template = Arc::new(template);
     set_test_mem(&restarted, data_dir, space);
     assert_eq!(restore_stored_sessions(&restarted).unwrap(), 1);
+    let repersisted = current_session_store(&restarted)
+        .unwrap()
+        .load_session(&session_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        repersisted
+            .env
+            .get("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        repersisted
+            .env
+            .get("TIMEM_PRIVATE_CA_PEM")
+            .map(String::as_str),
+        Some("future-host-private-ca")
+    );
+    assert!(!repersisted
+        .env_overrides
+        .as_ref()
+        .unwrap()
+        .contains_key("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"));
 
     let sessions = restarted.sessions.lock().unwrap();
     let restored = sessions.get(&session_id).unwrap();
@@ -5250,9 +5364,27 @@ fn restored_session_keeps_cached_runtime_environment_without_exposing_it_to_web(
             .cache_mode,
         agent_core::OpenAiCompatibleCacheMode::Off
     );
-    assert!(!serde_json::to_string(restored)
-        .unwrap()
-        .contains("session-only-secret"));
+    assert!(
+        !restored
+            .runtime
+            .settings
+            .config
+            .http_transport
+            .allow_cross_origin_redirects
+    );
+    assert_eq!(
+        restored
+            .runtime
+            .settings
+            .config
+            .http_transport
+            .private_ca_pem
+            .as_deref(),
+        None
+    );
+    let serialized = serde_json::to_string(restored).unwrap();
+    assert!(!serialized.contains("session-only-secret"));
+    assert!(!serialized.contains("BEGIN CERTIFICATE"));
 }
 
 #[test]
@@ -5571,17 +5703,10 @@ fn session_group_validation_rejects_case_insensitive_duplicate_names() {
 }
 
 #[test]
-fn session_groups_create_move_persist_and_delete_without_deleting_sessions() {
+fn session_groups_create_session_in_group_persist_and_reject_delete_while_nonempty() {
     let state = routing_test_state();
     let workspace = std::env::temp_dir().join(unique_web_id("session_group_workspace"));
     std::fs::create_dir_all(&workspace).unwrap();
-    let session_id = create_session(
-        &state,
-        Some("Grouped work".to_string()),
-        Some(workspace.display().to_string()),
-        BTreeMap::new(),
-    )
-    .unwrap();
 
     let Some(WireEvent::SessionGroupsUpdated { groups }) = handle_command(
         &state,
@@ -5596,22 +5721,21 @@ fn session_groups_create_move_persist_and_delete_without_deleting_sessions() {
     assert_eq!(groups.len(), 1);
     let group_id = groups[0].id.clone();
 
-    let moved = handle_command(
+    let Some(WireEvent::SessionCreated { session }) = handle_command(
         &state,
         TEST_PORT,
-        ClientCommand::SessionGroupMove {
-            session_id: session_id.clone(),
+        ClientCommand::SessionCreate {
+            display_name: Some("Grouped work".to_string()),
+            workspace_dir: Some(workspace.display().to_string()),
             group_id: Some(group_id.clone()),
+            env: BTreeMap::new(),
         },
     )
-    .unwrap();
-    assert!(matches!(
-        moved,
-        Some(WireEvent::SessionGroupChanged {
-            session_id: ref moved_session_id,
-            group_id: Some(ref persisted_group_id),
-        }) if moved_session_id == &session_id && persisted_group_id == &group_id
-    ));
+    .unwrap() else {
+        panic!("expected grouped session creation");
+    };
+    let session_id = session.session_id.clone();
+    assert_eq!(session.group_id.as_deref(), Some(group_id.as_str()));
     assert_eq!(
         current_session_store(&state)
             .unwrap()
@@ -5635,18 +5759,16 @@ fn session_groups_create_move_persist_and_delete_without_deleting_sessions() {
         Some(group_id.as_str())
     );
 
-    let deleted = handle_command(
+    let error = handle_command(
         &state,
         TEST_PORT,
         ClientCommand::SessionGroupDelete {
             group_id: group_id.clone(),
         },
     )
-    .unwrap();
-    assert!(matches!(
-        deleted,
-        Some(WireEvent::SessionGroupsUpdated { ref groups }) if groups.is_empty()
-    ));
+    .unwrap_err();
+    assert_eq!(error, "session_group_not_empty");
+    assert_eq!(current_mem_state(&state).unwrap().session_groups, groups);
     assert!(state.sessions.lock().unwrap().contains_key(&session_id));
     assert_eq!(
         current_session_store(&state)
@@ -5654,133 +5776,233 @@ fn session_groups_create_move_persist_and_delete_without_deleting_sessions() {
             .load_session(&session_id)
             .unwrap()
             .unwrap()
-            .group_id,
-        None
+            .group_id
+            .as_deref(),
+        Some(group_id.as_str())
     );
     let _ = std::fs::remove_dir_all(workspace);
 }
 
 #[test]
-fn session_group_move_persistence_failure_keeps_memory_and_disk_unchanged() {
+fn session_create_rejects_unknown_group_without_leaving_a_session() {
     let state = routing_test_state();
-    let Some(WireEvent::SessionGroupsUpdated { groups }) = handle_command(
+    let session_ids_before = state
+        .sessions
+        .lock()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    let error = handle_command(
         &state,
         TEST_PORT,
-        ClientCommand::SessionGroupCreate {
-            name: "Failure test".to_string(),
+        ClientCommand::SessionCreate {
+            display_name: Some("Invalid group".to_string()),
+            workspace_dir: None,
+            group_id: Some("missing-group".to_string()),
+            env: BTreeMap::new(),
         },
     )
-    .unwrap() else {
-        panic!("expected session groups update");
-    };
-    let group_id = groups[0].id.clone();
-    let store = current_session_store(&state).unwrap();
-    persist_web_session(&state, "session_a").unwrap();
-    let metadata = store.metadata_path_for_session("session_a");
-    let original = std::fs::read(&metadata).unwrap();
-    std::fs::remove_file(&metadata).unwrap();
-    std::fs::create_dir(&metadata).unwrap();
+    .unwrap_err();
 
+    assert_eq!(error, "session_group_not_found");
+    assert_eq!(
+        state
+            .sessions
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        session_ids_before
+    );
+}
+
+#[test]
+fn session_group_reorder_updates_and_persists_exact_existing_groups() {
+    let state = routing_test_state();
+    for name in ["First", "Second"] {
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::SessionGroupCreate {
+                name: name.to_string(),
+            },
+        )
+        .unwrap();
+    }
+    let mut reordered = current_mem_state(&state).unwrap().session_groups;
+    reordered.reverse();
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupsReorder {
+            groups: reordered.clone(),
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(
+        event,
+        Some(WireEvent::SessionGroupsUpdated { groups }) if groups == reordered
+    ));
+    assert_eq!(current_mem_state(&state).unwrap().session_groups, reordered);
+    let persisted = load_session_groups(&state.mem.lock().unwrap().layout.memory_dir()).unwrap();
+    assert_eq!(persisted, reordered);
+}
+
+#[test]
+fn session_group_reorder_rejects_changed_membership() {
+    let state = routing_test_state();
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupsReorder {
+            groups: vec![SessionGroup {
+                id: "unknown".to_string(),
+                name: "Unknown".to_string(),
+            }],
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "session_group_reorder_membership_changed");
+}
+
+#[test]
+fn session_reorder_updates_same_group_ordinals_and_persists_them() {
+    let state = routing_test_state();
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionReorder {
+            group_id: None,
+            session_ids: vec!["session_b".to_string(), "session_a".to_string()],
+        },
+    )
+    .unwrap();
+
+    assert!(matches!(
+        event,
+        Some(WireEvent::SessionOrderUpdated { group_id: None, session_ids })
+            if session_ids == ["session_b", "session_a"]
+    ));
+    let sessions = state.sessions.lock().unwrap();
+    assert_eq!(sessions["session_b"].ordinal, 0);
+    assert_eq!(sessions["session_a"].ordinal, 1);
+    drop(sessions);
+    let store = current_session_store(&state).unwrap();
+    assert_eq!(store.load_session("session_b").unwrap().unwrap().ordinal, 0);
+    assert_eq!(store.load_session("session_a").unwrap().unwrap().ordinal, 1);
+}
+
+#[test]
+fn session_reorder_rejects_cross_group_membership() {
+    let state = routing_test_state();
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .get_mut("session_a")
+        .unwrap()
+        .group_id = Some("other-group".to_string());
+
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionReorder {
+            group_id: None,
+            session_ids: vec!["session_b".to_string(), "session_a".to_string()],
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "session_reorder_membership_changed");
+    assert_eq!(state.sessions.lock().unwrap()["session_a"].ordinal, 0);
+    assert_eq!(state.sessions.lock().unwrap()["session_b"].ordinal, 1);
+}
+
+#[test]
+fn session_group_move_is_rejected_for_all_sessions() {
+    let state = routing_test_state();
     let error = handle_command(
         &state,
         TEST_PORT,
         ClientCommand::SessionGroupMove {
             session_id: "session_a".to_string(),
-            group_id: Some(group_id),
+            group_id: None,
         },
     )
     .unwrap_err();
-    assert!(error.contains("session_metadata_write_failed"));
-    assert_eq!(
-        state.sessions.lock().unwrap()["session_a"].group_id,
-        None,
-        "failed persistence must not mutate the in-memory session"
-    );
 
-    std::fs::remove_dir(&metadata).unwrap();
-    std::fs::write(&metadata, original).unwrap();
-    assert_eq!(
-        store.load_session("session_a").unwrap().unwrap().group_id,
-        None
-    );
+    assert_eq!(error, "session_group_assignment_fixed");
+    assert_eq!(state.sessions.lock().unwrap()["session_a"].group_id, None);
 }
 
 #[test]
-fn session_group_delete_persistence_failure_rolls_back_prior_metadata_writes() {
+fn deleting_unknown_session_group_is_rejected() {
+    let state = routing_test_state();
+
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::SessionGroupDelete {
+            group_id: "missing-group".to_string(),
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "session_group_not_found");
+    assert!(current_mem_state(&state).unwrap().session_groups.is_empty());
+}
+
+#[test]
+fn empty_session_group_can_be_deleted() {
     let state = routing_test_state();
     let Some(WireEvent::SessionGroupsUpdated { groups }) = handle_command(
         &state,
         TEST_PORT,
         ClientCommand::SessionGroupCreate {
-            name: "Rollback test".to_string(),
+            name: "Empty group".to_string(),
         },
     )
     .unwrap() else {
         panic!("expected session groups update");
     };
     let group_id = groups[0].id.clone();
-    for session_id in ["session_a", "session_b"] {
-        handle_command(
-            &state,
-            TEST_PORT,
-            ClientCommand::SessionGroupMove {
-                session_id: session_id.to_string(),
-                group_id: Some(group_id.clone()),
-            },
-        )
-        .unwrap();
-    }
-    let store = current_session_store(&state).unwrap();
-    let blocked_metadata = store.metadata_path_for_session("session_b");
-    let blocked_original = std::fs::read(&blocked_metadata).unwrap();
-    std::fs::remove_file(&blocked_metadata).unwrap();
-    std::fs::create_dir(&blocked_metadata).unwrap();
 
-    let error = handle_command(
+    let deleted = handle_command(
         &state,
         TEST_PORT,
-        ClientCommand::SessionGroupDelete {
-            group_id: group_id.clone(),
-        },
+        ClientCommand::SessionGroupDelete { group_id },
     )
-    .unwrap_err();
-    assert!(error.contains("session_group_delete_persist_failed"));
-    assert_eq!(
-        current_mem_state(&state).unwrap().session_groups,
-        groups,
-        "failed deletion must keep the group definition"
-    );
-    for session_id in ["session_a", "session_b"] {
+    .unwrap();
+    assert!(matches!(
+        deleted,
+        Some(WireEvent::SessionGroupsUpdated { ref groups }) if groups.is_empty()
+    ));
+    assert!(current_mem_state(&state).unwrap().session_groups.is_empty());
+}
+
+#[test]
+fn unsorted_name_is_reserved_for_the_builtin_group() {
+    let state = routing_test_state();
+    for name in ["Unsorted", " unsorted ", "UNSORTED"] {
         assert_eq!(
-            state.sessions.lock().unwrap()[session_id]
-                .group_id
-                .as_deref(),
-            Some(group_id.as_str()),
-            "failed deletion must keep every in-memory group assignment"
+            handle_command(
+                &state,
+                TEST_PORT,
+                ClientCommand::SessionGroupCreate {
+                    name: name.to_string(),
+                },
+            )
+            .unwrap_err(),
+            "session_group_name_reserved"
         );
     }
-    assert_eq!(
-        store
-            .load_session("session_a")
-            .unwrap()
-            .unwrap()
-            .group_id
-            .as_deref(),
-        Some(group_id.as_str()),
-        "metadata written before the injected failure must be compensated"
-    );
-
-    std::fs::remove_dir(&blocked_metadata).unwrap();
-    std::fs::write(&blocked_metadata, blocked_original).unwrap();
-    assert_eq!(
-        store
-            .load_session("session_b")
-            .unwrap()
-            .unwrap()
-            .group_id
-            .as_deref(),
-        Some(group_id.as_str())
-    );
+    assert!(current_mem_state(&state).unwrap().session_groups.is_empty());
 }
 
 #[test]
@@ -5812,6 +6034,7 @@ fn snapshot_reports_the_active_mem_space_and_paths() {
         snapshot.server.mem.conversation_capacity_bytes,
         Some(MEM_CAPACITY_128_MB)
     );
+    assert!(snapshot.server.mem.claude_codex_tool_discovery);
 }
 
 #[test]
@@ -5826,6 +6049,7 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
         normal.conversation_capacity_bytes,
         Some(MEM_CAPACITY_128_MB)
     );
+    assert!(normal.claude_codex_tool_discovery);
 
     let debug = load_web_mem_settings(&root, true).unwrap();
     assert_eq!(debug.temporary_retention_days, Some(5));
@@ -5841,6 +6065,7 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
     assert_eq!(saved.temporary_retention_days, None);
     assert_eq!(saved.temporary_capacity_bytes, None);
     assert_eq!(saved.conversation_capacity_bytes, Some(MEM_CAPACITY_512_MB));
+    assert!(saved.claude_codex_tool_discovery);
 
     std::fs::write(
         web_mem_settings_path(&root),
@@ -5868,6 +6093,58 @@ fn web_mem_capacity_defaults_follow_launch_mode_without_overriding_saved_values(
     );
 
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn claude_codex_tool_discovery_setting_is_authoritative_and_mem_persistent() {
+    let state = routing_test_state();
+    assert!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .claude_codex_tool_discovery
+    );
+
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::BetaClaudeCodexToolDiscoveryUpdate { enabled: false },
+    )
+    .unwrap();
+    assert!(
+        !load_web_mem_settings(&memory_dir, false)
+            .unwrap()
+            .claude_codex_tool_discovery
+    );
+
+    let event = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::BetaClaudeCodexToolDiscoveryUpdate { enabled: true },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::MemSettingsUpdated {
+        claude_codex_tool_discovery,
+        ..
+    } = event
+    else {
+        panic!("expected authoritative MEM settings event")
+    };
+    assert!(claude_codex_tool_discovery);
+    assert!(
+        snapshot_for(&state, TEST_PORT)
+            .server
+            .mem
+            .claude_codex_tool_discovery
+    );
+
+    assert!(
+        load_web_mem_settings(&memory_dir, false)
+            .unwrap()
+            .claude_codex_tool_discovery
+    );
 }
 
 #[test]
@@ -5992,6 +6269,7 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
         temporary_retention_days,
         temporary_capacity_bytes,
         conversation_capacity_bytes,
+        claude_codex_tool_discovery,
     } = event
     else {
         panic!("expected authoritative MEM settings event")
@@ -5999,6 +6277,7 @@ fn mem_temporary_retention_is_mem_scoped_persisted_and_applies_to_all_temporary_
     assert_eq!(temporary_retention_days, Some(5));
     assert_eq!(temporary_capacity_bytes, None);
     assert_eq!(conversation_capacity_bytes, Some(MEM_CAPACITY_128_MB));
+    assert!(claude_codex_tool_discovery);
 
     let retained = read_all_history_records(&store.history_path_for_session("session_a")).unwrap();
     assert!(retained.iter().any(|record| matches!(
@@ -6229,6 +6508,91 @@ fn successful_temporary_maintenance_completion_resets_runtime_and_clears_hint() 
             .accumulated_runtime,
         Duration::ZERO
     );
+}
+
+#[tokio::test]
+async fn failed_idle_maintenance_preserves_due_state_records_diagnostics_and_recovers() {
+    let mut state = routing_test_state();
+    let test_root = std::env::temp_dir().join(unique_web_id("idle_maintenance_failure"));
+    let runtime_log_path = test_root.join("runtime.log");
+    state.runtime_log = RuntimeLog::with_path_and_limit(runtime_log_path.clone(), 64 * 1024);
+    state.lifecycle_diagnostics = LifecycleDiagnostics::install_for_test(&test_root).unwrap();
+
+    let (memory_dir, audit_file, hint) = {
+        let mut mem = state.mem.lock().unwrap();
+        mem.temporary_maintenance.accumulated_runtime = TEMPORARY_MAINTENANCE_INTERVAL;
+        let memory_dir = mem.layout.memory_dir();
+        save_temporary_maintenance_runtime_state(&memory_dir, &mem.temporary_maintenance).unwrap();
+        let audit_file = mem.layout.api_audit_file();
+        let hint = agent_core::api_audit_maintenance_hint_path(&audit_file);
+        (memory_dir, audit_file, hint)
+    };
+    std::fs::create_dir_all(audit_file.parent().unwrap()).unwrap();
+    std::fs::create_dir(&audit_file).unwrap();
+    std::fs::write(
+        &hint,
+        b"audit_segment_rolled
+",
+    )
+    .unwrap();
+
+    let error = run_idle_temporary_maintenance(state.clone())
+        .await
+        .unwrap_err();
+    assert!(error.starts_with("api_audit_retention_failed:"));
+    assert!(hint.exists(), "a failed pass must remain due for retry");
+    assert_eq!(
+        load_temporary_maintenance_runtime_state(&memory_dir)
+            .unwrap()
+            .accumulated_runtime,
+        TEMPORARY_MAINTENANCE_INTERVAL,
+        "failure must not be committed as successful maintenance"
+    );
+
+    record_idle_temporary_maintenance_failure(&state, &error);
+    let runtime_record: Value =
+        serde_json::from_str(std::fs::read_to_string(&runtime_log_path).unwrap().trim()).unwrap();
+    assert_eq!(runtime_record["stage"], "idle_temporary_maintenance_failed");
+    assert_eq!(runtime_record["fields"]["error"], error);
+    let current_diagnostic = state
+        .lifecycle_diagnostics
+        .root()
+        .unwrap()
+        .join("current-runs")
+        .read_dir()
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let diagnostic: Value =
+        serde_json::from_slice(&std::fs::read(current_diagnostic).unwrap()).unwrap();
+    let last = diagnostic["recent_lifecycle_events"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap();
+    assert_eq!(last["name"], "idle_temporary_maintenance_failed");
+    assert_eq!(last["details"]["error"], error);
+
+    std::fs::remove_dir(&audit_file).unwrap();
+    std::fs::write(&audit_file, br#"{"version":1,"events":[]}"#).unwrap();
+    assert_eq!(
+        run_idle_temporary_maintenance(state.clone()).await.unwrap(),
+        TemporaryMaintenanceAttempt::Completed
+    );
+    assert!(!hint.exists());
+    assert_eq!(
+        load_temporary_maintenance_runtime_state(&memory_dir)
+            .unwrap()
+            .accumulated_runtime,
+        Duration::ZERO
+    );
+
+    state
+        .lifecycle_diagnostics
+        .finish("test_complete", true, None);
+    let _ = std::fs::remove_dir_all(test_root);
 }
 
 #[tokio::test]
@@ -6793,6 +7157,33 @@ fn session_runtime_env_rejects_unknown_empty_and_invalid_values() {
             .unwrap(),
         "unsupported_session_env_key:PATH"
     );
+    for key in ["TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS", "TIMEM_PRIVATE_CA_PEM"] {
+        assert_eq!(
+            state
+                .template
+                .session_settings(&BTreeMap::from([(key.to_string(), "true".to_string())]))
+                .unwrap_err(),
+            format!("unsupported_session_env_key:{key}")
+        );
+    }
+    assert_eq!(
+        state
+            .template
+            .restored_session_settings(&BTreeMap::from([(
+                "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS".to_string(),
+                "TRUE".to_string(),
+            )]))
+            .unwrap_err(),
+        "invalid_cached_session_env:TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"
+    );
+    assert!(state
+        .template
+        .restored_session_settings(&BTreeMap::from([(
+            "TIMEM_PRIVATE_CA_PEM".to_string(),
+            "not a certificate".to_string(),
+        )]))
+        .unwrap_err()
+        .starts_with("invalid_cached_model_private_ca:model_tls_error:"));
     assert_eq!(
         state
             .template
@@ -6834,6 +7225,49 @@ fn session_runtime_env_rejects_unknown_empty_and_invalid_values() {
         )]))
         .unwrap_err()
         .contains("invalid_TIMEM_STREAM"));
+}
+
+#[test]
+fn restored_session_env_ignores_newer_host_transport_cache_but_not_explicit_overrides() {
+    let cached = BTreeMap::from([
+        (
+            "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS".to_string(),
+            "true".to_string(),
+        ),
+        (
+            "TIMEM_PRIVATE_CA_PEM".to_string(),
+            "-----BEGIN CERTIFICATE-----\ncache-only\n-----END CERTIFICATE-----".to_string(),
+        ),
+        ("TIMEM_MODEL".to_string(), "cached-model".to_string()),
+    ]);
+    let compatible_cache = forward_compatible_session_cache(&cached, &BTreeMap::new());
+    assert_eq!(compatible_cache.len(), 2);
+    let sanitized = sanitize_restored_session_env(cached.clone(), &BTreeMap::new());
+    assert_eq!(
+        sanitized.get("TIMEM_MODEL").map(String::as_str),
+        Some("cached-model")
+    );
+    assert!(!sanitized.contains_key("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"));
+    assert!(!sanitized.contains_key("TIMEM_PRIVATE_CA_PEM"));
+
+    let explicit = BTreeMap::from([(
+        "TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS".to_string(),
+        "true".to_string(),
+    )]);
+    let sanitized = sanitize_restored_session_env(cached, &explicit);
+    assert_eq!(
+        sanitized
+            .get("TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        routing_test_state()
+            .template
+            .session_settings(&sanitized)
+            .unwrap_err(),
+        "unsupported_session_env_key:TIMEM_ALLOW_CROSS_ORIGIN_REDIRECTS"
+    );
 }
 
 #[test]
@@ -6915,6 +7349,7 @@ fn routing_test_state() -> AppState {
         api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let template = WorkerTemplate {
         settings: Arc::new(Mutex::new(RuntimeSettings {
@@ -6964,6 +7399,7 @@ fn routing_test_state() -> AppState {
         mem_epoch: Arc::new(RwLock::new(1)),
         debug: None,
         runtime_log: RuntimeLog::default(),
+        lifecycle_diagnostics: LifecycleDiagnostics::disabled(),
     }
 }
 
@@ -7109,6 +7545,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
             settings,
             env: BTreeMap::new(),
             env_overrides: BTreeMap::new(),
+            forward_compatible_cache: BTreeMap::new(),
         },
     }
 }
@@ -7136,6 +7573,7 @@ fn test_runtime_settings() -> RuntimeSettings {
             api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
             response_protocol: ResponseProtocolKind::Xml,
             openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+            http_transport: Default::default(),
         },
         bash_approval_mode: BashApprovalMode::Ask,
         work_instruction_mode: WorkInstructionLoadMode::Off,
@@ -11294,6 +11732,35 @@ impl ModelClient for TaggedFinalModel {
     }
 }
 
+struct DirectResumePromptCaptureModel {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+impl ModelClient for DirectResumePromptCaptureModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: confirmed_xml_response("<final_answer>direct resume complete</final_answer>"),
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
 struct ToolGenPromptCaptureModel {
     prompts: Arc<Mutex<Vec<String>>>,
 }
@@ -11535,6 +12002,62 @@ fn register_real_worker(state: &AppState, name: &'static str) -> String {
     session_id
 }
 
+fn register_direct_resume_capture_worker(
+    state: &AppState,
+    prompts: Arc<Mutex<Vec<String>>>,
+) -> String {
+    let ordinal = state.sessions.lock().unwrap().len() as u32;
+    let session_id = unique_web_id("direct_resume_session");
+    let context_id = test_context_id(&session_id);
+    let worker_dir = std::env::temp_dir().join(format!("timem_web_direct_resume_{}", now_ms()));
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &worker_dir,
+    );
+    let config = state.template.settings.lock().unwrap().config.clone();
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            config,
+            CoreSessionWorkerWorkspace::new(
+                &worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some("Direct resume test".to_string()),
+            None,
+            DirectResumePromptCaptureModel { prompts },
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, ordinal, "Direct resume test".to_string());
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id;
+    session.active_context_id = session.contexts[0].context_id.clone();
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    session_id
+}
+
 fn register_toolgen_capture_worker(state: &AppState, prompts: Arc<Mutex<Vec<String>>>) -> String {
     let ordinal = state.sessions.lock().unwrap().len() as u32;
     let session_id = unique_web_id("toolgen_session");
@@ -11682,6 +12205,226 @@ fn drive_worker_until_session_ready(
         );
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+fn direct_resume_command(session_id: &str) -> ClientCommand {
+    ClientCommand::TurnSubmit {
+        session_id: session_id.to_string(),
+        text: String::new(),
+        input_kind: Some("resume_directly".to_string()),
+        source_turn_id: None,
+        attachment_ids: Some(Vec::new()),
+        role_id: None,
+        role_ids: Vec::new(),
+    }
+}
+
+#[test]
+fn ordinary_empty_turn_remains_invalid_without_direct_resume_intent() {
+    let state = routing_test_state();
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: "session_a".to_string(),
+            text: String::new(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, "empty_turn text");
+    assert!(state.sessions.lock().unwrap()["session_a"].turns.is_empty());
+}
+
+#[test]
+fn direct_resume_host_constructs_hidden_turn_and_shared_model_input() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let session_id = register_direct_resume_capture_worker(&state, Arc::clone(&prompts));
+
+    let event = handle_command(&state, TEST_PORT, direct_resume_command(&session_id))
+        .unwrap()
+        .expect("direct resume must create a turn");
+    let WireEvent::TurnUpdated { turn, .. } = event else {
+        panic!("direct resume must return TurnUpdated")
+    };
+    assert_eq!(turn.user_entries.len(), 1);
+    assert_eq!(turn.user_entries[0].kind, "resume_directly");
+    assert!(turn.user_entries[0].text.is_empty());
+    assert!(turn.user_entries[0].attachments.is_empty());
+
+    drive_worker_until_session_ready(&state, &session_id, &prompts);
+    let prompt = prompts.lock().unwrap().last().unwrap().clone();
+    assert!(prompt.contains(agent_core::DIRECT_RESUME_USER_INPUT));
+    assert!(!prompt.contains("<USER>\n\n</USER>"));
+}
+
+#[test]
+fn direct_resume_host_rejects_invalid_payload_and_non_idle_state() {
+    let cases = [
+        (
+            "nonempty text",
+            ClientCommand::TurnSubmit {
+                session_id: "session_a".to_string(),
+                text: "new task".to_string(),
+                attachment_ids: None,
+                input_kind: Some("resume_directly".to_string()),
+                source_turn_id: None,
+                role_id: None,
+                role_ids: Vec::new(),
+            },
+            "resume_directly_text_must_be_empty",
+        ),
+        (
+            "attachment",
+            ClientCommand::TurnSubmit {
+                session_id: "session_a".to_string(),
+                text: String::new(),
+                attachment_ids: Some(vec!["upload_1".to_string()]),
+                input_kind: Some("resume_directly".to_string()),
+                source_turn_id: None,
+                role_id: None,
+                role_ids: Vec::new(),
+            },
+            "resume_directly_attachments_not_supported",
+        ),
+        (
+            "worker role",
+            ClientCommand::TurnSubmit {
+                session_id: "session_a".to_string(),
+                text: String::new(),
+                attachment_ids: None,
+                input_kind: Some("resume_directly".to_string()),
+                source_turn_id: None,
+                role_id: Some("role_reviewer".to_string()),
+                role_ids: Vec::new(),
+            },
+            "resume_directly_worker_role_not_supported",
+        ),
+        (
+            "worker role list",
+            ClientCommand::TurnSubmit {
+                session_id: "session_a".to_string(),
+                text: String::new(),
+                attachment_ids: None,
+                input_kind: Some("resume_directly".to_string()),
+                source_turn_id: None,
+                role_id: None,
+                role_ids: vec!["role_reviewer".to_string()],
+            },
+            "resume_directly_worker_role_not_supported",
+        ),
+        (
+            "source turn",
+            ClientCommand::TurnSubmit {
+                session_id: "session_a".to_string(),
+                text: String::new(),
+                attachment_ids: None,
+                input_kind: Some("resume_directly".to_string()),
+                source_turn_id: Some("turn_1".to_string()),
+                role_id: None,
+                role_ids: Vec::new(),
+            },
+            "resume_directly_source_turn_not_supported",
+        ),
+    ];
+    for (name, command, expected) in cases {
+        let state = routing_test_state();
+        assert_eq!(
+            handle_command(&state, TEST_PORT, command).unwrap_err(),
+            expected,
+            "{name}"
+        );
+        assert!(state.sessions.lock().unwrap()["session_a"].turns.is_empty());
+    }
+
+    let working = routing_test_state();
+    start_web_turn(&working, "session_a", "active task").unwrap();
+    assert_eq!(
+        handle_command(&working, TEST_PORT, direct_resume_command("session_a")).unwrap_err(),
+        "resume_directly_requires_idle_session"
+    );
+
+    let queued = routing_test_state();
+    start_web_turn(&queued, "session_a", "active task").unwrap();
+    handle_command_with_id(
+        &queued,
+        TEST_PORT,
+        Some("queued-task"),
+        ClientCommand::TurnSubmit {
+            session_id: "session_a".to_string(),
+            text: "queued task".to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+    {
+        let mut sessions = queued.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.active_turn_id = None;
+        session.pending_turn_id = None;
+        session.state = "ready".to_string();
+    }
+    assert_eq!(
+        handle_command(&queued, TEST_PORT, direct_resume_command("session_a")).unwrap_err(),
+        "resume_directly_requires_idle_session"
+    );
+}
+
+#[tokio::test]
+async fn direct_resume_survives_work_instruction_confirmation_as_shared_input() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let session_id = register_direct_resume_capture_worker(&state, Arc::clone(&prompts));
+    let current_dir = {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.work_instruction_mode = WorkInstructionLoadMode::Ask;
+        PathBuf::from(&session.current_dir)
+    };
+    std::fs::write(
+        current_dir.join("AGENTS.md"),
+        "Use the direct resume guide.",
+    )
+    .unwrap();
+
+    let event = handle_command(&state, TEST_PORT, direct_resume_command(&session_id))
+        .unwrap()
+        .expect("direct resume must create a pending turn");
+    let WireEvent::TurnUpdated { turn, .. } = event else {
+        panic!("direct resume must return TurnUpdated")
+    };
+    assert_eq!(turn.user_entries[0].kind, "resume_directly");
+    let request_id = {
+        let sessions = state.sessions.lock().unwrap();
+        let pending = sessions[&session_id]
+            .pending_work_instruction_turn
+            .as_ref()
+            .expect("work instruction decision must be pending");
+        assert!(pending.direct_resume);
+        assert!(pending.text.is_empty());
+        pending.request_id.clone()
+    };
+
+    assert!(resolve_work_instruction_decision(
+        &state,
+        &session_id,
+        Some(&request_id),
+        HostDecision::Accept,
+    )
+    .unwrap());
+    drive_worker_until_session_ready(&state, &session_id, &prompts);
+    let prompt = prompts.lock().unwrap().last().unwrap().clone();
+    assert!(prompt.contains(agent_core::DIRECT_RESUME_USER_INPUT));
+    assert!(prompt.contains("Use the direct resume guide."));
 }
 
 #[test]
@@ -12749,6 +13492,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
             max_llm_input_tokens: 100_000,
             max_llm_output_tokens: 10_000,
             stream: false,
+            allow_cross_origin_redirects: false,
+            private_ca_pem: String::new(),
             api_key: format!("secret-{index:05}"),
             http_headers: Default::default(),
             request_fields: Default::default(),
@@ -12806,6 +13551,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                 max_llm_input_tokens: 100_000,
                 max_llm_output_tokens: 10_000,
                 stream: true,
+                allow_cross_origin_redirects: false,
+                private_ca_pem: None,
                 api_key: None,
                 http_headers: BTreeMap::from([
                     ("Authorization".to_string(), "****".to_string()),
@@ -12861,6 +13608,8 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                         max_llm_input_tokens: 100_000,
                         max_llm_output_tokens: 10_000,
                         stream: false,
+                        allow_cross_origin_redirects: false,
+                        private_ca_pem: None,
                         api_key: None,
                         http_headers: Default::default(),
                         request_fields: Default::default(),
@@ -12898,6 +13647,8 @@ fn legacy_model_endpoints_load_with_default_token_limits() {
     assert_eq!(endpoints[0].max_llm_input_tokens, 100_000);
     assert_eq!(endpoints[0].max_llm_output_tokens, 10_000);
     assert!(!endpoints[0].stream);
+    assert!(!endpoints[0].allow_cross_origin_redirects);
+    assert!(endpoints[0].private_ca_pem.is_empty());
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -12940,6 +13691,8 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         max_llm_input_tokens: 128_000,
         max_llm_output_tokens: 10_000,
         stream: false,
+        allow_cross_origin_redirects: false,
+        private_ca_pem: None,
         api_key: None,
         http_headers: Default::default(),
         request_fields: Default::default(),
@@ -12959,6 +13712,8 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         max_llm_input_tokens: 200_000,
         max_llm_output_tokens: 8_000,
         stream: false,
+        allow_cross_origin_redirects: false,
+        private_ca_pem: None,
         api_key: None,
         http_headers: Default::default(),
         request_fields: Default::default(),
@@ -12966,6 +13721,31 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
     assert_eq!(
         normalize_model_endpoint_input(None, invalid_output).unwrap_err(),
         "invalid_model_endpoint_max_output_tokens"
+    );
+}
+
+#[test]
+fn model_endpoint_rejects_invalid_private_ca_before_persisting() {
+    let input = ModelEndpointInput {
+        id: None,
+        name: "Invalid private CA".to_string(),
+        model: "gpt".to_string(),
+        api_protocol: "openai-compatible".to_string(),
+        response_protocol: "xml".to_string(),
+        base_url: "https://api.example.test/v1".to_string(),
+        max_llm_input_tokens: 100_000,
+        max_llm_output_tokens: 10_000,
+        stream: false,
+        allow_cross_origin_redirects: true,
+        private_ca_pem: Some("not a PEM certificate".to_string()),
+        api_key: None,
+        http_headers: Default::default(),
+        request_fields: Default::default(),
+    };
+    let error = normalize_model_endpoint_input(None, input).unwrap_err();
+    assert!(
+        error.starts_with("invalid_model_endpoint_private_ca:model_tls_error:"),
+        "{error}"
     );
 }
 
@@ -12981,6 +13761,8 @@ fn model_endpoint_stream_requires_openai_compatible_protocol() {
         max_llm_input_tokens: 200_000,
         max_llm_output_tokens: 20_000,
         stream: true,
+        allow_cross_origin_redirects: false,
+        private_ca_pem: None,
         api_key: None,
         http_headers: Default::default(),
         request_fields: Default::default(),
@@ -13012,6 +13794,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 max_llm_input_tokens: 100_000,
                 max_llm_output_tokens: 10_000,
                 stream: false,
+                allow_cross_origin_redirects: false,
+                private_ca_pem: None,
                 api_key: Some("secret-endpoint-key".to_string()),
                 http_headers: BTreeMap::from([
                     ("X-Tenant".to_string(), "tenant\"one\\东京".to_string()),
@@ -13032,7 +13816,9 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     let serialized = serde_json::to_string(&created).unwrap();
     assert!(serialized.contains("Production"));
     assert!(serialized.contains("api_key_configured"));
+    assert!(serialized.contains("private_ca_configured"));
     assert!(!serialized.contains("secret-endpoint-key"));
+    assert!(!serialized.contains("BEGIN CERTIFICATE"));
     assert!(!serialized.contains("tenant\"one"));
     assert!(serialized.contains("\"X-Tenant\":\"****\""));
     assert!(serialized.contains("\"service_tier\":\"****\""));
@@ -13106,6 +13892,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
             ref api_key,
             ref http_headers,
             ref request_fields,
+            ..
         }) if endpoint_id == "endpoint-one" && api_key == "secret-endpoint-key"
             && http_headers.get("X-Tenant").map(String::as_str) == Some("tenant\"one\\东京")
             && request_fields.get("service_tier") == Some(&json!("fast"))
@@ -13126,6 +13913,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 max_llm_input_tokens: 1_000_000,
                 max_llm_output_tokens: 50_000,
                 stream: true,
+                allow_cross_origin_redirects: false,
+                private_ca_pem: None,
                 api_key: None,
                 http_headers: Default::default(),
                 request_fields: Default::default(),
@@ -13172,6 +13961,8 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 max_llm_input_tokens: 1_000_000,
                 max_llm_output_tokens: 50_000,
                 stream: false,
+                allow_cross_origin_redirects: false,
+                private_ca_pem: None,
                 api_key: None,
                 http_headers: Default::default(),
                 request_fields: Default::default(),

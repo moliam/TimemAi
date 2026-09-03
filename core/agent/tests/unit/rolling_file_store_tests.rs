@@ -301,3 +301,139 @@ fn append_result_reports_only_real_segment_rollovers() {
 
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn explicit_manifest_refresh_reconciles_missing_files_sizes_and_next_index() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_rolling_explicit_manifest_refresh_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("audit.jsonl");
+    let directory = segmented_directory(&path);
+    std::fs::create_dir_all(&directory).unwrap();
+    let retained = directory.join("segment-0000000000000042.jsonl");
+    std::fs::write(&retained, b"one\ntwo\n").unwrap();
+    let stale = RollingManifest {
+        version: 1,
+        next_index: 100,
+        segments: vec![
+            RollingManifestSegment {
+                file_name: "segment-0000000000000041.jsonl".into(),
+                bytes: 123,
+            },
+            RollingManifestSegment {
+                file_name: "segment-0000000000000042.jsonl".into(),
+                bytes: 456,
+            },
+        ],
+    };
+    write_rolling_manifest(&path, &stale).unwrap();
+
+    refresh_rolling_manifest(&path).unwrap();
+
+    let repaired: RollingManifest =
+        serde_json::from_slice(&std::fs::read(rolling_manifest_path(&path)).unwrap()).unwrap();
+    assert_eq!(repaired.next_index, 100);
+    assert_eq!(repaired.segments.len(), 1);
+    assert_eq!(
+        repaired.segments[0].file_name,
+        "segment-0000000000000042.jsonl"
+    );
+    assert_eq!(repaired.segments[0].bytes, 8);
+    assert_eq!(
+        read_segmented_records(&path).unwrap(),
+        vec![b"one\n".to_vec(), b"two\n".to_vec()]
+    );
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn manifest_refresh_preserves_next_index_after_all_segments_are_removed() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_rolling_refresh_empty_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("audit.jsonl");
+    let capacity = RollingCapacity::with_slice_bytes(32, 8).unwrap();
+    append_rolling_record(&path, b"one---\n", capacity, 8).unwrap();
+    append_rolling_record(&path, b"two---\n", capacity, 8).unwrap();
+    let before: RollingManifest =
+        serde_json::from_slice(&std::fs::read(rolling_manifest_path(&path)).unwrap()).unwrap();
+    assert!(before.next_index > 1);
+    for segment in rolling_segments(&path).unwrap() {
+        remove_segment(&segment.path).unwrap();
+    }
+
+    refresh_rolling_manifest(&path).unwrap();
+    let empty: RollingManifest =
+        serde_json::from_slice(&std::fs::read(rolling_manifest_path(&path)).unwrap()).unwrap();
+    assert!(empty.segments.is_empty());
+    assert_eq!(empty.next_index, before.next_index);
+
+    append_rolling_record(&path, b"after--\n", capacity, 8).unwrap();
+    let after = rolling_segments(&path).unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(
+        after[0].path.file_name().unwrap().to_str().unwrap(),
+        format!("segment-{:016}.jsonl", before.next_index)
+    );
+    assert_eq!(
+        read_segmented_records(&path).unwrap(),
+        vec![b"after--\n".to_vec()]
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn append_repairs_an_interrupted_external_segment_edit_before_trusting_manifest() {
+    let root = std::env::temp_dir().join(format!(
+        "timem_rolling_interrupted_external_edit_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("audit.jsonl");
+    let capacity = RollingCapacity::with_slice_bytes(48, 8).unwrap();
+    append_rolling_record(&path, b"old----\n", capacity, 8).unwrap();
+    append_rolling_record(&path, b"kept---\n", capacity, 8).unwrap();
+    let before = rolling_segments(&path).unwrap();
+    assert_eq!(before.len(), 2);
+    let removed = before[0].path.clone();
+    let retained = before[1].path.clone();
+
+    mark_rolling_manifest_dirty(&path).unwrap();
+    remove_segment(&removed).unwrap();
+    std::fs::write(&retained, b"kept\n").unwrap();
+    assert!(rolling_manifest_dirty_path(&path).exists());
+
+    append_rolling_record(&path, b"after--\n", capacity, 8).unwrap();
+
+    assert!(!rolling_manifest_dirty_path(&path).exists());
+    assert!(!removed.exists());
+    assert_eq!(
+        read_segmented_records(&path).unwrap(),
+        vec![b"kept\n".to_vec(), b"after--\n".to_vec()]
+    );
+    let repaired: RollingManifest =
+        serde_json::from_slice(&std::fs::read(rolling_manifest_path(&path)).unwrap()).unwrap();
+    assert!(repaired.segments.iter().all(|segment| {
+        let physical = segmented_directory(&path).join(&segment.file_name);
+        physical.is_file() && std::fs::metadata(physical).unwrap().len() == segment.bytes
+    }));
+
+    let _ = std::fs::remove_dir_all(root);
+}
