@@ -2304,6 +2304,11 @@ fn explicit_assistant_speaker_name_sets_prompt_identity_and_updates_on_rename() 
         "assistant history should use the updated identity heading:\n{}",
         prompts[1]
     );
+    let first_system_end = prompts[0].find("[END SYSTEM PROMPT]").unwrap();
+    let second_system_end = prompts[1].find("[END SYSTEM PROMPT]").unwrap();
+    assert!(prompts[0][..first_system_end].contains("Current session name: ID4"));
+    assert!(prompts[1][..second_system_end].contains("Current session name: Renamed worker"));
+    assert!(!prompts[1][second_system_end..].contains("Current session name: Renamed worker"));
 
     worker.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(dir);
@@ -2339,24 +2344,28 @@ fn session_worker_prompt_includes_identity_runtime_surface_and_command_target() 
     let prompts = prompts.lock().unwrap();
     assert_eq!(prompts.len(), 1);
     let prompt = &prompts[0];
-    assert!(
-        prompt.contains("Current session_id: session_runtime_identity"),
-        "{prompt}"
-    );
-    assert!(prompt.contains("Current session name: ID7"), "{prompt}");
-    assert!(prompt.contains("Current context_id: context_0"), "{prompt}");
-    assert!(
-        prompt.contains("Current worker_id: session_runtime_identity"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("Current runtime surface: test_worker"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("Current command target: test_machine"),
-        "{prompt}"
-    );
+    let system_end = prompt
+        .find("[END SYSTEM PROMPT]")
+        .expect("inline prompt should expose a system boundary");
+    let (system_prompt, dynamic_prompt) = prompt.split_at(system_end);
+    for expected in [
+        "## Session Runtime Identity",
+        "Current session_id: session_runtime_identity",
+        "Current session name: ID7",
+        "Current context_id: context_0",
+        "Current worker_id: session_runtime_identity",
+        "Current runtime surface: test_worker",
+        "Current command target: test_machine",
+    ] {
+        assert!(
+            system_prompt.contains(expected),
+            "missing {expected}:\n{prompt}"
+        );
+        assert!(
+            !dynamic_prompt.contains(expected),
+            "runtime identity leaked into user/runtime Delta: {expected}:\n{prompt}"
+        );
+    }
 
     worker.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(dir);

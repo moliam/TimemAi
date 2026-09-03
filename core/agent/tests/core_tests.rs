@@ -7501,6 +7501,67 @@ fn rendered_static_prompt_preserves_source_rule_order() {
 }
 
 #[test]
+fn runtime_system_context_is_part_of_the_api_system_block_and_survives_fork() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("runtime_system_context"),
+    );
+    core.set_runtime_system_context(
+        "Current session_id: session_7\nCurrent session name: Worker 7",
+    );
+
+    let prompt = match core.begin_turn("hello", None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected NeedModel, got {other:?}"),
+    };
+    let system_end = prompt
+        .find("[END SYSTEM PROMPT]")
+        .expect("system prompt boundary");
+    assert!(prompt[..system_end].contains("## Session Runtime Identity"));
+    assert!(prompt[..system_end].contains("Current session_id: session_7"));
+    assert!(!prompt[system_end..].contains("Current session_id: session_7"));
+
+    let config = ModelServiceConfig {
+        interaction: Default::default(),
+        model: "qwen-plus".to_string(),
+        base_url: "https://example.test/v1".to_string(),
+        api_key: "test-key".to_string(),
+        http_headers: Default::default(),
+        request_fields: Default::default(),
+        timeout_secs: 30,
+        max_llm_output_tokens: 10_000,
+        max_llm_input_tokens: 100_000,
+        api_protocol: agent_core::ApiProtocol::OpenAiCompatible,
+        response_protocol: agent_core::ResponseProtocolKind::Json,
+        openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
+    };
+    let prepared = agent_core::prepare_model_request(&config, &prompt);
+    let messages = prepared.body["messages"].as_array().unwrap();
+    let system_message = messages
+        .iter()
+        .find(|message| message["role"] == "system")
+        .expect("API request should contain a system-role message");
+    assert!(system_message["content"]
+        .as_str()
+        .unwrap()
+        .contains("Current session_id: session_7"));
+    assert!(messages
+        .iter()
+        .filter(|message| message["role"] == "user")
+        .all(|message| !message["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Current session_id: session_7")));
+
+    let mut fork = core.fork_ephemeral_context(tmp_dir("runtime_system_context_fork"));
+    let forked = fork.build_next_prompt();
+    let forked_system_end = forked.find("[END SYSTEM PROMPT]").unwrap();
+    assert!(forked[..forked_system_end].contains("Current session_id: session_7"));
+}
+
+#[test]
 fn interface_response_format_survives_static_prompt_refresh_and_context_fork() {
     let template = include_str!("../../../resources/system_prompt/system_prompt.md");
     let mut core = AgentCore::new_with_interface_preferences(

@@ -1675,6 +1675,7 @@ fn default_self_tool_process() -> SelfToolProcess {
 pub struct AgentCore {
     memory_dir: PathBuf,
     static_prompt: String,
+    runtime_system_context: String,
     rendered_static_prompt: String,
     startup_stamp: String,
     interface_preferences: InterfacePreferences,
@@ -1775,6 +1776,7 @@ impl AgentCore {
         Self {
             memory_dir: memory_dir.to_path_buf(),
             static_prompt,
+            runtime_system_context: String::new(),
             rendered_static_prompt,
             startup_stamp,
             interface_preferences,
@@ -1925,6 +1927,7 @@ impl AgentCore {
         fork.round_budget = self.configured_round_budget;
         fork.bash_approval_mode = self.bash_approval_mode;
         fork.assistant_speaker_name = self.assistant_speaker_name.clone();
+        fork.runtime_system_context = self.runtime_system_context.clone();
         fork.assistant_replay_mode = self.assistant_replay_mode;
         fork.current_prompt_cwd = cwd.as_ref().to_path_buf();
         fork.tool_repo_session_id = self.tool_repo_session_id.clone();
@@ -1941,6 +1944,15 @@ impl AgentCore {
 
     pub fn set_assistant_speaker_name(&mut self, name: impl AsRef<str>) {
         self.assistant_speaker_name = normalize_assistant_speaker_name(name.as_ref());
+        self.refresh_rendered_static_prompt();
+    }
+
+    pub fn set_runtime_system_context(&mut self, context: impl AsRef<str>) {
+        let context = context.as_ref().trim();
+        if self.runtime_system_context == context {
+            return;
+        }
+        self.runtime_system_context = context.to_string();
         self.refresh_rendered_static_prompt();
     }
 
@@ -2344,8 +2356,17 @@ impl AgentCore {
         self.self_tool.set_env_value(key, value);
     }
     fn refresh_rendered_static_prompt(&mut self) {
+        let static_prompt = if self.runtime_system_context.is_empty() {
+            self.static_prompt.clone()
+        } else {
+            format!(
+                "{}\n\n## Session Runtime Identity\n\n{}",
+                self.static_prompt.trim_end(),
+                self.runtime_system_context
+            )
+        };
         self.rendered_static_prompt = prompt_render::render_static_prompt_for_mode_with_preferences(
-            &self.static_prompt,
+            &static_prompt,
             &self.capabilities,
             self.response_protocol.suite(),
             &self.assistant_speaker_name,
