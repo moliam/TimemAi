@@ -10,8 +10,15 @@ export default defineConfig({
       output: {
         manualChunks: {
           assistantUi: ["@assistant-ui/react"],
+          dndKit: [
+            "@dnd-kit/core",
+            "@dnd-kit/sortable",
+            "@dnd-kit/utilities",
+          ],
+          icons: ["lucide-react"],
           highlighting: ["highlight.js", "rehype-highlight"],
-          markdown: ["react-markdown"],
+          markdown: ["react-markdown", "remark-gfm"],
+          math: ["remark-math", "rehype-katex", "katex"],
         },
       },
     },
