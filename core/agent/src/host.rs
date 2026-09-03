@@ -1417,7 +1417,7 @@ pub fn running_shell_job_exit_topic_event(update: &crate::ShellJobExitUpdate) ->
             CORE_TOPIC_ACTION,
             json!({
                 "name": CORE_TOPIC_ACTION,
-                "action": "run_bash",
+                "action": crate::os::local_shell_tool_name(),
                 "action_id": update.tool_call_id,
                 "active": false,
                 "event": "finish",
@@ -1425,7 +1425,7 @@ pub fn running_shell_job_exit_topic_event(update: &crate::ShellJobExitUpdate) ->
         ),
         CoreSessionState::Running,
         json!({
-            "action": "run_bash",
+            "action": crate::os::local_shell_tool_name(),
             "action_id": update.tool_call_id,
             "turn_id": update.turn_id,
             "input": input,

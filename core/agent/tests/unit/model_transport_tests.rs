@@ -1,125 +1,77 @@
 use super::*;
-use crate::{api_audit_stream_path, read_api_audit_doc, LocalLLMKeyFile};
+use crate::{
+    api_audit_stream_path, is_retryable_model_system_error, read_api_audit_doc, LocalLLMKeyFile,
+};
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
-use std::time::Instant;
-
-#[cfg(unix)]
-fn test_shell_command(script: &str) -> Command {
-    let mut command = Command::new("sh");
-    command.arg("-c").arg(script);
-    command
-}
-
-#[cfg(windows)]
-fn test_shell_command(script: &str) -> Command {
-    let mut command = Command::new("powershell.exe");
-    command.args([
-        "-NoLogo",
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        script,
-    ]);
-    command
-}
+use std::time::{Duration, Instant};
 
 fn local_llm_key_file_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../key")
 }
 
+fn test_audit_file(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "timem_native_http_{label}_{}_{}.jsonl",
+        std::process::id(),
+        crate::now_ms()
+    ))
+}
+
+fn success_body(content: &str) -> String {
+    serde_json::json!({
+        "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    })
+    .to_string()
+}
+
+fn local_config(addr: std::net::SocketAddr, timeout_secs: u64) -> ModelServiceConfig {
+    let mut config = LocalLLMKeyFile {
+        api_key: "native-http-test-key".to_string(),
+        available_models: vec!["native-http-test-model".to_string()],
+    }
+    .to_model_service_config("native-http-test-model");
+    config.base_url = format!("http://{addr}/v1");
+    config.timeout_secs = timeout_secs;
+    config
+}
+
 #[test]
-fn cancellable_command_returns_without_waiting_for_process_timeout() {
-    let started = Instant::now();
+fn cancellation_interrupts_waiting_for_response_headers() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        thread::sleep(Duration::from_secs(2));
+    });
+
+    let config = local_config(addr, 5);
+    let audit_file = test_audit_file("cancel");
     let cancel_after = Instant::now() + Duration::from_millis(80);
-    let err = run_command_with_optional_input_and_cancel(
-        test_shell_command(if cfg!(windows) {
-            "Start-Sleep -Seconds 5; Write-Output done"
-        } else {
-            "sleep 5; echo done"
-        }),
-        None,
-        &mut || Instant::now() >= cancel_after,
-    )
+    let started = Instant::now();
+    let error = call_model_with_cancel(&config, "cancel me", &audit_file, &mut || {
+        Instant::now() >= cancel_after
+    })
     .unwrap_err();
 
-    assert_eq!(err, "cancelled_by_user");
+    assert_eq!(error, "cancelled_by_user");
     assert!(
-        started.elapsed() < Duration::from_millis(250),
-        "model transport cancellation took {:?}",
+        started.elapsed() < Duration::from_millis(500),
+        "native HTTP cancellation took {:?}",
         started.elapsed()
     );
+    let _ = std::fs::remove_file(audit_file);
 }
 
 #[test]
-fn large_model_request_body_is_streamed_through_stdin_without_argv_limits() {
-    let body = vec![b'x'; 4 * 1024 * 1024];
-    let output = run_command_with_input_and_cancel(
-        test_shell_command(if cfg!(windows) {
-            r#"$received = [Console]::In.ReadToEnd().Length; [Console]::Out.Write("$received`n200")"#
-        } else {
-            "received=$(wc -c | tr -d ' '); printf '%s\n200' \"$received\""
-        }),
-        body,
-        &mut || false,
-    )
-    .unwrap();
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let (received, status) = split_curl_body_status(&stdout).unwrap();
-    assert_eq!(status, 200);
-    assert_eq!(received, (4 * 1024 * 1024).to_string());
-}
-
-#[test]
-fn model_api_curl_command_does_not_expose_secret_or_body_in_argv() {
-    let key_file = LocalLLMKeyFile {
-        api_key: "sk-test-secret".to_string(),
-        available_models: vec!["qwen-test".to_string()],
-    };
-    let config = key_file.to_model_service_config("qwen-test");
-    let request = prepare_model_http_request(&config, "prompt with private body");
-    let body = serde_json::to_string(&request.model_request.body).unwrap();
-    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
-    let command = build_curl_command(config.timeout_secs, curl_config_file.path());
-    let argv = command
-        .get_args()
-        .map(|arg| arg.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    assert!(!argv.contains("sk-test-secret"), "{argv}");
-    assert!(!argv.contains("prompt with private body"), "{argv}");
-    assert!(argv.contains("--config"), "{argv}");
-    assert!(argv.contains("--data-binary @-"), "{argv}");
-
-    let curl_config = build_curl_config(&request);
-    assert!(curl_config.contains("Authorization: Bearer sk-test-secret"));
-    assert!(!curl_config.contains("prompt with private body"));
-    assert!(body.contains("prompt with private body"));
-    assert!(curl_config_file.path().exists());
-}
-
-#[test]
-fn model_timeout_is_connect_and_inactivity_bound_not_total_duration() {
-    let command = build_curl_command(7, Path::new("curl-test.conf"));
-    let argv = command
-        .get_args()
-        .map(|arg| arg.to_string_lossy())
-        .collect::<Vec<_>>();
-
-    assert!(!argv.iter().any(|arg| arg == "--max-time"), "{argv:?}");
-    assert!(argv
-        .windows(2)
-        .any(|pair| pair == ["--connect-timeout", "7"]));
-    assert!(argv.iter().any(|arg| arg == "--no-buffer"), "{argv:?}");
-    assert!(!argv.iter().any(|arg| arg == "--speed-time"), "{argv:?}");
-}
-
-#[test]
-fn progressing_response_may_outlive_configured_timeout() {
+fn connection_closed_before_response_headers_is_retryable_network_error() {
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(listener) => listener,
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
@@ -128,54 +80,25 @@ fn progressing_response_may_outlive_configured_timeout() {
     let addr = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let _request = read_http_request(&mut stream);
-        stream
-            .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 6\r\nConnection: close\r\n\r\n",
-            )
-            .unwrap();
-        for part in [b"aa", b"bb", b"cc"] {
-            stream.write_all(part).unwrap();
-            stream.flush().unwrap();
-            thread::sleep(Duration::from_millis(600));
-        }
+        let request = read_http_request(&mut stream);
+        assert!(!request.is_empty());
+        // Drop the socket without sending an HTTP status line or headers.
     });
 
-    let mut request = prepare_model_http_request(
-        &LocalLLMKeyFile {
-            api_key: "test-key".to_string(),
-            available_models: vec!["test-model".to_string()],
-        }
-        .to_model_service_config("test-model"),
-        "hello",
-    );
-    request.endpoint = format!("http://{addr}/v1/chat/completions");
-    let body = serde_json::to_string(&request.model_request.body).unwrap();
-    let started = Instant::now();
-    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
-    let output = run_command_with_input_cancel_and_inactivity_timeout(
-        build_curl_command(1, curl_config_file.path()),
-        body.into_bytes(),
-        Duration::from_secs(1),
-        &mut || false,
-    )
-    .unwrap();
-
+    let config = local_config(addr, 2);
+    let audit_file = test_audit_file("closed-before-headers");
+    let error = call_model(&config, "retry this transport failure", &audit_file).unwrap_err();
     assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        error.starts_with("model_network_error: stage=response_headers"),
+        "{error}"
     );
-    assert!(started.elapsed() > Duration::from_millis(1_200));
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let (response, status) = split_curl_body_status(&stdout).unwrap();
-    assert_eq!(status, 200);
-    assert_eq!(response, "aabbcc");
+    assert!(is_retryable_model_system_error(&error), "{error}");
     server.join().unwrap();
+    let _ = std::fs::remove_file(audit_file);
 }
 
 #[test]
-fn stalled_response_still_hits_configured_inactivity_timeout() {
+fn response_body_connection_close_is_retryable_body_error() {
     let listener = match TcpListener::bind("127.0.0.1:0") {
         Ok(listener) => listener,
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
@@ -184,117 +107,94 @@ fn stalled_response_still_hits_configured_inactivity_timeout() {
     let addr = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        let _request = read_http_request(&mut stream);
+        let _ = read_http_request(&mut stream);
         stream
             .write_all(
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\n",
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{",
             )
             .unwrap();
-        thread::sleep(Duration::from_secs(4));
+        stream.flush().unwrap();
     });
 
-    let mut request = prepare_model_http_request(
-        &LocalLLMKeyFile {
-            api_key: "test-key".to_string(),
-            available_models: vec!["test-model".to_string()],
-        }
-        .to_model_service_config("test-model"),
-        "hello",
+    let config = local_config(addr, 2);
+    let audit_file = test_audit_file("closed-response-body");
+    let error = call_model(&config, "retry truncated body", &audit_file).unwrap_err();
+    assert!(
+        error.starts_with("model_body_error: stage=response_body"),
+        "{error}"
     );
-    request.endpoint = format!("http://{addr}/v1/chat/completions");
-    let body = serde_json::to_string(&request.model_request.body).unwrap();
-    let started = Instant::now();
-    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
-    let error = run_command_with_input_cancel_and_inactivity_timeout(
-        build_curl_command(1, curl_config_file.path()),
-        body.into_bytes(),
-        Duration::from_secs(1),
-        &mut || false,
-    )
-    .unwrap_err();
-
-    assert_eq!(error, "model_timeout: no response progress for 1 seconds");
-    assert!(started.elapsed() >= Duration::from_millis(900));
-    assert!(started.elapsed() < Duration::from_millis(2_500));
+    assert!(is_retryable_model_system_error(&error), "{error}");
     server.join().unwrap();
+    let _ = std::fs::remove_file(audit_file);
 }
 
 #[test]
-fn curl_config_escape_keeps_values_single_config_entries() {
-    let escaped = curl_config_escape("quote\" slash\\ newline\n tab\t");
-    assert_eq!(escaped, "quote\\\" slash\\\\ newline\\n tab\\t");
+fn transport_failure_markers_exclude_permanent_request_and_tls_errors() {
+    for transient in [
+        "can't assign requested address (os error 49)",
+        "cannot assign requested address (os error 99)",
+        "address not available (os error 10049)",
+        "EADDRNOTAVAIL while opening socket",
+        "connection closed before message completed",
+        "connection reset by peer",
+        "broken pipe",
+        "unexpected eof while reading response",
+        "incomplete message",
+        "http2 framing layer failure",
+        "h2 protocol error",
+    ] {
+        assert!(is_transient_connection_failure(transient), "{transient}");
+    }
+    let addr_not_available = std::io::Error::from(std::io::ErrorKind::AddrNotAvailable);
+    assert!(has_retryable_socket_error(&addr_not_available));
+    let invalid_input = std::io::Error::from(std::io::ErrorKind::InvalidInput);
+    assert!(!has_retryable_socket_error(&invalid_input));
+
+    for permanent in [
+        "builder error: invalid header value",
+        "relative url without a base",
+        "invalid peer certificate: unknown issuer",
+        "dns lookup failed",
+        "proxy authentication required",
+    ] {
+        assert!(!is_transient_connection_failure(permanent), "{permanent}");
+    }
 }
 
 #[test]
-fn curl_config_escapes_custom_header_special_characters() {
-    let key_file = LocalLLMKeyFile {
-        api_key: "sk-test-secret".to_string(),
-        available_models: vec!["qwen-test".to_string()],
+fn native_http_sends_custom_headers_and_json_body() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
     };
-    let mut config = key_file.to_model_service_config("qwen-test");
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        let body = success_body("ok");
+        stream
+            .write_all(&http_json_response("200 OK", &body))
+            .unwrap();
+        request
+    });
+
+    let mut config = local_config(addr, 2);
     config.http_headers.insert(
         "X-Signature".to_string(),
         "quoted=\"yes\"; path=C:\\tmp; city=东京".to_string(),
     );
-    let request = prepare_model_http_request(&config, "hello");
-    let curl_config = build_curl_config(&request);
-    assert!(curl_config
-        .contains("header = \"X-Signature: quoted=\\\"yes\\\"; path=C:\\\\tmp; city=东京\""));
-}
+    let audit_file = test_audit_file("headers");
+    let response = call_model(&config, "private prompt body", &audit_file).unwrap();
+    assert_eq!(response.content, "ok");
 
-#[test]
-fn curl_config_file_and_body_stdin_send_headers_and_body_without_argv_payload() {
-    let listener = match TcpListener::bind("127.0.0.1:0") {
-        Ok(listener) => listener,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
-        Err(error) => panic!("local test server bind failed: {error}"),
-    };
-    let addr = listener.local_addr().unwrap();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let mut request = Vec::new();
-        let mut buffer = [0_u8; 4096];
-        loop {
-            let read = stream.read(&mut buffer).unwrap();
-            if read == 0 {
-                break;
-            }
-            request.extend_from_slice(&buffer[..read]);
-            let text = String::from_utf8_lossy(&request);
-            if text.contains("\r\n\r\n") && text.contains("\"model\"") {
-                break;
-            }
-        }
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
-            .unwrap();
-        String::from_utf8_lossy(&request).to_string()
-    });
-
-    let key_file = LocalLLMKeyFile {
-        api_key: "sk-local-curl-secret".to_string(),
-        available_models: vec!["qwen-test".to_string()],
-    };
-    let expected_authorization = format!("Authorization: Bearer {}", key_file.api_key);
-    let mut config = key_file.to_model_service_config("qwen-test");
-    config.base_url = format!("http://{addr}/v1");
-    let request = prepare_model_http_request(&config, "prompt body through curl config");
-    let body = serde_json::to_string(&request.model_request.body).unwrap();
-    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
-    let output = run_command_with_input_and_cancel(
-        build_curl_command(config.timeout_secs, curl_config_file.path()),
-        body.into_bytes(),
-        &mut || false,
-    )
-    .unwrap();
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let (_body, status) = split_curl_body_status(&stdout).unwrap();
-    assert_eq!(status, 200);
     let captured = server.join().unwrap();
-    assert!(captured.contains(&expected_authorization));
-    assert!(captured.contains("prompt body through curl config"));
+    let captured_lower = captured.to_lowercase();
+    assert!(captured_lower.contains("authorization: bearer native-http-test-key"));
+    assert!(captured_lower.contains("x-signature: quoted=\"yes\"; path=c:\\tmp; city=东京"));
+    assert!(captured.contains("private prompt body"));
+    assert!(captured.contains(r#""model":"native-http-test-model""#));
+    let _ = std::fs::remove_file(audit_file);
 }
 
 #[test]
@@ -308,85 +208,171 @@ fn two_megabyte_model_body_reaches_http_server_intact() {
     let server = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let request = read_http_request(&mut stream);
+        let body = success_body("large-ok");
         stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+            .write_all(&http_json_response("200 OK", &body))
             .unwrap();
         request
     });
 
-    let mut config = LocalLLMKeyFile {
-        api_key: "large-body-test-key".to_string(),
-        available_models: vec!["large-body-test-model".to_string()],
-    }
-    .to_model_service_config("large-body-test-model");
-    config.base_url = format!("http://{addr}/v1");
+    let config = local_config(addr, 5);
     let marker = "large-body-tail-marker";
     let prompt = format!("{}{}", "x".repeat(2 * 1024 * 1024), marker);
-    let request = prepare_model_http_request(&config, &prompt);
-    let body = serde_json::to_string(&request.model_request.body).unwrap();
-    assert!(body.len() > 2 * 1024 * 1024);
+    let audit_file = test_audit_file("large");
+    let response = call_model(&config, &prompt, &audit_file).unwrap();
+    assert_eq!(response.content, "large-ok");
 
-    let curl_config_file = CurlConfigFile::create(&build_curl_config(&request)).unwrap();
-    let output = run_command_with_input_and_cancel(
-        build_curl_command(config.timeout_secs, curl_config_file.path()),
-        body.clone().into_bytes(),
-        &mut || false,
-    )
-    .unwrap();
-
-    assert!(output.status.success());
     let captured = server.join().unwrap();
     let (_, captured_body) = captured.split_once("\r\n\r\n").unwrap();
-    assert_eq!(captured_body.len(), body.len());
-    assert_eq!(captured_body, body);
+    assert!(captured_body.len() > 2 * 1024 * 1024);
     assert!(captured_body.contains(marker));
-    assert!(captured_body.contains(r#""model":"large-body-test-model""#));
+    assert!(captured_body.contains(r#""model":"native-http-test-model""#));
+    let _ = std::fs::remove_file(audit_file);
 }
 
 #[test]
-fn curl_config_file_is_removed_when_guard_drops() {
-    let path = {
-        let config_file = CurlConfigFile::create("request = \"POST\"\n").unwrap();
-        let path = config_file.path().to_path_buf();
-        assert!(path.exists());
-        path
+fn progressing_response_may_outlive_configured_timeout() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
     };
-    assert!(!path.exists());
+    let addr = listener.local_addr().unwrap();
+    let body = success_body("progress-ok");
+    let split_one = body.len() / 3;
+    let split_two = split_one * 2;
+    let body_bytes = body.as_bytes();
+    let pieces = vec![
+        body_bytes[..split_one].to_vec(),
+        body_bytes[split_one..split_two].to_vec(),
+        body_bytes[split_two..].to_vec(),
+    ];
+    let body_len = body.len();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        for piece in pieces {
+            stream.write_all(&piece).unwrap();
+            stream.flush().unwrap();
+            thread::sleep(Duration::from_millis(600));
+        }
+    });
+
+    let config = local_config(addr, 1);
+    let audit_file = test_audit_file("progress");
+    let started = Instant::now();
+    let response = call_model(&config, "slow but progressing", &audit_file).unwrap();
+    assert_eq!(response.content, "progress-ok");
+    assert!(started.elapsed() > Duration::from_secs(1));
+    server.join().unwrap();
+    let _ = std::fs::remove_file(audit_file);
 }
 
-#[cfg(unix)]
 #[test]
-fn curl_config_file_is_owner_readable_only_on_unix() {
-    use std::os::unix::fs::PermissionsExt;
+fn stalled_response_hits_configured_inactivity_timeout() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{")
+            .unwrap();
+        stream.flush().unwrap();
+        thread::sleep(Duration::from_millis(1300));
+    });
 
-    let config_file = CurlConfigFile::create("header = \"Authorization: secret\"\n").unwrap();
-    let mode = std::fs::metadata(config_file.path())
-        .unwrap()
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(mode, 0o600);
+    let config = local_config(addr, 1);
+    let audit_file = test_audit_file("stall");
+    let error = call_model(&config, "stall", &audit_file).unwrap_err();
+    assert_eq!(
+        error,
+        "model_timeout: stage=response_body no progress for 1 seconds"
+    );
+    server.join().unwrap();
+    let _ = std::fs::remove_file(audit_file);
 }
 
 #[test]
-fn large_stdout_and_stderr_are_drained_without_pipe_deadlock() {
-    let output = run_command_with_optional_input_and_cancel(
-        test_shell_command(if cfg!(windows) {
-            "$bytes = New-Object byte[] 2097152; [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length); [Console]::OpenStandardError().Write($bytes, 0, $bytes.Length)"
-        } else {
-            "head -c 2097152 /dev/zero; head -c 2097152 /dev/zero >&2"
-        }),
-        None,
-        &mut || false,
-    )
-    .unwrap();
+fn declared_oversized_response_is_rejected_before_body_read() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_MODEL_RESPONSE_BYTES + 1
+        )
+        .unwrap();
+        stream.flush().unwrap();
+    });
 
-    assert!(output.status.success());
-    assert_eq!(output.stdout.len(), 2 * 1024 * 1024);
-    assert_eq!(output.stderr.len(), 2 * 1024 * 1024);
+    let config = local_config(addr, 2);
+    let audit_file = test_audit_file("declared-oversized-response");
+    let error = call_model(&config, "oversized", &audit_file).unwrap_err();
+    assert_eq!(error, model_response_too_large());
+    server.join().unwrap();
+    let _ = std::fs::remove_file(audit_file);
 }
 
-fn read_http_request(stream: &mut std::net::TcpStream) -> String {
+#[test]
+fn streaming_response_is_rejected_when_accumulated_body_crosses_limit() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("local test server bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        let chunk = vec![b'x'; 1024 * 1024];
+        for _ in 0..=MAX_MODEL_RESPONSE_BYTES / chunk.len() {
+            if stream.write_all(&chunk).is_err() {
+                break;
+            }
+        }
+    });
+
+    let config = local_config(addr, 5);
+    let audit_file = test_audit_file("streaming-oversized-response");
+    let error = call_model(&config, "oversized stream", &audit_file).unwrap_err();
+    assert_eq!(error, model_response_too_large());
+    server.join().unwrap();
+    let _ = std::fs::remove_file(audit_file);
+}
+
+#[test]
+fn malformed_endpoint_is_a_request_url_error() {
+    let mut config = local_config("127.0.0.1:1".parse().unwrap(), 2);
+    config.base_url = "http://[invalid-host".to_string();
+    let audit_file = test_audit_file("network-error");
+    let error = call_model(&config, "invalid endpoint", &audit_file).unwrap_err();
+    assert!(error.starts_with("model_request_url_error:"), "{error}");
+    let _ = std::fs::remove_file(audit_file);
+}
+
+fn read_http_request(stream: &mut impl Read) -> String {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 4096];
     let mut expected_len = None;
@@ -574,13 +560,6 @@ fn unrelated_client_error_does_not_retry_without_cache_control() {
 }
 
 #[test]
-fn split_curl_body_status_parses_last_line_status() {
-    let (body, status) = split_curl_body_status("{\"ok\":true}\n200").unwrap();
-    assert_eq!(body, "{\"ok\":true}");
-    assert_eq!(status, 200);
-}
-
-#[test]
 #[ignore = "requires rust/key with a real Aliyun-compatible API key and network access"]
 fn real_aliyun_model_from_key_file_returns_usage_and_text() {
     let key_file = LocalLLMKeyFile::load(&local_llm_key_file_path()).unwrap();
@@ -611,4 +590,334 @@ fn real_aliyun_model_from_key_file_returns_usage_and_text() {
     assert!(audit_text.contains("llm_response"));
     assert!(!audit_text.contains(&key_file.api_key));
     let _ = std::fs::remove_file(audit_file);
+}
+
+fn http_redirect_response(location: &str) -> Vec<u8> {
+    format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
+}
+
+#[test]
+fn cross_origin_redirect_strips_sensitive_headers_when_enabled() {
+    let source = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("bind failed: {error}"),
+    };
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    let source_addr = source.local_addr().unwrap();
+    let target_addr = target.local_addr().unwrap();
+    let redirector = thread::spawn(move || {
+        let (mut stream, _) = source.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        stream
+            .write_all(&http_redirect_response(&format!(
+                "http://{target_addr}/v1/target"
+            )))
+            .unwrap();
+    });
+    let receiver = thread::spawn(move || {
+        let (mut stream, _) = target.accept().unwrap();
+        let request = read_http_request(&mut stream);
+        let body = success_body("redirect-ok");
+        stream
+            .write_all(&http_json_response("200 OK", &body))
+            .unwrap();
+        request
+    });
+    let mut config = local_config(source_addr, 2);
+    config.http_transport.allow_cross_origin_redirects = true;
+    config
+        .http_headers
+        .insert("X-Tenant".into(), "secret-tenant".into());
+    let audit = test_audit_file("cross-origin-strip");
+    assert_eq!(
+        call_model(&config, "redirect", &audit).unwrap().content,
+        "redirect-ok"
+    );
+    redirector.join().unwrap();
+    let request = receiver.join().unwrap().to_ascii_lowercase();
+    assert!(!request.contains("authorization:"));
+    assert!(!request.contains("x-tenant:"));
+    assert!(request.contains("content-type: application/json"));
+    let _ = std::fs::remove_file(audit);
+}
+
+#[test]
+fn cross_origin_redirect_is_blocked_before_target_contact_by_default() {
+    let source = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("bind failed: {error}"),
+    };
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    target.set_nonblocking(true).unwrap();
+    let source_addr = source.local_addr().unwrap();
+    let target_addr = target.local_addr().unwrap();
+    let redirector = thread::spawn(move || {
+        let (mut stream, _) = source.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        stream
+            .write_all(&http_redirect_response(&format!(
+                "http://{target_addr}/v1/target"
+            )))
+            .unwrap();
+    });
+    let config = local_config(source_addr, 2);
+    let audit = test_audit_file("cross-origin-block");
+    let error = call_model(&config, "redirect", &audit).unwrap_err();
+    assert!(error.starts_with("model_redirect_blocked:"), "{error}");
+    redirector.join().unwrap();
+    thread::sleep(Duration::from_millis(30));
+    assert!(
+        matches!(target.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    let _ = std::fs::remove_file(audit);
+}
+
+#[test]
+fn oversized_request_is_rejected_before_connecting() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("bind failed: {error}"),
+    };
+    listener.set_nonblocking(true).unwrap();
+    let config = local_config(listener.local_addr().unwrap(), 2);
+    let audit = test_audit_file("oversized-request");
+    let error =
+        call_model(&config, &"x".repeat(MAX_MODEL_REQUEST_BYTES + 1024), &audit).unwrap_err();
+    assert_eq!(error, model_request_too_large());
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    let _ = std::fs::remove_file(audit);
+}
+
+#[test]
+fn response_audit_contains_sanitized_transport_metrics() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_http_request(&mut stream);
+        let body = success_body("audit-ok");
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Request-Id: request-123\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+    });
+    let config = local_config(addr, 2);
+    let audit = test_audit_file("transport-metrics");
+    call_model(&config, "audit", &audit).unwrap();
+    server.join().unwrap();
+    let stream_path = api_audit_stream_path(&audit);
+    let document = read_api_audit_doc(&stream_path).unwrap();
+    let events = document["events"].as_array().unwrap();
+    let transport = events
+        .iter()
+        .find_map(|event| event.get("transport"))
+        .unwrap();
+    assert_eq!(transport["request_id"], "request-123");
+    assert!(transport["ttfb_ms"].is_u64());
+    assert!(transport["elapsed_ms"].is_u64());
+    assert!(transport["response_bytes"].as_u64().unwrap() > 0);
+    assert!(!document.to_string().contains("native-http-test-key"));
+    let _ = std::fs::remove_file(audit);
+    let _ = std::fs::remove_file(stream_path);
+}
+
+#[test]
+fn private_ca_enables_self_signed_https_endpoint() {
+    use rcgen::{Certificate as GeneratedCertificate, CertificateParams, SanType};
+    use rustls::{
+        Certificate as RustlsCertificate, PrivateKey, ServerConfig, ServerConnection, StreamOwned,
+    };
+    use std::net::IpAddr;
+    use std::sync::Arc;
+
+    let mut params = CertificateParams::new(vec!["localhost".to_string()]);
+    params
+        .subject_alt_names
+        .push(SanType::IpAddress(IpAddr::from([127, 0, 0, 1])));
+    let generated = GeneratedCertificate::from_params(params).unwrap();
+    let certificate_der = generated.serialize_der().unwrap();
+    let certificate_pem = generated.serialize_pem().unwrap();
+    let private_key = PrivateKey(generated.serialize_private_key_der());
+    let server_config = Arc::new(
+        ServerConfig::builder()
+            .with_safe_defaults()
+            .with_no_client_auth()
+            .with_single_cert(vec![RustlsCertificate(certificate_der)], private_key)
+            .unwrap(),
+    );
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let mut successful_requests = 0;
+        for _ in 0..2 {
+            let (tcp, _) = listener.accept().unwrap();
+            let connection = ServerConnection::new(server_config.clone()).unwrap();
+            let mut tls = StreamOwned::new(connection, tcp);
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                read_http_request(&mut tls)
+            })) {
+                Ok(request) if !request.is_empty() => {
+                    successful_requests += 1;
+                    let body = success_body("private-ca-ok");
+                    tls.write_all(&http_json_response("200 OK", &body)).unwrap();
+                }
+                _ => {}
+            }
+        }
+        successful_requests
+    });
+
+    let mut config = local_config(addr, 2);
+    config.base_url = format!("https://{addr}/v1");
+    let audit_without_ca = test_audit_file("private-ca-missing");
+    let error = call_model(&config, "tls", &audit_without_ca).unwrap_err();
+    assert!(error.starts_with("model_tls_error:"), "{error}");
+
+    config.http_transport.private_ca_pem = Some(certificate_pem);
+    let audit_with_ca = test_audit_file("private-ca-configured");
+    let response = call_model(&config, "tls", &audit_with_ca).unwrap();
+    assert_eq!(response.content, "private-ca-ok");
+    assert_eq!(server.join().unwrap(), 1);
+    let _ = std::fs::remove_file(audit_without_ca);
+    let _ = std::fs::remove_file(audit_with_ca);
+}
+
+#[test]
+fn native_http_client_reuses_keep_alive_connection() {
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(error) => panic!("bind failed: {error}"),
+    };
+    let addr = listener.local_addr().unwrap();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        for content in ["first", "second"] {
+            let request = read_http_request(&mut stream);
+            assert!(!request.is_empty());
+            let body = success_body(content);
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}", body.len()).unwrap();
+            stream.flush().unwrap();
+        }
+        listener.set_nonblocking(true).unwrap();
+        thread::sleep(Duration::from_millis(30));
+        matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    });
+    let config = local_config(addr, 2);
+    let mut client = HttpModelClient::default();
+    let first_audit = test_audit_file("reuse-first");
+    let second_audit = test_audit_file("reuse-second");
+    assert_eq!(
+        client
+            .call_model(&config, "one", &first_audit, &mut || false)
+            .unwrap()
+            .content,
+        "first"
+    );
+    assert_eq!(
+        client
+            .call_model(&config, "two", &second_audit, &mut || false)
+            .unwrap()
+            .content,
+        "second"
+    );
+    assert!(
+        server.join().unwrap(),
+        "client opened an unexpected second TCP connection"
+    );
+    let _ = std::fs::remove_file(first_audit);
+    let _ = std::fs::remove_file(second_audit);
+}
+
+#[test]
+#[ignore = "mutates process proxy environment; run serially"]
+fn proxy_and_no_proxy_environment_smoke() {
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    const KEYS: &[&str] = &[
+        "HTTP_PROXY",
+        "http_proxy",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ];
+    struct RestoreEnv(BTreeMap<&'static str, Option<String>>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+    let _restore = RestoreEnv(
+        KEYS.iter()
+            .map(|key| (*key, std::env::var(key).ok()))
+            .collect(),
+    );
+    for key in KEYS {
+        std::env::remove_var(key);
+    }
+
+    let proxy_port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let target = TcpListener::bind("127.0.0.1:0").unwrap();
+    target.set_nonblocking(true).unwrap();
+    let target_addr = target.local_addr().unwrap();
+    for key in ["HTTP_PROXY", "http_proxy"] {
+        std::env::set_var(key, format!("http://127.0.0.1:{proxy_port}"));
+    }
+
+    let config = local_config(target_addr, 1);
+    let proxy_audit = test_audit_file("proxy-smoke");
+    let proxy_error = HttpModelClient::default()
+        .call_model(&config, "proxy", &proxy_audit, &mut || false)
+        .unwrap_err();
+    assert!(
+        proxy_error.starts_with("model_connect_error:")
+            || proxy_error.starts_with("model_proxy_error:"),
+        "{proxy_error}"
+    );
+    assert!(
+        matches!(target.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+
+    for key in ["NO_PROXY", "no_proxy"] {
+        std::env::set_var(key, "127.0.0.1,localhost");
+    }
+    let no_proxy_audit = test_audit_file("no-proxy-smoke");
+    let no_proxy_error = HttpModelClient::default()
+        .call_model(&config, "no proxy", &no_proxy_audit, &mut || false)
+        .unwrap_err();
+    assert!(
+        no_proxy_error.starts_with("model_timeout: stage=response_headers"),
+        "{no_proxy_error}"
+    );
+    assert!(target.accept().is_ok(), "NO_PROXY did not bypass the proxy");
+    let _ = std::fs::remove_file(proxy_audit);
+    let _ = std::fs::remove_file(no_proxy_audit);
 }

@@ -11,7 +11,7 @@ fn write_echo_script(dir: &Path) -> PathBuf {
     #[cfg(windows)]
     {
         let script = dir.join("echo_payload.ps1");
-        fs::write(&script, "$data = [Console]::In.ReadToEnd() | ConvertFrom-Json\n[Console]::Out.WriteLine($data.args.message)\n").unwrap();
+        fs::write(&script, "$data = ($input | Out-String) | ConvertFrom-Json\n[Console]::Out.WriteLine($data.args.message)\n").unwrap();
         script
     }
 }
@@ -219,7 +219,7 @@ fn windows_powershell_background_tool_can_be_polled_until_finished() {
     let script = dir.join("echo_payload.ps1");
     fs::write(
         &script,
-        "$payload = [Console]::In.ReadToEnd()\n$data = $payload | ConvertFrom-Json\nWrite-Output $data.args.message\n",
+        "$data = ($input | Out-String) | ConvertFrom-Json\nWrite-Output $data.args.message\n",
     )
     .unwrap();
     let store = FileToolJobStore::new(&dir);

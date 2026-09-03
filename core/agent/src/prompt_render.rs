@@ -206,7 +206,7 @@ pub(crate) fn render_xml_bash_result_with_retention(
     let task = action_name
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .unwrap_or("run_bash");
+        .unwrap_or(crate::os::local_shell_tool_name());
     let escaped_task = escape_xml_attribute(task);
     let status = action_lifecycle_status(status);
     let exit_code = evidence
@@ -704,6 +704,23 @@ pub(crate) fn render_static_prompt_for_mode_with_preferences(
         AssistantResponseFormat::PlainText => "plain-text",
     };
     let with_protocol = static_prompt.replace("{{UI_PREFERENCE}}", ui_preference);
+    let tool_discovery_instruction = if interface_preferences.claude_codex_tool_discovery {
+        r#"If a task appears to involve some specific skill out of your scope, maybe in third-party agent's reusable skill or tool, search:
+1. Infer the required capability from intent, not a named skill.
+2. Inspect exposed tools, project/user Claude and Codex skill directories, and enabled plugin paths.
+3. Cover Linux, macOS, and Windows locations, including symlinks and junctions.
+4. Use available platform-native tools to enumerate files. Follow linked directories safely, prevent cycles, and do not use methods that may omit them.
+5. Match SKILL.md frontmatter (name, description, requires) or head part to the task.
+6. Read only matched instructions and required references.
+7. Verify dependencies, authentication, permissions, and a minimal read-only call when possible.
+8. Report candidate, loaded, or usable based only on verified evidence; disclose incomplete discovery."#
+    } else {
+        ""
+    };
+    let with_protocol = with_protocol.replace(
+        "{{CLAUDE_CODEX_TOOL_DISCOVERY_INSTRUCTION}}",
+        tool_discovery_instruction,
+    );
     let with_protocol = with_protocol.replace("{{RESPONSE_PROTOCOL_SECTION}}", &protocol_section);
     let response_mode_instruction = if tool_call_mode == ToolCallMode::Native {
         NATIVE_RESPONSE_MODE_INSTRUCTION
@@ -780,7 +797,32 @@ pub(crate) fn render_prompt_with_rendered_static_for_mode(
     tool_call_mode: ToolCallMode,
 ) -> String {
     let mut out = rendered_static_prompt.to_string();
+    append_rendered_deltas_for_mode(
+        &mut out,
+        deltas,
+        assistant_heading,
+        protocol_suite,
+        tool_call_mode,
+    );
+    out.push_str("\n\n");
+    if tool_call_mode == ToolCallMode::Native {
+        out.push_str(NATIVE_RESPONSE_TRAILER);
+    } else {
+        out.push_str(&formatted_response_trailer(
+            protocol_suite.response_shape_hint(),
+            assistant_heading,
+        ));
+    }
+    out
+}
 
+pub(crate) fn append_rendered_deltas_for_mode(
+    out: &mut String,
+    deltas: &[PromptDelta],
+    assistant_heading: &str,
+    protocol_suite: &dyn ResponseProtocolSuite,
+    tool_call_mode: ToolCallMode,
+) {
     for delta in deltas {
         let slices = render_delta_slices_for_mode(delta, tool_call_mode);
         if slices.is_empty() {
@@ -811,7 +853,6 @@ pub(crate) fn render_prompt_with_rendered_static_for_mode(
                 last_was_action_result = false;
                 continue;
             }
-
             if last_was_raw_xml {
                 out.push('\n');
                 last_was_raw_xml = false;
@@ -866,17 +907,6 @@ pub(crate) fn render_prompt_with_rendered_static_for_mode(
         out.push('\n');
         out.push_str(boundaries.delta_close());
     }
-
-    out.push_str("\n\n");
-    if tool_call_mode == ToolCallMode::Native {
-        out.push_str(NATIVE_RESPONSE_TRAILER);
-    } else {
-        out.push_str(&formatted_response_trailer(
-            protocol_suite.response_shape_hint(),
-            assistant_heading,
-        ));
-    }
-    out
 }
 
 pub(crate) fn render_prompt_slices(deltas: &[PromptDelta]) -> Vec<PromptSlice> {

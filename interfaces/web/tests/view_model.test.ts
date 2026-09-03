@@ -206,8 +206,12 @@ describe("authoritative turn projection", () => {
       turn_projection: activeProjection(3, 2, true),
     };
 
-    expect(applyTurnProjection(current, activeProjection(3, 2, false))).toBe(current);
-    expect(applyTurnProjection(current, activeProjection(2, 1, false))).toBe(current);
+    expect(applyTurnProjection(current, activeProjection(3, 2, false))).toBe(
+      current,
+    );
+    expect(applyTurnProjection(current, activeProjection(2, 1, false))).toBe(
+      current,
+    );
   });
 });
 
@@ -680,9 +684,9 @@ describe("web topic view model", () => {
               ? "idle"
               : current.name === "Host pending before Core TurnStarted"
                 ? "host_pending"
-              : current.name === "Core working"
-                ? "working"
-                : "cancelling",
+                : current.name === "Core working"
+                  ? "working"
+                  : "cancelling",
       );
       expect(composerPrimaryAction(current.phase, ""), current.name).toBe(
         current.empty,
@@ -1120,6 +1124,81 @@ describe("web topic view model", () => {
     });
   });
 
+  it("creates an explicit direct-resume command only when requested", () => {
+    expect(
+      composerSendDecision(
+        session("session_1"),
+        "",
+        false,
+        false,
+        [],
+        false,
+        true,
+        true,
+      ),
+    ).toEqual({
+      kind: "send",
+      text: "",
+      clearDraftOnSuccess: true,
+      command: {
+        type: "turn_submit",
+        session_id: "session_1",
+        text: "",
+        input_kind: "resume_directly",
+        attachment_ids: [],
+      },
+    });
+    expect(composerSendDecision(session("session_1"), "", false)).toEqual({
+      kind: "skip",
+      reason: "empty_text",
+    });
+  });
+
+  it("constructs direct resume only for an idle empty attachment-free new turn", () => {
+    const idle = session("session_1");
+    const working = { ...idle, state: "working" as const };
+
+    expect(
+      composerSendDecision(working, "", false, false, [], false, true, true),
+    ).toEqual({ kind: "skip", reason: "direct_resume_requires_idle" });
+    expect(
+      composerSendDecision(
+        idle,
+        "not empty",
+        false,
+        false,
+        [],
+        false,
+        true,
+        true,
+      ),
+    ).toEqual({
+      kind: "skip",
+      reason: "direct_resume_requires_empty_text",
+    });
+    expect(
+      composerSendDecision(
+        idle,
+        "",
+        false,
+        false,
+        ["upload_1"],
+        false,
+        true,
+        true,
+      ),
+    ).toEqual({
+      kind: "skip",
+      reason: "direct_resume_attachments_not_supported",
+    });
+    expect(
+      composerSendDecision(idle, "", false, false, [], true, false, true),
+    ).toEqual({
+      kind: "skip",
+      reason: "direct_resume_supplement_not_supported",
+    });
+  });
+
   it("does not send new tasks or supplements while a mem switch is pending", () => {
     expect(
       composerSendDecision(session("session_1"), "new task", false, true),
@@ -1175,6 +1254,7 @@ describe("web topic view model", () => {
           TIMEM_API_KEY: "   ",
           TIMEM_STREAM: " true ",
         },
+        "group-research",
         false,
       ),
     ).toEqual({
@@ -1186,11 +1266,12 @@ describe("web topic view model", () => {
         type: "session_create",
         display_name: "Research",
         workspace_dir: "/work/project",
+        group_id: "group-research",
         env: { TIMEM_MODEL: "qwen-plus", TIMEM_STREAM: "true" },
       },
     });
     expect(
-      sessionCreateDecision("   ", "/work/project", {}, false),
+      sessionCreateDecision("   ", "/work/project", {}, null, false),
     ).toMatchObject({
       kind: "send",
       command: {
@@ -1202,15 +1283,17 @@ describe("web topic view model", () => {
   });
 
   it("blocks session creation while creating, mem switching, or missing a workspace", () => {
-    expect(sessionCreateDecision("name", "   ", {}, false)).toEqual({
+    expect(sessionCreateDecision("name", "   ", {}, null, false)).toEqual({
       kind: "skip",
       reason: "empty_workspace",
     });
-    expect(sessionCreateDecision("name", "/work", {}, true)).toEqual({
+    expect(sessionCreateDecision("name", "/work", {}, null, true)).toEqual({
       kind: "skip",
       reason: "creating",
     });
-    expect(sessionCreateDecision("name", "/work", {}, false, true)).toEqual({
+    expect(
+      sessionCreateDecision("name", "/work", {}, null, false, true),
+    ).toEqual({
       kind: "skip",
       reason: "mem_switching",
     });
@@ -3051,6 +3134,55 @@ describe("web topic view model", () => {
     });
   });
 
+  it("renders run_powershell commands with PowerShell language and polling labels", () => {
+    const normal = activityFromTopic(
+      topic("core.action", {
+        action: "run_powershell",
+        status: "running",
+        input: { cmd: 'Set-Content "$HOME\\Desktop\\a.txt" "abc"' },
+        kind: {
+          kind: "bash",
+          command: 'Set-Content "$HOME\\Desktop\\a.txt" "abc"',
+          mode: "normal",
+          timeout_ms: 5000,
+        },
+      }),
+    );
+    expect(normal).toMatchObject({
+      tone: "action",
+      title: "PowerShell · running",
+      tool_name: "run_powershell",
+      tool_mode: "normal",
+      code_language: "powershell",
+      timeout_ms: 5000,
+    });
+
+    const poll = activityFromTopic(
+      topic("core.action", {
+        action: "run_powershell",
+        status: "running",
+        input: {
+          loop_cmd: "if (Test-Path done) { exit 0 } else { exit 1 }",
+        },
+        kind: {
+          kind: "bash",
+          command: "if (Test-Path done) { exit 0 } else { exit 1 }",
+          mode: "poll",
+          interval_ms: 1000,
+          loop_timeout_ms: 600000,
+        },
+      }),
+    );
+    expect(poll).toMatchObject({
+      title: "Poll · running",
+      tool_name: "run_powershell",
+      tool_mode: "poll",
+      code_language: "powershell",
+      interval_ms: 1000,
+      loop_timeout_ms: 600000,
+    });
+  });
+
   it("preserves effective Bash wait budgets for live UI countdowns", () => {
     const normal = activityFromTopic(
       topic("core.action", {
@@ -3190,7 +3322,13 @@ describe("web topic view model", () => {
   });
 
   it("uses execution_start as the authoritative countdown and elapsed-time origin", () => {
-    const proposed = actionEvent("1000", "start", "running", { cmd: "sleep 10" }, "slow");
+    const proposed = actionEvent(
+      "1000",
+      "start",
+      "running",
+      { cmd: "sleep 10" },
+      "slow",
+    );
     const executionStart = actionEvent(
       "6000",
       "execution_start",
@@ -3207,7 +3345,9 @@ describe("web topic view model", () => {
     };
     const [visible] = coalesceActionLifecycle([proposed, executionStart]);
     expect(visible.event_id).toBe("6000");
-    expect(activityFromTopic(visible.payload as unknown as CoreTopicEvent)).toMatchObject({
+    expect(
+      activityFromTopic(visible.payload as unknown as CoreTopicEvent),
+    ).toMatchObject({
       execution_started: true,
       timeout_ms: 5000,
     });

@@ -10,17 +10,17 @@ use super::{
     raw_multiline_paste_needs_confirmation, read_approval_key, read_approval_key_until,
     read_menu_key, read_paste_recovery_key, reedline_keyboard_protocol_enter_sequence,
     reedline_keyboard_protocol_exit_sequence, render_approval_choices, render_config_apply_report,
-    render_config_menu, render_expand_output_choices, render_expand_output_prompt,
-    render_note_box_at_width, render_paste_recovery_choices, render_paste_recovery_prompt,
-    render_queued_user_line, render_raw_multiline_paste_submit_choices,
-    render_raw_multiline_paste_submit_prompt, render_round_limit_choices,
-    render_round_limit_prompt, render_stale_context_choices, render_stale_context_prompt,
-    render_startup_banner, render_startup_status_block, render_submitted_user_line_rewrite,
-    render_user_approval_prompt, render_user_input_prompt, render_work_instructions_load_choices,
-    render_work_instructions_load_prompt, render_workspace_command_report,
-    render_workspace_delete_choices, render_workspace_menu, rendered_terminal_rows,
-    resolve_paste_markers, resolve_work_instruction_context_for_turn, runtime_help_text,
-    sanitize_user_input, shell_session_effective_env, shell_session_env_values,
+    render_config_menu, render_direct_resume_choices, render_direct_resume_prompt,
+    render_expand_output_choices, render_expand_output_prompt, render_note_box_at_width,
+    render_paste_recovery_choices, render_paste_recovery_prompt, render_queued_user_line,
+    render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
+    render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
+    render_stale_context_prompt, render_startup_banner, render_startup_status_block,
+    render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
+    render_work_instructions_load_choices, render_work_instructions_load_prompt,
+    render_workspace_command_report, render_workspace_delete_choices, render_workspace_menu,
+    rendered_terminal_rows, resolve_paste_markers, resolve_work_instruction_context_for_turn,
+    runtime_help_text, sanitize_user_input, shell_session_effective_env, shell_session_env_values,
     shell_session_profile, shell_session_work_dir, startup_control_hint, strip_ansi,
     strip_paste_markers, submitted_input_rows, take_shell_resume_notice,
     timem_reedline_keybindings, utf8_expected_len, work_instruction_shell_load_result,
@@ -74,6 +74,17 @@ use timem_shell::{
     workspace_menu_report, ApiProtocol, HostStatusLevel, ModelServiceConfig, SPINNER_ICONS,
 };
 use unicode_width::UnicodeWidthChar;
+
+#[test]
+fn direct_resume_confirmation_is_explicit_and_defaults_to_cancel() {
+    let prompt = render_direct_resume_prompt();
+    assert!(prompt.contains("未输入内容，是否让Timem直接继续？"));
+    assert!(prompt.contains("回车确认"));
+
+    let choices = render_direct_resume_choices(ApprovalChoice::Deny);
+    assert!(choices.contains("直接继续"));
+    assert!(choices.contains("\x1b[7m[ 取消 ]\x1b[0m"));
+}
 
 #[test]
 fn static_prompt_uses_full_shared_v1_resource() {
@@ -597,6 +608,7 @@ fn config_menu_renders_effective_values_and_can_apply_updates() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let mut core = AgentCore::new(
         "STATIC",
@@ -685,6 +697,7 @@ fn config_response_protocol_update_is_supported_by_terminal_host() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let mut core = AgentCore::new(
         "STATIC",
@@ -731,6 +744,7 @@ fn config_protocol_update_keeps_endpoint_defaults_consistent() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let mut core = AgentCore::new(
         "STATIC",
@@ -792,6 +806,7 @@ fn config_protocol_update_preserves_explicit_endpoint() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let mut core = AgentCore::new(
         "STATIC",
@@ -858,6 +873,7 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let banner = render_startup_banner(
         ".xxx_mem",
@@ -998,6 +1014,7 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let default_banner = render_startup_banner(
         ".test_mem",
@@ -1022,6 +1039,7 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let override_banner = render_startup_banner(
         ".test_mem",
@@ -1059,6 +1077,7 @@ fn startup_banner_highlights_custom_model_and_base_url() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Json,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let banner = render_startup_banner(
         ".test_mem",
@@ -2182,11 +2201,13 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let stored = StoredSession {
         session_id: "web_session_1".to_string(),
         display_name: "Recovered Web".to_string(),
         group_id: None,
+        ordinal: 0,
         created_at_ms: 1,
         updated_at_ms: 2,
         current_dir: workspace.display().to_string(),
@@ -2220,9 +2241,11 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
     let mut pending = true;
     let notice = take_shell_resume_notice(&store, &loaded.session_id, &workspace, &mut pending)
         .expect("first restored shell turn should include resume notice");
-    assert!(notice.contains(
-        "Runtime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them."
-    ));
+    assert!(notice.contains("Runtime just restarted. Previous runtime/job state may be stale."));
+    assert!(notice.contains("first inspect this Session's recent history below"));
+    assert!(notice.contains("use raw_chat search when more transcript context is needed"));
+    assert!(notice.contains("scratch search/read when a prior checkpoint may exist"));
+    assert!(notice.contains("verify the current cwd, files, and processes"));
     assert!(!notice.contains("This session was restored"));
     assert!(!notice.contains("## RUNTIME"));
     assert!(!notice.contains("<RUNTIME>"));
@@ -2256,11 +2279,13 @@ fn shell_start_recovers_valid_session_from_partially_corrupt_index() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let stored = StoredSession {
         session_id: "shell_recovered".to_string(),
         display_name: "Recovered".to_string(),
         group_id: None,
+        ordinal: 0,
         created_at_ms: 1,
         updated_at_ms: 2,
         current_dir: workspace.display().to_string(),
@@ -2322,12 +2347,14 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     store
         .upsert_session(&StoredSession {
             session_id: "web_session_cwd".to_string(),
             display_name: "Recovered Web".to_string(),
             group_id: None,
+            ordinal: 0,
             created_at_ms: 1,
             updated_at_ms: 2,
             current_dir: restored_dir.display().to_string(),
@@ -2394,6 +2421,7 @@ fn shell_resume_prefers_non_empty_launch_env_then_cli_over_stored_session_env() 
         session_id: "web_session_env".to_string(),
         display_name: "Recovered Web".to_string(),
         group_id: None,
+        ordinal: 0,
         created_at_ms: 1,
         updated_at_ms: 2,
         current_dir: workspace.display().to_string(),
@@ -2461,6 +2489,7 @@ fn shell_resume_ignores_empty_launch_env_values_instead_of_clearing_cache() {
         session_id: "cached_session".to_string(),
         display_name: "Cached Session".to_string(),
         group_id: None,
+        ordinal: 0,
         created_at_ms: 1,
         updated_at_ms: 2,
         current_dir: workspace.display().to_string(),
@@ -2510,6 +2539,7 @@ fn shell_resume_selects_the_most_recent_valid_session() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let mut older = new_shell_session(
         &store,
@@ -2566,6 +2596,7 @@ fn shell_runtime_config_changes_are_cached_before_another_turn_runs() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     let mut bash = BashApprovalMode::Approve;
     let mut work = WorkInstructionLoadMode::Silent;
@@ -2617,12 +2648,14 @@ fn shell_can_resume_web_style_session_history() {
         max_llm_input_tokens: 100_000,
         response_protocol: ResponseProtocolKind::Xml,
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     };
     store
         .upsert_session(&StoredSession {
             session_id: session_id.to_string(),
             display_name: "Session0".to_string(),
             group_id: None,
+            ordinal: 0,
             created_at_ms: 1,
             updated_at_ms: 4,
             current_dir: workspace.display().to_string(),

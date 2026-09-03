@@ -6,10 +6,10 @@ use crate::{
     local_time_label, model_service_config_from_env, observation_events_from_core_topic_events,
     observation_panel_width_for_terminal, parse_cli_args, render_final_answer_markdown,
     render_final_response_at, render_prof_report_data, render_shell_status_bar,
-    render_thinking_view_at, render_turn_outcome_text, resolve_memory_dir, run_in_process_turn,
-    runtime_active_elapsed_secs, runtime_profile_report, shell_status_message_from_core_topic,
-    stale_context_decision_request, topic_event_status_hint, work_instruction_load_report,
-    work_instruction_load_request, work_instruction_load_topic_event,
+    render_thinking_view_at, render_turn_outcome_text, resolve_memory_dir, resume_in_process_turn,
+    run_in_process_turn, runtime_active_elapsed_secs, runtime_profile_report,
+    shell_status_message_from_core_topic, stale_context_decision_request, topic_event_status_hint,
+    work_instruction_load_report, work_instruction_load_request, work_instruction_load_topic_event,
     work_instruction_mode_from_sources, workspace_config_file, workspace_reference_context,
     CoreMemoryActivity, CoreTopicEvent, HostDecision, HostDecisionRequest, HostStatusMessage,
     ModelDirection, NoopTurnUi, ObservationEvent, ObservationPanel, OutputExpansionRequest,
@@ -366,7 +366,8 @@ pub fn run(args: Vec<String>) {
                 }
             };
         let input = sanitize_user_input(&input).trim().to_string();
-        if input.is_empty() {
+        let direct_resume = input.is_empty();
+        if direct_resume && !matches!(choose_direct_resume(), ApprovalChoice::Allow) {
             prompt_status.clear_after_empty_input();
             continue;
         }
@@ -431,23 +432,27 @@ pub fn run(args: Vec<String>) {
             continue;
         }
 
-        if was_queued {
-            print!(
-                "{}",
-                render_queued_user_line(&submitted_display, &time_label())
-            );
-            let _ = io::stdout().flush();
-        } else {
-            rewrite_submitted_user_line(&submitted_display, prompt_status.take_visible());
+        if !direct_resume {
+            if was_queued {
+                print!(
+                    "{}",
+                    render_queued_user_line(&submitted_display, &time_label())
+                );
+                let _ = io::stdout().flush();
+            } else {
+                rewrite_submitted_user_line(&submitted_display, prompt_status.take_visible());
+            }
         }
         let turn_id = shell_turn_id();
-        append_shell_history_message(
-            &session_store,
-            &session,
-            &turn_id,
-            ChatHistoryRole::User,
-            &input,
-        );
+        if !direct_resume {
+            append_shell_history_message(
+                &session_store,
+                &session,
+                &turn_id,
+                ChatHistoryRole::User,
+                &input,
+            );
+        }
 
         let idle = last_dialog_activity.elapsed();
         let dynamic_context_tokens = core.dynamic_context_estimated_tokens();
@@ -496,7 +501,12 @@ pub fn run(args: Vec<String>) {
             turn_work_instruction_context.as_deref(),
             workspace_ctx.as_deref(),
         ]);
-        let outcome = run_in_process_turn(
+        let run_turn = if direct_resume {
+            resume_in_process_turn
+        } else {
+            run_in_process_turn
+        };
+        let outcome = run_turn(
             &mut core,
             &mut config,
             TurnInput {
@@ -626,6 +636,7 @@ fn new_shell_session(
         session_id: session_id.clone(),
         display_name: "ShellSession".to_string(),
         group_id: None,
+        ordinal: 0,
         created_at_ms: now_ms_i64(),
         updated_at_ms: now_ms_i64(),
         current_dir: current_dir.display().to_string(),
@@ -1410,6 +1421,24 @@ enum PasteRecoveryDecision {
 struct PasteRecoveryOutcome {
     decision: PasteRecoveryDecision,
     rendered_lines: usize,
+}
+
+fn render_direct_resume_prompt() -> String {
+    "\n未输入内容，是否让Timem直接继续？\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n".to_string()
+}
+
+fn render_direct_resume_choices(selected: ApprovalChoice) -> String {
+    let allow_label = "直接继续";
+    let deny_label = "取消";
+    match selected {
+        ApprovalChoice::Allow => format!("\x1b[7m[ {} ]\x1b[0m   {}", allow_label, deny_label),
+        ApprovalChoice::Deny => format!("  {}   \x1b[7m[ {} ]\x1b[0m", allow_label, deny_label),
+    }
+}
+
+fn choose_direct_resume() -> ApprovalChoice {
+    print!("{}", render_direct_resume_prompt());
+    choose_with_keyboard(render_direct_resume_choices, ApprovalChoice::Deny)
 }
 
 fn render_user_approval_prompt(request: &ApprovalRequest) -> String {

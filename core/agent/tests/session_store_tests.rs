@@ -1042,9 +1042,12 @@ fn resume_notice_references_history_format_without_web_specific_language() {
     assert!(rendered.starts_with("Runtime just restarted."));
     assert!(!rendered.contains("## RUNTIME"));
     assert!(!rendered.contains("<RUNTIME>"));
-    assert!(rendered.contains(
-        "Runtime just restarted. Previous chat history's runtime info/tasks are invalid/outdated unless user asks to retrieve them."
-    ));
+    assert!(rendered.contains("Runtime just restarted. Previous runtime/job state may be stale."));
+    assert!(rendered.contains("If the user asks to continue or recover prior work"));
+    assert!(rendered.contains("first inspect this Session's recent history below"));
+    assert!(rendered.contains("use raw_chat search when more transcript context is needed"));
+    assert!(rendered.contains("scratch search/read when a prior checkpoint may exist"));
+    assert!(rendered.contains("verify the current cwd, files, and processes"));
     assert!(!rendered.contains("Previous audit chat history's runtime info are valid."));
     assert!(!rendered
         .contains("This session was restored and may not include the full previous context."));

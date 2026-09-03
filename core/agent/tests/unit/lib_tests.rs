@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn direct_resume_prompt_follows_the_interruption_note_in_component_order() {
+    let mut core = test_core("direct_resume_after_interruption");
+    let _ = core.begin_turn("old interrupted work", None);
+    core.mark_user_interrupted_work();
+
+    let prompt = match core.begin_turn(DIRECT_RESUME_USER_INPUT, None) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    let interruption = prompt
+        .find("NOTE: User interrupted the above work.")
+        .expect("interruption note");
+    let resume = prompt
+        .find(DIRECT_RESUME_USER_INPUT)
+        .expect("direct resume input");
+    assert!(interruption < resume, "{prompt}");
+}
+
+#[test]
 fn native_interruption_note_is_not_rendered_as_an_action_result() {
     let mut core = test_core("native_interruption_runtime_note");
     core.set_interaction_profile(&InteractionProfile {
@@ -2142,4 +2161,107 @@ fn action_audit_finish_retry_does_not_duplicate_an_already_committed_turn() {
         .count();
     assert_eq!(matching, 1);
     let _ = fs::remove_dir_all(root);
+}
+
+fn controlled_job_snapshot(pid: u32) -> RunningShellJob {
+    RunningShellJob {
+        pid,
+        tool_call_id: format!("call_{pid}"),
+        kind: "test".to_string(),
+        command: format!("job-{pid}"),
+        cwd: "/tmp".to_string(),
+        session_id: "test_session".to_string(),
+        turn_id: "test_turn".to_string(),
+        created_at_ms: 1,
+    }
+}
+
+fn controlled_job_exit(pid: u32) -> ShellJobExitUpdate {
+    ShellJobExitUpdate {
+        pid,
+        tool_call_id: format!("call_{pid}"),
+        kind: "test".to_string(),
+        command: format!("job-{pid}"),
+        cwd: "/tmp".to_string(),
+        session_id: "test_session".to_string(),
+        turn_id: "test_turn".to_string(),
+        created_at_ms: 1,
+        elapsed_ms: 25,
+        status: "0".to_string(),
+        stdout: format!("stdout-{pid}"),
+        stderr: String::new(),
+        output: format!("output-{pid}"),
+    }
+}
+
+fn controlled_request_base() -> String {
+    format!(
+        "BASE_TOOL_RESULT: finished normally\n\n{}",
+        prompt_render::RESPONSE_TRAILER
+    )
+}
+
+#[test]
+fn model_prompt_job_finished_before_first_scan_has_only_exit_update() {
+    let mut core = test_core("job_status_before_first_scan");
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &controlled_request_base(),
+        None,
+        (Vec::new(), vec![controlled_job_exit(101)]),
+        || (Vec::new(), Vec::new()),
+    );
+
+    assert!(
+        prompt.contains("BASE_TOOL_RESULT: finished normally"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("### STILL RUNNING"), "{prompt}");
+    assert_eq!(prompt.matches("RUNNING_JOB_UPDATE").count(), 1, "{prompt}");
+    assert!(prompt.contains("Exit status: 0"), "{prompt}");
+    assert!(prompt.contains("output-101"), "{prompt}");
+}
+
+#[test]
+fn model_prompt_job_finished_between_scans_orders_running_before_exit() {
+    let mut core = test_core("job_status_between_scans");
+    let prompt = core.build_model_request_prompt_from_job_snapshots(
+        &controlled_request_base(),
+        None,
+        (vec![controlled_job_snapshot(202)], Vec::new()),
+        || (Vec::new(), vec![controlled_job_exit(202)]),
+    );
+
+    let tool = prompt.find("BASE_TOOL_RESULT: finished normally").unwrap();
+    let running = prompt.find("### STILL RUNNING").unwrap();
+    let exit = prompt.find("RUNNING_JOB_UPDATE").unwrap();
+    assert!(tool < running && running < exit, "{prompt}");
+    assert_eq!(prompt.matches("### STILL RUNNING").count(), 1, "{prompt}");
+    assert_eq!(prompt.matches("RUNNING_JOB_UPDATE").count(), 1, "{prompt}");
+    assert!(prompt.contains("Exit status: 0"), "{prompt}");
+    assert!(prompt.contains("output-202"), "{prompt}");
+}
+
+#[test]
+fn model_prompt_job_finished_after_final_scan_moves_exit_to_next_request() {
+    let mut core = test_core("job_status_after_final_scan");
+    let base = controlled_request_base();
+    let first = core.build_model_request_prompt_from_job_snapshots(
+        &base,
+        None,
+        (vec![controlled_job_snapshot(303)], Vec::new()),
+        || (Vec::new(), Vec::new()),
+    );
+    assert!(first.contains("### STILL RUNNING"), "{first}");
+    assert!(!first.contains("RUNNING_JOB_UPDATE"), "{first}");
+
+    let second = core.build_model_request_prompt_from_job_snapshots(
+        &base,
+        None,
+        (Vec::new(), vec![controlled_job_exit(303)]),
+        || (Vec::new(), Vec::new()),
+    );
+    assert!(!second.contains("### STILL RUNNING"), "{second}");
+    assert_eq!(second.matches("RUNNING_JOB_UPDATE").count(), 1, "{second}");
+    assert!(second.contains("Exit status: 0"), "{second}");
+    assert!(second.contains("output-303"), "{second}");
 }

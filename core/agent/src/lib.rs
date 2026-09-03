@@ -152,16 +152,18 @@ pub use model_api::{
     prepare_model_http_request, prepare_model_interaction_http_request, prepare_model_request,
     prompt_cache_plan_audit, validate_model_http_headers, validate_model_request_fields,
     without_openai_compatible_cache_control, ApiProtocol, ModelCacheControl,
-    ModelHttpResponseInterpretation, ModelPromptBlock, ModelPromptRole, ModelServiceConfig,
-    OpenAiCompatibleCacheMode, OpenAiCompatibleOptions, PreparedModelHttpRequest,
-    PreparedModelRequest, StructuredOutputHint,
+    ModelHttpResponseInterpretation, ModelHttpTransportOptions, ModelPromptBlock, ModelPromptRole,
+    ModelServiceConfig, OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
+    PreparedModelHttpRequest, PreparedModelRequest, StructuredOutputHint,
 };
 pub use model_service_config::{
     apply_openai_compatible_env_value, model_service_config_from_sources,
     model_service_config_from_sources_allow_missing_api_key, validate_api_key, LocalLLMKeyFile,
     ModelServiceConfigSource,
 };
-pub use model_transport::{call_model, call_model_with_cancel, HttpModelClient};
+pub use model_transport::{
+    call_model, call_model_with_cancel, validate_model_private_ca_pem, HttpModelClient,
+};
 pub use negotiation::negotiate_interaction;
 use notification::CoreNotification;
 pub use notification::{CoreActionKind, CoreMemoryActivity};
@@ -192,7 +194,8 @@ pub use retry_policy::{
 pub use runtime_context::{local_time_label, runtime_time_context, LocalTimeParts};
 use self_tool::{SelfToolAbout, SelfToolPaths, SelfToolProcess, SelfToolState};
 pub use session_runtime::{
-    cancelled_turn_result, run_session_turn, run_session_turn_with_model_client, ModelClient,
+    cancelled_turn_result, run_direct_resume_turn, run_direct_resume_turn_with_model_client,
+    run_session_turn, run_session_turn_with_model_client, ModelClient,
 };
 use shell_exec::ShellJobManager;
 pub use shell_exec::{RunningShellJob, ShellJobExitUpdate};
@@ -423,6 +426,8 @@ pub struct ModelInputOverflowRecovery {
     pub removed_action_output_bytes: usize,
 }
 pub const WORKER_ROLE_CONTEXT_PREFIX: &str = "TIMEM_WORKER_ROLE_CONTEXT: ";
+
+pub const DIRECT_RESUME_USER_INPUT: &str = "user resume directly";
 
 pub fn worker_role_supporting_context(name: &str, description: &str) -> String {
     format!(
@@ -837,6 +842,20 @@ impl MemGuard {
                         let _ = fs::remove_dir_all(&self.lock_dir);
                         continue;
                     }
+                    if started.elapsed() >= MEM_GUARD_TIMEOUT {
+                        return Err("mem_guard_timeout".to_string());
+                    }
+                    thread::sleep(MEM_GUARD_WAIT_STEP);
+                }
+                // Windows may transiently report PermissionDenied or NotFound while
+                // another writer removes and recreates the lock directory. Treat
+                // that hand-off window as contention rather than a lock failure.
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+                    ) =>
+                {
                     if started.elapsed() >= MEM_GUARD_TIMEOUT {
                         return Err("mem_guard_timeout".to_string());
                     }
@@ -1659,6 +1678,7 @@ fn default_self_tool_process() -> SelfToolProcess {
 pub struct AgentCore {
     memory_dir: PathBuf,
     static_prompt: String,
+    runtime_system_context: String,
     rendered_static_prompt: String,
     startup_stamp: String,
     interface_preferences: InterfacePreferences,
@@ -1759,6 +1779,7 @@ impl AgentCore {
         Self {
             memory_dir: memory_dir.to_path_buf(),
             static_prompt,
+            runtime_system_context: String::new(),
             rendered_static_prompt,
             startup_stamp,
             interface_preferences,
@@ -1909,6 +1930,7 @@ impl AgentCore {
         fork.round_budget = self.configured_round_budget;
         fork.bash_approval_mode = self.bash_approval_mode;
         fork.assistant_speaker_name = self.assistant_speaker_name.clone();
+        fork.runtime_system_context = self.runtime_system_context.clone();
         fork.assistant_replay_mode = self.assistant_replay_mode;
         fork.current_prompt_cwd = cwd.as_ref().to_path_buf();
         fork.tool_repo_session_id = self.tool_repo_session_id.clone();
@@ -1928,12 +1950,29 @@ impl AgentCore {
         self.refresh_rendered_static_prompt();
     }
 
+    pub fn set_runtime_system_context(&mut self, context: impl AsRef<str>) {
+        let context = context.as_ref().trim();
+        if self.runtime_system_context == context {
+            return;
+        }
+        self.runtime_system_context = context.to_string();
+        self.refresh_rendered_static_prompt();
+    }
+
     pub fn assistant_speaker_name(&self) -> &str {
         &self.assistant_speaker_name
     }
 
     pub fn set_assistant_replay_mode(&mut self, mode: AssistantReplayMode) {
         self.assistant_replay_mode = mode;
+    }
+
+    pub fn set_claude_codex_tool_discovery(&mut self, enabled: bool) {
+        if self.interface_preferences.claude_codex_tool_discovery == enabled {
+            return;
+        }
+        self.interface_preferences.claude_codex_tool_discovery = enabled;
+        self.refresh_rendered_static_prompt();
     }
 
     pub fn assistant_replay_mode(&self) -> AssistantReplayMode {
@@ -2041,24 +2080,24 @@ impl AgentCore {
                 .len()
     }
 
-    pub fn running_shell_jobs_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
-        self.shell_jobs.running_for_session(session_id)
+    pub fn query_running_shell_jobs_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
+        self.shell_jobs.query_running_for_session(session_id)
     }
 
-    pub fn refresh_running_shell_jobs_for_session(
+    pub fn consume_completed_shell_jobs_for_session(
         &mut self,
         session_id: &str,
     ) -> Vec<RunningShellJob> {
-        self.refresh_running_shell_jobs_for_session_with_runtime(session_id, None)
+        self.consume_completed_shell_jobs_for_session_with_runtime(session_id, None)
     }
 
     /// Refreshes detached shell jobs and reports exit events through the active Agent runtime.
-    pub fn refresh_running_shell_jobs_for_session_with_runtime(
+    pub fn consume_completed_shell_jobs_for_session_with_runtime(
         &mut self,
         session_id: &str,
         runtime: Option<&mut dyn ActionRuntime>,
     ) -> Vec<RunningShellJob> {
-        let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
+        let (running, updates) = self.shell_jobs.consume_completed_for_session(session_id);
         self.submit_running_job_updates_with_runtime(updates, runtime);
         running
     }
@@ -2068,7 +2107,7 @@ impl AgentCore {
         session_id: &str,
         runtime: &mut dyn ActionRuntime,
     ) {
-        let (_, updates) = self.shell_jobs.refresh_for_session(session_id);
+        let (_, updates) = self.shell_jobs.consume_completed_for_session(session_id);
         self.submit_running_job_updates_with_runtime(updates, Some(runtime));
     }
 
@@ -2089,25 +2128,30 @@ impl AgentCore {
         self.submit_running_job_updates(updates);
     }
 
+    fn format_running_job_updates(updates: &[ShellJobExitUpdate]) -> Option<String> {
+        (!updates.is_empty()).then(|| {
+            updates
+                .iter()
+                .map(|update| {
+                    format!(
+                        "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms\nExit status: {}\nFinal output:\n{}",
+                        update.pid,
+                        update.description(),
+                        compact_text(&update.command, 500),
+                        update.elapsed_ms,
+                        update.status,
+                        compact_text(&update.output, 4000),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+
     fn submit_running_job_updates(&mut self, updates: Vec<ShellJobExitUpdate>) {
-        if updates.is_empty() {
+        let Some(text) = Self::format_running_job_updates(&updates) else {
             return;
-        }
-        let text = updates
-            .into_iter()
-            .map(|update| {
-                format!(
-                    "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms\nExit status: {}\nFinal output:\n{}",
-                    update.pid,
-                    update.description(),
-                    compact_text(&update.command, 500),
-                    update.elapsed_ms,
-                    update.status,
-                    compact_text(&update.output, 4000),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        };
         self.submit_prompt_component(
             PromptComponentRole::system(),
             "running_job_update",
@@ -2160,17 +2204,59 @@ impl AgentCore {
         runtime: Option<&mut dyn ActionRuntime>,
     ) -> String {
         let session_id = self.current_session_id();
-        let (running, updates) = self.shell_jobs.refresh_for_session(&session_id);
-        self.submit_running_job_updates_with_runtime(updates, runtime);
+        let first_snapshot = self.shell_jobs.consume_completed_for_session(&session_id);
+        let shell_jobs = self.shell_jobs.clone();
+        self.build_model_request_prompt_from_job_snapshots(
+            current_prompt,
+            runtime,
+            first_snapshot,
+            move || shell_jobs.consume_completed_for_session(&session_id),
+        )
+    }
+
+    fn build_model_request_prompt_from_job_snapshots<F>(
+        &mut self,
+        current_prompt: &str,
+        runtime: Option<&mut dyn ActionRuntime>,
+        (running, mut updates): (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>),
+        final_scan: F,
+    ) -> String
+    where
+        F: FnOnce() -> (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>),
+    {
         let still_running = self.still_running_cmds_context_from(running);
-        if still_running.is_none() && !self.context_compact_required {
-            return current_prompt.to_string();
-        }
         let (body, trailer) = prompt_render::split_formatted_response_trailer(current_prompt);
         let mut prompt = body.trim_end().to_string();
-        if let Some(still_running) = still_running {
+        if let Some(still_running) = still_running.as_ref() {
             prompt.push_str("\n\n");
-            prompt.push_str(&still_running);
+            prompt.push_str(still_running);
+        }
+
+        // Capture jobs that finish while the base prompt and running table are rendered.
+        // The request-local order is historical tool results, running snapshot, then exits.
+        let (_, final_updates) = final_scan();
+        updates.extend(final_updates);
+        if let Some(update_text) = Self::format_running_job_updates(&updates) {
+            prompt.push_str("\n\n");
+            prompt.push_str(&update_text);
+        }
+
+        if let Some(runtime) = runtime {
+            let events = updates
+                .iter()
+                .map(host::running_shell_job_exit_topic_event)
+                .collect::<Vec<_>>();
+            if !events.is_empty() {
+                runtime.on_core_topic_events(&events);
+            }
+        }
+        // Persist terminal updates for later prompts, but do not re-render that delta into this
+        // request: the request-local copy above has the authoritative ordering.
+        self.submit_running_job_updates(updates.clone());
+        self.flush_pending_prompt_components();
+
+        if still_running.is_none() && updates.is_empty() && !self.context_compact_required {
+            return current_prompt.to_string();
         }
         prompt.push_str("\n\n");
         if self.context_compact_required {
@@ -2273,8 +2359,17 @@ impl AgentCore {
         self.self_tool.set_env_value(key, value);
     }
     fn refresh_rendered_static_prompt(&mut self) {
+        let static_prompt = if self.runtime_system_context.is_empty() {
+            self.static_prompt.clone()
+        } else {
+            format!(
+                "{}\n\n## Session Runtime Identity\n\n{}",
+                self.static_prompt.trim_end(),
+                self.runtime_system_context
+            )
+        };
         self.rendered_static_prompt = prompt_render::render_static_prompt_for_mode_with_preferences(
-            &self.static_prompt,
+            &static_prompt,
             &self.capabilities,
             self.response_protocol.suite(),
             &self.assistant_speaker_name,
@@ -2887,6 +2982,10 @@ impl AgentCore {
     pub(crate) fn record_sub_answer(&mut self) -> u64 {
         self.sub_answer_count = self.sub_answer_count.saturating_add(1);
         self.sub_answer_count
+    }
+
+    pub fn begin_direct_resume_turn(&mut self, supporting_context: Option<&str>) -> CoreStep {
+        self.begin_turn(DIRECT_RESUME_USER_INPUT, supporting_context)
     }
 
     pub fn begin_turn(&mut self, user_input: &str, supporting_context: Option<&str>) -> CoreStep {
@@ -4070,7 +4169,9 @@ impl AgentCore {
 
         let mut action_handles = Vec::new();
         for (idx, action) in actions.iter().cloned().enumerate() {
-            if results.get(idx).is_some_and(Option::is_some) || action.action == "run_bash" {
+            if results.get(idx).is_some_and(Option::is_some)
+                || shell_exec::is_local_shell_action(&action.action)
+            {
                 continue;
             }
             if self.can_spawn_parallel_readfile_action(&action) {
@@ -4148,7 +4249,7 @@ impl AgentCore {
 
         for next_index in (current_index + 1)..actions.len() {
             let action = actions[next_index].clone();
-            if action.action != "run_bash" {
+            if !shell_exec::is_local_shell_action(&action.action) {
                 continue;
             }
             match self.execute_action(action.clone(), runtime) {
@@ -5033,7 +5134,7 @@ Runtime tool_call ids:",
         let retention = tool_result_gate::Retention::from_tail_out(action.input_bool("tail_out"));
         if self.response_protocol == ResponseProtocolKind::Xml {
             let output_time_ms = now_ms();
-            if action.action == "run_bash" {
+            if shell_exec::is_local_shell_action(&action.action) {
                 if let Some(bash_result) = outcome.bash_result.as_ref() {
                     return prompt_render::render_xml_bash_result_with_retention(
                         action.name.as_deref(),
@@ -5149,7 +5250,8 @@ Runtime tool_call ids:",
     }
 
     fn can_spawn_parallel_bash_action(&self, action: &ParsedAction) -> bool {
-        self.bash_approval_mode == BashApprovalMode::Approve && action.action == "run_bash"
+        self.bash_approval_mode == BashApprovalMode::Approve
+            && shell_exec::is_local_shell_action(&action.action)
     }
 
     fn can_spawn_parallel_readfile_action(&self, action: &ParsedAction) -> bool {
@@ -5303,7 +5405,10 @@ Runtime tool_call ids:",
             };
             let result = if !loop_command.is_empty() && !cmd_command.is_empty() {
                 ActionExecution::Completed(ActionOutcome::failed(
-                    "Action result: run_bash\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.",
+                    format!(
+                        "Action result: {}\nThe command was not executed.\nReason: The action provided both cmd and loop_cmd. Use cmd for a normal/background command, or loop_cmd with interval_ms for polling.",
+                        action.action
+                    ),
                 ))
             } else {
                 let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
@@ -5332,8 +5437,8 @@ Runtime tool_call ids:",
             let outcome = match result {
                 ActionExecution::Completed(outcome) => outcome,
                 ActionExecution::NeedsApproval(_) => ActionOutcome::failed(format!(
-                    "Action result: run_bash\ncommand: {}\nerror: unexpected_parallel_approval_request",
-                    command,
+                    "Action result: {}\ncommand: {}\nerror: unexpected_parallel_approval_request",
+                    action.action, command,
                 )),
             };
             (idx, action_for_audit, outcome, None)
@@ -5400,8 +5505,10 @@ Runtime tool_call ids:",
                     }
                 }
                 Err(_) => {
-                    let result =
-                        "Action result: run_bash\nerror: parallel_action_panicked".to_string();
+                    let result = format!(
+                        "Action result: {}\nerror: parallel_action_panicked",
+                        crate::os::local_shell_tool_name()
+                    );
                     if let Some(slot) = results.iter_mut().find(|slot| slot.is_none()) {
                         *slot = Some(result);
                     }
@@ -5589,7 +5696,9 @@ Runtime tool_call ids:",
         };
 
         self.current_stats.tool_calls += 1;
-        if action.action == "run_bash" && self.bash_approval_mode == BashApprovalMode::Approve {
+        if shell_exec::is_local_shell_action(&action.action)
+            && self.bash_approval_mode == BashApprovalMode::Approve
+        {
             self.emit_action_execution_start_topic(&action, runtime);
         }
         let execution = match tool_registry::execute_builtin_tool(
@@ -5626,7 +5735,7 @@ Runtime tool_call ids:",
                     outcome.status.as_str(),
                     Some(&outcome.text),
                 );
-                let cpu_time = if action_for_audit.action == "run_bash" {
+                let cpu_time = if shell_exec::is_local_shell_action(&action_for_audit.action) {
                     None
                 } else {
                     elapsed_thread_cpu(action_cpu_start)
@@ -6356,26 +6465,21 @@ impl FileMemoryStore {
             .unwrap_or_default()
     }
 
-    fn schema_text(&self, chat_history: &FileChatHistoryStore) -> String {
-        format!(
-            "Action result: memmgr\ntype: durable\nop: schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: schema|sql|insert|update|upsert|delete\n- raw_chat: search|sql|delete\n- scratch: search|write|read|delete\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from sql results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content; scratch read requires id and returns full scratch content. Empty raw_chat search_text lists recent chat records. loaded_chat_records={}.",
-            chat_history.read_all().map(|rows| rows.len()).unwrap_or_default()
-        )
+    fn schema_text(&self) -> String {
+        "Action result: memmgr\ntype: durable\nop: schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: schema|sql|insert|update|upsert|delete\n- raw_chat: search|delete\n- scratch: search|write|read|delete\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from sql results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content; scratch read requires id and returns full scratch content. Empty raw_chat search_text lists recent chat records. loaded_chat_records={}".to_string()
     }
 
     fn sql_read(
         &self,
-        chat_history: &FileChatHistoryStore,
         sql: &str,
         params: &[String],
         limit: usize,
     ) -> Result<Vec<Vec<(String, String)>>, String> {
-        self.sql_read_unlocked(chat_history, sql, params, limit)
+        self.sql_read_unlocked(sql, params, limit)
     }
 
     fn sql_read_unlocked(
         &self,
-        chat_history: &FileChatHistoryStore,
         sql: &str,
         params: &[String],
         limit: usize,
@@ -6394,11 +6498,6 @@ impl FileMemoryStore {
             [],
         )
         .map_err(|_| "sqlite_schema_failed".to_string())?;
-        conn.execute(
-            "CREATE TABLE chat_messages(id TEXT NOT NULL, session_id TEXT NOT NULL, turn_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at_ms INTEGER NOT NULL, source TEXT NOT NULL, profile_name TEXT, model_name TEXT, source_message_id TEXT)",
-            [],
-        )
-        .map_err(|_| "sqlite_schema_failed".to_string())?;
         for record in self
             .read_all_unlocked()
             .map_err(|_| "memory_read_failed".to_string())?
@@ -6414,38 +6513,6 @@ impl FileMemoryStore {
                 ),
             )
             .map_err(|_| "sqlite_load_failed".to_string())?;
-        }
-        for record in chat_history
-            .read_all_unlocked()
-            .map_err(|_| "chat_history_read_failed".to_string())?
-        {
-            if !record.user_input.trim().is_empty() {
-                conn.execute(
-                    "INSERT INTO chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id) VALUES (?1, ?2, ?3, 'user', ?4, ?5, 'shell_audit', NULL, NULL, NULL)",
-                    (
-                        format!("{}_user", record.turn_id),
-                        &record.session,
-                        &record.turn_id,
-                        &record.user_input,
-                        record.started_at_ms,
-                    ),
-                )
-                .map_err(|_| "sqlite_load_failed".to_string())?;
-            }
-            if !record.assistant_output.trim().is_empty() {
-                conn.execute(
-                    "INSERT INTO chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id) VALUES (?1, ?2, ?3, 'assistant', ?4, ?5, 'shell_audit', NULL, NULL, ?6)",
-                    (
-                        format!("{}_assistant", record.turn_id),
-                        &record.session,
-                        &record.turn_id,
-                        &record.assistant_output,
-                        record.started_at_ms,
-                        format!("{}_user", record.turn_id),
-                    ),
-                )
-                .map_err(|_| "sqlite_load_failed".to_string())?;
-            }
         }
         let mut stmt = conn
             .prepare(sql)
@@ -6695,8 +6762,14 @@ impl FileChatHistoryStore {
         limit: usize,
         after_ms: Option<i64>,
         before_ms: Option<i64>,
+        session_scope: Option<&str>,
     ) -> std::io::Result<Vec<RawChatHistoryRecord>> {
-        self.query_unlocked(query, limit, after_ms, before_ms)
+        let mut rows = self.query_unlocked(query, 50, after_ms, before_ms)?;
+        if let Some(session_id) = session_scope {
+            rows.retain(|record| record.session == session_id);
+        }
+        rows.truncate(limit.clamp(1, 50));
+        Ok(rows)
     }
 
     fn query_unlocked(
@@ -6768,10 +6841,6 @@ impl FileChatHistoryStore {
             }
             Ok::<_, String>(deleted_turn_ids.len())
         })?
-    }
-
-    fn read_all(&self) -> std::io::Result<Vec<RawChatHistoryRecord>> {
-        self.read_all_unlocked()
     }
 
     fn read_all_unlocked(&self) -> std::io::Result<Vec<RawChatHistoryRecord>> {
@@ -6955,18 +7024,13 @@ fn validate_memory_sql(sql: &str) -> Result<(), String> {
         if compact == "pragmatable_info(memories)"
             || compact == "pragmatable_info('memories')"
             || compact == "pragmatable_info(\"memories\")"
-            || compact == "pragmatable_info(chat_messages)"
-            || compact == "pragmatable_info('chat_messages')"
-            || compact == "pragmatable_info(\"chat_messages\")"
         {
             return Ok(());
         }
         return Err("only_declared_tables_are_allowed".to_string());
     }
     let allowed_read = lowered.contains(" from memories")
-        || lowered.contains(" from chat_messages")
         || lowered.contains(" join memories")
-        || lowered.contains(" join chat_messages")
         || lowered.contains(" from (select");
     if !allowed_read {
         return Err("only_declared_tables_are_allowed".to_string());

@@ -1,11 +1,52 @@
 use super::*;
 use agent_core::{
-    ApiProtocol, ApprovalRequest, BashApprovalMode, CoreProfile, LlmResponse, ResponseProtocolKind,
-    SessionToolRepo, UsageStats,
+    ApiProtocol, ApprovalRequest, BashApprovalMode, CoreProfile, InterfacePreferences, LlmResponse,
+    ResponseProtocolKind, SessionToolRepo, UsageStats,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Instant;
+
+#[test]
+fn core_command_id_tracker_keeps_pending_and_bounds_recent_acceptance() {
+    let mut tracker = CoreCommandIdTracker::default();
+    assert!(tracker.reserve("pending".to_string()).unwrap());
+    assert!(!tracker.reserve("pending".to_string()).unwrap());
+
+    for ordinal in 0..=CORE_COMMAND_ID_CAPACITY {
+        let command_id = format!("accepted-{ordinal}");
+        assert!(tracker.reserve(command_id.clone()).unwrap());
+        tracker.accept(&command_id);
+    }
+
+    assert!(tracker.pending.contains("pending"));
+    assert_eq!(tracker.pending.len(), 1);
+    assert_eq!(tracker.recent_accepted.len(), CORE_COMMAND_ID_CAPACITY);
+    assert!(!tracker.recent_accepted.contains("accepted-0"));
+    assert!(tracker
+        .recent_accepted
+        .contains(&format!("accepted-{CORE_COMMAND_ID_CAPACITY}")));
+    assert!(tracker.reserve("accepted-0".to_string()).unwrap());
+    tracker.rollback("accepted-0");
+    assert!(!tracker.contains("accepted-0"));
+}
+
+#[test]
+fn core_command_id_tracker_rejects_pending_capacity_without_evicting_inflight_ids() {
+    let mut tracker = CoreCommandIdTracker::default();
+    for ordinal in 0..CORE_COMMAND_ID_CAPACITY {
+        assert!(tracker.reserve(format!("pending-{ordinal}")).unwrap());
+    }
+    assert_eq!(
+        tracker.reserve("one-too-many".to_string()),
+        Err("core_command_pending_capacity_exhausted".to_string())
+    );
+    assert_eq!(tracker.pending.len(), CORE_COMMAND_ID_CAPACITY);
+    assert!(tracker.pending.contains("pending-0"));
+    assert!(tracker
+        .pending
+        .contains(&format!("pending-{}", CORE_COMMAND_ID_CAPACITY - 1)));
+}
 
 #[test]
 fn failed_durable_supplement_append_releases_command_id_for_retry() {
@@ -21,7 +62,7 @@ fn failed_durable_supplement_append_releases_command_id_for_retry() {
         cancel_generation: Arc::new(AtomicU64::new(0)),
         shutdown_requested: Arc::new(AtomicBool::new(false)),
         reply_tx,
-        accepted_command_ids: Arc::new(Mutex::new(BTreeSet::new())),
+        command_ids: Arc::new(Mutex::new(CoreCommandIdTracker::default())),
         pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
         background_cancel: Arc::new(|| {}),
     };
@@ -34,7 +75,7 @@ fn failed_durable_supplement_append_releases_command_id_for_retry() {
         ),
         Err("persist failed".to_string())
     );
-    assert!(handle.accepted_command_ids.lock().unwrap().is_empty());
+    assert!(handle.command_ids.lock().unwrap().pending.is_empty());
     assert!(handle
         .try_add_user_supplement_with_command_id_after(
             "retry",
@@ -59,11 +100,11 @@ fn failed_runtime_update_notification_rolls_back_pending_update() {
             accepting: false,
             queue: Vec::new(),
         })),
+        command_ids: Arc::new(Mutex::new(CoreCommandIdTracker::default())),
         cancel_requested: Arc::new(AtomicBool::new(false)),
         cancel_generation: Arc::new(AtomicU64::new(0)),
         shutdown_requested: Arc::new(AtomicBool::new(false)),
         reply_tx,
-        accepted_command_ids: Arc::new(Mutex::new(BTreeSet::new())),
         pending_runtime_updates: Arc::clone(&pending_runtime_updates),
         background_cancel: Arc::new(|| {}),
     };
@@ -102,7 +143,7 @@ fn recovered_turn_batch_rejects_duplicate_ids_and_rolls_back_closed_send() {
         cancel_generation: Arc::new(AtomicU64::new(0)),
         shutdown_requested: Arc::new(AtomicBool::new(false)),
         reply_tx,
-        accepted_command_ids: Arc::new(Mutex::new(BTreeSet::new())),
+        command_ids: Arc::new(Mutex::new(CoreCommandIdTracker::default())),
         pending_runtime_updates: Arc::new(Mutex::new(Vec::new())),
         background_cancel: Arc::new(|| {}),
     };
@@ -115,7 +156,7 @@ fn recovered_turn_batch_rejects_duplicate_ids_and_rolls_back_closed_send() {
         ),
         Err("core_command_batch_duplicate_id".to_string())
     );
-    assert!(handle.accepted_command_ids.lock().unwrap().is_empty());
+    assert!(handle.command_ids.lock().unwrap().pending.is_empty());
     assert_eq!(
         handle.run_turn_batch_with_command_ids(
             "task",
@@ -125,7 +166,7 @@ fn recovered_turn_batch_rejects_duplicate_ids_and_rolls_back_closed_send() {
         ),
         Err("core_session_worker_stopped".to_string())
     );
-    assert!(handle.accepted_command_ids.lock().unwrap().is_empty());
+    assert!(handle.command_ids.lock().unwrap().pending.is_empty());
 }
 
 fn tmp_dir(name: &str) -> PathBuf {
@@ -157,6 +198,7 @@ fn test_config() -> ModelServiceConfig {
         api_protocol: ApiProtocol::OpenAiCompatible,
         response_protocol: agent_core::ResponseProtocolKind::Json,
         openai_compatible: agent_core::OpenAiCompatibleOptions::default(),
+        http_transport: Default::default(),
     }
 }
 
@@ -828,6 +870,369 @@ fn session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement() {
     worker.shutdown().unwrap();
 }
 
+struct PromptCutStressModel {
+    call_tx: std::sync::mpsc::Sender<(usize, String)>,
+    release_rx: std::sync::mpsc::Receiver<()>,
+    seed: u64,
+    calls: usize,
+}
+
+fn prompt_cut_stress_jitter_ms(seed: u64, iteration: usize) -> u64 {
+    let mut value = seed ^ (iteration as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    value ^= value << 13;
+    value ^= value >> 7;
+    value ^= value << 17;
+    if iteration % 50 == 49 {
+        50 + value % 51
+    } else {
+        2 + value % 19
+    }
+}
+
+impl ModelClient for PromptCutStressModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        prompt: &str,
+        _audit_file: &std::path::Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        let iteration = self.calls;
+        self.calls += 1;
+        self.call_tx
+            .send((iteration, prompt.to_string()))
+            .map_err(|_| format!("prompt_cut_stress_observer_closed iteration={iteration}"))?;
+        self.release_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|error| {
+                format!(
+                    "prompt_cut_stress_release_timeout seed={} iteration={} stage=model_waiting_release error={error}",
+                    self.seed, iteration
+                )
+            })?;
+        std::thread::sleep(Duration::from_millis(prompt_cut_stress_jitter_ms(
+            self.seed, iteration,
+        )));
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: format!(r#"{{"status":"ALL_FINISHED","final_answer":"FINAL_{iteration}"}}"#),
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 1_000 + iteration as u32,
+                completion_tokens: 10,
+                total_tokens: 1_010 + iteration as u32,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
+#[test]
+#[ignore = "run through scripts/turn_concurrency_stress.sh"]
+fn prompt_cut_terminal_ownership_stress_is_seeded_and_bounded() {
+    let iterations = std::env::var("TIMEM_TURN_STRESS_ITERATIONS")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .expect("TIMEM_TURN_STRESS_ITERATIONS must be an integer")
+        })
+        .unwrap_or(300);
+    assert!(iterations >= 1, "TIMEM_TURN_STRESS_ITERATIONS must be >= 1");
+    let seed = std::env::var("TIMEM_TURN_STRESS_SEED")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .expect("TIMEM_TURN_STRESS_SEED must be an integer")
+        })
+        .unwrap_or(0x5EED_C0DE_D15C_A11E);
+    let started = Instant::now();
+    let dir = tmp_dir("prompt_cut_terminal_ownership_stress");
+    let core = AgentCore::new(
+        "You are Timem.\n{{ response_protocol }}\n{{ capability_catalog }}",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let (call_tx, call_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "prompt_cut_terminal_ownership_stress", 1)
+            .with_separate_turn_for_supplements_after_final_answer(),
+        PromptCutStressModel {
+            call_tx,
+            release_rx,
+            seed,
+            calls: 0,
+        },
+    );
+    let handle = worker.handle();
+    let _ = worker
+        .events()
+        .recv_timeout(Duration::from_secs(2))
+        .expect("stress worker lifecycle");
+    let mut turn_ids = std::collections::HashSet::new();
+    let mut epochs = std::collections::HashSet::new();
+
+    for iteration in 0..iterations {
+        let task_id = format!("stress-{seed}-{iteration}-task");
+        let early_id = format!("stress-{seed}-{iteration}-early");
+        let in_flight_id = format!("stress-{seed}-{iteration}-in-flight");
+        let parsed_id = format!("stress-{seed}-{iteration}-parsed");
+        let early = format!("EARLY_{seed}_{iteration}");
+        let in_flight = format!("IN_FLIGHT_{seed}_{iteration}");
+        let parsed = format!("PARSED_{seed}_{iteration}");
+        handle
+            .run_turn_batch_with_command_ids(
+                format!("TASK_{seed}_{iteration}"),
+                None,
+                Some(task_id.clone()),
+                vec![(early.clone(), Some(early_id.clone()))],
+            )
+            .unwrap_or_else(|error| {
+                panic!("seed={seed} iteration={iteration} stage=submit error={error}")
+            });
+
+        let mut accepted = std::collections::BTreeSet::new();
+        let mut active_token = None;
+        loop {
+            let event = worker
+                .events()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|error| {
+                    panic!("seed={seed} iteration={iteration} stage=await_prompt_cut error={error}")
+                });
+            match event {
+                CoreSessionWorkerEvent::CommandAccepted { command_id } => {
+                    accepted.insert(command_id);
+                }
+                CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Active(
+                    active,
+                )) => {
+                    active_token.get_or_insert(active.token);
+                }
+                CoreSessionWorkerEvent::ModelRequest { round, .. } => {
+                    assert_eq!(
+                        round, 1,
+                        "seed={seed} iteration={iteration} stage=prompt_cut"
+                    );
+                    break;
+                }
+                CoreSessionWorkerEvent::TurnStarted { .. }
+                | CoreSessionWorkerEvent::Topics(_)
+                | CoreSessionWorkerEvent::ModelRequestCompleted { .. } => {}
+                other => panic!(
+                    "seed={seed} iteration={iteration} stage=await_prompt_cut unexpected={other:?}"
+                ),
+            }
+        }
+        let (model_iteration, prompt) = call_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|error| {
+                panic!("seed={seed} iteration={iteration} stage=model_entered error={error}")
+            });
+        assert_eq!(
+            model_iteration, iteration,
+            "seed={seed} iteration={iteration}"
+        );
+        assert!(
+            prompt.contains(&early),
+            "seed={seed} iteration={iteration} stage=prompt_cut early input missing"
+        );
+        assert!(!prompt.contains(&in_flight), "seed={seed} iteration={iteration} stage=prompt_cut in-flight input leaked into sealed request");
+        assert!(!prompt.contains(&parsed), "seed={seed} iteration={iteration} stage=prompt_cut parsed input leaked into sealed request");
+
+        let producer_handle = handle.clone();
+        let (boundary_tx, boundary_rx) = std::sync::mpsc::channel();
+        let (parsed_tx, parsed_rx) = std::sync::mpsc::channel();
+        let producer_in_flight = in_flight.clone();
+        let producer_parsed = parsed.clone();
+        let producer_in_flight_id = in_flight_id.clone();
+        let producer_parsed_id = parsed_id.clone();
+        let producer = std::thread::Builder::new()
+            .name(format!("prompt-cut-producer-{iteration}"))
+            .spawn(move || {
+                let in_flight_accepted = producer_handle
+                    .try_add_user_supplement_with_command_id_after(
+                        producer_in_flight,
+                        Some(producer_in_flight_id),
+                        || Ok(()),
+                    )?;
+                let parsed_accepted = producer_handle
+                    .try_add_user_supplement_with_command_id_after(
+                        producer_parsed,
+                        Some(producer_parsed_id),
+                        || {
+                            boundary_tx
+                                .send(())
+                                .map_err(|_| "boundary_observer_closed".to_string())?;
+                            parsed_rx
+                                .recv_timeout(Duration::from_secs(5))
+                                .map_err(|error| format!("parsed_release_timeout:{error}"))?;
+                            Ok(())
+                        },
+                    )?;
+                Ok::<_, String>((in_flight_accepted, parsed_accepted))
+            })
+            .expect("spawn prompt-cut producer");
+        boundary_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|error| {
+                panic!("seed={seed} iteration={iteration} stage=mailbox_locked error={error}")
+            });
+        release_tx.send(()).unwrap_or_else(|error| {
+            panic!("seed={seed} iteration={iteration} stage=release_model error={error}")
+        });
+
+        loop {
+            let event = worker
+                .events()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|error| {
+                    panic!("seed={seed} iteration={iteration} stage=await_terminal_parsed error={error}")
+                });
+            match event {
+                CoreSessionWorkerEvent::CommandAccepted { command_id } => {
+                    accepted.insert(command_id);
+                }
+                CoreSessionWorkerEvent::ModelResponseParsed { .. } => break,
+                CoreSessionWorkerEvent::TurnProjection(_)
+                | CoreSessionWorkerEvent::Topics(_)
+                | CoreSessionWorkerEvent::ModelRequestCompleted { .. }
+                | CoreSessionWorkerEvent::ModelResponse { .. } => {}
+                other => panic!(
+                    "seed={seed} iteration={iteration} stage=await_terminal_parsed unexpected={other:?}"
+                ),
+            }
+        }
+        parsed_tx.send(()).unwrap_or_else(|error| {
+            panic!("seed={seed} iteration={iteration} stage=release_mailbox error={error}")
+        });
+        let producer_result = producer
+            .join()
+            .unwrap_or_else(|_| {
+                panic!("seed={seed} iteration={iteration} stage=producer_join panic")
+            })
+            .unwrap_or_else(|error| {
+                panic!("seed={seed} iteration={iteration} stage=producer error={error}")
+            });
+        assert_eq!(
+            producer_result,
+            (true, true),
+            "seed={seed} iteration={iteration} stage=producer_acceptance"
+        );
+
+        let mut returned = Vec::new();
+        let mut finished_token = None;
+        let outcome = loop {
+            let event = worker
+                .events()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|error| {
+                    panic!("seed={seed} iteration={iteration} stage=await_terminal_commit error={error}")
+                });
+            match event {
+                CoreSessionWorkerEvent::CommandAccepted { command_id } => {
+                    accepted.insert(command_id);
+                }
+                CoreSessionWorkerEvent::UnconsumedSupplements { supplements } => {
+                    returned.extend(supplements);
+                }
+                CoreSessionWorkerEvent::TurnProjection(agent_core::TurnProjection::Finished(finished)) => {
+                    finished_token = Some(finished.token);
+                }
+                CoreSessionWorkerEvent::TurnProjection(_)
+                | CoreSessionWorkerEvent::Topics(_) => {}
+                CoreSessionWorkerEvent::TurnFinished { outcome } => break outcome,
+                other => panic!(
+                    "seed={seed} iteration={iteration} stage=await_terminal_commit unexpected={other:?}"
+                ),
+            }
+        };
+        let active_token = active_token.unwrap_or_else(|| {
+            panic!("seed={seed} iteration={iteration} stage=active_token missing")
+        });
+        let finished_token = finished_token.unwrap_or_else(|| {
+            panic!("seed={seed} iteration={iteration} stage=finished_token missing")
+        });
+        assert_eq!(
+            active_token, finished_token,
+            "seed={seed} iteration={iteration} stage=token_handoff"
+        );
+        assert!(
+            turn_ids.insert(active_token.turn_id.clone()),
+            "seed={seed} iteration={iteration} duplicate_turn_id={}",
+            active_token.turn_id
+        );
+        assert!(
+            epochs.insert(active_token.epoch),
+            "seed={seed} iteration={iteration} duplicate_epoch={}",
+            active_token.epoch
+        );
+        assert_eq!(
+            outcome.text,
+            format!("FINAL_{iteration}"),
+            "seed={seed} iteration={iteration} stage=final_answer"
+        );
+        assert_eq!(
+            outcome.stats.llm_calls, 1,
+            "seed={seed} iteration={iteration} stage=stats"
+        );
+        assert_eq!(
+            returned,
+            vec![in_flight, parsed],
+            "seed={seed} iteration={iteration} stage=unconsumed_ownership"
+        );
+        let expected = [task_id, early_id, in_flight_id, parsed_id]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            accepted, expected,
+            "seed={seed} iteration={iteration} stage=command_ownership"
+        );
+        assert!(
+            !handle.try_add_user_supplement(format!("AFTER_COMMIT_{iteration}")),
+            "seed={seed} iteration={iteration} stage=after_commit current turn accepted late input"
+        );
+    }
+
+    let command_ids = handle.command_ids.lock().unwrap();
+    assert!(
+        command_ids.pending.is_empty(),
+        "seed={seed} stage=resource_baseline pending command ids were not reclaimed"
+    );
+    assert!(
+        command_ids.recent_accepted.len() <= CORE_COMMAND_ID_CAPACITY,
+        "seed={seed} stage=resource_baseline recent command ids exceeded capacity"
+    );
+    drop(command_ids);
+    handle.request_shutdown().unwrap();
+    loop {
+        match worker
+            .events()
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stress worker should stop")
+        {
+            CoreSessionWorkerEvent::WorkerStopped => break,
+            CoreSessionWorkerEvent::TurnProjection(_) | CoreSessionWorkerEvent::Topics(_) => {}
+            other => panic!("seed={seed} stage=shutdown unexpected={other:?}"),
+        }
+    }
+    worker.shutdown().unwrap();
+    let elapsed = started.elapsed();
+    println!(
+        "turn_concurrency_stress scenario=prompt_cut_terminal_ownership seed={seed} iterations={iterations} elapsed_ms={}",
+        elapsed.as_millis()
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn worker_option_returns_late_supplement_after_preserving_the_first_final_answer() {
     let dir = tmp_dir("separate_late_supplement_turn");
@@ -1267,6 +1672,7 @@ fn toolgen_approval_topic_keeps_session_context_and_worker_scope() {
             accepting: false,
             queue: Vec::new(),
         })),
+        command_ids: Arc::new(Mutex::new(CoreCommandIdTracker::default())),
         cancel_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         reply_rx,
         runtime: CoreSessionWorkerRuntime::new(),
@@ -2303,6 +2709,68 @@ fn explicit_assistant_speaker_name_sets_prompt_identity_and_updates_on_rename() 
         "assistant history should use the updated identity heading:\n{}",
         prompts[1]
     );
+    let first_system_end = prompts[0].find("[END SYSTEM PROMPT]").unwrap();
+    let second_system_end = prompts[1].find("[END SYSTEM PROMPT]").unwrap();
+    assert!(prompts[0][..first_system_end].contains("Current session name: ID4"));
+    assert!(prompts[1][..second_system_end].contains("Current session name: Renamed worker"));
+    assert!(!prompts[1][second_system_end..].contains("Current session name: Renamed worker"));
+
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn session_worker_prompt_includes_identity_runtime_surface_and_command_target() {
+    let dir = tmp_dir("worker_runtime_identity_context");
+    let core = AgentCore::new(
+        "STATIC",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "session_runtime_identity", 7),
+        ImmediateFinalPromptCaptureModel {
+            prompts: Arc::clone(&prompts),
+        },
+    );
+
+    worker
+        .handle()
+        .run_turn("who and where am I", None)
+        .expect("worker should accept turn");
+    let outcome = wait_for_turn_finished(worker.events(), "runtime identity");
+    assert_eq!(outcome.text, "IMMEDIATE_FINAL");
+
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    let prompt = &prompts[0];
+    let system_end = prompt
+        .find("[END SYSTEM PROMPT]")
+        .expect("inline prompt should expose a system boundary");
+    let (system_prompt, dynamic_prompt) = prompt.split_at(system_end);
+    for expected in [
+        "## Session Runtime Identity",
+        "Current session_id: session_runtime_identity",
+        "Current session name: ID7",
+        "Current context_id: context_0",
+        "Current worker_id: session_runtime_identity",
+        "Current runtime surface: test_worker",
+        "Current command target: test_machine",
+    ] {
+        assert!(
+            system_prompt.contains(expected),
+            "missing {expected}:\n{prompt}"
+        );
+        assert!(
+            !dynamic_prompt.contains(expected),
+            "runtime identity leaked into user/runtime Delta: {expected}:\n{prompt}"
+        );
+    }
 
     worker.shutdown().unwrap();
     let _ = std::fs::remove_dir_all(dir);
@@ -3972,6 +4440,156 @@ fn wait_for_stress_turn_finished(
             other => panic!("{label} unexpected worker event: {other:?}"),
         }
     }
+}
+
+#[test]
+fn claude_codex_tool_discovery_updates_before_next_model_request_of_active_turn() {
+    use std::sync::mpsc;
+
+    struct BlockingPromptCapturingModel {
+        captured: Arc<Mutex<Vec<String>>>,
+        first_call_entered: mpsc::Sender<()>,
+        release_first_call: mpsc::Receiver<()>,
+        second_call_entered: mpsc::Sender<()>,
+        release_second_call: mpsc::Receiver<()>,
+        calls: usize,
+    }
+
+    impl ModelClient for BlockingPromptCapturingModel {
+        fn call_model(
+            &mut self,
+            config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &std::path::Path,
+            _should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.captured.lock().unwrap().push(prompt.to_string());
+            self.calls += 1;
+            match self.calls {
+                1 => {
+                    self.first_call_entered.send(()).unwrap();
+                    self.release_first_call
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("test should release the first model request");
+                }
+                2 => {
+                    self.second_call_entered.send(()).unwrap();
+                    self.release_second_call
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("test should release the second model request");
+                }
+                _ => {
+                    return Ok(LlmResponse {
+                        tool_calls: Vec::new(),
+                        content: r#"{"status":"ALL_FINISHED","final_answer":"Done"}"#.to_string(),
+                        model_name: config.model.clone(),
+                        usage: UsageStats::zero(),
+                        truncated: false,
+                    });
+                }
+            }
+            Ok(LlmResponse {
+                tool_calls: Vec::new(),
+                content:
+                    r#"{"status":"working","working_still_action":{"self_tool":{"type":"params"}}}"#
+                        .to_string(),
+                model_name: config.model.clone(),
+                usage: UsageStats::zero(),
+                truncated: false,
+            })
+        }
+    }
+
+    let dir = tmp_dir("active_turn_claude_codex_tool_discovery_update");
+    let core = AgentCore::new_with_interface_preferences(
+        include_str!("../../../../resources/system_prompt/system_prompt.md"),
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+        InterfacePreferences::markdown(),
+    );
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (first_call_entered_tx, first_call_entered_rx) = mpsc::channel();
+    let (release_first_call_tx, release_first_call_rx) = mpsc::channel();
+    let (second_call_entered_tx, second_call_entered_rx) = mpsc::channel();
+    let (release_second_call_tx, release_second_call_rx) = mpsc::channel();
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "active_turn_claude_codex_tool_discovery_update", 1),
+        BlockingPromptCapturingModel {
+            captured: Arc::clone(&captured),
+            first_call_entered: first_call_entered_tx,
+            release_first_call: release_first_call_rx,
+            second_call_entered: second_call_entered_tx,
+            release_second_call: release_second_call_rx,
+            calls: 0,
+        },
+    );
+    let handle = worker.handle();
+
+    handle.run_turn("hello", None).expect("turn should start");
+    first_call_entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first model request should start");
+    handle
+        .update_claude_codex_tool_discovery(true)
+        .expect("active-turn discovery enable should succeed");
+    release_first_call_tx
+        .send(())
+        .expect("first model request should be released");
+
+    second_call_entered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("second model request should start");
+    handle
+        .update_claude_codex_tool_discovery(false)
+        .expect("active-turn discovery disable should succeed");
+    release_second_call_tx
+        .send(())
+        .expect("second model request should be released");
+
+    loop {
+        match worker.events().recv_timeout(Duration::from_secs(5)) {
+            Ok(CoreSessionWorkerEvent::TurnFinished { .. }) => break,
+            Ok(_) => {}
+            Err(error) => panic!("timed out waiting for turn finish: {error}"),
+        }
+    }
+
+    let instruction = r#"If a task appears to involve some specific skill out of your scope, maybe in third-party agent's reusable skill or tool, search:
+1. Infer the required capability from intent, not a named skill.
+2. Inspect exposed tools, project/user Claude and Codex skill directories, and enabled plugin paths.
+3. Cover Linux, macOS, and Windows locations, including symlinks and junctions.
+4. Use available platform-native tools to enumerate files. Follow linked directories safely, prevent cycles, and do not use methods that may omit them.
+5. Match SKILL.md frontmatter (name, description, requires) or head part to the task.
+6. Read only matched instructions and required references.
+7. Verify dependencies, authentication, permissions, and a minimal read-only call when possible.
+8. Report candidate, loaded, or usable based only on verified evidence; disclose incomplete discovery."#;
+    let captured = captured.lock().unwrap();
+    assert_eq!(
+        captured.len(),
+        3,
+        "test model should receive three requests"
+    );
+    assert!(
+        !captured[0].contains(instruction),
+        "the already in-flight request must keep the disabled prompt"
+    );
+    assert!(
+        captured[1].contains(instruction),
+        "enabling must affect the next model request"
+    );
+    assert!(
+        !captured[2].contains(instruction),
+        "disabling must remove the instruction from the next model request"
+    );
+    assert!(captured
+        .iter()
+        .all(|prompt| { !prompt.contains("{{CLAUDE_CODEX_TOOL_DISCOVERY_INSTRUCTION}}") }));
+
+    worker.shutdown().unwrap();
 }
 
 #[test]

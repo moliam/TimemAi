@@ -147,7 +147,11 @@ checks. If a dimension is not applicable, record that residual decision in
   a maintenance hint only when an existing 16 MiB segment rolls. Due work runs
   only while all Sessions are idle and is serialized against browser mutations;
   Settings policy saves and the user-visible Top-files list remain explicit
-  maintenance triggers.
+  maintenance triggers. Retention tests deliberately corrupt the rolling manifest,
+  delete and resize physical segments, interrupt an edit before manifest commit,
+  immediately append afterward, and require exact data preservation, idempotent
+  retry, monotonic segment ids, bounded internal diagnostics, and no user-Shell
+  maintenance warning.
 
 ## Turn Concurrency Stress Standard
 
@@ -162,7 +166,7 @@ Required properties:
 - command/attachment ownership, final projection, resource cleanup, and user-visible latency percentiles are all asserted;
 - failures print a replayable seed and named stage trace.
 
-The implementation gate must add and run four heavy scenarios: PromptCut/terminal ownership, Stop/Start lifecycle storm, WebSocket reconnect/FIFO ownership, and real-Chrome interaction latency. PR CI runs at least 300 iterations per core scenario, Linux/macOS release certification at least 1,000, and scheduled/manual soak runs 10,000 or ten minutes. Do not replace these with repeated pure reducers or by running the entire workspace thousands of times.
+This is a target standard, not a description of the current CI. The implementation gate still needs four heavy scenarios: PromptCut/terminal ownership, Stop/Start lifecycle storm, WebSocket reconnect/FIFO ownership, and real-Chrome interaction latency. Once implemented, PR CI must run at least 300 iterations per core scenario, Linux/macOS release certification at least 1,000, and scheduled/manual soak runs 10,000 or ten minutes. Current focused deterministic tests and two-pass edge regression must not be presented as substitutes, nor should the entire workspace simply be repeated thousands of times.
 
 Latency evidence follows the same rule as Web performance tracing: use monotonic elapsed durations within one clock domain and command-correlated named stages. Timestamp order is not causality, and browser/server wall clocks must not be subtracted. Fake-model delay and intentional reconnect backoff are reported separately from Timem-added latency.
 
@@ -171,7 +175,7 @@ Latency evidence follows the same rule as Web performance tracing: use monotonic
 | Feature area | Function / unit coverage | Integration / E2E coverage | Repeated edge coverage |
 |---|---|---|---|
 | Model service config, protocol, URL, output/input limits | `model_service_config_from_sources`, `parse_cli_args_reads_model_service_and_limits`, protocol endpoint-default tests, protocol adapter tests | startup banner and `/config` real TTY smoke including protocol switching and explicit endpoint preservation | full CI |
-| Model response parsing and errors | OpenAI-compatible, OpenAI Responses, Anthropic usage/error tests | `truncated_native_sse_recovery_guides_small_tool_iteration_to_correct_answer` plus truncated native-tool argument recovery tests; transient model service error retry session test; protocol repair session test with audit assertions | edge regression session group |
+| Model response parsing and errors | OpenAI-compatible, OpenAI Responses, Anthropic usage/error tests; native HTTP classification tests for connection refusal, local address exhaustion, response-header disconnect, response-body truncation, timeout, TLS, proxy, malformed URL, and permanent local transport failures | `truncated_native_sse_recovery_guides_small_tool_iteration_to_correct_answer` plus truncated native-tool argument recovery tests; transient model service error retry session test; protocol repair session test with audit assertions | edge regression session group |
 | Prompt cache planning | `prompt_cache_strategy_*`, prefix-cache simulator tests with bounded lookback, model request cache-control tests, Anthropic cache read/create usage tests, `scripts/kvc_replay_test.sh`, `scripts/kvc_replay.py` local audit replay | `session_turn_preserves_incremental_prompt_cache_plan_across_rounds`, `session_turn_preserves_cache_plan_with_json_response_protocol`, `session_turn_preserves_cache_plan_with_xml_response_protocol`, request audit redaction/hash tests | full CI runs JSON/XML replay fixture coverage; run local audit replay before cache-strategy releases |
 | Prompt delta/slice rendering | prompt segmentation, multi-slice core tests, focused response-repair slice tests | shrink session E2E | edge regression shrink group |
 | Forced shrink | core shrink threshold, stale observed-token invalidation, static-dominant guard | `session_turn_forced_shrink_runs_to_final_without_repeated_shrink` | edge regression shrink + session groups |
@@ -184,7 +188,7 @@ Latency evidence follows the same rule as Web performance tracing: use monotonic
 | User scenario replay | focused core replay tests for coding, memory QA, self QA/env update, and file-writing output | `scenario_coding_inspects_project_and_reports_from_shell_evidence`, `scenario_memory_qa_retrieves_durable_and_raw_chat_before_answering`, `scenario_self_qa_and_runtime_env_update_stays_bounded`, `scenario_file_writing_outputs_artifact_and_verifies_content` | full CI |
 | Background jobs | `run_bash` pid start, timeout-to-running, exit update, per-model-request running table with tool-call attribution, PID-reuse identity rejection, and registered command-tool job tests | realistic story where applicable | shell/tool job groups |
 | Multi-turn replay story | protocol parsing, memory/scratch/shrink primitives | `session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rendering` | full CI |
-| Session worker lifecycle | lifecycle topic/accessor, worker channel tests | `session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement`, `worker_option_returns_late_supplement_after_preserving_the_first_final_answer`, `session_worker_rename_emits_updated_identity_topic`, `session_worker_shutdown_cancels_pending_host_decision`, `core_lifecycle_topic_round_trips_worker_identity_workspace_and_context` | full CI |
+| Session worker lifecycle | lifecycle topic/accessor, worker channel tests, bounded pending/recent command-ID tracker | `session_worker_emits_lifecycle_runs_turn_and_accepts_mid_turn_supplement`, `worker_option_returns_late_supplement_after_preserving_the_first_final_answer`, `prompt_cut_terminal_ownership_stress_is_seeded_and_bounded`, `session_worker_rename_emits_updated_identity_topic`, `session_worker_shutdown_cancels_pending_host_decision`, `core_lifecycle_topic_round_trips_worker_identity_workspace_and_context` | `scripts/turn_concurrency_stress.sh` runs the implemented Core/Worker PromptCut slice for 300 seeded PR iterations; remaining heavy scenarios stay open |
 | Round limit continuation | core continuation tests | `session_turn_round_limit_continue_recharges_and_finishes_same_task` | session group |
 | Cancellation | cancel before model call, command cancellation tests | real TTY Ctrl+C smoke | real TTY smoke |
 | Interactive input | CJK width, paste placeholder, Shift+Enter, control stripping, true multiline submitted-line redraw row counts, thinking-time next-question queue capture | real TTY multiline/paste/config/workspace smokes plus local fake-model-server supplement smoke and stress smoke | real TTY smoke/stress in CI |
@@ -209,12 +213,13 @@ Latency evidence follows the same rule as Web performance tracing: use monotonic
 8. clippy warning gate via `scripts/clippy_check.sh`
 9. `cargo test --workspace`
 10. Web dependency license scan, frontend functional tests, reproducible production build, and Linux real-Chrome acceptance
-11. dedicated performance guard via `scripts/performance_guard.sh`
-12. repeated edge regression via `scripts/edge_regression.sh`
-13. CLI and Web release builds
-14. cross-host resume smoke
-15. real TTY smoke through `expect`, including the 500,000 B/s average runtime I/O gate
-16. whitespace check
+11. `scripts/turn_concurrency_stress.sh` with the implemented 300-iteration PromptCut Core/Worker PR profile
+12. dedicated performance guard via `scripts/performance_guard.sh`
+13. repeated edge regression via `scripts/edge_regression.sh`
+14. CLI and Web release builds
+15. cross-host resume smoke
+16. real TTY smoke through `expect`, including the 500,000 B/s average runtime I/O gate
+17. whitespace check
 
 `scripts/edge_regression.sh` defaults to two iterations. Increase pressure with:
 

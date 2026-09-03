@@ -1,9 +1,9 @@
 use crate::{
     atomic_write_file, bash_approval_mode_label,
     rolling_file_store::{
-        append_rolling_record_with_result, migrate_legacy_file, read_segmented_records,
-        rolling_segments, segment_metadata_path, segmented_directory, trim_rolling_segments,
-        RollingCapacity, AUDIT_ROLLING_SLICE_BYTES,
+        append_rolling_record_with_result, mark_rolling_manifest_dirty, migrate_legacy_file,
+        read_segmented_records, refresh_rolling_manifest, rolling_segments, segment_metadata_path,
+        segmented_directory, trim_rolling_segments, RollingCapacity, AUDIT_ROLLING_SLICE_BYTES,
     },
     ApiProtocol, ApprovalRequest, BashApprovalMode, MemGuard, TurnStopSummary, UsageStats,
 };
@@ -567,8 +567,14 @@ fn prune_audit_segment(path: &Path, cutoff_ms: i64, now_ms: i64) -> std::io::Res
 
 fn prune_audit_jsonl(path: &Path, cutoff_ms: i64, now_ms: i64) -> std::io::Result<usize> {
     migrate_legacy_file(path, AUDIT_ROLLING_SLICE_BYTES)?;
+    // Retention edits physical slices directly. Reconcile first so an interrupted
+    // or older retention pass cannot leave a valid-looking manifest pointing at
+    // deleted files or stale lengths.
+    refresh_rolling_manifest(path)?;
+    let segments = rolling_segments(path)?;
+    mark_rolling_manifest_dirty(path)?;
     let mut removed = 0usize;
-    for segment in rolling_segments(path)? {
+    for segment in segments {
         match audit_segment_summary(&segment.path)? {
             Some(summary) if summary.max_time_ms < cutoff_ms || summary.min_time_ms > now_ms => {
                 removed = removed.saturating_add(summary.records);
@@ -581,6 +587,7 @@ fn prune_audit_jsonl(path: &Path, cutoff_ms: i64, now_ms: i64) -> std::io::Resul
             }
         }
     }
+    refresh_rolling_manifest(path)?;
     Ok(removed)
 }
 

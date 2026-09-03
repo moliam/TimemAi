@@ -62,6 +62,7 @@ fn raw_chat_search_status_is_independent_of_result_text() {
         raw_input: json!({
             "type": "raw_chat",
             "op": "search",
+            "scope": "global",
             "search_text": "STATUS-PAYLOAD-42",
             "limit": 5
         }),

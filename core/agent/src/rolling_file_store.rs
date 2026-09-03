@@ -141,6 +141,10 @@ fn rolling_manifest_path(path: &Path) -> PathBuf {
     segmented_directory(path).join("manifest.json")
 }
 
+fn rolling_manifest_dirty_path(path: &Path) -> PathBuf {
+    segmented_directory(path).join(".manifest-dirty")
+}
+
 fn write_rolling_manifest(path: &Path, manifest: &RollingManifest) -> std::io::Result<()> {
     let mut bytes = serde_json::to_vec(manifest).map_err(std::io::Error::other)?;
     bytes.push(b'\n');
@@ -173,6 +177,9 @@ fn manifest_from_segments(segments: &[RollingSegment]) -> RollingManifest {
 
 fn load_or_rebuild_manifest(path: &Path) -> std::io::Result<RollingManifest> {
     recover_segmented_directory(path)?;
+    if rolling_manifest_dirty_path(path).exists() {
+        refresh_rolling_manifest(path)?;
+    }
     if let Ok(bytes) = fs::read(rolling_manifest_path(path)) {
         if let Ok(manifest) = serde_json::from_slice::<RollingManifest>(&bytes) {
             if manifest.version == 1 {
@@ -184,6 +191,42 @@ fn load_or_rebuild_manifest(path: &Path) -> std::io::Result<RollingManifest> {
     let manifest = manifest_from_segments(&segments);
     write_rolling_manifest(path, &manifest)?;
     Ok(manifest)
+}
+
+/// Marks a segmented stream before a caller edits physical slices outside the
+/// rolling append path. A surviving marker makes the next load reconcile disk
+/// state before trusting the manifest.
+pub(crate) fn mark_rolling_manifest_dirty(path: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(segmented_directory(path))?;
+    atomic_write_file(
+        &rolling_manifest_dirty_path(path),
+        b"manifest update pending\n",
+    )
+}
+
+/// Rebuilds the segmented-stream manifest from the committed files on disk.
+/// Callers that remove or rewrite physical slices outside the rolling append
+/// path must refresh before considering their operation complete.
+pub(crate) fn refresh_rolling_manifest(path: &Path) -> std::io::Result<()> {
+    if !segmented_directory(path).exists() {
+        return Ok(());
+    }
+    let previous_next_index = fs::read(rolling_manifest_path(path))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<RollingManifest>(&bytes).ok())
+        .filter(|manifest| manifest.version == 1)
+        .map(|manifest| manifest.next_index);
+    let segments = segment_entries(path)?;
+    let mut manifest = manifest_from_segments(&segments);
+    if let Some(previous_next_index) = previous_next_index {
+        manifest.next_index = manifest.next_index.max(previous_next_index);
+    }
+    write_rolling_manifest(path, &manifest)?;
+    match fs::remove_file(rolling_manifest_dirty_path(path)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn manifest_segments(path: &Path, manifest: &RollingManifest) -> Vec<RollingSegment> {

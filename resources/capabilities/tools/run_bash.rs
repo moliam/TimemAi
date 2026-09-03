@@ -17,6 +17,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 static SHELL_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 const LONG_RUNNING_COMMAND_PROMPT_AFTER: Duration = Duration::from_secs(60);
 
+pub(crate) fn is_local_shell_action(action: &str) -> bool {
+    matches!(action, "run_bash" | "run_powershell")
+}
+
 fn configure_run_bash_environment(command: &mut Command) {
     command
         .env("GIT_PAGER", "cat")
@@ -145,6 +149,7 @@ enum ShellJobDelivery {
 
 #[derive(Debug, Clone)]
 struct FinishedShellJob {
+    completion_sequence: u64,
     status: String,
     stdout: String,
     stderr: String,
@@ -178,6 +183,7 @@ struct ManagedShellJob {
     state: Mutex<ShellJobState>,
     changed: Condvar,
     supervisor: Mutex<Option<thread::JoinHandle<()>>>,
+    completion_publication: Arc<Mutex<u64>>,
 }
 
 impl ManagedShellJob {
@@ -238,6 +244,7 @@ impl ManagedShellJob {
 #[derive(Debug)]
 struct ShellJobManagerState {
     jobs: Mutex<HashMap<u32, Arc<ManagedShellJob>>>,
+    completion_publication: Arc<Mutex<u64>>,
 }
 
 impl Drop for ShellJobManagerState {
@@ -270,6 +277,7 @@ impl ShellJobManager {
         Self {
             state: Arc::new(ShellJobManagerState {
                 jobs: Mutex::new(HashMap::new()),
+                completion_publication: Arc::new(Mutex::new(0)),
             }),
             long_running_prompt_after: LONG_RUNNING_COMMAND_PROMPT_AFTER,
         }
@@ -338,7 +346,8 @@ impl ShellJobManager {
             }
         };
         ActionOutcome::background_running(format!(
-            "Action result: run_bash\npid={}, now keeps running in background",
+            "Action result: {}\npid={}, now keeps running in background",
+            crate::os::local_shell_tool_name(),
             job.pid
         ))
         .with_bash_result(BashResultEvidence {
@@ -365,11 +374,10 @@ impl ShellJobManager {
         tail_out: bool,
         delivery: ShellJobDelivery,
     ) -> std::io::Result<Arc<ManagedShellJob>> {
-        let mut command = Command::new(crate::os::BASH_EXECUTABLE);
+        let mut command =
+            crate::os::command_for_local_shell(clean).map_err(std::io::Error::other)?;
         configure_run_bash_environment(&mut command);
         command
-            .arg("-c")
-            .arg(clean)
             .current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -411,6 +419,7 @@ impl ShellJobManager {
             }),
             changed: Condvar::new(),
             supervisor: Mutex::new(None),
+            completion_publication: Arc::clone(&self.state.completion_publication),
         });
         let supervised = Arc::clone(&job);
         let supervisor = thread::spawn(move || {
@@ -472,7 +481,7 @@ impl ShellJobManager {
             tail_out,
             runtime,
         )
-        .to_action_outcome("run_bash")
+        .to_action_outcome(crate::os::local_shell_tool_name())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -547,7 +556,7 @@ impl ShellJobManager {
                     DirectJobDecision::Promoted => {
                         if long_running {
                             runtime.on_long_running_command(&LongRunningCommandStatus {
-                                action: "run_bash".to_string(),
+                                action: crate::os::local_shell_tool_name().to_string(),
                                 command: clean.to_string(),
                                 pid: job.pid,
                                 elapsed,
@@ -609,11 +618,36 @@ impl ShellJobManager {
         jobs.into_iter().map(|job| job.pid.to_string()).collect()
     }
 
-    pub fn running_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
-        self.refresh_for_session(session_id).0
+    /// Read-only snapshot for exactly one Session; never consumes terminal updates.
+    pub fn query_running_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return Vec::new();
+        }
+        let jobs = self
+            .state
+            .jobs
+            .lock()
+            .ok()
+            .map(|jobs| jobs.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let mut running = jobs
+            .into_iter()
+            .filter_map(|job| {
+                let state = job.state.lock().ok()?;
+                (job.session_id == session_id
+                    && state.delivery != ShellJobDelivery::Delivered
+                    && matches!(state.lifecycle, ShellJobLifecycle::Running))
+                .then(|| job.running())
+            })
+            .collect::<Vec<_>>();
+        running.sort_by_key(|job| (job.created_at_ms, job.pid));
+        running
     }
 
-    pub fn refresh_for_session(
+    /// Atomically observes one Session and consumes each new terminal update once.
+    /// Use `query_running_for_session` for a non-consuming query.
+    pub fn consume_completed_for_session(
         &self,
         session_id: &str,
     ) -> (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>) {
@@ -621,6 +655,9 @@ impl ShellJobManager {
         if session_id.is_empty() {
             return (Vec::new(), Vec::new());
         }
+        let Ok(_publication) = self.state.completion_publication.lock() else {
+            return (Vec::new(), Vec::new());
+        };
         let jobs = self
             .state
             .jobs
@@ -648,9 +685,10 @@ impl ShellJobManager {
                     running.push(job.running());
                 }
                 (ShellJobDelivery::Background, ShellJobLifecycle::Finished(finished)) => {
+                    let completion_sequence = finished.completion_sequence;
                     let update = job.exit_update(finished);
                     state.delivery = ShellJobDelivery::Delivered;
-                    exited.push(update);
+                    exited.push((completion_sequence, update));
                     remove.push(Arc::clone(&job));
                 }
                 _ => {}
@@ -660,11 +698,16 @@ impl ShellJobManager {
             self.remove_job(job.pid);
             job.join_supervisor();
         }
-        (running, exited)
+        running.sort_by_key(|job| (job.created_at_ms, job.pid));
+        exited.sort_by_key(|(completion_sequence, _)| *completion_sequence);
+        (
+            running,
+            exited.into_iter().map(|(_, update)| update).collect(),
+        )
     }
 
     pub fn running_job_list_context(&self, session_id: &str) -> Option<String> {
-        let jobs = self.running_for_session(session_id);
+        let jobs = self.query_running_for_session(session_id);
         if jobs.is_empty() {
             return None;
         }
@@ -881,7 +924,12 @@ fn supervise_shell_job(
     }
     let stdout = shell_output_text(&job.stdout);
     let stderr = shell_output_text(&job.stderr);
+    let Ok(mut publication_sequence) = job.completion_publication.lock() else {
+        return;
+    };
+    *publication_sequence = publication_sequence.saturating_add(1);
     let finished = FinishedShellJob {
+        completion_sequence: *publication_sequence,
         status,
         output: normalized_shell_output(&combined_shell_output(&stdout, &stderr)),
         stdout,
@@ -904,6 +952,64 @@ fn parse_exit_status_text(status: &str) -> (Option<i32>, Option<i32>) {
     } else {
         (None, None)
     }
+}
+
+fn validate_local_shell_request(command: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        validate_powershell_request(command)
+    }
+    #[cfg(not(windows))]
+    {
+        validate_bash_request(command)
+    }
+}
+
+fn validate_local_shell_lifecycle(command: &str, background: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        validate_powershell_lifecycle(command, background)
+    }
+    #[cfg(not(windows))]
+    {
+        validate_bash_lifecycle(command, background)
+    }
+}
+
+#[cfg(windows)]
+fn validate_powershell_request(command: &str) -> Result<(), String> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err("command_required".to_string());
+    }
+    let normalized = trimmed.to_ascii_lowercase().replace('`', "");
+    let removes_items = normalized.contains("remove-item") || normalized.contains(" rm ");
+    let recursive = normalized.contains("-recurse") || normalized.contains("-r ");
+    let forced = normalized.contains("-force") || normalized.contains("-fo ");
+    let root_target = ["c:\\", "d:\\", "\\", "$env:systemdrive\\"]
+        .iter()
+        .any(|target| normalized.contains(target));
+    if removes_items && recursive && forced && root_target {
+        return Err("dangerous_recursive_root_delete".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn validate_powershell_lifecycle(command: &str, background: bool) -> Result<(), String> {
+    let normalized = command.to_ascii_lowercase().replace('`', "");
+    if normalized.contains("start-process") && !normalized.contains("-wait") {
+        return Err(if background {
+            "explicit_process_detach"
+        } else {
+            "unmanaged_background_process"
+        }
+        .to_string());
+    }
+    if normalized.contains("cmd.exe /c start") || normalized.contains("cmd /c start") {
+        return Err("explicit_process_detach".to_string());
+    }
+    Ok(())
 }
 
 pub fn validate_bash_request(command: &str) -> Result<(), String> {
@@ -969,6 +1075,7 @@ fn validate_bash_safety(command: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn validate_bash_lifecycle(command: &str, background: bool) -> Result<(), String> {
     if !background && contains_unmanaged_shell_background(command) && !contains_shell_wait(command)
     {
@@ -983,6 +1090,7 @@ fn validate_bash_lifecycle(command: &str, background: bool) -> Result<(), String
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn contains_unmanaged_shell_background(command: &str) -> bool {
     let chars = command.chars().collect::<Vec<_>>();
     let mut in_single = false;
@@ -1032,6 +1140,7 @@ fn contains_unmanaged_shell_background(command: &str) -> bool {
     false
 }
 
+#[cfg(not(windows))]
 fn contains_shell_wait(command: &str) -> bool {
     let words = shell_words_for_safety_scan(command);
     let mut index = 0;
@@ -1050,6 +1159,7 @@ fn contains_shell_wait(command: &str) -> bool {
     false
 }
 
+#[cfg(not(windows))]
 fn contains_explicit_process_detach(command: &str) -> bool {
     let words = shell_words_for_safety_scan(command);
     let mut index = 0;
@@ -1080,6 +1190,7 @@ fn contains_explicit_process_detach(command: &str) -> bool {
     false
 }
 
+#[cfg(not(windows))]
 fn nested_shell_scripts(command: &str) -> Vec<String> {
     let words = shell_words_for_safety_scan(command);
     let mut scripts = Vec::new();
@@ -1103,14 +1214,17 @@ fn nested_shell_scripts(command: &str) -> Vec<String> {
     scripts
 }
 
+#[cfg(not(windows))]
 fn shell_command_basename(command: &str) -> &str {
     command.rsplit('/').next().unwrap_or(command)
 }
 
+#[cfg(not(windows))]
 fn is_shell_interpreter(command: &str) -> bool {
     matches!(command, "sh" | "bash" | "dash" | "ksh" | "zsh")
 }
 
+#[cfg(not(windows))]
 fn nested_shell_script(words: &[String], mut index: usize) -> Option<&str> {
     while index < words.len() && !is_command_separator(&words[index]) {
         let word = words[index].as_str();
@@ -1126,6 +1240,7 @@ fn nested_shell_script(words: &[String], mut index: usize) -> Option<&str> {
     None
 }
 
+#[cfg(not(windows))]
 fn shell_executable_index(words: &[String], mut index: usize) -> Option<usize> {
     while index < words.len() && !is_command_separator(&words[index]) {
         if is_assignment_word(&words[index])
@@ -1509,7 +1624,7 @@ pub(crate) fn execute_run_bash_with_tail(
             reason,
         ));
     }
-    if let Err(reason) = validate_bash_request(command_to_run) {
+    if let Err(reason) = validate_local_shell_request(command_to_run) {
         let message = bash_validation_message(&reason);
         return ActionExecution::Completed(bash_finished_error_outcome(
             bash_action_not_executed(Some(command_to_run), message),
@@ -1517,7 +1632,7 @@ pub(crate) fn execute_run_bash_with_tail(
             message,
         ));
     }
-    if let Err(reason) = validate_bash_lifecycle(command_to_run, background) {
+    if let Err(reason) = validate_local_shell_lifecycle(command_to_run, background) {
         let message = bash_validation_message(&reason);
         return ActionExecution::Completed(bash_finished_error_outcome(
             bash_action_not_executed(Some(command_to_run), message),
@@ -1542,7 +1657,7 @@ pub(crate) fn execute_run_bash_with_tail(
             reason,
         ));
     }
-    if !background && is_regular_command && contains_long_normal_sleep(command_to_run) {
+    if !background && is_regular_command && contains_long_local_shell_sleep(command_to_run) {
         let reason = "The command contains a long sleep in normal mode. Use loop_cmd with interval_ms to poll external status, or background=true for long local work that should continue across turns.";
         return ActionExecution::Completed(bash_finished_error_outcome(
             bash_action_not_executed(Some(command_to_run), reason),
@@ -1579,9 +1694,12 @@ pub(crate) fn execute_run_bash_with_tail(
         return ActionExecution::NeedsApproval(PendingApproval {
             request: ApprovalRequest {
                 approval_id: format!("approval_{}", now_ms()),
-                action: "run_bash".to_string(),
+                action: crate::os::local_shell_tool_name().to_string(),
                 command: command_to_run.to_string(),
-                reason: "run_bash_requires_user_approval".to_string(),
+                reason: format!(
+                    "{}_requires_user_approval",
+                    crate::os::local_shell_tool_name()
+                ),
                 risk: "local_command_execution".to_string(),
             },
             approved_action: PendingApprovedAction::RunBash {
@@ -1686,7 +1804,7 @@ pub(crate) fn execute_approved_bash_with_tail(
     runtime: &mut dyn ActionRuntime,
 ) -> ActionOutcome {
     let clean = command.trim();
-    if let Err(reason) = validate_bash_request(clean) {
+    if let Err(reason) = validate_local_shell_request(clean) {
         let message = bash_validation_message(&reason);
         let mut outcome = bash_finished_error_outcome(
             bash_action_not_executed(Some(clean), message),
@@ -1699,7 +1817,7 @@ pub(crate) fn execute_approved_bash_with_tail(
         ));
         return outcome;
     }
-    if let Err(reason) = validate_bash_lifecycle(clean, background) {
+    if let Err(reason) = validate_local_shell_lifecycle(clean, background) {
         let message = bash_validation_message(&reason);
         let mut outcome = bash_finished_error_outcome(
             bash_action_not_executed(Some(clean), message),
@@ -1745,7 +1863,8 @@ pub(crate) fn execute_approved_bash_with_tail(
 
 pub fn execute_one_bash(command: &str, timeout_ms: i64, runtime: &mut dyn ActionRuntime) -> String {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    execute_one_bash_structured(command, &cwd, timeout_ms, runtime).to_action_result("run_bash")
+    execute_one_bash_structured(command, &cwd, timeout_ms, runtime)
+        .to_action_result(crate::os::local_shell_tool_name())
 }
 
 #[cfg(all(test, unix))]
@@ -1919,7 +2038,8 @@ fn polling_result(
         _ => "The polling command stopped.",
     };
     let mut out = format!(
-        "Action result: run_bash\n{state_sentence}\nPolling state: {}\nAttempts: {}\nElapsed: {} ms\nSuccess condition: exit code 0",
+        "Action result: {}\n{state_sentence}\nPolling state: {}\nAttempts: {}\nElapsed: {} ms\nSuccess condition: exit code 0",
+        crate::os::local_shell_tool_name(),
         state,
         attempts,
         elapsed.as_millis()
@@ -1972,6 +2092,46 @@ fn command_from_action(action: &ParsedAction) -> String {
     action.input_str("cmd")
 }
 
+fn contains_long_local_shell_sleep(command: &str) -> bool {
+    #[cfg(windows)]
+    {
+        contains_long_powershell_sleep(command)
+    }
+    #[cfg(not(windows))]
+    {
+        contains_long_normal_sleep(command)
+    }
+}
+
+#[cfg(windows)]
+fn contains_long_powershell_sleep(command: &str) -> bool {
+    let tokens = command
+        .split(|ch: char| ch.is_whitespace() || matches!(ch, ';' | '|' | '(' | ')'))
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            token
+                .trim_matches(|ch| ch == '\'' || ch == '"')
+                .to_ascii_lowercase()
+        })
+        .collect::<Vec<_>>();
+    tokens.windows(2).any(|pair| {
+        matches!(pair[0].as_str(), "start-sleep" | "sleep")
+            && pair[1]
+                .trim_start_matches("-seconds:")
+                .parse::<f64>()
+                .ok()
+                .is_some_and(|seconds| seconds >= 30.0)
+    }) || tokens.windows(3).any(|triple| {
+        matches!(triple[0].as_str(), "start-sleep" | "sleep")
+            && triple[1] == "-seconds"
+            && triple[2]
+                .parse::<f64>()
+                .ok()
+                .is_some_and(|seconds| seconds >= 30.0)
+    })
+}
+
+#[cfg(not(windows))]
 fn contains_long_normal_sleep(command: &str) -> bool {
     let tokens = shell_words_for_sleep_scan(command);
     tokens.windows(2).any(|pair| {
@@ -1979,6 +2139,7 @@ fn contains_long_normal_sleep(command: &str) -> bool {
     })
 }
 
+#[cfg(not(windows))]
 fn shell_words_for_sleep_scan(command: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
@@ -2002,6 +2163,7 @@ fn shell_words_for_sleep_scan(command: &str) -> Vec<String> {
     words
 }
 
+#[cfg(not(windows))]
 fn sleep_arg_seconds(arg: &str) -> Option<f64> {
     let clean = arg.trim();
     let (number, multiplier) = if let Some(number) = clean.strip_suffix('s') {
@@ -2147,11 +2309,12 @@ fn execute_one_bash_structured_with_prompt_after(
     if timeout_ms <= 0 {
         return bash_error(command, "invalid_timeout");
     }
-    let mut shell = Command::new(crate::os::BASH_EXECUTABLE);
+    let mut shell = match crate::os::command_for_local_shell(command) {
+        Ok(command) => command,
+        Err(_) => return bash_error(command, "command_failed"),
+    };
     configure_run_bash_environment(&mut shell);
     shell
-        .arg("-lc")
-        .arg(command)
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -2182,7 +2345,7 @@ fn execute_one_bash_structured_with_prompt_after(
         }
         if started.elapsed() >= next_long_running_check && started.elapsed() < timeout {
             let status = LongRunningCommandStatus {
-                action: "run_bash".to_string(),
+                action: crate::os::local_shell_tool_name().to_string(),
                 command: command.to_string(),
                 pid: child.id(),
                 elapsed: started.elapsed(),
@@ -2312,22 +2475,25 @@ fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
 }
 
 fn bash_action_not_executed(_command: Option<&str>, reason: &str) -> String {
-    format!("Action result: run_bash\nThe command was not executed.\nReason: {reason}")
+    format!(
+        "Action result: {}\nThe command was not executed.\nReason: {reason}",
+        crate::os::local_shell_tool_name()
+    )
 }
 
 fn bash_validation_message(reason: &str) -> &'static str {
     match reason {
         "command_required" => "No shell command was provided.",
         "dangerous_recursive_root_delete" => {
-            "The shell command was blocked by Timem safety policy because it may recursively delete the filesystem root."
+            "The local command was blocked by Timem safety policy because it may recursively delete the filesystem root."
         }
         "unmanaged_background_process" => {
-            "检测到命令可能创建脱离 Runtime 管理的后台进程。请改用 run_bash(background=true)。"
+            "检测到命令可能创建脱离 Runtime 管理的后台进程。请改用当前平台命令工具的 background=true。"
         }
         "explicit_process_detach" => {
-            "检测到命令可能创建脱离 Runtime 管理的后台进程。请改用 run_bash(background=true)，并移除 setsid、disown 或 daemon 等主动脱离方式。"
+            "检测到命令可能创建脱离 Runtime 管理的后台进程。请改用当前平台命令工具的 background=true，并移除 setsid、disown 或 daemon 等主动脱离方式。"
         }
-        _ => "The shell command request did not pass runtime validation.",
+        _ => "The local command request did not pass runtime validation.",
     }
 }
 

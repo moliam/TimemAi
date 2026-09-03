@@ -25,7 +25,7 @@ prompt_result: |
   path returns relevant runtime file and directory locations, including audit
   logical streams and their physical rolling-segment directories. cwd without
   new_path returns `CWD: ...` without changing state. cwd with new_path changes
-  the prompt-context directory and returns `CWD changed to: ...`; later run_bash
+  the prompt-context directory and returns `CWD changed to: ...`; later local command
   and readfile actions in the same context use the canonical path. params returns
   relevant effective, non-sensitive runtime values. Secrets are never returned.
 input_schema: |

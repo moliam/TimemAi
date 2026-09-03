@@ -14,6 +14,7 @@ pub const POSIX_SHELL_EXECUTABLE: &str = "/bin/sh";
 pub const POSIX_SHELL_EXECUTABLE: &str = "sh.exe";
 
 static HOST_ENVIRONMENT: OnceLock<String> = OnceLock::new();
+static POWERSHELL_HOST_ENVIRONMENT: OnceLock<String> = OnceLock::new();
 
 /// Opens a single-writer lease file while allowing concurrent diagnostic reads.
 ///
@@ -91,6 +92,53 @@ pub fn local_command_execution_available() -> bool {
 
 pub fn bash_execution_available() -> bool {
     bash_version().is_some()
+}
+
+pub fn powershell_execution_available() -> bool {
+    #[cfg(windows)]
+    {
+        powershell_version().is_some()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+pub fn local_shell_tool_name() -> &'static str {
+    if cfg!(windows) {
+        "run_powershell"
+    } else {
+        "run_bash"
+    }
+}
+
+pub fn command_for_local_shell(command_text: &str) -> Result<Command, String> {
+    #[cfg(unix)]
+    {
+        let mut command = Command::new(BASH_EXECUTABLE);
+        command.args(["--noprofile", "--norc", "-lc", command_text]);
+        Ok(command)
+    }
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("powershell.exe");
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+        ]);
+        command.arg(command_text);
+        Ok(command)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = command_text;
+        Err("local_shell_platform_unsupported".to_string())
+    }
 }
 
 pub fn command_for_script(path: &Path) -> Result<Command, String> {
@@ -179,6 +227,18 @@ pub fn host_environment() -> &'static str {
         .as_str()
 }
 
+pub fn powershell_host_environment() -> &'static str {
+    POWERSHELL_HOST_ENVIRONMENT
+        .get_or_init(|| {
+            format!(
+                "OS: {}; PowerShell: {}",
+                version().unwrap_or_else(|| "unknown".to_string()),
+                powershell_version().unwrap_or_else(|| "unknown".to_string())
+            )
+        })
+        .as_str()
+}
+
 pub fn version() -> Option<String> {
     platform_version().or_else(uname_version)
 }
@@ -193,6 +253,26 @@ pub fn bash_version() -> Option<String> {
             "printf '%s\\n' \"$BASH_VERSION\"",
         ],
     )
+}
+
+pub fn powershell_version() -> Option<String> {
+    #[cfg(windows)]
+    {
+        command_first_line(
+            "powershell.exe",
+            &[
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$PSVersionTable.PSVersion.ToString()",
+            ],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 pub fn default_config_root(

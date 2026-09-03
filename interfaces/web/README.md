@@ -16,11 +16,17 @@ The browser owns:
   and final answers;
 - Markdown, syntax highlighting, telemetry presentation, themes, fonts,
   responsive layout, and accessibility;
-- transient UI state such as drafts, panel state, and drag previews.
+- transient UI state such as drafts, panel state, and Role/message drag previews.
 
 The browser does not own model calls, prompt parsing, memory, tools, command
 approval policy, Session scheduling, or Turn lifecycle. It does not persist a
 command outbox or replay business commands after refresh.
+
+Session groups are selected at Session creation and then fixed. The Host validates
+and persists that selection. Sessions restored from older metadata without a
+`group_id` appear in the permanent built-in Unsorted group; there is no Session
+move interaction. Persisted groups keep creation order and cannot be dragged or
+otherwise reordered; they can be deleted only while empty.
 
 ## Authoritative state contract
 

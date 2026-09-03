@@ -416,6 +416,128 @@ async function main() {
     );
     assert(!(await exists('.turn-starting-status')), "obsolete placeholder working returned after the first process event");
 
+    // The message viewport and the complete composer are separate layout slots.
+    // Scrolling arbitrarily tall output must not move the composer or steal its
+    // editing focus. This is geometry-based so a merely sticky footer fails.
+    const composerGeometry = await browser.evaluate(`(async () => {
+      const viewport = document.querySelector('.chat-scroll');
+      const composer = document.querySelector('.composer-wrap');
+      const textarea = document.querySelector('textarea[aria-label="Message Timem"]');
+      const filler = document.createElement('div');
+      filler.dataset.acceptanceLongOutput = 'true';
+      filler.style.height = '2400px';
+      filler.style.flex = '0 0 2400px';
+      viewport.prepend(filler);
+      textarea.focus();
+      viewport.scrollTop = viewport.scrollHeight;
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const bottom = composer.getBoundingClientRect();
+      viewport.scrollTop = 0;
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const top = composer.getBoundingClientRect();
+      return {
+        bottomTop: bottom.top, bottomBottom: bottom.bottom,
+        topTop: top.top, topBottom: top.bottom,
+        viewportScrolled: viewport.scrollHeight > viewport.clientHeight,
+        focused: document.activeElement === textarea,
+        visible: top.top >= 0 && top.bottom <= window.innerHeight,
+      };
+    })()`);
+    assert(composerGeometry.viewportScrolled, "long output did not create a scrollable message viewport");
+    assert(
+      Math.abs(composerGeometry.bottomTop - composerGeometry.topTop) <= 0.5 &&
+        Math.abs(composerGeometry.bottomBottom - composerGeometry.topBottom) <= 0.5,
+      `message scrolling moved the composer: ${JSON.stringify(composerGeometry)}`,
+    );
+    assert(composerGeometry.focused, "message scrolling stole composer focus");
+    assert(composerGeometry.visible, "message scrolling moved the composer outside the viewport");
+
+    const multilineWheel = await browser.evaluate(`(() => {
+      const viewport = document.querySelector('.chat-scroll');
+      const textarea = document.querySelector('textarea[aria-label="Message Timem"]');
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(
+        textarea,
+        Array.from({ length: 48 }, (_, index) => 'draft line ' + index).join('\\n'),
+      );
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      textarea.focus();
+      textarea.scrollTop = 0;
+      const viewportBefore = viewport.scrollTop;
+      const accepted = textarea.dispatchEvent(new WheelEvent('wheel', {
+        bubbles: true, cancelable: true, deltaY: 80, deltaMode: 0,
+      }));
+      return {
+        textareaScrollTop: textarea.scrollTop,
+        viewportBefore, viewportAfter: viewport.scrollTop,
+        defaultPrevented: !accepted,
+        focused: document.activeElement === textarea,
+      };
+    })()`);
+    assert(multilineWheel.textareaScrollTop > 0, "multiline wheel did not scroll textarea content");
+    assert(multilineWheel.viewportAfter === multilineWheel.viewportBefore, "textarea wheel moved the message viewport");
+    assert(multilineWheel.defaultPrevented, "owned textarea wheel was not consumed");
+    assert(multilineWheel.focused, "textarea wheel lost editing focus");
+    await browser.call("Input.insertText", { text: " still editable" });
+    assert(
+      await browser.evaluate(`document.querySelector('textarea[aria-label="Message Timem"]').value.endsWith(' still editable')`),
+      "composer stopped accepting keyboard input after scrolling",
+    );
+    await browser.evaluate(`(() => {
+      const filler = document.querySelector('[data-acceptance-long-output="true"]');
+      filler?.remove();
+      const textarea = document.querySelector('textarea[aria-label="Message Timem"]');
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(textarea, '');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+
+    // A phone-width, short viewport must preserve the same invariant rather
+    // than relying on desktop space to keep the composer visible.
+    await browser.call("Emulation.setDeviceMetricsOverride", {
+      width: 390, height: 560, deviceScaleFactor: 1, mobile: true,
+    });
+    const narrowComposer = await browser.evaluate(`(async () => {
+      const viewport = document.querySelector('.chat-scroll');
+      const composer = document.querySelector('.composer-wrap');
+      const textarea = document.querySelector('textarea[aria-label="Message Timem"]');
+      const filler = document.createElement('div');
+      filler.dataset.acceptanceNarrowOutput = 'true';
+      filler.style.height = '1800px';
+      filler.style.flex = '0 0 1800px';
+      viewport.prepend(filler);
+      textarea.focus();
+      viewport.scrollTop = viewport.scrollHeight;
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const bottom = composer.getBoundingClientRect();
+      viewport.scrollTop = 0;
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const top = composer.getBoundingClientRect();
+      return {
+        bottomTop: bottom.top, bottomBottom: bottom.bottom,
+        topTop: top.top, topBottom: top.bottom,
+        visible: top.top >= 0 && top.bottom <= window.innerHeight,
+        focused: document.activeElement === textarea,
+      };
+    })()`);
+    assert(
+      Math.abs(narrowComposer.bottomTop - narrowComposer.topTop) <= 0.5 &&
+        Math.abs(narrowComposer.bottomBottom - narrowComposer.topBottom) <= 0.5,
+      `narrow output scrolling moved the composer: ${JSON.stringify(narrowComposer)}`,
+    );
+    assert(narrowComposer.visible, "narrow viewport hid part of the composer");
+    assert(narrowComposer.focused, "narrow viewport scrolling stole composer focus");
+    await browser.call("Input.insertText", { text: "narrow typing" });
+    assert(
+      await browser.evaluate(`document.querySelector('textarea[aria-label="Message Timem"]').value === 'narrow typing'`),
+      "narrow composer stopped accepting keyboard input",
+    );
+    await browser.evaluate(`(() => {
+      document.querySelector('[data-acceptance-narrow-output="true"]')?.remove();
+      const textarea = document.querySelector('textarea[aria-label="Message Timem"]');
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(textarea, '');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    await browser.call("Emulation.clearDeviceMetricsOverride");
+
     // Queue multiple future tasks through the real composer and WebSocket. Host
     // projects them as Session-owned FIFO items while the original Turn remains active.
     await enterMessage("Queued task two");
@@ -584,6 +706,9 @@ async function main() {
     console.log("PASS real Chrome Stop UI acceptance");
     console.log("- formal working frame is present before the first process event and remains the same DOM node afterward");
     console.log("- obsolete placeholder working never renders");
+    console.log("- output scrolling leaves composer geometry fixed, focused, and editable");
+    console.log("- multiline wheel input scrolls only textarea content");
+    console.log("- narrow, short viewports keep the composer visible and editable");
     console.log("- double Stop -> one targeted turn_cancel");
     console.log("- Stop click does not change business UI before Host state arrives");
     console.log("- two Host-projected queued tasks remain queued and cannot turn Send back into Stop");

@@ -113,10 +113,7 @@ export type VersionedTurnProjection = {
 };
 
 export type MessageQueueBlockReason =
-  | "user_cancelled"
-  | "turn_failed"
-  | "turn_interrupted"
-  | "session_stopped";
+  "user_cancelled" | "turn_failed" | "turn_interrupted" | "session_stopped";
 
 export type MessageQueueContinuation =
   | { state: "awaiting_normal_completion" }
@@ -362,6 +359,8 @@ export type ModelEndpoint = {
   api_key_configured: boolean;
   http_headers: Record<string, string>;
   request_fields: Record<string, unknown>;
+  allow_cross_origin_redirects: boolean;
+  private_ca_configured: boolean;
 };
 
 export type MemTemporaryItem = {
@@ -423,6 +422,7 @@ export type Snapshot = {
       temporary_retention_days: 1 | 5 | 10 | null;
       temporary_capacity_bytes: number | null;
       conversation_capacity_bytes: number | null;
+      claude_codex_tool_discovery: boolean;
     };
     runtime_options: Array<{
       key: string;
@@ -458,6 +458,11 @@ export type WireEvent =
   | { type: "session_restart_cwd_resolved"; session: Session }
   | { type: "session_deleted"; session_id: string }
   | { type: "session_groups_updated"; groups: SessionGroup[] }
+  | {
+      type: "session_order_updated";
+      group_id?: string | null;
+      session_ids: string[];
+    }
   | {
       type: "session_group_changed";
       session_id: string;
@@ -571,6 +576,7 @@ export type WireEvent =
       temporary_retention_days: 1 | 5 | 10 | null;
       temporary_capacity_bytes: number | null;
       conversation_capacity_bytes: number | null;
+      claude_codex_tool_discovery: boolean;
     }
   | { type: "mem_temporary_items"; items: MemTemporaryItem[]; error?: string }
   | { type: "file_uploaded"; session_id: string; file: Attachment }
@@ -608,6 +614,7 @@ export type WireEvent =
       api_key: string;
       http_headers: Record<string, string>;
       request_fields: Record<string, unknown>;
+      private_ca_pem: string;
     };
 
 export type ClientCommand =
@@ -615,6 +622,7 @@ export type ClientCommand =
       type: "session_create";
       display_name?: string;
       workspace_dir?: string;
+      group_id?: string | null;
       env?: Record<string, string>;
     }
   | { type: "session_rename"; session_id: string; display_name: string }
@@ -622,6 +630,11 @@ export type ClientCommand =
   | { type: "session_group_update"; group_id: string; name: string }
   | { type: "session_group_delete"; group_id: string }
   | { type: "session_groups_reorder"; groups: SessionGroup[] }
+  | {
+      type: "session_reorder";
+      group_id?: string | null;
+      session_ids: string[];
+    }
   | { type: "session_group_move"; session_id: string; group_id?: string | null }
   | { type: "session_api_key_update"; session_id: string; api_key: string }
   | { type: "session_api_key_reveal"; session_id: string }
@@ -674,7 +687,7 @@ export type ClientCommand =
       text: string;
       attachment_ids?: string[];
       role_ids?: string[];
-      input_kind?: "toolgen";
+      input_kind?: "toolgen" | "resume_directly";
       source_turn_id?: string;
     }
   | {
@@ -759,6 +772,8 @@ export type ClientCommand =
         api_key?: string;
         http_headers: Record<string, string>;
         request_fields: Record<string, unknown>;
+        allow_cross_origin_redirects: boolean;
+        private_ca_pem?: string;
       };
     }
   | { type: "model_endpoint_delete"; endpoint_id: string }
@@ -781,6 +796,7 @@ export type ClientCommand =
       max_bytes: number | null;
     }
   | { type: "mem_conversation_capacity_update"; max_bytes: number | null }
+  | { type: "beta_claude_codex_tool_discovery_update"; enabled: boolean }
   | { type: "mem_temporary_items_list" }
   | { type: "mem_temporary_items_delete"; ids: string[] }
   | {
