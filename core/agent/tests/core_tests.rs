@@ -5046,7 +5046,7 @@ fn memory_sql_query_allows_pragma_table_info() {
 }
 
 #[test]
-fn memory_sql_query_allows_chat_messages_table_info() {
+fn memory_sql_query_rejects_chat_messages_table_info() {
     let mut core = test_core(
         "STATIC",
         profile("qwen-plus"),
@@ -5065,9 +5065,7 @@ fn memory_sql_query_allows_chat_messages_table_info() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("name=content"));
-    assert!(prompt.contains("name=session_id"));
-    assert!(prompt.contains("name=created_at_ms"));
+    assert!(prompt.contains("error: only_declared_tables_are_allowed"));
 }
 
 #[test]
@@ -5320,25 +5318,16 @@ fn chat_history_search_empty_text_lists_recent_records() {
 }
 
 #[test]
-fn memory_sql_query_reads_chat_messages_with_time_window() {
-    let root = tmp_dir("chat_messages_sql");
-    let dir = root.join("memory");
-    fs::create_dir_all(&dir).unwrap();
-    let audit_file = root.join("audit").join("api_audit.json");
-    write_audit_doc(
-        &audit_file,
-        vec![
-            json!({"type":"turn_start","session":"shell_old","turn_id":"turn_1781760000000","user_input":"旧聊天"}),
-            json!({"type":"turn_final","session":"shell_old","turn_id":"turn_1781760000000","assistant_output":"旧回复"}),
-            json!({"type":"turn_start","session":"shell_new","turn_id":"turn_1781846400000","user_input":"新聊天"}),
-            json!({"type":"turn_final","session":"shell_new","turn_id":"turn_1781846400000","assistant_output":"新回复"}),
-        ],
+fn memory_sql_query_rejects_chat_messages_reads() {
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("chat_messages_sql_rejected"),
     );
-    let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
-    let _ = core.begin_turn("查最近窗口聊天", None);
+    let _ = core.begin_turn("查聊天 SQL", None);
     let step = core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
-        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT session_id, role, content, created_at_ms FROM chat_messages WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms DESC","params":["1781840000000","1781850000000"],"limit":20}}]}"#),
+        content: scored(r#"{"working_still_action":[{"memmgr":{"type":"durable","op":"sql","sql":"SELECT content FROM chat_messages LIMIT 5"}}]}"#),
         model_name: "qwen-plus".to_string(),
         usage: usage(),
         truncated: false,
@@ -5348,15 +5337,12 @@ fn memory_sql_query_reads_chat_messages_with_time_window() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(prompt.contains("Action result: memmgr"));
-    assert!(prompt.contains("session_id=shell_new"));
-    assert!(prompt.contains("content=新聊天"));
-    assert!(prompt.contains("content=新回复"));
-    assert!(!prompt.contains("content=旧聊天"));
+    assert!(prompt.contains("error: only_declared_tables_are_allowed"));
 }
 
 #[test]
 fn memory_sql_query_accepts_common_llm_param_shapes() {
-    let sql = "SELECT role, content, created_at_ms FROM chat_messages WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms ASC";
+    let sql = "SELECT id, content, created_at_ms FROM memories WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY created_at_ms ASC";
     let sql_json = serde_json::to_string(sql).unwrap();
     let cases = [
         (
@@ -5386,14 +5372,6 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
         let root = tmp_dir(case_name);
         let dir = root.join("memory");
         fs::create_dir_all(&dir).unwrap();
-        let audit_file = root.join("audit").join("api_audit.json");
-        write_audit_doc(
-            &audit_file,
-            vec![
-                json!({"type":"turn_start","session":"shell_today","turn_id":"turn_1782203922467","user_input":"我今天和你聊过什么？"}),
-                json!({"type":"turn_final","session":"shell_today","turn_id":"turn_1782203922467","assistant_output":"今天聊过 shell 记忆查询。"}),
-            ],
-        );
         let mut core = test_core("STATIC", profile("aws-claude-sonnet-4-6"), &dir);
         let _ = core.begin_turn("我今天和你聊过什么？", None);
         let content = scored(format!(
@@ -5412,18 +5390,8 @@ fn memory_sql_query_accepts_common_llm_param_shapes() {
             other => panic!("{case_name} unexpected step: {other:?}"),
         };
         assert!(prompt.contains("Action result: memmgr"), "{case_name}");
-        assert!(
-            prompt.contains("content=我今天和你聊过什么？"),
-            "{case_name}"
-        );
-        assert!(
-            prompt.contains("content=今天聊过 shell 记忆查询。"),
-            "{case_name}"
-        );
-        assert!(
-            !prompt.contains("params_count_mismatch"),
-            "{case_name}: {prompt}"
-        );
+        assert!(prompt.contains("results: none"), "{case_name}: {prompt}");
+        assert!(!prompt.contains("error:"), "{case_name}: {prompt}");
     }
 }
 
@@ -8048,7 +8016,8 @@ fn memmgr_tool_catalog_does_not_expose_legacy_query_surface() {
     assert!(memmgr.contains(r#"{"memmgr":{"type":"raw_chat","op":"search""#));
     assert!(memmgr.contains(r#"{"memmgr":{"type":"scratch","op":"read""#));
     assert!(memmgr.contains("durable: schema|sql|insert|update|upsert|delete"));
-    assert!(memmgr.contains("raw_chat: search|sql|delete"));
+    assert!(memmgr.contains("raw_chat: search|delete"));
+    assert!(!memmgr.contains("raw_chat: search|sql|delete"));
     assert!(memmgr.contains("scratch: search|write|read|delete"));
     assert!(memmgr.contains("search_text"));
     assert!(!memmgr.contains("op=<query"));
