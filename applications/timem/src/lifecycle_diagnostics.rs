@@ -48,6 +48,11 @@ impl LifecycleDiagnostics {
         Self::install_in(memory_root, args, true)
     }
 
+    #[cfg(test)]
+    pub(crate) fn install_for_test(memory_root: &Path) -> Result<Self, String> {
+        Self::install_in(memory_root, &[], false)
+    }
+
     fn install_in(data_root: &Path, args: &[String], install_hook: bool) -> Result<Self, String> {
         let root = data_root.join(DIAGNOSTICS_DIR);
         create_private_dir(&root)?;
