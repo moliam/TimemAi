@@ -2310,6 +2310,59 @@ fn explicit_assistant_speaker_name_sets_prompt_identity_and_updates_on_rename() 
 }
 
 #[test]
+fn session_worker_prompt_includes_identity_runtime_surface_and_command_target() {
+    let dir = tmp_dir("worker_runtime_identity_context");
+    let core = AgentCore::new(
+        "STATIC",
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &dir,
+    );
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let worker = CoreSessionWorker::spawn_with_model_client(
+        core,
+        test_config(),
+        test_worker_config(&dir, "session_runtime_identity", 7),
+        ImmediateFinalPromptCaptureModel {
+            prompts: Arc::clone(&prompts),
+        },
+    );
+
+    worker
+        .handle()
+        .run_turn("who and where am I", None)
+        .expect("worker should accept turn");
+    let outcome = wait_for_turn_finished(worker.events(), "runtime identity");
+    assert_eq!(outcome.text, "IMMEDIATE_FINAL");
+
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    let prompt = &prompts[0];
+    assert!(
+        prompt.contains("Current session_id: session_runtime_identity"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Current session name: ID7"), "{prompt}");
+    assert!(prompt.contains("Current context_id: context_0"), "{prompt}");
+    assert!(
+        prompt.contains("Current worker_id: session_runtime_identity"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Current runtime surface: test_worker"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Current command target: test_machine"),
+        "{prompt}"
+    );
+
+    worker.shutdown().unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn session_worker_identity_sets_prompt_assistant_heading() {
     let dir = tmp_dir("worker_assistant_heading");
     let core = AgentCore::new(
