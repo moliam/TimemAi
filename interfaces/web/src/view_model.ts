@@ -228,7 +228,15 @@ export function sessionInteractionLockReason(
 export type ComposerSendDecision =
   | {
       kind: "skip";
-      reason: "no_session" | "empty_text" | "cancelling" | "mem_switching";
+      reason:
+        | "no_session"
+        | "empty_text"
+        | "cancelling"
+        | "mem_switching"
+        | "direct_resume_requires_idle"
+        | "direct_resume_requires_empty_text"
+        | "direct_resume_attachments_not_supported"
+        | "direct_resume_supplement_not_supported";
     }
   | {
       kind: "send";
@@ -545,8 +553,24 @@ export function composerSendDecision(
 ): ComposerSendDecision {
   if (!session) return { kind: "skip", reason: "no_session" };
   const trimmed = text.trim();
-  if (!trimmed && !resumeDirectly)
+  if (resumeDirectly) {
+    if (session.state === "working")
+      return { kind: "skip", reason: "direct_resume_requires_idle" };
+    if (trimmed)
+      return { kind: "skip", reason: "direct_resume_requires_empty_text" };
+    if (attachmentIds?.length)
+      return {
+        kind: "skip",
+        reason: "direct_resume_attachments_not_supported",
+      };
+    if (forceSupplement && !forceNewTurn)
+      return {
+        kind: "skip",
+        reason: "direct_resume_supplement_not_supported",
+      };
+  } else if (!trimmed) {
     return { kind: "skip", reason: "empty_text" };
+  }
   if (isMemSwitching) return { kind: "skip", reason: "mem_switching" };
   return {
     kind: "send",
@@ -566,7 +590,9 @@ export function composerSendDecision(
             type: "turn_submit",
             session_id: session.session_id,
             text: trimmed,
-            ...(resumeDirectly ? { input_kind: "resume_directly" as const } : {}),
+            ...(resumeDirectly
+              ? { input_kind: "resume_directly" as const }
+              : {}),
             ...(attachmentIds === undefined
               ? {}
               : { attachment_ids: [...attachmentIds] }),
