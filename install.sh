@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-}"
+if [ -n "$SCRIPT_SOURCE" ]; then
+  ROOT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
+  RUNNING_FROM_STDIN=0
+else
+  ROOT_DIR="$PWD"
+  RUNNING_FROM_STDIN=1
+fi
 INSTALL_DIR="${TIMEM_SHELL_INSTALL_DIR:-$HOME/.local/bin}"
 RESOURCE_DIR="${TIMEM_RESOURCES_DIR:-$(dirname "$INSTALL_DIR")/share/timem/resources}"
 REMINDER_TIPS_SOURCE="$ROOT_DIR/resources/reminder_tips.json"
@@ -13,6 +20,100 @@ OLD_WRAPPER_NAME="timem-shell"
 MIN_RUST_VERSION="1.78.0"
 
 cd "$ROOT_DIR"
+
+ONLINE_REPOSITORY="${TIMEM_INSTALL_REPOSITORY:-moliam/TimemAi}"
+ONLINE_CURL_BIN="${TIMEM_INSTALL_CURL:-curl}"
+
+validate_online_repository() {
+  case "$1" in
+    *[!A-Za-z0-9_.\/-]*|/*|*/|*//*|*/*/*|"")
+      echo "error: invalid GitHub repository: $1" >&2
+      return 2
+      ;;
+  esac
+}
+
+validate_online_version() {
+  case "$1" in
+    *[!A-Za-z0-9._-]*|"")
+      echo "error: invalid release version: $1" >&2
+      return 2
+      ;;
+  esac
+}
+
+resolve_online_version() {
+  local requested="$1"
+  if [ "$requested" != "latest" ]; then
+    validate_online_version "$requested" || return
+    printf '%s\n' "$requested"
+    return
+  fi
+
+  local effective version
+  effective="$($ONLINE_CURL_BIN --proto '=https' --tlsv1.2 --fail --silent --show-error \
+    --location --output /dev/null --write-out '%{url_effective}' \
+    "https://github.com/$ONLINE_REPOSITORY/releases/latest")"
+  effective="${effective%%[?#]*}"
+  effective="${effective%/}"
+  version="${effective##*/}"
+  if [ -z "$version" ] || [ "$version" = "latest" ]; then
+    echo "error: GitHub did not resolve a latest TimemAi release." >&2
+    return 1
+  fi
+  validate_online_version "$version" || return
+  printf '%s\n' "$version"
+}
+
+source_tree_is_complete() {
+  [ -f "$ROOT_DIR/Cargo.lock" ] \
+    && [ -f "$ROOT_DIR/resources/reminder_tips.json" ] \
+    && [ -f "$ROOT_DIR/interfaces/web/dist/index.html" ]
+}
+
+install_from_online_release() {
+  if ! command -v "$ONLINE_CURL_BIN" >/dev/null 2>&1; then
+    echo "error: $ONLINE_CURL_BIN is required for online installation." >&2
+    return 1
+  fi
+  if ! command -v tar >/dev/null 2>&1; then
+    echo "error: tar is required for online installation." >&2
+    return 1
+  fi
+  validate_online_repository "$ONLINE_REPOSITORY" || return
+
+  local requested version temporary archive source_dir candidate candidate_count=0 cleanup_command
+  requested="${1:-${TIMEM_VERSION:-latest}}"
+  version="$(resolve_online_version "$requested")"
+  temporary="$(mktemp -d "${TMPDIR:-/tmp}/timem-online-install.XXXXXX")"
+  printf -v cleanup_command 'rm -rf -- %q' "$temporary"
+  trap "$cleanup_command" EXIT HUP INT TERM
+  archive="$temporary/timem.tar.gz"
+
+  echo "Downloading TimemAi $version from GitHub..."
+  "$ONLINE_CURL_BIN" --proto '=https' --tlsv1.2 --fail --silent --show-error \
+    --location --retry 3 --retry-delay 1 \
+    "https://github.com/$ONLINE_REPOSITORY/archive/refs/tags/$version.tar.gz" \
+    --output "$archive"
+  tar -xzf "$archive" -C "$temporary"
+
+  source_dir=""
+  while IFS= read -r candidate; do
+    if [ -f "$candidate/install.sh" ] \
+      && [ -f "$candidate/Cargo.lock" ] \
+      && [ -f "$candidate/interfaces/web/dist/index.html" ]; then
+      source_dir="$candidate"
+      candidate_count=$((candidate_count + 1))
+    fi
+  done < <(find "$temporary" -mindepth 1 -maxdepth 1 -type d -print)
+  if [ "$candidate_count" -ne 1 ]; then
+    echo "error: downloaded TimemAi archive is incomplete or has an unexpected layout." >&2
+    return 1
+  fi
+
+  echo "Building and installing TimemAi from release $version..."
+  (cd "$source_dir" && TIMEM_INSTALL_SOURCE_KIND=online bash ./install.sh)
+}
 
 detect_os() {
   case "$(uname -s)" in
@@ -226,8 +327,12 @@ print_install_success() {
   echo
   echo "Installed support files:"
   echo "  Resources:    $RESOURCE_DIR"
-  echo "  Env template: $ENV_TEMPLATE"
-  echo "  Uninstaller:  $ROOT_DIR/uninstall.sh"
+  if [ "${TIMEM_INSTALL_SOURCE_KIND:-checkout}" = "online" ]; then
+    echo "  Install source: temporary release archive (removed after installation)"
+  else
+    echo "  Env template: $ENV_TEMPLATE"
+    echo "  Uninstaller:  $ROOT_DIR/uninstall.sh"
+  fi
   echo
   echo "Start Timem Web (default):"
   echo "  1. Ensure $INSTALL_DIR is in PATH."
@@ -241,9 +346,15 @@ print_install_success() {
   echo "  Run: $COMMAND_NAME --shell"
   echo "  To provide environment defaults, copy $ENV_TEMPLATE to a private file, edit it, then source it before launch."
   echo
-  echo "Update later from this git clone:"
-  echo "  git pull --ff-only"
-  echo "  ./install.sh"
+  if [ "${TIMEM_INSTALL_SOURCE_KIND:-checkout}" = "online" ]; then
+    echo "Update later by rerunning the online install command from the README."
+    echo "Uninstall online with:"
+    echo "  curl -fsSL https://raw.githubusercontent.com/moliam/TimemAi/main/uninstall.sh | bash"
+  else
+    echo "Update later from this git clone:"
+    echo "  git pull --ff-only"
+    echo "  ./install.sh"
+  fi
 }
 
 main() {
@@ -265,6 +376,10 @@ main() {
   print_install_success
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  main "$@"
+if [ "$RUNNING_FROM_STDIN" -eq 1 ] || [[ "$SCRIPT_SOURCE" == "$0" ]]; then
+  if [ "$RUNNING_FROM_STDIN" -eq 0 ] && source_tree_is_complete; then
+    main "$@"
+  else
+    install_from_online_release "$@"
+  fi
 fi

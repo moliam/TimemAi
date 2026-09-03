@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $root = Split-Path $PSScriptRoot -Parent
 . (Join-Path $root 'install.ps1') -SkipPathUpdate
+. (Join-Path $root 'install-online.ps1') -SkipPathUpdate
 
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('timem-install-test-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temp | Out-Null
@@ -53,6 +54,31 @@ try {
     }
     foreach ($protected in @('MEM workspaces', 'API credentials', 'user configuration')) {
         if (-not $uninstallText.Contains($protected)) { throw "uninstall.ps1 missing preservation notice: $protected" }
+    }
+
+    if ((Resolve-TimemVersion 'v9.8.7' 'moliam/TimemAi') -ne 'v9.8.7') {
+        throw 'online installer did not preserve an explicit release version'
+    }
+    foreach ($invalidVersion in @('../main', 'bad/version', '')) {
+        try {
+            Resolve-TimemVersion $invalidVersion 'moliam/TimemAi' | Out-Null
+            throw "unsafe release version was accepted: $invalidVersion"
+        } catch {
+            if ($_.Exception.Message -like 'unsafe release version was accepted:*') { throw }
+        }
+    }
+    $onlineText = [IO.File]::ReadAllText((Join-Path $root 'install-online.ps1'))
+    foreach ($required in @(
+        'https://github.com/$Repository/archive/refs/tags/$resolvedVersion.zip',
+        "Join-Path `$_.FullName 'Cargo.lock'",
+        "Join-Path `$_.FullName 'interfaces\web\dist\index.html'",
+        '$sourceCandidates.Count -ne 1',
+        "`$env:TIMEM_INSTALL_SOURCE_KIND = 'online'",
+        '& powershell.exe @arguments',
+        '$installerExitCode = $LASTEXITCODE',
+        'Remove-Item -LiteralPath $temporary -Recurse -Force'
+    )) {
+        if (-not $onlineText.Contains($required)) { throw "install-online.ps1 missing contract: $required" }
     }
     Write-Output 'windows_install_logic_test: ok'
 } finally {

@@ -5,7 +5,38 @@ the full setup reference.
 
 ## Install
 
+### One-line install from the latest Release
+
 macOS/Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/moliam/TimemAi/main/install.sh | bash
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/moliam/TimemAi/main/install-online.ps1 | iex
+```
+
+The small online bootstrap is read from `main`, but it resolves and downloads the
+latest formal GitHub Release tag. Installation content therefore comes from a
+versioned Release source archive, not from the current `main` tree. The archive
+is verified for the expected repository layout, built in a temporary directory,
+and removed afterward.
+
+To install a specific Release instead of `latest`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/moliam/TimemAi/main/install.sh | TIMEM_VERSION=v2.0.0 bash
+```
+
+```powershell
+$env:TIMEM_VERSION = 'v2.0.0'; irm https://raw.githubusercontent.com/moliam/TimemAi/main/install-online.ps1 | iex
+```
+
+Review downloaded scripts before execution when required by your security
+policy. For a fully reviewable checkout-based flow:
 
 ```bash
 git clone https://github.com/moliam/TimemAi.git
@@ -13,54 +44,61 @@ cd TimemAi
 ./install.sh
 ```
 
-Windows PowerShell (delivery adapted; native revalidation is still required):
-
 ```powershell
 git clone https://github.com/moliam/TimemAi.git
 cd TimemAi
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-Platform prerequisites:
+### Prerequisites and installed files
+
+Both online and checkout flows are source builds. They require:
 
 - Windows: stable Rust with the `x86_64-pc-windows-msvc` host and Microsoft
   Visual C++ Build Tools with the x64 C++ workload. `install.ps1` locates and
   initializes `VsDevCmd.bat`; it does not require an administrator shell.
 - macOS: Xcode Command Line Tools and `curl`.
 - Linux: `cc`, `make`, `curl`, `pkg-config`, and `ca-certificates`; when
-  possible it installs missing packages through the system package manager.
+  possible `install.sh` installs missing packages through the system package
+  manager.
 
-On macOS/Linux, if Rust/cargo is missing, `install.sh` installs the Rust toolchain with
-rustup. Cargo 1.78+ is required. To disable automatic Rust install/update:
+On macOS/Linux, if Rust/cargo is missing, `install.sh` installs the Rust toolchain
+with rustup. Cargo 1.78+ is required. To disable automatic Rust install/update:
 
 ```bash
 TIMEM_SHELL_SKIP_RUST_INSTALL=1 ./install.sh
 ```
 
-Both installers run:
+Both platform installers run:
 
 ```bash
 cargo fetch --locked
 cargo build --locked --release --bin timem
 ```
 
-It installs:
+They install:
 
 - `timem`: the single executable; Web is the default mode and `--shell` selects the terminal UI
 - `timem-web`: a compatibility symlink on macOS/Linux or forwarding `.cmd` shim on Windows, not a second executable
 - `resources/reminder_tips.json`: runtime-loaded default reminder schedules, normally under `~/.local/share/timem/resources` on macOS/Linux or `%LOCALAPPDATA%\TimemAi\share\timem\resources` on Windows
 
-The completion message leads with `timem`. No env file is required to open
-the Web UI; model and API credentials can be configured in the browser. Env
-files remain available for terminal use, automation, or defaults for new Web
-Sessions.
+The completion message leads with `timem`. No env file is required to open the
+Web UI; model and API credentials can be configured in the browser. Env files
+remain available for terminal use, automation, or defaults for new Web Sessions.
 
-On macOS/Linux, `TIMEM_SHELL_INSTALL_DIR` changes the binary directory. On Windows, `-InstallDir` and `-ResourceDir` override the default `%LOCALAPPDATA%\TimemAi` locations. Resources follow the binary prefix unless `TIMEM_RESOURCES_DIR` is set explicitly. User-level `reminder_tips.json` overrides are separate and are never overwritten by installation.
+On macOS/Linux, `TIMEM_SHELL_INSTALL_DIR` changes the binary directory. On
+Windows checkout installs, `-InstallDir` and `-ResourceDir` override the default
+`%LOCALAPPDATA%\TimemAi` locations. For an online Windows install with custom
+locations, download `install-online.ps1` and invoke it with those parameters
+rather than piping it to `iex`. Resources follow the binary prefix unless
+`TIMEM_RESOURCES_DIR` is set explicitly. User-level `reminder_tips.json`
+overrides are separate and are never overwritten by installation.
 
 Binary updates are installed with an atomic file replacement. This allows
-`./install.sh` to update an installation even while an older `timem` Web host process is still running, without invalidating the executable inode used by
-that process on macOS. Restart the old process to use the newly installed
-version.
+`./install.sh` to update an installation even while an older `timem` Web host
+process is still running, without invalidating the executable inode used by that
+process on macOS. Restart the old process to use the newly installed version.
+On Windows, exit Timem before updating because the executable may be locked.
 
 Release users do not need Node.js or a separate assistant-ui checkout. Node/pnpm
 are only needed for frontend development.
@@ -465,9 +503,14 @@ Web:
 
 ## Update
 
-The installers support both first installation and in-place upgrade. They install the current source checkout and intentionally do not run `git pull`, because selecting and reviewing the source revision remains the user's or release system's responsibility.
+Rerun the same one-line online command to resolve and install the latest formal
+Release. To pin an update, set `TIMEM_VERSION` as shown above. The installer
+replaces program artifacts while preserving MEM workspaces, Sessions, cached
+runtime configuration, API credentials, private env files, and user
+`reminder_tips.json` overrides.
 
-macOS/Linux:
+For a source checkout, explicitly select the revision and rerun the platform
+installer:
 
 ```bash
 cd /path/to/TimemAi
@@ -475,32 +518,38 @@ git pull --ff-only
 ./install.sh
 ```
 
-The installer atomically replaces `timem`, converts an old independent `timem-web` file into a relative symlink to `timem`, and removes legacy `timem-native-rs` and `timem-shell` artifacts. Existing running processes continue using their already-open executable image on Unix; restart them to use the update.
-
-Windows PowerShell:
-
 ```powershell
 cd C:\path\to\TimemAi
 git pull --ff-only
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-Exit Timem before a Windows upgrade because Windows may lock a running `.exe`. The installer replaces `timem.exe`, removes old `timem-web.exe`, `timem-native-rs.exe`, and `timem-shell.exe` files, then creates `timem-web.cmd`. Removing `timem-web.exe` is required because Windows command lookup would otherwise prefer that stale executable over the compatibility `.cmd` shim.
-
-Neither installer removes MEM workspaces, Sessions, cached runtime configuration, API credentials, private env files, or user `reminder_tips.json` overrides.
+The checkout installers intentionally do not run `git pull`. On Unix, an older
+running process continues using its already-open executable image; restart it to
+use the update. On Windows, exit Timem before updating because Windows may lock
+a running `.exe`. Upgrades remove legacy independent executables and retain
+`timem-web` only as a compatibility alias.
 
 ## Uninstall
 
-```bash
-./uninstall.sh
-```
-
-Uninstall removes the binaries and installed reminder resource. It does not remove user configuration, including a user-level `reminder_tips.json` override.
-If Rust was installed only for Timem, remove it separately:
+macOS/Linux online or checkout installation:
 
 ```bash
-rustup self uninstall
+curl -fsSL https://raw.githubusercontent.com/moliam/TimemAi/main/uninstall.sh | bash
 ```
+
+Windows PowerShell online or checkout installation:
+
+```powershell
+irm https://raw.githubusercontent.com/moliam/TimemAi/main/uninstall.ps1 | iex
+```
+
+You may instead run `./uninstall.sh` or `.\uninstall.ps1` from a reviewed
+checkout. Uninstall removes installed binaries, compatibility aliases, shipped
+resources, and on Windows the installer-added user PATH entry. It does not
+remove MEM workspaces, Sessions, credentials, user configuration, Rust, Visual
+C++ Build Tools, or user reminder overrides. If Rust was installed only for
+Timem, remove it separately with `rustup self uninstall`.
 
 ## MEM 历史记录保留
 
@@ -514,16 +563,6 @@ Timem Web 左下角的 **Memory** 卡片用于打开当前 MEM 的设置；卡�
 - 不限
 
 设置保存在当前 MEM 的 `mem_settings.json` 中。用户修改为有限期限时，Timem 会先应用新期限再报告成功。Timem Web 启动时会先完成端口监听并报告 ready，再在后台应用该策略；切换到另一个 MEM 后也会在后台立即应用，运行期间每小时再执行一次。这样大体量历史或审计文件的扫描与原子重写不会阻塞 Web 启动。该操作不会删除 Session、ToolRepo 工具、角色、MCP 或模型接入点。为避免与正在写入的历史冲突，存在运行中任务时不能修改保留期限。
-
-## Windows Uninstall
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
-```
-
-The uninstaller removes installed binaries, the shipped reminder resource, and
-the installer-added user PATH entry. It does not remove MEM workspaces,
-Sessions, credentials, user configuration, Rust, or Visual C++ Build Tools.
 
 ### 模型 HTTP 重定向与私有 CA
 
