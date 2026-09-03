@@ -59,6 +59,7 @@ ci_required=(
   "== macOS Timem Web platform smoke =="
   "scripts/web_license_check.sh"
   "scripts/version_consistency_check.sh"
+  "scripts/online_install_logic_test.sh"
   "python3 scripts/architecture_guard.py --self-test"
   "scripts/module_boundary_check.sh"
   "scripts/self_capability_check.sh"
@@ -115,6 +116,19 @@ for pattern in "${windows_ci_required[@]}"; do
     exit 1
   fi
 done
+online_install_required=(
+  "raw.githubusercontent.com/moliam/TimemAi/main/install.sh"
+  "install-online.ps1"
+  "TIMEM_VERSION=v2.0.0"
+  "irm https://raw.githubusercontent.com/moliam/TimemAi/main/install-online.ps1 | iex"
+)
+for pattern in "${online_install_required[@]}"; do
+  if ! search_fixed "$pattern" README.md docs/install-and-configuration.md scripts/ci.sh; then
+    echo "missing online installation contract: $pattern" >&2
+    exit 1
+  fi
+done
+
 if search_fixed "web_ui/timem-web" .github/workflows/ci.yml; then
   echo "Windows CI must use the semantic interfaces/web layout" >&2
   exit 1

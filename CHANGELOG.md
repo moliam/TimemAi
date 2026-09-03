@@ -4,6 +4,11 @@
 
 ### Added
 
+- Add one-line macOS/Linux and Windows PowerShell installation entry points that resolve a
+  formal GitHub Release, download and validate its source archive, run the
+  existing source-build installer, clean temporary files, support version
+  pinning, and provide offline installer-logic coverage.
+
 - Add the first focused Turn-concurrency CI profile: 300 seeded iterations of a
   real `CoreSessionWorker` PromptCut/terminal-ownership race with independent
   model and user producers, explicit synchronization, bounded waits, replayable

@@ -133,10 +133,18 @@ function Invoke-TimemInstall {
     Write-Host "  Timem CLI:           $(Join-Path $InstallDir 'timem.exe')"
     Write-Host "  Compatibility shim: $(Join-Path $InstallDir 'timem-web.cmd')"
     Write-Host "  Resources:               $ResourceDir"
+    if ($env:TIMEM_INSTALL_SOURCE_KIND -eq 'online') {
+        Write-Host '  Install source: temporary release archive (removed after installation)'
+    }
     if ($pathAdded) { Write-Host 'The user PATH was updated. Open a new terminal before invoking Timem by name.' }
     Write-Host 'Start Timem Web (default): timem'
     Write-Host 'Start the terminal Shell: timem --shell'
     Write-Host 'No environment file is required to open the local Web UI.'
+    if ($env:TIMEM_INSTALL_SOURCE_KIND -eq 'online') {
+        Write-Host 'Update later by rerunning the online install command from the README.'
+        Write-Host 'Uninstall online with:'
+        Write-Host '  irm https://raw.githubusercontent.com/moliam/TimemAi/main/uninstall.ps1 | iex'
+    }
 }
 
 if ($MyInvocation.InvocationName -ne '.') { Invoke-TimemInstall }

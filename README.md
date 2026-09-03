@@ -17,22 +17,24 @@ Both interfaces use the same Core runtime and persisted data. Installer-created
 macOS or Linux:
 
 ```bash
-git clone https://github.com/moliam/TimemAi.git
-cd TimemAi
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/moliam/TimemAi/main/install.sh | bash
 ```
 
 Windows PowerShell:
 
 ```powershell
-git clone https://github.com/moliam/TimemAi.git
-cd TimemAi
-powershell -ExecutionPolicy Bypass -File .\install.ps1
+irm https://raw.githubusercontent.com/moliam/TimemAi/main/install-online.ps1 | iex
 ```
 
-The installer builds the unified `timem` executable. Cargo downloads Rust crates
-automatically during the build. The released Web bundle is embedded, so Node.js
-is required only for frontend development.
+The online installer resolves the latest formal GitHub Release, downloads its
+source archive to a temporary directory, builds the unified `timem` executable,
+and then removes the archive. It does not install unreviewed source from `main`.
+This is a source build: Rust and the platform C/C++ build prerequisites are still
+required. Cargo downloads Rust crates automatically. The released Web bundle is
+embedded, so Node.js is required only for frontend development.
+
+To inspect the source or installer before running it, clone the repository and
+run `./install.sh` on macOS/Linux or `install.ps1` on Windows instead.
 
 See [Install and configuration](docs/install-and-configuration.md) for platform
 prerequisites, custom install locations, environment variables, updates, and
@@ -169,10 +171,10 @@ repository's delivery rules.
 
 ## Update and uninstall
 
-Installers update from the current checkout; they do not fetch source. Pull the
-revision you intend to run, then rerun the platform installer. Existing MEM data
-and user configuration are preserved. See
+Rerun the one-line command to update to the latest formal Release, or pull and
+rerun the installer when using a source checkout. Existing MEM data and user
+configuration are preserved. See
 [Install and configuration](docs/install-and-configuration.md#update) for exact
-commands and compatibility behavior.
+update, version-pinning, and uninstall commands.
 
 TimemAi is licensed under the [Apache License 2.0](LICENSE).
