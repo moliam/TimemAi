@@ -2113,25 +2113,30 @@ impl AgentCore {
         self.submit_running_job_updates(updates);
     }
 
+    fn format_running_job_updates(updates: &[ShellJobExitUpdate]) -> Option<String> {
+        (!updates.is_empty()).then(|| {
+            updates
+                .iter()
+                .map(|update| {
+                    format!(
+                        "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms\nExit status: {}\nFinal output:\n{}",
+                        update.pid,
+                        update.description(),
+                        compact_text(&update.command, 500),
+                        update.elapsed_ms,
+                        update.status,
+                        compact_text(&update.output, 4000),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+    }
+
     fn submit_running_job_updates(&mut self, updates: Vec<ShellJobExitUpdate>) {
-        if updates.is_empty() {
+        let Some(text) = Self::format_running_job_updates(&updates) else {
             return;
-        }
-        let text = updates
-            .into_iter()
-            .map(|update| {
-                format!(
-                    "RUNNING_JOB_UPDATE: pid={}, {}, cmd={}, now exits. elapsed time={}ms\nExit status: {}\nFinal output:\n{}",
-                    update.pid,
-                    update.description(),
-                    compact_text(&update.command, 500),
-                    update.elapsed_ms,
-                    update.status,
-                    compact_text(&update.output, 4000),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        };
         self.submit_prompt_component(
             PromptComponentRole::system(),
             "running_job_update",
@@ -2184,30 +2189,59 @@ impl AgentCore {
         runtime: Option<&mut dyn ActionRuntime>,
     ) -> String {
         let session_id = self.current_session_id();
-        let (running, updates) = self.shell_jobs.consume_completed_for_session(&session_id);
-        let first_new_delta = self.deltas.len();
-        self.submit_running_job_updates_with_runtime(updates, runtime);
-        self.flush_pending_prompt_components();
+        let first_snapshot = self.shell_jobs.consume_completed_for_session(&session_id);
+        let shell_jobs = self.shell_jobs.clone();
+        self.build_model_request_prompt_from_job_snapshots(
+            current_prompt,
+            runtime,
+            first_snapshot,
+            move || shell_jobs.consume_completed_for_session(&session_id),
+        )
+    }
 
+    fn build_model_request_prompt_from_job_snapshots<F>(
+        &mut self,
+        current_prompt: &str,
+        runtime: Option<&mut dyn ActionRuntime>,
+        (running, mut updates): (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>),
+        final_scan: F,
+    ) -> String
+    where
+        F: FnOnce() -> (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>),
+    {
         let still_running = self.still_running_cmds_context_from(running);
         let (body, trailer) = prompt_render::split_formatted_response_trailer(current_prompt);
         let mut prompt = body.trim_end().to_string();
-        prompt_render::append_rendered_deltas_for_mode(
-            &mut prompt,
-            &self.deltas[first_new_delta..],
-            &self.assistant_speaker_name,
-            self.response_protocol.suite(),
-            self.resolved_tool_call_mode,
-        );
-        if still_running.is_none()
-            && first_new_delta == self.deltas.len()
-            && !self.context_compact_required
-        {
-            return current_prompt.to_string();
-        }
-        if let Some(still_running) = still_running {
+        if let Some(still_running) = still_running.as_ref() {
             prompt.push_str("\n\n");
-            prompt.push_str(&still_running);
+            prompt.push_str(still_running);
+        }
+
+        // Capture jobs that finish while the base prompt and running table are rendered.
+        // The request-local order is historical tool results, running snapshot, then exits.
+        let (_, final_updates) = final_scan();
+        updates.extend(final_updates);
+        if let Some(update_text) = Self::format_running_job_updates(&updates) {
+            prompt.push_str("\n\n");
+            prompt.push_str(&update_text);
+        }
+
+        if let Some(runtime) = runtime {
+            let events = updates
+                .iter()
+                .map(host::running_shell_job_exit_topic_event)
+                .collect::<Vec<_>>();
+            if !events.is_empty() {
+                runtime.on_core_topic_events(&events);
+            }
+        }
+        // Persist terminal updates for later prompts, but do not re-render that delta into this
+        // request: the request-local copy above has the authoritative ordering.
+        self.submit_running_job_updates(updates.clone());
+        self.flush_pending_prompt_components();
+
+        if still_running.is_none() && updates.is_empty() && !self.context_compact_required {
+            return current_prompt.to_string();
         }
         prompt.push_str("\n\n");
         if self.context_compact_required {
