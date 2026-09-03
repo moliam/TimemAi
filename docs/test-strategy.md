@@ -166,7 +166,7 @@ Required properties:
 - command/attachment ownership, final projection, resource cleanup, and user-visible latency percentiles are all asserted;
 - failures print a replayable seed and named stage trace.
 
-The implementation gate must add and run four heavy scenarios: PromptCut/terminal ownership, Stop/Start lifecycle storm, WebSocket reconnect/FIFO ownership, and real-Chrome interaction latency. PR CI runs at least 300 iterations per core scenario, Linux/macOS release certification at least 1,000, and scheduled/manual soak runs 10,000 or ten minutes. Do not replace these with repeated pure reducers or by running the entire workspace thousands of times.
+This is a target standard, not a description of the current CI. The implementation gate still needs four heavy scenarios: PromptCut/terminal ownership, Stop/Start lifecycle storm, WebSocket reconnect/FIFO ownership, and real-Chrome interaction latency. Once implemented, PR CI must run at least 300 iterations per core scenario, Linux/macOS release certification at least 1,000, and scheduled/manual soak runs 10,000 or ten minutes. Current focused deterministic tests and two-pass edge regression must not be presented as substitutes, nor should the entire workspace simply be repeated thousands of times.
 
 Latency evidence follows the same rule as Web performance tracing: use monotonic elapsed durations within one clock domain and command-correlated named stages. Timestamp order is not causality, and browser/server wall clocks must not be subtracted. Fake-model delay and intentional reconnect backoff are reported separately from Timem-added latency.
 

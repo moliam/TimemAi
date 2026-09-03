@@ -61,6 +61,7 @@ ci_required=(
   "scripts/version_consistency_check.sh"
   "python3 scripts/architecture_guard.py --self-test"
   "scripts/module_boundary_check.sh"
+  "scripts/self_capability_check.sh"
 )
 
 for pattern in "${ci_required[@]}"; do
@@ -276,6 +277,32 @@ feature_doc_required=(
 for pattern in "${feature_doc_required[@]}"; do
   if ! search_fixed "$pattern" "$feature_doc"; then
     echo "missing required feature management item: $pattern" >&2
+    exit 1
+  fi
+done
+
+
+self_capability_doc="docs/self-capability-test-matrix.md"
+if [ ! -f "$self_capability_doc" ]; then
+  echo "missing Timem self-capability matrix: $self_capability_doc" >&2
+  exit 1
+fi
+self_capability_required=(
+  "Who"
+  "Where"
+  "What"
+  "How"
+  "Long work"
+  "Runtime completeness"
+  "scripts/self_capability_check.sh"
+  "300 PR"
+  "1,000 release"
+  "10,000 soak"
+  "must not be described as implemented"
+)
+for pattern in "${self_capability_required[@]}"; do
+  if ! search_fixed "$pattern" "$self_capability_doc"; then
+    echo "missing Timem self-capability contract item: $pattern" >&2
     exit 1
   fi
 done
