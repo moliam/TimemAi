@@ -541,10 +541,12 @@ export function composerSendDecision(
   attachmentIds?: readonly string[],
   forceSupplement = false,
   forceNewTurn = false,
+  resumeDirectly = false,
 ): ComposerSendDecision {
   if (!session) return { kind: "skip", reason: "no_session" };
   const trimmed = text.trim();
-  if (!trimmed) return { kind: "skip", reason: "empty_text" };
+  if (!trimmed && !resumeDirectly)
+    return { kind: "skip", reason: "empty_text" };
   if (isMemSwitching) return { kind: "skip", reason: "mem_switching" };
   return {
     kind: "send",
@@ -564,6 +566,7 @@ export function composerSendDecision(
             type: "turn_submit",
             session_id: session.session_id,
             text: trimmed,
+            ...(resumeDirectly ? { input_kind: "resume_directly" as const } : {}),
             ...(attachmentIds === undefined
               ? {}
               : { attachment_ids: [...attachmentIds] }),

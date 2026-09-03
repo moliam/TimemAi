@@ -650,6 +650,7 @@ struct PendingWorkInstructionTurn {
     attachments: Vec<WebAttachment>,
     command_id: Option<String>,
     worker_roles: Vec<WorkerRole>,
+    direct_resume: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3047,10 +3048,27 @@ fn handle_command_with_id(
                     command_id,
                 )?
             } else {
-                if input_kind.is_some() || source_turn_id.is_some() {
-                    return Err("unsupported_turn_input_kind".to_string());
-                }
-                let text = nonempty_text(text, "turn text")?;
+                let resume_directly = input_kind.as_deref() == Some("resume_directly");
+                let text = if resume_directly {
+                    if source_turn_id.is_some() {
+                        return Err("resume_directly_source_turn_not_supported".to_string());
+                    }
+                    if attachment_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
+                        return Err("resume_directly_attachments_not_supported".to_string());
+                    }
+                    if role_id.is_some() || !role_ids.is_empty() {
+                        return Err("resume_directly_worker_role_not_supported".to_string());
+                    }
+                    if !text.trim().is_empty() {
+                        return Err("resume_directly_text_must_be_empty".to_string());
+                    }
+                    String::new()
+                } else {
+                    if input_kind.is_some() || source_turn_id.is_some() {
+                        return Err("unsupported_turn_input_kind".to_string());
+                    }
+                    nonempty_text(text, "turn text")?
+                };
                 let worker_roles =
                     resolve_worker_roles(state, &session_id, &role_ids, role_id.as_deref())?;
                 let must_queue = {
@@ -3064,6 +3082,9 @@ fn handle_command_with_id(
                     current_turn_id(session).is_some() || !session.message_queue.is_empty()
                 };
                 if must_queue {
+                    if resume_directly {
+                        return Err("resume_directly_requires_idle_session".to_string());
+                    }
                     let command_id = command_id
                         .ok_or_else(|| "message_queue_command_id_required".to_string())?;
                     let message_queue = enqueue_next_turn_intent(
@@ -3079,13 +3100,18 @@ fn handle_command_with_id(
                         message_queue,
                     }));
                 }
-                submit_turn_with_selected_attachments(
+                submit_turn_with_selected_attachments_and_kind(
                     state,
                     &session_id,
                     text,
                     attachment_ids.as_deref(),
                     command_id,
                     worker_roles,
+                    if resume_directly {
+                        "resume_directly"
+                    } else {
+                        "task"
+                    },
                 )?
             };
             return Ok(Some(WireEvent::TurnUpdated { session_id, turn }));
@@ -6612,6 +6638,26 @@ fn submit_turn_with_selected_attachments(
     command_id: Option<&str>,
     worker_roles: Vec<WorkerRole>,
 ) -> Result<WebTurn, String> {
+    submit_turn_with_selected_attachments_and_kind(
+        state,
+        session_id,
+        text,
+        attachment_ids,
+        command_id,
+        worker_roles,
+        "task",
+    )
+}
+
+fn submit_turn_with_selected_attachments_and_kind(
+    state: &AppState,
+    session_id: &str,
+    text: String,
+    attachment_ids: Option<&[String]>,
+    command_id: Option<&str>,
+    worker_roles: Vec<WorkerRole>,
+    entry_kind: &str,
+) -> Result<WebTurn, String> {
     validate_session_model_service_config(state, session_id)?;
     apply_pending_session_mcp(state, session_id)?;
     let request = {
@@ -6638,6 +6684,7 @@ fn submit_turn_with_selected_attachments(
             attachment_ids,
             command_id,
             worker_roles.clone(),
+            entry_kind,
         )?;
         publish_semantic(
             state,
@@ -6667,6 +6714,7 @@ fn submit_turn_with_selected_attachments(
                 attachments,
                 command_id: command_id.map(str::to_string),
                 worker_roles,
+                direct_resume: entry_kind == "resume_directly",
             });
         }
         let wire_payload = event.wire_payload();
@@ -6714,6 +6762,7 @@ fn submit_turn_with_selected_attachments(
         attachment_ids,
         command_id,
         worker_roles.clone(),
+        entry_kind,
     )?;
     // Publish the authoritative turn before allowing Core to emit activity for
     // it. Otherwise a fast worker event can overtake the direct command reply.
@@ -6734,11 +6783,18 @@ fn submit_turn_with_selected_attachments(
         }),
     );
     let enqueue_started = std::time::Instant::now();
-    if let Err(error) = primary_worker_handle(state, session_id)?.run_turn_with_command_id(
-        text,
-        session_context_with_roles(state, session_id, &attachments, &worker_roles)?,
-        command_id.map(str::to_string),
-    ) {
+    let worker = primary_worker_handle(state, session_id)?;
+    let additional_context =
+        session_context_with_roles(state, session_id, &attachments, &worker_roles)?;
+    let enqueue_result = if entry_kind == "resume_directly" {
+        worker.resume_turn_directly_with_command_id(
+            additional_context,
+            command_id.map(str::to_string),
+        )
+    } else {
+        worker.run_turn_with_command_id(text, additional_context, command_id.map(str::to_string))
+    };
+    if let Err(error) = enqueue_result {
         rollback_web_turn(state, session_id, &turn.turn_id, attachments);
         return Err(error);
     }
@@ -6869,16 +6925,18 @@ fn resolve_work_instruction_decision(
             publish_semantic(state, event);
         }
     }
-    primary_worker_handle(state, session_id)?.run_turn_with_command_id(
-        pending.text,
-        session_context_with_roles(
-            state,
-            session_id,
-            &pending.attachments,
-            &pending.worker_roles,
-        )?,
-        pending.command_id,
+    let worker = primary_worker_handle(state, session_id)?;
+    let additional_context = session_context_with_roles(
+        state,
+        session_id,
+        &pending.attachments,
+        &pending.worker_roles,
     )?;
+    if pending.direct_resume {
+        worker.resume_turn_directly_with_command_id(additional_context, pending.command_id)?;
+    } else {
+        worker.run_turn_with_command_id(pending.text, additional_context, pending.command_id)?;
+    }
     Ok(true)
 }
 
@@ -8049,6 +8107,7 @@ fn start_web_turn_with_command_id(
         None,
         command_id,
         Vec::new(),
+        "task",
     )
 }
 
@@ -8067,6 +8126,7 @@ fn start_web_turn_with_selected_attachments(
         attachment_ids,
         command_id,
         Vec::new(),
+        "task",
     )
 }
 
@@ -8077,6 +8137,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
     attachment_ids: Option<&[String]>,
     command_id: Option<&str>,
     worker_roles: Vec<WorkerRole>,
+    entry_kind: &str,
 ) -> Result<WebTurn, String> {
     ensure_restart_cwd_resolved(state, session_id)?;
     let mut sessions = state
@@ -8100,7 +8161,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
         created_at_ms: now_ms(),
         interrupted_at_ms: None,
         user_entries: vec![WebTurnUserEntry {
-            kind: "task".to_string(),
+            kind: entry_kind.to_string(),
             text: text.to_string(),
             attachments,
             created_at_ms: now_ms(),
@@ -8139,7 +8200,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
         session_id,
         &turn_id,
         "user",
-        Some("task"),
+        Some(entry_kind),
         command_id,
         created_at_ms,
         text.to_string(),

@@ -1124,6 +1124,27 @@ describe("web topic view model", () => {
     });
   });
 
+  it("creates an explicit direct-resume command only when requested", () => {
+    expect(
+      composerSendDecision(session("session_1"), "", false, false, [], false, true, true),
+    ).toEqual({
+      kind: "send",
+      text: "",
+      clearDraftOnSuccess: true,
+      command: {
+        type: "turn_submit",
+        session_id: "session_1",
+        text: "",
+        input_kind: "resume_directly",
+        attachment_ids: [],
+      },
+    });
+    expect(composerSendDecision(session("session_1"), "", false)).toEqual({
+      kind: "skip",
+      reason: "empty_text",
+    });
+  });
+
   it("does not send new tasks or supplements while a mem switch is pending", () => {
     expect(
       composerSendDecision(session("session_1"), "new task", false, true),

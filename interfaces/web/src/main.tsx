@@ -2607,6 +2607,7 @@ function TimemApp() {
       forceSupplement = false,
       roleIds: readonly string[] = [],
       forceNewTurn = false,
+      resumeDirectly = false,
     ): boolean => {
       const targetSession = sessionsRef.current.find(
         (session) => session.session_id === sessionId,
@@ -2633,6 +2634,7 @@ function TimemApp() {
         attachmentIds,
         forceSupplement,
         forceNewTurn,
+        resumeDirectly,
       );
       if (decision.kind === "skip") {
         if (decision.reason === "cancelling" && targetSession) {
@@ -7329,6 +7331,7 @@ function TimemThread({
     forceSupplement?: boolean,
     roleIds?: readonly string[],
     forceNewTurn?: boolean,
+    resumeDirectly?: boolean,
   ) => boolean;
   onMessageQueueCommand: (command: ClientCommand) => boolean;
   selectedRoleIds: readonly string[];
@@ -7481,7 +7484,6 @@ function TimemThread({
     undefined,
     isCancelling,
   );
-  const hasDraftText = !!draft.trim();
   const showStopAction =
     composerPrimaryAction(interactionPhase, draft) === "stop";
   const sendLabel =
@@ -8143,6 +8145,20 @@ function TimemThread({
   };
   const submitDraft = () => {
     if (uploadingAttachment || sessionInteractionLocked) return;
+    if (activeSession && activeSession.state !== "working" && !draft.trim()) {
+      if (!window.confirm("未输入内容，是否让Timem强制继续")) return;
+      onSendForSession(
+        activeSession.session_id,
+        "",
+        clientId("resume"),
+        [],
+        false,
+        [],
+        true,
+        true,
+      );
+      return;
+    }
     const reserved = reserveSessionDraftSubmission(
       submittingDraftSessionIdsRef,
       activeSessionId,
@@ -8850,8 +8866,8 @@ function TimemThread({
                       : sessionInteractionLocked
                         ? sessionInteractionLockReason
                         : activeSession.state === "working"
-                          ? "继续输入…"
-                          : "Ask Timem to investigate, write, or work with you."
+                          ? "在 Timem思考时继续输入补充对话..."
+                          : "输入问题，或按发送直接继续..."
                   }
                   aria-label="Message Timem"
                   aria-describedby={composerHintId}
@@ -8899,8 +8915,8 @@ function TimemThread({
                   disabled={sessionInteractionLocked}
                   placeholder={
                     activeSession.state === "working"
-                      ? "继续输入…"
-                      : "Ask Timem to investigate, write, or work with you."
+                      ? "在 Timem思考时继续输入补充对话..."
+                      : "输入问题，或按发送直接继续..."
                   }
                   onCommit={(value) =>
                     setDraftsBySession((current) =>
@@ -9030,7 +9046,6 @@ function TimemThread({
                       aria-label={effectiveSendLabel}
                       disabled={
                         !activeSession ||
-                        !hasDraftText ||
                         uploadingAttachment ||
                         sessionInteractionLocked
                       }
@@ -9420,12 +9435,17 @@ const TurnInteraction = memo(function TurnInteraction({
       className={`turn-interaction ${isWorking ? "active" : "completed"}`}
       data-turn-id={turn.turn_id}
     >
-      {!!turn.user_entries.filter((e) => e.kind !== "approval").length && (
+      {!!turn.user_entries.filter(
+        (entry) => entry.kind !== "approval" && entry.kind !== "resume_directly",
+      ).length && (
         <section className="turn-user-frame" data-user-message-anchor>
           <div className="turn-user-content">
             {turn.user_entries
               .map((entry, roleIndex) => ({ entry, roleIndex }))
-              .filter(({ entry }) => entry.kind !== "approval")
+              .filter(
+                ({ entry }) =>
+                  entry.kind !== "approval" && entry.kind !== "resume_directly",
+              )
               .map(({ entry, roleIndex }) => (
                 <div
                   className={`turn-user-entry ${entry.kind}`}

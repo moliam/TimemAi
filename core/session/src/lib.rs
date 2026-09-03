@@ -1,11 +1,12 @@
 pub mod message_queue;
 
 use agent_core::{
-    core_initialized_topic_event_with_worker, run_session_turn_with_model_client, AgentCore,
-    CoreGlobalWorkerStatus, CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopicEvent,
-    HostDecision, HostDecisionRequest, HttpModelClient, ModelClient, ModelServiceConfig,
-    ResponseProtocolKind, RuntimeProfiler, TopicReply, TurnInput, TurnOutcome, TurnStopDetail,
-    TurnStopSummary, TurnUi, UsageStats,
+    core_initialized_topic_event_with_worker, run_direct_resume_turn_with_model_client,
+    run_session_turn_with_model_client, AgentCore, CoreGlobalWorkerStatus,
+    CoreSessionWorkerIdentity, CoreSessionWorkerWorkspace, CoreTopicEvent, HostDecision,
+    HostDecisionRequest, HttpModelClient, ModelClient, ModelServiceConfig, ResponseProtocolKind,
+    RuntimeProfiler, TopicReply, TurnInput, TurnOutcome, TurnStopDetail, TurnStopSummary, TurnUi,
+    UsageStats,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -37,6 +38,27 @@ pub fn run_synchronous_turn(
     profiler: Option<&mut RuntimeProfiler>,
 ) -> TurnOutcome {
     agent_core::run_session_turn(core, config, input, ui, profiler)
+}
+
+pub fn resume_synchronous_turn(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    input: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+) -> TurnOutcome {
+    agent_core::run_direct_resume_turn(core, config, input, ui, profiler)
+}
+
+pub fn resume_synchronous_turn_with_model_client(
+    core: &mut AgentCore,
+    config: &mut ModelServiceConfig,
+    input: TurnInput<'_>,
+    ui: &mut dyn TurnUi,
+    profiler: Option<&mut RuntimeProfiler>,
+    model_client: &mut dyn ModelClient,
+) -> TurnOutcome {
+    run_direct_resume_turn_with_model_client(core, config, input, ui, profiler, model_client)
 }
 
 pub fn run_synchronous_turn_with_model_client(
@@ -310,6 +332,7 @@ enum CoreSessionWorkerCommand {
         additional_context: Option<String>,
         command_id: Option<String>,
         initial_supplements: Vec<QueuedSupplement>,
+        direct_resume: bool,
         cancel_generation: u64,
     },
     RunToolGen {
@@ -400,6 +423,24 @@ impl CoreSessionWorkerHandle {
         self.run_turn_with_command_id(input, additional_context, None)
     }
 
+    pub fn resume_turn_directly(&self, additional_context: Option<String>) -> Result<(), String> {
+        self.resume_turn_directly_with_command_id(additional_context, None)
+    }
+
+    pub fn resume_turn_directly_with_command_id(
+        &self,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+    ) -> Result<(), String> {
+        self.run_turn_batch_with_supplements_kind(
+            String::new(),
+            additional_context,
+            command_id,
+            Vec::new(),
+            true,
+        )
+    }
+
     pub fn run_turn_with_command_id(
         &self,
         input: impl Into<String>,
@@ -433,6 +474,23 @@ impl CoreSessionWorkerHandle {
         additional_context: Option<String>,
         command_id: Option<String>,
         supplements: Vec<(agent_core::UserSupplement, Option<String>)>,
+    ) -> Result<(), String> {
+        self.run_turn_batch_with_supplements_kind(
+            input,
+            additional_context,
+            command_id,
+            supplements,
+            false,
+        )
+    }
+
+    fn run_turn_batch_with_supplements_kind(
+        &self,
+        input: impl Into<String>,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+        supplements: Vec<(agent_core::UserSupplement, Option<String>)>,
+        direct_resume: bool,
     ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
@@ -479,6 +537,7 @@ impl CoreSessionWorkerHandle {
                         command_id,
                     })
                     .collect(),
+                direct_resume,
                 cancel_generation,
             })
             .map_err(|_| "core_session_worker_stopped".to_string());
@@ -1496,6 +1555,7 @@ impl CoreSessionWorker {
                         mut additional_context,
                         command_id,
                         initial_supplements,
+                        direct_resume,
                         cancel_generation: command_generation,
                     } => {
                         if command_generation < cancel_generation.load(Ordering::SeqCst) {
@@ -1544,7 +1604,12 @@ impl CoreSessionWorker {
                             });
                             ui.current_turn_active = Some(working.active_handle());
                             let outcome = loop {
-                                let main_outcome = run_session_turn_with_model_client(
+                                let run_turn = if direct_resume {
+                                    run_direct_resume_turn_with_model_client
+                                } else {
+                                    run_session_turn_with_model_client
+                                };
+                                let main_outcome = run_turn(
                                     &mut core,
                                     &mut config,
                                     TurnInput {
