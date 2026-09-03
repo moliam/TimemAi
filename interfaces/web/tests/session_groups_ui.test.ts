@@ -92,6 +92,22 @@ describe("sortable Session group UI", () => {
     expect(styles).toContain(".session-row.has-workers .session-rename-button");
   });
 
+  it("uses symmetric compact sidebars while preserving stored layout preferences", () => {
+    expect(source).toContain("leftWidth: 200,");
+    expect(source).toContain("rightWidth: 200,");
+    expect(source).toContain("Number(stored.leftWidth) || fallback.leftWidth");
+    expect(source).toContain("Number(stored.rightWidth) || fallback.rightWidth");
+    expect(source).toContain("const LEFT_SIDEBAR_MIN_WIDTH = 180;");
+    expect(source).toContain("const RIGHT_SIDEBAR_MIN_WIDTH = 180;");
+    expect(styles).toContain("var(--left-sidebar-width, 200px)");
+    expect(styles).toContain("var(--right-sidebar-width, 200px)");
+    expect(styles).not.toContain("var(--left-sidebar-width, 220px)");
+    expect(styles).not.toContain("var(--right-sidebar-width, 286px)");
+    expect(styles).toContain(
+      ".settings-center-layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px minmax(0, 1fr);",
+    );
+  });
+
   it("keeps Search, Favorite, and Settings visible beside a long Session list", () => {
     expect(source).toContain('className="session-list"');
     expect(source).toContain('className="sidebar-footer"');
