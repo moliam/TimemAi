@@ -163,6 +163,7 @@ struct AppState {
     mem_epoch: Arc<RwLock<u64>>,
     debug: Option<Arc<DebugStore>>,
     runtime_log: RuntimeLog,
+    lifecycle_diagnostics: LifecycleDiagnostics,
 }
 
 #[derive(Clone)]
@@ -1521,6 +1522,7 @@ pub async fn run(
         mem_epoch: Arc::new(RwLock::new(1)),
         debug,
         runtime_log,
+        lifecycle_diagnostics: diagnostics.clone(),
     };
     let cleanup_guard = WebRuntimeCleanupGuard::new(&state);
 

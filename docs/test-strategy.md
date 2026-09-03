@@ -147,7 +147,11 @@ checks. If a dimension is not applicable, record that residual decision in
   a maintenance hint only when an existing 16 MiB segment rolls. Due work runs
   only while all Sessions are idle and is serialized against browser mutations;
   Settings policy saves and the user-visible Top-files list remain explicit
-  maintenance triggers.
+  maintenance triggers. Retention tests deliberately corrupt the rolling manifest,
+  delete and resize physical segments, interrupt an edit before manifest commit,
+  immediately append afterward, and require exact data preservation, idempotent
+  retry, monotonic segment ids, bounded internal diagnostics, and no user-Shell
+  maintenance warning.
 
 ## Turn Concurrency Stress Standard
 

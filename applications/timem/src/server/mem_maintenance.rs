@@ -485,7 +485,7 @@ pub(super) fn apply_temporary_retention(
         }
         result.api_audit_events =
             agent_core::prune_api_audit_before(&layout.api_audit_file(), cutoff_ms, now_ms)
-                .map_err(|_| "api_audit_retention_failed".to_string())?;
+                .map_err(|error| format!("api_audit_retention_failed:{error}"))?;
     }
     if let Some(total_bytes) = max_bytes {
         let capacity = RollingCapacity::from_total_bytes(total_bytes)
@@ -696,6 +696,16 @@ pub(super) fn complete_temporary_maintenance(state: &AppState, now: Instant) -> 
     }
 }
 
+pub(super) fn record_idle_temporary_maintenance_failure(state: &AppState, error: &str) {
+    let details = json!({ "error": error });
+    state
+        .runtime_log
+        .record("idle_temporary_maintenance_failed", details.clone());
+    state
+        .lifecycle_diagnostics
+        .checkpoint("idle_temporary_maintenance_failed", details);
+}
+
 pub(super) fn spawn_idle_temporary_maintenance_loop(state: AppState) {
     tokio::spawn(async move {
         loop {
@@ -722,9 +732,7 @@ pub(super) fn spawn_idle_temporary_maintenance_loop(state: AppState) {
                         sleep(TEMPORARY_MAINTENANCE_BUSY_RETRY_INTERVAL).await;
                     }
                     Err(error) => {
-                        eprintln!(
-                            "[timem_web_warning] idle_temporary_maintenance_failed error={error}"
-                        );
+                        record_idle_temporary_maintenance_failure(&state, &error);
                         break;
                     }
                 }

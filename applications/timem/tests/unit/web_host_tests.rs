@@ -6511,6 +6511,91 @@ fn successful_temporary_maintenance_completion_resets_runtime_and_clears_hint() 
 }
 
 #[tokio::test]
+async fn failed_idle_maintenance_preserves_due_state_records_diagnostics_and_recovers() {
+    let mut state = routing_test_state();
+    let test_root = std::env::temp_dir().join(unique_web_id("idle_maintenance_failure"));
+    let runtime_log_path = test_root.join("runtime.log");
+    state.runtime_log = RuntimeLog::with_path_and_limit(runtime_log_path.clone(), 64 * 1024);
+    state.lifecycle_diagnostics = LifecycleDiagnostics::install_for_test(&test_root).unwrap();
+
+    let (memory_dir, audit_file, hint) = {
+        let mut mem = state.mem.lock().unwrap();
+        mem.temporary_maintenance.accumulated_runtime = TEMPORARY_MAINTENANCE_INTERVAL;
+        let memory_dir = mem.layout.memory_dir();
+        save_temporary_maintenance_runtime_state(&memory_dir, &mem.temporary_maintenance).unwrap();
+        let audit_file = mem.layout.api_audit_file();
+        let hint = agent_core::api_audit_maintenance_hint_path(&audit_file);
+        (memory_dir, audit_file, hint)
+    };
+    std::fs::create_dir_all(audit_file.parent().unwrap()).unwrap();
+    std::fs::create_dir(&audit_file).unwrap();
+    std::fs::write(
+        &hint,
+        b"audit_segment_rolled
+",
+    )
+    .unwrap();
+
+    let error = run_idle_temporary_maintenance(state.clone())
+        .await
+        .unwrap_err();
+    assert!(error.starts_with("api_audit_retention_failed:"));
+    assert!(hint.exists(), "a failed pass must remain due for retry");
+    assert_eq!(
+        load_temporary_maintenance_runtime_state(&memory_dir)
+            .unwrap()
+            .accumulated_runtime,
+        TEMPORARY_MAINTENANCE_INTERVAL,
+        "failure must not be committed as successful maintenance"
+    );
+
+    record_idle_temporary_maintenance_failure(&state, &error);
+    let runtime_record: Value =
+        serde_json::from_str(std::fs::read_to_string(&runtime_log_path).unwrap().trim()).unwrap();
+    assert_eq!(runtime_record["stage"], "idle_temporary_maintenance_failed");
+    assert_eq!(runtime_record["fields"]["error"], error);
+    let current_diagnostic = state
+        .lifecycle_diagnostics
+        .root()
+        .unwrap()
+        .join("current-runs")
+        .read_dir()
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let diagnostic: Value =
+        serde_json::from_slice(&std::fs::read(current_diagnostic).unwrap()).unwrap();
+    let last = diagnostic["recent_lifecycle_events"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap();
+    assert_eq!(last["name"], "idle_temporary_maintenance_failed");
+    assert_eq!(last["details"]["error"], error);
+
+    std::fs::remove_dir(&audit_file).unwrap();
+    std::fs::write(&audit_file, br#"{"version":1,"events":[]}"#).unwrap();
+    assert_eq!(
+        run_idle_temporary_maintenance(state.clone()).await.unwrap(),
+        TemporaryMaintenanceAttempt::Completed
+    );
+    assert!(!hint.exists());
+    assert_eq!(
+        load_temporary_maintenance_runtime_state(&memory_dir)
+            .unwrap()
+            .accumulated_runtime,
+        Duration::ZERO
+    );
+
+    state
+        .lifecycle_diagnostics
+        .finish("test_complete", true, None);
+    let _ = std::fs::remove_dir_all(test_root);
+}
+
+#[tokio::test]
 async fn idle_temporary_maintenance_waits_for_the_global_command_barrier() {
     let state = routing_test_state();
     let barrier = state.command_global_barrier.clone();
@@ -7314,6 +7399,7 @@ fn routing_test_state() -> AppState {
         mem_epoch: Arc::new(RwLock::new(1)),
         debug: None,
         runtime_log: RuntimeLog::default(),
+        lifecycle_diagnostics: LifecycleDiagnostics::disabled(),
     }
 }
 
