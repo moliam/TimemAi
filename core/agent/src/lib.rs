@@ -6815,10 +6815,6 @@ impl FileChatHistoryStore {
         })?
     }
 
-    fn read_all(&self) -> std::io::Result<Vec<RawChatHistoryRecord>> {
-        self.read_all_unlocked()
-    }
-
     fn read_all_unlocked(&self) -> std::io::Result<Vec<RawChatHistoryRecord>> {
         let mut rows = Vec::<RawChatHistoryRecord>::new();
         for audit_file in self.audit_files() {
