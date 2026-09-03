@@ -618,7 +618,8 @@ impl ShellJobManager {
         jobs.into_iter().map(|job| job.pid.to_string()).collect()
     }
 
-    pub fn running_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
+    /// Read-only snapshot for exactly one Session; never consumes terminal updates.
+    pub fn query_running_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
         let session_id = session_id.trim();
         if session_id.is_empty() {
             return Vec::new();
@@ -644,7 +645,9 @@ impl ShellJobManager {
         running
     }
 
-    pub fn refresh_for_session(
+    /// Atomically observes one Session and consumes each new terminal update once.
+    /// Use `query_running_for_session` for a non-consuming query.
+    pub fn consume_completed_for_session(
         &self,
         session_id: &str,
     ) -> (Vec<RunningShellJob>, Vec<ShellJobExitUpdate>) {
@@ -704,7 +707,7 @@ impl ShellJobManager {
     }
 
     pub fn running_job_list_context(&self, session_id: &str) -> Option<String> {
-        let jobs = self.running_for_session(session_id);
+        let jobs = self.query_running_for_session(session_id);
         if jobs.is_empty() {
             return None;
         }

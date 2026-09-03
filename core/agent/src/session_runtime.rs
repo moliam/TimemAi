@@ -626,10 +626,11 @@ fn run_session_turn_with_model_client_and_reminder_override(
         core.mark_user_interrupted_work();
     }
     let mut action_runtime = TurnActionRuntime::new(ui);
-    outcome = outcome.with_running_jobs(core.refresh_running_shell_jobs_for_session_with_runtime(
-        request.session,
-        Some(&mut action_runtime),
-    ));
+    outcome =
+        outcome.with_running_jobs(core.consume_completed_shell_jobs_for_session_with_runtime(
+            request.session,
+            Some(&mut action_runtime),
+        ));
     if let Some(profiler) = profiler {
         profiler.record_turn(elapsed, model_wait_this_turn);
     }

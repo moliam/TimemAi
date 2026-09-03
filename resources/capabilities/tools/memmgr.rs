@@ -36,6 +36,8 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
     let mem_type = action.input_lower("type");
     let op = action.input_lower("op");
     let search_text = action.input_str("search_text");
+    let scope = action.input_lower("scope");
+    let requested_session_id = action.input_str("session_id");
     let content = action.input_str("content");
     let scratch_type = action.input_str("kind");
     let label = action.input_str("label");
@@ -51,14 +53,11 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
     let outcome = match (mem_type.as_str(), op.as_str()) {
         ("durable", "schema") => {
             core.current_stats.mem_reads += 1;
-            ActionOutcome::completed(core.memory.schema_text(&core.chat_history))
+            ActionOutcome::completed(core.memory.schema_text())
         }
-        ("durable", "sql") | ("raw_chat", "sql") => {
+        ("durable", "sql") => {
             core.current_stats.mem_reads += 1;
-            match core
-                .memory
-                .sql_read(&core.chat_history, &sql, &params, limit)
-            {
+            match core.memory.sql_read(&sql, &params, limit) {
                 Ok(rows) if rows.is_empty() => {
                     let text = if mem_type == "durable" {
                         let total_rows = core.memory.count().unwrap_or_default();
@@ -117,10 +116,26 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
             }
         }
         ("raw_chat", "search") => {
-            let rows = match core
-                .chat_history
-                .query(&search_text, limit, after_ms, before_ms)
-            {
+            let scope = if scope.is_empty() {
+                "current_session".to_string()
+            } else {
+                scope
+            };
+            let session_scope = match scope.as_str() {
+                "current_session" if requested_session_id.is_empty() => Some(core.current_session_id()),
+                "session" if !requested_session_id.trim().is_empty() => Some(requested_session_id.clone()),
+                "global" if requested_session_id.is_empty() => None,
+                "current_session" => return ActionOutcome::failed("Action result: memmgr\ntype: raw_chat\nop: search\nerror: session_id_not_allowed"),
+                "session" => return ActionOutcome::failed("Action result: memmgr\ntype: raw_chat\nop: search\nerror: session_id_required"),
+                _ => return ActionOutcome::failed("Action result: memmgr\ntype: raw_chat\nop: search\nerror: invalid_raw_chat_scope"),
+            };
+            let rows = match core.chat_history.query(
+                &search_text,
+                limit,
+                after_ms,
+                before_ms,
+                session_scope.as_deref(),
+            ) {
                 Ok(rows) => rows,
                 Err(err) => {
                     let text = format!(
@@ -148,15 +163,15 @@ pub(crate) fn execute_outcome(core: &mut AgentCore, action: &ParsedAction) -> Ac
                 if !rows.is_empty() {
                     let lines = rows
                         .into_iter()
-                        .map(|record| {
-                            format!(
-                                "- source=chat_record time_ms={} session={} turn_id={} user={} assistant={}",
-                                record.started_at_ms,
-                                record.session,
-                                record.turn_id,
-                                compact_text(&record.user_input, 160),
-                                compact_text(&record.assistant_output, 220)
-                            )
+                        .flat_map(|record| {
+                            let mut messages = Vec::new();
+                            if !record.user_input.trim().is_empty() {
+                                messages.push(format!("- source=chat_history session_id={} turn_id={} role=user created_at_ms={} content={}", record.session, record.turn_id, record.started_at_ms, compact_text(&record.user_input, 240)));
+                            }
+                            if !record.assistant_output.trim().is_empty() {
+                                messages.push(format!("- source=chat_history session_id={} turn_id={} role=assistant created_at_ms={} content={}", record.session, record.turn_id, record.started_at_ms, compact_text(&record.assistant_output, 320)));
+                            }
+                            messages
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
