@@ -403,7 +403,7 @@ function makeMessage(
 const SIDEBAR_LAYOUT_STORAGE_KEY = "timem.sidebar-layout.v1";
 const LEFT_SIDEBAR_MIN_WIDTH = 180;
 const LEFT_SIDEBAR_MAX_WIDTH = 380;
-const RIGHT_SIDEBAR_MIN_WIDTH = 240;
+const RIGHT_SIDEBAR_MIN_WIDTH = 180;
 const RIGHT_SIDEBAR_MAX_WIDTH = 480;
 
 type SidebarLayout = {
@@ -419,8 +419,8 @@ function clampSidebarWidth(value: number, minimum: number, maximum: number) {
 
 function loadSidebarLayout(): SidebarLayout {
   const fallback = {
-    leftWidth: 220,
-    rightWidth: 286,
+    leftWidth: 200,
+    rightWidth: 200,
     leftCollapsed: false,
     rightCollapsed: false,
   };
