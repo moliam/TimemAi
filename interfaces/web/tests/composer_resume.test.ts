@@ -10,7 +10,7 @@ describe("composer direct resume", () => {
   });
 
   it("requires confirmation before an idle empty submit and sends explicit intent", () => {
-    expect(source).toContain('window.confirm("未输入内容，是否让Timem强制继续")');
+    expect(source).toContain('window.confirm("未输入内容，是否让Timem直接继续")');
     expect(source).toMatch(
       /activeSession\.state !== "working" && !draft\.trim\(\)[\s\S]*onSendForSession\([\s\S]*clientId\("resume"\)[\s\S]*true,\s*true,/,
     );

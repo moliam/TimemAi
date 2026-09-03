@@ -1424,7 +1424,7 @@ struct PasteRecoveryOutcome {
 }
 
 fn render_direct_resume_prompt() -> String {
-    "\n未输入内容，是否让Timem强制继续？\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n".to_string()
+    "\n未输入内容，是否让Timem直接继续？\n使用 ←/→ 或 ↑/↓ 选择，回车确认。\n".to_string()
 }
 
 fn render_direct_resume_choices(selected: ApprovalChoice) -> String {

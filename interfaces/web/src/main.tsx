@@ -8146,7 +8146,7 @@ function TimemThread({
   const submitDraft = () => {
     if (uploadingAttachment || sessionInteractionLocked) return;
     if (activeSession && activeSession.state !== "working" && !draft.trim()) {
-      if (!window.confirm("未输入内容，是否让Timem强制继续")) return;
+      if (!window.confirm("未输入内容，是否让Timem直接继续")) return;
       onSendForSession(
         activeSession.session_id,
         "",

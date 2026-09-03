@@ -78,7 +78,7 @@ use unicode_width::UnicodeWidthChar;
 #[test]
 fn direct_resume_confirmation_is_explicit_and_defaults_to_cancel() {
     let prompt = render_direct_resume_prompt();
-    assert!(prompt.contains("未输入内容，是否让Timem强制继续？"));
+    assert!(prompt.contains("未输入内容，是否让Timem直接继续？"));
     assert!(prompt.contains("回车确认"));
 
     let choices = render_direct_resume_choices(ApprovalChoice::Deny);

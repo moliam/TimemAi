@@ -1126,7 +1126,16 @@ describe("web topic view model", () => {
 
   it("creates an explicit direct-resume command only when requested", () => {
     expect(
-      composerSendDecision(session("session_1"), "", false, false, [], false, true, true),
+      composerSendDecision(
+        session("session_1"),
+        "",
+        false,
+        false,
+        [],
+        false,
+        true,
+        true,
+      ),
     ).toEqual({
       kind: "send",
       text: "",
@@ -1142,6 +1151,51 @@ describe("web topic view model", () => {
     expect(composerSendDecision(session("session_1"), "", false)).toEqual({
       kind: "skip",
       reason: "empty_text",
+    });
+  });
+
+  it("constructs direct resume only for an idle empty attachment-free new turn", () => {
+    const idle = session("session_1");
+    const working = { ...idle, state: "working" as const };
+
+    expect(
+      composerSendDecision(working, "", false, false, [], false, true, true),
+    ).toEqual({ kind: "skip", reason: "direct_resume_requires_idle" });
+    expect(
+      composerSendDecision(
+        idle,
+        "not empty",
+        false,
+        false,
+        [],
+        false,
+        true,
+        true,
+      ),
+    ).toEqual({
+      kind: "skip",
+      reason: "direct_resume_requires_empty_text",
+    });
+    expect(
+      composerSendDecision(
+        idle,
+        "",
+        false,
+        false,
+        ["upload_1"],
+        false,
+        true,
+        true,
+      ),
+    ).toEqual({
+      kind: "skip",
+      reason: "direct_resume_attachments_not_supported",
+    });
+    expect(
+      composerSendDecision(idle, "", false, false, [], true, false, true),
+    ).toEqual({
+      kind: "skip",
+      reason: "direct_resume_supplement_not_supported",
     });
   });
 

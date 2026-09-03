@@ -11646,6 +11646,35 @@ impl ModelClient for TaggedFinalModel {
     }
 }
 
+struct DirectResumePromptCaptureModel {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+impl ModelClient for DirectResumePromptCaptureModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        prompt: &str,
+        _audit_file: &Path,
+        _should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        Ok(LlmResponse {
+            tool_calls: Vec::new(),
+            content: confirmed_xml_response("<final_answer>direct resume complete</final_answer>"),
+            model_name: "test-model".to_string(),
+            usage: UsageStats {
+                llm_calls: 1,
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..UsageStats::zero()
+            },
+            truncated: false,
+        })
+    }
+}
+
 struct ToolGenPromptCaptureModel {
     prompts: Arc<Mutex<Vec<String>>>,
 }
@@ -11887,6 +11916,62 @@ fn register_real_worker(state: &AppState, name: &'static str) -> String {
     session_id
 }
 
+fn register_direct_resume_capture_worker(
+    state: &AppState,
+    prompts: Arc<Mutex<Vec<String>>>,
+) -> String {
+    let ordinal = state.sessions.lock().unwrap().len() as u32;
+    let session_id = unique_web_id("direct_resume_session");
+    let context_id = test_context_id(&session_id);
+    let worker_dir = std::env::temp_dir().join(format!("timem_web_direct_resume_{}", now_ms()));
+    std::fs::create_dir_all(&worker_dir).unwrap();
+    let core = AgentCore::new(
+        STATIC_PROMPT,
+        CoreProfile {
+            model: "test-model".to_string(),
+        },
+        &worker_dir,
+    );
+    let config = state.template.settings.lock().unwrap().config.clone();
+    let worker_id = state
+        .manager
+        .lock()
+        .unwrap()
+        .spawn_worker_in_session_with_model_client(
+            core,
+            config,
+            CoreSessionWorkerWorkspace::new(
+                &worker_dir,
+                worker_dir.join("audit.json"),
+                "test-web",
+                "local",
+            ),
+            session_id.clone(),
+            context_id.clone(),
+            Some("Direct resume test".to_string()),
+            None,
+            DirectResumePromptCaptureModel { prompts },
+        )
+        .unwrap();
+    let mut session = test_web_session(&session_id, ordinal, "Direct resume test".to_string());
+    session.current_dir = worker_dir.display().to_string();
+    session.contexts[0] = WebContext {
+        context_id: context_id.clone(),
+        current_dir: worker_dir.display().to_string(),
+        worker_ids: vec![worker_id.clone()],
+    };
+    session.workers[0].worker_id = worker_id.clone();
+    session.workers[0].context_id = context_id;
+    session.active_context_id = session.contexts[0].context_id.clone();
+    session.primary_worker_id = worker_id;
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session);
+    session_id
+}
+
 fn register_toolgen_capture_worker(state: &AppState, prompts: Arc<Mutex<Vec<String>>>) -> String {
     let ordinal = state.sessions.lock().unwrap().len() as u32;
     let session_id = unique_web_id("toolgen_session");
@@ -12034,6 +12119,226 @@ fn drive_worker_until_session_ready(
         );
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+fn direct_resume_command(session_id: &str) -> ClientCommand {
+    ClientCommand::TurnSubmit {
+        session_id: session_id.to_string(),
+        text: String::new(),
+        input_kind: Some("resume_directly".to_string()),
+        source_turn_id: None,
+        attachment_ids: Some(Vec::new()),
+        role_id: None,
+        role_ids: Vec::new(),
+    }
+}
+
+#[test]
+fn ordinary_empty_turn_remains_invalid_without_direct_resume_intent() {
+    let state = routing_test_state();
+    let error = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::TurnSubmit {
+            session_id: "session_a".to_string(),
+            text: String::new(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error, "empty_turn text");
+    assert!(state.sessions.lock().unwrap()["session_a"].turns.is_empty());
+}
+
+#[test]
+fn direct_resume_host_constructs_hidden_turn_and_shared_model_input() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let session_id = register_direct_resume_capture_worker(&state, Arc::clone(&prompts));
+
+    let event = handle_command(&state, TEST_PORT, direct_resume_command(&session_id))
+        .unwrap()
+        .expect("direct resume must create a turn");
+    let WireEvent::TurnUpdated { turn, .. } = event else {
+        panic!("direct resume must return TurnUpdated")
+    };
+    assert_eq!(turn.user_entries.len(), 1);
+    assert_eq!(turn.user_entries[0].kind, "resume_directly");
+    assert!(turn.user_entries[0].text.is_empty());
+    assert!(turn.user_entries[0].attachments.is_empty());
+
+    drive_worker_until_session_ready(&state, &session_id, &prompts);
+    let prompt = prompts.lock().unwrap().last().unwrap().clone();
+    assert!(prompt.contains(agent_core::DIRECT_RESUME_USER_INPUT));
+    assert!(!prompt.contains("<USER>\n\n</USER>"));
+}
+
+#[test]
+fn direct_resume_host_rejects_invalid_payload_and_non_idle_state() {
+    let cases = [
+        (
+            "nonempty text",
+            ClientCommand::TurnSubmit {
+                session_id: "session_a".to_string(),
+                text: "new task".to_string(),
+                attachment_ids: None,
+                input_kind: Some("resume_directly".to_string()),
+                source_turn_id: None,
+                role_id: None,
+                role_ids: Vec::new(),
+            },
+            "resume_directly_text_must_be_empty",
+        ),
+        (
+            "attachment",
+            ClientCommand::TurnSubmit {
+                session_id: "session_a".to_string(),
+                text: String::new(),
+                attachment_ids: Some(vec!["upload_1".to_string()]),
+                input_kind: Some("resume_directly".to_string()),
+                source_turn_id: None,
+                role_id: None,
+                role_ids: Vec::new(),
+            },
+            "resume_directly_attachments_not_supported",
+        ),
+        (
+            "worker role",
+            ClientCommand::TurnSubmit {
+                session_id: "session_a".to_string(),
+                text: String::new(),
+                attachment_ids: None,
+                input_kind: Some("resume_directly".to_string()),
+                source_turn_id: None,
+                role_id: Some("role_reviewer".to_string()),
+                role_ids: Vec::new(),
+            },
+            "resume_directly_worker_role_not_supported",
+        ),
+        (
+            "worker role list",
+            ClientCommand::TurnSubmit {
+                session_id: "session_a".to_string(),
+                text: String::new(),
+                attachment_ids: None,
+                input_kind: Some("resume_directly".to_string()),
+                source_turn_id: None,
+                role_id: None,
+                role_ids: vec!["role_reviewer".to_string()],
+            },
+            "resume_directly_worker_role_not_supported",
+        ),
+        (
+            "source turn",
+            ClientCommand::TurnSubmit {
+                session_id: "session_a".to_string(),
+                text: String::new(),
+                attachment_ids: None,
+                input_kind: Some("resume_directly".to_string()),
+                source_turn_id: Some("turn_1".to_string()),
+                role_id: None,
+                role_ids: Vec::new(),
+            },
+            "resume_directly_source_turn_not_supported",
+        ),
+    ];
+    for (name, command, expected) in cases {
+        let state = routing_test_state();
+        assert_eq!(
+            handle_command(&state, TEST_PORT, command).unwrap_err(),
+            expected,
+            "{name}"
+        );
+        assert!(state.sessions.lock().unwrap()["session_a"].turns.is_empty());
+    }
+
+    let working = routing_test_state();
+    start_web_turn(&working, "session_a", "active task").unwrap();
+    assert_eq!(
+        handle_command(&working, TEST_PORT, direct_resume_command("session_a")).unwrap_err(),
+        "resume_directly_requires_idle_session"
+    );
+
+    let queued = routing_test_state();
+    start_web_turn(&queued, "session_a", "active task").unwrap();
+    handle_command_with_id(
+        &queued,
+        TEST_PORT,
+        Some("queued-task"),
+        ClientCommand::TurnSubmit {
+            session_id: "session_a".to_string(),
+            text: "queued task".to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+    {
+        let mut sessions = queued.sessions.lock().unwrap();
+        let session = sessions.get_mut("session_a").unwrap();
+        session.active_turn_id = None;
+        session.pending_turn_id = None;
+        session.state = "ready".to_string();
+    }
+    assert_eq!(
+        handle_command(&queued, TEST_PORT, direct_resume_command("session_a")).unwrap_err(),
+        "resume_directly_requires_idle_session"
+    );
+}
+
+#[tokio::test]
+async fn direct_resume_survives_work_instruction_confirmation_as_shared_input() {
+    let state = routing_test_state();
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let session_id = register_direct_resume_capture_worker(&state, Arc::clone(&prompts));
+    let current_dir = {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.work_instruction_mode = WorkInstructionLoadMode::Ask;
+        PathBuf::from(&session.current_dir)
+    };
+    std::fs::write(
+        current_dir.join("AGENTS.md"),
+        "Use the direct resume guide.",
+    )
+    .unwrap();
+
+    let event = handle_command(&state, TEST_PORT, direct_resume_command(&session_id))
+        .unwrap()
+        .expect("direct resume must create a pending turn");
+    let WireEvent::TurnUpdated { turn, .. } = event else {
+        panic!("direct resume must return TurnUpdated")
+    };
+    assert_eq!(turn.user_entries[0].kind, "resume_directly");
+    let request_id = {
+        let sessions = state.sessions.lock().unwrap();
+        let pending = sessions[&session_id]
+            .pending_work_instruction_turn
+            .as_ref()
+            .expect("work instruction decision must be pending");
+        assert!(pending.direct_resume);
+        assert!(pending.text.is_empty());
+        pending.request_id.clone()
+    };
+
+    assert!(resolve_work_instruction_decision(
+        &state,
+        &session_id,
+        Some(&request_id),
+        HostDecision::Accept,
+    )
+    .unwrap());
+    drive_worker_until_session_ready(&state, &session_id, &prompts);
+    let prompt = prompts.lock().unwrap().last().unwrap().clone();
+    assert!(prompt.contains(agent_core::DIRECT_RESUME_USER_INPUT));
+    assert!(prompt.contains("Use the direct resume guide."));
 }
 
 #[test]
