@@ -2065,24 +2065,24 @@ impl AgentCore {
                 .len()
     }
 
-    pub fn running_shell_jobs_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
-        self.shell_jobs.running_for_session(session_id)
+    pub fn query_running_shell_jobs_for_session(&self, session_id: &str) -> Vec<RunningShellJob> {
+        self.shell_jobs.query_running_for_session(session_id)
     }
 
-    pub fn refresh_running_shell_jobs_for_session(
+    pub fn consume_completed_shell_jobs_for_session(
         &mut self,
         session_id: &str,
     ) -> Vec<RunningShellJob> {
-        self.refresh_running_shell_jobs_for_session_with_runtime(session_id, None)
+        self.consume_completed_shell_jobs_for_session_with_runtime(session_id, None)
     }
 
     /// Refreshes detached shell jobs and reports exit events through the active Agent runtime.
-    pub fn refresh_running_shell_jobs_for_session_with_runtime(
+    pub fn consume_completed_shell_jobs_for_session_with_runtime(
         &mut self,
         session_id: &str,
         runtime: Option<&mut dyn ActionRuntime>,
     ) -> Vec<RunningShellJob> {
-        let (running, updates) = self.shell_jobs.refresh_for_session(session_id);
+        let (running, updates) = self.shell_jobs.consume_completed_for_session(session_id);
         self.submit_running_job_updates_with_runtime(updates, runtime);
         running
     }
@@ -2092,7 +2092,7 @@ impl AgentCore {
         session_id: &str,
         runtime: &mut dyn ActionRuntime,
     ) {
-        let (_, updates) = self.shell_jobs.refresh_for_session(session_id);
+        let (_, updates) = self.shell_jobs.consume_completed_for_session(session_id);
         self.submit_running_job_updates_with_runtime(updates, Some(runtime));
     }
 
@@ -2184,7 +2184,7 @@ impl AgentCore {
         runtime: Option<&mut dyn ActionRuntime>,
     ) -> String {
         let session_id = self.current_session_id();
-        let (running, updates) = self.shell_jobs.refresh_for_session(&session_id);
+        let (running, updates) = self.shell_jobs.consume_completed_for_session(&session_id);
         let first_new_delta = self.deltas.len();
         self.submit_running_job_updates_with_runtime(updates, runtime);
         self.flush_pending_prompt_components();
@@ -6403,26 +6403,21 @@ impl FileMemoryStore {
             .unwrap_or_default()
     }
 
-    fn schema_text(&self, chat_history: &FileChatHistoryStore) -> String {
-        format!(
-            "Action result: memmgr\ntype: durable\nop: schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- chat_messages(id TEXT, session_id TEXT, turn_id TEXT, role TEXT, content TEXT, created_at_ms INTEGER, source TEXT, profile_name TEXT, model_name TEXT, source_message_id TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: schema|sql|insert|update|upsert|delete\n- raw_chat: search|sql|delete\n- scratch: search|write|read|delete\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories/chat_messages); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from sql results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content; scratch read requires id and returns full scratch content. Empty raw_chat search_text lists recent chat records. loaded_chat_records={}.",
-            chat_history.read_all().map(|rows| rows.len()).unwrap_or_default()
-        )
+    fn schema_text(&self) -> String {
+        "Action result: memmgr\ntype: durable\nop: schema\ntables:\n- memories(id TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, version INTEGER, content TEXT)\n- scratch_notes(id TEXT, created_at_ms INTEGER, scratch_type TEXT, label TEXT, content TEXT, prompt_delta_ids ARRAY, prompt_slice_ids ARRAY)\nsafe_interface: memmgr\nops:\n- durable: schema|sql|insert|update|upsert|delete\n- raw_chat: search|delete\n- scratch: search|write|read|delete\nrules: memmgr sql ops accept SELECT, WITH ... SELECT, or PRAGMA table_info(memories); SQL writes are forbidden; use memmgr type=durable for durable memory insert/update/delete; use expected_version from sql results when updating/deleting an existing durable memory to avoid multi-CLI conflicts; use memmgr type=raw_chat op=delete for explicit chat transcript deletion; scratch write requires kind=notes with content; scratch read requires id and returns full scratch content. Empty raw_chat search_text lists recent chat records. loaded_chat_records={}".to_string()
     }
 
     fn sql_read(
         &self,
-        chat_history: &FileChatHistoryStore,
         sql: &str,
         params: &[String],
         limit: usize,
     ) -> Result<Vec<Vec<(String, String)>>, String> {
-        self.sql_read_unlocked(chat_history, sql, params, limit)
+        self.sql_read_unlocked(sql, params, limit)
     }
 
     fn sql_read_unlocked(
         &self,
-        chat_history: &FileChatHistoryStore,
         sql: &str,
         params: &[String],
         limit: usize,
@@ -6441,11 +6436,6 @@ impl FileMemoryStore {
             [],
         )
         .map_err(|_| "sqlite_schema_failed".to_string())?;
-        conn.execute(
-            "CREATE TABLE chat_messages(id TEXT NOT NULL, session_id TEXT NOT NULL, turn_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at_ms INTEGER NOT NULL, source TEXT NOT NULL, profile_name TEXT, model_name TEXT, source_message_id TEXT)",
-            [],
-        )
-        .map_err(|_| "sqlite_schema_failed".to_string())?;
         for record in self
             .read_all_unlocked()
             .map_err(|_| "memory_read_failed".to_string())?
@@ -6461,38 +6451,6 @@ impl FileMemoryStore {
                 ),
             )
             .map_err(|_| "sqlite_load_failed".to_string())?;
-        }
-        for record in chat_history
-            .read_all_unlocked()
-            .map_err(|_| "chat_history_read_failed".to_string())?
-        {
-            if !record.user_input.trim().is_empty() {
-                conn.execute(
-                    "INSERT INTO chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id) VALUES (?1, ?2, ?3, 'user', ?4, ?5, 'shell_audit', NULL, NULL, NULL)",
-                    (
-                        format!("{}_user", record.turn_id),
-                        &record.session,
-                        &record.turn_id,
-                        &record.user_input,
-                        record.started_at_ms,
-                    ),
-                )
-                .map_err(|_| "sqlite_load_failed".to_string())?;
-            }
-            if !record.assistant_output.trim().is_empty() {
-                conn.execute(
-                    "INSERT INTO chat_messages(id, session_id, turn_id, role, content, created_at_ms, source, profile_name, model_name, source_message_id) VALUES (?1, ?2, ?3, 'assistant', ?4, ?5, 'shell_audit', NULL, NULL, ?6)",
-                    (
-                        format!("{}_assistant", record.turn_id),
-                        &record.session,
-                        &record.turn_id,
-                        &record.assistant_output,
-                        record.started_at_ms,
-                        format!("{}_user", record.turn_id),
-                    ),
-                )
-                .map_err(|_| "sqlite_load_failed".to_string())?;
-            }
         }
         let mut stmt = conn
             .prepare(sql)
@@ -6742,8 +6700,14 @@ impl FileChatHistoryStore {
         limit: usize,
         after_ms: Option<i64>,
         before_ms: Option<i64>,
+        session_scope: Option<&str>,
     ) -> std::io::Result<Vec<RawChatHistoryRecord>> {
-        self.query_unlocked(query, limit, after_ms, before_ms)
+        let mut rows = self.query_unlocked(query, 50, after_ms, before_ms)?;
+        if let Some(session_id) = session_scope {
+            rows.retain(|record| record.session == session_id);
+        }
+        rows.truncate(limit.clamp(1, 50));
+        Ok(rows)
     }
 
     fn query_unlocked(
@@ -7002,18 +6966,13 @@ fn validate_memory_sql(sql: &str) -> Result<(), String> {
         if compact == "pragmatable_info(memories)"
             || compact == "pragmatable_info('memories')"
             || compact == "pragmatable_info(\"memories\")"
-            || compact == "pragmatable_info(chat_messages)"
-            || compact == "pragmatable_info('chat_messages')"
-            || compact == "pragmatable_info(\"chat_messages\")"
         {
             return Ok(());
         }
         return Err("only_declared_tables_are_allowed".to_string());
     }
     let allowed_read = lowered.contains(" from memories")
-        || lowered.contains(" from chat_messages")
         || lowered.contains(" join memories")
-        || lowered.contains(" join chat_messages")
         || lowered.contains(" from (select");
     if !allowed_read {
         return Err("only_declared_tables_are_allowed".to_string());

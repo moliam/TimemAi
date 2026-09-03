@@ -1322,6 +1322,13 @@ impl Default for CoreSessionWorkerManager {
     }
 }
 
+fn session_runtime_identity_context(identity: &agent_core::CoreSessionWorkerIdentity) -> String {
+    format!(
+        "Current session_id: {}\nCurrent session name: {}\nCurrent context_id: {}\nCurrent worker_id: {}",
+        identity.session_id, identity.display_name, identity.context_id, identity.worker_id
+    )
+}
+
 impl CoreSessionWorker {
     pub fn spawn(
         core: AgentCore,
@@ -1438,10 +1445,10 @@ impl CoreSessionWorker {
                     match command_rx.recv_timeout(Duration::from_millis(100)) {
                         Ok(command) => command,
                         Err(RecvTimeoutError::Timeout) => {
-                            let context_id = identity.context_id.clone();
+                            let session_id = identity.session_id.clone();
                             has_running_shell_jobs = !core
-                                .refresh_running_shell_jobs_for_session_with_runtime(
-                                    &context_id,
+                                .consume_completed_shell_jobs_for_session_with_runtime(
+                                    &session_id,
                                     Some(&mut ui),
                                 )
                                 .is_empty();
@@ -1480,6 +1487,10 @@ impl CoreSessionWorker {
                         initial_supplements,
                         cancel_generation: command_generation,
                     } => {
+                        additional_context = agent_core::combine_additional_contexts([
+                            Some(session_runtime_identity_context(&identity).as_str()),
+                            additional_context.as_deref(),
+                        ]);
                         if command_generation < cancel_generation.load(Ordering::SeqCst) {
                             if let Some(command_id) = command_id.as_ref() {
                                 let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
@@ -1519,7 +1530,6 @@ impl CoreSessionWorker {
                                 command_id: command_id.clone(),
                             });
                         }
-                        let context_id = identity.context_id.clone();
                         let outcome = {
                             let working = runtime.begin_worker_turn(&identity.session_id);
                             let _ = event_tx.send(CoreSessionWorkerEvent::TurnStarted {
@@ -1532,7 +1542,7 @@ impl CoreSessionWorker {
                                     &mut config,
                                     TurnInput {
                                         input: &input,
-                                        session: &context_id,
+                                        session: &identity.session_id,
                                         audit_file: &workspace.audit_file,
                                         runtime: &workspace.runtime,
                                         run_bash_target: &workspace.run_bash_target,
@@ -1859,14 +1869,14 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
         );
         ui.begin_toolgen_run(before.len());
         let mut input = request.user_instruction.clone().unwrap_or_default();
-        let mut additional_context = None;
+        let mut additional_context = Some(session_runtime_identity_context(identity));
         let mut outcome = loop {
             let current = run_session_turn_with_model_client(
                 core,
                 config,
                 TurnInput {
                     input: &input,
-                    session: &identity.context_id,
+                    session: &identity.session_id,
                     audit_file: &workspace.audit_file,
                     runtime: &workspace.runtime,
                     run_bash_target: &workspace.run_bash_target,
