@@ -62,11 +62,27 @@ ci_required=(
   "python3 scripts/architecture_guard.py --self-test"
   "scripts/module_boundary_check.sh"
   "scripts/self_capability_check.sh"
+  "scripts/turn_concurrency_stress.sh"
 )
 
 for pattern in "${ci_required[@]}"; do
   if ! search_fixed "$pattern" scripts/ci.sh; then
     echo "missing required CI gate: $pattern" >&2
+    exit 1
+  fi
+done
+
+turn_stress_required=(
+  "TIMEM_TURN_STRESS_ITERATIONS"
+  "TIMEM_TURN_STRESS_SEED"
+  "tests::prompt_cut_terminal_ownership_stress_is_seeded_and_bounded"
+  "--exact --ignored --nocapture --test-threads=1"
+  "implemented=prompt_cut_core_worker"
+  "pending=host_attachment_fifo,stop_start,websocket_fifo,chrome_latency"
+)
+for pattern in "${turn_stress_required[@]}"; do
+  if ! search_fixed "$pattern" scripts/turn_concurrency_stress.sh; then
+    echo "missing Turn concurrency stress contract: $pattern" >&2
     exit 1
   fi
 done
@@ -295,10 +311,11 @@ self_capability_required=(
   "Long work"
   "Runtime completeness"
   "scripts/self_capability_check.sh"
-  "300 PR"
-  "1,000 release"
-  "10,000 soak"
-  "must not be described as implemented"
+  "300 seeded iterations"
+  "1,000-iteration release profiles"
+  "10,000-iteration soak profiles"
+  "must not be described as complete"
+  "Host attachment/FIFO"
 )
 for pattern in "${self_capability_required[@]}"; do
   if ! search_fixed "$pattern" "$self_capability_doc"; then

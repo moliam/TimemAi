@@ -8,7 +8,7 @@ use agent_core::{
     RuntimeProfiler, TopicReply, TurnInput, TurnOutcome, TurnStopDetail, TurnStopSummary, TurnUi,
     UsageStats,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
@@ -401,15 +401,69 @@ enum PendingRuntimeUpdate {
     ClaudeCodexToolDiscovery(bool),
 }
 
+const CORE_COMMAND_ID_CAPACITY: usize = 1_024;
+
+#[derive(Default)]
+struct CoreCommandIdTracker {
+    pending: BTreeSet<String>,
+    recent_accepted: BTreeSet<String>,
+    recent_order: VecDeque<String>,
+}
+
+impl CoreCommandIdTracker {
+    fn contains(&self, command_id: &str) -> bool {
+        self.pending.contains(command_id) || self.recent_accepted.contains(command_id)
+    }
+
+    fn reserve(&mut self, command_id: String) -> Result<bool, String> {
+        if self.contains(&command_id) {
+            return Ok(false);
+        }
+        if self.pending.len() >= CORE_COMMAND_ID_CAPACITY {
+            return Err("core_command_pending_capacity_exhausted".to_string());
+        }
+        self.pending.insert(command_id);
+        Ok(true)
+    }
+
+    fn accept(&mut self, command_id: &str) {
+        self.pending.remove(command_id);
+        if self.recent_accepted.insert(command_id.to_string()) {
+            self.recent_order.push_back(command_id.to_string());
+        }
+        while self.recent_accepted.len() > CORE_COMMAND_ID_CAPACITY {
+            let Some(oldest) = self.recent_order.pop_front() else {
+                break;
+            };
+            self.recent_accepted.remove(&oldest);
+        }
+    }
+
+    fn rollback(&mut self, command_id: &str) {
+        self.pending.remove(command_id);
+    }
+}
+
+fn publish_command_accepted(
+    event_tx: &Sender<CoreSessionWorkerEvent>,
+    command_ids: &Arc<Mutex<CoreCommandIdTracker>>,
+    command_id: String,
+) {
+    if let Ok(mut command_ids) = command_ids.lock() {
+        command_ids.accept(&command_id);
+    }
+    let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+}
+
 #[derive(Clone)]
 pub struct CoreSessionWorkerHandle {
     command_tx: Sender<CoreSessionWorkerCommand>,
     supplement_mailbox: Arc<Mutex<SupplementMailbox>>,
+    command_ids: Arc<Mutex<CoreCommandIdTracker>>,
     cancel_requested: Arc<AtomicBool>,
     cancel_generation: Arc<AtomicU64>,
     shutdown_requested: Arc<AtomicBool>,
     reply_tx: Sender<TopicReply>,
-    accepted_command_ids: Arc<Mutex<BTreeSet<String>>>,
     pending_runtime_updates: Arc<Mutex<Vec<PendingRuntimeUpdate>>>,
     background_cancel: Arc<dyn Fn() + Send + Sync>,
 }
@@ -506,20 +560,32 @@ impl CoreSessionWorkerHandle {
             return Err("core_command_batch_duplicate_id".to_string());
         }
         {
-            let mut accepted = self
-                .accepted_command_ids
+            let mut command_ids = self
+                .command_ids
                 .lock()
                 .map_err(|_| "core_command_dedup_poisoned".to_string())?;
             if command_id
                 .as_ref()
-                .is_some_and(|command_id| accepted.contains(command_id))
+                .is_some_and(|command_id| command_ids.contains(command_id))
             {
                 return Ok(());
             }
-            if batch_command_ids.iter().any(|id| accepted.contains(id)) {
+            if batch_command_ids.iter().any(|id| command_ids.contains(id)) {
                 return Err("core_command_batch_id_conflict".to_string());
             }
-            accepted.extend(batch_command_ids.iter().cloned());
+            let mut reserved = Vec::new();
+            for command_id in &batch_command_ids {
+                match command_ids.reserve(command_id.clone()) {
+                    Ok(true) => reserved.push(command_id.clone()),
+                    Ok(false) => unreachable!("prechecked command id conflict"),
+                    Err(error) => {
+                        for command_id in reserved {
+                            command_ids.rollback(&command_id);
+                        }
+                        return Err(error);
+                    }
+                }
+            }
         }
         let cancel_generation = self.cancel_generation.load(Ordering::SeqCst);
         self.open_supplement_mailbox();
@@ -543,9 +609,9 @@ impl CoreSessionWorkerHandle {
             .map_err(|_| "core_session_worker_stopped".to_string());
         if result.is_err() {
             self.close_supplement_mailbox();
-            if let Ok(mut accepted) = self.accepted_command_ids.lock() {
+            if let Ok(mut command_ids) = self.command_ids.lock() {
                 for command_id in &batch_command_ids {
-                    accepted.remove(command_id);
+                    command_ids.rollback(command_id);
                 }
             }
         }
@@ -565,11 +631,11 @@ impl CoreSessionWorkerHandle {
             return Err("core_session_worker_stopped".to_string());
         }
         if let Some(command_id) = command_id.as_ref() {
-            let mut accepted = self
-                .accepted_command_ids
+            let mut command_ids = self
+                .command_ids
                 .lock()
                 .map_err(|_| "core_command_dedup_poisoned".to_string())?;
-            if !accepted.insert(command_id.clone()) {
+            if !command_ids.reserve(command_id.clone())? {
                 return Ok(());
             }
         }
@@ -586,8 +652,8 @@ impl CoreSessionWorkerHandle {
         if result.is_err() {
             self.close_supplement_mailbox();
             if let Some(command_id) = command_id.as_ref() {
-                if let Ok(mut accepted) = self.accepted_command_ids.lock() {
-                    accepted.remove(command_id);
+                if let Ok(mut command_ids) = self.command_ids.lock() {
+                    command_ids.rollback(command_id);
                 }
             }
         }
@@ -673,18 +739,18 @@ impl CoreSessionWorkerHandle {
             return Ok(false);
         }
         if let Some(command_id) = command_id.as_ref() {
-            let mut accepted = self
-                .accepted_command_ids
+            let mut command_ids = self
+                .command_ids
                 .lock()
                 .map_err(|_| "core_command_dedup_poisoned".to_string())?;
-            if !accepted.insert(command_id.clone()) {
+            if !command_ids.reserve(command_id.clone())? {
                 return Ok(true);
             }
         }
         if let Err(error) = before_enqueue() {
             if let Some(command_id) = command_id.as_ref() {
-                if let Ok(mut accepted) = self.accepted_command_ids.lock() {
-                    accepted.remove(command_id);
+                if let Ok(mut command_ids) = self.command_ids.lock() {
+                    command_ids.rollback(command_id);
                 }
             }
             return Err(error);
@@ -1446,7 +1512,7 @@ impl CoreSessionWorker {
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let cancel_generation = Arc::new(AtomicU64::new(0));
         let shutdown_requested = Arc::new(AtomicBool::new(false));
-        let accepted_command_ids = Arc::new(Mutex::new(BTreeSet::new()));
+        let command_ids = Arc::new(Mutex::new(CoreCommandIdTracker::default()));
         let pending_runtime_updates = Arc::new(Mutex::new(Vec::new()));
         let background_cancel =
             core.background_resource_cancel_callback(worker_config.identity.session_id.clone());
@@ -1457,7 +1523,7 @@ impl CoreSessionWorker {
             cancel_generation: Arc::clone(&cancel_generation),
             shutdown_requested: Arc::clone(&shutdown_requested),
             reply_tx,
-            accepted_command_ids,
+            command_ids: Arc::clone(&command_ids),
             pending_runtime_updates: Arc::clone(&pending_runtime_updates),
             background_cancel,
         };
@@ -1497,6 +1563,7 @@ impl CoreSessionWorker {
                 context_id: identity.context_id.clone(),
                 worker_id: identity.worker_id.clone(),
                 supplement_mailbox,
+                command_ids: Arc::clone(&command_ids),
                 cancel_requested: Arc::clone(&cancel_requested),
                 reply_rx,
                 runtime: runtime.clone(),
@@ -1560,16 +1627,15 @@ impl CoreSessionWorker {
                     } => {
                         if command_generation < cancel_generation.load(Ordering::SeqCst) {
                             if let Some(command_id) = command_id.as_ref() {
-                                let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
-                                    command_id: command_id.clone(),
-                                });
+                                publish_command_accepted(
+                                    &event_tx,
+                                    &command_ids,
+                                    command_id.clone(),
+                                );
                             }
                             for supplement in initial_supplements {
                                 if let Some(command_id) = supplement.command_id {
-                                    let _ =
-                                        event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
-                                            command_id,
-                                        });
+                                    publish_command_accepted(&event_tx, &command_ids, command_id);
                                 }
                             }
                             // The Host has already recorded a pending turn before enqueueing
@@ -1593,9 +1659,7 @@ impl CoreSessionWorker {
                             }
                         }
                         if let Some(command_id) = command_id.as_ref() {
-                            let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
-                                command_id: command_id.clone(),
-                            });
+                            publish_command_accepted(&event_tx, &command_ids, command_id.clone());
                         }
                         let outcome = {
                             let working = runtime.begin_worker_turn(&identity.session_id);
@@ -1677,9 +1741,11 @@ impl CoreSessionWorker {
                     } => {
                         if command_generation < cancel_generation.load(Ordering::SeqCst) {
                             if let Some(command_id) = command_id.as_ref() {
-                                let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
-                                    command_id: command_id.clone(),
-                                });
+                                publish_command_accepted(
+                                    &event_tx,
+                                    &command_ids,
+                                    command_id.clone(),
+                                );
                             }
                             let _ = event_tx.send(CoreSessionWorkerEvent::TurnStarted {
                                 command_id: command_id.clone(),
@@ -1694,9 +1760,7 @@ impl CoreSessionWorker {
                         }
                         cancel_requested.store(false, Ordering::SeqCst);
                         if let Some(command_id) = command_id.as_ref() {
-                            let _ = event_tx.send(CoreSessionWorkerEvent::CommandAccepted {
-                                command_id: command_id.clone(),
-                            });
+                            publish_command_accepted(&event_tx, &command_ids, command_id.clone());
                         }
                         let working = runtime.begin_worker_turn(&identity.session_id);
                         let _ = event_tx.send(CoreSessionWorkerEvent::TurnStarted {
@@ -1882,6 +1946,7 @@ struct WorkerTurnUi {
     context_id: String,
     worker_id: String,
     supplement_mailbox: Arc<Mutex<SupplementMailbox>>,
+    command_ids: Arc<Mutex<CoreCommandIdTracker>>,
     cancel_requested: Arc<AtomicBool>,
     reply_rx: Receiver<TopicReply>,
     runtime: CoreSessionWorkerRuntime,
@@ -2343,9 +2408,7 @@ impl WorkerTurnUi {
             .into_iter()
             .map(|queued| {
                 if let Some(command_id) = queued.command_id {
-                    let _ = self
-                        .event_tx
-                        .send(CoreSessionWorkerEvent::CommandAccepted { command_id });
+                    publish_command_accepted(&self.event_tx, &self.command_ids, command_id);
                 }
                 agent_core::UserSupplement::new(queued.text, queued.additional_context)
             })
