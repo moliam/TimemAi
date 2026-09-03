@@ -98,7 +98,7 @@ fn separately_constructed_manager_does_not_adopt_or_cancel_existing_jobs() {
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap();
     let isolated = ShellJobManager::new(&dir);
-    assert!(isolated.running_for_session("owner").is_empty());
+    assert!(isolated.query_running_for_session("owner").is_empty());
     assert_eq!(isolated.terminate_owned_running(), 0);
     assert!(crate::os::process_group_running(pid));
     assert_eq!(owner.terminate_owned_running(), 1);
@@ -237,7 +237,7 @@ fn consumed_background_completion_is_removed_from_the_manager_index() {
 
     let deadline = Instant::now() + Duration::from_secs(3);
     let update = loop {
-        let (_, updates) = store.refresh_for_session("bg-session");
+        let (_, updates) = store.consume_completed_for_session("bg-session");
         if let Some(update) = updates.into_iter().next() {
             break update;
         }
@@ -247,7 +247,10 @@ fn consumed_background_completion_is_removed_from_the_manager_index() {
 
     assert_eq!(update.stdout, "background_done");
     assert_eq!(store.tracked_job_count_for_tests(), 0);
-    assert!(store.refresh_for_session("bg-session").1.is_empty());
+    assert!(store
+        .consume_completed_for_session("bg-session")
+        .1
+        .is_empty());
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -270,13 +273,16 @@ fn one_refresh_orders_multiple_exits_by_completion_publication() {
 
     // Delay observation until both terminal states can be collected together.
     thread::sleep(Duration::from_millis(500));
-    let (running, updates) = store.refresh_for_session("ordered-session");
+    let (running, updates) = store.consume_completed_for_session("ordered-session");
 
     assert!(running.is_empty());
     assert_eq!(updates.len(), 2);
     assert_eq!(updates[0].stdout, "first-finished");
     assert_eq!(updates[1].stdout, "second-finished");
-    assert!(store.refresh_for_session("ordered-session").1.is_empty());
+    assert!(store
+        .consume_completed_for_session("ordered-session")
+        .1
+        .is_empty());
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -287,15 +293,18 @@ fn read_only_running_query_never_consumes_a_terminal_update() {
     let _ = store.spawn_background("printf query-safe", &dir, "query-session", "query-turn");
 
     let deadline = Instant::now() + Duration::from_secs(3);
-    while !store.running_for_session("query-session").is_empty() {
+    while !store.query_running_for_session("query-session").is_empty() {
         assert!(Instant::now() < deadline, "job did not finish");
         thread::sleep(Duration::from_millis(10));
     }
-    let (_, updates) = store.refresh_for_session("query-session");
+    let (_, updates) = store.consume_completed_for_session("query-session");
 
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].stdout, "query-safe");
-    assert!(store.refresh_for_session("query-session").1.is_empty());
+    assert!(store
+        .consume_completed_for_session("query-session")
+        .1
+        .is_empty());
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -321,7 +330,7 @@ fn concurrent_refresh_delivers_each_terminal_update_exactly_once() {
         let barrier = Arc::clone(&barrier);
         readers.push(thread::spawn(move || {
             barrier.wait();
-            store.refresh_for_session("race-session").1
+            store.consume_completed_for_session("race-session").1
         }));
     }
     barrier.wait();
@@ -335,7 +344,10 @@ fn concurrent_refresh_delivers_each_terminal_update_exactly_once() {
     pids.sort_unstable();
     pids.dedup();
     assert_eq!(pids.len(), job_count);
-    assert!(store.refresh_for_session("race-session").1.is_empty());
+    assert!(store
+        .consume_completed_for_session("race-session")
+        .1
+        .is_empty());
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -361,10 +373,10 @@ fn concurrent_session_refreshes_never_cross_deliver_updates() {
     thread::sleep(Duration::from_millis(300));
     let alpha_store = store.clone();
     let beta_store = store.clone();
-    let alpha = thread::spawn(move || alpha_store.refresh_for_session("session-alpha").1)
+    let alpha = thread::spawn(move || alpha_store.consume_completed_for_session("session-alpha").1)
         .join()
         .expect("alpha refresh");
-    let beta = thread::spawn(move || beta_store.refresh_for_session("session-beta").1)
+    let beta = thread::spawn(move || beta_store.consume_completed_for_session("session-beta").1)
         .join()
         .expect("beta refresh");
 
@@ -376,8 +388,14 @@ fn concurrent_session_refreshes_never_cross_deliver_updates() {
     assert!(beta
         .iter()
         .all(|update| update.session_id == "session-beta"));
-    assert!(store.refresh_for_session("session-alpha").1.is_empty());
-    assert!(store.refresh_for_session("session-beta").1.is_empty());
+    assert!(store
+        .consume_completed_for_session("session-alpha")
+        .1
+        .is_empty());
+    assert!(store
+        .consume_completed_for_session("session-beta")
+        .1
+        .is_empty());
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -399,7 +417,7 @@ fn repeated_refresh_across_completion_windows_loses_no_jobs() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut delivered = Vec::new();
     loop {
-        let (running, updates) = store.refresh_for_session("window-session");
+        let (running, updates) = store.consume_completed_for_session("window-session");
         delivered.extend(updates);
         if running.is_empty() && delivered.len() == job_count {
             break;
@@ -416,7 +434,10 @@ fn repeated_refresh_across_completion_windows_loses_no_jobs() {
     pids.sort_unstable();
     pids.dedup();
     assert_eq!(pids.len(), job_count);
-    assert!(store.refresh_for_session("window-session").1.is_empty());
+    assert!(store
+        .consume_completed_for_session("window-session")
+        .1
+        .is_empty());
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -437,7 +458,7 @@ fn many_consumed_background_jobs_leave_no_index_growth() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut completed = 0;
     while completed < job_count {
-        let (_, updates) = store.refresh_for_session("many-session");
+        let (_, updates) = store.consume_completed_for_session("many-session");
         completed += updates.len();
         assert!(
             Instant::now() < deadline,
@@ -463,13 +484,14 @@ fn repeated_session_cancellation_selects_a_running_job_only_once() {
         1
     );
     let deadline = Instant::now() + Duration::from_secs(3);
-    while !store.running_for_session("cancel-session").is_empty() && Instant::now() < deadline {
+    while !store.query_running_for_session("cancel-session").is_empty() && Instant::now() < deadline
+    {
         thread::sleep(Duration::from_millis(10));
     }
     assert!(store
         .cancel_unfinished_for_session("cancel-session")
         .is_empty());
-    let _ = store.refresh_for_session("cancel-session");
+    let _ = store.consume_completed_for_session("cancel-session");
     assert_eq!(store.tracked_job_count_for_tests(), 0);
     let _ = fs::remove_dir_all(dir);
 }
@@ -1189,7 +1211,7 @@ fn background_job_reports_pid_and_running_list_until_exit() {
         .and_then(|rest| rest.split(',').next())
         .and_then(|pid| pid.parse::<u32>().ok())
         .unwrap();
-    let running = store.running_for_session("session_a");
+    let running = store.query_running_for_session("session_a");
     assert_eq!(running.len(), 1);
     assert_eq!(running[0].pid, pid);
     assert_eq!(running[0].kind, "background");
@@ -1198,7 +1220,7 @@ fn background_job_reports_pid_and_running_list_until_exit() {
     let mut updates = Vec::new();
     let wait_started = Instant::now();
     while wait_started.elapsed() < Duration::from_secs(5) {
-        (running, updates) = store.refresh_for_session("session_a");
+        (running, updates) = store.consume_completed_for_session("session_a");
         if running.is_empty() && !updates.is_empty() {
             break;
         }
@@ -1238,7 +1260,7 @@ fn timeout_job_reports_pid_and_later_exit_update() {
         .and_then(|pid| pid.parse::<u32>().ok())
         .expect("pid");
 
-    let running = store.running_for_session("session_a");
+    let running = store.query_running_for_session("session_a");
     assert_eq!(running.len(), 1);
     assert_eq!(running[0].pid, pid);
     assert_eq!(running[0].kind, "timeout");
@@ -1247,7 +1269,7 @@ fn timeout_job_reports_pid_and_later_exit_update() {
     let mut updates = Vec::new();
     let wait_started = Instant::now();
     while wait_started.elapsed() < Duration::from_secs(3) {
-        (running, updates) = store.refresh_for_session("session_a");
+        (running, updates) = store.consume_completed_for_session("session_a");
         if running.is_empty() && !updates.is_empty() {
             break;
         }
@@ -1315,7 +1337,7 @@ fn timed_out_job_remains_cancellable_after_launcher_exits() {
     );
     assert!(!crate::os::process_group_running(leader_pid));
     assert!(store
-        .running_for_session("timeout-group-session")
+        .query_running_for_session("timeout-group-session")
         .is_empty());
     let _ = fs::remove_dir_all(&dir);
 }
@@ -1359,7 +1381,7 @@ fn background_job_supports_heredoc_with_backticks() {
     let mut updates = Vec::new();
     let wait_started = Instant::now();
     while wait_started.elapsed() < Duration::from_secs(3) {
-        let (running_now, updates_now) = store.refresh_for_session("session_a");
+        let (running_now, updates_now) = store.consume_completed_for_session("session_a");
         updates = updates_now;
         if running_now.is_empty() && !updates.is_empty() {
             break;
@@ -1386,7 +1408,7 @@ fn supervisor_reaps_sigsegv_background_job_and_reports_signal_transition() {
     let mut updates = Vec::new();
     let wait_started = Instant::now();
     while wait_started.elapsed() < Duration::from_secs(3) {
-        let (running, current_updates) = store.refresh_for_session("session_signal");
+        let (running, current_updates) = store.consume_completed_for_session("session_signal");
         updates = current_updates;
         if running.is_empty() && !updates.is_empty() {
             break;
@@ -1395,7 +1417,7 @@ fn supervisor_reaps_sigsegv_background_job_and_reports_signal_transition() {
     }
     assert_eq!(updates.len(), 1, "signal exit must produce one update");
     assert_eq!(updates[0].status, "signal:11");
-    assert!(store.running_for_session("session_signal").is_empty());
+    assert!(store.query_running_for_session("session_signal").is_empty());
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -1457,7 +1479,7 @@ fn background_bash_sets_noninteractive_pager_environment() {
 
     let started_wait = Instant::now();
     let update = loop {
-        let (_, updates) = store.refresh_for_session("session_env");
+        let (_, updates) = store.consume_completed_for_session("session_env");
         if let Some(update) = updates.into_iter().next() {
             break update;
         }
@@ -1503,10 +1525,11 @@ fn shutdown_terminates_shell_jobs_owned_by_this_manager() {
 
     assert_eq!(store.terminate_owned_running(), 1);
     let deadline = Instant::now() + Duration::from_secs(3);
-    while !store.running_for_session("session_owned").is_empty() && Instant::now() < deadline {
+    while !store.query_running_for_session("session_owned").is_empty() && Instant::now() < deadline
+    {
         thread::sleep(Duration::from_millis(20));
     }
-    assert!(store.running_for_session("session_owned").is_empty());
+    assert!(store.query_running_for_session("session_owned").is_empty());
     let _ = fs::remove_dir_all(&dir);
 }
 
@@ -1568,10 +1591,10 @@ fn running_job_list_context_uses_pid_kind_and_command() {
         "{context}"
     );
     assert!(!context.contains("session_other"), "{context}");
-    for job in store.running_for_session("session_owned") {
+    for job in store.query_running_for_session("session_owned") {
         terminate_process(job.pid);
     }
-    for job in store.running_for_session("session_other") {
+    for job in store.query_running_for_session("session_other") {
         terminate_process(job.pid);
     }
     let _ = fs::remove_dir_all(&dir);
@@ -1686,13 +1709,13 @@ fn supervisor_waits_for_managed_process_group_after_launcher_exits() {
         "launcher should exit before its background child"
     );
     assert!(crate::os::process_group_running(pid));
-    let (running, updates) = store.refresh_for_session("group-session");
+    let (running, updates) = store.consume_completed_for_session("group-session");
     assert_eq!(running.len(), 1, "the process group must remain tracked");
     assert!(updates.is_empty());
 
     let group_deadline = Instant::now() + Duration::from_secs(3);
     let update = loop {
-        let (_, updates) = store.refresh_for_session("group-session");
+        let (_, updates) = store.consume_completed_for_session("group-session");
         if let Some(update) = updates.into_iter().next() {
             break update;
         }
@@ -1984,7 +2007,7 @@ fn background_tail_out_retains_bounded_tail_until_exit_refresh() {
 
     let wait_started = Instant::now();
     let update = loop {
-        let (_, updates) = store.refresh_for_session("session_tail_background");
+        let (_, updates) = store.consume_completed_for_session("session_tail_background");
         if let Some(update) = updates.into_iter().next() {
             break update;
         }
@@ -1995,7 +2018,7 @@ fn background_tail_out_retains_bounded_tail_until_exit_refresh() {
     assert!(update.stdout.contains("retained last"), "{}", update.stdout);
     assert!(update.stdout.contains("END_MARKER"), "{}", update.stdout);
     assert!(!update.stdout.contains("BEGIN_MARKER"), "{}", update.stdout);
-    let (_, repeated) = store.refresh_for_session("session_tail_background");
+    let (_, repeated) = store.consume_completed_for_session("session_tail_background");
     assert!(repeated.is_empty(), "exit notification must be one-shot");
     let _ = std::fs::remove_dir_all(dir);
 }
