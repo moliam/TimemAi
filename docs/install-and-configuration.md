@@ -19,6 +19,14 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/moliam/TimemAi/main/install-online.ps1 | iex
 ```
 
+After installation, run `timem`. To update later, rerun the same one-line
+command for your platform. MEM workspaces, Sessions, model settings, and user
+configuration are preserved. Exit Timem before updating on Windows.
+
+The completion message is installation-mode aware: one-line installs show the
+simple rerun-to-update instruction, while source-checkout installs show the Git
+update command. Temporary source paths are never presented as user actions.
+
 The small online bootstrap is read from `main`, but it resolves and downloads the
 latest formal GitHub Release tag. Installation content therefore comes from a
 versioned Release source archive, not from the current `main` tree. The archive

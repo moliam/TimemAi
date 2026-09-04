@@ -12,33 +12,42 @@ Both interfaces use the same Core runtime and persisted data. Installer-created
 
 ![Timem Web UI](docs/assets/timem-web.png)
 
-## Install
+## Install or update
 
-macOS or Linux:
+Use the same command for both the first installation and future updates.
+
+### macOS / Linux
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/moliam/TimemAi/main/install.sh | bash
 ```
 
-Windows PowerShell:
+### Windows PowerShell
 
 ```powershell
 irm https://raw.githubusercontent.com/moliam/TimemAi/main/install-online.ps1 | iex
 ```
 
-The online installer resolves the latest formal GitHub Release, downloads its
-source archive to a temporary directory, builds the unified `timem` executable,
-and then removes the archive. It does not install unreviewed source from `main`.
-This is a source build: Rust and the platform C/C++ build prerequisites are still
-required. Cargo downloads Rust crates automatically. The released Web bundle is
-embedded, so Node.js is required only for frontend development.
+Then start Timem:
 
-To inspect the source or installer before running it, clone the repository and
-run `./install.sh` on macOS/Linux or `install.ps1` on Windows instead.
+```bash
+timem
+```
 
-See [Install and configuration](docs/install-and-configuration.md) for platform
-prerequisites, custom install locations, environment variables, updates, and
-uninstall instructions.
+Your MEM workspaces, Sessions, model settings, and user configuration are
+preserved when you update. On Windows, exit Timem before rerunning the command.
+
+The installer builds the latest formal GitHub Release in a temporary directory,
+installs the `timem` executable, and removes the temporary source. Rust and the
+platform C/C++ build tools are required; Node.js is not required.
+
+Developers who prefer a source checkout can clone the repository and run
+`./install.sh` on macOS/Linux or `install.ps1` on Windows. Checkout installs use
+Git-based update instructions; one-line installs simply tell users to rerun the
+same command.
+
+See [Install and configuration](docs/install-and-configuration.md) for
+prerequisites, version pinning, custom locations, and uninstall instructions.
 
 ## Quick start
 

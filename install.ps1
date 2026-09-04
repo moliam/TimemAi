@@ -129,22 +129,26 @@ function Invoke-TimemInstall {
     $pathAdded = -not $SkipPathUpdate -and (Add-UserPathEntry $InstallDir)
 
     Write-Host ''
-    Write-Host 'TimemAi installation complete.'
-    Write-Host "  Timem CLI:           $(Join-Path $InstallDir 'timem.exe')"
-    Write-Host "  Compatibility shim: $(Join-Path $InstallDir 'timem-web.cmd')"
-    Write-Host "  Resources:               $ResourceDir"
+    Write-Host 'TimemAi installation complete.' -ForegroundColor Green
+    if ($env:TIMEM_INSTALL_VERSION) { Write-Host "Version:   $($env:TIMEM_INSTALL_VERSION)" }
+    Write-Host "Installed: $(Join-Path $InstallDir 'timem.exe')"
+    Write-Host ''
+    Write-Host 'Run Timem:  ' -NoNewline
+    Write-Host 'timem' -ForegroundColor Cyan
+    Write-Host 'Shell mode: ' -NoNewline
+    Write-Host 'timem --shell' -ForegroundColor Cyan
+    Write-Host ''
     if ($env:TIMEM_INSTALL_SOURCE_KIND -eq 'online') {
-        Write-Host '  Install source: temporary release archive (removed after installation)'
+        Write-Host 'Update:    rerun the same one-line install command'
+        Write-Host 'Uninstall: irm https://raw.githubusercontent.com/moliam/TimemAi/main/uninstall.ps1 | iex'
+    } else {
+        Write-Host 'Update:    git pull --ff-only; .\install.ps1'
+        Write-Host "Uninstall: $(Join-Path $RootDir 'uninstall.ps1')"
     }
-    if ($pathAdded) { Write-Host 'The user PATH was updated. Open a new terminal before invoking Timem by name.' }
-    Write-Host 'Start Timem Web (default): timem'
-    Write-Host 'Start the terminal Shell: timem --shell'
-    Write-Host 'No environment file is required to open the local Web UI.'
-    if ($env:TIMEM_INSTALL_SOURCE_KIND -eq 'online') {
-        Write-Host 'Update later by rerunning the online install command from the README.'
-        Write-Host 'Uninstall online with:'
-        Write-Host '  irm https://raw.githubusercontent.com/moliam/TimemAi/main/uninstall.ps1 | iex'
+    if ($pathAdded) {
+        Write-Host 'PATH was updated. Open a new terminal before running timem.' -ForegroundColor Yellow
     }
+
 }
 
 if ($MyInvocation.InvocationName -ne '.') { Invoke-TimemInstall }

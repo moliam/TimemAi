@@ -121,6 +121,8 @@ online_install_required=(
   "install-online.ps1"
   "TIMEM_VERSION=v2.0.0"
   "irm https://raw.githubusercontent.com/moliam/TimemAi/main/install-online.ps1 | iex"
+  "Use the same command for both the first installation and future updates"
+  "Then start Timem:"
 )
 for pattern in "${online_install_required[@]}"; do
   if ! search_fixed "$pattern" README.md docs/install-and-configuration.md scripts/ci.sh; then
