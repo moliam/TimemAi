@@ -83,7 +83,7 @@ try {
         '$sourceCandidates.Count -ne 1',
         'https://raw.githubusercontent.com/$Repository/main/install.ps1',
         "`$env:TIMEM_INSTALL_SOURCE_KIND = 'online'",
-        '`$env:TIMEM_INSTALL_VERSION = $resolvedVersion',
+        '$env:TIMEM_INSTALL_VERSION = $resolvedVersion',
         '& powershell.exe @arguments',
         '$installerExitCode = $LASTEXITCODE',
         'Remove-Item -LiteralPath $temporary -Recurse -Force'
