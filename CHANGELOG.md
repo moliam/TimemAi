@@ -2,30 +2,40 @@
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-04
+
 ### Added
 
-- Add one-line macOS/Linux and Windows PowerShell installation entry points that resolve a
-  formal GitHub Release, download and validate its source archive, run the
-  existing source-build installer, clean temporary files, support version
-  pinning, and provide offline installer-logic coverage. Completion output is
-  concise and installation-mode aware: one-line users get highlighted run and
-  rerun-to-update guidance, while source checkouts retain Git update guidance.
+- Add Web Session groups, sortable navigation, a permanent Unsorted group, and
+  a refined responsive layout with a docked composer for long conversations.
+- Add platform-native command tools: Bash on macOS/Linux and PowerShell on
+  Windows, with native lifecycle, pipeline, and CI coverage.
+- Add configurable Claude/Codex external skill discovery and enable tool
+  discovery by default in the Web interface.
+- Add one-line installation and update commands for macOS, Linux, and Windows.
+  Online installs use formal GitHub Releases, clean temporary source, preserve
+  user data, and show concise mode-aware run and update guidance.
 
-- Add the first focused Turn-concurrency CI profile: 300 seeded iterations of a
-  real `CoreSessionWorker` PromptCut/terminal-ownership race with independent
-  model and user producers, explicit synchronization, bounded waits, replayable
-  failure evidence, and command/Turn ownership assertions. The remaining Host
-  attachment/FIFO, Stop/Start, WebSocket/FIFO, and Chrome-latency stress profiles
-  remain release blockers for complete concurrency certification.
+### Changed
+
+- Harden model HTTP transport with same-origin redirect policy, protected
+  credentials on cross-origin redirects, per-endpoint private CA support,
+  bounded request/response handling, and richer redacted diagnostics.
+- Unify confirmed Session continuation and runtime identity delivery so resumed
+  work keeps the intended Worker and Session context.
+- Strengthen Shell job lifecycle and memory scoping so completion events are
+  ordered and refreshed at the model-request boundary.
 
 ### Fixed
 
-- Replace a Linux-sensitive background-job prompt-refresh wall-clock assertion
-  with an explicit process marker and bounded synchronization, allowing either
-  legal prompt cut while still proving the eventual exit update.
-- Bound Core worker command-ID tracking to pending and recent accepted sets.
-  In-flight IDs are never evicted, pending exhaustion fails explicitly, accepted
-  history is FIFO-bounded, and failed delivery reservations remain retryable.
+- Retry transient model disconnects and temporary local-address exhaustion
+  instead of treating them as permanent failures.
+- Fix Windows MEM lock handoff races, stale Web transport-cache overwrite, and
+  audit-retention recovery from stale manifests.
+- Keep the Web composer and sidebar controls reachable across long output and
+  constrained viewport sizes.
+- Fix one-line installer execution through standard input and prevent online
+  installs from exposing temporary paths or obsolete Git-based update advice.
 
 ## [2.0.0] - 2026-08-31
 
