@@ -12692,7 +12692,8 @@ fn real_concurrent_workers_route_final_topics_to_matching_web_sessions() {
         .run_turn("beta", None)
         .unwrap();
 
-    for _ in 0..200 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
         for (session_id, context_id, worker_id, event) in drain_worker_events(&state) {
             handle_scoped_worker_event(&state, &session_id, &context_id, &worker_id, event);
         }
@@ -12709,6 +12710,10 @@ fn real_concurrent_workers_route_final_topics_to_matching_web_sessions() {
         if complete {
             break;
         }
+        assert!(
+            Instant::now() < deadline,
+            "concurrent workers did not publish both final responses before the deadline"
+        );
         thread::sleep(Duration::from_millis(5));
     }
 
