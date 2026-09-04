@@ -119,7 +119,7 @@ done
 online_install_required=(
   "raw.githubusercontent.com/moliam/TimemAi/main/install.sh"
   "install-online.ps1"
-  "TIMEM_VERSION=v2.0.0"
+  "TIMEM_VERSION=v2.1.0"
   "irm https://raw.githubusercontent.com/moliam/TimemAi/main/install-online.ps1 | iex"
   "Use the same command for both the first installation and future updates"
   "Then start Timem:"

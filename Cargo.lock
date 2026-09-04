@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agent_core"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "encoding_rs",
  "libc",
@@ -1760,7 +1760,7 @@ checksum = "ef927ca75afb808a4d64dd374f00a2adf8d0fcff8e7b184af886c3c87ec4a3f3"
 
 [[package]]
 name = "timem"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "agent_core",
  "axum",
@@ -1778,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "timem_http_websocket"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -1791,7 +1791,7 @@ dependencies = [
 
 [[package]]
 name = "timem_in_process"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "timem_session",
  "timem_ui_contract",
@@ -1799,7 +1799,7 @@ dependencies = [
 
 [[package]]
 name = "timem_platform"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -1807,7 +1807,7 @@ dependencies = [
 
 [[package]]
 name = "timem_session"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "agent_core",
  "serde",
@@ -1817,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "timem_shell"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "crossterm",
  "home",
@@ -1835,7 +1835,7 @@ dependencies = [
 
 [[package]]
 name = "timem_ui_contract"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "serde",
  "serde_json",

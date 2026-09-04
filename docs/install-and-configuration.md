@@ -36,11 +36,11 @@ and removed afterward.
 To install a specific Release instead of `latest`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/moliam/TimemAi/main/install.sh | TIMEM_VERSION=v2.0.0 bash
+curl -fsSL https://raw.githubusercontent.com/moliam/TimemAi/main/install.sh | TIMEM_VERSION=v2.1.0 bash
 ```
 
 ```powershell
-$env:TIMEM_VERSION = 'v2.0.0'; irm https://raw.githubusercontent.com/moliam/TimemAi/main/install-online.ps1 | iex
+$env:TIMEM_VERSION = 'v2.1.0'; irm https://raw.githubusercontent.com/moliam/TimemAi/main/install-online.ps1 | iex
 ```
 
 Review downloaded scripts before execution when required by your security
