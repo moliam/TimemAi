@@ -101,6 +101,7 @@ install_from_online_release() {
   while IFS= read -r candidate; do
     if [ -f "$candidate/install.sh" ] \
       && [ -f "$candidate/Cargo.lock" ] \
+      && [ -f "$candidate/resources/reminder_tips.json" ] \
       && [ -f "$candidate/interfaces/web/dist/index.html" ]; then
       source_dir="$candidate"
       candidate_count=$((candidate_count + 1))
@@ -112,7 +113,15 @@ install_from_online_release() {
   fi
 
   echo "Building and installing TimemAi from release $version..."
-  (cd "$source_dir" && TIMEM_INSTALL_SOURCE_KIND=online bash ./install.sh)
+  (
+    ROOT_DIR="$source_dir"
+    REMINDER_TIPS_SOURCE="$source_dir/resources/reminder_tips.json"
+    ENV_TEMPLATE="$source_dir/env_template"
+    TIMEM_INSTALL_SOURCE_KIND=online
+    TIMEM_INSTALL_VERSION="$version"
+    cd "$source_dir"
+    main
+  )
 }
 
 detect_os() {
@@ -318,42 +327,31 @@ install_resource_atomically() {
 }
 
 print_install_success() {
-  echo
-  echo "TimemAi installation complete."
-  echo
-  echo "Installed program:"
-  echo "  Timem CLI:               $INSTALL_DIR/$COMMAND_NAME"
-  echo "  Compatibility alias:     $INSTALL_DIR/$WEB_ALIAS_NAME -> $COMMAND_NAME"
-  echo
-  echo "Installed support files:"
-  echo "  Resources:    $RESOURCE_DIR"
-  if [ "${TIMEM_INSTALL_SOURCE_KIND:-checkout}" = "online" ]; then
-    echo "  Install source: temporary release archive (removed after installation)"
-  else
-    echo "  Env template: $ENV_TEMPLATE"
-    echo "  Uninstaller:  $ROOT_DIR/uninstall.sh"
+  local reset='' bold='' green='' cyan=''
+  if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]; then
+    reset=$'\033[0m'
+    bold=$'\033[1m'
+    green=$'\033[32m'
+    cyan=$'\033[36m'
   fi
+
   echo
-  echo "Start Timem Web (default):"
-  echo "  1. Ensure $INSTALL_DIR is in PATH."
-  echo "  2. Run: $COMMAND_NAME"
-  echo "  3. Your browser should open automatically. Configure the model and API key in Timem Web, then start chatting."
+  printf '%sTimemAi installation complete.%s\n' "$bold$green" "$reset"
+  [ -n "${TIMEM_INSTALL_VERSION:-}" ] && printf 'Version:   %s\n' "$TIMEM_INSTALL_VERSION"
+  printf 'Installed: %s\n' "$INSTALL_DIR/$COMMAND_NAME"
   echo
-  echo "No env file is required to open Timem Web."
-  echo "For remote access on a trusted network, run: $COMMAND_NAME --public"
-  echo
-  echo "Optional terminal workflow:"
-  echo "  Run: $COMMAND_NAME --shell"
-  echo "  To provide environment defaults, copy $ENV_TEMPLATE to a private file, edit it, then source it before launch."
+  printf '%sRun Timem:%s  %stimem%s\n' "$bold" "$reset" "$bold$cyan" "$reset"
+  printf 'Shell mode: %stimem --shell%s\n' "$cyan" "$reset"
   echo
   if [ "${TIMEM_INSTALL_SOURCE_KIND:-checkout}" = "online" ]; then
-    echo "Update later by rerunning the online install command from the README."
-    echo "Uninstall online with:"
-    echo "  curl -fsSL https://raw.githubusercontent.com/moliam/TimemAi/main/uninstall.sh | bash"
+    echo "Update:    rerun the same one-line install command"
+    echo "Uninstall: curl -fsSL https://raw.githubusercontent.com/moliam/TimemAi/main/uninstall.sh | bash"
   else
-    echo "Update later from this git clone:"
-    echo "  git pull --ff-only"
-    echo "  ./install.sh"
+    echo "Update:    git pull --ff-only && ./install.sh"
+    echo "Uninstall: $ROOT_DIR/uninstall.sh"
+  fi
+  if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    printf '%sNote:%s add %s to PATH, then open a new terminal.\n' "$bold" "$reset" "$INSTALL_DIR"
   fi
 }
 

@@ -7,7 +7,9 @@
 - Add one-line macOS/Linux and Windows PowerShell installation entry points that resolve a
   formal GitHub Release, download and validate its source archive, run the
   existing source-build installer, clean temporary files, support version
-  pinning, and provide offline installer-logic coverage.
+  pinning, and provide offline installer-logic coverage. Completion output is
+  concise and installation-mode aware: one-line users get highlighted run and
+  rerun-to-update guidance, while source checkouts retain Git update guidance.
 
 - Add the first focused Turn-concurrency CI profile: 300 seeded iterations of a
   real `CoreSessionWorker` PromptCut/terminal-ownership race with independent

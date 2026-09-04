@@ -52,6 +52,14 @@ try {
     foreach ($forbidden in @("'-p', 'timem_shell'", 'target\release\timem-web.exe')) {
         if ($installText.Contains($forbidden)) { throw "install.ps1 must not install a second executable: $forbidden" }
     }
+    foreach ($required in @(
+        "Write-Host 'TimemAi installation complete.' -ForegroundColor Green",
+        "Write-Host 'timem' -ForegroundColor Cyan",
+        "Write-Host 'Update:    rerun the same one-line install command'",
+        "Write-Host 'Update:    git pull --ff-only; .\install.ps1'"
+    )) {
+        if (-not $installText.Contains($required)) { throw "install.ps1 missing completion UX contract: $required" }
+    }
     foreach ($protected in @('MEM workspaces', 'API credentials', 'user configuration')) {
         if (-not $uninstallText.Contains($protected)) { throw "uninstall.ps1 missing preservation notice: $protected" }
     }
@@ -73,7 +81,9 @@ try {
         "Join-Path `$_.FullName 'Cargo.lock'",
         "Join-Path `$_.FullName 'interfaces\web\dist\index.html'",
         '$sourceCandidates.Count -ne 1',
+        'https://raw.githubusercontent.com/$Repository/main/install.ps1',
         "`$env:TIMEM_INSTALL_SOURCE_KIND = 'online'",
+        '`$env:TIMEM_INSTALL_VERSION = $resolvedVersion',
         '& powershell.exe @arguments',
         '$installerExitCode = $LASTEXITCODE',
         'Remove-Item -LiteralPath $temporary -Recurse -Force'

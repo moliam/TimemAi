@@ -84,39 +84,60 @@ fi
 install_prompt="$(
   INSTALL_DIR="/example/bin"
   RESOURCE_DIR="/example/share/timem/resources"
-  ENV_TEMPLATE="/example/source/env_template"
+  ROOT_DIR="/example/source"
   COMMAND_NAME="timem"
   WEB_ALIAS_NAME="timem-web"
+  PATH="/usr/bin:/bin"
+  NO_COLOR=1
   print_install_success
 )"
 
 for expected in \
   "TimemAi installation complete." \
-  "Timem CLI:               /example/bin/timem" \
-  "Compatibility alias:     /example/bin/timem-web -> timem" \
-  "Start Timem Web (default):" \
-  "2. Run: timem" \
-  "Configure the model and API key in Timem Web" \
-  "No env file is required to open Timem Web." \
-  "Run: timem --shell" \
-  "Optional terminal workflow:"; do
+  "Installed: /example/bin/timem" \
+  "Run Timem:  timem" \
+  "Shell mode: timem --shell" \
+  "Update:    git pull --ff-only && ./install.sh" \
+  "Uninstall: /example/source/uninstall.sh" \
+  "Note: add /example/bin to PATH"; do
   if ! grep -Fq "$expected" <<< "$install_prompt"; then
-    echo "install prompt is missing unified CLI guidance: $expected" >&2
+    echo "install prompt is missing concise CLI guidance: $expected" >&2
     exit 1
   fi
 done
-
-web_start_line="$(grep -nF "Start Timem Web (default):" <<< "$install_prompt" | cut -d: -f1)"
-terminal_start_line="$(grep -nF "Optional terminal workflow:" <<< "$install_prompt" | cut -d: -f1)"
-if [ "$web_start_line" -ge "$terminal_start_line" ]; then
-  echo "install prompt should present Timem Web before the optional terminal workflow" >&2
+if grep -Fq $'\033[' <<< "$install_prompt"; then
+  echo "non-interactive install output must not contain ANSI color escapes" >&2
+  exit 1
+fi
+if [ "$(wc -l <<< "$install_prompt" | tr -d ' ')" -gt 12 ]; then
+  echo "install success output should remain concise" >&2
   exit 1
 fi
 
-if grep -Fq "Create a private env file" <<< "$install_prompt"; then
-  echo "install prompt should not require env-file setup before starting Timem Web" >&2
-  exit 1
-fi
+online_prompt="$(
+  INSTALL_DIR="/example/bin"
+  COMMAND_NAME="timem"
+  PATH="/example/bin:/usr/bin:/bin"
+  NO_COLOR=1
+  TIMEM_INSTALL_SOURCE_KIND=online
+  TIMEM_INSTALL_VERSION=v9.8.7
+  print_install_success
+)"
+for expected in \
+  "Version:   v9.8.7" \
+  "Update:    rerun the same one-line install command" \
+  "Uninstall: curl -fsSL https://raw.githubusercontent.com/moliam/TimemAi/main/uninstall.sh | bash"; do
+  if ! grep -Fq "$expected" <<< "$online_prompt"; then
+    echo "online install prompt is missing guidance: $expected" >&2
+    exit 1
+  fi
+done
+for forbidden in "Env template:" "Update later from this git clone" "/timem-online-install."; do
+  if grep -Fq "$forbidden" <<< "$online_prompt"; then
+    echo "online install prompt contains stale or temporary guidance: $forbidden" >&2
+    exit 1
+  fi
+done
 
 if ! grep -q 'cargo fetch --locked' "$ROOT_DIR/install.sh"; then
   echo "install script should fetch Rust crate dependencies from Cargo.lock before building" >&2
@@ -162,8 +183,8 @@ if ! grep -Fq 'interfaces\web\dist\index.html' "$ROOT_DIR/install.ps1"; then
   exit 1
 fi
 
-if ! grep -q 'Cargo downloads Rust crates' "$ROOT_DIR/README.md"; then
-  echo "README should explain that Cargo installs Rust crate dependencies automatically" >&2
+if ! grep -Fq 'cargo fetch --locked' "$ROOT_DIR/docs/install-and-configuration.md"; then
+  echo "detailed install documentation should explain locked Cargo dependency fetching" >&2
   exit 1
 fi
 

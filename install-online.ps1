@@ -68,18 +68,27 @@ function Invoke-TimemOnlineInstall {
         }
         $source = $sourceCandidates[0]
 
-        $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $source.FullName 'install.ps1'))
+        # A formal Release may contain an older installer message. Use the current
+        # bootstrap-compatible installer logic against the selected Release source.
+        $sourceInstaller = Join-Path $source.FullName 'install.ps1'
+        $installerUrl = "https://raw.githubusercontent.com/$Repository/main/install.ps1"
+        Invoke-WebRequest -UseBasicParsing -Uri $installerUrl -OutFile $sourceInstaller
+
+        $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $sourceInstaller)
         if ($InstallDir) { $arguments += @('-InstallDir', $InstallDir) }
         if ($ResourceDir) { $arguments += @('-ResourceDir', $ResourceDir) }
         if ($SkipPathUpdate) { $arguments += '-SkipPathUpdate' }
         Write-Host "Building and installing TimemAi from release $resolvedVersion..."
         $previousSourceKind = $env:TIMEM_INSTALL_SOURCE_KIND
+        $previousInstallVersion = $env:TIMEM_INSTALL_VERSION
         $env:TIMEM_INSTALL_SOURCE_KIND = 'online'
+        $env:TIMEM_INSTALL_VERSION = $resolvedVersion
         try {
             & powershell.exe @arguments
             $installerExitCode = $LASTEXITCODE
         } finally {
             $env:TIMEM_INSTALL_SOURCE_KIND = $previousSourceKind
+            $env:TIMEM_INSTALL_VERSION = $previousInstallVersion
         }
         if ($installerExitCode -ne 0) { throw "TimemAi installer failed with exit code $installerExitCode" }
     } finally {
