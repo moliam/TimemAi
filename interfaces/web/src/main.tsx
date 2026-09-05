@@ -1,4 +1,5 @@
 import { StreamUiModeSetting, useStreamUiMode } from "./stream_ui_mode";
+import { StreamText } from "./stream_reveal";
 import {
   AssistantRuntimeProvider,
   ThreadMessageLike,
@@ -9839,9 +9840,9 @@ function TurnAnswerDelivery({
                     index: item.preview_index, ordinal,
                   })),
                 ].map((item) => (
-                  <section className={`turn-interim-item${item.provisional ? " provisional-chat" : ""}`} key={item.key} data-preview-index={item.index}>
+                  <section className={`turn-interim-item${item.provisional ? " provisional-chat" : ""}${item.provisional && !preview?.interruption ? " streaming" : ""}`} key={item.key} data-preview-index={item.index}>
                     {item.task && <h3>{item.ordinal !== undefined && <span>{item.ordinal}.</span>} {item.task}</h3>}
-                    <div className="message-content"><MarkdownContent text={item.answer} /></div>
+                    <div className="message-content">{item.provisional ? <StreamText text={item.answer} /> : <MarkdownContent text={item.answer} />}</div>
                   </section>
                 ))}
               </div>
@@ -9854,6 +9855,7 @@ function TurnAnswerDelivery({
         <FinalAnswerDelivery
           text={turn.final_answer || previewText}
           provisional={!hasFinal}
+          streaming={!hasFinal && preview?.response?.status === "streaming"}
           completion={turn.completion}
           toolGenPending={toolGenPending}
           toolGenBlocked={toolGenBlocked}
@@ -9871,6 +9873,7 @@ function TurnAnswerDelivery({
 function FinalAnswerDelivery({
   text,
   provisional = false,
+  streaming = false,
   completion,
   toolGenPending,
   toolGenBlocked,
@@ -9882,6 +9885,7 @@ function FinalAnswerDelivery({
 }: {
   text: string;
   provisional?: boolean;
+  streaming?: boolean;
   completion: WebTurn["completion"];
   toolGenPending: boolean;
   toolGenBlocked: boolean;
@@ -9950,7 +9954,7 @@ function FinalAnswerDelivery({
     </div>
   );
   return (
-    <section className={provisional ? "response-preview" : "turn-final-delivery"}>
+    <section className={provisional ? `response-preview${streaming ? " streaming" : ""}` : "turn-final-delivery"}>
       <FinalAnswerContent text={text} provisional={provisional} />
       {provisional ? null : completion ? (
         <CompletionCard
@@ -10429,14 +10433,18 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
       className={`message-content final-answer-reading${showOutline ? " has-outline" : ""}`}
     >
       {outlineElement}
-      <MarkdownContent
-        text={text}
-        headingIdPrefix={
-          outline.length >= FINAL_ANSWER_OUTLINE_MIN_SECTIONS
-            ? headingPrefix
-            : undefined
-        }
-      />
+      {provisional ? (
+        <StreamText text={text} />
+      ) : (
+        <MarkdownContent
+          text={text}
+          headingIdPrefix={
+            outline.length >= FINAL_ANSWER_OUTLINE_MIN_SECTIONS
+              ? headingPrefix
+              : undefined
+          }
+        />
+      )}
     </div>
   );
 }
