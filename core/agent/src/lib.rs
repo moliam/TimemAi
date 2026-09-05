@@ -48,6 +48,7 @@ pub mod interaction;
 pub mod memmgr;
 pub mod model_api;
 pub mod model_service_config;
+pub mod model_stream;
 pub mod model_transport;
 pub mod negotiation;
 mod notification;
@@ -1125,6 +1126,10 @@ pub trait ActionRuntime {
     fn should_cancel(&mut self) -> bool;
 
     fn on_core_topic_events(&mut self, _events: &[host::CoreTopicEvent]) {}
+
+    /// Complete protocol validation result, before any response actions execute.
+    /// Provisional display is never permission to execute an action.
+    fn on_model_response_validated(&mut self, _accepted: bool, _final_response: bool) {}
 
     fn on_model_response_parsed(
         &mut self,
@@ -3210,6 +3215,11 @@ impl AgentCore {
             protocol_suite.parse(&response.content, &self.capabilities)
         };
         self.normalize_intrinsic_actions(&mut parsed);
+        let preview_accepted = parsed.repair_issue.is_none()
+            && !response.truncated
+            && (!self.context_compact_required || parsed.context_compacts.len() == 1);
+        runtime.on_model_response_validated(preview_accepted, !parsed.continue_work);
+
         if self.context_compact_required
             && (parsed.context_compacts.len() != 1 || parsed.repair_issue.is_some())
         {

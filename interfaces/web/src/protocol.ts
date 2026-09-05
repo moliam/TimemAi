@@ -240,7 +240,16 @@ export type SessionWorker = {
   parent_worker_id?: string | null;
 };
 
+export type ResponsePreview = {
+  attempt: number;
+  revision: number;
+  interruption?: string | null;
+  response?: { attempt: number; revision: number; text: string; status: "streaming" | "intermediate" | "final" } | null;
+  chat: { index: number; task: string; answer: string }[];
+};
+
 export type WebTurn = {
+  preview?: ResponsePreview | null;
   turn_id: string;
   state: string;
   created_at_ms: number;
@@ -253,6 +262,8 @@ export type WebTurn = {
 };
 
 export type WebSubAnswer = {
+  preview_attempt?: number;
+  preview_index?: number;
   sub_answer_id: string;
   ordinal: number;
   task: string;

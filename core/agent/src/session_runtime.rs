@@ -1,3 +1,7 @@
+use crate::model_stream::{
+    JsonChatTextStream, JsonPublicTextStream, NativeChatTextStream, PublicTextTarget,
+    TurnResponsePreview, XmlPublicTextStream,
+};
 use crate::turn_state::{allocate_turn_token, TurnProjectionState};
 use crate::{
     append_audit_event, is_model_input_too_large_error, model_input_overflow_recovery_audit_event,
@@ -186,6 +190,19 @@ pub trait ModelClient {
     ) -> Result<LlmResponse, String> {
         self.call_model(config, &request.rendered_prompt, audit_file, should_cancel)
     }
+
+    /// Optional public-content observer. This is provisional transport data, not
+    /// permission to execute tools or accept a response protocol.
+    fn call_model_interaction_streaming(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        audit_file: &Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+        _on_content: &mut dyn FnMut(&serde_json::Value),
+    ) -> Result<LlmResponse, String> {
+        self.call_model_interaction(config, request, audit_file, should_cancel)
+    }
 }
 
 pub fn run_session_turn(
@@ -289,6 +306,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
     ui.on_turn_projection(&started_projection);
     let mut reminders = TurnReminderSchedules::new(&turn_id, core.reminder_tips_config());
     let mut progress_reminder = TurnProgressReminder::default();
+    let mut response_preview = TurnResponsePreview::default();
     if let Some(interval) = focus_reminder_interval {
         reminders.override_first_time_interval(interval);
     }
@@ -434,6 +452,7 @@ fn run_session_turn_with_model_client_and_reminder_override(
                     &mut profiler,
                     request.session,
                     &turn_id,
+                    &mut response_preview,
                 ) {
                     Ok(response) => {
                         publish_turn_projection(
@@ -453,6 +472,8 @@ fn run_session_turn_with_model_client_and_reminder_override(
                         let continue_supplements_after_final_answer =
                             ui.continue_supplements_after_final_answer();
                         let mut action_runtime = TurnActionRuntime::new(ui);
+                        action_runtime.preview =
+                            Some((&mut response_preview, request.session, &turn_id));
                         step = core.apply_model_response_with_repair_audit_and_runtime(
                             response.response,
                             request.audit_file,
@@ -460,6 +481,10 @@ fn run_session_turn_with_model_client_and_reminder_override(
                             &turn_id,
                             &mut action_runtime,
                         );
+                        if let Some((preview, session, turn_id)) = action_runtime.preview.as_mut() {
+                            preview.clear_chat();
+                            preview.publish(action_runtime.ui, session, turn_id);
+                        }
                         if let Some((has_tool_call, has_free_talk)) =
                             action_runtime.take_model_response_progress()
                         {
@@ -667,6 +692,8 @@ fn run_session_turn_with_model_client_and_reminder_override(
         _ => unreachable!("session turn loop must produce exactly one outcome kind"),
     };
     if outcome.stop_reason == Some(TurnStopReason::CancelledByUser) {
+        response_preview.interrupt("cancelled");
+        response_preview.publish(ui, request.session, &turn_id);
         // Stop performs an immediate best-effort resource sweep. Repeat it at
         // the authoritative turn boundary to catch a background job whose
         // registration raced the first sweep.
@@ -732,6 +759,7 @@ struct TurnActionRuntime<'a> {
     pending_supplements: Vec<String>,
     user_wait: Duration,
     model_response_progress: Option<(bool, bool)>,
+    preview: Option<(&'a mut TurnResponsePreview, &'a str, &'a str)>,
 }
 
 impl<'a> TurnActionRuntime<'a> {
@@ -741,6 +769,7 @@ impl<'a> TurnActionRuntime<'a> {
             pending_supplements: Vec::new(),
             user_wait: Duration::ZERO,
             model_response_progress: None,
+            preview: None,
         }
     }
 
@@ -758,12 +787,32 @@ impl<'a> TurnActionRuntime<'a> {
 }
 
 impl ActionRuntime for TurnActionRuntime<'_> {
+    fn on_model_response_validated(&mut self, accepted: bool, final_response: bool) {
+        if let Some((preview, session, turn_id)) = self.preview.as_mut() {
+            preview.validated(accepted, final_response);
+            preview.publish(self.ui, session, turn_id);
+        }
+    }
+
     fn should_cancel(&mut self) -> bool {
         self.ui.is_cancel_requested()
     }
 
     fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
-        self.ui.on_core_topic_events(events);
+        for event in events {
+            let mut event = event.clone();
+            if event.topic.name == crate::host::CORE_TOPIC_SUB_ANSWER {
+                if let Some((preview, _, _)) = self.preview.as_mut() {
+                    let task = event.payload["task"].as_str().unwrap_or_default();
+                    let answer = event.payload["answer"].as_str().unwrap_or_default();
+                    if let Some((attempt, index)) = preview.confirm_chat(task, answer) {
+                        event.payload["preview_attempt"] = serde_json::json!(attempt);
+                        event.payload["preview_index"] = serde_json::json!(index);
+                    }
+                }
+            }
+            self.ui.on_core_topic_events(&[event]);
+        }
     }
 
     fn on_model_response_parsed(
@@ -794,15 +843,86 @@ fn call_model_with_system_retries(
     profiler: &mut Option<&mut RuntimeProfiler>,
     session: &str,
     turn_id: &str,
+    preview: &mut TurnResponsePreview,
 ) -> Result<ModelCallOutcome<LlmResponse>, String> {
     let retry_policy = model_system_retry_policy();
     let mut total_model_wait = Duration::ZERO;
     let mut total_retry_wait = Duration::ZERO;
     for attempt in 0..=retry_policy.max_attempts {
         let model_wait_start = Instant::now();
-        let result = model_client.call_model_interaction(config, request, audit_file, &mut || {
-            ui.is_cancel_requested()
-        });
+        preview.begin();
+        let mut json = JsonPublicTextStream::default();
+        let mut json_chat = JsonChatTextStream::default();
+        let mut xml = XmlPublicTextStream::default();
+        let mut native_chat = NativeChatTextStream::default();
+        let shared_ui = std::cell::RefCell::new(&mut *ui);
+        let mut preview_error = false;
+        let result = model_client.call_model_interaction_streaming(
+            config,
+            request,
+            audit_file,
+            &mut || shared_ui.borrow_mut().is_cancel_requested(),
+            &mut |event| {
+                if preview_error {
+                    return;
+                }
+                let mut changed = false;
+                let mut append_error = false;
+                let mut emit = |target, text: &str| match preview.append(target, text) {
+                    Ok(value) => changed |= value,
+                    Err(_) => append_error = true,
+                };
+                let content = event
+                    .pointer("/choices/0/delta/content")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let parsed = if request.is_native() {
+                    emit(PublicTextTarget::Response, content);
+                    native_chat.push(event, &mut emit)
+                } else if config.response_protocol
+                    == crate::response_protocol::ResponseProtocolKind::Json
+                {
+                    json.push(content, &mut |text| emit(PublicTextTarget::Response, text))
+                        .and_then(|_| json_chat.push(content, &mut emit))
+                } else {
+                    xml.push_typed(content, &mut emit)
+                };
+                if parsed.is_err() || append_error {
+                    preview_error = true;
+                    preview.retract();
+                    changed = true;
+                }
+                if changed {
+                    preview.publish(&mut **shared_ui.borrow_mut(), session, turn_id);
+                }
+            },
+        );
+        if let Err(error) = &result {
+            if error.starts_with("invalid_model_stream_") || error == "model_stream_event_too_large"
+            {
+                preview.retract();
+            } else {
+                preview.interrupt(if error == "cancelled_by_user" {
+                    "cancelled"
+                } else if [
+                    "model_network_error:",
+                    "model_timeout:",
+                    "model_proxy_error:",
+                    "model_dns_error:",
+                    "model_tls_error:",
+                    "model_connect_error:",
+                    "model_body_error:",
+                ]
+                .iter()
+                .any(|prefix| error.starts_with(prefix))
+                {
+                    "network_error"
+                } else {
+                    "model_error"
+                });
+            }
+            preview.publish(ui, session, turn_id);
+        }
         let model_wait = model_wait_start.elapsed();
         total_model_wait = total_model_wait.saturating_add(model_wait);
         match result {

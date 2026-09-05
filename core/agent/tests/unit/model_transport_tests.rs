@@ -921,3 +921,45 @@ fn proxy_and_no_proxy_environment_smoke() {
     let _ = std::fs::remove_file(proxy_audit);
     let _ = std::fs::remove_file(no_proxy_audit);
 }
+
+#[test]
+fn provisional_content_arrives_before_server_can_finish_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    let first = "data: {\"choices\":[{\"delta\":{\"content\":\"early\"}}]}\n\n";
+    let last = "data: [DONE]\n\n";
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        read_http_request(&mut socket);
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", first.len() + last.len(), first).unwrap();
+        socket.flush().unwrap();
+        // A causal handshake, not a timing assertion: completion is withheld
+        // until the transport observer has received the first content.
+        observed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        socket.write_all(last.as_bytes()).unwrap();
+    });
+    let config = local_config(addr, 10);
+    let request = prepare_model_http_request(&config, "stream test");
+    let mut transport = NativeHttpTransport::new().unwrap();
+    let mut text = String::new();
+    let response = transport
+        .execute(
+            &config,
+            &request,
+            Duration::from_secs(10),
+            &mut || false,
+            Some(&mut |part| {
+                text.push_str(
+                    part.pointer("/choices/0/delta/content")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap(),
+                );
+                observed_tx.send(()).unwrap();
+            }),
+        )
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(text, "early");
+    assert!(response.body.ends_with("data: [DONE]\n\n"));
+}

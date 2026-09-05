@@ -1121,6 +1121,9 @@ export function appendTurnEvent(
   turns[turnIndex] = {
     ...target,
     sub_answers: subAnswers,
+    preview: subAnswer?.preview_attempt === target.preview?.attempt && subAnswer?.preview_index !== undefined && target.preview
+      ? { ...target.preview, chat: target.preview.chat.filter(item => item.index !== subAnswer.preview_index) }
+      : target.preview,
     final_answer:
       finalAnswerFromTurnEvent(session, event) ?? target.final_answer,
     events: [...target.events, event],
@@ -1191,6 +1194,8 @@ function subAnswerFromTurnEventPayload(
   if (!item.sub_answer_id.trim() || !item.task.trim() || !item.answer.trim())
     return undefined;
   return {
+    preview_attempt: typeof item.preview_attempt === "number" ? item.preview_attempt : undefined,
+    preview_index: typeof item.preview_index === "number" ? item.preview_index : undefined,
     sub_answer_id: item.sub_answer_id,
     ordinal: item.ordinal,
     task: item.task,
@@ -1530,6 +1535,16 @@ export function applyCoreTopicToSession(
     !session.contexts.some((context) => context.context_id === event.context_id)
   )
     return session;
+  if (event.topic.name === "core.model.preview") {
+    if (event.worker_id && event.worker_id !== session.primary_worker_id) return session;
+    if (event.payload.runtime_phase === "toolgen") return session;
+    const id = turnId ?? event.payload.turn_id;
+    const preview = event.payload as unknown as NonNullable<WebTurn["preview"]>;
+    if (!Number.isSafeInteger(preview.revision) || !Array.isArray(preview.chat)) return session;
+    return { ...session, turns: session.turns.map((turn) =>
+      turn.turn_id === id && preview.revision > (turn.preview?.revision ?? 0)
+        ? { ...turn, preview } : turn) };
+  }
   const contextState = event.payload.context_state;
   const reportedDir =
     contextState &&

@@ -1,3 +1,4 @@
+import { StreamUiModeSetting, useStreamUiMode } from "./stream_ui_mode";
 import {
   AssistantRuntimeProvider,
   ThreadMessageLike,
@@ -182,6 +183,7 @@ import {
   sessionCacheHitPercent,
   sessionCancellationApplies,
   shouldRenderTurnWorkFrame,
+  hasOnlyFreeTalkActivity,
   sessionContextUsage,
   sessionCreateDecision,
   sessionInteractionLockReason as sessionInteractionLockReasonForState,
@@ -2358,7 +2360,7 @@ function TimemApp() {
         if (sessionIndex < 0) return current;
         const session = current[sessionIndex];
         const nextSession = applyCoreTopicToSession(
-          appendTurnEvent(session, event.turn_id, {
+          topic.topic.name === "core.model.preview" ? session : appendTurnEvent(session, event.turn_id, {
             event_id: event.turn_event_id ?? clientId(),
             source: "core_topic",
             payload: topic as unknown as Record<string, unknown>,
@@ -7538,7 +7540,7 @@ function TimemThread({
       ? "Loading earlier history…"
       : `Load ${STORED_HISTORY_PAGE_SIZE} older stored tasks`;
   const latestTurn = turns.at(-1);
-  const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${latestTurn?.events.length ?? 0}:${latestTurn?.user_entries.length ?? 0}:${latestTurn?.final_answer?.length ?? 0}:${latestTurn?.completion ? 1 : 0}`;
+  const latestTurnVersion = `${latestTurn?.turn_id ?? ""}:${latestTurn?.events.length ?? 0}:${latestTurn?.user_entries.length ?? 0}:${latestTurn?.final_answer?.length ?? 0}:${latestTurn?.completion ? 1 : 0}:${latestTurn?.preview?.revision ?? 0}`;
   const liveSessionKey = sessionIds.join("\u0000");
   const liveSessionIds = useMemo(() => new Set(sessionIds), [liveSessionKey]);
   const [recentTimelineSessionIds, setRecentTimelineSessionIds] = useState<
@@ -9339,7 +9341,8 @@ const TurnInteraction = memo(function TurnInteraction({
     isCancelling ||
     turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
   const interrupted = cancelled || turn.state === "interrupted";
-  const [showWorkStream, setShowWorkStream] = useState(() => isWorking);
+  const onlyFreeTalk = hasOnlyFreeTalkActivity(processActivities, decisions.length);
+  const [showWorkStream, setShowWorkStream] = useState(() => isWorking || (hasVisibleProcess && !onlyFreeTalk));
   const isToolGenTurn =
     turn.turn_id.startsWith("web_toolgen_turn_") ||
     turn.user_entries.some((entry) => entry.kind === "toolgen_instruction") ||
@@ -9362,8 +9365,8 @@ const TurnInteraction = memo(function TurnInteraction({
     previousFinalAnswer.current = !!turn.final_answer;
     if (!wasWorking && isWorking) setShowWorkStream(true);
     if (finalArrived || (wasWorking && turn.state === "interrupted"))
-      setShowWorkStream(false);
-  }, [isWorking, turn.final_answer, turn.state]);
+      setShowWorkStream(hasVisibleProcess && !onlyFreeTalk);
+  }, [isWorking, turn.final_answer, turn.state, hasVisibleProcess, onlyFreeTalk]);
 
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
@@ -9681,7 +9684,7 @@ const TurnInteraction = memo(function TurnInteraction({
           )}
         </div>
       )}
-      {(turn.sub_answers.length > 0 || turn.final_answer) && (
+      {(turn.sub_answers.length > 0 || turn.final_answer || turn.preview) && (
         <TurnAnswerDelivery
           turn={turn}
           toolGenPending={toolGenPending}
@@ -9772,8 +9775,13 @@ function TurnAnswerDelivery({
   onToolGen?: () => void;
   onDelete?: () => void;
 }) {
+  const streamUiMode = useStreamUiMode();
+  const preview = streamUiMode ? turn.preview : undefined;
+  const previewChat = preview?.chat ?? [];
+  const previewText = preview?.response?.text ?? "";
+  const hasPreview = !!previewText || previewChat.length > 0;
   const hasFinal = !!turn.final_answer;
-  const hasChat = turn.sub_answers.length > 0;
+  const hasChat = turn.sub_answers.length > 0 || previewChat.length > 0;
   const [chatExpanded, setChatExpanded] = useState(() => !hasFinal);
   const previousFinal = useRef(hasFinal);
   const chatPanelId = `turn-chat-${turn.turn_id}`;
@@ -9783,7 +9791,7 @@ function TurnAnswerDelivery({
     previousFinal.current = !!turn.final_answer;
     if (finalArrived) setChatExpanded(false);
   }, [turn.final_answer]);
-  if (!hasChat && !hasFinal) return null;
+  if (!hasChat && !hasFinal && !hasPreview) return null;
   return (
     <section className="turn-answer-delivery">
       {hasChat && (
@@ -9818,17 +9826,22 @@ function TurnAnswerDelivery({
               aria-label="Chat answers"
             >
               <div className="turn-interim-list">
-                {chatItems.map(({ item, ordinal }) => (
-                  <section
-                    className="turn-interim-item"
-                    key={item.sub_answer_id}
-                  >
-                    <h3>
-                      <span>{ordinal}.</span> {item.task}
-                    </h3>
-                    <div className="message-content">
-                      <MarkdownContent text={item.answer} />
-                    </div>
+                {[
+                  ...previewChat.map((item) => ({
+                    key: `preview-${preview?.attempt}-${item.index}`,
+                    task: item.task, answer: item.answer, provisional: true,
+                    index: item.index, ordinal: undefined as number | undefined,
+                  })),
+                  ...chatItems.map(({item, ordinal}) => ({
+                    key: streamUiMode && item.preview_attempt !== undefined && item.preview_index !== undefined
+                      ? `preview-${item.preview_attempt}-${item.preview_index}` : item.sub_answer_id,
+                    task: item.task, answer: item.answer, provisional: false,
+                    index: item.preview_index, ordinal,
+                  })),
+                ].map((item) => (
+                  <section className={`turn-interim-item${item.provisional ? " provisional-chat" : ""}`} key={item.key} data-preview-index={item.index}>
+                    {item.task && <h3>{item.ordinal !== undefined && <span>{item.ordinal}.</span>} {item.task}</h3>}
+                    <div className="message-content"><MarkdownContent text={item.answer} /></div>
                   </section>
                 ))}
               </div>
@@ -9836,9 +9849,11 @@ function TurnAnswerDelivery({
           )}
         </section>
       )}
-      {hasFinal && turn.final_answer && (
+      {hasPreview && preview?.interruption && <div className="response-preview-interruption" role="status">{preview.interruption === "cancelled" ? "Stopped — partial response" : preview.interruption === "network_error" ? "Network error — partial response" : "Model error — partial response"}</div>}
+      {(hasFinal || !!previewText) && (
         <FinalAnswerDelivery
-          text={turn.final_answer}
+          text={turn.final_answer || previewText}
+          provisional={!hasFinal}
           completion={turn.completion}
           toolGenPending={toolGenPending}
           toolGenBlocked={toolGenBlocked}
@@ -9855,6 +9870,7 @@ function TurnAnswerDelivery({
 
 function FinalAnswerDelivery({
   text,
+  provisional = false,
   completion,
   toolGenPending,
   toolGenBlocked,
@@ -9865,6 +9881,7 @@ function FinalAnswerDelivery({
   onDelete,
 }: {
   text: string;
+  provisional?: boolean;
   completion: WebTurn["completion"];
   toolGenPending: boolean;
   toolGenBlocked: boolean;
@@ -9933,9 +9950,9 @@ function FinalAnswerDelivery({
     </div>
   );
   return (
-    <section className="turn-final-delivery">
-      <FinalAnswerContent text={text} />
-      {completion ? (
+    <section className={provisional ? "response-preview" : "turn-final-delivery"}>
+      <FinalAnswerContent text={text} provisional={provisional} />
+      {provisional ? null : completion ? (
         <CompletionCard
           completion={completion}
           toolGenPending={toolGenPending}
@@ -9959,7 +9976,7 @@ const FINAL_ANSWER_OUTLINE_EDGE_GUARD = 12;
 const FINAL_ANSWER_OUTLINE_VIEWPORT_RATIO = 0.15;
 const FINAL_ANSWER_OUTLINE_TOGGLE_HEIGHT = 52;
 
-function FinalAnswerContent({ text }: { text: string }) {
+function FinalAnswerContent({ text, provisional = false }: { text: string; provisional?: boolean }) {
   const timelineActive = useContext(SessionTimelineActiveContext);
   const outline = useMemo(() => {
     try {
@@ -10033,6 +10050,7 @@ function FinalAnswerContent({ text }: { text: string }) {
     const viewport = root?.closest<HTMLElement>(".chat-scroll");
     const chatShell = viewport?.closest<HTMLElement>(".chat-shell");
     if (
+      provisional ||
       !timelineActive ||
       !root ||
       !content ||
@@ -10106,7 +10124,7 @@ function FinalAnswerContent({ text }: { text: string }) {
       observer?.disconnect();
       if (updateFrame !== null) cancelAnimationFrame(updateFrame);
     };
-  }, [outline, outlineCollapsed, text, timelineActive]);
+  }, [outline, outlineCollapsed, text, timelineActive, provisional]);
 
   useEffect(() => {
     setOutlineCollapsed(outlinePlacement === "overlay");
@@ -12178,6 +12196,7 @@ const SettingsCenter = memo(function SettingsCenter(
                   <h3 id="beta-settings-title">Beta</h3>
                   <TriangleAlert size={19} aria-hidden="true" />
                 </div>
+                <StreamUiModeSetting />
                 <section className="settings-group toolgen-beta-card">
                   <div className="settings-group-heading">
                     <div>

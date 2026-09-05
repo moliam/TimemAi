@@ -2,6 +2,7 @@ mod command_dedup;
 mod command_lane;
 mod desktop_launch;
 mod mem_maintenance;
+mod response_preview;
 mod websocket_delivery;
 
 #[cfg(test)]
@@ -592,6 +593,8 @@ struct WebSessionRuntimeProfile {
 
 #[derive(Debug, Clone, Serialize)]
 struct WebTurn {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<Value>,
     turn_id: String,
     state: String,
     created_at_ms: u128,
@@ -606,6 +609,10 @@ struct WebTurn {
 
 #[derive(Debug, Clone, Serialize)]
 struct WebSubAnswer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_attempt: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_index: Option<u64>,
     sub_answer_id: String,
     ordinal: u64,
     task: String,
@@ -615,6 +622,9 @@ struct WebSubAnswer {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct WebNextTurnPayload {
+    // Live explicit Send after Stop; never replay this intent after restart.
+    #[serde(skip)]
+    send_after_cancel: bool,
     turn_id: String,
     created_at_ms: u128,
     text: String,
@@ -5015,6 +5025,7 @@ fn interrupted_turn_from_queued_message(
             completion: None,
         },
         WebTurn {
+            preview: None,
             turn_id: payload.turn_id.clone(),
             state: "interrupted".to_string(),
             created_at_ms: payload.created_at_ms,
@@ -5405,6 +5416,8 @@ fn persist_restored_session_runtime_cache(
 fn web_sub_answer_from_topic_payload(payload: &Value, created_at_ms: u128) -> Option<WebSubAnswer> {
     let body = payload.get("payload")?;
     Some(WebSubAnswer {
+        preview_attempt: body.get("preview_attempt").and_then(Value::as_u64),
+        preview_index: body.get("preview_index").and_then(Value::as_u64),
         sub_answer_id: body.get("sub_answer_id")?.as_str()?.to_string(),
         ordinal: body.get("ordinal")?.as_u64()?,
         task: body.get("task")?.as_str()?.to_string(),
@@ -5438,6 +5451,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     continue;
                 }
                 let turn = turns.entry(turn_id.clone()).or_insert_with(|| WebTurn {
+                    preview: None,
                     turn_id: turn_id.clone(),
                     state: "restored".to_string(),
                     created_at_ms: created_at_ms as u128,
@@ -5539,6 +5553,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     .and_then(|value| value.as_str().map(str::to_string))
                     .unwrap_or_else(|| "history".to_string());
                 let turn = turns.entry(turn_id.clone()).or_insert_with(|| WebTurn {
+                    preview: None,
                     turn_id: turn_id.clone(),
                     state: "restored".to_string(),
                     created_at_ms: created_at_ms as u128,
@@ -5990,6 +6005,8 @@ fn enqueue_next_turn_intent(
         previous_session = session.clone();
         let attachments = take_pending_attachments_for_ids(session, attachment_ids)?;
         let payload = WebNextTurnPayload {
+            send_after_cancel: session.cancelling_turn_id.is_some()
+                && session.message_queue.is_empty(),
             turn_id: unique_web_id("web_turn"),
             created_at_ms: now_ms(),
             text,
@@ -6029,7 +6046,22 @@ fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
         if current_turn_id(session).is_some() {
             return None;
         }
-        let item = session.message_queue.begin_automatic_dispatch()?.clone();
+        let explicit_after_stop = session
+            .message_queue
+            .projection()
+            .items
+            .first()
+            .filter(|item| item.payload.send_after_cancel)
+            .map(|item| item.command_id.clone());
+        let item = if let Some(command_id) = explicit_after_stop {
+            session
+                .message_queue
+                .begin_immediate_dispatch(&command_id)
+                .ok()?
+                .clone()
+        } else {
+            session.message_queue.begin_automatic_dispatch()?.clone()
+        };
         session.pending_turn_id = Some(item.payload.turn_id.clone());
         Some(item)
     });
@@ -8158,6 +8190,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
     let previous_session = session.clone();
     let attachments = take_pending_attachments_for_ids(session, attachment_ids)?;
     let turn = WebTurn {
+        preview: None,
         turn_id: unique_web_id("web_turn"),
         state: "pending".to_string(),
         created_at_ms: now_ms(),
@@ -8335,6 +8368,7 @@ fn start_web_toolgen_turn(
         })
         .unwrap_or_default();
     let turn = WebTurn {
+        preview: None,
         turn_id: unique_web_id("web_toolgen_turn"),
         state: "pending".to_string(),
         created_at_ms,
@@ -9350,6 +9384,7 @@ fn activate_core_started_turn(
             }
             let payload = item.payload;
             let turn = WebTurn {
+                preview: None,
                 turn_id: payload.turn_id.clone(),
                 state: "pending".to_string(),
                 created_at_ms: payload.created_at_ms,
@@ -9645,6 +9680,12 @@ fn handle_scoped_worker_event(
                     );
                     continue;
                 }
+                if event.topic.name == "core.model.preview" {
+                    if !toolgen_scoped {
+                        response_preview::publish(state, session_id, worker_id, &event);
+                    }
+                    continue;
+                }
                 let mut wire_payload = event.wire_payload();
                 if !toolgen_scoped {
                     if let Some(cwd) = event
@@ -9784,6 +9825,25 @@ fn handle_scoped_worker_event(
                                     if !turn.sub_answers.iter().any(|existing| {
                                         existing.sub_answer_id == sub_answer.sub_answer_id
                                     }) {
+                                        if let (Some(attempt), Some(index), Some(preview)) = (
+                                            sub_answer.preview_attempt,
+                                            sub_answer.preview_index,
+                                            turn.preview.as_mut(),
+                                        ) {
+                                            if preview.get("attempt").and_then(Value::as_u64)
+                                                == Some(attempt)
+                                            {
+                                                if let Some(chat) = preview
+                                                    .get_mut("chat")
+                                                    .and_then(Value::as_array_mut)
+                                                {
+                                                    chat.retain(|item| {
+                                                        item.get("index").and_then(Value::as_u64)
+                                                            != Some(index)
+                                                    });
+                                                }
+                                            }
+                                        }
                                         turn.sub_answers.push(sub_answer);
                                         turn.sub_answers.sort_by_key(|item| item.ordinal);
                                     }
