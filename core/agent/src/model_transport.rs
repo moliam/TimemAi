@@ -97,6 +97,7 @@ impl NativeHttpTransport {
         request: &PreparedModelHttpRequest,
         inactivity_timeout: Duration,
         should_cancel: &mut dyn FnMut() -> bool,
+        on_content: Option<&mut dyn FnMut(&serde_json::Value)>,
     ) -> Result<NativeHttpResponse, String> {
         let client = self.client_for(config)?;
         let headers = request_headers(request)?;
@@ -111,10 +112,12 @@ impl NativeHttpTransport {
             config.http_transport.allow_cross_origin_redirects,
             inactivity_timeout,
             should_cancel,
+            on_content,
         ))
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_with_redirects(
     client: &reqwest::Client,
     mut url: Url,
@@ -123,6 +126,7 @@ async fn execute_with_redirects(
     allow_cross_origin_redirects: bool,
     inactivity_timeout: Duration,
     should_cancel: &mut dyn FnMut() -> bool,
+    mut on_content: Option<&mut dyn FnMut(&serde_json::Value)>,
 ) -> Result<NativeHttpResponse, String> {
     let started = Instant::now();
     let mut redirect_count = 0;
@@ -197,6 +201,19 @@ async fn execute_with_redirects(
         {
             return Err(model_response_too_large());
         }
+        let is_sse = (200..300).contains(&status)
+            && response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| {
+                    v.split(';')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .eq_ignore_ascii_case("text/event-stream")
+                });
+        let mut stream = crate::model_stream::OpenAiContentStream::default();
         let mut response_body = Vec::new();
         loop {
             let chunk = wait_for_progress(
@@ -213,6 +230,11 @@ async fn execute_with_redirects(
                         return Err(model_response_too_large());
                     }
                     response_body.extend_from_slice(&bytes);
+                    if is_sse {
+                        if let Some(observer) = on_content.as_deref_mut() {
+                            stream.push_events(&bytes, observer)?;
+                        }
+                    }
                 }
                 None => break,
             }
@@ -475,14 +497,26 @@ impl HttpModelClient {
         http_request: PreparedModelHttpRequest,
         audit_file: &Path,
         should_cancel: &mut dyn FnMut() -> bool,
+        mut on_content: Option<&mut dyn FnMut(&serde_json::Value)>,
     ) -> Result<LlmResponse, String> {
-        let first =
-            self.execute_model_http_request(config, &http_request, audit_file, should_cancel)?;
+        let first = self.execute_model_http_request(
+            config,
+            &http_request,
+            audit_file,
+            should_cancel,
+            &mut on_content,
+        )?;
 
         if should_retry_without_openai_cache_control(config, &http_request, &first) {
             let fallback_request = without_openai_compatible_cache_control(&http_request);
             return self
-                .execute_model_http_request(config, &fallback_request, audit_file, should_cancel)?
+                .execute_model_http_request(
+                    config,
+                    &fallback_request,
+                    audit_file,
+                    should_cancel,
+                    &mut on_content,
+                )?
                 .result;
         }
 
@@ -495,15 +529,19 @@ impl HttpModelClient {
         http_request: &PreparedModelHttpRequest,
         audit_file: &Path,
         should_cancel: &mut dyn FnMut() -> bool,
+        on_content: &mut Option<&mut dyn FnMut(&serde_json::Value)>,
     ) -> Result<ModelHttpResponseInterpretation, String> {
         let _ = append_audit_event(
             audit_file,
             &model_request_audit_event(config, &http_request.model_request),
         );
         let timeout = Duration::from_secs(config.timeout_secs);
-        let response = self
-            .transport()?
-            .execute(config, http_request, timeout, should_cancel)?;
+        let observer = on_content
+            .as_mut()
+            .map(|callback| &mut **callback as &mut dyn FnMut(&serde_json::Value));
+        let response =
+            self.transport()?
+                .execute(config, http_request, timeout, should_cancel, observer)?;
         let interpreted =
             interpret_model_http_response(config, response.status, &response.body, "");
         let mut response_audit =
@@ -539,6 +577,7 @@ impl ModelClient for HttpModelClient {
             http_request,
             audit_file,
             should_cancel,
+            None,
         )
     }
 
@@ -555,6 +594,32 @@ impl ModelClient for HttpModelClient {
             http_request,
             audit_file,
             should_cancel,
+            None,
+        )
+    }
+
+    fn call_model_interaction_streaming(
+        &mut self,
+        config: &ModelServiceConfig,
+        request: &ModelInteractionRequest,
+        audit_file: &Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+        on_content: &mut dyn FnMut(&serde_json::Value),
+    ) -> Result<LlmResponse, String> {
+        // This entry point promises incremental delivery. Do not depend on a
+        // separately configured TIMEM_STREAM flag: the browser preference only
+        // controls presentation, while transport streaming is Core-owned.
+        let mut streaming_config = config.clone();
+        if streaming_config.api_protocol == ApiProtocol::OpenAiCompatible {
+            streaming_config.openai_compatible.stream = true;
+        }
+        let http_request = prepare_model_interaction_http_request(&streaming_config, request);
+        self.execute_prepared_request_with_cache_fallback(
+            &streaming_config,
+            http_request,
+            audit_file,
+            should_cancel,
+            Some(on_content),
         )
     }
 }

@@ -1,4 +1,4 @@
-import{r as l}from"./assistantUi-C4MsV_3V.js";/**
+import{r as l}from"./assistantUi-ChM2284k.js";/**
  * @license lucide-react v0.468.0 - ISC
  *
  * This source code is licensed under the ISC license.

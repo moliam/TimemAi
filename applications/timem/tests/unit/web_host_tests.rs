@@ -1576,6 +1576,7 @@ fn unmatched_core_turn_started_does_not_activate_an_unrelated_pending_intent() {
 fn restored_interrupted_session_marks_every_unfinished_turn() {
     let mut turns = vec![
         WebTurn {
+            preview: None,
             turn_id: "older_unfinished".to_string(),
             state: "restored".to_string(),
             created_at_ms: 1,
@@ -1587,6 +1588,7 @@ fn restored_interrupted_session_marks_every_unfinished_turn() {
             completion: None,
         },
         WebTurn {
+            preview: None,
             turn_id: "persisted_last".to_string(),
             state: "restored".to_string(),
             created_at_ms: 2,
@@ -1613,6 +1615,7 @@ fn restored_interrupted_session_marks_every_unfinished_turn() {
 #[test]
 fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn() {
     let terminal = WebTurn {
+        preview: None,
         turn_id: "terminal_last".to_string(),
         state: "completed".to_string(),
         created_at_ms: 2,
@@ -1624,6 +1627,7 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         completion: Some(json!({"stop_reason": "model_error"})),
     };
     let unfinished = WebTurn {
+        preview: None,
         turn_id: "older_unfinished".to_string(),
         state: "restored".to_string(),
         created_at_ms: 1,
@@ -1642,6 +1646,7 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
     assert_eq!(turns[1].state, "completed");
 
     let mut ready_turns = vec![WebTurn {
+        preview: None,
         turn_id: "ready_unfinished".to_string(),
         state: "restored".to_string(),
         created_at_ms: 3,
@@ -1716,6 +1721,7 @@ fn interrupted_session_persists_without_an_active_or_pending_turn() {
     session.active_turn_id = None;
     session.pending_turn_id = None;
     session.turns.push(WebTurn {
+        preview: None,
         turn_id: "interrupted_turn".to_string(),
         state: "interrupted".to_string(),
         created_at_ms: 1,
@@ -1746,6 +1752,7 @@ fn stale_turn_started_without_command_id_cannot_revive_an_interrupted_session() 
         session.active_turn_id = None;
         session.pending_turn_id = None;
         session.turns.push(WebTurn {
+            preview: None,
             turn_id: "old_interrupted_turn".to_string(),
             state: "interrupted".to_string(),
             created_at_ms: 1,
@@ -1806,6 +1813,7 @@ fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can
         let session = sessions.get_mut(session_id).unwrap();
         session.state = "interrupted".to_string();
         session.turns.push(WebTurn {
+            preview: None,
             turn_id: "interrupted_turn".to_string(),
             state: "interrupted".to_string(),
             created_at_ms: 1,
@@ -4142,6 +4150,7 @@ fn session_runtime_update_is_allowed_during_an_active_turn() {
         session.active_turn_id = Some("turn_active".to_string());
         session.state = "working".to_string();
         session.turns.push(WebTurn {
+            preview: None,
             turn_id: "turn_active".to_string(),
             state: "working".to_string(),
             created_at_ms: now_ms(),
@@ -4206,6 +4215,7 @@ fn session_api_key_update_is_rejected_during_an_active_turn() {
     let session = sessions.get_mut("session_a").unwrap();
     session.active_turn_id = Some("turn_active".to_string());
     session.turns.push(WebTurn {
+        preview: None,
         turn_id: "turn_active".to_string(),
         state: "working".to_string(),
         created_at_ms: now_ms(),
@@ -10814,6 +10824,18 @@ fn send_after_stop_with_an_empty_queue_becomes_one_distinct_queued_message() {
         session.message_queue.projection().items[0].command_id,
         "after-stop-q2"
     );
+    assert!(
+        session.message_queue.projection().items[0]
+            .payload
+            .send_after_cancel
+    );
+    let persisted = serde_json::to_value(&session.message_queue).unwrap();
+    let restored: timem_session::message_queue::MessageQueueProjection<WebNextTurnPayload> =
+        serde_json::from_value(persisted).unwrap();
+    assert!(
+        !restored.items[0].payload.send_after_cancel,
+        "restart must not redrive explicit Send"
+    );
 }
 
 #[test]
@@ -11468,6 +11490,7 @@ fn background_exit_event_is_appended_to_its_original_turn() {
         let session = sessions.get_mut("session_a").unwrap();
         session.active_turn_id = None;
         session.turns.push(WebTurn {
+            preview: None,
             turn_id: "turn_newer".to_string(),
             state: "working".to_string(),
             created_at_ms: now_ms(),
