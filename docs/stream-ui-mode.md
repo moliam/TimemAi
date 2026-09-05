@@ -6,6 +6,10 @@ Core emits a provisional `core.model.preview` snapshot scoped to the current res
 
 Public content is routed separately from interim Chat (`sub_answer.task` and `sub_answer.answer`). Other tool arguments and reasoning are not display content. Provisional display never permits tool execution. Complete protocol validation remains the execution gate. Invalid responses retract their provisional windows; network interruption and Stop retain partial text with an interruption notice. Confirmed Chat is delivered by `core.sub_answer`, with preview correlation metadata used to replace provisional content.
 
+## Running tools and typography
+
+While Stream UI Mode is enabled and the turn is active, running tool calls stay out of the Thought/Action frame and render as expanded rows in the stream delivery area (full multi-line command instead of the frame's truncated one-line preview). When a tool reaches a terminal status it persists into the frame like any completed activity, so the frame remains an execution ledger rather than a live spinner. Provisional response and Chat text uses exactly the final-answer font family, size, line height, and color, so confirmation never resizes content.
+
 ## Smooth provisional reveal
 
 Provisional response and Chat text is replayed at a frame-independent, backlog-adaptive cadence (default 300 chars/s, catch-up bounded to 6000 chars/s and 160 chars/frame), so bursty SSE pushes and protocol retries never make text jump. Only monotonically growing prefixes animate; retraction, retry resets, restored snapshots, confirmation and `prefers-reduced-motion` users always see the exact delivered text immediately. New top-level markdown blocks fade in softly, an optional streaming caret marks the active tail, and interruption notices stay visible until the turn ends. Pacing is presentation-only and never delays protocol validation or delivery.

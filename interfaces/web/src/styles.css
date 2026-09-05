@@ -4908,6 +4908,68 @@ body.workspace-modal-open .app-shell { user-select: none; }
 
 
 
+
+
+/* Stream UI Mode: preview text must match final-answer typography exactly,
+   so confirmation never resizes anything. */
+.response-preview,
+.turn-interim-item {
+  font-family: var(--agent-other-font), var(--agent-chinese-font), sans-serif;
+  font-weight: var(--agent-font-weight);
+}
+.response-preview > .message-content,
+.turn-interim-item .message-content {
+  color: #e6edf4;
+  font-size: var(--content-size);
+  line-height: 1.68;
+}
+:root[data-theme="light"] .response-preview > .message-content,
+:root[data-theme="light"] .turn-interim-item .message-content { color: #24333a; }
+
+/* Running tools render expanded in the stream delivery area while the
+   Thought/Action frame waits for their terminal status. */
+.turn-stream-tools { display: grid; gap: 8px; margin: 0 0 14px; min-width: 0; }
+.stream-tool-row {
+  border: 1px solid #26333e;
+  border-radius: 7px;
+  background: #111820;
+  padding: 9px 12px;
+  min-width: 0;
+}
+.stream-tool-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: 12px; }
+.stream-tool-head b { color: #e1ebf0; font-weight: 650; }
+.stream-tool-dot { width: 8px; height: 8px; border-radius: 50%; background: #e6b86a; animation: breathe 1.2s infinite; flex: none; align-self: center; }
+.stream-tool-status { color: #98afbc; }
+.stream-tool-command {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid #26333e;
+  border-radius: 5px;
+  background: #0d141b;
+  color: #a8c9d7;
+  font: 11.5px/1.55 "SFMono-Regular", Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  max-height: 200px;
+  overflow: auto;
+}
+.stream-tool-detail {
+  margin: 6px 0 0;
+  color: #869ca9;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  max-height: 160px;
+  overflow: auto;
+}
+:root[data-theme="light"] .stream-tool-row { border-color: #c7d2d8; background: #eef2f4; }
+:root[data-theme="light"] .stream-tool-head b { color: #24333a; }
+:root[data-theme="light"] .stream-tool-dot { background: #b07f2e; }
+:root[data-theme="light"] .stream-tool-status { color: #5c6f7a; }
+:root[data-theme="light"] .stream-tool-command { background: #111820; color: #a8c9d7; }
+:root[data-theme="light"] .stream-tool-detail { color: #53675f; }
+@media (prefers-reduced-motion: reduce) { .stream-tool-dot { animation: none; } }
+
 .restart-cwd-gate {
   width: 100%;
   max-width: 100%;

@@ -1,6 +1,22 @@
 import { Activity } from "./protocol";
 import { toolActivityDisplayName } from "./view_model";
-import { isToolActivityFailed, isToolActivityRunning } from "./tool_status";
+import {
+  isToolActivityFailed,
+  isToolActivityRunning,
+  TOOL_STATUS_RUNNING,
+} from "./tool_status";
+
+/** True while a tool call has started but not reached a terminal status. */
+export function isRunningToolActivity(
+  activity: Activity | null | undefined,
+): boolean {
+  return (
+    !!activity &&
+    activity.tone === "action" &&
+    activity.kind !== "toolgen" &&
+    isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING)
+  );
+}
 
 export type ToolActivityGroupStatus = "running" | "failed" | "completed";
 
