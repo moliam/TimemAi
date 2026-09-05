@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { Activity } from "../src/protocol";
-import { summarizeConsecutiveToolActivities, summarizeToolActivities } from "../src/activity_groups";
+import {
+  isRunningToolActivity,
+  summarizeConsecutiveToolActivities,
+  summarizeToolActivities,
+} from "../src/activity_groups";
 
 function activity(tool_name: string, tool_status: string): Activity {
   return {
@@ -143,5 +147,47 @@ describe("tool activity grouping", () => {
       createdAt: 1,
     };
     expect(summarizeToolActivities([thought])).toBeNull();
+  });
+});
+
+describe("running tool activity gate", () => {
+  const base = {
+    id: "a1",
+    sessionId: "s1",
+    title: "run_bash",
+    createdAt: 1,
+  };
+  it("marks running foreground/background actions as live", () => {
+    expect(
+      isRunningToolActivity({ ...base, tone: "action", tool_status: "running" }),
+    ).toBe(true);
+    expect(
+      isRunningToolActivity({
+        ...base,
+        tone: "action",
+        tool_status: "background_running",
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps terminal actions, non-actions and toolgen inside the frame", () => {
+    expect(
+      isRunningToolActivity({ ...base, tone: "action", tool_status: "finish" }),
+    ).toBe(false);
+    expect(
+      isRunningToolActivity({ ...base, tone: "action", tool_status: "timeout" }),
+    ).toBe(false);
+    expect(
+      isRunningToolActivity({ ...base, tone: "thinking" }),
+    ).toBe(false);
+    expect(isRunningToolActivity(null)).toBe(false);
+    expect(
+      isRunningToolActivity({
+        ...base,
+        tone: "action",
+        tool_status: "running",
+        kind: "toolgen",
+      }),
+    ).toBe(false);
   });
 });

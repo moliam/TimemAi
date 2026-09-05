@@ -249,6 +249,7 @@ import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens } from "./token_format";
 import {
   summarizeConsecutiveToolActivities,
+  isRunningToolActivity,
   ToolActivitySummary,
 } from "./activity_groups";
 import {
@@ -9318,12 +9319,23 @@ const TurnInteraction = memo(function TurnInteraction({
       visibleItems.filter((item) => !persistentToolGenItemKeys.has(item.key)),
     [persistentToolGenItemKeys, visibleItems],
   );
+  // Running tools stay out of the Thought/Action frame while the turn is
+  // active; they render expanded in the stream delivery area instead and
+  // persist into the frame once they reach a terminal status.
+  const isWorking = turn.state === "working" && !isCancelling;
+  const workItems = useMemo(
+    () =>
+      isWorking
+        ? scrollItems.filter((item) => !isRunningToolActivity(item.activity))
+        : scrollItems,
+    [isWorking, scrollItems],
+  );
   const toolActivityRuns = useMemo(
     () =>
       summarizeConsecutiveToolActivities(
-        scrollItems.map(({ activity }) => activity),
+        workItems.map(({ activity }) => activity),
       ),
-    [scrollItems],
+    [workItems],
   );
   const toolActivityRunByStartIndex = useMemo(
     () => new Map(toolActivityRuns.map((run) => [run.startIndex, run.summary])),
@@ -9331,7 +9343,11 @@ const TurnInteraction = memo(function TurnInteraction({
   );
   const hasVisibleProcess =
     scrollItems.some((item) => item.activity !== null) || decisions.length > 0;
-  const isWorking = turn.state === "working" && !isCancelling;
+  const streamUiMode = useStreamUiMode();
+  const runningStreamTools =
+    streamUiMode && isWorking
+      ? processActivities.filter((activity) => isRunningToolActivity(activity))
+      : [];
   const hasLiveUsage = isWorking && turnLiveUsage(turn) !== undefined;
   const showWorkFrame = shouldRenderTurnWorkFrame(
     turn.state,
@@ -9632,7 +9648,7 @@ const TurnInteraction = memo(function TurnInteraction({
               >
                 <div className="turn-work-content" ref={workContentRef}>
                   {" "}
-                  {scrollItems.map((item, index) => {
+                  {workItems.map((item, index) => {
                     const { activity } = item;
                     if (activity?.tone === "action") {
                       const summary = toolActivityRunByStartIndex.get(index);
@@ -9685,9 +9701,13 @@ const TurnInteraction = memo(function TurnInteraction({
           )}
         </div>
       )}
-      {(turn.sub_answers.length > 0 || turn.final_answer || turn.preview) && (
+      {(turn.sub_answers.length > 0 ||
+        turn.final_answer ||
+        turn.preview ||
+        runningStreamTools.length > 0) && (
         <TurnAnswerDelivery
           turn={turn}
+          streamTools={runningStreamTools}
           toolGenPending={toolGenPending}
           toolGenBlocked={toolGenBlocked}
           onToolGen={
@@ -9757,8 +9777,32 @@ function areTurnInteractionPropsEqual(
   });
 }
 
+function StreamToolRow({ activity }: { activity: Activity }) {
+  const status = activity.tool_status || TOOL_STATUS_RUNNING;
+  const running = isToolActivityRunning(status);
+  const toolName = toolActivityDisplayName(
+    activity.tool_name || activity.title,
+    activity.tool_mode,
+  );
+  const command =
+    activity.code?.trim() || toolInvocationPreview(activity) || "";
+  const detail = activity.detail?.trim();
+  return (
+    <div className={`stream-tool-row${running ? " running" : ""}`}>
+      <div className="stream-tool-head">
+        <span className="stream-tool-dot" aria-hidden="true" />
+        <b>{toolName}</b>
+        <span className="stream-tool-status">{humanizeToolStatus(status)}</span>
+      </div>
+      {command && <pre className="stream-tool-command">{command}</pre>}
+      {detail && <div className="stream-tool-detail">{detail}</div>}
+    </div>
+  );
+}
+
 function TurnAnswerDelivery({
   turn,
+  streamTools,
   toolGenPending,
   toolGenBlocked,
   favorite,
@@ -9768,6 +9812,7 @@ function TurnAnswerDelivery({
   onDelete,
 }: {
   turn: WebTurn;
+  streamTools: Activity[];
   toolGenPending: boolean;
   toolGenBlocked: boolean;
   favorite?: ChatFavorite;
@@ -9792,9 +9837,17 @@ function TurnAnswerDelivery({
     previousFinal.current = !!turn.final_answer;
     if (finalArrived) setChatExpanded(false);
   }, [turn.final_answer]);
-  if (!hasChat && !hasFinal && !hasPreview) return null;
+  if (!hasChat && !hasFinal && !hasPreview && streamTools.length === 0)
+    return null;
   return (
     <section className="turn-answer-delivery">
+      {streamTools.length > 0 && (
+        <section className="turn-stream-tools" aria-label="Running tools">
+          {streamTools.map((activity) => (
+            <StreamToolRow key={activity.id} activity={activity} />
+          ))}
+        </section>
+      )}
       {hasChat && (
         <section
           className={`turn-chat-delivery${chatExpanded ? " expanded" : " collapsed"}`}
