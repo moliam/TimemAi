@@ -66,3 +66,10 @@ describe("collapsed tool summary", () => {
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 7px 4px;/);
   });
 });
+
+it("keeps automatic tool absorption free of page-wide height animation", () => {
+  const rule = styles.match(/\.stream-tool-merged-item \{([^}]*)\}/)?.[1];
+  expect(rule).toBeDefined();
+  expect(rule).not.toContain("transition:");
+  expect(styles).toContain(".stream-tool-count.incremented { animation:");
+});

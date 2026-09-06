@@ -106,3 +106,17 @@ checks two proposals followed by serial execution/finish pairs; the actual-produ
 Chrome `tools` scenario executes two readfiles and checks predecessor folding
 before final delivery. Disclosure uses plus/tools while collapsed and minus/tools
 while expanded, with `✓` success and `✗` failure counts; browser tests cover both.
+
+### Atomic tool absorption
+
+Automatic tool absorption no longer animates grid height or opacity: collapsing
+rows and presenting the next tool settle in one layout update. Tool nodes remain
+mounted and only the absorbed count pulses. This avoids repeated movement of the
+following content during a height transition; it does not freeze global scrolling
+or reserve permanent blank space. Content shrinkage may still require a single
+viewport adjustment. Manual disclosure and selection protection are unchanged.
+
+Coverage: tool layout guard and Chrome serial-handoff sampling check that the
+viewport scroll position and running row position vary by less than 1px across
+18 frames after the committed handoff. This checks post-commit stability, not
+zero displacement between the pre-handoff and post-handoff layouts.

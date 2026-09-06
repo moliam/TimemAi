@@ -5173,7 +5173,9 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .live-interim-answer { font-size: var(--content-size); line-height: 1.68; }
 @media (prefers-reduced-motion: reduce) { .stream-tool-fold { transition: none; } }
 
-.stream-tool-merged-item { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 260ms ease, opacity 180ms ease; }
+/* Automatic handoff is atomic: height animation moves every following block and
+   competes with viewport follow. Only the absorbed count animates locally. */
+.stream-tool-merged-item { display: grid; grid-template-rows: 1fr; opacity: 1; }
 .stream-tool-merged-item.merged { grid-template-rows: 0fr; opacity: 0; }
 .stream-tool-merged-item > div { min-height: 0; overflow: hidden; }
 .stream-tool-run-toggle { display: flex; align-items: center; gap: 6px; border: 0; background: transparent; color: inherit; padding: 7px 4px; cursor: pointer; font-size: 12px; font-weight: 400; }

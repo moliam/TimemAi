@@ -471,6 +471,20 @@ async function main() {
     host.setSession(serial); host.send({ type: "hello", snapshot: makeSnapshot(serial) });
     await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 1 && document.querySelectorAll('.stream-tool-row.running').length === 1`), "serial B start must fold A and retain B");
     assert(await browser.evaluate(`window.actionRow === document.querySelector('.stream-tool-row')`), "serial handoff remounted A");
+    assert(await browser.evaluate(`getComputedStyle(document.querySelector('.stream-tool-merged-item')).transitionDuration === '0s'`), "automatic tool handoff must not animate page layout");
+    const settledPositions = await browser.evaluate(`new Promise(resolve => {
+      const positions = []; let remaining = 18;
+      const sample = () => {
+        const viewport = document.querySelector('.chat-scroll');
+        const row = document.querySelector('.stream-tool-row.running');
+        positions.push({scroll: viewport.scrollTop, top: row.getBoundingClientRect().top});
+        if (--remaining) requestAnimationFrame(sample); else resolve(positions);
+      }; requestAnimationFrame(sample);
+    })`);
+    for (const field of ['scroll', 'top']) {
+      const values = settledPositions.map(position => position[field]);
+      assert(Math.max(...values) - Math.min(...values) < 1, `serial handoff keeps ${field} stable after commit: ${JSON.stringify(values)}`);
+    }
     for (const width of [1440, 390]) {
       await browser.call("Emulation.setDeviceMetricsOverride", {width, height:1000, deviceScaleFactor:1, mobile:false});
       assert(await browser.evaluate(`(() => {
