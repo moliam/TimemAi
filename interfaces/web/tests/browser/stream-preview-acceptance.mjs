@@ -532,7 +532,7 @@ async function main() {
       const style = getComputedStyle(command);
       return style.animationName === 'stream-tool-enter' && style.animationDuration === '0.16s';
     })()`), "command entrance transition missing");
-    assert(await browser.evaluate(`['.stream-tool-dot', '.session-working-icon', '.worker-working-icon'].every(selector => [...document.querySelectorAll(selector)].every(node => getComputedStyle(node).animationName === 'none'))`), "duplicate activity cues must stay static");
+    assert(await browser.evaluate(`['.session-working-icon', '.worker-working-icon'].every(selector => [...document.querySelectorAll(selector)].every(node => getComputedStyle(node).animationName === 'none'))`), "duplicate activity cues must stay static");
     assert(await browser.evaluate(`['.user-message-navigation button', '.session-group-heading', '.final-answer-outline-toggle'].every(selector => [...document.querySelectorAll(selector)].every(node => getComputedStyle(node).backdropFilter === 'none'))`), "scroll overlays must not sample blurred backdrops");
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
     assert(await browser.evaluate(`['.stream-tool-head', '.stream-tool-command', '.stream-tool-dot'].every(selector => { const node = document.querySelector(selector); return !node || getComputedStyle(node).animationName === 'none'; })`), "reduced motion must disable tool entrance");
@@ -628,6 +628,24 @@ async function main() {
         await browser.call("Page.reload", { ignoreCache: true });
         await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-row')`), "action row missing");
         assert(await browser.evaluate(`!!document.querySelector('.stream-tool-dot') === ${status === "running" || status === "background_running"}`), `${name}/${status}: execution dot must match running state`);
+        if (status === "running" || status === "background_running") {
+          assert(await browser.evaluate(`(() => {
+            const dot = document.querySelector('.stream-tool-dot');
+            const animation = dot.getAnimations()[0];
+            if (!animation) return false;
+            animation.pause(); animation.currentTime = 0;
+            const small = dot.getBoundingClientRect().width;
+            const slot = dot.parentElement.getBoundingClientRect().width;
+            animation.currentTime = 600;
+            const large = dot.getBoundingClientRect().width;
+            const stable = Math.abs(dot.parentElement.getBoundingClientRect().width - slot) < .1;
+            animation.play();
+            return large > small + 2 && stable;
+          })()`), `${name}/${status}: dot must breathe without resizing its slot`);
+          await browser.call("Emulation.setEmulatedMedia", {features:[{name:"prefers-reduced-motion",value:"reduce"}]});
+          assert(await browser.evaluate(`getComputedStyle(document.querySelector('.stream-tool-dot')).animationName === 'none'`), "reduced motion must disable breathing");
+          await browser.call("Emulation.setEmulatedMedia", {features:[]});
+        }
         if (status === "running" || status === "background_running") {
           assert(await browser.evaluate(`![...document.querySelectorAll('.stream-tool-status')].some(node => /running/i.test(node.textContent)) && !!document.querySelector('.stream-tool-status-slot[aria-label]')`), "running text must be omitted visually but retained accessibly");
         }

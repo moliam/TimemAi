@@ -73,3 +73,9 @@ it("keeps automatic tool absorption free of page-wide height animation", () => {
   expect(rule).not.toContain("transition:");
   expect(styles).toContain(".stream-tool-count.incremented { animation:");
 });
+
+it("animates running dots without changing layout dimensions", () => {
+  expect(styles).toContain("animation: stream-tool-breathe 1.2s ease-in-out infinite");
+  expect(styles).toContain("transform: scale(.65)");
+  expect(styles).toContain("transform: scale(1)");
+});

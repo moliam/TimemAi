@@ -168,7 +168,7 @@ Each tick retains the existing bounded character credit and memoized blocks;
 retractions, reduced motion and hidden-document updates show the delivered text
 without replaying a backlog. No semantic event is throttled or discarded.
 
-Tool/worker/sidebar duplicate running markers are static; the main working cue
+Worker/sidebar duplicate running markers are static; the main working cue
 and short status/count feedback remain. Markdown blocks do not each fade in.
 Tool entry lasts 160ms without a retained animation fill layer. Sticky/floating
 conversation navigation no longer blurs moving content behind it. This reduces
@@ -188,3 +188,12 @@ main-thread/style/layout work. It is a synthetic fixed-window test, not a full
 text-drain benchmark or macOS WindowServer/thermal measurement. Compare repeated
 runs under the same conditions; a process-list CPU snapshot cannot identify a
 specific Chrome tab or prove a WindowServer reduction.
+
+### Running tool breathing indicator
+
+Running and background-running tool dots breathe from scale .65 to 1 over a
+1.2s cycle using only transform and opacity. Their 8px layout size and status
+slot stay fixed; terminal tools use result markers instead. Reduced motion
+disables breathing. Tool absorption remains free of height animation. Chrome
+coverage seeks animation time to verify changing dot size with a stable slot
+for bash/readfile and both running states, plus reduced-motion behavior.

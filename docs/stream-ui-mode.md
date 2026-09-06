@@ -76,7 +76,7 @@ Coverage: logical tool handoff unit tests, Chrome same-round A-finish/B-start/
 B-failure and stable-row checks, existing next-AI-response and interaction tests,
 and a 20,000-action linear handoff performance guard (1500 ms ceiling).
 
-Stream tool rows use the static dot alone for running state, with an accessible
+Stream tool rows use the breathing dot alone for running state, with an accessible
 label. Background execution shows only `bg`, never redundant `running` text.
 Terminal result labels use the shared success/failure symbols. Chrome
 lifecycle/status-matrix acceptance guards this visual contract.
@@ -120,3 +120,12 @@ Coverage: tool layout guard and Chrome serial-handoff sampling check that the
 viewport scroll position and running row position vary by less than 1px across
 18 frames after the committed handoff. This checks post-commit stability, not
 zero displacement between the pre-handoff and post-handoff layouts.
+
+### Running tool breathing indicator
+
+Running and background-running tool dots breathe from scale .65 to 1 over a
+1.2s cycle using only transform and opacity. Their 8px layout size and status
+slot stay fixed; terminal tools use result markers instead. Reduced motion
+disables breathing. Tool absorption remains free of height animation. Chrome
+coverage seeks animation time to verify changing dot size with a stable slot
+for bash/readfile and both running states, plus reduced-motion behavior.
