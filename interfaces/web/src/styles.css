@@ -4930,23 +4930,23 @@ body.workspace-modal-open .app-shell { user-select: none; }
    Thought/Action frame waits for their terminal status. */
 .turn-stream-tools { display: grid; gap: 8px; margin: 0 0 14px; min-width: 0; }
 .stream-tool-row {
-  border: 1px solid #26333e;
+  border: 1px solid #454545;
   border-radius: 7px;
-  background: #111820;
+  background: #313131;
   padding: 9px 12px;
   min-width: 0;
 }
 .stream-tool-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: 12px; }
 .stream-tool-head b { color: #e1ebf0; font-weight: 650; }
-.stream-tool-dot { width: 8px; height: 8px; border-radius: 50%; background: #e6b86a; animation: breathe 1.2s infinite; flex: none; align-self: center; }
+.stream-tool-dot { width: 8px; height: 8px; border-radius: 50%; background: #f1c56f; animation: breathe 1.2s infinite; flex: none; align-self: center; }
 .stream-tool-status { color: #98afbc; }
 .stream-tool-command {
   margin: 8px 0 0;
   padding: 8px 10px;
-  border: 1px solid #26333e;
+  border: 1px solid #454545;
   border-radius: 5px;
-  background: #0d141b;
-  color: #a8c9d7;
+  background: #262626;
+  color: #c9d6de;
   font: 11.5px/1.55 "SFMono-Regular", Consolas, monospace;
   white-space: pre-wrap;
   word-break: break-word;
@@ -4956,18 +4956,18 @@ body.workspace-modal-open .app-shell { user-select: none; }
 }
 .stream-tool-detail {
   margin: 6px 0 0;
-  color: #869ca9;
+  color: #9aabb3;
   font-size: 12px;
   overflow-wrap: anywhere;
   max-height: 160px;
   overflow: auto;
 }
-:root[data-theme="light"] .stream-tool-row { border-color: #c7d2d8; background: #eef2f4; }
+:root[data-theme="light"] .stream-tool-row { border-color: #d3ddda; background: #f4f7f6; }
 :root[data-theme="light"] .stream-tool-head b { color: #24333a; }
 :root[data-theme="light"] .stream-tool-dot { background: #b07f2e; }
 :root[data-theme="light"] .stream-tool-status { color: #5c6f7a; }
-:root[data-theme="light"] .stream-tool-command { background: #111820; color: #a8c9d7; }
-:root[data-theme="light"] .stream-tool-detail { color: #53675f; }
+:root[data-theme="light"] .stream-tool-command { border-color: #d3ddda; background: #eef2f1; color: #33484f; }
+:root[data-theme="light"] .stream-tool-detail { color: #5c6f7a; }
 @media (prefers-reduced-motion: reduce) { .stream-tool-dot { animation: none; } }
 
 .restart-cwd-gate {
@@ -5070,19 +5070,24 @@ body.workspace-modal-open .app-shell { user-select: none; }
 }
 
 
-/* Stream UI Mode: smooth provisional reveal.
-   New top-level markdown blocks fade in instead of popping; text itself is
-   paced by StreamText, so only container-level transitions live here. */
+/* Stream UI Mode: incremental provisional reveal.
+   StreamText renders one .markdown-body per top-level block. Frozen blocks
+   are memoized so nothing already on screen re-parses, re-animates or
+   flickers; only newly appended blocks fade in once. */
+.stream-markdown { min-width: 0; display: grid; }
+.stream-markdown > .markdown-body { min-width: 0; }
+.stream-markdown > .markdown-body > *:first-child { margin-top: 0; }
+.stream-markdown > .markdown-body > *:last-child { margin-bottom: 0; }
+.stream-markdown > .markdown-body + .markdown-body { margin-top: .48em; }
 @keyframes stream-block-enter { from { opacity: 0; } to { opacity: 1; } }
-.response-preview > .message-content .markdown-body > *,
-.provisional-chat .message-content .markdown-body > * {
+.stream-markdown > .markdown-body + .markdown-body {
   animation: stream-block-enter .3s ease-out both;
 }
 
 /* Soft blinking caret at the tail of the actively streaming block. */
 @keyframes stream-caret-pulse { 0%, 55% { opacity: 1; } 56%, 100% { opacity: 0; } }
-.response-preview.streaming > .message-content .markdown-body > :last-child:is(p, li, h1, h2, h3, h4, h5, h6)::after,
-.provisional-chat.streaming .message-content .markdown-body > :last-child:is(p, li, h2, h3, h4, h5, h6)::after {
+.response-preview.streaming .stream-markdown > .markdown-body:last-child > :last-child:is(p, li, h1, h2, h3, h4, h5, h6)::after,
+.provisional-chat.streaming .stream-markdown > .markdown-body:last-child > :last-child:is(p, li, h2, h3, h4, h5, h6)::after {
   content: "▍";
   display: inline-block;
   margin-left: 2px;
@@ -5093,8 +5098,8 @@ body.workspace-modal-open .app-shell { user-select: none; }
   background: #79cbb9;
   animation: stream-caret-pulse 1.1s steps(1) infinite;
 }
-:root[data-theme="light"] .response-preview.streaming > .message-content .markdown-body > :last-child:is(p, li, h1, h2, h3, h4, h5, h6)::after,
-:root[data-theme="light"] .provisional-chat.streaming .message-content .markdown-body > :last-child:is(p, li, h2, h3, h4, h5, h6)::after { background: #237c70; }
+:root[data-theme="light"] .response-preview.streaming .stream-markdown > .markdown-body:last-child > :last-child:is(p, li, h1, h2, h3, h4, h5, h6)::after,
+:root[data-theme="light"] .provisional-chat.streaming .stream-markdown > .markdown-body:last-child > :last-child:is(p, li, h2, h3, h4, h5, h6)::after { background: #237c70; }
 
 .response-preview-interruption {
   margin: 8px 2px 2px;
@@ -5103,9 +5108,32 @@ body.workspace-modal-open .app-shell { user-select: none; }
 }
 :root[data-theme="light"] .response-preview-interruption { color: #8a5b19; }
 
+/* Stream UI Mode: retained thought card in the live stream area. */
+.stream-thought-card {
+  min-width: 0;
+  margin: 0 0 10px;
+  padding: 10px 14px 11px;
+  border: 1px solid #454545;
+  border-left: 2px solid #79cbb9;
+  border-radius: 8px;
+  background: #313131;
+  box-shadow: inset 0 1px 0 #ffffff08;
+}
+.stream-thought-card .stream-markdown { color: #c4d2dc; font-size: var(--content-size); line-height: 1.68; }
+:root[data-theme="light"] .stream-thought-card { border-color: #d3ddda; border-left-color: #237c70; background: #f4f7f6; }
+:root[data-theme="light"] .stream-thought-card .stream-markdown { color: #24333a; }
+
+/* Migration cue: when a thought run leaves the stream and settles into the
+   Thought/Action frame, its frame row enters with one soft settle-in pulse. */
+@keyframes thought-run-settle {
+  0% { opacity: 0; transform: translateY(4px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+.thought-run-enter { animation: thought-run-settle .45s cubic-bezier(.22,.75,.3,1) both; }
+
 @media (prefers-reduced-motion: reduce) {
-  .response-preview > .message-content .markdown-body > *,
-  .provisional-chat .message-content .markdown-body > *,
-  .response-preview.streaming > .message-content .markdown-body > :last-child:is(p, li, h1, h2, h3, h4, h5, h6)::after,
-  .provisional-chat.streaming .message-content .markdown-body > :last-child:is(p, li, h2, h3, h4, h5, h6)::after { animation: none; }
+  .stream-markdown > .markdown-body + .markdown-body,
+  .response-preview.streaming .stream-markdown > .markdown-body:last-child > :last-child:is(p, li, h1, h2, h3, h4, h5, h6)::after,
+  .provisional-chat.streaming .stream-markdown > .markdown-body:last-child > :last-child:is(p, li, h2, h3, h4, h5, h6)::after,
+  .thought-run-enter { animation: none; }
 }

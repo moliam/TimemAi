@@ -122,3 +122,72 @@ export function summarizeConsecutiveToolActivities(
 
   return runs;
 }
+
+export type StreamRetention = {
+  /** Non-null activities kept in the live stream area, in order. */
+  retained: Activity[];
+  /** Latest thought snapshot kept in the stream; null when none exists. */
+  thought: Activity | null;
+  /** Membership test by object identity; nulls are never retained. */
+  isRetained: (activity: Activity | null | undefined) => boolean;
+};
+
+/**
+ * Stream UI Mode retention rule: the latest model-thought run (consecutive
+ * free-talk snapshots plus every tool activity after it) stays in the live
+ * stream area until the next thought run arrives, at which point the previous
+ * run migrates into the Thought/Action frame. Without any thought yet, only
+ * running tools stay in the stream. Terminal turns keep everything framed.
+ */
+export function computeStreamRetention(
+  activities: readonly (Activity | null)[],
+): StreamRetention {
+  const dense = activities.filter((a): a is Activity => a !== null);
+  let lastThoughtIndex = -1;
+  for (let i = dense.length - 1; i >= 0; i -= 1) {
+    if (dense[i].kind === "free_talk") { lastThoughtIndex = i; break; }
+  }
+  let runStart = lastThoughtIndex;
+  while (runStart > 0 && dense[runStart - 1].kind === "free_talk") runStart -= 1;
+
+  const retainedSet = new Set<Activity>();
+  let thought: Activity | null = null;
+  if (lastThoughtIndex >= 0) {
+    for (let i = runStart; i < dense.length; i += 1) retainedSet.add(dense[i]);
+    thought = dense[lastThoughtIndex];
+  } else {
+    for (const activity of dense)
+      if (isRunningToolActivity(activity)) retainedSet.add(activity);
+  }
+  const retained = dense.filter((a) => retainedSet.has(a));
+  return {
+    retained,
+    thought,
+    isRetained: (activity) => !!activity && retainedSet.has(activity),
+  };
+}
+
+/**
+ * Collapses each consecutive run of free-talk snapshots (null activities are
+ * transparent) into its latest item, so both the frame and the stream show
+ * one growing thought instead of stacking redundant snapshots.
+ */
+export function coalesceFreeTalkItems<T extends { activity: Activity | null }>(
+  items: readonly T[],
+): T[] {
+  const out: T[] = [];
+  let run: T[] = [];
+  const flush = () => {
+    if (run.length === 0) return;
+    const thoughts = run.filter((item) => item.activity !== null);
+    out.push(...run.filter((item) => item.activity === null));
+    if (thoughts.length > 0) out.push(thoughts[thoughts.length - 1]);
+    run = [];
+  };
+  for (const item of items) {
+    if (item.activity?.kind === "free_talk") run.push(item);
+    else { flush(); out.push(item); }
+  }
+  flush();
+  return out;
+}
