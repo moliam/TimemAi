@@ -430,6 +430,11 @@ async function main() {
     await setRound(actionEvents, "Stable thought");
     await waitFor(() => contains(".stream-tool-row", "Bash"), "initial action missing");
     await browser.evaluate(`window.actionRow = document.querySelector('.stream-tool-row'); window.actionCommand = document.querySelector('.stream-tool-command'); window.actionHead = document.querySelector('.stream-tool-head'); true;`);
+    assert(await browser.evaluate(`!document.querySelector('.stream-tool-fold.expanded') && document.querySelector('.stream-tool-command-preview').textContent === 'echo hello' && document.querySelector('.stream-tool-toggle').getAttribute('aria-expanded') === 'false'`), "running tool must default to one-line closed summary");
+    await browser.evaluate(`document.querySelector('.stream-tool-toggle').click()`);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded')`), "running command cannot expand");
+    await sleep(450);
+    await browser.evaluate(`window.toolHeight = document.querySelector('.stream-tool-row').getBoundingClientRect().height; true`);
     for (const [phase, status, time] of [["execution_start", "running", 3], ["finish", "background_running", 4], ["finish", "completed", 5]]) {
       actionEvents.push(lifecycle(`update-${time}`, phase, status, time));
       const base = host.getSession();
@@ -445,15 +450,14 @@ async function main() {
       }
     }
     await waitFor(() => contains(".stream-tool-status", "Succ"), "terminal status missing");
-    assert(await browser.evaluate(`(() => { const fold = document.querySelector('.stream-tool-fold'); const style = getComputedStyle(fold); return !fold.classList.contains('expanded') && style.transitionProperty.includes('grid-template-rows') && style.transitionDuration.includes('0.36s') && style.transitionDelay.includes('0.1s'); })()`), "completed tool must fold with delayed height transition");
-    assert(await browser.evaluate(`(() => {
-      const head = document.querySelector('.stream-tool-head');
-      const toggle = head.querySelector('.stream-tool-toggle');
-      return head.firstElementChild === toggle && toggle.getBoundingClientRect().right <= head.querySelector('b').getBoundingClientRect().left;
-    })()`), "folded tool toggle must be left of its name");
-    await browser.evaluate(`document.querySelector('.stream-tool-toggle').click()`);
-    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded')`), "completed tool cannot reopen");
-    assert(await browser.evaluate(`!document.querySelector('.stream-tool-dot')`), "reopening completed output must not restore the dot");
+    await sleep(700);
+    assert(await browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded') && Math.abs(document.querySelector('.stream-tool-row').getBoundingClientRect().height - window.toolHeight) < 1 && !document.querySelector('.stream-tool-merged-item.merged')`), "completion changed user expansion or geometry before AI reply");
+    const afterTool = host.getSession();
+    const reply = {...afterTool, turns:afterTool.turns.map(t => ({...t, events:[...actionEvents, thoughtEvent("after-tool", "Next AI reply", 6)]}))};
+    host.setSession(reply); host.send({type:"hello", snapshot:makeSnapshot(reply)});
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-merged-item.merged')`), "next AI reply did not retire completed single tool");
+    await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
+    await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-merged-item.merged') && !!document.querySelector('.stream-tool-fold.expanded')`), "reopening run lost manual output expansion");
 
     const events = [thoughtEvent("thought-n", "Unique thought N", 1), toolEvent("tool-old", 2)];
     await setRound(events, "Unique thought N");
@@ -585,7 +589,7 @@ async function main() {
       })()`), `stream/final typography differs at ${size}`);
     }
     const longThought = Array.from({length: 60}, (_, i) => `Paragraph ${i} remains stable.\n\n`).join("");
-    const longEvents = [thoughtEvent("long", longThought, 1), toolEvent("adjacent-a", 3), toolEvent("adjacent-b", 4)];
+    const longEvents = [thoughtEvent("long", longThought, 1), toolEvent("adjacent-a", 3), toolEvent("adjacent-b", 4), thoughtEvent("after-adjacent", "Following AI reply", 100)];
     await setRound(longEvents, longThought);
     await waitFor(() => contains(".stream-tool-run-toggle", "2 Succ"), "adjacent completed tools not merged");
     await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 2`), "completed group not folded");
@@ -743,15 +747,17 @@ async function main() {
     await browser.evaluate(`getSelection().removeAllRanges(); document.dispatchEvent(new Event('selectionchange'));`);
     const failed = toolEvent("failed-call", 3); failed.payload.payload.status = "failed";
     await setRound([thoughtEvent("error-thought", "Failure details", 1), failed], "Failure details");
-    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded')`), "failure details hidden by default");
+    assert(await browser.evaluate(`!document.querySelector('.stream-tool-fold.expanded')`), "failure must preserve closed default");
+    await browser.evaluate(`document.querySelector('.stream-tool-toggle').click()`);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded')`), "failure details cannot expand");
     await browser.evaluate(`document.querySelector('.stream-tool-toggle').click()`);
     await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-fold.expanded')`), "failed tool collapse control ineffective");
-    await setRound([thoughtEvent("mixed-thought", "Mixed results", 1), toolEvent("success-call", 2.75), failed], "Mixed results");
+    await setRound([thoughtEvent("mixed-thought", "Mixed results", 1), toolEvent("success-call", 2.75), failed, thoughtEvent("mixed-reply", "Failure explanation", 4)], "Mixed results");
     await waitFor(() => contains(".stream-tool-run-toggle", "1 Succ | 1 Failed"), "mixed result counts missing");
     await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 2`), "failed call not merged with adjacent success");
     assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle strong')?.textContent === 'Tools'`), "Tools label must be bold");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
-    await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-merged-item.merged') && !!document.querySelector('.stream-tool-fold.expanded')`), "merged failure details cannot reopen");
+    await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-merged-item.merged')`), "merged failure rows cannot reopen");
     for (const width of [390, 768]) {
       await browser.call("Emulation.setDeviceMetricsOverride", {width, height:844, deviceScaleFactor:1, mobile:false});
       assert(await browser.evaluate(`document.documentElement.scrollWidth <= window.innerWidth + 1`), `horizontal overflow at ${width}px`);
