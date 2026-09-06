@@ -36,7 +36,7 @@ describe("tool activity row layout", () => {
 
   it("uses compact aligned terminal labels and always includes the failure count", () => {
     expect(source).toContain('summary.status === "completed") return "Succ"');
-    expect(source).toContain('return `Fail(${summary.failedCount})`');
+    expect(source).toContain('return `Failed(${summary.failedCount})`');
     expect(source).not.toContain('summary.failedCount > 1');
   });
 

@@ -22,7 +22,13 @@ export function isToolActivityFailed(status: string) {
 }
 
 export function humanizeToolStatus(status: string) {
+  if (status === "completed") return "Succ";
+  if (status === "failed") return "Failed";
   if (status === TOOL_STATUS_BACKGROUND_RUNNING) return "running (bg)";
   if (status === "timeout") return "timed out";
   return status.replaceAll("_", " ");
+}
+
+export function toolResultCountsLabel(succeeded: number, failed: number) {
+  return `${succeeded} Succ${failed > 0 ? ` | ${failed} Failed` : ""}`;
 }

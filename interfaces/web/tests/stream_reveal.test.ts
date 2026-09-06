@@ -163,3 +163,12 @@ describe("splitMarkdownBlocks incremental stability", () => {
    expect(mainSource).toContain("if (followBottom) frame = requestAnimationFrame(follow)");
    expect(mainSource).toContain("if (mergeReady || completed.length < 2) return");
  });
+
+it("animates growing merged counts without remounting the toggle", () => {
+  expect(mainSource).toContain("merged && completed.length > previousMergedCount.current");
+  expect(mainSource).toContain('<span key={countRevision}');
+  expect(mainSource).toContain("toolResultCountsLabel(succeededCount, failedCount)");
+  const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+  expect(css).toContain("@keyframes stream-tool-count-increment");
+  expect(css).toContain(".stream-tool-count.incremented { animation: none; }");
+});
