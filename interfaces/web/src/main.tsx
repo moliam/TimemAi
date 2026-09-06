@@ -267,6 +267,7 @@ import {
 import { clipboardImageFiles } from "./clipboard_images";
 import {
   humanizeToolStatus,
+  toolResultCountsLabel,
   isToolActivityRunning,
   TOOL_STATUS_RUNNING,
 } from "./tool_status";
@@ -9930,6 +9931,14 @@ function StreamToolRun({ activities }: { activities: Activity[] }) {
     return subscribeStreamInteraction(update);
   }, []);
   const merged = completed.length > 1 && mergeReady && !expanded && !interactionHeld;
+  const previousMergedCount = useRef(completed.length);
+  const [countRevision, setCountRevision] = useState(0);
+  useEffect(() => {
+    if (merged && completed.length > previousMergedCount.current) {
+      setCountRevision(value => value + 1);
+    }
+    previousMergedCount.current = completed.length;
+  }, [merged, completed.length]);
   useLayoutEffect(() => {
     if (!merged) return;
     const focused = document.activeElement;
@@ -9940,7 +9949,7 @@ function StreamToolRun({ activities }: { activities: Activity[] }) {
   }, [merged, completed.length]);
   return <div ref={runRef} className="stream-tool-run">
     {completed.length > 1 && <button className="stream-tool-run-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
-      <ChevronRight size={13} /><strong>Tools</strong> {succeededCount} Succ | {failedCount} Failed
+      <ChevronRight size={13} /><strong>Tools</strong> <span key={countRevision} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{toolResultCountsLabel(succeededCount, failedCount)}</span>
     </button>}
     {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && (activity.tool_status === "completed" || activity.tool_status === "failed") ? " merged" : ""}`} inert={merged && (activity.tool_status === "completed" || activity.tool_status === "failed")}>
       <div><StreamToolRow activity={activity} /></div>
@@ -10888,7 +10897,7 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
 
 function toolActivityGroupStatusLabel(summary: ToolActivitySummary) {
   if (summary.status === "completed") return "Succ";
-  if (summary.status === "failed") return `Fail(${summary.failedCount})`;
+  if (summary.status === "failed") return `Failed(${summary.failedCount})`;
 
   const activeParts: string[] = [];
   if (summary.foregroundRunningCount > 0)

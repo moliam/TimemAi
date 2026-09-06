@@ -4930,7 +4930,8 @@ body.workspace-modal-open .app-shell { user-select: none; }
 
 /* Running tools render expanded in the stream delivery area while the
    Thought/Action frame waits for their terminal status. */
-.turn-stream-tools { display: grid; gap: 8px; margin: 0 0 14px; min-width: 0; }
+/* Follow reading size; rem bounds also respect the browser base font. */
+.turn-stream-tools { --stream-content-gap: clamp(.25rem, calc(var(--content-size) * .375), .75rem); display: grid; gap: var(--stream-content-gap); margin: 0 0 var(--stream-content-gap); min-width: 0; }
 .stream-tool-row {
   border: none;
   background: transparent;
@@ -5197,3 +5198,14 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .turn-stream-tools .user-supplement-line { flex-wrap: wrap; }
 .turn-stream-tools .user-supplement-line strong,
 .turn-stream-tools .user-supplement-line .markdown-body { color: inherit; }
+
+/* Count feedback stays local; it does not change the tool archive layout. */
+.stream-tool-count { display: inline-block; font-variant-numeric: tabular-nums; }
+.stream-tool-count.incremented { animation: stream-tool-count-increment 360ms ease-out; }
+@keyframes stream-tool-count-increment {
+  from { transform: translateY(.25em); opacity: .55; background-color: rgba(104, 184, 167, .22); }
+  to { transform: translateY(0); opacity: 1; background-color: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stream-tool-count.incremented { animation: none; }
+}

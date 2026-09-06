@@ -310,3 +310,21 @@ Chrome stream acceptance covers 80 tools plus a multi-section final answer in bo
 and with/without reduced motion, asserting actual answer/viewport intersection and less than
 150px trailing scroll space after archive. The fixture failed before the fix with an invisible
 answer and approximately 1567px phantom space. This regression runs through test:browser/CI.
+
+### Web 工具结果文案
+
+- 工具成功/失败标签统一为 `Succ` / `Failed`；不展示原始 `completed`。
+- 合并工具计数在失败数为零时隐藏 `0 Failed` 及分隔符，非零时保留失败计数。
+- 仅改变 Interface 展示，不修改 Host 状态或运行中、超时等状态语义。
+- 回归：`interfaces/web/tests/tool_status.test.ts`、`tool_activity_layout.test.ts`。
+- 新增工具并入折叠区时，仅计数播放 360ms 上移/高亮反馈，不重挂载按钮或改变滚动；减少动态效果时禁用动画。回归：`stream_reveal.test.ts`。
+
+### Web 工具计数反馈与紧凑间距回归
+
+- Chrome 验收 `interfaces/web/tests/browser/stream-preview-acceptance.mjs` 校验真实 DOM：初始计数无动画、隐藏零失败、非零失败保留、终态 Succ、连续新增逐次动画、重复快照不重播、按钮和既有工具行不重挂载、动画结束无残留、减少动态效果禁用动画但保留计数更新。
+- 连续新增 20 个工具的浏览器预算：主线程 TaskDuration < 4 秒、LayoutCount < 500；检查唯一计数节点和全部历史保持折叠。预算始终启用，随现有 `test:browser` / CI 入口运行，不只检查源码字符串。
+- 流式区域内部 gap 与底部 margin 使用 `clamp(.25rem, calc(var(--content-size) * .375), .75rem)`，16px 正文字号下为 6px；计数动画位移使用 `.25em`。保留原有按钮触摸目标尺寸。
+- Chrome 响应式回归覆盖 390/768/1440 CSS 像素视口、12/16/24/40px 正文字号、100%/150%/200% CSS zoom 共 36 组，视口分别采用 DPR 3/2/1；检查计算间距、页面横向溢出、计数标签与按钮非零尺寸，另测根字号下限缩放。CSS zoom 不等同于浏览器原生缩放，未宣称覆盖全部 DPR 交叉组合或真实设备。
+- 原有 80 工具最终答案交接仍覆盖两种显示模式和两种动态效果设置，防止答案不可见及旧目录位置撑出空白。
+
+- 补充边界回归：空计数、取消/错误/未知状态语义不变；Chrome 根字号变化下的间距上限；单次 Host 快照批量完成成功与失败工具时只反馈一次，重复快照不重播且历史保持折叠。
