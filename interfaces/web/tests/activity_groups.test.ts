@@ -209,7 +209,7 @@ describe("stream retention split", () => {
     id,
   });
 
-  it("retains the latest thought run plus trailing tools", () => {
+  it("retains all thought rounds and tools in their original order", () => {
     const items = [
       thought("t1"),
       tool("a1", "completed"),
@@ -218,34 +218,45 @@ describe("stream retention split", () => {
       tool("a3", "running"),
     ];
     const ret = computeStreamRetention(items);
-    expect(ret.retained.map((a) => a.id)).toEqual(["t2", "a2", "a3"]);
+    expect(ret.retained.map((a) => a.id)).toEqual(["t1", "a1", "t2", "a2", "a3"]);
     expect(ret.thought?.id).toBe("t2");
-    expect(ret.isRetained(items[0])).toBe(false);
+    expect(ret.isRetained(items[0])).toBe(true);
     expect(ret.isRetained(items[4])).toBe(true);
     expect(ret.isRetained(null)).toBe(false);
   });
 
-  it("falls back to running tools when no thought exists yet", () => {
+  it("retains completed and running tools even without thoughts", () => {
     const ret = computeStreamRetention([
       tool("a1", "completed"),
       tool("a2", "running"),
       tool("a3", "background_running"),
     ]);
-    expect(ret.retained.map((a) => a.id)).toEqual(["a2", "a3"]);
+    expect(ret.retained.map((a) => a.id)).toEqual(["a1", "a2", "a3"]);
     expect(ret.thought).toBeNull();
   });
 
-  it("moves old tools into the frame on a thoughtless response, retaining thought", () => {
+  it("does not archive tools on a thoughtless response", () => {
     const items = [thought("t1"), tool("a1", "completed"), null, tool("a2", "completed")];
-    const ret = computeStreamRetention(items, 2);
-    expect(ret.retained.map(a => a.id)).toEqual(["t1", "a2"]);
-    expect(ret.isRetained(items[1])).toBe(false);
+    const ret = computeStreamRetention(items);
+    expect(ret.retained.map(a => a.id)).toEqual(["t1", "a1", "a2"]);
+    expect(ret.isRetained(items[1])).toBe(true);
     expect(ret.thought?.id).toBe("t1");
   });
 
-  it("keeps current completed tools without any thought, using response boundaries", () => {
+  it("keeps completed calls across thoughtless responses", () => {
     const items = [null, tool("a1", "completed"), null, tool("a2", "completed")];
-    expect(computeStreamRetention(items, 2).retained.map(a => a.id)).toEqual(["a2"]);
+    expect(computeStreamRetention(items).retained.map(a => a.id)).toEqual(["a1", "a2"]);
+  });
+
+  it("keeps supplements and thoughts in place across rounds", () => {
+    const supplement = { ...thought("supplement"), kind: "user_supplement" as const };
+    const items = [thought("t1"), tool("a1", "completed"), supplement];
+    const current = computeStreamRetention(items);
+    expect(current.retained.map(a => a.id)).toEqual(["t1", "a1", "supplement"]);
+    expect(current.isFramed(supplement)).toBe(false);
+    const next = computeStreamRetention([...items, null, tool("a2", "running")]);
+    expect(next.retained.map(a => a.id)).toEqual(["t1", "a1", "supplement", "a2"]);
+    expect(items.filter(a => next.isFramed(a)).map(a => a.id)).toEqual([]);
   });
 
   it("keeps everything framed when the list is empty", () => {

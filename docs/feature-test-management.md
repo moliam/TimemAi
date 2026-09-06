@@ -224,20 +224,77 @@ Before tagging a release:
 
 ### Stream UI reading handoff
 
-Stream UI defaults work details to collapsed (manual expansion remains available).
-Thought text precedes action rows; non-action timeline markers are not tools and
-must not acquire a running badge. Supplement text has one full-text home in the
-user message; its timeline entry is only a positional reference.
-Each model-response event starts a new presentation round, even if it has no
-thought text. Previous tools move into the collapsed Thought/Action frame; the
-latest thought remains unboxed until replaced. Intermediate preview and retained
-thought have one text home, with no outgoing duplicate or delayed snapshot.
-Tool rows have no outer box; command blocks use a background and soft shadow,
-without border lines, in both themes.
-A growing dot follows the live stream while the authoritative Turn is working;
-cancellation and terminal projections remove it. Reduced-motion disables its
-animation. Stream reveal accumulates fractional frame credit and caps elapsed
-catch-up at 40 ms and rate at 240 UTF-16 units/s.
-Coverage: `interfaces/web/tests/stream_reveal.test.ts`, activity grouping tests,
-frontend suite, production build, and stream browser acceptance. Visual pacing
-still needs subjective browser review.
+Stream UI keeps all thought rounds, supplements and interim answers in chronological
+order throughout authoritative working state. Model-response boundaries never archive
+previous content. Accepted interim answers reuse preview attempt/index identity.
+Only leaving working starts a height-dependent 320–700 ms height/opacity handoff into collapsed Thought/Action;
+completion and interruption both archive, while ordinary mode keeps its working panel.
+Reduced-motion skips animation. Bottom following during handoff stops on wheel/touch.
+
+Completed tools retain their DOM identity: status highlights locally, output folds with
+100 ms delay and 360 ms easing, and completed calls in an adjacent tool run merge after
+600 ms. Calls separated by thought, answer or supplement are not merged. Groups and
+outputs can be reopened. Adjacent failed calls merge with successful calls; the summary uses bold Tools followed by N Succ | M Failed. Expanding the group retains failure details for diagnosis. No typing caret is
+rendered; the growing trailer dot alone indicates live work.
+
+Commands use the assistant reading font. Thought/interim text shares final-answer
+font size and line height. Coverage: activity grouping, stream reveal, lifecycle identity
+unit tests and Chrome continuous-stream acceptance (multi-round retention, adjacency,
+reopening, terminal/interruption animation and reduced-motion). Subjective visual quality
+still needs user review; automated tests verify behavior rather than aesthetic preference.
+
+### Action 状态局部更新
+
+- Web 同一 action 的生命周期合并保留首次可见的展示 ID 与排序时间；权威事件 ID、执行时间及耗时计算不变。
+- 状态变化不得重挂载整行或命令节点；仅状态字段短暂高亮并通过 polite live region 提醒，减少动态效果时改用静态下划线。
+- 回归：`view_model.test.ts` 覆盖执行/后台/完成及裁剪历史身份；`stream-preview-acceptance.mjs` 验证真实浏览器 DOM 身份、单行数量和状态局部提示。
+
+### 流式区视觉交互验收
+
+- 新增完成调用不得重新展开已合并历史；失败调用参与相邻工具合并并计入 Failed 数量；展开组后失败详情默认展开且允许手动折叠。
+- 用户选中文字或焦点位于工具内容中时保留内容，避免自动折叠中断复制和键盘操作。
+- 归档前将内部焦点转移到思考框按钮；滚轮、触摸和滚动键可以打断底部跟随。
+- 归档时长随高度变化并限制在 320–700 ms，减少动态效果时直接归档。
+- 粗指针控件至少 44px，合并控件有可见键盘焦点，窄屏长标签允许换行。
+- Chrome 回归覆盖合并稳定性、文本选择、失败详情开关及 390/768px 横向溢出。
+- 尚未完成：Safari/Firefox 真机验证、所有 Markdown 高度变化的阅读锚点验证、屏幕阅读器实测、全站设置/侧栏/会话切换视觉验收。不能以流式区通过代替全站视觉通过。
+
+### 流式渲染开销
+
+- 工具行按实际展示字段 memo；活动列表按输入引用缓存，避免预览更新重复创建历史工具行。
+- selectionchange/focusin 使用共享监听，随最后一个订阅卸载清理；订阅量跟随已挂载行，不积累历史记录。
+- 已合并组不重复启动合并定时器；非底部跟随不启动归档逐帧循环，用户输入立即取消循环。
+- 验证包含源码约束测试、启用阈值的 Web 性能门禁和 Chrome 行为回归。这些结果不是实际会话 CPU 降幅测量；仍需同负载浏览器性能采样判断剩余热点。
+
+### Chrome 流式渲染实测
+
+使用生产 dist、独立 headless Chrome 和确定性模拟 Host，通过 CDP Performance 测量
+120 次、间隔 40ms 的增长文本更新，并继续观察 1500ms。运行命令：
+`STREAM_CPU_BENCH=1 node interfaces/web/tests/browser/stream-preview-acceptance.mjs`。
+
+文字推进仍按帧累计字符预算，但 Markdown/React 绘制合并为约 32ms 一次，末尾可立即提交。
+一次优化前 Task/Script/Layout 耗时分别为 1.56089/1.049251/0.105822 秒，布局 381 次；
+优化后两次分别为 1.234403/0.808963/0.058852 秒、192 次，以及
+1.253865/0.819110/0.058257 秒、193 次。这是固定采样窗口的主线程开销，
+并非整个 Chrome CPU 百分比，也不是用户原高占用标签页的性能追踪。
+测试使用持续增长的文本，不代表所有复杂 Markdown、长历史或高并发情形。
+
+### Tool command presentation
+
+Thought/Action tool groups omit the left rail; keyboard focus uses a thin outline rather than a thick left stripe. Stream tool disclosure buttons precede the tool name, both collapsed and expanded. Chrome stream-preview acceptance checks left-side placement and dark/light archived tool styles.
+
+Completed stream tools omit the dot before the tool name, including when reopened; running/background-running calls retain it. Chrome lifecycle acceptance verifies the transition without remounting the row or command.
+
+### Stream / ordinary UI regression ownership
+
+`pnpm --dir interfaces/web test:browser` (also called by `scripts/ci.sh`) owns:
+- Chrome simulated Host: both UI modes, completion/interruption, reload, manual expansion, dark/light archived styles.
+- Real Host + HTTP SSE: XML/JSON/native normal delivery in both UI modes; ordinary interim collapse/reopen and tool visibility; stream invalid response, disconnect, Stop, supplement, long-text clipboard/reading anchor and tool execution.
+- Stream completed-dot removal, adjacent success/failure grouping with **Tools** N Succ | M Failed, reopening diagnostics, and dark/light user-colored supplement bubbles.
+- Deterministic Chrome stream performance window: 120 updates at 40 ms plus 1500 ms settling; main-thread TaskDuration < 4 seconds and LayoutCount < 500. These generous regression ceilings are not a CPU percentage or a guarantee for all content; failure must be investigated rather than raising limits to pass.
+
+`scripts/performance_guard.sh` additionally checks 20,000 mixed activities through stream retention and ordinary grouping within 1500 ms, with correctness assertions, alongside lifecycle/event-queue/scroll guards.
+Long-text browser acceptance retains 180 paragraphs; its 60-second bounded wait accommodates the 240 UTF-16 units/second progressive reveal cap without reducing the fixture or skipping clipboard/scroll checks.
+Generated dist changes are rebuilt main JavaScript and CSS plus index.html hashed references; dependency chunks and fonts remain unchanged.
+
+Scope: module tests and applicable architecture/performance/browser guards do not replace the full repository `scripts/ci.sh`, cross-browser manual review, or screen-reader testing.

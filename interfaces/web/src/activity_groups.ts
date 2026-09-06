@@ -128,45 +128,24 @@ export type StreamRetention = {
   retained: Activity[];
   /** Latest thought snapshot kept in the stream; null when none exists. */
   thought: Activity | null;
+  /** Historical frame membership is independent of the live thought fallback. */
+  isFramed: (activity: Activity | null | undefined) => boolean;
   /** Membership test by object identity; nulls are never retained. */
   isRetained: (activity: Activity | null | undefined) => boolean;
 };
 
-/** Partition presentation at an explicit model-response event, even without thought.
- * The latest thought survives tool-only rounds; old tools belong in the frame.
- * The optional boundary is an index in the original (including nulls) list.
- */
+/** All rounds remain in place until the caller archives the confirmed final answer. */
 export function computeStreamRetention(
   activities: readonly (Activity | null)[],
-  responseIndex?: number,
 ): StreamRetention {
-  let lastThoughtIndex = -1;
-  activities.forEach((activity, index) => {
-    if (activity?.kind === "free_talk") lastThoughtIndex = index;
-  });
-  const thought = lastThoughtIndex >= 0 ? activities[lastThoughtIndex] : null;
-  const boundary = responseIndex ?? lastThoughtIndex;
-  const retainedSet = new Set<Activity>();
-  // Hide superseded snapshots of this thought from the frame as well.
-  if (thought) {
-    retainedSet.add(thought);
-    for (let i = lastThoughtIndex - 1; i >= 0; i--) {
-      const activity = activities[i];
-      if (!activity) continue;
-      if (activity.kind !== "free_talk") break;
-      retainedSet.add(activity);
-    }
-  }
-  activities.forEach((activity, index) => {
-    if (activity?.tone === "action" &&
-        (boundary >= 0 ? index >= boundary : isRunningToolActivity(activity))) {
-      retainedSet.add(activity);
-    }
-  });
+  const retained = activities.filter((activity): activity is Activity => !!activity &&
+    (activity.kind === "free_talk" || activity.tone === "action" || activity.kind === "user_supplement"));
+  const retainedSet = new Set(retained);
   return {
-    retained: activities.filter((a): a is Activity => !!a && retainedSet.has(a)),
-    thought,
-    isRetained: (activity) => !!activity && retainedSet.has(activity),
+    retained,
+    thought: [...retained].reverse().find(activity => activity.kind === "free_talk") ?? null,
+    isFramed: activity => !!activity && !retainedSet.has(activity),
+    isRetained: activity => !!activity && retainedSet.has(activity),
   };
 }
 

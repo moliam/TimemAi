@@ -362,6 +362,29 @@ async function main() {
   };
   try {
     await waitFor(() => contains("body", "Long task"), "initial snapshot missing");
+    if (process.env.STREAM_CPU_BENCH === "1") {
+      await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "true")`);
+      await browser.call("Page.reload", {ignoreCache:true});
+      await waitFor(() => contains("body", "Long task"), "benchmark reload missing");
+      await browser.call("Performance.enable");
+      const metrics = async () => Object.fromEntries((await browser.call("Performance.getMetrics")).metrics.map(m => [m.name,m.value]));
+      const before = await metrics();
+      let text = "";
+      for (let i = 1; i <= 120; i++) {
+        text += `Streaming paragraph ${i}: **stable text** and inline code. `;
+        publish(i, text);
+        await sleep(40);
+      }
+      await sleep(1500);
+      const after = await metrics();
+      const delta = Object.fromEntries(["TaskDuration","ScriptDuration","LayoutDuration","RecalcStyleDuration","LayoutCount","RecalcStyleCount"].map(k => [k,after[k]-before[k]]));
+      console.log("CPU_BENCH", JSON.stringify(delta));
+      if (process.env.TIMEM_PERF_GUARD === "1") {
+        assert(delta.TaskDuration < 4, `stream main-thread budget exceeded: ${delta.TaskDuration}s`);
+        assert(delta.LayoutCount < 500, `stream layout budget exceeded: ${delta.LayoutCount}`);
+      }
+      return;
+    }
     publish(1, "early response", [{ index: 0, task: "Interim", answer: "early chat" }]);
     await sleep(150);
     assert(!(await contains(".response-preview", "early response")), "default off leaked preview");
@@ -389,12 +412,49 @@ async function main() {
     const setRound = async (events, text, working = true) => {
       const base = host.getSession();
       host.setSession({ ...base, turns: base.turns.map(t => ({ ...t,
-        state: working ? "working" : "ready", events,
+        state: working ? "working" : "ready", events, sub_answers: [], final_answer: null, completion: null,
+        user_entries: [...t.user_entries.filter(entry => entry.kind !== "supplement"),
+          { kind: "supplement", text: "Chronological supplement", created_at_ms: 2.5 }],
         preview: { attempt: 2, revision: 20, chat: [], response: { attempt: 2, revision: 20, text, status: "intermediate" } },
       })) });
       await browser.call("Page.reload", { ignoreCache: true });
       await waitFor(() => contains("body", "Long task"), "round snapshot missing");
     };
+    // Lifecycle projections update the same DOM row, not a newly entering command.
+    const lifecycle = (id, phase, status, time) => {
+      const event = toolEvent(id, time);
+      Object.assign(event.payload.payload, { action: "run_bash", action_id: "stable-action", event: phase, status });
+      return event;
+    };
+    const actionEvents = [thoughtEvent("stable-thought", "Stable thought", 1), lifecycle("start", "start", "running", 2)];
+    await setRound(actionEvents, "Stable thought");
+    await waitFor(() => contains(".stream-tool-row", "Bash"), "initial action missing");
+    await browser.evaluate(`window.actionRow = document.querySelector('.stream-tool-row'); window.actionCommand = document.querySelector('.stream-tool-command'); window.actionHead = document.querySelector('.stream-tool-head'); true;`);
+    for (const [phase, status, time] of [["execution_start", "running", 3], ["finish", "background_running", 4], ["finish", "completed", 5]]) {
+      actionEvents.push(lifecycle(`update-${time}`, phase, status, time));
+      const base = host.getSession();
+      const updated = { ...base, turns: base.turns.map(t => ({ ...t, events: [...actionEvents] })) };
+      host.setSession(updated);
+      host.send({ type: "hello", snapshot: makeSnapshot(updated) });
+      await waitFor(() => contains(".stream-tool-status", status === "background_running" ? "running (bg)" : status), `${status}: status not delivered`);
+      assert(await browser.evaluate(`window.actionRow === document.querySelector('.stream-tool-row') && window.actionCommand === document.querySelector('.stream-tool-command') && window.actionHead === document.querySelector('.stream-tool-head')`), `${status}: action DOM remounted`);
+      assert(await browser.evaluate(`document.querySelectorAll('.stream-tool-row').length === 1`), "status update duplicated action");
+      assert(await browser.evaluate(`!!document.querySelector('.stream-tool-dot') === ${status !== "completed"}`), `${status}: tool dot visibility incorrect`);
+      if (status !== "running") {
+        await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-status[role="status"] .action-status-changed')`), "status-only highlight missing");
+      }
+    }
+    await waitFor(() => contains(".stream-tool-status", "completed"), "terminal status missing");
+    assert(await browser.evaluate(`(() => { const fold = document.querySelector('.stream-tool-fold'); const style = getComputedStyle(fold); return !fold.classList.contains('expanded') && style.transitionProperty.includes('grid-template-rows') && style.transitionDuration.includes('0.36s') && style.transitionDelay.includes('0.1s'); })()`), "completed tool must fold with delayed height transition");
+    assert(await browser.evaluate(`(() => {
+      const head = document.querySelector('.stream-tool-head');
+      const toggle = head.querySelector('.stream-tool-toggle');
+      return head.firstElementChild === toggle && toggle.getBoundingClientRect().right <= head.querySelector('b').getBoundingClientRect().left;
+    })()`), "folded tool toggle must be left of its name");
+    await browser.evaluate(`document.querySelector('.stream-tool-toggle').click()`);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded')`), "completed tool cannot reopen");
+    assert(await browser.evaluate(`!document.querySelector('.stream-tool-dot')`), "reopening completed output must not restore the dot");
+
     const events = [thoughtEvent("thought-n", "Unique thought N", 1), toolEvent("tool-old", 2)];
     await setRound(events, "Unique thought N");
     await waitFor(() => contains(".stream-thought-text", "Unique thought N"), "retained thought missing");
@@ -411,19 +471,179 @@ async function main() {
           command.borderTopWidth === '0px' && command.boxShadow !== 'none';
       })()`), `${theme} tool styles must be unboxed with borderless command shadow`);
     }
+    assert(await browser.evaluate(`(() => {
+      const command = document.querySelector('.stream-tool-command');
+      const style = getComputedStyle(command);
+      return style.animationName === 'stream-tool-enter' && style.animationDuration === '0.28s';
+    })()`), "command entrance transition missing");
+    await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+    assert(await browser.evaluate(`['.stream-tool-head', '.stream-tool-command', '.stream-tool-dot'].every(selector => { const node = document.querySelector(selector); return !node || getComputedStyle(node).animationName === 'none'; })`), "reduced motion must disable tool entrance");
+    await browser.call("Emulation.setEmulatedMedia", { features: [] });
+    await waitFor(() => contains(".turn-stream-tools .user-supplement", "Chronological supplement"), "live supplement missing");
+    assert(await browser.evaluate(`(() => {
+      const region = document.querySelector('.turn-stream-tools');
+      const text = region.textContent;
+      return text.indexOf('Unique thought N') < text.indexOf('tool-old') &&
+        text.indexOf('tool-old') < text.indexOf('Chronological supplement');
+    })()`), "live supplement order incorrect");
     events.push(thoughtEvent("response-next", "", 3), toolEvent("tool-next", 4));
     await setRound(events, "Unique thought N");
     await waitFor(() => contains(".stream-tool-row", "tool-next"), "thoughtless round tool missing");
-    assert(!(await contains(".stream-tool-row", "tool-old")), "previous tool remained live");
+    assert(await contains(".stream-tool-row", "tool-old"), "previous tool disappeared during work");
     assert(await contains(".stream-thought-text", "Unique thought N"), "thoughtless round lost prior thought");
+    assert(await contains(".turn-stream-tools .user-supplement", "Chronological supplement"), "supplement disappeared during work");
+    for (const theme of ["dark", "light"]) {
+      assert(await browser.evaluate(`(() => {
+        document.documentElement.dataset.theme = ${JSON.stringify(theme)};
+        const bubble = getComputedStyle(document.querySelector('.turn-stream-tools .user-supplement'));
+        const user = getComputedStyle(document.querySelector('.turn-user-content'));
+        return bubble.backgroundColor === user.backgroundColor && bubble.color === user.color &&
+          bubble.backgroundColor !== 'rgba(0, 0, 0, 0)' && parseFloat(bubble.borderTopLeftRadius) >= 12 && parseFloat(bubble.paddingLeft) > 0;
+      })()`), `${theme}: supplement must use the user's colored bubble`);
+    }
+
+    assert(await browser.evaluate(`!document.querySelector('.turn-assistant-frame')`), "working process was prematurely archived");
     events.push(thoughtEvent("thought-new", "Unique thought NEW", 5), toolEvent("tool-new", 6));
     await setRound(events, "Unique thought NEW");
     await waitFor(() => contains(".stream-thought-text", "Unique thought NEW"), "new thought missing");
-    assert(await browser.evaluate(`document.querySelectorAll(".stream-thought-text").length === 1`), "thought duplicated");
-    assert(!(await contains(".stream-tool-row", "tool-next")), "older round tool remained live");
+    assert(await browser.evaluate(`document.querySelectorAll(".stream-thought-text").length === 2`), "earlier thought disappeared");
+    assert(await contains(".stream-tool-row", "tool-next"), "older round tool disappeared");
     await setRound(events, "Unique thought NEW", false);
     assert(await browser.evaluate(`!document.querySelector('.stream-working-trailer')`), "terminal turn retained working trailer");
-    console.log("PASS Chrome round handoff: single unboxed thought, tool-only round, next thought, terminal trailer");
+    const workExpanded = () => browser.evaluate(`document.querySelector('button.work-title-chip')?.getAttribute('aria-expanded')`);
+    for (const streamMode of [false, true]) {
+      await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", ${JSON.stringify(String(streamMode))});`);
+      for (const terminal of ["finished", "interrupted"]) {
+        const base = host.getSession();
+        const workingSession = { ...base, state: "working", active_turn_id: "turn-1",
+          turns: base.turns.map(t => ({ ...t, state: "working", final_answer: null, completion: null })) };
+        host.setSession(workingSession);
+        await browser.call("Page.reload", { ignoreCache: true });
+        if (streamMode) assert(await browser.evaluate(`!document.querySelector('.turn-assistant-frame')`), "working frame should not appear");
+        else await waitFor(async () => (await workExpanded()) === "true", "working panel default changed");
+        const completedSession = { ...workingSession, state: "ready", active_turn_id: null,
+          workers: [worker("ready")], turns: workingSession.turns.map(t => ({ ...t,
+            state: terminal, final_answer: terminal === "finished" ? "Completed answer" : null,
+          })) };
+        host.setSession(completedSession);
+        host.send({ type: "hello", snapshot: makeSnapshot(completedSession) });
+        await waitFor(async () => (await workExpanded()) === "false", `${streamMode}/${terminal}: did not auto-collapse`);
+        await browser.call("Page.reload", { ignoreCache: true });
+        await waitFor(async () => (await workExpanded()) === "false", `${streamMode}/${terminal}: reload expanded historical work`);
+        await waitFor(() => contains(".work-tool-count", "(+3 tools)"), "historical collapsed count must include all calls");
+        await browser.evaluate(`document.querySelector('button.work-title-chip').click()`);
+        await waitFor(async () => (await workExpanded()) === "true", "historical manual expansion failed");
+        for (const theme of ["dark", "light"]) {
+          assert(await browser.evaluate(`(() => {
+            document.documentElement.dataset.theme = ${JSON.stringify(theme)};
+            const groups = [...document.querySelectorAll('.tool-activity-group-body')];
+            const summaries = [...document.querySelectorAll('.tool-activity summary, .tool-activity-group > summary')];
+            if (!groups.length || !summaries.length) return false;
+            summaries[0].focus();
+            return groups.every(node => getComputedStyle(node).borderLeftWidth === '0px') &&
+              summaries.every(node => !getComputedStyle(node).boxShadow.includes('inset'));
+          })()`), `${theme}: archived commands must not have a left rail or thick focus stripe`);
+        }
+
+      }
+    }
+    await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "true")`);
+    const answer = (id, ordinal, time) => ({ sub_answer_id: id, ordinal, task: "Hidden task metadata", answer: `Interim body ${ordinal}`, created_at_ms: time, preview_attempt: 3, preview_index: ordinal - 1 });
+    const interimSession = { ...host.getSession(), state: "working", active_turn_id: "turn-1", turns: [{
+      ...turn("turn-1"), events: [thoughtEvent("prior", "Prior thought archived", 1),
+        { ...toolEvent("delivery", 2), payload: { ...toolEvent("delivery", 2).payload,
+          payload: { action: "sub_answer", status: "completed", input: { answer: "Interim body 2", task: "Hidden task metadata" } } } }],
+      sub_answers: [answer("a1", 1, 3), answer("a2", 2, 4)],
+      preview: { attempt: 3, revision: 1, chat: [{ index: 1, task: "Hidden task metadata", answer: "Interim body 2" }], response: null },
+    }] };
+    host.setSession(interimSession);
+    await browser.call("Page.reload", { ignoreCache: true });
+    await waitFor(() => contains(".live-interim-answer", "Interim body 2"), "latest answer not live");
+    assert(!(await contains(".turn-stream-tools", "sub_answer")), "delivery tool leaked into stream");
+    assert(await contains(".turn-stream-tools", "Prior thought archived"), "prior thought disappeared");
+    assert(await browser.evaluate(`document.querySelectorAll('.live-interim-answer').length === 2`), "continuous answers duplicated or missing");
+    const next = { ...interimSession, turns: interimSession.turns.map(t => ({ ...t, preview: null,
+      events: [...t.events, thoughtEvent("after", "Next thought focus", 5), toolEvent("run_bash", 6)] })) };
+    host.setSession(next);
+    await browser.call("Page.reload", { ignoreCache: true });
+    await waitFor(() => contains(".stream-thought-text", "Next thought focus"), "next thought not focused");
+    assert(await contains(".live-interim-answer", "Interim body"), "old answer disappeared at next thought");
+    assert(await browser.evaluate(`document.querySelectorAll('.live-interim-answer').length === 2`), "reload lost continuous answers");
+    assert(await browser.evaluate(`!getComputedStyle(document.querySelector('.stream-tool-command')).fontFamily.match(/monospace|Consolas|SFMono/i)`), "command still uses console font");
+    for (const size of ["12px", "16px"]) {
+      assert(await browser.evaluate(`(() => {
+        document.documentElement.style.setProperty('--content-size', ${JSON.stringify(size)});
+        const reference = document.createElement('section');
+        reference.className = 'turn-final-delivery';
+        reference.innerHTML = '<div class="message-content"><div class="markdown-body"><p>Reference</p></div></div>';
+        document.querySelector('.turn-answer-delivery').append(reference);
+        const actual = getComputedStyle(document.querySelector('.stream-thought-text .markdown-body p'));
+        const expected = getComputedStyle(reference.querySelector('p'));
+        const equal = ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight'].every(key => actual[key] === expected[key]);
+        reference.remove();
+        return equal;
+      })()`), `stream/final typography differs at ${size}`);
+    }
+    const longThought = Array.from({length: 60}, (_, i) => `Paragraph ${i} remains stable.\n\n`).join("");
+    const longEvents = [thoughtEvent("long", longThought, 1), toolEvent("adjacent-a", 3), toolEvent("adjacent-b", 4)];
+    await setRound(longEvents, longThought);
+    await waitFor(() => contains(".stream-tool-run-toggle", "2 Succ | 0 Failed"), "adjacent completed tools not merged");
+    await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 2`), "completed group not folded");
+    await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
+    await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-merged-item.merged')`), "merged calls cannot expand");
+    await browser.evaluate(`document.querySelector('.stream-tool-toggle').click()`);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded')`), "completed output cannot expand");
+    await browser.evaluate(`window.stableThought = document.querySelector('.stream-thought-text'); window.stableTop = window.stableThought.getBoundingClientRect().top; true;`);
+    const baseLong = host.getSession();
+    const nextLong = {...baseLong, turns: baseLong.turns.map(t => ({...t, events: [...longEvents, thoughtEvent("long-next", "Next round stays below", 5)]}))};
+    host.setSession(nextLong); host.send({type:"hello", snapshot:makeSnapshot(nextLong)});
+    await waitFor(() => contains(".stream-thought-text", "Next round stays below"), "next round missing");
+    assert(await browser.evaluate(`window.stableThought === document.querySelector('.stream-thought-text')`), "next round remounted old text");
+    for (const terminal of ["finished", "interrupted"]) {
+      await setRound(longEvents, longThought);
+      const current = host.getSession();
+      const done = {...current, state:"ready", active_turn_id:null, turns:current.turns.map(t => ({...t, state:terminal, final_answer:terminal === "finished" ? "Final settled answer" : null}))};
+      host.setSession(done); host.send({type:"hello", snapshot:makeSnapshot(done)});
+      await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-continuous-process.archiving')`), "terminal transition did not start");
+      assert(await browser.evaluate(`document.querySelector('.stream-continuous-process').getAnimations().length > 0`), "terminal height animation missing");
+      await waitFor(() => browser.evaluate(`!document.querySelector('.stream-continuous-process') && !!document.querySelector('.collapsed-work')`), "process not archived after transition");
+      assert(await browser.evaluate(`!document.querySelector('.stream-working-trailer')`), "terminal trailer still visible");
+    }
+    // Visual interaction contracts, beyond node identity.
+    await setRound(longEvents, longThought);
+    await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 2`), "initial merged run missing");
+    const visualBase = host.getSession();
+    const moreCalls = {...visualBase, turns: visualBase.turns.map(t => ({...t, events:[...longEvents, toolEvent("adjacent-c", 5)]}))};
+    host.setSession(moreCalls); host.send({type:"hello", snapshot:makeSnapshot(moreCalls)});
+    await waitFor(() => contains(".stream-tool-run-toggle", "3 Succ | 0 Failed"), "new completion missing");
+    assert(await browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 3`), "new completion reopened merged history");
+    await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click(); document.querySelector('.stream-tool-toggle').click();`);
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded')`), "output did not open");
+    await browser.evaluate(`(() => { const range = document.createRange(); range.selectNodeContents(document.querySelector('.stream-tool-command')); const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range); document.dispatchEvent(new Event('selectionchange')); })()`);
+    await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
+    assert(await browser.evaluate(`!document.querySelector('.stream-tool-merged-item.merged') && !getSelection().isCollapsed`), "merging disrupted text selection");
+    await browser.evaluate(`getSelection().removeAllRanges(); document.dispatchEvent(new Event('selectionchange'));`);
+    const failed = toolEvent("failed-call", 3); failed.payload.payload.status = "failed";
+    await setRound([thoughtEvent("error-thought", "Failure details", 1), failed], "Failure details");
+    await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded')`), "failure details hidden by default");
+    await browser.evaluate(`document.querySelector('.stream-tool-toggle').click()`);
+    await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-fold.expanded')`), "failed tool collapse control ineffective");
+    await setRound([thoughtEvent("mixed-thought", "Mixed results", 1), toolEvent("success-call", 2.75), failed], "Mixed results");
+    await waitFor(() => contains(".stream-tool-run-toggle", "1 Succ | 1 Failed"), "mixed result counts missing");
+    await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 2`), "failed call not merged with adjacent success");
+    assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle strong')?.textContent === 'Tools'`), "Tools label must be bold");
+    await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
+    await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-merged-item.merged') && !!document.querySelector('.stream-tool-fold.expanded')`), "merged failure details cannot reopen");
+    for (const width of [390, 768]) {
+      await browser.call("Emulation.setDeviceMetricsOverride", {width, height:844, deviceScaleFactor:1, mobile:false});
+      assert(await browser.evaluate(`document.documentElement.scrollWidth <= window.innerWidth + 1`), `horizontal overflow at ${width}px`);
+    }
+    await browser.call("Emulation.clearDeviceMetricsOverride");
+    console.log("PASS Chrome visual interaction: stable completed groups, selection protection, failure toggle, 390/768px overflow");
+    console.log("PASS Chrome continuous stream: multi-round DOM stability, completed adjacency merge/reopen, terminal animation and interruption archive");
+    console.log("PASS Chrome interim continuity: deduplicated deliveries, earlier thought/answers retained, reload and typography");
+    console.log("PASS Chrome work collapse: both modes, completion/interruption, reload, manual expansion");
+    console.log("PASS Chrome round continuity: earlier thoughts/tools retained, no working archive, terminal trailer removed");
     console.log("PASS Chrome provisional UI: default off, midstream enable, response/chat updates, network interruption, reload snapshot, retraction");
   } finally { await browser.close(); await host.close(); }
 }

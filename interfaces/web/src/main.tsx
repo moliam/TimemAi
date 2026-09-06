@@ -144,7 +144,7 @@ import {
   UserMessageNavigationDirection,
   wheelDeltaPixels,
 } from "./scroll";
-import { newestInterimAnswersFirst } from "./interim_answers";
+import { interimAnswerPresentation } from "./interim_answers";
 import {
   applyTurnProjection,
   activeModelRetryStatus,
@@ -184,7 +184,6 @@ import {
   sessionCacheHitPercent,
   sessionCancellationApplies,
   shouldRenderTurnWorkFrame,
-  hasOnlyFreeTalkActivity,
   sessionContextUsage,
   sessionCreateDecision,
   sessionInteractionLockReason as sessionInteractionLockReasonForState,
@@ -248,7 +247,6 @@ import {
 import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens } from "./token_format";
 import {
-  coalesceFreeTalkItems,
   computeStreamRetention,
   summarizeConsecutiveToolActivities,
   ToolActivitySummary,
@@ -9257,10 +9255,10 @@ const TurnInteraction = memo(function TurnInteraction({
     () =>
       lifecycleEvents.map((event) => ({
         type: "event" as const,
-        key: event.event_id,
-        createdAt: event.created_at_ms,
+        key: event.presentation_id ?? event.event_id,
+        createdAt: event.presentation_created_at_ms ?? event.created_at_ms,
         event,
-        activity: activityFromTurnEvent(event, sessionId),
+        activity: activityFromTurnEvent({ ...event, event_id: event.presentation_id ?? event.event_id }, sessionId),
       })),
     [lifecycleEvents, sessionId],
   );
@@ -9293,13 +9291,6 @@ const TurnInteraction = memo(function TurnInteraction({
     [lifecycleItems, supplementItems],
   );
   const visibleItems = timelineItems;
-  const processActivities = useMemo(
-    () =>
-      timelineItems
-        .map(({ activity }) => activity)
-        .filter((activity): activity is Activity => activity !== null),
-    [timelineItems],
-  );
   const modelRetryStatus = useMemo(() => activeModelRetryStatus(turn), [turn]);
   const persistentToolGenItems = useMemo(
     () =>
@@ -9320,34 +9311,20 @@ const TurnInteraction = memo(function TurnInteraction({
       visibleItems.filter((item) => !persistentToolGenItemKeys.has(item.key)),
     [persistentToolGenItemKeys, visibleItems],
   );
-  // Partition at model replies, not thought presence: tool-only replies also
-  // archive previous tools while preserving the latest thought.
   const isWorking = turn.state === "working" && !isCancelling;
   const streamUiMode = useStreamUiMode();
-  const streamRetentionActive = streamUiMode && isWorking;
+  // Archive only after the authoritative working state ends, never at a round boundary.
+  const [streamArchived, setStreamArchived] = useState(turn.state !== "working");
+  const archiveStream = useCallback(() => setStreamArchived(true), []);
+  useEffect(() => { if (turn.state === "working") setStreamArchived(false); }, [turn.state]);
+  const streamRetentionActive = streamUiMode && !streamArchived;
+  const latestThoughtTime = lifecycleItems.reduce((time, item) => item.activity?.kind === "free_talk" ? Math.max(time, item.createdAt) : time, -1);
   const streamRetention = useMemo(
-    () =>
-      streamRetentionActive
-        ? computeStreamRetention(
-            scrollItems.map(({ activity }) => activity),
-            scrollItems.reduce((latest, item, index) => {
-              if (item.type !== "event" || item.event.source !== "core_topic") return latest;
-              const topic = item.event.payload.topic as { name?: string } | undefined;
-              return topic?.name === "core.model.response" ? index : latest;
-            }, -1),
-          )
-        : null,
+    () => streamRetentionActive ? computeStreamRetention(scrollItems.map(({ activity }) => activity)) : null,
     [streamRetentionActive, scrollItems],
   );
   const workItems = useMemo(
-    () =>
-      streamRetention
-        ? coalesceFreeTalkItems(
-            scrollItems.filter(
-              (item) => !streamRetention.isRetained(item.activity),
-            ),
-          )
-        : scrollItems,
+    () => streamRetention ? scrollItems.filter(item => streamRetention.isFramed(item.activity)) : scrollItems,
     [scrollItems, streamRetention],
   );
   const toolActivityRuns = useMemo(
@@ -9357,15 +9334,20 @@ const TurnInteraction = memo(function TurnInteraction({
       ),
     [workItems],
   );
+  // Runs contain lifecycle-coalesced calls belonging to the collapsible frame.
+  const framedToolCount = toolActivityRuns.reduce(
+    (count, run) => count + run.summary.activities.length,
+    0,
+  );
   const toolActivityRunByStartIndex = useMemo(
     () => new Map(toolActivityRuns.map((run) => [run.startIndex, run.summary])),
     [toolActivityRuns],
   );
   const hasVisibleProcess =
-    scrollItems.some((item) => item.activity !== null) || decisions.length > 0;
-  const runningStreamTools = streamRetention
-    ? streamRetention.retained
-    : [];
+    scrollItems.some((item) => item.activity !== null) || decisions.length > 0 || turn.sub_answers.length > 0;
+  const runningStreamTools = useMemo(() => streamRetention
+    ? scrollItems.filter(item => item.activity && streamRetention.isRetained(item.activity) && (item.activity as Activity).tool_name !== "sub_answer").map(item => ({ ...item.activity!, createdAt: item.createdAt }))
+    : [], [streamRetention, scrollItems]);
   const streamThoughtId = streamRetention?.thought?.id ?? null;
   const [thoughtPulseKey, setThoughtPulseKey] = useState<string | null>(null);
   const lastStreamThoughtIdRef = useRef<string | null>(null);
@@ -9395,8 +9377,7 @@ const TurnInteraction = memo(function TurnInteraction({
     isCancelling ||
     turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
   const interrupted = cancelled || turn.state === "interrupted";
-  const onlyFreeTalk = hasOnlyFreeTalkActivity(processActivities, decisions.length);
-  const [showWorkStream, setShowWorkStream] = useState(() => !streamUiMode && (isWorking || (hasVisibleProcess && !onlyFreeTalk)));
+  const [showWorkStream, setShowWorkStream] = useState(() => !streamUiMode && isWorking);
   const isToolGenTurn =
     turn.turn_id.startsWith("web_toolgen_turn_") ||
     turn.user_entries.some((entry) => entry.kind === "toolgen_instruction") ||
@@ -9418,9 +9399,9 @@ const TurnInteraction = memo(function TurnInteraction({
     previousTurnState.current = isWorking ? "working" : turn.state;
     previousFinalAnswer.current = !!turn.final_answer;
     if (!wasWorking && isWorking) setShowWorkStream(!streamUiMode);
-    if (finalArrived || (wasWorking && turn.state === "interrupted"))
-      setShowWorkStream(!streamUiMode && hasVisibleProcess && !onlyFreeTalk);
-  }, [isWorking, turn.final_answer, turn.state, hasVisibleProcess, onlyFreeTalk, streamUiMode]);
+    if (finalArrived || (wasWorking && turn.state !== "working"))
+      setShowWorkStream(false);
+  }, [isWorking, turn.final_answer, turn.state, streamUiMode]);
 
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
@@ -9586,7 +9567,7 @@ const TurnInteraction = memo(function TurnInteraction({
           </div>
         </section>
       )}
-      {showWorkFrame && (
+      {showWorkFrame && (!streamRetentionActive || turn.state !== "working" || decisions.length > 0) && (
         <section
           className={`turn-assistant-frame ${isWorking ? "working" : interrupted ? "interrupted" : turn.state} ${workStreamVisible ? "" : "collapsed-work"}`}
         >
@@ -9620,6 +9601,11 @@ const TurnInteraction = memo(function TurnInteraction({
                   "ToolGen"
                 ) : (
                   "Thought/Action"
+                )}
+                {!workStreamVisible && !isToolGenTurn && framedToolCount > 0 && (
+                  <span className="work-tool-count">
+                    (+{framedToolCount} {framedToolCount === 1 ? "tool" : "tools"})
+                  </span>
                 )}
                 {isWorking && (
                   <WorkingElapsed createdAtMs={turn.created_at_ms} />
@@ -9705,6 +9691,9 @@ const TurnInteraction = memo(function TurnInteraction({
                       />
                     ) : null;
                   })}{" "}
+                  {streamUiMode && streamArchived && turn.sub_answers.map(answer => <section className="turn-interim-item" key={answer.sub_answer_id}>
+                    <MarkdownContent text={answer.answer} />
+                  </section>)}
                   {decisions.map((decision, index) => (
                     <InlineDecision
                       key={decisionKey(decision)}
@@ -9751,6 +9740,9 @@ const TurnInteraction = memo(function TurnInteraction({
           turn={turn}
           streamTools={runningStreamTools}
           streamWorking={isWorking}
+          latestThoughtTime={latestThoughtTime}
+          streamRetained={streamRetentionActive}
+          onStreamArchived={archiveStream}
           toolGenPending={toolGenPending}
           toolGenBlocked={toolGenBlocked}
           onToolGen={
@@ -9820,17 +9812,159 @@ function areTurnInteractionPropsEqual(
   });
 }
 
-function StreamActivityPresentation({ thoughtText }: {
-  thoughtText: string;
+// Shared interaction subscriptions avoid two document listeners per tool row/run.
+const streamInteractionSubscribers = new Set<() => void>();
+const notifyStreamInteraction = () => { for (const update of streamInteractionSubscribers) update(); };
+function subscribeStreamInteraction(update: () => void) {
+  if (streamInteractionSubscribers.size === 0) {
+    document.addEventListener("selectionchange", notifyStreamInteraction);
+    document.addEventListener("focusin", notifyStreamInteraction);
+  }
+  streamInteractionSubscribers.add(update);
+  return () => {
+    streamInteractionSubscribers.delete(update);
+    if (streamInteractionSubscribers.size === 0) {
+      document.removeEventListener("selectionchange", notifyStreamInteraction);
+      document.removeEventListener("focusin", notifyStreamInteraction);
+    }
+  };
+}
+
+/** Height collapse keeps the live nodes mounted until the final handoff finishes. */
+function StreamProcess({ closing, onArchived, children }: {
+  closing: boolean; onArchived: () => void; children: ReactNode;
 }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!closing || !node) return;
+    const destination = node.closest("article")?.querySelector<HTMLButtonElement>("button.work-title-chip");
+    if (node.contains(document.activeElement)) destination?.focus({ preventScroll: true });
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      onArchived();
+      return;
+    }
+    const viewport = node.closest<HTMLElement>(".chat-scroll");
+    let followBottom = !!viewport && viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 100;
+    let frame = 0;
+    const stopFollowing = () => { followBottom = false; cancelAnimationFrame(frame); };
+    viewport?.addEventListener("wheel", stopFollowing, { passive: true });
+    viewport?.addEventListener("touchstart", stopFollowing, { passive: true });
+    const stopOnKey = (event: KeyboardEvent) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) stopFollowing();
+    };
+    viewport?.addEventListener("keydown", stopOnKey);
+    const height = node.getBoundingClientRect().height;
+    const duration = Math.min(700, Math.max(320, 320 + Math.sqrt(height) * 5));
+    const animation = node.animate([
+      { height: `${height}px`, opacity: 1 },
+      { height: "0px", opacity: 0 },
+    ], { duration, easing: "cubic-bezier(.22, 1, .36, 1)", fill: "forwards" });
+    const follow = () => {
+      if (!followBottom || !viewport) return;
+      viewport.scrollTop = viewport.scrollHeight;
+      frame = requestAnimationFrame(follow);
+    };
+    if (followBottom) frame = requestAnimationFrame(follow);
+    animation.onfinish = () => { cancelAnimationFrame(frame); onArchived(); };
+    return () => { cancelAnimationFrame(frame); animation.cancel(); viewport?.removeEventListener("wheel", stopFollowing); viewport?.removeEventListener("touchstart", stopFollowing); viewport?.removeEventListener("keydown", stopOnKey); };
+  }, [closing, onArchived]);
+  return <div ref={ref} className={`stream-continuous-process${closing ? " archiving" : ""}`}>{children}</div>;
+}
+
+function StreamActivityPresentation({ thoughtText, activities, answers }: {
+  thoughtText: string;
+  activities: Activity[];
+  answers: ReturnType<typeof interimAnswerPresentation>;
+}) {
+  const entries = [
+    ...activities.map(activity => ({ key: activity.id, time: activity.createdAt, activity, answer: undefined as typeof answers[number] | undefined })),
+    ...answers.map(answer => ({ key: answer.key, time: answer.createdAt, activity: undefined as Activity | undefined, answer })),
+  ].sort((a, b) => a.time - b.time);
+  const groups: (typeof entries)[] = [];
+  for (const entry of entries) {
+    const previous = groups.at(-1);
+    if (entry.activity?.tone === "action" && previous?.[0].activity?.tone === "action") previous.push(entry);
+    else groups.push([entry]);
+  }
   return <section className="turn-stream-tools" aria-label="Live model activity">
-    {thoughtText && <div className="stream-thought-text" aria-label="Model thought preview">
-      <StreamText text={thoughtText} />
-    </div>}
+    {groups.map(group => {
+      const { key, activity, answer } = group[0];
+      if (activity?.tone === "action") return <StreamToolRun key={key} activities={group.map(entry => entry.activity!)} />;
+      return answer
+        ? <section className={`live-interim-answer${answer.provisional ? " provisional-chat" : ""}`} key={key}>
+            {answer.provisional ? <StreamText text={answer.answer} /> : <MarkdownContent text={answer.answer} />}
+          </section>
+        : activity?.kind === "free_talk"
+          ? <div key={key} className="stream-thought-text"><MarkdownContent text={activity.detail ?? ""} /></div>
+          : activity?.kind === "user_supplement" ? <ActivityView key={key} activity={activity} /> : null;
+    })}
+    {thoughtText && <div className="stream-thought-text" aria-label="Model thought preview"><StreamText text={thoughtText} /></div>}
   </section>;
 }
 
-function StreamToolRow({ activity }: { activity: Activity }) {
+function StreamToolRun({ activities }: { activities: Activity[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const completed = activities.filter(activity => activity.tool_status === "completed" || activity.tool_status === "failed");
+  const succeededCount = completed.filter(activity => activity.tool_status === "completed").length;
+  const failedCount = completed.length - succeededCount;
+  const [mergeReady, setMergeReady] = useState(completed.length > 1);
+  const runRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    // Never reopen an already merged run when another call completes.
+    // Let status feedback and output folding finish before merging the run.
+    if (mergeReady || completed.length < 2) return;
+    const timer = window.setTimeout(() => setMergeReady(true), 600);
+    return () => window.clearTimeout(timer);
+  }, [completed.length, mergeReady]);
+  const [interactionHeld, setInteractionHeld] = useState(false);
+  useEffect(() => {
+    const update = () => {
+      const run = runRef.current;
+      const selection = window.getSelection();
+      setInteractionHeld(!!run && (
+        (!!selection && !selection.isCollapsed && !!selection.anchorNode && run.contains(selection.anchorNode)) ||
+        (!!document.activeElement?.closest(".stream-tool-merged-item") && run.contains(document.activeElement))
+      ));
+    };
+    return subscribeStreamInteraction(update);
+  }, []);
+  const merged = completed.length > 1 && mergeReady && !expanded && !interactionHeld;
+  useLayoutEffect(() => {
+    if (!merged) return;
+    const focused = document.activeElement;
+    const run = runRef.current;
+    if (focused instanceof HTMLElement && run?.contains(focused) && focused.closest(".stream-tool-merged-item.merged")) {
+      run.querySelector<HTMLButtonElement>(".stream-tool-run-toggle")?.focus({ preventScroll: true });
+    }
+  }, [merged, completed.length]);
+  return <div ref={runRef} className="stream-tool-run">
+    {completed.length > 1 && <button className="stream-tool-run-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+      <ChevronRight size={13} /><strong>Tools</strong> {succeededCount} Succ | {failedCount} Failed
+    </button>}
+    {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && (activity.tool_status === "completed" || activity.tool_status === "failed") ? " merged" : ""}`} inert={merged && (activity.tool_status === "completed" || activity.tool_status === "failed")}>
+      <div><StreamToolRow activity={activity} /></div>
+    </div>)}
+  </div>;
+
+}
+
+/** Only the status field announces and highlights lifecycle updates. */
+function ActionStatus({ status, label, className }: { status: string; label: string; className: string }) {
+  const previous = useRef(status);
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    if (previous.current !== status) {
+      previous.current = status;
+      setRevision(value => value + 1);
+    }
+  }, [status]);
+  return <span className={className} role="status" aria-live="polite" aria-atomic="true">
+    <span key={revision} className={revision ? "action-status-changed" : undefined}>{label}</span>
+  </span>;
+}
+
+const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Activity }) {
   const status = activity.tool_status || TOOL_STATUS_RUNNING;
   const running = isToolActivityRunning(status);
   const toolName = toolActivityDisplayName(
@@ -9840,20 +9974,48 @@ function StreamToolRow({ activity }: { activity: Activity }) {
   const command =
     activity.code?.trim() || toolInvocationPreview(activity) || "";
   const detail = activity.detail?.trim();
+  const [expanded, setExpanded] = useState<boolean | null>(null);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const [interactionHeld, setInteractionHeld] = useState(false);
+  useEffect(() => {
+    const update = () => {
+      const row = rowRef.current;
+      const selection = window.getSelection();
+      setInteractionHeld(!!row && (
+        (!!selection && !selection.isCollapsed && !!selection.anchorNode && row.contains(selection.anchorNode)) ||
+        (!!document.activeElement?.closest(".stream-tool-fold") && row.contains(document.activeElement))
+      ));
+    };
+    return subscribeStreamInteraction(update);
+  }, []);
+  const open = running || interactionHeld || (expanded ?? status !== "completed");
   return (
-    <div className={`stream-tool-row${running ? " running" : ""}`}>
+    <div ref={rowRef} className={`stream-tool-row${running ? " running" : ""}`}>
       <div className="stream-tool-head">
-        <span className="stream-tool-dot" aria-hidden="true" />
+        {!running && <button type="button" className="stream-tool-toggle" aria-expanded={open} aria-label={open ? "Collapse tool output" : "Expand tool output"} onClick={() => setExpanded(!open)}><ChevronRight size={13} /></button>}
+        {status !== "completed" && <span className="stream-tool-dot" aria-hidden="true" />}
         <b>{toolName}</b>
-        <span className="stream-tool-status">{humanizeToolStatus(status)}</span>
+        <ActionStatus status={status} label={humanizeToolStatus(status)} className="stream-tool-status" />
       </div>
-      {command && <pre className="stream-tool-command">{command}</pre>}
-      {detail && <div className="stream-tool-detail">{detail}</div>}
+      <div className={`stream-tool-fold${open ? " expanded" : ""}`} inert={!open}>
+        <div>
+          {command && <pre className="stream-tool-command">{command}</pre>}
+          {detail && <div className="stream-tool-detail">{detail}</div>}
+        </div>
+      </div>
     </div>
   );
-}
+}, (previous, next) => {
+  const a = previous.activity;
+  const b = next.activity;
+  return a.id === b.id && a.tool_status === b.tool_status && a.tool_name === b.tool_name &&
+    a.tool_mode === b.tool_mode && a.title === b.title && a.code === b.code && a.detail === b.detail;
+});
 
 function TurnAnswerDelivery({
+  streamRetained,
+  onStreamArchived,
+  latestThoughtTime,
   turn,
   streamTools,
   streamWorking,
@@ -9868,6 +10030,9 @@ function TurnAnswerDelivery({
   turn: WebTurn;
   streamTools: Activity[];
   streamWorking: boolean;
+  latestThoughtTime: number;
+  streamRetained: boolean;
+  onStreamArchived: () => void;
   toolGenPending: boolean;
   toolGenBlocked: boolean;
   favorite?: ChatFavorite;
@@ -9887,11 +10052,18 @@ function TurnAnswerDelivery({
     (streamWorking && intermediate ? preview?.response?.text ?? "" : "");
   const hasPreview = !!previewText || previewChat.length > 0;
   const hasFinal = !!turn.final_answer;
-  const hasChat = turn.sub_answers.length > 0 || previewChat.length > 0;
-  const [chatExpanded, setChatExpanded] = useState(() => !hasFinal);
+  const items = interimAnswerPresentation(turn.sub_answers, preview);
+  const newest = items[0];
+  const [collapsedAnswer, setCollapsedAnswer] = useState<string | null>(null);
+  const liveAnswer = !streamUiMode && streamWorking && !hasFinal && newest &&
+    newest.key !== collapsedAnswer && newest.createdAt >= latestThoughtTime &&
+    (!previewText || newest.provisional)
+    ? newest : undefined;
+  const chatItems = items.filter(item => item !== liveAnswer);
+  const hasChat = !streamUiMode && chatItems.length > 0;
+  const [chatExpanded, setChatExpanded] = useState(false);
   const previousFinal = useRef(hasFinal);
   const chatPanelId = `turn-chat-${turn.turn_id}`;
-  const chatItems = newestInterimAnswersFirst(turn.sub_answers);
   useEffect(() => {
     const finalArrived = !previousFinal.current && !!turn.final_answer;
     previousFinal.current = !!turn.final_answer;
@@ -9899,7 +10071,13 @@ function TurnAnswerDelivery({
   }, [turn.final_answer]);
   return (
     <section className="turn-answer-delivery">
-      {streamUiMode && <StreamActivityPresentation thoughtText={thoughtText} />}
+      {streamRetained && <StreamProcess closing={turn.state !== "working"} onArchived={onStreamArchived}>
+        <StreamActivityPresentation thoughtText={intermediate && !retainedThought ? thoughtText : ""} activities={streamTools} answers={items} />
+      </StreamProcess>}
+      {liveAnswer && <div className={`stream-thought-text live-interim-answer${liveAnswer.provisional ? " provisional-chat" : ""}`} aria-label="Current interim answer">
+        {liveAnswer.provisional ? <StreamText text={liveAnswer.answer} /> : <MarkdownContent text={liveAnswer.answer} />}
+        <button type="button" className="working-chip" aria-label="Collapse interim answer into Chat" onClick={() => setCollapsedAnswer(liveAnswer.key)}>收起到 Chat</button>
+      </div>}
       {hasChat && (
         <section
           className={`turn-chat-delivery${chatExpanded ? " expanded" : " collapsed"}`}
@@ -9921,7 +10099,7 @@ function TurnAnswerDelivery({
                 size={13}
                 aria-hidden="true"
               />
-              Chat
+              Chat{!chatExpanded && ` (+${chatItems.length})`}
             </button>
           </div>
           {chatExpanded && (
@@ -9932,19 +10110,7 @@ function TurnAnswerDelivery({
               aria-label="Chat answers"
             >
               <div className="turn-interim-list">
-                {[
-                  ...previewChat.map((item) => ({
-                    key: `preview-${preview?.attempt}-${item.index}`,
-                    task: item.task, answer: item.answer, provisional: true,
-                    index: item.index, ordinal: undefined as number | undefined,
-                  })),
-                  ...chatItems.map(({item, ordinal}) => ({
-                    key: streamUiMode && item.preview_attempt !== undefined && item.preview_index !== undefined
-                      ? `preview-${item.preview_attempt}-${item.preview_index}` : item.sub_answer_id,
-                    task: item.task, answer: item.answer, provisional: false,
-                    index: item.preview_index, ordinal,
-                  })),
-                ].map((item) => (
+                {chatItems.map((item) => (
                   <section className={`turn-interim-item${item.provisional ? " provisional-chat" : ""}${item.provisional && !preview?.interruption ? " streaming" : ""}`} key={item.key} data-preview-index={item.index}>
                     {item.task && <h3>{item.ordinal !== undefined && <span>{item.ordinal}.</span>} {item.task}</h3>}
                     <div className="message-content">{item.provisional ? <StreamText text={item.answer} /> : <MarkdownContent text={item.answer} />}</div>
@@ -9971,9 +10137,6 @@ function TurnAnswerDelivery({
           onDelete={onDelete}
         />
       )}
-      {streamUiMode && streamTools.filter((activity) => activity.tone === "action").map((activity) => (
-        <StreamToolRow key={activity.id} activity={activity} />
-      ))}
       {streamUiMode && streamWorking && (
         <div className="stream-working-trailer" role="status" aria-label="Working">
           <span className="stream-working-dot" aria-hidden="true" />
@@ -10632,7 +10795,7 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
         </span>
         <div className="user-supplement-line">
           <strong>{activity.title}</strong>
-          <span>已补充，内容见上方用户消息</span>
+          {activity.detail && <MarkdownContent text={activity.detail} />}
         </div>
       </div>
     );
@@ -10807,7 +10970,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
     const timer = window.setInterval(updateElapsed, 1_000);
     return () => window.clearInterval(timer);
   }, [activity.createdAt, pollingActivity, running, waitBudgetMs]);
-  const invocationPreview = toolInvocationPreview(activity);
+  const invocationPreview = activity.tool_name === "sub_answer" ? undefined : toolInvocationPreview(activity);
   const detail = activity.detail?.trim();
   const code = activity.code?.trim();
   const hasExpandableDetail = !!detail || !!code;
@@ -10846,7 +11009,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
       )}
       <b>{toolName}</b>
       <span className="tool-activity-meta">
-        <span className="tool-activity-status">{statusLabel}</span>
+        <ActionStatus status={status} label={statusLabel} className="tool-activity-status" />
         {remainingWaitMs !== undefined && (
           <span className="tool-activity-countdown">
             {formatRemainingDuration(remainingWaitMs)} remaining
