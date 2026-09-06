@@ -609,6 +609,32 @@ async function main() {
       await waitFor(() => browser.evaluate(`!document.querySelector('.stream-continuous-process') && !!document.querySelector('.collapsed-work')`), "process not archived after transition");
       assert(await browser.evaluate(`!document.querySelector('.stream-working-trailer')`), "terminal trailer still visible");
     }
+    // A tall process must not leave stale scroll space after final-answer handoff.
+    for (const reducedMotion of [false, true]) {
+    await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: reducedMotion ? "reduce" : "no-preference" }] });
+    for (const streamMode of [true, false]) {
+      await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", ${JSON.stringify(String(streamMode))})`);
+      const manyTools = Array.from({length: 80}, (_, i) => toolEvent(`handoff-tool-${i}`, 3 + i));
+      await setRound([thoughtEvent("handoff-thought", longThought, 1), ...manyTools], longThought);
+      await browser.evaluate(`document.querySelector('.chat-scroll').scrollTop = document.querySelector('.chat-scroll').scrollHeight`);
+      const current = host.getSession();
+      const finalText = Array.from({length: 8}, (_, i) => `## Final section ${i}\n\n${"Final answer reading text. ".repeat(20)}\n\n`).join("");
+      const done = {...current, state:"ready", active_turn_id:null, turns:current.turns.map(t => ({...t, state:"finished", final_answer:finalText}))};
+      host.setSession(done); host.send({type:"hello", snapshot:makeSnapshot(done)});
+      await waitFor(() => browser.evaluate(`!!document.querySelector('.turn-final-delivery') && !document.querySelector('.stream-continuous-process')`), "large process did not archive");
+      await sleep(300);
+      const geometry = await browser.evaluate(`(() => {
+        const viewport = document.querySelector('.chat-scroll');
+        const answer = document.querySelector('.turn-final-delivery').getBoundingClientRect();
+        const view = viewport.getBoundingClientRect();
+        return { visible: answer.bottom > view.top && answer.top < view.bottom, trailing: viewport.scrollHeight - (answer.bottom - view.top + viewport.scrollTop), top: viewport.scrollTop };
+      })()`);
+      assert(geometry.visible && geometry.trailing < 150, `${streamMode}: archive left blank viewport/stale scroll space: ${JSON.stringify(geometry)}`);
+    }
+    }
+    await browser.call("Emulation.setEmulatedMedia", { features: [] });
+    console.log("PASS Chrome large-tool handoff: final answer visible without stale scroll space in both UI and motion modes");
+    await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "true")`);
     // Visual interaction contracts, beyond node identity.
     await setRound(longEvents, longThought);
     await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 2`), "initial merged run missing");
