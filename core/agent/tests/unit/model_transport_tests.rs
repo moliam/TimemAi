@@ -963,3 +963,80 @@ fn provisional_content_arrives_before_server_can_finish_response() {
     assert_eq!(text, "early");
     assert!(response.body.ends_with("data: [DONE]\n\n"));
 }
+
+#[test]
+fn stream_failure_is_audited_without_response_body() {
+    for (label, tail, expected) in [
+        (
+            "oversize",
+            format!("data: {}", "x".repeat(4 * 1024 * 1024)),
+            "model_stream_event_too_large",
+        ),
+        (
+            "invalid",
+            "data: private-response-marker\n\n".to_string(),
+            "invalid_model_stream_event",
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = format!("data: {{\"choices\":[]}}\n\n{tail}");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            read_http_request(&mut socket);
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-Request-Id: test-request-123\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            if let Err(error) = socket.write_all(body.as_bytes()) {
+                assert!(matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                ));
+            }
+        });
+        let dir = std::env::temp_dir().join(crate::unique_id("stream_failure_audit"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let audit_file = dir.join("api.jsonl");
+        let config = local_config(addr, 10);
+        let request = prepare_model_http_request(&config, label);
+        let mut observer = |_: &serde_json::Value| {};
+        let error = HttpModelClient::default()
+            .execute_model_http_request(
+                &config,
+                &request,
+                &audit_file,
+                &mut || false,
+                &mut Some(&mut observer),
+            )
+            .unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error, expected);
+        let audit = read_api_audit_doc(&api_audit_stream_path(&audit_file)).unwrap();
+        let events = audit["events"].as_array().unwrap();
+        let failure = events
+            .iter()
+            .find(|e| e["error_kind"] == "stream_decode_error")
+            .unwrap();
+        let request = events.iter().find(|e| e["type"] == "llm_request").unwrap();
+        assert_eq!(failure["audit_request_id"], request["audit_request_id"]);
+        assert_eq!(failure["status"], 200);
+        assert_eq!(failure["transport"]["request_id"], "test-request-123");
+        assert_eq!(failure["stream_diagnostics"]["event_count"], 1);
+        assert_eq!(
+            failure["stream_diagnostics"]["event_limit_bytes"],
+            4 * 1024 * 1024
+        );
+        assert!(
+            failure["stream_diagnostics"]["line_bytes"]
+                .as_u64()
+                .unwrap()
+                + failure["stream_diagnostics"]["event_data_bytes"]
+                    .as_u64()
+                    .unwrap()
+                > 0
+        );
+        assert_eq!(failure["body_omitted"], true);
+        assert!(failure.get("body").is_none());
+        assert!(!failure.to_string().contains("private-response-marker"));
+        assert!(failure.to_string().len() < 2048);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

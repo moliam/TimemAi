@@ -3,16 +3,16 @@ import { humanizeToolStatus, toolResultCountsLabel, isToolActivityFailed, isTool
 
 describe("tool result labels", () => {
   it("hides zero failures without a trailing separator", () => {
-    expect(toolResultCountsLabel(0, 0)).toBe("0 Succ");
-    expect(toolResultCountsLabel(2, 0)).toBe("2 Succ");
+    expect(toolResultCountsLabel(0, 0)).toBe("0 ✓");
+    expect(toolResultCountsLabel(2, 0)).toBe("2 ✓");
   });
   it("shows nonzero failures", () => {
-    expect(toolResultCountsLabel(2, 1)).toBe("2 Succ | 1 Failed");
-    expect(toolResultCountsLabel(0, 2)).toBe("0 Succ | 2 Failed");
+    expect(toolResultCountsLabel(2, 1)).toBe("2 ✓ | 1 ✗");
+    expect(toolResultCountsLabel(0, 2)).toBe("0 ✓ | 2 ✗");
   });
-  it("uses Succ and Failed for terminal result labels", () => {
-    expect(humanizeToolStatus("completed")).toBe("Succ");
-    expect(humanizeToolStatus("failed")).toBe("Failed");
+  it("uses ✓ and ✗ for terminal result labels", () => {
+    expect(humanizeToolStatus("completed")).toBe("✓");
+    expect(humanizeToolStatus("failed")).toBe("✗");
     expect(humanizeToolStatus("running")).toBe("running");
     expect(humanizeToolStatus("background_running")).toBe("running (bg)");
     expect(humanizeToolStatus("timeout")).toBe("timed out");

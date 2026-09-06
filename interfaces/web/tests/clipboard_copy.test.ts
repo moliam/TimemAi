@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { copyTextToClipboard } from "../src/clipboard_copy";
+import { selectedUserMessageText, copyTextToClipboard } from "../src/clipboard_copy";
 
 const originalDescriptors = new Map<PropertyKey, PropertyDescriptor | undefined>();
 for (const key of ["navigator", "document", "window"] as const) {
@@ -76,5 +76,14 @@ describe("copyTextToClipboard", () => {
     await expect(copyTextToClipboard("cannot copy")).rejects.toThrow("execCommand copy failed");
     expect(fallback.removeChild).toHaveBeenCalledWith(fallback.textarea);
     expect(fallback.removeAllRanges).toHaveBeenCalledOnce();
+  });
+});
+
+describe("selectedUserMessageText guards", () => {
+  it("leaves empty and multi-range selections to the browser", () => {
+    const root = {} as HTMLElement;
+    expect(selectedUserMessageText(root, null)).toBeNull();
+    expect(selectedUserMessageText(root, { isCollapsed: true } as Selection)).toBeNull();
+    expect(selectedUserMessageText(root, { isCollapsed: false, rangeCount: 2 } as Selection)).toBeNull();
   });
 });

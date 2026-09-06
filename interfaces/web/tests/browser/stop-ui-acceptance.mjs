@@ -376,6 +376,44 @@ async function main() {
     await browser.evaluate(`(() => {
       document.querySelector('.turn-assistant-frame.working').dataset.acceptanceWorkingFrame = 'stable';
     })()`);
+    assert(await browser.evaluate(`getComputedStyle(document.querySelector('.turn-assistant-frame.working')).animationName === 'none'`), "large working surface must not animate continuously");
+    // Whole-bubble selections have endpoints on the parent, not inside the bubble.
+    await browser.call("Browser.grantPermissions", {
+      origin: new URL(host.url).origin,
+      permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"],
+    });
+    for (const mode of ["contents", "node", "text", "boundary"]) {
+      await browser.evaluate(`(() => {
+        const entry = document.querySelector('.turn-user-entry');
+        const range = document.createRange();
+        if (${JSON.stringify(mode)} === 'boundary') {
+          range.setStart(entry.querySelector('p').firstChild, 0);
+          range.setEnd(document.querySelector('.turn-assistant-frame'), 0);
+        } else if (${JSON.stringify(mode)} === 'node') range.selectNode(entry);
+        else if (${JSON.stringify(mode)} === 'text') {
+          const text = entry.querySelector('p').firstChild;
+          range.setStart(text, 0); range.setEnd(text, 4);
+        } else range.selectNodeContents(entry);
+        const selection = window.getSelection();
+        selection.removeAllRanges(); selection.addRange(range);
+      })()`);
+      await browser.call("Input.dispatchKeyEvent", {type:"keyDown", key:"c", code:"KeyC", modifiers:4, commands:["copy"]});
+      await browser.call("Input.dispatchKeyEvent", {type:"keyUp", key:"c", code:"KeyC", modifiers:4});
+      const copied = await browser.evaluate('navigator.clipboard.readText()');
+      assert(copied === (mode === "text" ? "Long" : "Long task"), `user bubble ${mode} copy added whitespace: ${JSON.stringify(copied)}`);
+      await browser.evaluate(`(() => {
+        const textarea = document.querySelector('textarea[aria-label="Message Timem"]');
+        textarea.focus(); textarea.select();
+      })()`);
+      await browser.call("Input.dispatchKeyEvent", {type:"keyDown", key:"v", code:"KeyV", modifiers:4, commands:["paste"]});
+      await browser.call("Input.dispatchKeyEvent", {type:"keyUp", key:"v", code:"KeyV", modifiers:4});
+      assert(await browser.evaluate(`document.querySelector('textarea[aria-label="Message Timem"]').value === ${JSON.stringify(copied)}`), "paste changed user bubble text");
+    }
+    await browser.evaluate(`(() => {
+      const textarea = document.querySelector('textarea[aria-label="Message Timem"]');
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(textarea, '');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
     host.send({
       type: "worker_activity", session_id: "session-1", context_id: "context-1",
       worker_id: "worker-1", turn_id: "turn-1",

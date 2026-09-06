@@ -336,3 +336,112 @@ answer and approximately 1567px phantom space. This regression runs through test
 - 回复边界定位单次反向扫描，避免按工具分组重复扫描后缀；沿用 CSS 高度/透明度短过渡及 reduced-motion，无新增逐帧 JS 或计时器。
 - Chrome 回归检查运行时默认关闭且可展开、完成后等待 700ms 高度仍保持（误差 < 1px）、下一回复收起单工具、重新展开保留详情状态。已有批量计数、重复快照、36 组响应式、80 工具最终交接及 CPU 预算继续执行。
 - 本节替代前述“完成立即折叠/失败默认展开”的旧展示约定；仅为 Interface 行为，不改变 Host 生命周期。
+
+### Stream Chat disclosure
+
+Stream UI renders each interim answer with a Chat disclosure. A confirmed answer
+collapses when later AI content arrives, not on a tool completion or user supplement;
+provisional Chat stays visible while streaming. Users can collapse/reopen it manually.
+After stream archival or history reload, confirmed answers live in the collapsed
+Chat panel rather than Thought/Action. Core delivery and Turn semantics are unchanged.
+Chrome `stream-preview-acceptance.mjs` covers latest-answer visibility, next-reply
+collapse, manual reopening, completed-history recovery, preview continuity and both UI modes.
+
+### SSE failure audit and execution indicators
+
+- SSE wire event capacity is 4 MiB; preview parser limits remain 1 MiB and the
+  whole HTTP response limit remains 16 MiB.
+- Stream decode failures produce a bounded `llm_response` audit record with
+  `error_kind=stream_decode_error`, HTTP status, normalized SSE content type,
+  received bytes, timing, redirect count, safe bounded provider request id,
+  and completed-event/current-line/current-event byte counters. No failed body
+  is persisted. `audit_request_id` correlates request and response records.
+- Request audit write failure fails before sending; stream-failure audit write
+  failure preserves the original error with an audit-write failure marker.
+  This does not yet add diagnostic snapshots for all transport errors.
+- Coverage: `stream_failure_is_audited_without_response_body` (oversized and invalid
+  JSON over real local HTTP), `sse_event_between_one_and_four_mib_is_accepted`,
+  `unterminated_and_oversized_events_never_emit`, existing preview bound tests.
+- Execution dots only represent running/background-running actions. Chrome
+  stream acceptance tests bash/readfile across success, failure, timeout,
+  cancellation and both running states; ordinary action views already use the
+  shared running-state predicate.
+
+Tools absorption feedback tracks newly absorbed completed results, not merely
+completion count changes. Deferred next-reply handoff pulses the count even if
+completion happened earlier. Initial snapshots and manual reclose do not replay.
+Component/CSS comments preserve these visual contracts; Chrome acceptance checks
+the deferred absorption case alongside count increments and reduced motion.
+
+### Logical-step tool handoff
+
+Settled stream tools fold when a later tool execution begins (including serial
+calls within one model response), or later AI response content arrives. Completion
+alone is not a handoff. Host lifecycle event order, preserved through coalescing,
+compares execution starts with settlements; presentation timestamps are not used
+to invent serial causality. A parallel start preceding settlement does not qualify.
+Running/background tools remain visible, and incomplete historical evidence does
+not infer an execution step. Eligible settled statuses include failures, timeouts
+and cancellations, not only successes. Selection/manual disclosure protections
+remain in force. Folding and incoming content are computed in the same render;
+only newly absorbed counts pulse, without remounting existing tool rows.
+
+Coverage: logical tool handoff unit tests, Chrome same-round A-finish/B-start/
+B-failure and stable-row checks, existing next-AI-response and interaction tests,
+and a 20,000-action linear handoff performance guard (1500 ms ceiling).
+
+Stream tool rows use the static dot alone for running state, with an accessible
+label. Background execution shows only `bg`, never redundant `running` text.
+Terminal result labels use the shared success/failure symbols. Chrome
+lifecycle/status-matrix acceptance guards this visual contract.
+
+Terminal tool result labels use `✓` for success and `✗` for failure, including
+Tools counts (for example `2 ✓ | 1 ✗`). Accessible labels retain full words.
+Unit and Chrome count/status acceptance tests guard the exact symbols.
+
+### 用户气泡复制与工作区重绘回归
+
+- 用户气泡选区延伸到相邻布局空白时，复制处理由聊天视口接管；只处理单条用户消息，不改写跨消息选区，也不在输入框粘贴时全局裁剪文本。
+- `interfaces/web/tests/browser/stop-ui-acceptance.mjs` 使用真实 Chrome 剪贴板验证气泡内容、整节点、局部文字、延伸至助手区起点的选区及粘贴到 composer；修复前边界选区复现尾部三个换行。
+- 工作中回答框保留静态状态边框，移除持续改变大面积边框与阴影的呼吸动画；浏览器验收断言其 animationName 为 none。小型状态指示不变。
+- 此项减少已知持续重绘源，不代表已测得用户环境 CPU 或温度下降；Safari/Firefox 和实际用户 Chrome CPU 对照仍需验证。
+
+### 流式工具状态位置连续性
+
+- 运行圆点与完成/失败标记共用工具名称前的固定最小宽度状态槽；后台 `(bg)` 仍位于名称后并以较淡颜色显示，避免圆点消失后结果跳到另一侧。
+- `tool_activity_layout.test.ts` 守卫 DOM 顺序和状态槽样式；`stream-preview-acceptance.mjs` 验证状态标记居中且位于工具名称前，状态更新不重建工具行。
+
+### Tools disclosure alignment
+
+Collapsed stream tool summaries use `+ tools N ✓ | M ✗` (omit zero failures).
+Tool status/layout unit tests guard labels and inset; stream-preview Chrome
+acceptance checks summary/live disclosure alignment at 1440px and 390px, mixed
+counts, and reopening results. Individual terminal failure labels remain `✗`.
+
+The `tools` label is lowercase without a colon; the entire summary row,
+including success/failure counts, uses normal font weight (400).
+
+### Low-cost stream rendering
+
+- `interfaces/web/tests/stream_reveal.test.ts`: 40ms refresh-independent reveal
+  scheduling, preserved character pacing, hidden/reduced-motion immediate text.
+- `interfaces/web/tests/browser/stream-preview-acceptance.mjs`: short tool entry,
+  static duplicate activity cues, no blurred scroll navigation, plus existing
+  multi-round handoff, failure, selection, count and reduced-motion coverage.
+- The `STREAM_CPU_BENCH=1 TIMEM_PERF_GUARD=1` variant retains main-thread/layout
+  budgets; measurement scope and limitations are in `web-performance-tracing.md`.
+
+### Serial tool handoff and disclosure
+
+Core now emits `execution_start` for non-shell builtins, command extensions, MCP
+and parallel readfile dispatch as well as the existing approved shell paths.
+Proposal `start` remains distinct from execution; approval waiting does not
+advance execution. The UI folds a settled predecessor when a later execution
+boundary arrives, without waiting for Turn completion. Parallel running tools,
+background jobs and active reading/selection remain protected.
+
+Regression: `serial_builtin_actions_emit_execution_boundaries_before_each_finish`
+checks two proposals followed by serial execution/finish pairs; the actual-product
+Chrome `tools` scenario executes two readfiles and checks predecessor folding
+before final delivery. Disclosure uses plus/tools while collapsed and minus/tools
+while expanded, with `✓` success and `✗` failure counts; browser tests cover both.

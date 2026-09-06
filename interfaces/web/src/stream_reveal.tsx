@@ -18,6 +18,13 @@ export function streamRevealDelta(
   return Math.min(lag, (charsPerSecond * Math.min(dtMs, 40)) / 1000);
 }
 
+// 性能约束：40ms 定时器将每个增长文本组件限制为最多 25 次调度/秒，不跟随
+// 60/120/144Hz 屏幕逐帧唤醒。保留字符额度和渐显速度；只限制呈现，不节流 Host 事件。
+// 不要为高刷屏恢复常驻 rAF 循环或取消 FrozenBlock memo，否则重复解析旧 Markdown。
+// 隐藏页面直接同步已交付文字，不回放积压；滚动仍独立保持原有帧调度。
+// 回归：stream_reveal.test.ts 和浏览器 STREAM_CPU_BENCH。
+export const STREAM_REVEAL_INTERVAL_MS = 40;
+
 const prefersReducedMotion = () =>
   typeof window !== "undefined" &&
   !!window.matchMedia &&
@@ -134,33 +141,38 @@ export const StreamText = memo(function StreamText({ text }: { text: string }) {
   const creditRef = useRef(0);
   const frameRef = useRef<number | null>(null);
   const lastTsRef = useRef<number | null>(null);
-  const lastPaintRef = useRef(0);
 
   useEffect(() => {
     targetRef.current = text;
-    if (!text.startsWith(visibleRef.current) || prefersReducedMotion()) {
+    if (!text.startsWith(visibleRef.current) || prefersReducedMotion() || document.hidden) {
       visibleRef.current = text;
       creditRef.current = 0;
       setVisible(text);
-      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      if (frameRef.current !== null) window.clearTimeout(frameRef.current);
       frameRef.current = null;
       return;
     }
     if (visibleRef.current === text || frameRef.current !== null) return;
-    lastTsRef.current = null;
-    lastPaintRef.current = 0;
-    const step = (ts: number) => {
+    lastTsRef.current = performance.now();
+    const step = () => {
+      const ts = performance.now();
       const target = targetRef.current;
+      if (document.hidden) {
+        visibleRef.current = target;
+        creditRef.current = 0;
+        frameRef.current = null;
+        setVisible(target);
+        return;
+      }
       const last = lastTsRef.current ?? ts;
       lastTsRef.current = ts;
       creditRef.current += streamRevealDelta(visibleRef.current.length, target.length, ts - last);
       const count = Math.floor(creditRef.current);
-      // Accumulate at frame cadence, but batch costly Markdown/React commits.
-      if (count > 0 && (ts - lastPaintRef.current >= 32 || count >= target.length - visibleRef.current.length)) {
-        lastPaintRef.current = ts;
+      // One bounded Markdown/React commit per tick, independent of refresh rate.
+      if (count > 0) {
         let end = Math.min(target.length, visibleRef.current.length + count);
         // Never paint half of a UTF-16 surrogate pair.
-        if (end < target.length && /[\\uD800-\\uDBFF]/.test(target[end - 1])) end += 1;
+        if (end < target.length && /[\uD800-\uDBFF]/.test(target[end - 1])) end += 1;
         creditRef.current = Math.max(0, creditRef.current - (end - visibleRef.current.length));
         visibleRef.current = target.slice(0, end);
         setVisible(visibleRef.current);
@@ -170,13 +182,13 @@ export const StreamText = memo(function StreamText({ text }: { text: string }) {
         creditRef.current = 0;
         return;
       }
-      frameRef.current = requestAnimationFrame(step);
+      frameRef.current = window.setTimeout(step, STREAM_REVEAL_INTERVAL_MS);
     };
-    frameRef.current = requestAnimationFrame(step);
+    frameRef.current = window.setTimeout(step, STREAM_REVEAL_INTERVAL_MS);
   }, [text]);
 
   useEffect(() => () => {
-    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+    if (frameRef.current !== null) window.clearTimeout(frameRef.current);
   }, []);
 
   const blocks = useMemo(() => splitMarkdownBlocks(visible), [visible]);

@@ -1,7 +1,10 @@
+import { coalesceActionLifecycle } from "../src/view_model";
+import type { WebTurnEvent } from "../src/protocol";
 import { describe, expect, it } from "vitest";
 import { Activity } from "../src/protocol";
 import {
   coalesceFreeTalkItems,
+  streamToolHandoffIds,
   computeStreamRetention,
   isRunningToolActivity,
   summarizeConsecutiveToolActivities,
@@ -278,4 +281,39 @@ describe("stream retention split", () => {
       "a1",
     ]);
   });
+});
+
+describe("logical tool handoff", () => {
+  it("waits for a later execution, retaining parallel finishes and running jobs", () => {
+    const a = { ...activity("a", "failed"), execution_order: 1, settled_order: 2 };
+    const b = { ...activity("b", "completed"), execution_order: 3, settled_order: 4 };
+    const bg = { ...activity("bg", "background_running"), execution_order: 0, settled_order: 1 };
+    expect([...streamToolHandoffIds([a])]).toEqual([]);
+    expect([...streamToolHandoffIds([a, b, bg])]).toEqual([a.id]);
+    expect([...streamToolHandoffIds([{ ...a, settled_order: 5 }, b])]).toEqual([]);
+    expect([...streamToolHandoffIds([{ ...a, settled_order: undefined }, b])]).toEqual([]);
+    for (const status of ["completed", "failed", "timeout", "cancelled", "cancelled_by_user"])
+      expect(streamToolHandoffIds([{ ...a, tool_status: status }, b]).has(a.id)).toBe(true);
+  });
+});
+
+it("preserves execution and settlement order through lifecycle coalescing", () => {
+  const event = (id: string, phase: string): WebTurnEvent => ({
+    event_id: `${id}-${phase}`, source: "core_topic", created_at_ms: 1,
+    payload: { topic: { name: "core.action" }, payload: {
+      action: "run_bash", action_id: id, event: phase,
+      status: phase === "finish" ? "completed" : "running",
+    } },
+  });
+  const visible = coalesceActionLifecycle([
+    event("a", "start"), event("b", "start"),
+    event("a", "execution_start"), event("a", "finish"),
+    event("b", "execution_start"), event("b", "finish"),
+  ]);
+  expect(visible).toHaveLength(2);
+  expect(visible[0].execution_order).toBe(2);
+  expect(visible[0].settled_order).toBe(3);
+  expect(visible[1].execution_order).toBe(4);
+  expect(visible[1].settled_order).toBe(5);
+  expect(visible[0].presentation_id).toBe("a-start");
 });

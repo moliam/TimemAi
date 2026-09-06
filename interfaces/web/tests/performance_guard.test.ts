@@ -3,7 +3,7 @@ import { createFrameEventQueue } from "../src/frame_event_queue";
 import { coalesceActionLifecycle } from "../src/view_model";
 import { reconcileSessionTimelineCache } from "../src/session_timeline_cache";
 import { requestTimelineNavigationWork } from "../src/timeline_navigation_work";
-import { computeStreamRetention, summarizeConsecutiveToolActivities } from "../src/activity_groups";
+import { streamToolHandoffIds, computeStreamRetention, summarizeConsecutiveToolActivities } from "../src/activity_groups";
 import type { Activity, WebTurnEvent } from "../src/protocol";
 
 const guardEnabled = process.env.TIMEM_PERF_GUARD === "1";
@@ -93,4 +93,14 @@ describe("web performance guard", () => {
     assertUnder("web_scroll_and_warm_switch_50000_cycles", elapsedMs, 1_500);
   });
 
+});
+
+it("computes 20000 logical tool handoffs in linear time", () => {
+  const activities: Activity[] = Array.from({length: 20000}, (_, i) => ({
+    id: String(i), sessionId: "perf", tone: "action", title: "tool", createdAt: 0,
+    tool_status: "completed", execution_order: i * 2, settled_order: i * 2 + 1,
+  }));
+  const started = performance.now();
+  expect(streamToolHandoffIds(activities).size).toBe(19999);
+  assertUnder("web_logical_handoff_20000", performance.now() - started, 1500);
 });

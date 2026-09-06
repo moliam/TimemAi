@@ -40,3 +40,69 @@ The OpenAI-compatible streaming entry point explicitly requests SSE without requ
 ## Scope and limits
 
 Preview is bounded and ephemeral, not a replacement for full protocol parsing or durable conversation history. Malformed/oversized preview data fails closed; authoritative response validation still owns execution and final delivery. Host restart does not restore an in-flight stream. The failure/interaction browser matrix covers XML, while JSON/native use unit-level malformed-input coverage and normal product-path acceptance. These tests are not an exhaustive provider compatibility claim.
+
+## Interim Chat folding
+
+In Stream UI, confirmed interim answers collapse into Chat when later AI content
+arrives. Tool completion and user supplements alone do not collapse them. Provisional
+answers remain visible during generation; each Chat can be manually collapsed or
+reopened. Once the stream is archived, including restored completed history, answers
+are available in the collapsed Chat panel instead of Thought/Action. The ordinary UI
+keeps its existing Chat behavior. This is browser presentation, not a delivery or
+Turn lifecycle change.
+
+Regression: Chrome `stream-preview-acceptance.mjs` checks next-reply folding,
+manual reopen/collapse, completed-history reload and provisional streaming.
+
+Execution dots are shown only for `running` and `background_running`, never for
+completed, failed, timed-out or cancelled tools. This applies to all stream tool
+rows, not just bash. SSE wire events allow up to 4 MiB independently of the
+1 MiB preview-parser budget; full HTTP responses remain capped at 16 MiB.
+
+### Logical-step tool handoff
+
+Settled stream tools fold when a later tool execution begins (including serial
+calls within one model response), or later AI response content arrives. Completion
+alone is not a handoff. Host lifecycle event order, preserved through coalescing,
+compares execution starts with settlements; presentation timestamps are not used
+to invent serial causality. A parallel start preceding settlement does not qualify.
+Running/background tools remain visible, and incomplete historical evidence does
+not infer an execution step. Eligible settled statuses include failures, timeouts
+and cancellations, not only successes. Selection/manual disclosure protections
+remain in force. Folding and incoming content are computed in the same render;
+only newly absorbed counts pulse, without remounting existing tool rows.
+
+Coverage: logical tool handoff unit tests, Chrome same-round A-finish/B-start/
+B-failure and stable-row checks, existing next-AI-response and interaction tests,
+and a 20,000-action linear handoff performance guard (1500 ms ceiling).
+
+Stream tool rows use the static dot alone for running state, with an accessible
+label. Background execution shows only `bg`, never redundant `running` text.
+Terminal result labels use the shared success/failure symbols. Chrome
+lifecycle/status-matrix acceptance guards this visual contract.
+
+Terminal tool result labels use `✓` for success and `✗` for failure, while collapsed
+tool summaries use `+ tools 2 ✓ | 1 ✗`. Accessible labels retain full words.
+Unit and Chrome count/status acceptance tests guard the exact symbols.
+
+The collapsed tools disclosure and individual live tool disclosure arrows
+share the same left inset (4px); neither appears nested under the other.
+Chrome acceptance checks their horizontal alignment at desktop and narrow widths.
+
+The `tools` label is lowercase without a colon; the entire summary row,
+including success/failure counts, uses normal font weight (400).
+
+### Serial tool handoff and disclosure
+
+Core now emits `execution_start` for non-shell builtins, command extensions, MCP
+and parallel readfile dispatch as well as the existing approved shell paths.
+Proposal `start` remains distinct from execution; approval waiting does not
+advance execution. The UI folds a settled predecessor when a later execution
+boundary arrives, without waiting for Turn completion. Parallel running tools,
+background jobs and active reading/selection remain protected.
+
+Regression: `serial_builtin_actions_emit_execution_boundaries_before_each_finish`
+checks two proposals followed by serial execution/finish pairs; the actual-product
+Chrome `tools` scenario executes two readfiles and checks predecessor folding
+before final delivery. Disclosure uses plus/tools while collapsed and minus/tools
+while expanded, with `✓` success and `✗` failure counts; browser tests cover both.

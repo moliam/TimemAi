@@ -2,6 +2,7 @@
 use serde_json::Value;
 
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
+const MAX_SSE_EVENT_BYTES: usize = 4 * 1024 * 1024;
 
 /// Decodes public choice-zero content, never reasoning or tool arguments.
 #[derive(Default)]
@@ -10,6 +11,8 @@ pub struct OpenAiContentStream {
     data: Vec<u8>,
     pending_cr: bool,
     stopped: bool,
+    event_count: usize,
+    failure_sizes: Option<(usize, usize)>,
 }
 
 impl OpenAiContentStream {
@@ -42,7 +45,9 @@ impl OpenAiContentStream {
                 }
             }
             if byte == b'\r' || byte == b'\n' {
+                let sizes = (self.line.len(), self.data.len());
                 if let Err(error) = self.finish_line(emit) {
+                    self.failure_sizes = Some(sizes);
                     self.stopped = true;
                     self.line.clear();
                     self.data.clear();
@@ -53,7 +58,8 @@ impl OpenAiContentStream {
                     break;
                 }
             } else {
-                if self.line.len().saturating_add(self.data.len()) >= MAX_EVENT_BYTES {
+                if self.line.len().saturating_add(self.data.len()) >= MAX_SSE_EVENT_BYTES {
+                    self.failure_sizes = Some((self.line.len(), self.data.len()));
                     self.stopped = true;
                     self.line.clear();
                     self.data.clear();
@@ -63,6 +69,18 @@ impl OpenAiContentStream {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn diagnostics(&self) -> Value {
+        let (line_bytes, event_data_bytes) = self
+            .failure_sizes
+            .unwrap_or((self.line.len(), self.data.len()));
+        serde_json::json!({
+            "event_count": self.event_count,
+            "line_bytes": line_bytes,
+            "event_data_bytes": event_data_bytes,
+            "event_limit_bytes": MAX_SSE_EVENT_BYTES,
+        })
     }
 
     fn finish_line(&mut self, emit: &mut dyn FnMut(&Value)) -> Result<(), String> {
@@ -80,6 +98,7 @@ impl OpenAiContentStream {
             }
             let event: Value =
                 serde_json::from_str(text).map_err(|_| "invalid_model_stream_event".to_string())?;
+            self.event_count = self.event_count.saturating_add(1);
             emit(&event);
         } else if let Some(data) = line.strip_prefix(b"data:") {
             let data = data.strip_prefix(b" ").unwrap_or(data);
