@@ -9873,7 +9873,8 @@ function StreamProcess({ closing, onArchived, children }: {
   return <div ref={ref} className={`stream-continuous-process${closing ? " archiving" : ""}`}>{children}</div>;
 }
 
-function StreamActivityPresentation({ thoughtText, activities, answers }: {
+function StreamActivityPresentation({ thoughtText, activities, answers, responseArriving }: {
+  responseArriving: boolean;
   thoughtText: string;
   activities: Activity[];
   answers: ReturnType<typeof interimAnswerPresentation>;
@@ -9888,10 +9889,23 @@ function StreamActivityPresentation({ thoughtText, activities, answers }: {
     if (entry.activity?.tone === "action" && previous?.[0].activity?.tone === "action") previous.push(entry);
     else groups.push([entry]);
   }
+  // One reverse scan, rather than rescanning the suffix for every tool group.
+  let lastReplyIndex = -1;
+  for (let index = groups.length - 1; index >= 0; index--) {
+    if (groups[index].some(entry => !!entry.answer || (entry.activity?.kind === "free_talk" && !!entry.activity.detail))) {
+      lastReplyIndex = index;
+      break;
+    }
+  }
   return <section className="turn-stream-tools" aria-label="Live model activity">
-    {groups.map(group => {
+    {groups.map((group, index) => {
       const { key, activity, answer } = group[0];
-      if (activity?.tone === "action") return <StreamToolRun key={key} activities={group.map(entry => entry.activity!)} />;
+      if (activity?.tone === "action") {
+        // Only later AI content hands off a tool run; a user supplement or
+        // another tool completion must not move the current output.
+        const superseded = responseArriving || !!thoughtText || index < lastReplyIndex;
+        return <StreamToolRun key={key} activities={group.map(entry => entry.activity!)} superseded={superseded} />;
+      }
       return answer
         ? <section className={`live-interim-answer${answer.provisional ? " provisional-chat" : ""}`} key={key}>
             {answer.provisional ? <StreamText text={answer.answer} /> : <MarkdownContent text={answer.answer} />}
@@ -9904,20 +9918,12 @@ function StreamActivityPresentation({ thoughtText, activities, answers }: {
   </section>;
 }
 
-function StreamToolRun({ activities }: { activities: Activity[] }) {
+function StreamToolRun({ activities, superseded }: { activities: Activity[]; superseded: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const completed = activities.filter(activity => activity.tool_status === "completed" || activity.tool_status === "failed");
   const succeededCount = completed.filter(activity => activity.tool_status === "completed").length;
   const failedCount = completed.length - succeededCount;
-  const [mergeReady, setMergeReady] = useState(completed.length > 1);
   const runRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    // Never reopen an already merged run when another call completes.
-    // Let status feedback and output folding finish before merging the run.
-    if (mergeReady || completed.length < 2) return;
-    const timer = window.setTimeout(() => setMergeReady(true), 600);
-    return () => window.clearTimeout(timer);
-  }, [completed.length, mergeReady]);
   const [interactionHeld, setInteractionHeld] = useState(false);
   useEffect(() => {
     const update = () => {
@@ -9930,7 +9936,7 @@ function StreamToolRun({ activities }: { activities: Activity[] }) {
     };
     return subscribeStreamInteraction(update);
   }, []);
-  const merged = completed.length > 1 && mergeReady && !expanded && !interactionHeld;
+  const merged = completed.length > 0 && superseded && !expanded && !interactionHeld;
   const previousMergedCount = useRef(completed.length);
   const [countRevision, setCountRevision] = useState(0);
   useEffect(() => {
@@ -9948,7 +9954,7 @@ function StreamToolRun({ activities }: { activities: Activity[] }) {
     }
   }, [merged, completed.length]);
   return <div ref={runRef} className="stream-tool-run">
-    {completed.length > 1 && <button className="stream-tool-run-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+    {completed.length > 0 && superseded && <button className="stream-tool-run-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
       <ChevronRight size={13} /><strong>Tools</strong> <span key={countRevision} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{toolResultCountsLabel(succeededCount, failedCount)}</span>
     </button>}
     {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && (activity.tool_status === "completed" || activity.tool_status === "failed") ? " merged" : ""}`} inert={merged && (activity.tool_status === "completed" || activity.tool_status === "failed")}>
@@ -9983,7 +9989,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
   const command =
     activity.code?.trim() || toolInvocationPreview(activity) || "";
   const detail = activity.detail?.trim();
-  const [expanded, setExpanded] = useState<boolean | null>(null);
+  const [expanded, setExpanded] = useState(false);
   const rowRef = useRef<HTMLDivElement>(null);
   const [interactionHeld, setInteractionHeld] = useState(false);
   useEffect(() => {
@@ -9997,14 +10003,15 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     };
     return subscribeStreamInteraction(update);
   }, []);
-  const open = running || interactionHeld || (expanded ?? status !== "completed");
+  const open = expanded || interactionHeld;
   return (
     <div ref={rowRef} className={`stream-tool-row${running ? " running" : ""}`}>
       <div className="stream-tool-head">
-        {!running && <button type="button" className="stream-tool-toggle" aria-expanded={open} aria-label={open ? "Collapse tool output" : "Expand tool output"} onClick={() => setExpanded(!open)}><ChevronRight size={13} /></button>}
+        <button type="button" className="stream-tool-toggle" aria-expanded={open} aria-label={open ? "Collapse tool output" : "Expand tool output"} onClick={() => setExpanded(!open)}><ChevronRight size={13} /></button>
         {status !== "completed" && <span className="stream-tool-dot" aria-hidden="true" />}
         <b>{toolName}</b>
         <ActionStatus status={status} label={humanizeToolStatus(status)} className="stream-tool-status" />
+        {command && <span className="stream-tool-command-preview" title={command}>{command.replace(/\s+/g, " ")}</span>}
       </div>
       <div className={`stream-tool-fold${open ? " expanded" : ""}`} inert={!open}>
         <div>
@@ -10081,7 +10088,7 @@ function TurnAnswerDelivery({
   return (
     <section className="turn-answer-delivery">
       {streamRetained && <StreamProcess closing={turn.state !== "working"} onArchived={onStreamArchived}>
-        <StreamActivityPresentation thoughtText={intermediate && !retainedThought ? thoughtText : ""} activities={streamTools} answers={items} />
+        <StreamActivityPresentation thoughtText={intermediate && !retainedThought ? thoughtText : ""} activities={streamTools} answers={items} responseArriving={!!previewText} />
       </StreamProcess>}
       {liveAnswer && <div className={`stream-thought-text live-interim-answer${liveAnswer.provisional ? " provisional-chat" : ""}`} aria-label="Current interim answer">
         {liveAnswer.provisional ? <StreamText text={liveAnswer.answer} /> : <MarkdownContent text={liveAnswer.answer} />}

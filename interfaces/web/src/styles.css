@@ -5159,7 +5159,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
   .action-status-changed { animation: none; text-decoration: underline; text-underline-offset: 3px; }
 }
 
-/* Continuous stream: completed tools fold in place; only final delivery archives it. */
+/* Continuous stream: tool completion preserves geometry; later AI content folds runs. */
 .stream-continuous-process { min-width: 0; }
 .stream-continuous-process.archiving { overflow: clip; pointer-events: none; }
 .stream-tool-fold { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows 360ms cubic-bezier(.22,1,.36,1) 100ms, opacity 260ms ease 100ms; }
@@ -5209,3 +5209,9 @@ body.workspace-modal-open .app-shell { user-select: none; }
 @media (prefers-reduced-motion: reduce) {
   .stream-tool-count.incremented { animation: none; }
 }
+
+/* One-line live summary; full commands/output are opt-in, including while running. */
+.stream-tool-head { flex-wrap: nowrap; }
+.stream-tool-head b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30%; }
+.stream-tool-status { flex: none; }
+.stream-tool-command-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; opacity: .7; }

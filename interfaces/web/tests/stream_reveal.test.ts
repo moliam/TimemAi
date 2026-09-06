@@ -161,7 +161,10 @@ describe("splitMarkdownBlocks incremental stability", () => {
    expect(mainSource).toContain("const runningStreamTools = useMemo(");
    expect(mainSource.match(/document.addEventListener\("selectionchange"/g)?.length).toBe(1);
    expect(mainSource).toContain("if (followBottom) frame = requestAnimationFrame(follow)");
-   expect(mainSource).toContain("if (mergeReady || completed.length < 2) return");
+   expect(mainSource).toContain("completed.length > 0 && superseded && !expanded && !interactionHeld");
+   expect(mainSource).not.toContain("setMergeReady");
+   expect(mainSource).toContain("const open = expanded || interactionHeld");
+   expect(mainSource).toContain('className="stream-tool-command-preview"');
  });
 
 it("animates growing merged counts without remounting the toggle", () => {
