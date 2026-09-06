@@ -4952,7 +4952,12 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-tool-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: 12px; }
 .stream-tool-head b { color: #e1ebf0; font-weight: 650; }
 .stream-tool-dot { width: 8px; height: 8px; border-radius: 50%; background: #f1c56f; flex: none; align-self: center; }
-.stream-tool-row.running .stream-tool-dot { animation: none; }
+.stream-tool-row.running .stream-tool-dot { animation: stream-tool-breathe 1.2s ease-in-out infinite; }
+/* Transform-only breathing keeps the fixed status slot and surrounding layout stable. */
+@keyframes stream-tool-breathe {
+  0%, 100% { transform: scale(.65); opacity: .5; }
+  50% { transform: scale(1); opacity: 1; }
+}
 .stream-tool-status { color: #98afbc; }
 .stream-tool-command {
   margin: 8px 0 0;
