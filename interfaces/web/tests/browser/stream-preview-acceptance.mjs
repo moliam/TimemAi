@@ -378,6 +378,52 @@ async function main() {
     publish(4, null, []);
     await waitFor(async () => !(await contains(".provisional-chat", "early chat")), "invalid chat not retracted");
     assert(!(await contains(".response-preview", "early response")), "invalid response not retracted");
+    const thoughtEvent = (id, text, time) => ({
+      event_id: id, source: "core_topic", created_at_ms: time,
+      payload: { session_id: "session-1", state: { name: "running" }, topic: { name: "core.model.response", attributes: {} }, payload: { free_talk: text } },
+    });
+    const toolEvent = (id, time) => ({
+      event_id: id, source: "core_topic", created_at_ms: time,
+      payload: { session_id: "session-1", state: { name: "running" }, topic: { name: "core.action", attributes: {} }, payload: { action: id, status: "completed", input: { cmd: "echo hello" } } },
+    });
+    const setRound = async (events, text, working = true) => {
+      const base = host.getSession();
+      host.setSession({ ...base, turns: base.turns.map(t => ({ ...t,
+        state: working ? "working" : "ready", events,
+        preview: { attempt: 2, revision: 20, chat: [], response: { attempt: 2, revision: 20, text, status: "intermediate" } },
+      })) });
+      await browser.call("Page.reload", { ignoreCache: true });
+      await waitFor(() => contains("body", "Long task"), "round snapshot missing");
+    };
+    const events = [thoughtEvent("thought-n", "Unique thought N", 1), toolEvent("tool-old", 2)];
+    await setRound(events, "Unique thought N");
+    await waitFor(() => contains(".stream-thought-text", "Unique thought N"), "retained thought missing");
+    assert(!(await contains(".response-preview", "Unique thought N")), "intermediate thought duplicated in preview");
+    assert(await contains(".stream-tool-row", "tool-old"), "current tool missing");
+    assert(await browser.evaluate(`!!document.querySelector('.stream-working-trailer')`), "working trailer missing");
+    assert(await browser.evaluate(`!document.querySelector('.stream-thought-card, .stream-reading-hold')`), "extra thought frame exists");
+    for (const theme of ["dark", "light"]) {
+      assert(await browser.evaluate(`(() => {
+        document.documentElement.dataset.theme = ${JSON.stringify(theme)};
+        const row = getComputedStyle(document.querySelector('.stream-tool-row'));
+        const command = getComputedStyle(document.querySelector('.stream-tool-command'));
+        return row.borderTopWidth === '0px' && row.backgroundColor === 'rgba(0, 0, 0, 0)' &&
+          command.borderTopWidth === '0px' && command.boxShadow !== 'none';
+      })()`), `${theme} tool styles must be unboxed with borderless command shadow`);
+    }
+    events.push(thoughtEvent("response-next", "", 3), toolEvent("tool-next", 4));
+    await setRound(events, "Unique thought N");
+    await waitFor(() => contains(".stream-tool-row", "tool-next"), "thoughtless round tool missing");
+    assert(!(await contains(".stream-tool-row", "tool-old")), "previous tool remained live");
+    assert(await contains(".stream-thought-text", "Unique thought N"), "thoughtless round lost prior thought");
+    events.push(thoughtEvent("thought-new", "Unique thought NEW", 5), toolEvent("tool-new", 6));
+    await setRound(events, "Unique thought NEW");
+    await waitFor(() => contains(".stream-thought-text", "Unique thought NEW"), "new thought missing");
+    assert(await browser.evaluate(`document.querySelectorAll(".stream-thought-text").length === 1`), "thought duplicated");
+    assert(!(await contains(".stream-tool-row", "tool-next")), "older round tool remained live");
+    await setRound(events, "Unique thought NEW", false);
+    assert(await browser.evaluate(`!document.querySelector('.stream-working-trailer')`), "terminal turn retained working trailer");
+    console.log("PASS Chrome round handoff: single unboxed thought, tool-only round, next thought, terminal trailer");
     console.log("PASS Chrome provisional UI: default off, midstream enable, response/chat updates, network interruption, reload snapshot, retraction");
   } finally { await browser.close(); await host.close(); }
 }

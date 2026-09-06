@@ -4930,20 +4930,21 @@ body.workspace-modal-open .app-shell { user-select: none; }
    Thought/Action frame waits for their terminal status. */
 .turn-stream-tools { display: grid; gap: 8px; margin: 0 0 14px; min-width: 0; }
 .stream-tool-row {
-  border: 1px solid #454545;
-  border-radius: 7px;
-  background: #313131;
-  padding: 9px 12px;
+  border: none;
+  background: transparent;
+  padding: 9px 0;
   min-width: 0;
 }
 .stream-tool-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: 12px; }
 .stream-tool-head b { color: #e1ebf0; font-weight: 650; }
-.stream-tool-dot { width: 8px; height: 8px; border-radius: 50%; background: #f1c56f; animation: breathe 1.2s infinite; flex: none; align-self: center; }
+.stream-tool-dot { width: 8px; height: 8px; border-radius: 50%; background: #f1c56f; flex: none; align-self: center; }
+.stream-tool-row.running .stream-tool-dot { animation: breathe 1.2s infinite; }
 .stream-tool-status { color: #98afbc; }
 .stream-tool-command {
   margin: 8px 0 0;
   padding: 8px 10px;
-  border: 1px solid #454545;
+  border: none;
+  box-shadow: 0 2px 6px #0003;
   border-radius: 5px;
   background: #262626;
   color: #c9d6de;
@@ -4962,11 +4963,11 @@ body.workspace-modal-open .app-shell { user-select: none; }
   max-height: 160px;
   overflow: auto;
 }
-:root[data-theme="light"] .stream-tool-row { border-color: #d3ddda; background: #f4f7f6; }
+:root[data-theme="light"] .stream-tool-row { background: transparent; }
 :root[data-theme="light"] .stream-tool-head b { color: #24333a; }
 :root[data-theme="light"] .stream-tool-dot { background: #b07f2e; }
 :root[data-theme="light"] .stream-tool-status { color: #5c6f7a; }
-:root[data-theme="light"] .stream-tool-command { border-color: #d3ddda; background: #eef2f1; color: #33484f; }
+:root[data-theme="light"] .stream-tool-command { background: #eef2f1; color: #33484f; box-shadow: 0 2px 6px #24333a14; }
 :root[data-theme="light"] .stream-tool-detail { color: #5c6f7a; }
 @media (prefers-reduced-motion: reduce) { .stream-tool-dot { animation: none; } }
 
@@ -5108,20 +5109,12 @@ body.workspace-modal-open .app-shell { user-select: none; }
 }
 :root[data-theme="light"] .response-preview-interruption { color: #8a5b19; }
 
-/* Stream UI Mode: retained thought card in the live stream area. */
-.stream-thought-card {
-  min-width: 0;
-  margin: 0 0 10px;
-  padding: 10px 14px 11px;
-  border: 1px solid #454545;
-  border-left: 2px solid #79cbb9;
-  border-radius: 8px;
-  background: #313131;
-  box-shadow: inset 0 1px 0 #ffffff08;
-}
-.stream-thought-card .stream-markdown { color: #c4d2dc; font-size: var(--content-size); line-height: 1.68; }
-:root[data-theme="light"] .stream-thought-card { border-color: #d3ddda; border-left-color: #237c70; background: #f4f7f6; }
-:root[data-theme="light"] .stream-thought-card .stream-markdown { color: #24333a; }
+/* Current thought is unboxed; only previous work belongs in Thought/Action. */
+.stream-thought-text { min-width: 0; margin-bottom: 10px; }
+.stream-working-trailer { padding: 10px 0; }
+.stream-working-dot { display: block; width: 9px; height: 9px; border-radius: 50%; background: currentColor; animation: stream-working-grow 1.2s ease-in-out infinite; }
+@keyframes stream-working-grow { 0%, 100% { transform: scale(.4); opacity: .45; } 65% { transform: scale(1); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .stream-working-dot { animation: none; } }
 
 /* Migration cue: when a thought run leaves the stream and settles into the
    Thought/Action frame, its frame row enters with one soft settle-in pulse. */
