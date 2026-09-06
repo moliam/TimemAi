@@ -3303,7 +3303,7 @@ describe("web topic view model", () => {
       ),
     );
     expect(activity).toMatchObject({
-      title: "Bash · Succ",
+      title: "Bash · ✓",
       code: "gh run list --limit 5",
       code_language: "bash",
     });
@@ -3413,7 +3413,7 @@ describe("web topic view model", () => {
     const completedTopic = completed.payload as unknown as CoreTopicEvent;
 
     expect(activityFromTopic(completedTopic)).toMatchObject({
-      title: "Poll · Succ",
+      title: "Poll · ✓",
       tool_mode: "poll",
       code: "test -f build/done",
       elapsed_ms: 18000,

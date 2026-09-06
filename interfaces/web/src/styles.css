@@ -70,7 +70,8 @@ button:disabled { cursor: not-allowed; }
 .turn-entry-attachments small { flex: none; color: #728489; font-size: 10px; }
 .turn-assistant-frame { border: 1px solid #2a3b46; border-left: 3px solid #4b8f87; border-radius: 7px; background: #131c24; }
 .turn-assistant-frame { position: relative; overflow: hidden; transition: border-color .25s, box-shadow .25s; }
-.turn-assistant-frame.working { border-left-color: #d0a75f; animation: working-frame-breathe 2.8s ease-in-out infinite; }
+/* Keep the large work surface static: shadow/border animation repaints it continuously. */
+.turn-assistant-frame.working { border-left-color: #d0a75f; }
 .turn-assistant-heading { min-height: 42px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 13px; border-bottom: 1px solid #25343e; }
 .turn-assistant-heading .message-label { margin: 0; color: #b9cbd3; }
 .working-chip { display: inline-flex; align-items: center; gap: 7px; color: #d6b46f; font-size: 11px; font-weight: 700; }
@@ -511,7 +512,6 @@ button:disabled { cursor: not-allowed; }
 @keyframes compact-before-fade { to { opacity: .16; } }
 @keyframes compact-after-settle { from { width: 100%; } }
 @keyframes work-row-enter { from { opacity: 0; transform: translateY(3px); } }
-@keyframes working-frame-breathe { 50% { border-left-color: #e4bc72; box-shadow: inset 3px 0 12px #d0a75f12; } }
 
 @media (max-width: 720px) { .user-message-navigation { left: 6px; }.user-message-navigation button { width: 30px; height: 30px; border-radius: 8px; } }
 @media (prefers-reduced-motion: reduce) { .chat-scroll { scroll-behavior: auto; }.live-turn-usage, .pulse, .connection.offline, .session-row.working, .session-working-icon, .load-history.loading svg, .send-button.sending svg, .stop-button.sending svg, .decision-actions .primary.sending svg, .completion-toolgen.sending svg, .context-compact-notice, .compact-before, .compact-after, .turn-assistant-frame.working, .working-chip.toolgen-working svg, .turn-work-item, .toolrepo-header-button.count-pulse .toolrepo-header-count, .attach-button.uploading:disabled, .attach-button.uploading svg, .toolrepo-search-pending, .toolrepo-empty.searching svg, .upload-dot { animation: none; }.mcp-session-toggle-thumb { transition: none; }.user-message-navigation, .user-message-navigation button, .session-row .session, .session-expand { transition: none; } }
@@ -4946,12 +4946,13 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-tool-head,
 .stream-tool-command,
 .stream-tool-detail {
-  animation: stream-tool-enter .28s ease-out both;
+  /* 短暂入场即可，不保留 forwards/both 动画填充；状态更新应复用节点而非重播。 */
+  animation: stream-tool-enter .16s ease-out;
 }
 .stream-tool-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; font-size: 12px; }
 .stream-tool-head b { color: #e1ebf0; font-weight: 650; }
 .stream-tool-dot { width: 8px; height: 8px; border-radius: 50%; background: #f1c56f; flex: none; align-self: center; }
-.stream-tool-row.running .stream-tool-dot { animation: breathe 1.2s infinite; }
+.stream-tool-row.running .stream-tool-dot { animation: none; }
 .stream-tool-status { color: #98afbc; }
 .stream-tool-command {
   margin: 8px 0 0;
@@ -5099,8 +5100,9 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-markdown > .markdown-body > *:last-child { margin-bottom: 0; }
 .stream-markdown > .markdown-body + .markdown-body { margin-top: .48em; }
 @keyframes stream-block-enter { from { opacity: 0; } to { opacity: 1; } }
+/* 文字已经按节奏渐显，每段再淡入不提供新信息，却增加绘制/合成工作。 */
 .stream-markdown > .markdown-body + .markdown-body {
-  animation: stream-block-enter .3s ease-out both;
+  animation: none;
 }
 
 
@@ -5132,7 +5134,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
   0% { opacity: 0; transform: translateY(4px); }
   100% { opacity: 1; transform: translateY(0); }
 }
-.thought-run-enter { animation: thought-run-settle .45s cubic-bezier(.22,.75,.3,1) both; }
+.thought-run-enter { animation: thought-run-settle .18s ease-out; }
 
 @media (prefers-reduced-motion: reduce) {
   .stream-markdown > .markdown-body + .markdown-body,
@@ -5174,8 +5176,8 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-tool-merged-item { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 260ms ease, opacity 180ms ease; }
 .stream-tool-merged-item.merged { grid-template-rows: 0fr; opacity: 0; }
 .stream-tool-merged-item > div { min-height: 0; overflow: hidden; }
-.stream-tool-run-toggle { display: flex; align-items: center; gap: 6px; border: 0; background: transparent; color: inherit; padding: 7px 0; cursor: pointer; font-size: 12px; }
-.stream-tool-run-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+.stream-tool-run-toggle { display: flex; align-items: center; gap: 6px; border: 0; background: transparent; color: inherit; padding: 7px 4px; cursor: pointer; font-size: 12px; font-weight: 400; }
+.stream-tool-run-toggle[aria-expanded="true"] svg { transform: none; }
 @media (prefers-reduced-motion: reduce) { .stream-tool-merged-item { transition: none; } }
 
 /* Controls remain visible and usable with keyboard, touch, long labels and narrow screens. */
@@ -5201,6 +5203,8 @@ body.workspace-modal-open .app-shell { user-select: none; }
 
 /* Count feedback stays local; it does not change the tool archive layout. */
 .stream-tool-count { display: inline-block; font-variant-numeric: tabular-nums; }
+/* Visual contract: absorbed tools signal arrival with a 360ms count-only pulse.
+   Do not animate container height here or remount rows; respect reduced motion. */
 .stream-tool-count.incremented { animation: stream-tool-count-increment 360ms ease-out; }
 @keyframes stream-tool-count-increment {
   from { transform: translateY(.25em); opacity: .55; background-color: rgba(104, 184, 167, .22); }
@@ -5215,3 +5219,23 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-tool-head b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30%; }
 .stream-tool-status { flex: none; }
 .stream-tool-command-preview { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit; opacity: .7; }
+
+/* Running dot and terminal result share a stable leading cell. */
+.stream-tool-status-slot { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: 14px; align-self: center; }
+.stream-tool-row.running .stream-tool-status-slot > .stream-tool-status { display: none; }
+.stream-tool-background { color: #98afbc; opacity: .65; }
+
+/* 性能约束：保留主运行提示和短暂状态反馈，不恢复每个工具/Worker/侧栏的常驻旋转。
+   重复动画的合成工作会随数量增长，即使只是在等待结果。浮动/吸顶导航不可重新模糊
+   背后滚动的正文，避免滚动和文字渐显期间重复背景采样。保留正常滚动交互。
+   这是减少无效工作的设计约束，不是 WindowServer 或温度降幅承诺；浏览器测试
+   验证重复标记静态和导航无背景模糊。 */
+.session-working-icon, .worker-working-icon { animation: none; filter: none; }
+:root[data-theme="light"] .worker-working-icon { filter: none; }
+.user-message-navigation button,
+.session-group-heading,
+.final-answer-outline-toggle,
+.final-answer-outline.overlay.expanded .final-answer-outline-card {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}

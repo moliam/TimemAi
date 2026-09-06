@@ -35,8 +35,8 @@ describe("tool activity row layout", () => {
   });
 
   it("uses compact aligned terminal labels and always includes the failure count", () => {
-    expect(source).toContain('summary.status === "completed") return "Succ"');
-    expect(source).toContain('return `Failed(${summary.failedCount})`');
+    expect(source).toContain('summary.status === "completed") return "✓"');
+    expect(source).toContain('return `✗(${summary.failedCount})`');
     expect(source).not.toContain('summary.failedCount > 1');
   });
 
@@ -46,4 +46,23 @@ describe("tool activity row layout", () => {
     expect(source).toContain("wait ended · process still running · pid");
   });
 
+});
+
+describe("stream tool status continuity", () => {
+  it("keeps the dot and terminal status in one leading cell before the name", () => {
+    const row = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
+    expect(row).toMatch(/className="stream-tool-status-slot"[\s\S]*className="stream-tool-dot"[\s\S]*<ActionStatus[\s\S]*<b>\{toolName\}<\/b>/);
+    expect(styles).toContain("min-width: 14px; align-self: center;");
+    expect(row).toContain('className="stream-tool-background">(bg)');
+    expect(styles).toContain(".stream-tool-background { color: #98afbc; opacity: .65; }");
+  });
+});
+
+
+describe("collapsed tool summary", () => {
+  it("labels prior tools explicitly and aligns the disclosure with live rows", () => {
+    expect(source).toContain('<span>tools</span>');
+    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*font-weight: 400;/);
+    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 7px 4px;/);
+  });
 });

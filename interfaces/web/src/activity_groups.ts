@@ -173,3 +173,24 @@ export function coalesceFreeTalkItems<T extends { activity: Activity | null }>(
   flush();
   return out;
 }
+
+/** 逻辑时序 +1（工具入口）：旧工具结束后，新 call 实际开始执行才触发退场。
+ * 同轮串行也适用；proposal/start 不等于 execution_start，完成事件本身不推进。
+ * Presentation order comes from Host lifecycle events, never wall-clock guesses.
+ * 防回退：不可改成 Turn 结束统一收起，否则积累高度并在最终交付时大幅跳动。
+ * 比较 A.settled < B.execution，不是工具数组索引或完成先后：并行 A/B 开始后
+ * A 才结束，不表示 B 是新时序。不可用墙钟猜测，同毫秒事件和恢复快照均可能出现。
+ * O(n), bounded by the current turn. A finish after a parallel start does not
+ * qualify; it waits for another logical step. Missing history fails closed.
+ */
+export function streamToolHandoffIds(activities: Activity[]): Set<string> {
+  let latestExecution = -1;
+  for (const activity of activities) {
+    if (activity.tone === "action" && activity.execution_order !== undefined)
+      latestExecution = Math.max(latestExecution, activity.execution_order);
+  }
+  return new Set(activities.filter(activity => activity.tone === "action" &&
+    !isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING) &&
+    activity.settled_order !== undefined && activity.settled_order < latestExecution
+  ).map(activity => activity.id));
+}

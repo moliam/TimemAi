@@ -61,6 +61,7 @@ import {
   Pencil,
   Plug,
   Plus,
+  Minus,
   RefreshCw,
   Search,
   Send,
@@ -171,7 +172,6 @@ import {
   finishTurn,
   groupDecisionsBySessionTurn,
   manualToolGenCommand,
-  normalizeCopiedUserMessageText,
   prependHistoryRecords,
   pruneSessionDrafts,
   pruneSessionSubmissionLocks,
@@ -248,6 +248,7 @@ import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens } from "./token_format";
 import {
   computeStreamRetention,
+  streamToolHandoffIds,
   summarizeConsecutiveToolActivities,
   ToolActivitySummary,
 } from "./activity_groups";
@@ -276,7 +277,7 @@ import { BrowserPerformanceTrace } from "./performance_trace";
 import { createFrameTask, FrameTask } from "./frame_task";
 import { reconcileSessionTimelineCache } from "./session_timeline_cache";
 import { requestTimelineNavigationWork } from "./timeline_navigation_work";
-import { useTimedClipboardCopy } from "./clipboard_copy";
+import { selectedUserMessageText, useTimedClipboardCopy } from "./clipboard_copy";
 import "./styles.css";
 import "highlight.js/styles/github-dark.css";
 import "katex/dist/katex.min.css";
@@ -8295,6 +8296,13 @@ function TimemThread({
       <ThreadPrimitive.Viewport
         ref={viewportRef}
         className="chat-scroll aui-thread-viewport"
+        onCopy={(event) => {
+          if (event.defaultPrevented) return;
+          const text = selectedUserMessageText(event.currentTarget, window.getSelection());
+          if (text === null) return;
+          event.clipboardData.setData("text/plain", text);
+          event.preventDefault();
+        }}
         autoScroll={false}
         scrollToBottomOnInitialize={false}
         scrollToBottomOnRunStart={false}
@@ -9259,7 +9267,10 @@ const TurnInteraction = memo(function TurnInteraction({
         key: event.presentation_id ?? event.event_id,
         createdAt: event.presentation_created_at_ms ?? event.created_at_ms,
         event,
-        activity: activityFromTurnEvent({ ...event, event_id: event.presentation_id ?? event.event_id }, sessionId),
+        activity: (() => {
+          const activity = activityFromTurnEvent({ ...event, event_id: event.presentation_id ?? event.event_id }, sessionId);
+          return activity ? { ...activity, execution_order: event.execution_order, settled_order: event.settled_order } : activity;
+        })(),
       })),
     [lifecycleEvents, sessionId],
   );
@@ -9314,6 +9325,9 @@ const TurnInteraction = memo(function TurnInteraction({
   );
   const isWorking = turn.state === "working" && !isCancelling;
   const streamUiMode = useStreamUiMode();
+  // 整段归档与单项折叠是两件事：容器在 Turn 结束才归档，但 StreamToolRun
+  // 必须在新逻辑时序进入时逐项收起旧工具。不可把单项折叠也绑定到 streamArchived，
+  // 否则重新出现工具平铺积高、最终一次性大幅收起的问题。
   // Archive only after the authoritative working state ends, never at a round boundary.
   const [streamArchived, setStreamArchived] = useState(turn.state !== "working");
   const archiveStream = useCallback(() => setStreamArchived(true), []);
@@ -9489,27 +9503,6 @@ const TurnInteraction = memo(function TurnInteraction({
                 <div
                   className={`turn-user-entry ${entry.kind}`}
                   key={`${entry.created_at_ms}-${roleIndex}`}
-                  onCopy={(event) => {
-                    const selection = window.getSelection();
-                    if (
-                      !selection ||
-                      selection.rangeCount === 0 ||
-                      selection.isCollapsed ||
-                      !selection.anchorNode ||
-                      !selection.focusNode
-                    )
-                      return;
-                    if (
-                      !event.currentTarget.contains(selection.anchorNode) ||
-                      !event.currentTarget.contains(selection.focusNode)
-                    )
-                      return;
-                    const copiedText = normalizeCopiedUserMessageText(
-                      selection.toString(),
-                    );
-                    event.clipboardData.setData("text/plain", copiedText);
-                    event.preventDefault();
-                  }}
                 >
                   <button
                     type="button"
@@ -9692,9 +9685,6 @@ const TurnInteraction = memo(function TurnInteraction({
                       />
                     ) : null;
                   })}{" "}
-                  {streamUiMode && streamArchived && turn.sub_answers.map(answer => <section className="turn-interim-item" key={answer.sub_answer_id}>
-                    <MarkdownContent text={answer.answer} />
-                  </section>)}
                   {decisions.map((decision, index) => (
                     <InlineDecision
                       key={decisionKey(decision)}
@@ -9897,19 +9887,19 @@ function StreamActivityPresentation({ thoughtText, activities, answers, response
       break;
     }
   }
+  const handoffIds = streamToolHandoffIds(activities);
   return <section className="turn-stream-tools" aria-label="Live model activity">
     {groups.map((group, index) => {
       const { key, activity, answer } = group[0];
       if (activity?.tone === "action") {
-        // Only later AI content hands off a tool run; a user supplement or
-        // another tool completion must not move the current output.
+        // 逻辑时序 +1 有两种入口：后续 AI 回复内容，或新 call 实际开始执行。
+        // 此处处理 AI 内容入口；串行 call 入口由 handoffIds 按执行事件顺序判定。
+        // 工具完成、用户补充本身不推进时序，不得仅据此折叠旧结果。
         const superseded = responseArriving || !!thoughtText || index < lastReplyIndex;
-        return <StreamToolRun key={key} activities={group.map(entry => entry.activity!)} superseded={superseded} />;
+        return <StreamToolRun key={key} activities={group.map(entry => entry.activity!)} superseded={superseded} handoffIds={handoffIds} />;
       }
       return answer
-        ? <section className={`live-interim-answer${answer.provisional ? " provisional-chat" : ""}`} key={key}>
-            {answer.provisional ? <StreamText text={answer.answer} /> : <MarkdownContent text={answer.answer} />}
-          </section>
+        ? <StreamChatAnswer key={key} answer={answer} superseded={!answer.provisional && (responseArriving || !!thoughtText || index < lastReplyIndex)} />
         : activity?.kind === "free_talk"
           ? <div key={key} className="stream-thought-text"><MarkdownContent text={activity.detail ?? ""} /></div>
           : activity?.kind === "user_supplement" ? <ActivityView key={key} activity={activity} /> : null;
@@ -9918,9 +9908,41 @@ function StreamActivityPresentation({ thoughtText, activities, answers, response
   </section>;
 }
 
-function StreamToolRun({ activities, superseded }: { activities: Activity[]; superseded: boolean }) {
+/** Chat disclosure is presentation-only; delivery stays owned by core.sub_answer. */
+function StreamChatAnswer({ answer, superseded }: {
+  answer: ReturnType<typeof interimAnswerPresentation>[number];
+  superseded: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
-  const completed = activities.filter(activity => activity.tool_status === "completed" || activity.tool_status === "failed");
+  const [collapsed, setCollapsed] = useState(false);
+  // Keep provisional Chat readable; later AI content may fold confirmed Chat.
+  // Manual disclosure remains available; archival must preserve a Chat entry.
+  const open = expanded || (!superseded && !collapsed);
+  return <section className={`turn-chat-delivery${open ? " expanded" : " collapsed"}`}>
+    <button type="button" className="working-chip work-title-chip work-collapse-toggle chat-title-chip"
+      aria-label={open ? "Collapse interim answer into Chat" : "Show chat answers"}
+      aria-expanded={open} onClick={() => { setExpanded(!open); setCollapsed(open); }}>
+      <ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true" />Chat{!open && " (+1)"}
+    </button>
+    {open && <div className={`live-interim-answer${answer.provisional ? " provisional-chat" : ""}`}>
+      {answer.provisional ? <StreamText text={answer.answer} /> : <MarkdownContent text={answer.answer} />}
+    </div>}
+  </section>;
+}
+
+function StreamToolRun({ activities, superseded, handoffIds }: { activities: Activity[]; superseded: boolean; handoffIds: Set<string> }) {
+  const [expanded, setExpanded] = useState(false);
+  // 视觉契约：工具完成不立即折叠；逻辑时序 +1 才将旧的非 running 工具收起。
+  // +1 包括同轮串行新 call 实际开始执行，以及后续 AI 回复内容到来。
+  // 前台/后台 running 始终保留；折叠与新内容进入在同一次 render 中完成。
+  // 保持既有 DOM 与阅读/选择保护，避免先增高再收起造成二次页面跳动。
+  // 与新内容同次 render 判定，不能用延迟定时器或后续 effect 先增高再收起。
+  // background_running 仍在执行；手动展开、选择/焦点保护优先，不能为压低高度
+  // 强制中断用户阅读。保持行节点身份，避免状态变化导致整行重新入场。
+  const completed = activities.filter(activity =>
+    !isToolActivityRunning(activity.tool_status || TOOL_STATUS_RUNNING) &&
+    (superseded || handoffIds.has(activity.id)));
+  const completedIds = new Set(completed.map(activity => activity.id));
   const succeededCount = completed.filter(activity => activity.tool_status === "completed").length;
   const failedCount = completed.length - succeededCount;
   const runRef = useRef<HTMLDivElement>(null);
@@ -9936,14 +9958,18 @@ function StreamToolRun({ activities, superseded }: { activities: Activity[]; sup
     };
     return subscribeStreamInteraction(update);
   }, []);
-  const merged = completed.length > 0 && superseded && !expanded && !interactionHeld;
-  const previousMergedCount = useRef(completed.length);
+  const merged = completed.length > 0 && !expanded && !interactionHeld;
+  // Visual contract: pulse when NEW results actually enter collapsed Tools,
+  // including deferred handoff after completion. Completion alone must not pulse.
+  // Initial history, duplicate snapshots and manual reopen/reclose must not replay.
+  // Keep the disclosure/rows mounted; animate only the count to avoid scroll jumps.
+  const previousMergedCount = useRef(merged ? completed.length : 0);
   const [countRevision, setCountRevision] = useState(0);
   useEffect(() => {
     if (merged && completed.length > previousMergedCount.current) {
       setCountRevision(value => value + 1);
     }
-    previousMergedCount.current = completed.length;
+    if (merged) previousMergedCount.current = Math.max(previousMergedCount.current, completed.length);
   }, [merged, completed.length]);
   useLayoutEffect(() => {
     if (!merged) return;
@@ -9953,11 +9979,13 @@ function StreamToolRun({ activities, superseded }: { activities: Activity[]; sup
       run.querySelector<HTMLButtonElement>(".stream-tool-run-toggle")?.focus({ preventScroll: true });
     }
   }, [merged, completed.length]);
+  // 控件契约：收起显示 + tools，展开显示 − tools，与 aria-expanded 一致。
+  // +/- 不表达成功失败；计数另用 ✓ / ✗。保留按钮与行节点，仅新计数可重放反馈。
   return <div ref={runRef} className="stream-tool-run">
-    {completed.length > 0 && superseded && <button className="stream-tool-run-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
-      <ChevronRight size={13} /><strong>Tools</strong> <span key={countRevision} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{toolResultCountsLabel(succeededCount, failedCount)}</span>
+    {completed.length > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
+      {expanded ? <Minus size={13} aria-hidden="true" /> : <Plus size={13} aria-hidden="true" />}<span>tools</span> <span key={countRevision} aria-label={`${succeededCount} succeeded, ${failedCount} failed`} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{toolResultCountsLabel(succeededCount, failedCount)}</span>
     </button>}
-    {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && (activity.tool_status === "completed" || activity.tool_status === "failed") ? " merged" : ""}`} inert={merged && (activity.tool_status === "completed" || activity.tool_status === "failed")}>
+    {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
       <div><StreamToolRow activity={activity} /></div>
     </div>)}
   </div>;
@@ -9974,7 +10002,7 @@ function ActionStatus({ status, label, className }: { status: string; label: str
       setRevision(value => value + 1);
     }
   }, [status]);
-  return <span className={className} role="status" aria-live="polite" aria-atomic="true">
+  return <span className={className} role="status" aria-live="polite" aria-atomic="true" aria-label={status === "completed" ? "Succeeded" : status === "failed" ? "Failed" : undefined}>
     <span key={revision} className={revision ? "action-status-changed" : undefined}>{label}</span>
   </span>;
 }
@@ -10008,9 +10036,13 @@ const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Acti
     <div ref={rowRef} className={`stream-tool-row${running ? " running" : ""}`}>
       <div className="stream-tool-head">
         <button type="button" className="stream-tool-toggle" aria-expanded={open} aria-label={open ? "Collapse tool output" : "Expand tool output"} onClick={() => setExpanded(!open)}><ChevronRight size={13} /></button>
-        {status !== "completed" && <span className="stream-tool-dot" aria-hidden="true" />}
+        {/* One fixed leading slot keeps execution and result markers in place. */}
+        <span className="stream-tool-status-slot" aria-label={running ? (status === "background_running" ? "Running in background" : "Running") : undefined}>
+          {running && <span className="stream-tool-dot" aria-hidden="true" />}
+          <ActionStatus status={status} label={running ? "" : humanizeToolStatus(status)} className="stream-tool-status" />
+        </span>
         <b>{toolName}</b>
-        <ActionStatus status={status} label={humanizeToolStatus(status)} className="stream-tool-status" />
+        {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
         {command && <span className="stream-tool-command-preview" title={command}>{command.replace(/\s+/g, " ")}</span>}
       </div>
       <div className={`stream-tool-fold${open ? " expanded" : ""}`} inert={!open}>
@@ -10075,8 +10107,8 @@ function TurnAnswerDelivery({
     newest.key !== collapsedAnswer && newest.createdAt >= latestThoughtTime &&
     (!previewText || newest.provisional)
     ? newest : undefined;
-  const chatItems = items.filter(item => item !== liveAnswer);
-  const hasChat = !streamUiMode && chatItems.length > 0;
+  const chatItems = streamUiMode && streamRetained ? [] : items.filter(item => item !== liveAnswer);
+  const hasChat = chatItems.length > 0;
   const [chatExpanded, setChatExpanded] = useState(false);
   const previousFinal = useRef(hasFinal);
   const chatPanelId = `turn-chat-${turn.turn_id}`;
@@ -10903,8 +10935,8 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
 }
 
 function toolActivityGroupStatusLabel(summary: ToolActivitySummary) {
-  if (summary.status === "completed") return "Succ";
-  if (summary.status === "failed") return `Failed(${summary.failedCount})`;
+  if (summary.status === "completed") return "✓";
+  if (summary.status === "failed") return `✗(${summary.failedCount})`;
 
   const activeParts: string[] = [];
   if (summary.foregroundRunningCount > 0)

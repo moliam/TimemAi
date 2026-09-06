@@ -50,6 +50,7 @@ struct NativeHttpResponse {
     elapsed: Duration,
     response_bytes: usize,
     redirect_count: usize,
+    stream_error: Option<(String, serde_json::Value)>,
 }
 
 impl NativeHttpTransport {
@@ -232,7 +233,18 @@ async fn execute_with_redirects(
                     response_body.extend_from_slice(&bytes);
                     if is_sse {
                         if let Some(observer) = on_content.as_deref_mut() {
-                            stream.push_events(&bytes, observer)?;
+                            if let Err(error) = stream.push_events(&bytes, observer) {
+                                return Ok(NativeHttpResponse {
+                                    status,
+                                    body: String::new(), // Never retain failed response content in audit.
+                                    request_id,
+                                    ttfb,
+                                    elapsed: started.elapsed(),
+                                    response_bytes: response_body.len(),
+                                    redirect_count,
+                                    stream_error: Some((error, stream.diagnostics())),
+                                });
+                            }
                         }
                     }
                 }
@@ -248,6 +260,7 @@ async fn execute_with_redirects(
             elapsed: started.elapsed(),
             response_bytes,
             redirect_count,
+            stream_error: None,
         });
     }
 }
@@ -531,10 +544,11 @@ impl HttpModelClient {
         should_cancel: &mut dyn FnMut() -> bool,
         on_content: &mut Option<&mut dyn FnMut(&serde_json::Value)>,
     ) -> Result<ModelHttpResponseInterpretation, String> {
-        let _ = append_audit_event(
-            audit_file,
-            &model_request_audit_event(config, &http_request.model_request),
-        );
+        let audit_request_id = crate::unique_id("model_request");
+        let mut request_audit = model_request_audit_event(config, &http_request.model_request);
+        request_audit["audit_request_id"] = serde_json::json!(audit_request_id);
+        append_audit_event(audit_file, &request_audit)
+            .map_err(|_| "model_audit_write_failed:request".to_string())?;
         let timeout = Duration::from_secs(config.timeout_secs);
         let observer = on_content
             .as_mut()
@@ -542,10 +556,31 @@ impl HttpModelClient {
         let response =
             self.transport()?
                 .execute(config, http_request, timeout, should_cancel, observer)?;
+        if let Some((error, diagnostics)) = &response.stream_error {
+            let event = serde_json::json!({
+                "type": "llm_response", "time_ms": crate::now_ms(),
+                "audit_request_id": audit_request_id,
+                "status": response.status, "error_kind": "stream_decode_error",
+                "error": error, "content_type": "text/event-stream",
+                "stream_diagnostics": diagnostics,
+                "transport": {
+                    "request_id": response.request_id.as_deref().filter(|id| id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))),
+                    "ttfb_ms": response.ttfb.as_millis(),
+                    "elapsed_ms": response.elapsed.as_millis(),
+                    "response_bytes": response.response_bytes,
+                    "redirect_count": response.redirect_count,
+                },
+                "body_omitted": true,
+            });
+            append_audit_event(audit_file, &event)
+                .map_err(|_| format!("{error}; model_audit_write_failed:stream_failure"))?;
+            return Err(error.clone());
+        }
         let interpreted =
             interpret_model_http_response(config, response.status, &response.body, "");
         let mut response_audit =
             model_response_audit_event(interpreted.status, &interpreted.raw_json);
+        response_audit["audit_request_id"] = serde_json::json!(audit_request_id);
         if let Some(object) = response_audit.as_object_mut() {
             object.insert(
                 "transport".to_string(),

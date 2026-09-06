@@ -2265,3 +2265,46 @@ fn model_prompt_job_finished_after_final_scan_moves_exit_to_next_request() {
     assert!(second.contains("Exit status: 0"), "{second}");
     assert!(second.contains("output-303"), "{second}");
 }
+
+#[test]
+fn serial_builtin_actions_emit_execution_boundaries_before_each_finish() {
+    #[derive(Default)]
+    struct TopicRecorder(Vec<CoreTopicEvent>);
+    impl ActionRuntime for TopicRecorder {
+        fn should_cancel(&mut self) -> bool {
+            false
+        }
+        fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+            self.0.extend_from_slice(events);
+        }
+    }
+    let mut core = test_core("serial_builtin_execution_boundaries");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let _ = core.begin_turn("inspect context twice", None);
+    let mut runtime = TopicRecorder::default();
+    core.apply_model_response_with_action_runtime(
+        LlmResponse {
+            tool_calls: Vec::new(),
+            content: r#"{"status":"working","working_still_action":[{"self_tool":{"type":"cwd"}},{"self_tool":{"type":"cwd"}}]}"#.to_string(),
+            model_name: "test".to_string(), usage: UsageStats::zero(), truncated: false,
+        }, &mut runtime,
+    );
+    let phases: Vec<_> = runtime
+        .0
+        .iter()
+        .filter_map(CoreTopicEvent::as_action)
+        .filter(|event| event.action == "self_tool")
+        .map(|event| event.event)
+        .collect();
+    assert_eq!(
+        phases,
+        [
+            "start",
+            "start",
+            "execution_start",
+            "finish",
+            "execution_start",
+            "finish"
+        ]
+    );
+}

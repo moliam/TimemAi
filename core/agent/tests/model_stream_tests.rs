@@ -66,7 +66,8 @@ fn unterminated_and_oversized_events_never_emit() {
         .unwrap();
     assert!(output.is_empty());
     assert!(decoder
-        .push(&vec![b'x'; 1024 * 1024], &mut |s| output.push_str(s))
+        .push(&vec![b'x'; 4 * 1024 * 1024 + 1], &mut |s| output
+            .push_str(s))
         .is_err());
     assert!(output.is_empty());
 }
@@ -434,4 +435,19 @@ fn chat_first_text_replaces_prior_response_without_waiting_for_plain_content() {
     state.publish(&mut ui, "session", "turn");
     assert!(ui.0.last().unwrap()["response"].is_null());
     assert_eq!(ui.0.last().unwrap()["chat"][0]["answer"], "new chat");
+}
+
+#[test]
+fn sse_event_between_one_and_four_mib_is_accepted() {
+    let text = "x".repeat(2 * 1024 * 1024);
+    let wire = format!(
+        "data: {}\n\n",
+        serde_json::json!({"choices":[{"delta":{"content":text}}]})
+    );
+    let mut decoder = OpenAiContentStream::default();
+    let mut output = String::new();
+    for chunk in wire.as_bytes().chunks(8192) {
+        decoder.push(chunk, &mut |s| output.push_str(s)).unwrap();
+    }
+    assert_eq!(output, text);
 }

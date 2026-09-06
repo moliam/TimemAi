@@ -388,7 +388,7 @@ async function main() {
       await new Promise(resolve => { release = resolve; });
       if (scenario === 'network') { res.destroy(); return; }
       if (scenario === 'invalid') write('</answer></sub_answer></actions><invalid></ASSISTANT>');
-      else if (scenario === "tools") write('</answer></sub_answer><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes></readfile></actions></ASSISTANT>');
+      else if (scenario === "tools") write('</answer></sub_answer><readfile><path>Cargo.toml</path><max_bytes>200</max_bytes></readfile><readfile><path>Cargo.toml</path><max_bytes>100</max_bytes></readfile></actions></ASSISTANT>');
       else write(protocol === "json" ? '"}}]}' : '</answer></sub_answer></actions></ASSISTANT>');
     } else {
       if (scenario === "normal" || scenario === "tools") await new Promise(resolve => { releaseFinal = resolve; });
@@ -495,6 +495,9 @@ async function main() {
       if (scenario === "tools") {
         await waitFor(() => browser.evaluate(`document.querySelector('.turn-stream-tools')?.textContent.includes('readfile')`), "executed readfile missing while preview enabled");
         await waitFor(() => received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.action" && e.event.payload.action === "readfile" && e.event.payload.event === "finish"; }), "readfile execution evidence missing");
+        await waitFor(() => received.some(raw => { const e = raw.type === "semantic_event" ? raw.event : raw; return e.event?.topic?.name === "core.action" && e.event.payload.action === "readfile" && e.event.payload.event === "execution_start"; }), "readfile actual execution boundary missing");
+        await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length >= 1`), "serial readfile must fold its predecessor before final delivery");
+
       }
       releaseFinal();
     }

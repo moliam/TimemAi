@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   splitMarkdownBlocks,
   streamRevealDelta,
+  STREAM_REVEAL_INTERVAL_MS,
   StreamText,
 } from "../src/stream_reveal";
 
@@ -96,7 +97,7 @@ describe("stream reveal integration", () => {
   it("snaps non-monotonic and reduced-motion updates immediately", () => {
     expect(revealSource).toContain("startsWith(visibleRef.current)");
     expect(revealSource).toContain("prefers-reduced-motion: reduce");
-    expect(revealSource).toContain("cancelAnimationFrame");
+    expect(revealSource).toContain("window.clearTimeout");
   });
 });
 
@@ -161,7 +162,8 @@ describe("splitMarkdownBlocks incremental stability", () => {
    expect(mainSource).toContain("const runningStreamTools = useMemo(");
    expect(mainSource.match(/document.addEventListener\("selectionchange"/g)?.length).toBe(1);
    expect(mainSource).toContain("if (followBottom) frame = requestAnimationFrame(follow)");
-   expect(mainSource).toContain("completed.length > 0 && superseded && !expanded && !interactionHeld");
+   expect(mainSource).toContain("completed.length > 0 && !expanded && !interactionHeld");
+   expect(mainSource).toContain("superseded || handoffIds.has(activity.id)");
    expect(mainSource).not.toContain("setMergeReady");
    expect(mainSource).toContain("const open = expanded || interactionHeld");
    expect(mainSource).toContain('className="stream-tool-command-preview"');
@@ -174,4 +176,12 @@ it("animates growing merged counts without remounting the toggle", () => {
   const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
   expect(css).toContain("@keyframes stream-tool-count-increment");
   expect(css).toContain(".stream-tool-count.incremented { animation: none; }");
+});
+
+it("bounds reveal wakeups independently of display refresh rate and skips hidden replay", () => {
+  expect(STREAM_REVEAL_INTERVAL_MS).toBe(40);
+  expect(revealSource).not.toContain("requestAnimationFrame");
+  expect(revealSource).toContain("document.hidden");
+  // The 40ms tick preserves the existing 60 chars/s small-backlog pacing.
+  expect(streamRevealDelta(0, 90, STREAM_REVEAL_INTERVAL_MS) * 25).toBe(60);
 });

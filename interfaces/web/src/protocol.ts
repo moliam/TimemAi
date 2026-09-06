@@ -339,6 +339,8 @@ export type Activity = {
   interval_ms?: number;
   pid?: number;
   execution_started?: boolean;
+  execution_order?: number;
+  settled_order?: number;
   kind?: "context_compact" | "toolgen" | "free_talk" | "user_supplement";
   toolgen_phase?: string;
   before_tokens?: number;

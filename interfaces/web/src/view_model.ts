@@ -714,17 +714,27 @@ function toolgenLifecycle(event: WebTurnEvent) {
     : undefined;
 }
 
+// 合并 start/finish 成稳定行时，仍须保留原始 Host 事件序列中的执行/结束位置。
+// 用合并后的行号会丢掉同轮串行时序；finish 覆盖 execution_order 会让快照恢复后
+// 折叠失效。不能按时间戳或批量 proposal start 推断实际执行。
 export function coalesceActionLifecycle(events: WebTurnEvent[]) {
-  const visible: (WebTurnEvent & { presentation_id?: string; presentation_created_at_ms?: number })[] = [];
+  const visible: (WebTurnEvent & { presentation_id?: string; presentation_created_at_ms?: number; execution_order?: number; settled_order?: number })[] = [];
   const preservePresentation = (previous: typeof visible[number], next: WebTurnEvent) => ({
     ...next,
+    execution_order: (next as typeof visible[number]).execution_order ?? previous.execution_order,
     presentation_id: previous.presentation_id ?? previous.event_id,
     presentation_created_at_ms: previous.presentation_created_at_ms ?? previous.created_at_ms,
   });
   const pendingStarts = new Map<string, number[]>();
   const pendingBackgroundFinishes = new Map<string, number[]>();
   const pendingToolGen = new Set<string>();
-  for (const event of events) {
+  for (const [order, sourceEvent] of events.entries()) {
+    const payload = sourceEvent.payload as unknown as CoreTopicEvent;
+    const phase = payload?.payload?.event ?? payload?.topic?.attributes?.event;
+    const event = { ...sourceEvent,
+      ...(phase === "execution_start" ? { execution_order: order } : {}),
+      ...(phase === "finish" ? { settled_order: order } : {}),
+    };
     const toolgen = toolgenLifecycle(event);
     if (toolgen) {
       if (toolgen.phase === "started") {

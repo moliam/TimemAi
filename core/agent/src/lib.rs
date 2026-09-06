@@ -4185,6 +4185,7 @@ impl AgentCore {
                 continue;
             }
             if self.can_spawn_parallel_readfile_action(&action) {
+                self.emit_action_execution_start_topic(&action, runtime);
                 action_handles.push(self.spawn_parallel_readfile_action(idx, action));
                 continue;
             }
@@ -5570,6 +5571,7 @@ Runtime tool_call ids:",
                 continue;
             }
             if self.can_spawn_parallel_readfile_action(&action) {
+                self.emit_action_execution_start_topic(&action, runtime);
                 handles.push(self.spawn_parallel_readfile_action(idx, action));
                 continue;
             }
@@ -5652,6 +5654,7 @@ Runtime tool_call ids:",
         }
 
         if let executor::ExecutorTarget::Command { path, .. } = &executor_target {
+            self.emit_action_execution_start_topic(&action, runtime);
             let outcome = self.execute_command_capability(&action, path);
             self.record_action_audit(
                 &action_for_audit,
@@ -5668,6 +5671,7 @@ Runtime tool_call ids:",
         } = &executor_target
         {
             self.current_stats.tool_calls += 1;
+            self.emit_action_execution_start_topic(&action, runtime);
             let outcome = match self.mcp_servers.get(server_id) {
                 Some(config) => {
                     match self
@@ -5706,8 +5710,8 @@ Runtime tool_call ids:",
         };
 
         self.current_stats.tool_calls += 1;
-        if shell_exec::is_local_shell_action(&action.action)
-            && self.bash_approval_mode == BashApprovalMode::Approve
+        if !shell_exec::is_local_shell_action(&action.action)
+            || self.bash_approval_mode == BashApprovalMode::Approve
         {
             self.emit_action_execution_start_topic(&action, runtime);
         }
@@ -5770,6 +5774,12 @@ Runtime tool_call ids:",
         }
     }
 
+    // 实际执行入口，不是模型提出调用的 start 通知。所有执行路径都要覆盖，
+    // 否则普通 readfile 等工具缺少边界，消费者无法观察 A结束 -> B执行 的串行时序。
+    // 不可按 proposal 顺序假定执行：同批工具可能并行或等待审批；Shell 审批路径
+    // 必须在批准之后发送。普通内置、命令扩展、MCP、并行读文件也不能遗漏。
+    // 回归：serial_builtin_actions_emit_execution_boundaries_before_each_finish；
+    // 真实产品浏览器 tools 场景验证最终答复之前，第二次 readfile 已让第一项折叠。
     fn emit_action_execution_start_topic(
         &self,
         action: &ParsedAction,
