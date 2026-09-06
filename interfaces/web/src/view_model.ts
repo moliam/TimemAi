@@ -715,7 +715,12 @@ function toolgenLifecycle(event: WebTurnEvent) {
 }
 
 export function coalesceActionLifecycle(events: WebTurnEvent[]) {
-  const visible: WebTurnEvent[] = [];
+  const visible: (WebTurnEvent & { presentation_id?: string; presentation_created_at_ms?: number })[] = [];
+  const preservePresentation = (previous: typeof visible[number], next: WebTurnEvent) => ({
+    ...next,
+    presentation_id: previous.presentation_id ?? previous.event_id,
+    presentation_created_at_ms: previous.presentation_created_at_ms ?? previous.created_at_ms,
+  });
   const pendingStarts = new Map<string, number[]>();
   const pendingBackgroundFinishes = new Map<string, number[]>();
   const pendingToolGen = new Set<string>();
@@ -749,7 +754,7 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
       const startIndexes = pendingStarts.get(key);
       const startIndex = startIndexes?.[0];
       if (startIndex !== undefined) {
-        visible[startIndex] = event;
+        visible[startIndex] = preservePresentation(visible[startIndex], event);
       } else {
         const index = visible.push(event) - 1;
         pendingStarts.set(key, [index]);
@@ -767,7 +772,7 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
         const started = visible[startIndex];
         const elapsedMs = event.created_at_ms - started.created_at_ms;
         visible[startIndex] =
-          elapsedMs >= 0 ? withActionElapsed(event, elapsedMs) : event;
+          preservePresentation(started, elapsedMs >= 0 ? withActionElapsed(event, elapsedMs) : event);
         if (status !== TOOL_STATUS_BACKGROUND_RUNNING) startIndexes?.shift();
       } else {
         // A trimmed history may no longer contain the action start. Only a
@@ -782,7 +787,7 @@ export function coalesceActionLifecycle(events: WebTurnEvent[]) {
           status !== TOOL_STATUS_BACKGROUND_RUNNING &&
           backgroundIndex !== undefined
         ) {
-          visible[backgroundIndex] = event;
+          visible[backgroundIndex] = preservePresentation(visible[backgroundIndex], event);
           backgroundIndexes?.shift();
         } else {
           const index = visible.push(event) - 1;

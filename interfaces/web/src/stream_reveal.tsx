@@ -134,6 +134,7 @@ export const StreamText = memo(function StreamText({ text }: { text: string }) {
   const creditRef = useRef(0);
   const frameRef = useRef<number | null>(null);
   const lastTsRef = useRef<number | null>(null);
+  const lastPaintRef = useRef(0);
 
   useEffect(() => {
     targetRef.current = text;
@@ -147,13 +148,16 @@ export const StreamText = memo(function StreamText({ text }: { text: string }) {
     }
     if (visibleRef.current === text || frameRef.current !== null) return;
     lastTsRef.current = null;
+    lastPaintRef.current = 0;
     const step = (ts: number) => {
       const target = targetRef.current;
       const last = lastTsRef.current ?? ts;
       lastTsRef.current = ts;
       creditRef.current += streamRevealDelta(visibleRef.current.length, target.length, ts - last);
       const count = Math.floor(creditRef.current);
-      if (count > 0) {
+      // Accumulate at frame cadence, but batch costly Markdown/React commits.
+      if (count > 0 && (ts - lastPaintRef.current >= 32 || count >= target.length - visibleRef.current.length)) {
+        lastPaintRef.current = ts;
         let end = Math.min(target.length, visibleRef.current.length + count);
         // Never paint half of a UTF-16 surrogate pair.
         if (end < target.length && /[\\uD800-\\uDBFF]/.test(target[end - 1])) end += 1;

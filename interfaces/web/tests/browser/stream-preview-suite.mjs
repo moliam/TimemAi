@@ -24,3 +24,10 @@ for (const scenario of ["invalid", "network", "stop", "supplement", "interaction
     STREAM_PREVIEW_SCENARIO: scenario,
   });
 }
+
+for (const protocol of ["xml", "json", "native"]) {
+  run("stream-preview-product.mjs", { STREAM_UI_MODE: "false", STREAM_PREVIEW_PROTOCOL: protocol, STREAM_PREVIEW_SCENARIO: "normal" });
+}
+run("stream-preview-product.mjs", { STREAM_UI_MODE: "false", STREAM_PREVIEW_PROTOCOL: "xml", STREAM_PREVIEW_SCENARIO: "tools" });
+
+run("stream-preview-acceptance.mjs", { STREAM_CPU_BENCH: "1", TIMEM_PERF_GUARD: "1" });

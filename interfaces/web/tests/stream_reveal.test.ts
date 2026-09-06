@@ -43,12 +43,25 @@ describe("stream reveal integration", () => {
   });
   it("keeps reading handoff mounted and defaults stream details closed", () => {
     expect(mainSource).toContain("streamUiMode || turn.sub_answers.length");
-    expect(mainSource).toContain("!streamUiMode && (isWorking");
+    expect(mainSource).toContain("useState(() => !streamUiMode && isWorking)");
     expect(mainSource).not.toContain("stream-reading-hold");
     expect(mainSource).not.toContain("stream-thought-card");
     expect(mainSource).toContain('className="stream-working-trailer"');
     expect(mainSource).toContain('const previewText = intermediate ? ""');
-    expect(mainSource).toContain("已补充，内容见上方用户消息");
+    expect(mainSource).toContain("activity.detail && <MarkdownContent text={activity.detail}");
+  });
+
+  it("collapses completed and interrupted work independently of stream mode", () => {
+    expect(mainSource).toContain(
+      'if (finalArrived || (wasWorking && turn.state !== "working"))\n      setShowWorkStream(false);',
+    );
+    expect(mainSource).not.toContain("hasVisibleProcess && !onlyFreeTalk");
+  });
+
+  it("counts only framed lifecycle-coalesced tools while work is collapsed", () => {
+    expect(mainSource).toContain("count + run.summary.activities.length");
+    expect(mainSource).toContain("!workStreamVisible && !isToolGenTurn && framedToolCount > 0");
+    expect(mainSource).toContain('framedToolCount === 1 ? "tool" : "tools"');
   });
 
   it("renders delivered markdown immediately without a DOM test double", () => {
@@ -66,7 +79,8 @@ describe("stream reveal integration", () => {
     expect(mainSource).toContain(
       'provisional ? `response-preview${streaming ? " streaming" : ""}` : "turn-final-delivery"',
     );
-    expect(mainSource.match(/<StreamText /g)?.length).toBe(3);
+    expect(mainSource.match(/<StreamText /g)?.length).toBe(5);
+    expect(mainSource).toContain("liveAnswer.provisional ? <StreamText text={liveAnswer.answer} /> : <MarkdownContent text={liveAnswer.answer} />");
     expect(mainSource).toContain("{item.provisional ? <StreamText text={item.answer} />");
   });
 
@@ -134,3 +148,18 @@ describe("splitMarkdownBlocks incremental stability", () => {
     expect(html.match(/class="markdown-body"/g)?.length).toBe(2);
   });
 });
+
+ it("uses the trailer instead of a typing caret and archives only after working ends", () => {
+   const css = readFileSync(new URL("../src/styles.css", import.meta.url), "utf8");
+   expect(css).not.toContain("stream-caret-pulse");
+   expect(mainSource).toContain('<StreamProcess closing={turn.state !== "working"}');
+   expect(mainSource).toContain('className="stream-working-dot"');
+ });
+
+ it("bounds repeated stream rendering and interaction listeners", () => {
+   expect(mainSource).toContain("const StreamToolRow = memo(");
+   expect(mainSource).toContain("const runningStreamTools = useMemo(");
+   expect(mainSource.match(/document.addEventListener\("selectionchange"/g)?.length).toBe(1);
+   expect(mainSource).toContain("if (followBottom) frame = requestAnimationFrame(follow)");
+   expect(mainSource).toContain("if (mergeReady || completed.length < 2) return");
+ });

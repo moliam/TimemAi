@@ -3,7 +3,8 @@ import { createFrameEventQueue } from "../src/frame_event_queue";
 import { coalesceActionLifecycle } from "../src/view_model";
 import { reconcileSessionTimelineCache } from "../src/session_timeline_cache";
 import { requestTimelineNavigationWork } from "../src/timeline_navigation_work";
-import type { WebTurnEvent } from "../src/protocol";
+import { computeStreamRetention, summarizeConsecutiveToolActivities } from "../src/activity_groups";
+import type { Activity, WebTurnEvent } from "../src/protocol";
 
 const guardEnabled = process.env.TIMEM_PERF_GUARD === "1";
 function assertUnder(label: string, elapsedMs: number, budgetMs: number) {
@@ -24,6 +25,22 @@ function actionEvent(index: number, lifecycle: "start" | "finish"): WebTurnEvent
   };
 }
 describe("web performance guard", () => {
+  it("partitions mixed tool histories for stream and ordinary presentations within budget", () => {
+    const activities: Activity[] = Array.from({ length: 20_000 }, (_, index) => ({
+      id: `activity-${index}`, sessionId: "perf", createdAt: index, title: "run_bash", tool_name: "run_bash",
+      tone: index % 10 === 0 ? "thinking" : "action", kind: index % 10 === 0 ? "free_talk" : undefined,
+      tool_status: index % 3 === 0 ? "failed" : "completed",
+    }));
+    const started = performance.now();
+    const retained = computeStreamRetention(activities);
+    const ordinary = summarizeConsecutiveToolActivities(activities);
+    expect(retained.retained).toHaveLength(20_000);
+    expect(ordinary).toHaveLength(2_000);
+    expect(ordinary.reduce((n, run) => n + run.summary.activities.length, 0)).toBe(18_000);
+    expect(ordinary.reduce((n, run) => n + run.summary.failedCount, 0)).toBeGreaterThan(0);
+    assertUnder("web_stream_and_ordinary_20000_activities", performance.now() - started, 1_500);
+  });
+
   it("coalesces a long action lifecycle without a scale cliff", () => {
     const events: WebTurnEvent[] = [];
     for (let index = 0; index < 10_000; index += 1) events.push(actionEvent(index, "start"), actionEvent(index, "finish"));

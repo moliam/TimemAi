@@ -1379,6 +1379,22 @@ describe("web topic view model", () => {
     expect(workspacePathLabel("timem_shell")).toBe("timem_shell");
   });
 
+  it("preserves presentation identity and order while keeping authoritative event timestamps", () => {
+    const start = actionEvent("1000", "start", "running", { cmd: "sleep 10" }, "stable");
+    const execution = actionEvent("2000", "execution_start", "running", { cmd: "sleep 10" }, "stable");
+    const background = actionEvent("3000", "finish", "background_running", { cmd: "sleep 10" }, "stable");
+    const finish = actionEvent("4000", "finish", "completed", { cmd: "sleep 10" }, "stable");
+    for (const updates of [[execution], [execution, background], [execution, background, finish]]) {
+      const [row] = coalesceActionLifecycle([start, ...updates]);
+      expect(row.presentation_id).toBe(start.event_id);
+      expect(row.presentation_created_at_ms).toBe(start.created_at_ms);
+      expect(row.event_id).toBe(updates.at(-1)!.event_id);
+      expect(row.created_at_ms).toBe(updates.at(-1)!.created_at_ms);
+    }
+    const [trimmed] = coalesceActionLifecycle([background, finish]);
+    expect(trimmed.presentation_id).toBe(background.event_id);
+  });
+
   it("replaces an action start with its terminal lifecycle event", () => {
     const events = coalesceActionLifecycle([
       actionEvent("event_1", "start", "running"),
