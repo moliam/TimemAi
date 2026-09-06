@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { Activity } from "../src/protocol";
 import {
+  coalesceFreeTalkItems,
+  computeStreamRetention,
   isRunningToolActivity,
   summarizeConsecutiveToolActivities,
   summarizeToolActivities,
@@ -189,5 +191,67 @@ describe("running tool activity gate", () => {
         kind: "toolgen",
       }),
     ).toBe(false);
+  });
+});
+
+describe("stream retention split", () => {
+  const thought = (id: string): Activity => ({
+    id,
+    sessionId: "s",
+    tone: "thinking",
+    kind: "free_talk",
+    title: "",
+    detail: id,
+    createdAt: 1,
+  });
+  const tool = (id: string, tool_status: string): Activity => ({
+    ...activity(id, tool_status),
+    id,
+  });
+
+  it("retains the latest thought run plus trailing tools", () => {
+    const items = [
+      thought("t1"),
+      tool("a1", "completed"),
+      thought("t2"),
+      tool("a2", "completed"),
+      tool("a3", "running"),
+    ];
+    const ret = computeStreamRetention(items);
+    expect(ret.retained.map((a) => a.id)).toEqual(["t2", "a2", "a3"]);
+    expect(ret.thought?.id).toBe("t2");
+    expect(ret.isRetained(items[0])).toBe(false);
+    expect(ret.isRetained(items[4])).toBe(true);
+    expect(ret.isRetained(null)).toBe(false);
+  });
+
+  it("falls back to running tools when no thought exists yet", () => {
+    const ret = computeStreamRetention([
+      tool("a1", "completed"),
+      tool("a2", "running"),
+      tool("a3", "background_running"),
+    ]);
+    expect(ret.retained.map((a) => a.id)).toEqual(["a2", "a3"]);
+    expect(ret.thought).toBeNull();
+  });
+
+  it("keeps everything framed when the list is empty", () => {
+    expect(computeStreamRetention([]).retained).toEqual([]);
+  });
+
+  it("collapses consecutive free-talk snapshots into the latest one", () => {
+    const items = [
+      { key: "s1", activity: thought("t1") },
+      { key: "s2", activity: thought("t2") },
+      { key: "n1", activity: null },
+      { key: "s3", activity: thought("t3") },
+      { key: "a1", activity: tool("a1", "completed") },
+    ];
+    expect(coalesceFreeTalkItems(items).map((item) => item.key)).toEqual([
+      "s2",
+      "n1",
+      "s3",
+      "a1",
+    ]);
   });
 });

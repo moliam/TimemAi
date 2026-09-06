@@ -2,7 +2,11 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { streamRevealDelta, StreamText } from "../src/stream_reveal";
+import {
+  splitMarkdownBlocks,
+  streamRevealDelta,
+  StreamText,
+} from "../src/stream_reveal";
 
 const mainSource = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
 const revealSource = readFileSync(new URL("../src/stream_reveal.tsx", import.meta.url), "utf8");
@@ -48,7 +52,7 @@ describe("stream reveal integration", () => {
     expect(mainSource).toContain(
       'provisional ? `response-preview${streaming ? " streaming" : ""}` : "turn-final-delivery"',
     );
-    expect(mainSource.match(/<StreamText /g)?.length).toBe(2);
+    expect(mainSource.match(/<StreamText /g)?.length).toBe(3);
     expect(mainSource).toContain("{item.provisional ? <StreamText text={item.answer} />");
   });
 
@@ -65,5 +69,54 @@ describe("stream reveal integration", () => {
     expect(revealSource).toContain("startsWith(visibleRef.current)");
     expect(revealSource).toContain("prefers-reduced-motion: reduce");
     expect(revealSource).toContain("cancelAnimationFrame");
+  });
+});
+
+describe("splitMarkdownBlocks incremental stability", () => {
+  it("never rewrites finished blocks while text grows", () => {
+    const bases = [
+      "para one\n\npara two",
+      "intro\n\n```rust\nfn a() {}",
+      "# Title\n\nbody text",
+      "list start\n- a\n- b",
+      "math\n\n$$\nE=mc^2",
+    ];
+    const extensions = ["", " more", "\n\nnext para", "\n```\n\nafter", "\n$$\n\nafter math"];
+    for (const base of bases) {
+      const baseBlocks = splitMarkdownBlocks(base);
+      for (const ext of extensions) {
+        const grown = splitMarkdownBlocks(base + ext);
+        // The last base block is still open and may grow in place; every
+        // earlier block must stay byte-identical (never rewritten).
+        baseBlocks.slice(0, -1).forEach((block, index) => {
+          expect(grown[index]).toBe(block);
+        });
+        // For closed-text bases, a new-paragraph extension must keep the
+        // previous split as a strict prefix. Bases ending inside an open
+        // fence/math block correctly keep growing the open tail instead.
+        const openTail = base.includes("```") || base.includes("$$");
+        if (ext === "" || (ext.startsWith("\n\n") && !openTail)) {
+          expect(grown.slice(0, baseBlocks.length)).toEqual(baseBlocks);
+        }
+      }
+    }
+  });
+
+  it("splits completed paragraphs and keeps open fences as one tail block", () => {
+    expect(splitMarkdownBlocks("a\n\nb")).toEqual(["a", "b"]);
+    expect(splitMarkdownBlocks("```js\n1\n```\n\ntail")).toEqual([
+      "```js\n1\n```",
+      "tail",
+    ]);
+    const open = splitMarkdownBlocks("text\n\n```js\nlet x = 1;\n");
+    expect(open).toEqual(["text", "```js\nlet x = 1;\n"]);
+  });
+
+  it("renders frozen blocks through memoized markdown so old blocks stay stable", () => {
+    const html = renderToStaticMarkup(
+      createElement(StreamText, { text: "one\n\ntwo **bold**" }),
+    );
+    expect(html).toContain("stream-markdown");
+    expect(html.match(/class="markdown-body"/g)?.length).toBe(2);
   });
 });

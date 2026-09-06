@@ -248,8 +248,9 @@ import {
 import { createFrameEventQueue } from "./frame_event_queue";
 import { formatTokens } from "./token_format";
 import {
+  coalesceFreeTalkItems,
+  computeStreamRetention,
   summarizeConsecutiveToolActivities,
-  isRunningToolActivity,
   ToolActivitySummary,
 } from "./activity_groups";
 import {
@@ -9319,16 +9320,29 @@ const TurnInteraction = memo(function TurnInteraction({
       visibleItems.filter((item) => !persistentToolGenItemKeys.has(item.key)),
     [persistentToolGenItemKeys, visibleItems],
   );
-  // Running tools stay out of the Thought/Action frame while the turn is
-  // active; they render expanded in the stream delivery area instead and
-  // persist into the frame once they reach a terminal status.
+  // Stream UI Mode retention: the latest model-thought run and every tool
+  // after it stay in the live stream area; when the next thought run arrives
+  // (or the turn ends) the previous run migrates into the frame.
   const isWorking = turn.state === "working" && !isCancelling;
+  const streamUiMode = useStreamUiMode();
+  const streamRetentionActive = streamUiMode && isWorking;
+  const streamRetention = useMemo(
+    () =>
+      streamRetentionActive
+        ? computeStreamRetention(scrollItems.map(({ activity }) => activity))
+        : null,
+    [streamRetentionActive, scrollItems],
+  );
   const workItems = useMemo(
     () =>
-      isWorking
-        ? scrollItems.filter((item) => !isRunningToolActivity(item.activity))
+      streamRetention
+        ? coalesceFreeTalkItems(
+            scrollItems.filter(
+              (item) => !streamRetention.isRetained(item.activity),
+            ),
+          )
         : scrollItems,
-    [isWorking, scrollItems],
+    [scrollItems, streamRetention],
   );
   const toolActivityRuns = useMemo(
     () =>
@@ -9343,11 +9357,28 @@ const TurnInteraction = memo(function TurnInteraction({
   );
   const hasVisibleProcess =
     scrollItems.some((item) => item.activity !== null) || decisions.length > 0;
-  const streamUiMode = useStreamUiMode();
-  const runningStreamTools =
-    streamUiMode && isWorking
-      ? processActivities.filter((activity) => isRunningToolActivity(activity))
-      : [];
+  const runningStreamTools = streamRetention
+    ? streamRetention.retained
+    : [];
+  const streamThoughtId = streamRetention?.thought?.id ?? null;
+  const [thoughtPulseKey, setThoughtPulseKey] = useState<string | null>(null);
+  const lastStreamThoughtIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const previousId = lastStreamThoughtIdRef.current;
+    lastStreamThoughtIdRef.current = streamThoughtId;
+    // A thought run migrates into the frame when the next thought run
+    // replaces it or when the turn ends; pulse the row it settled into.
+    if (!previousId || previousId === streamThoughtId) return;
+    const migrated = workItems.find(
+      (item) => item.activity?.id === previousId,
+    );
+    if (migrated) setThoughtPulseKey(migrated.key);
+  }, [streamThoughtId, workItems]);
+  useEffect(() => {
+    if (!thoughtPulseKey) return;
+    const timer = window.setTimeout(() => setThoughtPulseKey(null), 800);
+    return () => window.clearTimeout(timer);
+  }, [thoughtPulseKey]);
   const hasLiveUsage = isWorking && turnLiveUsage(turn) !== undefined;
   const showWorkFrame = shouldRenderTurnWorkFrame(
     turn.state,
@@ -9656,11 +9687,16 @@ const TurnInteraction = memo(function TurnInteraction({
                         <ToolActivityGroup
                           key={`tool-activity-group-${item.key}`}
                           summary={summary}
+                          enterPulse={item.key === thoughtPulseKey}
                         />
                       ) : null;
                     }
                     return activity ? (
-                      <ActivityView key={item.key} activity={activity} />
+                      <ActivityView
+                        key={item.key}
+                        activity={activity}
+                        enterPulse={item.key === thoughtPulseKey}
+                      />
                     ) : null;
                   })}{" "}
                   {decisions.map((decision, index) => (
@@ -9777,6 +9813,17 @@ function areTurnInteractionPropsEqual(
   });
 }
 
+function StreamThoughtCard({ activity }: { activity: Activity }) {
+  return (
+    <section
+      className="stream-thought-card"
+      aria-label="Model thought preview"
+    >
+      <StreamText text={activity.detail ?? ""} />
+    </section>
+  );
+}
+
 function StreamToolRow({ activity }: { activity: Activity }) {
   const status = activity.tool_status || TOOL_STATUS_RUNNING;
   const running = isToolActivityRunning(status);
@@ -9842,10 +9889,22 @@ function TurnAnswerDelivery({
   return (
     <section className="turn-answer-delivery">
       {streamTools.length > 0 && (
-        <section className="turn-stream-tools" aria-label="Running tools">
-          {streamTools.map((activity) => (
-            <StreamToolRow key={activity.id} activity={activity} />
-          ))}
+        <section className="turn-stream-tools" aria-label="Live model activity">
+          {(() => {
+            const thought = [...streamTools]
+              .reverse()
+              .find((activity) => activity.kind === "free_talk");
+            return (
+              <>
+                {thought && <StreamThoughtCard activity={thought} />}
+                {streamTools
+                  .filter((activity) => activity.kind !== "free_talk")
+                  .map((activity) => (
+                    <StreamToolRow key={activity.id} activity={activity} />
+                  ))}
+              </>
+            );
+          })()}
         </section>
       )}
       {hasChat && (
@@ -10560,7 +10619,7 @@ function LiveTurnUsage({ turn }: { turn: WebTurn }) {
   );
 }
 
-function ActivityView({ activity }: { activity: Activity }) {
+function ActivityView({ activity, enterPulse = false }: { activity: Activity; enterPulse?: boolean }) {
   if (activity.kind === "context_compact")
     return <ContextCompactNotice activity={activity} />;
   if (activity.kind === "toolgen") return <ToolGenNotice activity={activity} />;
@@ -10579,7 +10638,7 @@ function ActivityView({ activity }: { activity: Activity }) {
   if (activity.tone === "action") return <ToolActivity activity={activity} />;
   return (
     <div
-      className={`turn-work-item ${activity.tone}${activity.kind === "free_talk" ? " free-talk" : ""}`}
+      className={`turn-work-item ${activity.tone}${activity.kind === "free_talk" ? " free-talk" : ""}${enterPulse ? " thought-run-enter" : ""}`}
     >
       <span className="activity-mark">
         {activity.tone === "thinking" ? (
@@ -10674,7 +10733,7 @@ function toolActivityGroupStatusLabel(summary: ToolActivitySummary) {
     : "running";
 }
 
-function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
+function ToolActivityGroup({ summary, enterPulse = false }: { summary: ToolActivitySummary; enterPulse?: boolean }) {
   const [open, setOpen] = useState(false);
   const singleActivity =
     summary.activities.length === 1 ? summary.activities[0] : undefined;
@@ -10689,7 +10748,7 @@ function ToolActivityGroup({ summary }: { summary: ToolActivitySummary }) {
   const summaryLabel = `${open ? "收起" : "展开"}工具活动：${summary.label}，${groupStatusLabel}`;
   return (
     <details
-      className={`tool-activity-group ${summary.status}`}
+      className={`tool-activity-group ${summary.status}${enterPulse ? " thought-run-enter" : ""}`}
       open={open}
       aria-busy={running || undefined}
       onToggle={(event) => setOpen(event.currentTarget.open)}
