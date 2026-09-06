@@ -10399,6 +10399,11 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
     observer?.observe(content);
     observer?.observe(viewport);
     observer?.observe(chatShell);
+    // Sibling work panels can collapse without resizing the answer itself.
+    // Keep the portaled outline aligned so its old absolute top cannot retain
+    // phantom scroll space below the now-shorter turn.
+    const turnContainer = root.closest(".turn-interaction");
+    if (turnContainer) observer?.observe(turnContainer);
     return () => {
       window.removeEventListener("resize", scheduleUpdate);
       observer?.disconnect();

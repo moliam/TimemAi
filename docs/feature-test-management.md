@@ -298,3 +298,15 @@ Long-text browser acceptance retains 180 paragraphs; its 60-second bounded wait 
 Generated dist changes are rebuilt main JavaScript and CSS plus index.html hashed references; dependency chunks and fonts remain unchanged.
 
 Scope: module tests and applicable architecture/performance/browser guards do not replace the full repository `scripts/ci.sh`, cross-browser manual review, or screen-reader testing.
+
+### Final-answer handoff scroll geometry
+
+The portaled final-answer outline observes its enclosing Turn size as well as answer size.
+Collapsing preceding tools changes the answer offset without changing the answer height;
+leaving the outline at its old absolute top creates phantom scroll space and can hide the
+answer above the viewport. Resize invalidation remains frame-coalesced and observers are
+cleaned up; it does not introduce unconditional scrolling or override the reader's position.
+Chrome stream acceptance covers 80 tools plus a multi-section final answer in both UI modes
+and with/without reduced motion, asserting actual answer/viewport intersection and less than
+150px trailing scroll space after archive. The fixture failed before the fix with an invisible
+answer and approximately 1567px phantom space. This regression runs through test:browser/CI.
