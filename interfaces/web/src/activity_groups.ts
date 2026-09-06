@@ -132,36 +132,39 @@ export type StreamRetention = {
   isRetained: (activity: Activity | null | undefined) => boolean;
 };
 
-/**
- * Stream UI Mode retention rule: the latest model-thought run (consecutive
- * free-talk snapshots plus every tool activity after it) stays in the live
- * stream area until the next thought run arrives, at which point the previous
- * run migrates into the Thought/Action frame. Without any thought yet, only
- * running tools stay in the stream. Terminal turns keep everything framed.
+/** Partition presentation at an explicit model-response event, even without thought.
+ * The latest thought survives tool-only rounds; old tools belong in the frame.
+ * The optional boundary is an index in the original (including nulls) list.
  */
 export function computeStreamRetention(
   activities: readonly (Activity | null)[],
+  responseIndex?: number,
 ): StreamRetention {
-  const dense = activities.filter((a): a is Activity => a !== null);
   let lastThoughtIndex = -1;
-  for (let i = dense.length - 1; i >= 0; i -= 1) {
-    if (dense[i].kind === "free_talk") { lastThoughtIndex = i; break; }
-  }
-  let runStart = lastThoughtIndex;
-  while (runStart > 0 && dense[runStart - 1].kind === "free_talk") runStart -= 1;
-
+  activities.forEach((activity, index) => {
+    if (activity?.kind === "free_talk") lastThoughtIndex = index;
+  });
+  const thought = lastThoughtIndex >= 0 ? activities[lastThoughtIndex] : null;
+  const boundary = responseIndex ?? lastThoughtIndex;
   const retainedSet = new Set<Activity>();
-  let thought: Activity | null = null;
-  if (lastThoughtIndex >= 0) {
-    for (let i = runStart; i < dense.length; i += 1) retainedSet.add(dense[i]);
-    thought = dense[lastThoughtIndex];
-  } else {
-    for (const activity of dense)
-      if (isRunningToolActivity(activity)) retainedSet.add(activity);
+  // Hide superseded snapshots of this thought from the frame as well.
+  if (thought) {
+    retainedSet.add(thought);
+    for (let i = lastThoughtIndex - 1; i >= 0; i--) {
+      const activity = activities[i];
+      if (!activity) continue;
+      if (activity.kind !== "free_talk") break;
+      retainedSet.add(activity);
+    }
   }
-  const retained = dense.filter((a) => retainedSet.has(a));
+  activities.forEach((activity, index) => {
+    if (activity?.tone === "action" &&
+        (boundary >= 0 ? index >= boundary : isRunningToolActivity(activity))) {
+      retainedSet.add(activity);
+    }
+  });
   return {
-    retained,
+    retained: activities.filter((a): a is Activity => !!a && retainedSet.has(a)),
     thought,
     isRetained: (activity) => !!activity && retainedSet.has(activity),
   };

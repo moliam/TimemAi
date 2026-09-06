@@ -9320,16 +9320,22 @@ const TurnInteraction = memo(function TurnInteraction({
       visibleItems.filter((item) => !persistentToolGenItemKeys.has(item.key)),
     [persistentToolGenItemKeys, visibleItems],
   );
-  // Stream UI Mode retention: the latest model-thought run and every tool
-  // after it stay in the live stream area; when the next thought run arrives
-  // (or the turn ends) the previous run migrates into the frame.
+  // Partition at model replies, not thought presence: tool-only replies also
+  // archive previous tools while preserving the latest thought.
   const isWorking = turn.state === "working" && !isCancelling;
   const streamUiMode = useStreamUiMode();
   const streamRetentionActive = streamUiMode && isWorking;
   const streamRetention = useMemo(
     () =>
       streamRetentionActive
-        ? computeStreamRetention(scrollItems.map(({ activity }) => activity))
+        ? computeStreamRetention(
+            scrollItems.map(({ activity }) => activity),
+            scrollItems.reduce((latest, item, index) => {
+              if (item.type !== "event" || item.event.source !== "core_topic") return latest;
+              const topic = item.event.payload.topic as { name?: string } | undefined;
+              return topic?.name === "core.model.response" ? index : latest;
+            }, -1),
+          )
         : null,
     [streamRetentionActive, scrollItems],
   );
@@ -9390,7 +9396,7 @@ const TurnInteraction = memo(function TurnInteraction({
     turn.completion?.stop_reason?.toLowerCase() === "cancelledbyuser";
   const interrupted = cancelled || turn.state === "interrupted";
   const onlyFreeTalk = hasOnlyFreeTalkActivity(processActivities, decisions.length);
-  const [showWorkStream, setShowWorkStream] = useState(() => isWorking || (hasVisibleProcess && !onlyFreeTalk));
+  const [showWorkStream, setShowWorkStream] = useState(() => !streamUiMode && (isWorking || (hasVisibleProcess && !onlyFreeTalk)));
   const isToolGenTurn =
     turn.turn_id.startsWith("web_toolgen_turn_") ||
     turn.user_entries.some((entry) => entry.kind === "toolgen_instruction") ||
@@ -9411,10 +9417,10 @@ const TurnInteraction = memo(function TurnInteraction({
     const finalArrived = !previousFinalAnswer.current && !!turn.final_answer;
     previousTurnState.current = isWorking ? "working" : turn.state;
     previousFinalAnswer.current = !!turn.final_answer;
-    if (!wasWorking && isWorking) setShowWorkStream(true);
+    if (!wasWorking && isWorking) setShowWorkStream(!streamUiMode);
     if (finalArrived || (wasWorking && turn.state === "interrupted"))
-      setShowWorkStream(hasVisibleProcess && !onlyFreeTalk);
-  }, [isWorking, turn.final_answer, turn.state, hasVisibleProcess, onlyFreeTalk]);
+      setShowWorkStream(!streamUiMode && hasVisibleProcess && !onlyFreeTalk);
+  }, [isWorking, turn.final_answer, turn.state, hasVisibleProcess, onlyFreeTalk, streamUiMode]);
 
   useLayoutEffect(() => {
     const scroll = workScrollRef.current;
@@ -9737,13 +9743,14 @@ const TurnInteraction = memo(function TurnInteraction({
           )}
         </div>
       )}
-      {(turn.sub_answers.length > 0 ||
+      {(streamUiMode || turn.sub_answers.length > 0 ||
         turn.final_answer ||
         turn.preview ||
         runningStreamTools.length > 0) && (
         <TurnAnswerDelivery
           turn={turn}
           streamTools={runningStreamTools}
+          streamWorking={isWorking}
           toolGenPending={toolGenPending}
           toolGenBlocked={toolGenBlocked}
           onToolGen={
@@ -9813,15 +9820,14 @@ function areTurnInteractionPropsEqual(
   });
 }
 
-function StreamThoughtCard({ activity }: { activity: Activity }) {
-  return (
-    <section
-      className="stream-thought-card"
-      aria-label="Model thought preview"
-    >
-      <StreamText text={activity.detail ?? ""} />
-    </section>
-  );
+function StreamActivityPresentation({ thoughtText }: {
+  thoughtText: string;
+}) {
+  return <section className="turn-stream-tools" aria-label="Live model activity">
+    {thoughtText && <div className="stream-thought-text" aria-label="Model thought preview">
+      <StreamText text={thoughtText} />
+    </div>}
+  </section>;
 }
 
 function StreamToolRow({ activity }: { activity: Activity }) {
@@ -9850,6 +9856,7 @@ function StreamToolRow({ activity }: { activity: Activity }) {
 function TurnAnswerDelivery({
   turn,
   streamTools,
+  streamWorking,
   toolGenPending,
   toolGenBlocked,
   favorite,
@@ -9860,6 +9867,7 @@ function TurnAnswerDelivery({
 }: {
   turn: WebTurn;
   streamTools: Activity[];
+  streamWorking: boolean;
   toolGenPending: boolean;
   toolGenBlocked: boolean;
   favorite?: ChatFavorite;
@@ -9871,7 +9879,12 @@ function TurnAnswerDelivery({
   const streamUiMode = useStreamUiMode();
   const preview = streamUiMode ? turn.preview : undefined;
   const previewChat = preview?.chat ?? [];
-  const previewText = preview?.response?.text ?? "";
+  const retainedThought = [...streamTools].reverse().find((activity) => activity.kind === "free_talk");
+  const intermediate = preview?.response?.status === "intermediate";
+  const previewText = intermediate ? "" : preview?.response?.text ?? "";
+  // A response has one text home: live preview supersedes the retained thought.
+  const thoughtText = previewText ? "" : retainedThought?.detail ??
+    (streamWorking && intermediate ? preview?.response?.text ?? "" : "");
   const hasPreview = !!previewText || previewChat.length > 0;
   const hasFinal = !!turn.final_answer;
   const hasChat = turn.sub_answers.length > 0 || previewChat.length > 0;
@@ -9884,29 +9897,9 @@ function TurnAnswerDelivery({
     previousFinal.current = !!turn.final_answer;
     if (finalArrived) setChatExpanded(false);
   }, [turn.final_answer]);
-  if (!hasChat && !hasFinal && !hasPreview && streamTools.length === 0)
-    return null;
   return (
     <section className="turn-answer-delivery">
-      {streamTools.length > 0 && (
-        <section className="turn-stream-tools" aria-label="Live model activity">
-          {(() => {
-            const thought = [...streamTools]
-              .reverse()
-              .find((activity) => activity.kind === "free_talk");
-            return (
-              <>
-                {thought && <StreamThoughtCard activity={thought} />}
-                {streamTools
-                  .filter((activity) => activity.kind !== "free_talk")
-                  .map((activity) => (
-                    <StreamToolRow key={activity.id} activity={activity} />
-                  ))}
-              </>
-            );
-          })()}
-        </section>
-      )}
+      {streamUiMode && <StreamActivityPresentation thoughtText={thoughtText} />}
       {hasChat && (
         <section
           className={`turn-chat-delivery${chatExpanded ? " expanded" : " collapsed"}`}
@@ -9977,6 +9970,14 @@ function TurnAnswerDelivery({
           onToolGen={onToolGen}
           onDelete={onDelete}
         />
+      )}
+      {streamUiMode && streamTools.filter((activity) => activity.tone === "action").map((activity) => (
+        <StreamToolRow key={activity.id} activity={activity} />
+      ))}
+      {streamUiMode && streamWorking && (
+        <div className="stream-working-trailer" role="status" aria-label="Working">
+          <span className="stream-working-dot" aria-hidden="true" />
+        </div>
       )}
     </section>
   );
@@ -10631,7 +10632,7 @@ function ActivityView({ activity, enterPulse = false }: { activity: Activity; en
         </span>
         <div className="user-supplement-line">
           <strong>{activity.title}</strong>
-          {activity.detail && <span>{activity.detail}</span>}
+          <span>已补充，内容见上方用户消息</span>
         </div>
       </div>
     );

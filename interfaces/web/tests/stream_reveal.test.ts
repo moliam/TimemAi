@@ -21,11 +21,11 @@ describe("stream reveal pacing", () => {
   });
 
   it("paces a small backlog slowly and bounds each frame", () => {
-    expect(streamRevealDelta(0, 20, 100)).toBe(30);
-    expect(streamRevealDelta(0, 20, 16)).toBe(5);
-    expect(streamRevealDelta(0, 5000, 1000)).toBe(160);
-    expect(streamRevealDelta(0, 5000, 8)).toBe(42);
-    expect(streamRevealDelta(0, 5, 1)).toBe(1);
+    expect(streamRevealDelta(0, 20, 100)).toBe(2.4);
+    expect(streamRevealDelta(0, 20, 16)).toBe(0.96);
+    expect(streamRevealDelta(0, 5000, 1000)).toBe(9.6);
+    expect(streamRevealDelta(0, 5000, 8)).toBe(1.92);
+    expect(streamRevealDelta(0, 5, 1)).toBe(0.06);
   });
 
   it("catches up faster as lag grows while each frame stays bounded", () => {
@@ -37,6 +37,20 @@ describe("stream reveal pacing", () => {
 });
 
 describe("stream reveal integration", () => {
+  it("preserves fractional progress across high-refresh frames", () => {
+    expect(streamRevealDelta(0, 90, 8) * 2).toBe(streamRevealDelta(0, 90, 16));
+    expect(streamRevealDelta(0, 1, 40)).toBe(1);
+  });
+  it("keeps reading handoff mounted and defaults stream details closed", () => {
+    expect(mainSource).toContain("streamUiMode || turn.sub_answers.length");
+    expect(mainSource).toContain("!streamUiMode && (isWorking");
+    expect(mainSource).not.toContain("stream-reading-hold");
+    expect(mainSource).not.toContain("stream-thought-card");
+    expect(mainSource).toContain('className="stream-working-trailer"');
+    expect(mainSource).toContain('const previewText = intermediate ? ""');
+    expect(mainSource).toContain("已补充，内容见上方用户消息");
+  });
+
   it("renders delivered markdown immediately without a DOM test double", () => {
     const html = renderToStaticMarkup(
       createElement(StreamText, { text: "Hello **stream** world" }),

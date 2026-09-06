@@ -221,3 +221,23 @@ Before tagging a release:
    present in tracked source or release notes.
 8. Run applicable rows from `docs/manual-release-smoke.md` when the release is
    broad, host-facing, or touches terminal/Web/model service/install behavior.
+
+### Stream UI reading handoff
+
+Stream UI defaults work details to collapsed (manual expansion remains available).
+Thought text precedes action rows; non-action timeline markers are not tools and
+must not acquire a running badge. Supplement text has one full-text home in the
+user message; its timeline entry is only a positional reference.
+Each model-response event starts a new presentation round, even if it has no
+thought text. Previous tools move into the collapsed Thought/Action frame; the
+latest thought remains unboxed until replaced. Intermediate preview and retained
+thought have one text home, with no outgoing duplicate or delayed snapshot.
+Tool rows have no outer box; command blocks use a background and soft shadow,
+without border lines, in both themes.
+A growing dot follows the live stream while the authoritative Turn is working;
+cancellation and terminal projections remove it. Reduced-motion disables its
+animation. Stream reveal accumulates fractional frame credit and caps elapsed
+catch-up at 40 ms and rate at 240 UTF-16 units/s.
+Coverage: `interfaces/web/tests/stream_reveal.test.ts`, activity grouping tests,
+frontend suite, production build, and stream browser acceptance. Visual pacing
+still needs subjective browser review.

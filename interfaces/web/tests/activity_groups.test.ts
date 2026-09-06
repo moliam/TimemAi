@@ -235,6 +235,19 @@ describe("stream retention split", () => {
     expect(ret.thought).toBeNull();
   });
 
+  it("moves old tools into the frame on a thoughtless response, retaining thought", () => {
+    const items = [thought("t1"), tool("a1", "completed"), null, tool("a2", "completed")];
+    const ret = computeStreamRetention(items, 2);
+    expect(ret.retained.map(a => a.id)).toEqual(["t1", "a2"]);
+    expect(ret.isRetained(items[1])).toBe(false);
+    expect(ret.thought?.id).toBe("t1");
+  });
+
+  it("keeps current completed tools without any thought, using response boundaries", () => {
+    const items = [null, tool("a1", "completed"), null, tool("a2", "completed")];
+    expect(computeStreamRetention(items, 2).retained.map(a => a.id)).toEqual(["a2"]);
+  });
+
   it("keeps everything framed when the list is empty", () => {
     expect(computeStreamRetention([]).retained).toEqual([]);
   });

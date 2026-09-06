@@ -14,8 +14,8 @@ export function streamRevealDelta(
   if (!Number.isFinite(dtMs) || dtMs <= 0) return 0;
   if (targetLength <= visibleLength) return 0;
   const lag = targetLength - visibleLength;
-  const charsPerSecond = Math.min(6000, 300 + Math.max(0, lag - 100));
-  return Math.max(1, Math.min(160, Math.round((charsPerSecond * dtMs) / 1000)));
+  const charsPerSecond = Math.min(240, 60 + Math.max(0, lag - 120) * 0.12);
+  return Math.min(lag, (charsPerSecond * Math.min(dtMs, 40)) / 1000);
 }
 
 const prefersReducedMotion = () =>
@@ -130,58 +130,57 @@ const FrozenBlock = memo(function FrozenBlock({ text }: { text: string }) {
 export const StreamText = memo(function StreamText({ text }: { text: string }) {
   const [visible, setVisible] = useState(text);
   const visibleRef = useRef(text);
+  const targetRef = useRef(text);
+  const creditRef = useRef(0);
   const frameRef = useRef<number | null>(null);
   const lastTsRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (visibleRef.current === text) return;
+    targetRef.current = text;
     if (!text.startsWith(visibleRef.current) || prefersReducedMotion()) {
       visibleRef.current = text;
+      creditRef.current = 0;
       setVisible(text);
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
       return;
     }
-    if (frameRef.current !== null) return;
+    if (visibleRef.current === text || frameRef.current !== null) return;
     lastTsRef.current = null;
     const step = (ts: number) => {
+      const target = targetRef.current;
       const last = lastTsRef.current ?? ts;
       lastTsRef.current = ts;
-      const delta = streamRevealDelta(visibleRef.current.length, text.length, ts - last);
-      const next = text.slice(0, visibleRef.current.length + delta);
-      visibleRef.current = next;
-      setVisible(next);
-      if (next === text) {
+      creditRef.current += streamRevealDelta(visibleRef.current.length, target.length, ts - last);
+      const count = Math.floor(creditRef.current);
+      if (count > 0) {
+        let end = Math.min(target.length, visibleRef.current.length + count);
+        // Never paint half of a UTF-16 surrogate pair.
+        if (end < target.length && /[\\uD800-\\uDBFF]/.test(target[end - 1])) end += 1;
+        creditRef.current = Math.max(0, creditRef.current - (end - visibleRef.current.length));
+        visibleRef.current = target.slice(0, end);
+        setVisible(visibleRef.current);
+      }
+      if (visibleRef.current === target) {
         frameRef.current = null;
+        creditRef.current = 0;
         return;
       }
       frameRef.current = requestAnimationFrame(step);
     };
     frameRef.current = requestAnimationFrame(step);
-    return () => {
-      if (frameRef.current !== null) {
-        cancelAnimationFrame(frameRef.current);
-        frameRef.current = null;
-      }
-    };
   }, [text]);
 
-  useEffect(
-    () => () => {
-      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
-    },
-    [],
-  );
+  useEffect(() => () => {
+    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+  }, []);
 
   const blocks = useMemo(() => splitMarkdownBlocks(visible), [visible]);
-  const lastIndex = blocks.length - 1;
   return (
     <div className="stream-markdown">
-      {blocks.map((block, index) =>
-        index === lastIndex ? (
-          <MarkdownContent key={`live-${index}`} text={block} />
-        ) : (
-          <FrozenBlock key={`block-${index}`} text={block} />
-        ),
-      )}
+      {blocks.map((block, index) => (
+        <FrozenBlock key={`block-${index}`} text={block} />
+      ))}
     </div>
   );
 });
