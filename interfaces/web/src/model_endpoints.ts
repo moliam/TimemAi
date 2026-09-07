@@ -1,4 +1,5 @@
-import { UNCONFIGURED_MODEL_LABEL } from "./model_service_ui";
+import { t } from "./i18n";
+import { unconfiguredModelLabel } from "./model_service_ui";
 
 export type ModelEndpoint = {
   id: string;
@@ -85,11 +86,11 @@ export function endpointLabelForProfile(
 ): string {
   if (profile?.model_endpoint_id) {
     return endpoints.find((endpoint) => endpoint.id === profile.model_endpoint_id)?.name
-      ?? "接入点已删除";
+      ?? t("modelService.endpointDeleted");
   }
-  if (!profile?.model.trim()) return UNCONFIGURED_MODEL_LABEL;
+  if (!profile?.model.trim()) return unconfiguredModelLabel();
   return endpointNameForProfile(endpoints, profile)
-    ?? `自定义配置 · ${profile.model.trim()}`;
+    ?? t("modelService.customConfig", { model: profile.model.trim() });
 }
 
 export function endpointDraftValid(draft: ModelEndpointDraft): boolean {

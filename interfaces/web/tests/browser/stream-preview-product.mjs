@@ -286,6 +286,7 @@ async function startBrowser(url) {
   const child = spawn(chrome, [
     "--remote-debugging-port=0", `--user-data-dir=${profile}`,
     "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+      "--lang=en-US", "--accept-lang=en-US",
     "--no-first-run", "--no-default-browser-check",
     "--disable-background-networking", "--disable-component-update", "--disable-sync",
     "--window-size=1440,1000", "about:blank",

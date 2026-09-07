@@ -59,9 +59,9 @@ describe("Beta browser preferences", () => {
     const main = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
     expect(main).toContain("applyBetaDebugDefault(snapshot.server.debug_mode)");
     expect(main).toContain("<ToolResultStatusSetting />");
-    expect(main).toContain('!showResults && !isToolActivityRunning(status) ? "Done" : label');
-    expect(main).toContain('`${completed.length} Done`');
-    expect(main).toContain('if (!showResults && summary.status !== "running") return "Done"');
+    expect(main).toContain('!showResults && !isToolActivityRunning(status) ? t("tools.done") : label');
+    expect(main).toContain('t("tools.doneCount", { count: completed.length })');
+    expect(main).toContain('if (!showResults && summary.status !== "running") return t("tools.done")');
     expect(main).toContain('if (showResults && summary.failedCount > 0)');
   });
 });

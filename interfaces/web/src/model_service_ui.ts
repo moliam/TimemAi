@@ -1,23 +1,24 @@
+import { t } from "./i18n";
 import { Session } from "./protocol";
 
-export const UNCONFIGURED_MODEL_LABEL = "未配置";
-
+// 展示标签在渲染期取词，跟随语言切换。
+export const unconfiguredModelLabel = () => t("modelService.unconfigured");
 
 export type ModelServiceIssue = {
   title: string;
   detail: string;
 };
 
-export const NO_MODEL_ENDPOINTS_ISSUE: ModelServiceIssue = {
-  title: "没有接入点可用",
-  detail: "请先新增并配置一个模型接入点，再发送消息。",
-};
+export const noModelEndpointsIssue = (): ModelServiceIssue => ({
+  title: t("modelService.noEndpointsTitle"),
+  detail: t("modelService.noEndpointsDetail"),
+});
 
 export function modelDisplayName(
   session: Pick<Session, "runtime_profile"> | undefined,
 ): string {
   const profile = session?.runtime_profile;
-  return profile?.model.trim() || UNCONFIGURED_MODEL_LABEL;
+  return profile?.model.trim() || unconfiguredModelLabel();
 }
 
 
@@ -27,8 +28,8 @@ export function sessionModelConfigurationIssue(
   const profile = session?.runtime_profile;
   if (!profile || !profile.model.trim()) {
     return {
-      title: "Model not configured",
-      detail: "Open Runtime settings and configure a model and Base URL before sending a message.",
+      title: t("modelService.sessionNotConfiguredTitle"),
+      detail: t("modelService.sessionNotConfiguredDetail"),
     };
   }
   return null;
@@ -51,7 +52,7 @@ function providerReason(safeError: string): string {
 }
 
 function serviceDetail(reason: string, guidance: string): string {
-  return reason ? `Model service response: ${reason}\n${guidance}` : guidance;
+  return reason ? t("service.responseDetail", { reason, guidance }) : guidance;
 }
 
 export function modelServiceIssue(rawError: unknown): ModelServiceIssue {
@@ -66,8 +67,8 @@ export function modelServiceIssue(rawError: unknown): ModelServiceIssue {
     || lower.includes("api key required")
   ) {
     return {
-      title: "Endpoint authentication not configured",
-      detail: "This endpoint has no API key. If the target service requires authentication, edit the endpoint and add one; otherwise verify the service response.",
+      title: t("service.authTitle"),
+      detail: t("service.authDetail"),
     };
   }
 
@@ -76,10 +77,10 @@ export function modelServiceIssue(rawError: unknown): ModelServiceIssue {
     && (lower.includes("maximum of") || lower.includes("too many") || lower.includes("found "))
   ) {
     return {
-      title: "Model request rejected",
+      title: t("service.cacheTitle"),
       detail: serviceDetail(
         reason,
-        "The endpoint rejected the request cache layout. Retry after reducing the number of cache_control blocks or updating Timem.",
+        t("service.cacheDetail"),
       ),
     };
   }
@@ -93,10 +94,10 @@ export function modelServiceIssue(rawError: unknown): ModelServiceIssue {
     || lower.includes("invalid_api_key")
   ) {
     return {
-      title: "Model authentication failed",
+      title: t("service.authFailedTitle"),
       detail: serviceDetail(
         reason,
-        "Open Runtime settings and verify the Session API key. If the key is correct, check that it has access to the configured model and Base URL.",
+        t("service.authFailedDetail"),
       ),
     };
   }
@@ -108,10 +109,10 @@ export function modelServiceIssue(rawError: unknown): ModelServiceIssue {
     || lower.includes("model_not_found")
   ) {
     return {
-      title: "Model unavailable",
+      title: t("service.unavailableTitle"),
       detail: serviceDetail(
         reason,
-        "Open Runtime settings and verify the model name and Base URL. The configured model may not exist or may not be available to this account.",
+        t("service.unavailableDetail"),
       ),
     };
   }
@@ -125,17 +126,17 @@ export function modelServiceIssue(rawError: unknown): ModelServiceIssue {
     || lower.includes("dns")
   ) {
     return {
-      title: "Model service unavailable",
+      title: t("service.unreachableTitle"),
       detail: serviceDetail(
         reason,
-        "Check the Base URL, network connection, and model service status, then retry.",
+        t("service.unreachableDetail"),
       ),
     };
   }
 
   return {
-    title: "Model request failed",
-    detail: safe || "The model service did not provide a usable reason. Check Runtime settings and retry.",
+    title: t("service.failedTitle"),
+    detail: safe || t("service.failedDetailFallback"),
   };
 }
 

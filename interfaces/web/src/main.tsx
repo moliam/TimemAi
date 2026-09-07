@@ -95,6 +95,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { Appearance, applyAppearance, loadAppearance } from "./appearance";
+import { getLocale, setLocale, t, useT } from "./i18n";
 import { RestartCwdGate } from "./restart_cwd_gate";
 import {
   MemSwitchCandidate,
@@ -233,8 +234,8 @@ import {
   commandSessionId,
   isModelSubmissionCommand,
   modelDisplayName,
+  noModelEndpointsIssue,
   modelServiceIssue,
-  NO_MODEL_ENDPOINTS_ISSUE,
 } from "./model_service_ui";
 import {
   endpointDraftValid,
@@ -465,6 +466,7 @@ function saveSidebarLayout(layout: SidebarLayout) {
 }
 
 function TimemApp() {
+  useT();
   useDialogFocusTrap();
   const [appearance, setAppearance] = useState<Appearance>(loadAppearance);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -1589,7 +1591,7 @@ function TimemApp() {
             reportUiError(issue.title, issue.detail, sessionId);
           } else if (completed?.type === "favorite_capacity_update") {
             setFavoriteCapacityUpdating(false);
-            reportUiError("无法调整收藏夹空间", "请稍后重试。", sessionId);
+            reportUiError(t("errors.favoritesResizeTitle"), t("errors.retryLater"), sessionId);
           } else if (
             completed?.type === "favorite_create" ||
             completed?.type === "favorite_delete" ||
@@ -1597,10 +1599,10 @@ function TimemApp() {
           ) {
             setFavoritesLoading(false);
             setPendingFavoriteSourceKeys(new Set());
-            reportUiError("收藏夹暂时不可用", "请稍后重试。", sessionId);
+            reportUiError(t("errors.favoritesUnavailableTitle"), t("errors.retryLater"), sessionId);
           } else if (completed?.type === "chat_search") {
             setChatSearchPending(false);
-            reportUiError("搜索暂时不可用", "请稍后重试。", sessionId);
+            reportUiError(t("errors.searchUnavailableTitle"), t("errors.retryLater"), sessionId);
           } else {
             reportUiError(
               "Command rejected",
@@ -2627,7 +2629,7 @@ function TimemApp() {
           id: clientId(),
           sessionId,
           tone: "notice",
-          ...NO_MODEL_ENDPOINTS_ISSUE,
+          ...noModelEndpointsIssue(),
           createdAt: Date.now(),
         });
         return false;
@@ -2973,7 +2975,7 @@ function TimemApp() {
   const restartCwdDecision = activeSession?.restart_cwd_decision ?? null;
   const sessionWorkLocked = runtimeLocked || restartCwdDecision !== null;
   const sessionWorkLockReason = restartCwdDecision
-    ? "请先选择本 Session 在 Timem 重启后的工作目录"
+    ? t("sessions.restartGatePrompt")
     : sessionInteractionLockReason;
   const connectionLabel = runtimeConnectionLabel(
     connected,
@@ -2982,10 +2984,10 @@ function TimemApp() {
     reconnectAttempt,
   );
   const settingsTitle = !runtimeReady
-    ? "Wait for the runtime snapshot before opening settings"
+    ? t("nav.settingsLocked")
     : pendingMemSwitch
-      ? "Memory switch is in progress"
-      : "Open settings";
+      ? t("nav.settingsMemSwitch")
+      : t("nav.settingsOpen");
   const modelEndpointsUnavailable =
     !!server && server.model_endpoints.length === 0;
   const headerModelLabel =
@@ -3298,7 +3300,7 @@ function TimemApp() {
           <button
             type="button"
             className="mobile-sidebar-backdrop"
-            aria-label="Close session navigation"
+            aria-label={t("sessions.closeNavigation")}
             onClick={() => closeMobileSidebar()}
           />
         )}
@@ -3306,7 +3308,7 @@ function TimemApp() {
           id="session-navigation"
           ref={mobileSidebarRef}
           className={`sidebar ${leftSidebarCollapsed ? "collapsed" : ""} ${showMobileSessions ? "mobile-open" : ""}`}
-          aria-label="Session navigation"
+          aria-label={t("sessions.navigation")}
           tabIndex={-1}
         >
           {leftSidebarCollapsed && (
@@ -3315,7 +3317,7 @@ function TimemApp() {
                 type="button"
                 className="collapsed-brand brand-logo-toggle brand-logo-restore"
                 title="Show session navigation"
-                aria-label="Show session navigation"
+                aria-label={t("sessions.showNavigation")}
                 onClick={() =>
                   setSidebarLayout((current) => ({
                     ...current,
@@ -3354,7 +3356,7 @@ function TimemApp() {
               type="button"
               className="sidebar-resize-handle left"
               title="Resize session navigation"
-              aria-label="Resize session navigation"
+              aria-label={t("sessions.resizeNavigation")}
               onPointerDown={(event) => startSidebarResize("left", event)}
             />
           )}
@@ -3363,7 +3365,7 @@ function TimemApp() {
               type="button"
               className="brand-logo-toggle"
               title="Hide session navigation"
-              aria-label="Hide session navigation"
+              aria-label={t("sessions.hideNavigation")}
               onClick={() =>
                 setSidebarLayout((current) => ({
                   ...current,
@@ -3390,7 +3392,7 @@ function TimemApp() {
               type="button"
               className="mobile-sidebar-close"
               title="Close sessions"
-              aria-label="Close sessions"
+              aria-label={t("sessions.closePanel")}
               onClick={() => closeMobileSidebar()}
             >
               <X size={17} />
@@ -3404,7 +3406,7 @@ function TimemApp() {
                 type="button"
                 className="new-session-group"
                 title="New session group"
-                aria-label="New session group"
+                aria-label={t("sessions.newGroup")}
                 disabled={runtimeLocked || sessionDeleteMode}
                 onClick={() => setSessionGroupEditor({ name: "" })}
               >
@@ -3416,8 +3418,8 @@ function TimemApp() {
                 <button
                   type="button"
                   className="session-delete-cancel"
-                  title="取消删除 Session"
-                  aria-label="取消删除 Session"
+                  title={t("sessions.cancelDelete")}
+                  aria-label={t("sessions.cancelDelete")}
                   onClick={cancelSessionDeleteMode}
                 >
                   <X size={14} strokeWidth={3} />
@@ -3429,16 +3431,16 @@ function TimemApp() {
                 title={
                   sessionDeleteMode
                     ? selectedDeleteSessionId
-                      ? "确认删除选中的 Session"
-                      : "请选择要删除的 Session"
-                    : "选择要删除的 Session"
+                      ? t("sessions.confirmDeleteSelected")
+                      : t("sessions.selectToDeletePrompt")
+                    : t("sessions.selectToDelete")
                 }
                 aria-label={
                   sessionDeleteMode
                     ? selectedDeleteSessionId
-                      ? "确认删除选中的 Session"
-                      : "请选择要删除的 Session"
-                    : "选择要删除的 Session"
+                      ? t("sessions.confirmDeleteSelected")
+                      : t("sessions.selectToDeletePrompt")
+                    : t("sessions.selectToDelete")
                 }
                 disabled={
                   runtimeLocked ||
@@ -3474,8 +3476,8 @@ function TimemApp() {
               <input
                 autoFocus
                 value={sessionGroupEditor.name}
-                placeholder="Group name"
-                aria-label="New session group name"
+                placeholder={t("sessions.newGroupNamePlaceholder")}
+                aria-label={t("sessions.newGroupNameAria")}
                 onChange={(event) =>
                   setSessionGroupEditor({ name: event.target.value })
                 }
@@ -3496,7 +3498,7 @@ function TimemApp() {
           )}
           <nav
             className="session-list"
-            aria-label="Sessions"
+            aria-label={t("nav.sessions")}
             aria-busy={!snapshotReady}
           >
             <DndContext
@@ -4001,8 +4003,8 @@ function TimemApp() {
                                               <button
                                                 type="button"
                                                 className={`session-delete-select ${selectedDeleteSessionId === session.session_id ? "selected" : ""}`}
-                                                title={`选择删除 ${session.display_name}`}
-                                                aria-label={`选择删除 ${session.display_name}`}
+                                                title={t("sessions.selectForDelete", { name: session.display_name })}
+                                                aria-label={t("sessions.selectForDelete", { name: session.display_name })}
                                                 aria-pressed={
                                                   selectedDeleteSessionId ===
                                                   session.session_id
@@ -4116,8 +4118,8 @@ function TimemApp() {
             <button
               type="button"
               className={`sidebar-library-button ${chatLibraryMode === "search" ? "active" : ""}`}
-              title="Search chats"
-              aria-label="Search chats"
+              title={t("nav.searchChats")}
+              aria-label={t("nav.searchChats")}
               aria-expanded={chatLibraryMode === "search"}
               aria-controls="chat-library-center"
               disabled={!runtimeReady || pendingMemSwitch}
@@ -4132,13 +4134,13 @@ function TimemApp() {
               }}
             >
               <Search size={17} aria-hidden="true" />
-              {!leftSidebarCollapsed && <span>Search</span>}
+              {!leftSidebarCollapsed && <span>{t("nav.search")}</span>}
             </button>
             <button
               type="button"
               className={`sidebar-library-button ${chatLibraryMode === "favorites" ? "active" : ""}`}
-              title="Favorite answers"
-              aria-label="Favorite answers"
+              title={t("nav.favoriteAnswers")}
+              aria-label={t("nav.favoriteAnswers")}
               aria-expanded={chatLibraryMode === "favorites"}
               aria-controls="chat-library-center"
               disabled={!runtimeReady || pendingMemSwitch}
@@ -4158,7 +4160,7 @@ function TimemApp() {
               }}
             >
               <Star size={17} aria-hidden="true" />
-              {!leftSidebarCollapsed && <span>Favorite</span>}
+              {!leftSidebarCollapsed && <span>{t("nav.favorites")}</span>}
             </button>
             <button
               type="button"
@@ -4176,7 +4178,7 @@ function TimemApp() {
               }}
             >
               <Settings size={17} aria-hidden="true" />
-              {!leftSidebarCollapsed && <span>Settings</span>}
+              {!leftSidebarCollapsed && <span>{t("nav.settings")}</span>}
             </button>
           </div>
         </aside>
@@ -4244,12 +4246,12 @@ function TimemApp() {
                       <Sparkles size={14} />
                     </span>
                     <div className="endpoint-guide-copy">
-                      <strong>尚未配置模型接入点</strong>
-                      <span>添加一个接入点，即可开始使用当前 Session。</span>
+                      <strong>{t("modelService.unconfiguredTitle")}</strong>
+                      <span>{t("modelService.unconfiguredDetail")}</span>
                     </div>
                     <button type="button" onClick={openEndpointCreator}>
                       <Plus size={13} />
-                      <span>立即配置</span>
+                      <span>{t("modelService.configureNow")}</span>
                     </button>
                   </div>
                 )}
@@ -4924,8 +4926,8 @@ function TimemApp() {
               ) {
                 setFavoriteCapacityUpdating(false);
                 reportUiError(
-                  "无法调整收藏夹空间",
-                  "请检查连接后重试。",
+                  t("errors.favoritesResizeTitle"),
+                  t("errors.checkConnection"),
                   "system",
                 );
               }
@@ -5209,6 +5211,7 @@ function ExpandedTextEditor({
   onCommit: (value: string) => void;
   onClose: () => void;
 }) {
+  useT();
   // Keep high-frequency typing local to the fullscreen editor. Updating the
   // thread-level session draft for every key would rerender the entire chat UI.
   const [draft, setDraft] = useState(value);
@@ -5235,13 +5238,13 @@ function ExpandedTextEditor({
           <div>
             <span className="eyebrow">{eyebrow}</span>
             <h2>{title}</h2>
-            <p>输入内容会在完成编辑时一次性同步；不会自动保存或发送。</p>
+            <p>{t("composer.editCommitNote")}</p>
           </div>
           <button
             type="button"
             className="expanded-text-collapse"
-            title="收起编辑器"
-            aria-label="收起编辑器"
+            title={t("composer.collapseEditor")}
+            aria-label={t("composer.collapseEditor")}
             onClick={finish}
           >
             <Minimize2 size={16} />
@@ -5260,14 +5263,14 @@ function ExpandedTextEditor({
           <span>
             {maxLength
               ? `${draft.length.toLocaleString()} / ${maxLength.toLocaleString()}`
-              : `${draft.length.toLocaleString()} 字符`}
+              : t("composer.charCount", { count: draft.length.toLocaleString() })}
           </span>
           <div>
             <button type="button" className="secondary" onClick={onClose}>
-              取消修改
+              {t("composer.discardChanges")}
             </button>
             <button type="button" className="primary" onClick={finish}>
-              完成编辑
+              {t("composer.finishEdit")}
             </button>
           </div>
         </footer>
@@ -5304,6 +5307,7 @@ function WorkerRolePanel({
   onSelect: (roleId: string) => void;
   onCommand: (command: ClientCommand) => boolean;
 }) {
+  useT();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -5451,8 +5455,8 @@ function WorkerRolePanel({
             type="button"
             className="worker-role-drag"
             disabled={disabled || roleDeleteMode}
-            title={`拖动 ${role.name}`}
-            aria-label={`拖动 ${role.name}`}
+            title={t("roles.dragRole", { name: role.name })}
+            aria-label={t("roles.dragRole", { name: role.name })}
             {...attributes}
             {...listeners}
           >
@@ -5461,8 +5465,8 @@ function WorkerRolePanel({
           <label
             title={
               roleDeleteMode
-                ? `选择删除 ${role.name}`
-                : `Use ${role.name} for the next message`
+                ? t("roles.selectForDelete", { name: role.name })
+                : t("roles.useForNextMessage", { name: role.name })
             }
           >
             <input
@@ -5553,8 +5557,8 @@ function WorkerRolePanel({
                 <button
                   type="button"
                   className="worker-role-delete-cancel"
-                  title="取消删除 Role"
-                  aria-label="取消删除 Role"
+                  title={t("roles.cancelDelete")}
+                  aria-label={t("roles.cancelDelete")}
                   onClick={() => {
                     setRoleDeleteMode(false);
                     setSelectedDeleteRoleId("");
@@ -5569,16 +5573,16 @@ function WorkerRolePanel({
                 title={
                   roleDeleteMode
                     ? selectedDeleteRoleId
-                      ? "确认删除选中的 Role"
-                      : "请选择要删除的 Role"
-                    : "选择要删除的 Role"
+                      ? t("roles.confirmDeleteSelected")
+                      : t("roles.selectToDeletePrompt")
+                    : t("roles.selectToDelete")
                 }
                 aria-label={
                   roleDeleteMode
                     ? selectedDeleteRoleId
-                      ? "确认删除选中的 Role"
-                      : "请选择要删除的 Role"
-                    : "选择要删除的 Role"
+                      ? t("roles.confirmDeleteSelected")
+                      : t("roles.selectToDeletePrompt")
+                    : t("roles.selectToDelete")
                 }
                 disabled={
                   disabled ||
@@ -5627,8 +5631,8 @@ function WorkerRolePanel({
             className={`worker-role-help ${roleDeleteMode ? "delete-mode" : ""}`}
           >
             {roleDeleteMode
-              ? "勾选一个 Role，然后点击顶部对勾确认删除。"
-              : "拖动 Role 可排序或归入分组。"}
+              ? t("roles.deleteHint")
+              : t("roles.reorderHint")}
           </p>
           <DndContext
             sensors={sensors}
@@ -5681,8 +5685,8 @@ function WorkerRolePanel({
                           aria-controls={`worker-role-group-list-${group.id}`}
                           title={
                             collapsed
-                              ? `展开 ${group.name}`
-                              : `折叠 ${group.name}`
+                              ? t("roles.expandGroup", { name: group.name })
+                              : t("roles.collapseGroup", { name: group.name })
                           }
                           onClick={() => toggleRoleGroup(group.id)}
                         >
@@ -5735,7 +5739,7 @@ function WorkerRolePanel({
                           .map(roleItem)}
                         {group.role_ids.length === 0 && (
                           <span className="worker-role-drop-hint">
-                            拖动 Role 到这里
+                            {t("roles.dropHere")}
                           </span>
                         )}
                       </div>
@@ -5756,13 +5760,13 @@ function WorkerRolePanel({
                     aria-controls="worker-role-group-list-ungrouped"
                     title={
                       collapsedRoleGroupIds.has("ungrouped")
-                        ? "展开未分组"
-                        : "折叠未分组"
+                        ? t("roles.expandUngrouped")
+                        : t("roles.collapseUngrouped")
                     }
                     onClick={() => toggleRoleGroup("ungrouped")}
                   >
                     <ChevronRight size={12} />
-                    <strong>未分组</strong>
+                    <strong>{t("roles.ungrouped")}</strong>
                     <small>{ungroupedRoles.length}</small>
                   </button>
                 </header>
@@ -5775,7 +5779,7 @@ function WorkerRolePanel({
                     {ungroupedRoles.length === 0 &&
                       library.roles.length > 0 && (
                         <span className="worker-role-drop-hint">
-                          所有 Role 已归组
+                          {t("roles.allGrouped")}
                         </span>
                       )}
                   </div>
@@ -5783,7 +5787,7 @@ function WorkerRolePanel({
               </WorkerRoleDropGroup>
               {library.roles.length === 0 && (
                 <div className="worker-role-empty">
-                  还没有 Role。创建一个，供所有 Session 使用。
+                  {t("roles.emptyHint")}
                 </div>
               )}
               {!session && (
@@ -5835,8 +5839,8 @@ function WorkerRolePanel({
                 value={newGroupName}
                 maxLength={80}
                 disabled={disabled}
-                placeholder="新分组名称"
-                aria-label="Role group name"
+                placeholder={t("roles.newGroupName")}
+                aria-label={t("roles.groupNameAria")}
                 onChange={(event) => setNewGroupName(event.target.value)}
               />
               <button
@@ -5844,7 +5848,7 @@ function WorkerRolePanel({
                 className="worker-role-group-create"
                 disabled={disabled || !newGroupName.trim()}
               >
-                <Plus size={12} /> 分组
+                <Plus size={12} /> {t("roles.createGroup")}
               </button>
             </form>
           )}
@@ -5856,12 +5860,12 @@ function WorkerRolePanel({
                 submit();
               }}
             >
-              <strong>{editingId ? "编辑 Role" : "新建 Role"}</strong>
+              <strong>{editingId ? t("roles.editRole") : t("roles.newRole")}</strong>
               <input
                 value={name}
                 maxLength={80}
                 disabled={disabled}
-                placeholder="称呼，例如：严谨审查员"
+                placeholder={t("roles.namePlaceholder")}
                 aria-label="Role name"
                 onChange={(event) => setName(event.target.value)}
               />
@@ -5870,15 +5874,15 @@ function WorkerRolePanel({
                   value={description}
                   maxLength={16384}
                   disabled={disabled}
-                  placeholder="描述工作要求、步骤和约束…"
+                  placeholder={t("roles.descPlaceholder")}
                   aria-label="Role description"
                   onChange={(event) => setDescription(event.target.value)}
                 />
                 <button
                   type="button"
                   className="text-field-expand"
-                  title="展开编辑 Role 描述"
-                  aria-label="展开编辑 Role 描述"
+                  title={t("roles.expandDescEditor")}
+                  aria-label={t("roles.expandDescEditor")}
                   disabled={disabled}
                   onClick={() => setDescriptionExpanded(true)}
                 >
@@ -5891,26 +5895,26 @@ function WorkerRolePanel({
                   className="worker-role-primary-action"
                   disabled={disabled || !name.trim() || !description.trim()}
                 >
-                  {editingId ? "保存" : "创建"}
+                  {editingId ? t("common.save") : t("common.create")}
                 </button>
                 {editingId && (
                   <button type="button" onClick={resetEditor}>
-                    取消
+                    {t("common.cancel")}
                   </button>
                 )}
               </div>
               {descriptionExpanded && (
                 <ExpandedTextEditor
-                  eyebrow="ROLE DESCRIPTION"
+                  eyebrow={t("roles.descEyebrow")}
                   title={
                     editingId
-                      ? `编辑 ${name.trim() || "Role"} 的描述`
-                      : "编写 Role 描述"
+                      ? t("roles.editDescFor", { name: name.trim() || "Role" })
+                      : t("roles.writeDesc")
                   }
                   value={description}
                   maxLength={16384}
                   disabled={disabled}
-                  placeholder="描述工作要求、步骤和约束…"
+                  placeholder={t("roles.descPlaceholder")}
                   onCommit={setDescription}
                   onClose={() => setDescriptionExpanded(false)}
                 />
@@ -6202,11 +6206,11 @@ function ChatLibraryPanel({
   const loading = showingFavorites ? favoritesLoading : searchPending;
   const emptyLabel = showingFavorites
     ? normalizedFavoriteQuery
-      ? "No matching favorites."
-      : "Favorite final answers to keep them close."
+      ? t("chatLibrary.noMatchingFavorites")
+      : t("chatLibrary.favoritePrompt")
     : query.trim()
-      ? "No matching messages."
-      : "Search across user messages and final answers.";
+      ? t("chatLibrary.noMatchingMessages")
+      : t("chatLibrary.searchPrompt");
   const toggleFavoriteSelection = useCallback(
     (favoriteId: string) =>
       setSelectedFavoriteIds((current) => {
@@ -6262,14 +6266,14 @@ function ChatLibraryPanel({
       >
         <header className="chat-library-header">
           <div>
-            <span className="eyebrow">CHAT LIBRARY</span>
-            <strong>Search</strong>
+            <span className="eyebrow">{t("nav.chatLibrary")}</span>
+            <strong>{t("chatLibrary.title")}</strong>
           </div>
           <button
             type="button"
             className="icon-button"
-            title="Close chat library"
-            aria-label="Close chat library"
+            title={t("chatLibrary.close")}
+            aria-label={t("chatLibrary.close")}
             onClick={onClose}
           >
             <X size={16} />
@@ -6288,19 +6292,19 @@ function ChatLibraryPanel({
               autoFocus
               value={query}
               maxLength={256}
-              placeholder={showingFavorites ? "Filter favorites" : "Keywords"}
+              placeholder={showingFavorites ? t("chatLibrary.filterFavorites") : t("chatLibrary.keywords")}
               aria-label={
                 showingFavorites
-                  ? "Filter favorite answers"
-                  : "Search chat history"
+                  ? t("chatLibrary.filterFavoritesAria")
+                  : t("chatLibrary.searchHistory")
               }
               onChange={(event) => onQueryChange(event.target.value)}
             />
             {query && (
               <button
                 type="button"
-                title="Clear search"
-                aria-label="Clear search"
+                title={t("chatLibrary.clearSearch")}
+                aria-label={t("chatLibrary.clearSearch")}
                 onClick={() => onQueryChange("")}
               >
                 <X size={12} />
@@ -6309,9 +6313,9 @@ function ChatLibraryPanel({
           </label>
           <div className="chat-library-scope">
             <label>
-              <span>Search scope</span>
+              <span>{t("nav.searchScope")}</span>
               <select
-                aria-label="Search scope"
+                aria-label={t("nav.searchScope")}
                 value={scope}
                 onChange={(event) =>
                   onScopeChange(
@@ -6319,11 +6323,11 @@ function ChatLibraryPanel({
                   )
                 }
               >
-                <option value="all">All Sessions</option>
+                <option value="all">{t("nav.scopeAll")}</option>
                 <option value="session" disabled={!activeSession}>
-                  Current Session
+                  {t("chatLibrary.scopeSession")}
                 </option>
-                <option value="favorites">Favorites</option>
+                <option value="favorites">{t("nav.scopeFavorites")}</option>
               </select>
             </label>
             {!showingFavorites && (
@@ -6337,7 +6341,7 @@ function ChatLibraryPanel({
                 ) : (
                   <ArrowDown className="chat-library-submit-arrow" size={13} />
                 )}
-                <span>Search</span>
+                <span>{t("chatLibrary.submit")}</span>
               </button>
             )}
           </div>
@@ -6367,10 +6371,10 @@ function ChatLibraryPanel({
                       setFavoriteSort(event.target.value as typeof favoriteSort)
                     }
                   >
-                    <option value="time-desc">Newest</option>
-                    <option value="time-asc">Oldest</option>
-                    <option value="size-desc">Largest</option>
-                    <option value="size-asc">Smallest</option>
+                    <option value="time-desc">{t("nav.sortNewest")}</option>
+                    <option value="time-asc">{t("nav.sortOldest")}</option>
+                    <option value="size-desc">{t("nav.sortLargest")}</option>
+                    <option value="size-asc">{t("nav.sortSmallest")}</option>
                   </select>
                 </label>
               )}
@@ -6640,7 +6644,7 @@ function ToolRepoPanel({
     ? `Loading ${pendingTool.name} tool directory`
     : "";
   const sortLabel = sort === "time" ? "recent update" : sort;
-  const sortControlLabel = `Sort ToolRepo by ${sortLabel}`;
+  const sortControlLabel = t("toolRepo.sortBy", { sort: sortLabel });
   return (
     <aside
       id="toolrepo-panel"
@@ -6659,7 +6663,7 @@ function ToolRepoPanel({
       <header className="side-panel-header">
         <div className="side-panel-title">
           <Wrench size={15} />
-          <strong>ToolRepo</strong>
+          <strong>{t("toolRepo.title")}</strong>
         </div>
         <button
           type="button"
@@ -6715,9 +6719,9 @@ function ToolRepoPanel({
             title={sortControlLabel}
             aria-label={sortControlLabel}
           >
-            <option value="time">Recent</option>
-            <option value="type">Type</option>
-            <option value="language">Language</option>
+            <option value="time">{t("toolRepo.sortRecent")}</option>
+            <option value="type">{t("toolRepo.sortType")}</option>
+            <option value="language">{t("toolRepo.sortLanguage")}</option>
           </select>
         </div>
         {session && (
@@ -6743,8 +6747,8 @@ function ToolRepoPanel({
                 const renamingTool = pendingToolRenameIds.has(tool.tool_id);
                 const expanded = selectedTool?.summary.tool_id === tool.tool_id;
                 const toolToggleLabel = expanded
-                  ? `收起 ${tool.name} 详情`
-                  : `展开 ${tool.name} 详情`;
+                  ? t("tools.toolDetailCollapse", { name: tool.name })
+                  : t("tools.toolDetailExpand", { name: tool.name });
                 return (
                   <div
                     className={`toolrepo-item ${selectedTool?.summary.tool_id === tool.tool_id ? "selected" : ""} ${loadingDetail ? "loading-detail" : ""} ${renamingTool ? "renaming-tool" : ""}`}
@@ -6811,13 +6815,13 @@ function ToolRepoPanel({
                         <strong>{tool.name}</strong>
                         <small>
                           {renamingTool
-                            ? "Renaming..."
+                            ? t("toolRepo.renaming")
                             : loadingDetail
-                              ? "Loading details..."
+                              ? t("toolRepo.loadingDetails")
                               : `${tool.language} · ${tool.tool_type}`}
                         </small>
                         <em className="toolrepo-toggle-state">
-                          {expanded ? "收起" : "展开"}
+                          {expanded ? t("common.collapse") : t("common.expand")}
                         </em>
                       </span>
                     </button>
@@ -6900,7 +6904,7 @@ function ToolRepoPanel({
                       aria-label={`Stop viewing ${pendingTool.name} details`}
                       onClick={onCollapseTool}
                     >
-                      收起详情
+                      {t("tools.collapseDetails")}
                     </button>
                   </div>
                 </header>
@@ -6947,7 +6951,7 @@ function ToolRepoPanel({
                         aria-label="Collapse tool detail"
                         onClick={onCollapseTool}
                       >
-                        收起详情
+                        {t("tools.collapseDetails")}
                       </button>
                     </div>
                   </header>
@@ -6999,7 +7003,7 @@ function ToolRepoPanel({
             }}
           >
             <Terminal size={14} />
-            在命令行中打开目录
+            {t("tools.openInTerminal")}
           </button>
         </div>
       )}
@@ -7431,7 +7435,7 @@ function TimemThread({
           reason:
             activeSession.message_queue.continuation.state === "blocked"
               ? activeSession.message_queue.continuation.reason
-              : "用户关闭了自动发送",
+              : t("composer.autoSendDisabledByUser"),
           stoppedAtMs: 0,
         }
       : null;
@@ -7501,16 +7505,16 @@ function TimemThread({
     ? ""
     : "Create a session before using Timem";
   const uploadingAttachmentText = uploadingAttachmentFile
-    ? `Uploading ${uploadingAttachmentFile.name}`
-    : "Uploading file…";
+    ? t("composer.uploading", { name: uploadingAttachmentFile.name })
+    : t("composer.uploadingFile");
   const composerHint =
     missingSessionHint ||
     lockedControlHint ||
     (uploadingAttachment
-      ? `${uploadingAttachmentText} · send is paused until it finishes`
+      ? t("composer.uploadingHint", { text: uploadingAttachmentText })
       : activeSession?.state === "working"
-        ? "Enter to queue safely in Timem · use 立即 to supplement this turn"
-        : "Enter to send · Shift+Enter for newline");
+        ? t("composer.queueSupplementHint")
+        : t("composer.sendHint"));
   const attachTitle =
     missingSessionHint ||
     lockedControlHint ||
@@ -8152,7 +8156,7 @@ function TimemThread({
   const submitDraft = () => {
     if (uploadingAttachment || sessionInteractionLocked) return;
     if (activeSession && activeSession.state !== "working" && !draft.trim()) {
-      if (!window.confirm("未输入内容，是否让Timem直接继续")) return;
+      if (!window.confirm(t("composer.emptyContinueConfirm"))) return;
       onSendForSession(
         activeSession.session_id,
         "",
@@ -8384,7 +8388,7 @@ function TimemThread({
               aria-live="polite"
             >
               <header>
-                <span>待发送</span>
+                <span>{t("composer.queueTitle")}</span>
                 {queuePanelCollapsed ? (
                   <div
                     className={`queued-message-summary ${firstQueuedMessage?.deliveryError ? "delivery-error" : ""}`}
@@ -8402,29 +8406,35 @@ function TimemThread({
                         </small>
                       )}
                     <small className="queued-message-summary-count">
-                      {displayQueuedMessages.length} 条
+                      {t("composer.countLabel", { count: displayQueuedMessages.length })}
                     </small>
                   </div>
                 ) : (
                   <small title={queuedMessagesPause?.reason}>
                     {queuedMessagesPause
-                      ? `自动发送已停止${queuedMessagesPause.reason ? `：${queuedMessagesPause.reason}` : ""}`
-                      : "正在迁移到 Timem 运行时队列"}
+                      ? queuedMessagesPause.reason
+                        ? t("composer.autoSendStoppedReason", { reason: queuedMessagesPause.reason })
+                        : t("composer.autoSendStopped")
+                      : t("composer.migratingToQueue")}
                   </small>
                 )}
                 <div className="queued-message-header-actions">
                   <label className="queued-auto-send-control">
-                    <span>自动发送</span>
+                    <span>{t("composer.autoSend")}</span>
                     <button
                       type="button"
                       role="switch"
                       className="queued-auto-send-switch"
                       aria-checked={!queuedMessagesPause}
                       aria-label={
-                        queuedMessagesPause ? "开启自动发送" : "停止自动发送"
+                        queuedMessagesPause
+                          ? t("composer.enableAutoSend")
+                          : t("composer.pauseAutoSend")
                       }
                       title={
-                        queuedMessagesPause ? "开启自动发送" : "停止自动发送"
+                        queuedMessagesPause
+                          ? t("composer.enableAutoSend")
+                          : t("composer.pauseAutoSend")
                       }
                       onClick={() => {
                         if (!activeSessionId) return;
@@ -8445,8 +8455,8 @@ function TimemThread({
                       aria-expanded={queueExpanded}
                       title={
                         queueExpanded
-                          ? "收起待发送消息"
-                          : `向上展开全部 ${displayQueuedMessages.length} 条待发送消息`
+                          ? t("composer.collapseQueue")
+                          : t("composer.expandAllQueue", { count: displayQueuedMessages.length })
                       }
                       onClick={toggleQueuedMessages}
                     >
@@ -8457,8 +8467,8 @@ function TimemThread({
                       )}
                       <span>
                         {queueExpanded
-                          ? "收起"
-                          : `展开 ${hiddenQueuedMessageCount} 条`}
+                          ? t("composer.collapseOne")
+                          : t("composer.expandCount", { count: hiddenQueuedMessageCount })}
                       </span>
                     </button>
                   )}
@@ -8469,8 +8479,8 @@ function TimemThread({
                     aria-controls={`queued-message-items-${activeSession.session_id}`}
                     title={
                       queuePanelCollapsed
-                        ? "展开待发送队列"
-                        : "折叠待发送队列为一行"
+                        ? t("composer.expandQueuePanel")
+                        : t("composer.collapseQueuePanel")
                     }
                     onClick={toggleQueuedMessagePanel}
                   >
@@ -8479,7 +8489,7 @@ function TimemThread({
                     ) : (
                       <ChevronUp size={14} />
                     )}
-                    <span>{queuePanelCollapsed ? "展开" : "折叠"}</span>
+                    <span>{queuePanelCollapsed ? t("composer.toggleQueuePanel") : t("composer.collapsePanel")}</span>
                   </button>
                 </div>
               </header>
@@ -8554,8 +8564,8 @@ function TimemThread({
                                   type="button"
                                   className="queued-message-drag"
                                   disabled={dragDisabled}
-                                  title={`拖动调整第 ${index + 1} 条消息的顺序`}
-                                  aria-label={`拖动调整第 ${index + 1} 条消息的顺序`}
+                                  title={t("composer.reorderItem", { index: index + 1 })}
+                                  aria-label={t("composer.reorderItem", { index: index + 1 })}
                                   {...attributes}
                                   {...listeners}
                                 >
@@ -8563,7 +8573,7 @@ function TimemThread({
                                 </button>
                                 <span
                                   className="queued-message-order"
-                                  aria-label={`Queue position ${index + 1}`}
+                                  aria-label={t("composer.queuePosition", { index: index + 1 })}
                                 >
                                   {index + 1}
                                 </span>
@@ -8601,7 +8611,7 @@ function TimemThread({
                                       className="queued-message-editor"
                                       autoFocus
                                       value={editingQueuedMessage.text}
-                                      aria-label={`编辑第 ${index + 1} 条待发送消息`}
+                                      aria-label={t("composer.editItem", { index: index + 1 })}
                                       onChange={(event) =>
                                         setEditingQueuedMessage({
                                           ...editingQueuedMessage,
@@ -8634,7 +8644,7 @@ function TimemThread({
                                   {message.attachmentIds.length > 0 && (
                                     <small className="queued-message-attachments">
                                       <Paperclip size={11} />
-                                      {message.attachmentIds.length} 个附件
+                                      {t("composer.attachmentCount", { count: message.attachmentIds.length })}
                                     </small>
                                   )}
                                   {message.deliveryError && (
@@ -8655,7 +8665,7 @@ function TimemThread({
                                         }
                                         onClick={saveQueuedMessageEdit}
                                       >
-                                        保存
+                                        {t("common.save")}
                                       </button>
                                       <button
                                         type="button"
@@ -8665,7 +8675,7 @@ function TimemThread({
                                           setEditingQueuedMessage(undefined)
                                         }
                                       >
-                                        取消
+                                        {t("common.cancel")}
                                       </button>
                                     </>
                                   ) : (
@@ -8673,8 +8683,8 @@ function TimemThread({
                                       <button
                                         type="button"
                                         className="queued-message-edit"
-                                        title="重新编辑这条待发送消息"
-                                        aria-label={`重新编辑第 ${index + 1} 条待发送消息`}
+                                        title={t("composer.reEditItem")}
+                                        aria-label={t("composer.reEditItemIndex", { index: index + 1 })}
                                         disabled={claimed}
                                         onClick={() => {
                                           setEditingQueuedMessage({
@@ -8697,10 +8707,10 @@ function TimemThread({
                                         className="queued-message-supplement"
                                         title={
                                           message.deliveryError
-                                            ? "重试发送这条消息"
+                                            ? t("composer.retryThisMessage")
                                             : sendAsNewTurn
-                                              ? "作为新消息开始任务"
-                                              : "立即发送为当前任务的补充"
+                                              ? t("composer.startAsNewTask")
+                                              : t("composer.sendAsSupplement")
                                         }
                                         disabled={
                                           claimed ||
@@ -8716,7 +8726,7 @@ function TimemThread({
                                           });
                                         }}
                                       >
-                                        立即
+                                        {t("composer.sendNow")}
                                       </button>
                                       <button
                                         type="button"
@@ -8771,7 +8781,7 @@ function TimemThread({
                           {draggedQueuedMessage.attachmentIds.length > 0 && (
                             <small className="queued-message-attachments">
                               <Paperclip size={11} />
-                              {draggedQueuedMessage.attachmentIds.length} 个附件
+                              {t("composer.attachmentCount", { count: draggedQueuedMessage.attachmentIds.length })}
                             </small>
                           )}
                         </div>
@@ -8875,14 +8885,14 @@ function TimemThread({
                   value={draft}
                   placeholder={
                     !activeSession
-                      ? "Create a session to start…"
+                      ? t("composer.createSessionFirst")
                       : sessionInteractionLocked
                         ? sessionInteractionLockReason
                         : activeSession.state === "working"
-                          ? "在 Timem思考时继续输入补充对话..."
-                          : "输入问题，或按发送直接继续..."
+                          ? t("composer.placeholderQueue")
+                          : t("composer.placeholderDirect")
                   }
-                  aria-label="Message Timem"
+                  aria-label={t("composer.messageAria")}
                   aria-describedby={composerHintId}
                   title={composerHint}
                   disabled={!activeSession || sessionInteractionLocked}
@@ -8924,8 +8934,8 @@ function TimemThread({
                 <button
                   type="button"
                   className="text-field-expand"
-                  title="展开编辑用户信息"
-                  aria-label="展开编辑用户信息"
+                  title={t("composer.expandEditUserMessage")}
+                  aria-label={t("composer.expandEditUserMessage")}
                   disabled={!activeSession || sessionInteractionLocked}
                   onClick={() => setComposerExpanded(true)}
                 >
@@ -8934,14 +8944,14 @@ function TimemThread({
               </div>
               {composerExpanded && activeSession && (
                 <ExpandedTextEditor
-                  eyebrow="MESSAGE"
-                  title="编辑用户信息"
+                  eyebrow={t("composer.eyebrowMessage")}
+                  title={t("composer.editUserMessage")}
                   value={draft}
                   disabled={sessionInteractionLocked}
                   placeholder={
                     activeSession.state === "working"
-                      ? "在 Timem思考时继续输入补充对话..."
-                      : "输入问题，或按发送直接继续..."
+                      ? t("composer.placeholderQueue")
+                      : t("composer.placeholderDirect")
                   }
                   onCommit={(value) =>
                     setDraftsBySession((current) =>
@@ -8960,7 +8970,7 @@ function TimemThread({
                 >
                   <BriefcaseBusiness size={14} />
                   <span>
-                    本条将使用{" "}
+                    {t("composer.usingRoles")}{" "}
                     <strong>
                       {selectedRoles.map((role) => role.name).join("、")}
                     </strong>
@@ -9092,14 +9102,14 @@ function TimemThread({
             ? undefined
             : { left: `${userMessageNavigationLayout.left}px` }
         }
-        aria-label="用户消息导航"
+        aria-label={t("messageNav.userMessages")}
         onPointerEnter={lockUserMessageNavigationLayout}
         onPointerLeave={unlockUserMessageNavigationLayout}
       >
         <button
           type="button"
-          title="上一条用户消息"
-          aria-label="上一条用户消息"
+          title={t("messageNav.previousMessage")}
+          aria-label={t("messageNav.previousMessage")}
           disabled={!userMessageNavigation.previous}
           onClick={() => navigateUserMessage("previous")}
         >
@@ -9108,10 +9118,10 @@ function TimemThread({
         <button
           type="button"
           title={
-            userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"
+            userMessageNavigation.next ? t("messageNav.nextMessage") : t("messageNav.jumpToBottom")
           }
           aria-label={
-            userMessageNavigation.next ? "下一条用户消息" : "导航至聊天最下方"
+            userMessageNavigation.next ? t("messageNav.nextMessage") : t("messageNav.jumpToBottom")
           }
           disabled={
             !userMessageNavigation.next && !userMessageNavigation.bottom
@@ -9130,20 +9140,20 @@ function TimemThread({
             title={
               activeSession.state === "working"
                 ? threadAwayFromBottom
-                  ? "工作仍在继续，跳转到最新内容"
-                  : "工作仍在继续，当前已是最新内容"
+                  ? t("messageNav.workingJumpLatest")
+                  : t("messageNav.workingAtLatest")
                 : threadAwayFromBottom
-                  ? "跳转到聊天最下方"
-                  : "当前已是聊天最下方"
+                  ? t("messageNav.jumpToChatBottom")
+                  : t("messageNav.atChatBottom")
             }
             aria-label={
               activeSession.state === "working"
                 ? threadAwayFromBottom
-                  ? "工作仍在继续，跳转到最新内容"
-                  : "工作仍在继续，当前已是最新内容"
+                  ? t("messageNav.workingJumpLatest")
+                  : t("messageNav.workingAtLatest")
                 : threadAwayFromBottom
-                  ? "跳转到聊天最下方"
-                  : "当前已是聊天最下方"
+                  ? t("messageNav.jumpToChatBottom")
+                  : t("messageNav.atChatBottom")
             }
             onClick={navigateWorkingToThreadBottom}
           >
@@ -9301,7 +9311,7 @@ const TurnInteraction = memo(function TurnInteraction({
             sessionId,
             tone: "thinking" as const,
             kind: "user_supplement" as const,
-            title: "[用户补充]",
+            title: t("composer.supplementTitle"),
             detail: entry.text,
             createdAt: entry.created_at_ms,
           },
@@ -9535,7 +9545,7 @@ const TurnInteraction = memo(function TurnInteraction({
                   >
                     <Trash2 size={13} />
                   </button>
-                  {entry.kind === "supplement" && <span>[补充]</span>}
+                  {entry.kind === "supplement" && <span>{t("composer.supplementTag")}</span>}
                   <MarkdownContent text={entry.text} />
                   {(
                     entry.worker_roles ??
@@ -9543,7 +9553,7 @@ const TurnInteraction = memo(function TurnInteraction({
                   ).length > 0 && (
                     <div
                       className="turn-entry-roles"
-                      aria-label={`使用 Role：${(entry.worker_roles ?? (entry.worker_role ? [entry.worker_role] : [])).map((role) => role.name).join("、")}`}
+                      aria-label={t("roles.appliedAria", { names: (entry.worker_roles ?? (entry.worker_role ? [entry.worker_role] : [])).map((role) => role.name).join("、") })}
                     >
                       <BriefcaseBusiness size={12} />
                       <span>Role</span>
@@ -9627,7 +9637,7 @@ const TurnInteraction = memo(function TurnInteraction({
                   )}
                 {interrupted && (
                   <span className="work-title-status">
-                    ({cancelled ? "Cancelled" : "Interrupted"})
+                    ({cancelled ? t("turn.cancelled") : t("turn.interrupted")})
                   </span>
                 )}
               </button>
@@ -9636,8 +9646,8 @@ const TurnInteraction = memo(function TurnInteraction({
                   className={`model-retry-status ${modelRetryStatus.kind}`}
                 >
                   <summary
-                    title={`展开 ${modelRetryStatus.label} 详情`}
-                    aria-label={`展开 ${modelRetryStatus.label} 详情`}
+                    title={t("retry.detailExpand", { name: modelRetryStatus.label })}
+                    aria-label={t("retry.detailExpand", { name: modelRetryStatus.label })}
                   >
                     <ChevronRight size={12} aria-hidden="true" />
                     <span>{modelRetryStatus.label}</span>
@@ -9928,12 +9938,13 @@ function StreamChatAnswer({ answer, superseded }: {
 }) {
   const [expanded, setExpanded] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  useT();
   // Keep provisional Chat readable; later AI content may fold confirmed Chat.
   // Manual disclosure remains available; archival must preserve a Chat entry.
   const open = expanded || (!superseded && !collapsed);
   return <section className={`turn-chat-delivery${open ? " expanded" : " collapsed"}`}>
     <button type="button" className="working-chip work-title-chip work-collapse-toggle chat-title-chip"
-      aria-label={open ? "Collapse interim answer into Chat" : "Show chat answers"}
+      aria-label={open ? t("tools.hideChatAria") : t("tools.showChatAria")}
       aria-expanded={open} onClick={() => { setExpanded(!open); setCollapsed(open); }}>
       <ChevronRight className="work-collapse-arrow" size={13} aria-hidden="true" />Chat{!open && " (+1)"}
     </button>
@@ -9997,7 +10008,7 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
   // +/- 不表达成功失败；计数另用 ✓ / ✗。保留按钮与行节点，仅新计数可重放反馈。
   return <div ref={runRef} className="stream-tool-run">
     {completed.length > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
-      {expanded ? <Minus size={13} aria-hidden="true" /> : <Plus size={13} aria-hidden="true" />}<span>tools</span> <span key={countRevision} aria-label={showResults ? `${succeededCount} succeeded, ${failedCount} failed` : `${completed.length} Done`} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{showResults ? toolResultCountsLabel(succeededCount, failedCount) : `${completed.length} Done`}</span>
+      {expanded ? <Minus size={13} aria-hidden="true" /> : <Plus size={13} aria-hidden="true" />}<span>{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
     </button>}
     {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
       <div><StreamToolRow activity={activity} /></div>
@@ -10017,12 +10028,13 @@ function ActionStatus({ status, label, className }: { status: string; label: str
       setRevision(value => value + 1);
     }
   }, [status]);
-  return <span className={className} role="status" aria-live="polite" aria-atomic="true" aria-label={!showResults && !isToolActivityRunning(status) ? "Done" : status === "completed" ? "Succeeded" : status === "failed" ? "Failed" : undefined}>
-    <span key={revision} className={revision ? "action-status-changed" : undefined}>{!showResults && !isToolActivityRunning(status) ? "Done" : label}</span>
+  return <span className={className} role="status" aria-live="polite" aria-atomic="true" aria-label={!showResults && !isToolActivityRunning(status) ? t("tools.done") : status === "completed" ? t("tools.succeeded") : status === "failed" ? t("tools.failed") : undefined}>
+    <span key={revision} className={revision ? "action-status-changed" : undefined}>{!showResults && !isToolActivityRunning(status) ? t("tools.done") : label}</span>
   </span>;
 }
 
 const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Activity }) {
+  useT();
   const status = activity.tool_status || TOOL_STATUS_RUNNING;
   const running = isToolActivityRunning(status);
   const toolName = toolActivityDisplayName(
@@ -10104,6 +10116,7 @@ function TurnAnswerDelivery({
   onToolGen?: () => void;
   onDelete?: () => void;
 }) {
+  useT();
   const streamUiMode = useStreamUiMode();
   const preview = streamUiMode ? turn.preview : undefined;
   const previewChat = preview?.chat ?? [];
@@ -10137,9 +10150,9 @@ function TurnAnswerDelivery({
       {streamRetained && <StreamProcess closing={turn.state !== "working"} onArchived={onStreamArchived}>
         <StreamActivityPresentation thoughtText={intermediate && !retainedThought ? thoughtText : ""} activities={streamTools} answers={items} responseArriving={!!previewText} />
       </StreamProcess>}
-      {liveAnswer && <div className={`stream-thought-text live-interim-answer${liveAnswer.provisional ? " provisional-chat" : ""}`} aria-label="Current interim answer">
+      {liveAnswer && <div className={`stream-thought-text live-interim-answer${liveAnswer.provisional ? " provisional-chat" : ""}`} aria-label={t("interim.currentAnswer")}>
         {liveAnswer.provisional ? <StreamText text={liveAnswer.answer} /> : <MarkdownContent text={liveAnswer.answer} />}
-        <button type="button" className="working-chip" aria-label="Collapse interim answer into Chat" onClick={() => setCollapsedAnswer(liveAnswer.key)}>收起到 Chat</button>
+        <button type="button" className="working-chip" aria-label={t("tools.collapseToChatAria")} onClick={() => setCollapsedAnswer(liveAnswer.key)}>{t("tools.collapseToChat")}</button>
       </div>}
       {hasChat && (
         <section
@@ -10149,10 +10162,8 @@ function TurnAnswerDelivery({
             <button
               type="button"
               className="working-chip work-title-chip work-collapse-toggle chat-title-chip"
-              title={chatExpanded ? "Hide chat answers" : "Show chat answers"}
-              aria-label={
-                chatExpanded ? "Hide chat answers" : "Show chat answers"
-              }
+              title={chatExpanded ? t("tools.hideChatAria") : t("tools.showChatAria")}
+              aria-label={chatExpanded ? t("tools.hideChatAria") : t("tools.showChatAria")}
               aria-expanded={chatExpanded}
               aria-controls={chatPanelId}
               onClick={() => setChatExpanded((expanded) => !expanded)}
@@ -10726,7 +10737,7 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
                         strokeWidth={1.8}
                         aria-hidden="true"
                       />
-                      Contents
+                      {t("outline.contents")}
                     </span>
                   </header>
                   <nav ref={outlineNavRef}>
@@ -10738,11 +10749,11 @@ function FinalAnswerContent({ text, provisional = false }: { text: string; provi
                           ? "location"
                           : undefined
                       }
-                      title="Go to the start of this answer"
+                      title={t("outline.goToStart")}
                       onClick={navigateToStart}
                     >
                       <CornerUpLeft size={11} aria-hidden="true" />
-                      <span>Start</span>
+                      <span>{t("outline.start")}</span>
                     </button>
                     {outline.map((item) => (
                       <button
@@ -10833,18 +10844,18 @@ function LiveTurnUsage({ turn }: { turn: WebTurn }) {
   const usage = turnLiveUsage(turn);
   if (!usage) return null;
   return (
-    <div className="live-turn-usage" aria-label="Current task token usage">
+    <div className="live-turn-usage" aria-label={t("usage.aria")}>
       <span>
-        <b>Task</b> ▲{formatTokens(usage.total.prompt_tokens) ?? "0"} ▼
+        <b>{t("usage.task")}</b> ▲{formatTokens(usage.total.prompt_tokens) ?? "0"} ▼
         {formatTokens(usage.total.completion_tokens) ?? "0"}
       </span>
       <span>
-        <b>Latest</b> △{formatTokens(usage.latest.prompt_tokens) ?? "0"} ▽
+        <b>{t("usage.latest")}</b> △{formatTokens(usage.latest.prompt_tokens) ?? "0"} ▽
         {formatTokens(usage.latest.completion_tokens) ?? "0"}
       </span>
       {!!usage.total.cached_tokens && (
         <span>
-          <b>KVC</b> {formatTokens(usage.total.cached_tokens)}
+          <b>{t("usage.kvc")}</b> {formatTokens(usage.total.cached_tokens)}
         </span>
       )}
     </div>
@@ -10910,7 +10921,12 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
       </blockquote>
     );
   const collapse = () => setOpen(false);
-  const summaryLabel = `${open ? "收起" : "展开"} ToolGen 详情${activity.title ? `：${activity.title}` : ""}`;
+  const toolgenBaseLabel = open
+    ? t("tools.toolgenCollapse")
+    : t("tools.toolgenExpand");
+  const summaryLabel = activity.title
+    ? `${toolgenBaseLabel}：${activity.title}`
+    : toolgenBaseLabel;
   return (
     <details
       className={`toolgen-notice ${activity.toolgen_phase ?? ""}`}
@@ -10918,8 +10934,10 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary
-        title={open ? "收起 ToolGen 详情" : "展开 ToolGen 详情"}
+        title={open ? t("tools.toolgenCollapse") : t("tools.toolgenExpand")}
         aria-label={summaryLabel}
+        data-expanded-label={t("common.collapse")}
+        data-collapsed-label={t("common.expand")}
       >
         <ChevronRight size={13} />
         <span>{activity.title}</span>
@@ -10932,7 +10950,7 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
           aria-label="Collapse ToolGen details"
           onClick={collapse}
         >
-          收起详情
+          {t("tools.collapseDetails")}
         </button>
         <MarkdownContent text={activity.detail ?? ""} />
         <button
@@ -10942,7 +10960,7 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
           aria-label="Collapse ToolGen details"
           onClick={collapse}
         >
-          收起详情
+          {t("tools.collapseDetails")}
         </button>
       </div>
     </details>
@@ -10950,20 +10968,20 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
 }
 
 function toolActivityGroupStatusLabel(summary: ToolActivitySummary, showResults: boolean) {
-  if (!showResults && summary.status !== "running") return "Done";
+  if (!showResults && summary.status !== "running") return t("tools.done");
   if (summary.status === "completed") return "✓";
   if (summary.status === "failed") return `✗(${summary.failedCount})`;
 
   const activeParts: string[] = [];
   if (summary.foregroundRunningCount > 0)
-    activeParts.push(`fg ${summary.foregroundRunningCount}`);
+    activeParts.push(t("tools.fgCount", { count: summary.foregroundRunningCount }));
   if (summary.backgroundRunningCount > 0)
-    activeParts.push(`bg ${summary.backgroundRunningCount}`);
+    activeParts.push(t("tools.bgCount", { count: summary.backgroundRunningCount }));
   if (showResults && summary.failedCount > 0)
-    activeParts.push(`failed ${summary.failedCount}`);
+    activeParts.push(t("tools.failedCount", { count: summary.failedCount }));
   return activeParts.length > 0
-    ? `running (${activeParts.join(" · ")})`
-    : "running";
+    ? t("tools.runningWith", { parts: activeParts.join(" · ") })
+    : t("tools.running");
 }
 
 function ToolActivityGroup({ summary, enterPulse = false }: { summary: ToolActivitySummary; enterPulse?: boolean }) {
@@ -10979,7 +10997,11 @@ function ToolActivityGroup({ summary, enterPulse = false }: { summary: ToolActiv
     return <ToolActivity activity={singleActivity} />;
   const running = summary.status === "running";
   const groupStatusLabel = toolActivityGroupStatusLabel(summary, showResults);
-  const summaryLabel = `${open ? "收起" : "展开"}工具活动：${summary.label}，${groupStatusLabel}`;
+  const summaryLabel = t("tools.groupSummary", {
+    action: open ? t("tools.groupCollapse") : t("tools.groupExpand"),
+    label: summary.label,
+    status: groupStatusLabel,
+  });
   return (
     <details
       className={`tool-activity-group ${!showResults && summary.status !== "running" ? "settled" : summary.status}${enterPulse ? " thought-run-enter" : ""}`}
@@ -10989,7 +11011,7 @@ function ToolActivityGroup({ summary, enterPulse = false }: { summary: ToolActiv
     >
       <summary
         aria-label={summaryLabel}
-        title={open ? "收起工具活动" : "展开工具活动"}
+        title={open ? t("tools.groupCollapse") : t("tools.groupExpand")}
       >
         <ChevronRight
           className="tool-activity-group-icon tool-activity-chevron"
@@ -11057,10 +11079,13 @@ function ToolActivity({ activity }: { activity: Activity }) {
   const statusLabel =
     status === "timeout" && bashActivity
       ? activity.pid !== undefined
-        ? `wait ended · process still running · pid ${activity.pid}`
-        : "wait ended · process may still be running"
+        ? t("tools.waitEndedRunning", { pid: activity.pid })
+        : t("tools.waitEndedMaybe")
       : humanizeToolStatus(status);
-  const summaryLabel = `${open ? "收起" : "展开"}工具详情：${toolName}`;
+  const summaryLabel = t("tools.detailSummary", {
+    action: open ? t("tools.detailCollapse") : t("tools.detailExpand"),
+    name: toolName,
+  });
   const summaryContent = (
     <>
       {hasExpandableDetail ? (
@@ -11082,13 +11107,13 @@ function ToolActivity({ activity }: { activity: Activity }) {
         <ActionStatus status={status} label={statusLabel} className="tool-activity-status" />
         {remainingWaitMs !== undefined && (
           <span className="tool-activity-countdown">
-            {formatRemainingDuration(remainingWaitMs)} remaining
+            {t("tools.remaining", { time: formatRemainingDuration(remainingWaitMs) })}
           </span>
         )}
         {displayedElapsedMs !== undefined && (pollingActivity || !running) && (
           <span className="tool-activity-duration">
             {pollingActivity
-              ? `${formatClockDuration(displayedElapsedMs)} elapsed`
+              ? t("tools.elapsed", { time: formatClockDuration(displayedElapsedMs) })
               : formatDuration(displayedElapsedMs)}
           </span>
         )}
@@ -11117,7 +11142,7 @@ function ToolActivity({ activity }: { activity: Activity }) {
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary
-        title={open ? "收起工具详情" : "展开工具详情"}
+        title={open ? t("tools.detailCollapse") : t("tools.detailExpand")}
         aria-label={summaryLabel}
       >
         {summaryContent}
@@ -11224,9 +11249,18 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
     activity.text_before_tokens !== undefined ||
     activity.native_before_tokens !== undefined;
   const breakdown = hasBreakdown
-    ? `Text ${formatTokens(activity.text_before_tokens) ?? "?"} → ${formatTokens(activity.text_after_tokens) ?? "?"}; Tool ${formatTokens(activity.native_before_tokens) ?? "?"} → ${formatTokens(activity.native_after_tokens) ?? "?"}`
+    ? t("context.textToolBreakdown", {
+        textBefore: formatTokens(activity.text_before_tokens) ?? "?",
+        textAfter: formatTokens(activity.text_after_tokens) ?? "?",
+        toolBefore: formatTokens(activity.native_before_tokens) ?? "?",
+        toolAfter: formatTokens(activity.native_after_tokens) ?? "?",
+      })
     : undefined;
-  const label = `Dynamic context compacted: ${formatTokens(before) ?? "unknown"} to ${formatTokens(after) ?? "unknown"}${breakdown ? `. ${breakdown}` : ""}`;
+  const label = t("context.compactedAria", {
+    before: formatTokens(before) ?? t("context.unknown"),
+    after: formatTokens(after) ?? t("context.unknown"),
+    suffix: breakdown ? t("context.compactedSuffix", { breakdown }) : "",
+  });
   return (
     <section
       className="context-compact-notice"
@@ -11237,7 +11271,7 @@ function ContextCompactNotice({ activity }: { activity: Activity }) {
         <Gauge size={13} />
       </div>
       <div className="compact-copy">
-        <span>Dynamic context</span>
+        <span>{t("context.dynamic")}</span>
         <strong>
           {formatTokens(before) ?? "?"} → {formatTokens(after) ?? "?"}
         </strong>
@@ -11340,8 +11374,8 @@ function McpPanel({
             <button
               type="button"
               className="mcp-delete-cancel"
-              title="取消删除 MCP"
-              aria-label="取消删除 MCP"
+              title={t("mcp.cancelDelete")}
+              aria-label={t("mcp.cancelDelete")}
               onClick={cancelDeleteMode}
             >
               <X size={14} strokeWidth={3} />
@@ -11354,16 +11388,16 @@ function McpPanel({
               title={
                 deleteMode
                   ? selectedDeleteServerId
-                    ? "确认删除选中的 MCP"
-                    : "请选择要删除的 MCP"
-                  : "选择要删除的 MCP"
+                    ? t("mcp.confirmDeleteSelected")
+                    : t("mcp.selectToDeletePrompt")
+                  : t("mcp.selectToDelete")
               }
               aria-label={
                 deleteMode
                   ? selectedDeleteServerId
-                    ? "确认删除选中的 MCP"
-                    : "请选择要删除的 MCP"
-                  : "选择要删除的 MCP"
+                    ? t("mcp.confirmDeleteSelected")
+                    : t("mcp.selectToDeletePrompt")
+                  : t("mcp.selectToDelete")
               }
               disabled={
                 servers.length === 0 ||
@@ -11429,7 +11463,7 @@ function McpPanel({
             {servers.length === 0 ? (
               <div className="mcp-empty">
                 <Plug size={20} />
-                <strong>No MCP servers</strong>
+                <strong>{t("mcp.noServers")}</strong>
                 <span>Add local stdio, Streamable HTTP, or legacy SSE.</span>
               </div>
             ) : (
@@ -11449,14 +11483,14 @@ function McpPanel({
                   connectionState === "connected"
                     ? `${server.tools.length} tools`
                     : connectionState === "failed"
-                      ? "⚠️无法连接"
+                      ? t("mcp.connectFailed")
                       : connectionState === "connecting"
-                        ? "连接中…"
+                        ? t("mcp.connecting")
                         : "";
                 const connectionTitle =
                   connectionState === "failed" && server.error
                     ? `${connectionLabel}：${server.error}`
-                    : connectionLabel || "未启用";
+                    : connectionLabel || t("mcp.disabled");
                 return (
                   <article
                     className={`mcp-server ${connectionState} ${active && !deleteMode ? "selected" : ""} ${deleteMode ? "delete-selecting" : ""} ${selectedDeleteServerId === server.config.id ? "delete-selected" : ""}`}
@@ -11508,8 +11542,8 @@ function McpPanel({
                       <button
                         type="button"
                         className={`mcp-delete-select ${selectedDeleteServerId === server.config.id ? "selected" : ""}`}
-                        title={`选择删除 ${server.config.name}`}
-                        aria-label={`选择删除 ${server.config.name}`}
+                        title={t("mcp.selectForDelete", { name: server.config.name })}
+                        aria-label={t("mcp.selectForDelete", { name: server.config.name })}
                         aria-pressed={
                           selectedDeleteServerId === server.config.id
                         }
@@ -11628,15 +11662,15 @@ function parseRequestFieldRows(rows: StructuredRow[]): {
     const key = row.key.trim();
     if (!key) continue;
     if (RESERVED_REQUEST_FIELDS.has(key.toLowerCase()))
-      return { value: {}, error: `${key} 由 Timem 管理，不能覆盖。` };
+      return { value: {}, error: t("mcp.managedKeyError", { key }) };
     if (!row.value.trim())
-      return { value: {}, error: `${key} 的 Value 不能为空。` };
+      return { value: {}, error: t("mcp.emptyValueError", { key }) };
     try {
       value[key] = JSON.parse(row.value);
     } catch {
       return {
         value: {},
-        error: `${key} 的 Value 必须是合法 JSON。字符串请使用双引号，例如 \"fast\"。`,
+        error: t("mcp.invalidJsonError", { key }),
       };
     }
   }
@@ -11715,8 +11749,8 @@ function StructuredKeyValueEditor({
             <button
               type="button"
               className="structured-field-delete"
-              title={`删除这一项 ${label}`}
-              aria-label={`删除 ${label}`}
+              title={t("mcp.deleteEntry", { label })}
+              aria-label={t("mcp.deleteEntryAria", { label })}
               onClick={() =>
                 onChange(rows.filter((item) => item.id !== row.id))
               }
@@ -11728,7 +11762,7 @@ function StructuredKeyValueEditor({
       </div>
       {duplicateKeys && (
         <small className="structured-field-error" role="alert">
-          {keyLabel} 不能重复。
+          {t("mcp.duplicateKey", { key: keyLabel })}
         </small>
       )}
       <button
@@ -11788,8 +11822,8 @@ function StructuredListEditor({
             <button
               type="button"
               className="structured-field-delete"
-              title={`删除第 ${index + 1} 项`}
-              aria-label={`删除 ${label} ${index + 1}`}
+              title={t("mcp.deleteIndexed", { index: index + 1 })}
+              aria-label={t("mcp.deleteIndexedAria", { label, index: index + 1 })}
               onClick={() =>
                 onChange(rows.filter((item) => item.id !== row.id))
               }
@@ -11925,7 +11959,7 @@ function McpEditor({
       }}
     >
       <fieldset className="mcp-transport">
-        <legend>Transport</legend>
+        <legend>{t("mcp.transport")}</legend>
         <div>
           {(["stdio", "streamable_http", "sse"] as const).map((type) => (
             <button
@@ -11979,19 +12013,19 @@ function McpEditor({
           </label>
           <StructuredListEditor
             label="Arguments"
-            description="每个命令参数单独一项，不需要手动编排多行格式。"
+            description={t("mcp.argsDescription")}
             rows={argumentRows}
-            placeholder="例如：-y 或 @modelcontextprotocol/server-filesystem"
-            addLabel="添加参数"
+            placeholder={t("mcp.argsPlaceholder")}
+            addLabel={t("mcp.addArg")}
             onChange={setArgumentRows}
           />
           <StructuredKeyValueEditor
             label="Environment"
-            description="环境变量使用独立的 Key / Value 输入。"
+            description={t("mcp.envDescription")}
             rows={envRows}
-            keyPlaceholder="例如：GITHUB_TOKEN"
+            keyPlaceholder={t("mcp.envKeyPlaceholder")}
             valuePlaceholder="Environment value"
-            addLabel="添加环境变量"
+            addLabel={t("mcp.addEnv")}
             showValues={showSecrets || !draft.id}
             revealAction={revealAction}
             onChange={setEnvRows}
@@ -12021,16 +12055,16 @@ function McpEditor({
           </label>
           <StructuredKeyValueEditor
             label="Headers"
-            description={`每个 Header 单独填写；Value 中可使用 ${"${NAME}"} 引用环境变量。`}
+            description={t("mcp.headerDescription", { name: "${NAME}" })}
             rows={
               transport.type === "streamable_http"
                 ? httpHeaderRows
                 : sseHeaderRows
             }
             keyLabel="Name"
-            keyPlaceholder="例如：Authorization"
-            valuePlaceholder={`例如：Bearer ${"${MCP_TOKEN}"}`}
-            addLabel="添加 Header"
+            keyPlaceholder={t("mcp.headerKeyPlaceholder")}
+            valuePlaceholder={t("mcp.headerValuePlaceholder", { token: "${MCP_TOKEN}" })}
+            addLabel={t("mcp.addHeader")}
             showValues={showSecrets || !draft.id}
             revealAction={revealAction}
             onChange={
@@ -12131,6 +12165,7 @@ type SettingsCenterProps = {
 const SettingsCenter = memo(function SettingsCenter(
   props: SettingsCenterProps,
 ) {
+  useT();
   const {
     panelRef,
     section,
@@ -12273,7 +12308,7 @@ const SettingsCenter = memo(function SettingsCenter(
     <div
       className="settings-center-backdrop"
       role="presentation"
-      aria-label="Dismiss settings"
+      aria-label={t("settings.dismiss")}
       onClick={closeIfIdle}
     >
       <section
@@ -12288,8 +12323,8 @@ const SettingsCenter = memo(function SettingsCenter(
       >
         <header className="settings-center-header">
           <div>
-            <span className="eyebrow">SETTINGS</span>
-            <h2 id="settings-center-title">Settings</h2>
+            <span className="eyebrow">{t("settings.eyebrow")}</span>
+            <h2 id="settings-center-title">{t("settings.title")}</h2>
             <div
               className="settings-runtime-status"
               role="status"
@@ -12305,8 +12340,8 @@ const SettingsCenter = memo(function SettingsCenter(
           <button
             type="button"
             className="icon-button"
-            title="Close settings"
-            aria-label="Close settings"
+            title={t("settings.close")}
+            aria-label={t("settings.close")}
             disabled={busy}
             onClick={closeIfIdle}
           >
@@ -12314,7 +12349,7 @@ const SettingsCenter = memo(function SettingsCenter(
           </button>
         </header>
         <div className="settings-center-layout">
-          <nav className="settings-center-nav" aria-label="Settings categories">
+          <nav className="settings-center-nav" aria-label={t("settings.categories")}>
             <button
               type="button"
               className={section === "appearance" ? "active" : ""}
@@ -12324,7 +12359,7 @@ const SettingsCenter = memo(function SettingsCenter(
             >
               <Palette size={16} />
               <span>
-                <strong>Appearance</strong>
+                <strong>{t("settings.appearance")}</strong>
               </span>
             </button>
             <button
@@ -12336,7 +12371,7 @@ const SettingsCenter = memo(function SettingsCenter(
             >
               <Sparkles size={16} />
               <span>
-                <strong>Model Endpoints</strong>
+                <strong>{t("settings.endpoints")}</strong>
               </span>
             </button>
             <button
@@ -12348,7 +12383,7 @@ const SettingsCenter = memo(function SettingsCenter(
             >
               <Database size={16} />
               <span>
-                <strong>Memory</strong>
+                <strong>{t("settings.memory")}</strong>
               </span>
             </button>
             <button
@@ -12360,7 +12395,7 @@ const SettingsCenter = memo(function SettingsCenter(
             >
               <TriangleAlert size={16} />
               <span>
-                <strong>Beta</strong>
+                <strong>{t("settings.beta")}</strong>
               </span>
             </button>
           </nav>
@@ -12371,22 +12406,22 @@ const SettingsCenter = memo(function SettingsCenter(
                 aria-labelledby="appearance-settings-title"
               >
                 <div className="settings-pane-heading">
-                  <h3 id="appearance-settings-title">Appearance</h3>
+                  <h3 id="appearance-settings-title">{t("settings.appearance")}</h3>
                   <Palette size={19} aria-hidden="true" />
                 </div>
                 <fieldset>
-                  <legend>Theme</legend>
+                  <legend>{t("settings.theme")}</legend>
                   <div className="segmented-control">
                     {(["dark", "light"] as const).map((theme) => (
                       <button
                         type="button"
-                        title={`Use ${theme} theme`}
+                        title={t("settings.themeAria", { theme: theme === "dark" ? t("settings.themeDark") : t("settings.themeLight") })}
                         className={appearance.theme === theme ? "active" : ""}
                         aria-pressed={appearance.theme === theme}
                         key={theme}
                         onClick={() => updateAppearance("theme", theme)}
                       >
-                        {theme === "dark" ? "Dark" : "Light"}
+                        {theme === "dark" ? t("settings.themeDark") : t("settings.themeLight")}
                       </button>
                     ))}
                   </div>
@@ -12395,13 +12430,13 @@ const SettingsCenter = memo(function SettingsCenter(
                   className="appearance-role-fonts"
                   aria-labelledby="appearance-user-fonts-title"
                 >
-                  <h4 id="appearance-user-fonts-title">User</h4>
+                  <h4 id="appearance-user-fonts-title">{t("settings.userFonts")}</h4>
                   <div className="appearance-font-selects">
                     <label>
-                      <span>汉语字体</span>
+                      <span>{t("settings.cjkFont")}</span>
                       <select
                         value={appearance.userChineseFont}
-                        aria-label="User Chinese font"
+                        aria-label={t("settings.userChineseFontAria")}
                         onChange={(event) =>
                           updateAppearance(
                             "userChineseFont",
@@ -12409,17 +12444,17 @@ const SettingsCenter = memo(function SettingsCenter(
                           )
                         }
                       >
-                        <option value="system">系统</option>
-                        <option value="heiti">黑体</option>
-                        <option value="kaiti">楷体</option>
-                        <option value="songti">宋体</option>
+                        <option value="system">{t("appearance.cjkSystem")}</option>
+                        <option value="heiti">{t("appearance.cjkHeiti")}</option>
+                        <option value="kaiti">{t("appearance.cjkKaiti")}</option>
+                        <option value="songti">{t("appearance.cjkSongti")}</option>
                       </select>
                     </label>
                     <label>
-                      <span>其他语言字体</span>
+                      <span>{t("settings.otherFont")}</span>
                       <select
                         value={appearance.userFont}
-                        aria-label="User other language font"
+                        aria-label={t("settings.userOtherFontAria")}
                         onChange={(event) =>
                           updateAppearance(
                             "userFont",
@@ -12427,9 +12462,9 @@ const SettingsCenter = memo(function SettingsCenter(
                           )
                         }
                       >
-                        <option value="system">System</option>
-                        <option value="serif">Serif</option>
-                        <option value="mono">Mono</option>
+                        <option value="system">{t("appearance.fontSystem")}</option>
+                        <option value="serif">{t("appearance.fontSerif")}</option>
+                        <option value="mono">{t("appearance.fontMono")}</option>
                       </select>
                     </label>
                   </div>
@@ -12444,20 +12479,20 @@ const SettingsCenter = memo(function SettingsCenter(
                     <span className="appearance-checkbox" aria-hidden="true">
                       <Check size={12} strokeWidth={3} />
                     </span>
-                    <span>粗体</span>
+                    <span>{t("settings.bold")}</span>
                   </label>
                 </section>
                 <section
                   className="appearance-role-fonts"
                   aria-labelledby="appearance-agent-fonts-title"
                 >
-                  <h4 id="appearance-agent-fonts-title">Agent</h4>
+                  <h4 id="appearance-agent-fonts-title">{t("settings.agentFonts")}</h4>
                   <div className="appearance-font-selects">
                     <label>
-                      <span>汉语字体</span>
+                      <span>{t("settings.cjkFont")}</span>
                       <select
                         value={appearance.agentChineseFont}
-                        aria-label="Agent Chinese font"
+                        aria-label={t("settings.agentChineseFontAria")}
                         onChange={(event) =>
                           updateAppearance(
                             "agentChineseFont",
@@ -12466,17 +12501,17 @@ const SettingsCenter = memo(function SettingsCenter(
                           )
                         }
                       >
-                        <option value="system">系统</option>
-                        <option value="heiti">黑体</option>
-                        <option value="kaiti">楷体</option>
-                        <option value="songti">宋体</option>
+                        <option value="system">{t("appearance.cjkSystem")}</option>
+                        <option value="heiti">{t("appearance.cjkHeiti")}</option>
+                        <option value="kaiti">{t("appearance.cjkKaiti")}</option>
+                        <option value="songti">{t("appearance.cjkSongti")}</option>
                       </select>
                     </label>
                     <label>
-                      <span>其他语言字体</span>
+                      <span>{t("settings.otherFont")}</span>
                       <select
                         value={appearance.agentFont}
-                        aria-label="Agent other language font"
+                        aria-label={t("settings.agentOtherFontAria")}
                         onChange={(event) =>
                           updateAppearance(
                             "agentFont",
@@ -12484,9 +12519,9 @@ const SettingsCenter = memo(function SettingsCenter(
                           )
                         }
                       >
-                        <option value="system">System</option>
-                        <option value="serif">Serif</option>
-                        <option value="mono">Mono</option>
+                        <option value="system">{t("appearance.fontSystem")}</option>
+                        <option value="serif">{t("appearance.fontSerif")}</option>
+                        <option value="mono">{t("appearance.fontMono")}</option>
                       </select>
                     </label>
                   </div>
@@ -12501,26 +12536,44 @@ const SettingsCenter = memo(function SettingsCenter(
                     <span className="appearance-checkbox" aria-hidden="true">
                       <Check size={12} strokeWidth={3} />
                     </span>
-                    <span>粗体</span>
+                    <span>{t("settings.bold")}</span>
                   </label>
                 </section>
                 <fieldset>
-                  <legend>Text size</legend>
+                  <legend>{t("settings.textSize")}</legend>
                   <div className="segmented-control text-size-control">
                     {(["small", "medium", "large"] as const).map((size) => (
                       <button
                         type="button"
-                        title={`Use ${size === "medium" ? "default" : size} text size`}
+                        title={t("settings.textSizeAria", { size: size === "medium" ? t("settings.textDefault") : size === "small" ? t("settings.textSizeSmall") : t("settings.textSizeLarge") })}
                         className={appearance.textSize === size ? "active" : ""}
                         aria-pressed={appearance.textSize === size}
                         key={size}
                         onClick={() => updateAppearance("textSize", size)}
                       >
                         {size === "small"
-                          ? "Small"
+                          ? t("settings.textSizeSmall")
                           : size === "medium"
-                            ? "Default"
-                            : "Large"}
+                            ? t("settings.textDefault")
+                            : t("settings.textSizeLarge")}
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
+                <fieldset>
+                  <legend>{t("common.language")}</legend>
+                  <div className="segmented-control">
+                    {(["zh", "en"] as const).map((locale) => (
+                      <button
+                        type="button"
+                        key={locale}
+                        title={locale === "zh" ? t("common.zhName") : t("common.enName")}
+                        aria-label={locale === "zh" ? t("common.zhName") : t("common.enName")}
+                        aria-pressed={getLocale() === locale}
+                        className={getLocale() === locale ? "active" : ""}
+                        onClick={() => setLocale(locale)}
+                      >
+                        {locale === "zh" ? t("common.zhName") : t("common.enName")}
                       </button>
                     ))}
                   </div>
@@ -12547,7 +12600,7 @@ const SettingsCenter = memo(function SettingsCenter(
                 aria-labelledby="beta-settings-title"
               >
                 <div className="settings-pane-heading">
-                  <h3 id="beta-settings-title">Beta</h3>
+                  <h3 id="beta-settings-title">{t("beta.title")}</h3>
                   <TriangleAlert size={19} aria-hidden="true" />
                 </div>
                 <StreamUiModeSetting />
@@ -12555,19 +12608,15 @@ const SettingsCenter = memo(function SettingsCenter(
                 <section className="settings-group toolgen-beta-card">
                   <div className="settings-group-heading">
                     <div>
-                      <strong>Enable ToolGen</strong>
-                      <p>
-                        When enabled, completed answers show a ToolGen action
-                        and can start the generation workflow. This preference
-                        is stored only in this browser.
-                      </p>
+                      <strong>{t("beta.enableToolGen")}</strong>
+                      <p>{t("beta.enableToolGenDesc")}</p>
                     </div>
                     <button
                       type="button"
                       role="switch"
                       className="settings-feature-switch"
                       aria-checked={toolGenEnabled}
-                      aria-label="Enable ToolGen Beta"
+                      aria-label={t("beta.enableToolGenAria")}
                       disabled={toolGenToggleDisabled}
                       onClick={() => onToolGenEnabledChange(!toolGenEnabled)}
                     >
@@ -12581,33 +12630,29 @@ const SettingsCenter = memo(function SettingsCenter(
                   >
                     <span className={toolGenEnabled ? "enabled" : "disabled"} />
                     <strong>
-                      {toolGenEnabled ? "Enabled" : "Disabled by default"}
+                      {toolGenEnabled ? t("beta.enabled") : t("beta.disabledByDefault")}
                     </strong>
                     <small>
                       {toolGenToggleDisabled
-                        ? "A ToolGen task is active; wait for it to finish before changing this setting."
+                        ? t("beta.toolGenActiveWait")
                         : toolGenEnabled
-                          ? "ToolGen actions and generation UI are available."
-                          : "ToolGen actions and generation UI are hidden."}
+                          ? t("beta.toolGenAvailable")
+                          : t("beta.toolGenHidden")}
                     </small>
                   </div>
                 </section>
                 <section className="settings-group toolgen-beta-card">
                   <div className="settings-group-heading">
                     <div>
-                      <strong>Claude/Codex 工具发现</strong>
-                      <p>
-                        引导模型在任务适合本地 Skill 或工具时，搜索 Claude 和
-                        Codex 的内置 Skill、工具目录，并采用合适的现有工具。
-                        设置由当前 MEM 保存，并从下一次模型 API 请求开始生效。
-                      </p>
+                      <strong>{t("beta.toolDiscovery")}</strong>
+                      <p>{t("beta.toolDiscoveryDesc")}</p>
                     </div>
                     <button
                       type="button"
                       role="switch"
                       className="settings-feature-switch"
                       aria-checked={claudeCodexToolDiscoveryEnabled}
-                      aria-label="Enable Claude Codex tool discovery Beta"
+                      aria-label={t("beta.toolDiscoveryAria")}
                       disabled={claudeCodexToolDiscoveryPending || !connected}
                       onClick={() =>
                         onClaudeCodexToolDiscoveryChange(
@@ -12630,28 +12675,25 @@ const SettingsCenter = memo(function SettingsCenter(
                     />
                     <strong>
                       {claudeCodexToolDiscoveryPending
-                        ? "Saving…"
+                        ? t("beta.saving")
                         : claudeCodexToolDiscoveryEnabled
-                          ? "Enabled"
-                          : "Disabled by default"}
+                          ? t("beta.enabled")
+                          : t("beta.disabledByDefault")}
                     </strong>
                     <small>
                       {claudeCodexToolDiscoveryPending
-                        ? "Waiting for the Host to persist and apply this setting."
+                        ? t("beta.pendingWait")
                         : claudeCodexToolDiscoveryEnabled
-                          ? "The discovery instruction is present in the System Prompt."
-                          : "The discovery instruction is absent from the System Prompt."}
+                          ? t("beta.instructionPresent")
+                          : t("beta.instructionAbsent")}
                     </small>
                   </div>
                 </section>
                 <section className="toolgen-beta-note">
                   <TriangleAlert size={16} />
                   <div>
-                    <strong>Beta capability</strong>
-                    <p>
-                      Generated tools should be reviewed before relying on them
-                      in important workflows.
-                    </p>
+                    <strong>{t("beta.capabilityTitle")}</strong>
+                    <p>{t("beta.capabilityDesc")}</p>
                   </div>
                 </section>
               </section>
@@ -12667,7 +12709,7 @@ const SettingsCenter = memo(function SettingsCenter(
                 </div>
                 <section
                   className="memory-identity-card"
-                  aria-label="Current MEM"
+                  aria-label={t("beta.currentMemAria")}
                 >
                   <div className="memory-identity-icon" aria-hidden="true">
                     <Database size={20} />
@@ -13610,20 +13652,20 @@ function ModelEndpointPanel({
     >
       <div className="endpoint-menu-heading">
         <div>
-          <span className="eyebrow">MODEL ENDPOINTS</span>
+          <span className="eyebrow">{t("endpoints.panel")}</span>
           <strong>
-            {session ? `用于 ${session.display_name}` : "选择 Session 后应用"}
+            {session ? t("sessions.applyForSession", { name: session.display_name }) : t("sessions.applyNeedSession")}
           </strong>
         </div>
         <button type="button" className="endpoint-menu-edit" onClick={onEdit}>
           <Pencil size={13} />
-          <span>编辑</span>
+          <span>{t("common.edit")}</span>
         </button>
       </div>
       <div className="endpoint-list">
         {endpoints.length === 0 ? (
           <div className="endpoint-empty">
-            还没有可用接入点。请在 Settings 中添加后再选择。
+            {t("endpoints.empty")}
           </div>
         ) : (
           endpoints.map((endpoint) => {
@@ -13675,7 +13717,7 @@ function ModelEndpointPanel({
       </div>
       {session?.state === "working" && (
         <p className="endpoint-note">
-          当前 Session 工作中，结束或停止任务后才能切换接入点。
+          {t("endpoints.workingNote")}
         </p>
       )}
     </section>
@@ -13765,12 +13807,12 @@ function ModelEndpointEditor({
   const { copyState, copy, copyLabel, copyClass } = useTimedClipboardCopy(
     apiKey,
     {
-      idle: "复制 API Key",
-      copied: "API Key 已复制",
-      failed: "API Key 复制失败",
+      idle: t("endpoints.apiKeyCopy"),
+      copied: t("endpoints.apiKeyCopied"),
+      failed: t("endpoints.apiKeyCopyFailed"),
     },
   );
-  const apiKeyVisibilityLabel = showApiKey ? "隐藏 API Key" : "显示 API Key";
+  const apiKeyVisibilityLabel = showApiKey ? t("endpoints.apiKeyHide") : t("endpoints.apiKeyShow");
   const headers = structuredRecord(headerRows);
   const parsedRequestFields = parseRequestFieldRows(requestRows);
   const endpointDraft = {
@@ -13791,10 +13833,10 @@ function ModelEndpointEditor({
   return (
     <div className="endpoint-editor">
       <div className="endpoint-editor-heading">
-        <strong>{endpoint ? "编辑接入点" : "新增接入点"}</strong>
+        <strong>{endpoint ? t("endpoints.editEndpoint") : t("endpoints.newEndpoint")}</strong>
         <button
           type="button"
-          aria-label="Close endpoint editor"
+          aria-label={t("endpoints.closeEditor")}
           onClick={onClose}
         >
           <X size={14} />
@@ -13802,18 +13844,18 @@ function ModelEndpointEditor({
       </div>
       <div className="endpoint-editor-grid">
         <label>
-          名称
+          {t("endpoints.nameLabel")}
           <input
             autoFocus
             value={draft.name}
-            placeholder="例如：生产环境 GPT"
+            placeholder={t("endpoints.namePlaceholder")}
             onChange={(event) =>
               setDraft({ ...draft, name: event.target.value })
             }
           />
         </label>
         <label>
-          模型 ID
+          {t("endpoints.modelIdLabel")}
           <input
             value={draft.model}
             placeholder="gpt-4.1"
@@ -13842,8 +13884,8 @@ function ModelEndpointEditor({
               value={apiKey}
               placeholder={
                 endpoint?.api_key_configured && revealedApiKey === undefined
-                  ? "正在读取…"
-                  : "可留空"
+                  ? t("common.loading")
+                  : t("common.optionalLeaveEmpty")
               }
               onChange={(event) =>
                 setDraft({ ...draft, api_key: event.target.value })
@@ -13877,7 +13919,7 @@ function ModelEndpointEditor({
         </label>
         <div className="endpoint-api-protocol">
           <label>
-            API 协议
+            {t("endpoints.apiProtocol")}
             <select
               value={draft.api_protocol}
               onChange={(event) => {
@@ -13896,7 +13938,7 @@ function ModelEndpointEditor({
           </label>
           <label
             className="endpoint-stream-toggle"
-            title="以流式 SSE 接收 OpenAI-compatible 响应"
+            title={t("endpoints.sseTitle")}
           >
             <input
               type="checkbox"
@@ -13906,11 +13948,11 @@ function ModelEndpointEditor({
                 setDraft({ ...draft, stream: event.target.checked })
               }
             />
-            <span>Stream</span>
+            <span>{t("endpoints.streamLabel")}</span>
           </label>
         </div>
         <label>
-          响应协议
+          {t("endpoints.responseProtocol")}
           <select
             value={draft.response_protocol}
             onChange={(event) =>
@@ -13923,7 +13965,7 @@ function ModelEndpointEditor({
         </label>
 
         <label>
-          最大上下文窗口
+          {t("endpoints.contextWindow")}
           <select
             value={draft.max_llm_input_tokens}
             onChange={(event) =>
@@ -13941,7 +13983,7 @@ function ModelEndpointEditor({
           </select>
         </label>
         <label>
-          最大输出
+          {t("endpoints.maxOutput")}
           <select
             value={draft.max_llm_output_tokens}
             onChange={(event) =>
@@ -13970,14 +14012,14 @@ function ModelEndpointEditor({
                 })
               }
             />
-            允许跨 Origin / 跨协议重定向
+            {t("endpoints.redirectLabel")}
           </span>
           <small>
-            默认关闭。开启后会跟随跳转，但跨 Origin 时不会转发 API Key 或自定义 Headers。
+            {t("endpoints.redirectWarning")}
           </small>
         </label>
         <label className="wide">
-          私有 CA（PEM）
+          {t("endpoints.privateCa")}
           <textarea
             className="endpoint-private-ca"
             spellCheck={false}
@@ -13985,26 +14027,26 @@ function ModelEndpointEditor({
             placeholder={
               endpoint?.private_ca_configured &&
               revealedPrivateCaPem === undefined
-                ? "正在读取…"
-                : "可选：-----BEGIN CERTIFICATE-----"
+                ? t("common.loading")
+                : t("endpoints.certPlaceholder")
             }
             onChange={(event) =>
               setDraft({ ...draft, private_ca_pem: event.target.value })
             }
           />
-          <small>仅用于此接入点的模型 HTTPS 连接，不替换系统根证书。</small>
+          <small>{t("endpoints.certNote")}</small>
         </label>
 
 
         <div className="wide endpoint-structured-headers">
           <StructuredKeyValueEditor
             label="Headers"
-            description="可选。每个 HTTP Header 单独填写，无需输入 JSON 或多行格式文本。"
+            description={t("endpoints.headersOptional")}
             rows={headerRows}
             keyLabel="Name"
             keyPlaceholder="Header name"
             valuePlaceholder="Header value"
-            addLabel="添加 Header"
+            addLabel={t("endpoints.addHeader")}
             showValues={showHeaders}
             revealAction={
               headerRows.length > 0 ? (
@@ -14012,10 +14054,14 @@ function ModelEndpointEditor({
                   type="button"
                   className="structured-field-visibility"
                   title={
-                    showHeaders ? "隐藏 Header Value" : "显示 Header Value"
+                    showHeaders
+                      ? t("endpoints.hideHeaderValues")
+                      : t("endpoints.showHeaderValues")
                   }
                   aria-label={
-                    showHeaders ? "隐藏 Header Value" : "显示 Header Value"
+                    showHeaders
+                      ? t("endpoints.hideHeaderValues")
+                      : t("endpoints.showHeaderValues")
                   }
                   onClick={() => setShowHeaders((visible) => !visible)}
                 >
@@ -14031,15 +14077,15 @@ function ModelEndpointEditor({
         </div>
         <div className="wide endpoint-structured-headers">
           <StructuredKeyValueEditor
-            label="Request Fields"
+            label={t("endpoints.requestFields")}
             description={
-              '可选。作为 JSON 请求体顶层字段发送；字符串需写成 "fast"，也支持数字、布尔值、数组和对象。'
+              t("endpoints.requestFieldsHint")
             }
             rows={requestRows}
             keyLabel="Field"
-            keyPlaceholder="例如：service_tier"
-            valuePlaceholder={'例如："fast"'}
-            addLabel="Add Req Field"
+            keyPlaceholder={t("endpoints.fieldKeyPlaceholder")}
+            valuePlaceholder={t("endpoints.fieldValuePlaceholder")}
+            addLabel={t("endpoints.addReqField")}
             showValues={showRequestFields}
             revealAction={
               requestRows.length > 0 ? (
@@ -14048,13 +14094,13 @@ function ModelEndpointEditor({
                   className="structured-field-visibility"
                   title={
                     showRequestFields
-                      ? "隐藏 Request Field Value"
-                      : "显示 Request Field Value"
+                      ? t("endpoints.hideFieldValues")
+                      : t("endpoints.showFieldValues")
                   }
                   aria-label={
                     showRequestFields
-                      ? "隐藏 Request Field Value"
-                      : "显示 Request Field Value"
+                      ? t("endpoints.hideFieldValues")
+                      : t("endpoints.showFieldValues")
                   }
                   onClick={() => setShowRequestFields((visible) => !visible)}
                 >
@@ -14076,7 +14122,7 @@ function ModelEndpointEditor({
       </div>
       <div className="endpoint-editor-buttons">
         <button type="button" className="secondary compact" onClick={onClose}>
-          取消
+          {t("common.cancel")}
         </button>
         <button
           type="button"
@@ -14084,7 +14130,7 @@ function ModelEndpointEditor({
           disabled={saveDisabled}
           onClick={save}
         >
-          保存接入点
+          {t("endpoints.saveEndpoint")}
         </button>
       </div>
     </div>
@@ -14445,7 +14491,7 @@ const SESSION_RUNTIME_FIELDS = [
 const FAVORITE_CAPACITY_OPTIONS = [
   { label: "256 MB", bytes: 256 * 1024 * 1024 },
   { label: "1 GB", bytes: 1024 * 1024 * 1024 },
-  { label: "不限", bytes: null },
+  { label: "unlimited", bytes: null },
 ] as const;
 
 function FavoriteCapacityDialog({
@@ -14464,10 +14510,10 @@ function FavoriteCapacityDialog({
   const capacity = notice.capacity;
   const percent = capacity.used_percent ?? 0;
   const limitLabel = formatFavoriteCapacityLimit(capacity.limit_bytes);
-  const title = notice.full ? "收藏夹已满" : "收藏夹空间快满了";
+  const title = notice.full ? t("favorites.full") : t("favorites.nearFull");
   const message = notice.full
-    ? `这条回复还没有收藏。当前收藏夹上限为 ${limitLabel}，已使用 ${percent}%。请扩大空间或删除一些收藏后再试。`
-    : `这条回复已收藏。当前收藏夹上限为 ${limitLabel}，已使用 ${percent}%。建议现在扩大空间，或删除不再需要的收藏。`;
+    ? t("favorites.nearFullBody", { limit: limitLabel, percent })
+    : t("favorites.fullBody", { limit: limitLabel, percent });
   return (
     <div
       className="modal-backdrop favorite-capacity-backdrop"
@@ -14491,7 +14537,7 @@ function FavoriteCapacityDialog({
       >
         <div className="modal-titlebar">
           <div>
-            <span className="eyebrow">收藏夹空间</span>
+            <span className="eyebrow">{t("favorites.eyebrow")}</span>
             <h2 id="favorite-capacity-title">
               <Star size={19} fill="currentColor" /> {title}
             </h2>
@@ -14499,8 +14545,8 @@ function FavoriteCapacityDialog({
           <button
             type="button"
             className="icon-button"
-            title="关闭"
-            aria-label="关闭"
+            title={t("common.close")}
+            aria-label={t("common.close")}
             disabled={updating}
             onClick={onClose}
           >
@@ -14510,18 +14556,18 @@ function FavoriteCapacityDialog({
         <p>{message}</p>
         <div
           className="favorite-capacity-meter"
-          aria-label={`收藏夹已使用 ${percent}%`}
+          aria-label={t("favorites.usageAria", { percent })}
         >
           <span style={{ width: `${Math.min(100, percent)}%` }} />
         </div>
         <div className="favorite-capacity-usage">
           <strong>{percent}%</strong>
           <span>
-            已使用约 {formatFavoriteCapacityUsed(capacity.used_bytes)}
+            {t("favorites.usedApprox", { amount: formatFavoriteCapacityUsed(capacity.used_bytes) })}
           </span>
         </div>
         <fieldset disabled={updating}>
-          <legend>扩大收藏夹空间</legend>
+          <legend>{t("favorites.capacityLegend")}</legend>
           <div className="favorite-capacity-options">
             {FAVORITE_CAPACITY_OPTIONS.map((option) => {
               const selected =
@@ -14534,8 +14580,8 @@ function FavoriteCapacityDialog({
                   key={option.label}
                   onClick={() => onSelectLimit(option.bytes)}
                 >
-                  <span>{option.label}</span>
-                  {selected && <small>当前</small>}
+                  <span>{option.bytes === null ? t("favorites.unlimited") : option.label}</span>
+                  {selected && <small>{t("favorites.current")}</small>}
                 </button>
               );
             })}
@@ -14548,12 +14594,12 @@ function FavoriteCapacityDialog({
             disabled={updating}
             onClick={onClose}
           >
-            {notice.full ? "稍后处理" : "知道了"}
+            {notice.full ? t("common.later") : t("common.gotIt")}
           </button>
           {updating && (
             <span className="favorite-capacity-updating" role="status">
               <LoaderCircle size={14} />
-              正在调整…
+              {t("favorites.adjusting")}
             </span>
           )}
         </div>
@@ -14563,7 +14609,7 @@ function FavoriteCapacityDialog({
 }
 
 function formatFavoriteCapacityLimit(bytes?: number | null) {
-  if (bytes == null) return "不限";
+  if (bytes == null) return t("favorites.unlimited");
   return bytes >= 1024 * 1024 * 1024 ? "1 GB" : "256 MB";
 }
 
@@ -14773,12 +14819,9 @@ function NewSessionDialog({
               ))}
             </datalist>
           </label>
-          <p className="mem-hint">
-            Choose a suggested workspace or type an absolute directory path that
-            exists on the Timem host.
-          </p>
+          <p className="mem-hint">{t("beta.workspaceHint")}</p>
           <details className="session-runtime-overrides">
-            <summary>Runtime environment</summary>
+            <summary data-expanded-label={t("sessions.overridesHide")} data-collapsed-label={t("sessions.overridesShow")}>{t("beta.runtimeEnv")}</summary>
             <div className="session-runtime-grid">
               {SESSION_RUNTIME_FIELDS.map(([key, label, kind]) => (
                 <label key={key}>

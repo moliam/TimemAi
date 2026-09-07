@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { humanizeToolStatus, toolResultCountsLabel, isToolActivityFailed, isToolActivityRunning } from "../src/tool_status";
+import { setLocale } from "../src/i18n";
+
+setLocale("zh");
 
 describe("tool result labels", () => {
   it("hides zero failures without a trailing separator", () => {
@@ -14,13 +17,13 @@ describe("tool result labels", () => {
     expect(humanizeToolStatus("completed")).toBe("✓");
     expect(humanizeToolStatus("failed")).toBe("✗");
     expect(humanizeToolStatus("running")).toBe("running");
-    expect(humanizeToolStatus("background_running")).toBe("running (bg)");
-    expect(humanizeToolStatus("timeout")).toBe("timed out");
+    expect(humanizeToolStatus("background_running")).toBe("后台运行");
+    expect(humanizeToolStatus("timeout")).toBe("已超时");
   });
   it.each(["error", "timeout", "cancelled", "cancelled_by_user"])("preserves failure semantics for %s", status => {
     expect(isToolActivityFailed(status)).toBe(true);
     expect(isToolActivityRunning(status)).toBe(false);
-    expect(humanizeToolStatus(status)).toBe(status === "timeout" ? "timed out" : status.replaceAll("_", " "));
+    expect(humanizeToolStatus(status)).toBe(status === "timeout" ? "已超时" : status.replaceAll("_", " "));
   });
   it("does not reinterpret unknown statuses", () => {
     expect(humanizeToolStatus("future_state")).toBe("future state");

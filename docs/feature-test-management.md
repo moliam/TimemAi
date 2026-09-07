@@ -553,3 +553,18 @@ archived/non-stream paragraph spacing are unchanged; coarse-pointer controls
 retain 44px minimum targets. Layout unit tests and Chrome acceptance check these
 bounds along with responsive overflow and stable tool folding. Regenerated Web
 assets include CSS plus the entry chunk/HTML references to the new CSS hash.
+
+### Web UI localization (zh/en)
+
+Settings > Appearance adds a Language segmented control backed by the
+browser-local locale store (`src/i18n/locale.ts`): localStorage persistence,
+`navigator.languages` default, storage-denial fallback, cross-tab sync, and
+`<html lang>` updates. `strings.en.ts` is typed against the zh source catalog,
+so missing or extra keys fail `tsc`; `tests/i18n.test.ts` checks parity,
+non-empty values, interpolation, runtime switching, and unknown-key fallback.
+`tests/i18n_source_guard.test.ts` keeps user-visible CJK literals inside the
+catalog only (comments stripped first). Directory-copy assertions pin
+`setLocale("zh")`; browser acceptance launches Chrome with
+`--lang=zh-CN --accept-lang=zh-CN` so default-render assertions stay stable.
+CSS pseudo-element labels read localized `data-*` attributes instead of
+hardcoded `content` strings.

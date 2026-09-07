@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { zh } from "../src/i18n/strings.zh";
+import { en } from "../src/i18n/strings.en";
 
 const source = readFileSync(
   new URL("../src/restart_cwd_gate.tsx", import.meta.url),
@@ -25,17 +27,25 @@ describe("restart working-directory gate", () => {
   });
 
   it("keeps the normal mismatch notice concise and offers both valid actions", () => {
-    expect(source).toContain("当前 Timem 的启动目录和 Session 上次工作的目录不同");
+    expect(source).toContain('t("restartGate.mismatchPrompt")');
     expect(source).toContain(
-      'canKeepSessionDirectory ? "切换" : "使用当前工作目录"',
+      'canKeepSessionDirectory ? t("restartGate.switchToRuntime") : t("restartGate.useRuntime")',
     );
-    expect(source).toMatch(/<button[\s\S]*>\s*保持\s*<\/button>/);
+    expect(source).toMatch(
+      /<button[\s\S]*>\s*\{t\("restartGate.keepInSession"\)\}\s*<\/button>/,
+    );
     expect(source).not.toContain('className="restart-cwd-choice');
+    // Catalog copy keeps the original wording intent in both languages.
+    expect(zh.restartGate.mismatchPrompt).toContain("启动目录");
+    expect(zh.restartGate.mismatchPrompt).toContain("工作目录");
+    expect(zh.restartGate.switchToRuntime).toBe("切换");
+    expect(zh.restartGate.useRuntime).toBe("使用当前工作目录");
+    expect(en.restartGate.mismatchPrompt).toContain("working directory");
   });
 
   it("shows both complete paths as wrapping text outside the buttons", () => {
-    expect(source).toMatch(/<\/button>[\s\S]*至新启动目录：[\s\S]*<code[\s\S]*{decision.runtime_cwd}/);
-    expect(source).toMatch(/<\/button>[\s\S]*在旧工作目录：[\s\S]*<code[\s\S]*{decision.session_cwd}/);
+    expect(source).toMatch(/<\/button>[\s\S]*t\("restartGate.toNewRuntime"\)[\s\S]*<code[\s\S]*{decision.runtime_cwd}/);
+    expect(source).toMatch(/<\/button>[\s\S]*t\("restartGate.inOldSession"\)[\s\S]*<code[\s\S]*{decision.session_cwd}/);
     expect(styles).toMatch(/\.restart-cwd-option code \{[\s\S]*font-family: var\(--ui-font\);[\s\S]*overflow-wrap: anywhere;[\s\S]*word-break: break-word;[\s\S]*white-space: normal;/);
     expect(styles).not.toMatch(/\.restart-cwd-option code \{[\s\S]*(SFMono|Cascadia Code|Consolas|monospace)/);
   });
@@ -47,12 +57,14 @@ describe("restart working-directory gate", () => {
   });
 
   it("gracefully falls back to a single switch action when the old directory is gone", () => {
-    expect(source).toContain("原工作目录已不可用。聊天记录已保留");
-    expect(source).toMatch(/canKeepSessionDirectory\s*&&\s*\([\s\S]*保持/);
+    expect(source).toContain('t("restartGate.missingPrompt")');
+    expect(source).toMatch(/canKeepSessionDirectory\s*&&\s*\([\s\S]*restartGate.keepInSession/);
     expect(source).toContain(
-      'canKeepSessionDirectory ? "切换" : "使用当前工作目录"',
+      'canKeepSessionDirectory ? t("restartGate.switchToRuntime") : t("restartGate.useRuntime")',
     );
-    expect(source).toMatch(/canKeepSessionDirectory\s*&&\s*\([\s\S]*至新启动目录/);
+    expect(source).toMatch(/canKeepSessionDirectory\s*&&\s*\([\s\S]*restartGate.toNewRuntime/);
+    expect(zh.restartGate.missingPrompt).toContain("聊天记录已保留");
+    expect(en.restartGate.missingPrompt).toContain("Chat history is kept");
     expect(source).toMatch(/onResolve\("use_runtime"\)/);
   });
 
