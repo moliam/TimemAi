@@ -365,6 +365,40 @@ async function main() {
     await browser.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
   };
   try {
+    // Exercise the real endpoint editor before continuing lifecycle acceptance.
+    await waitFor(() => exists('.sidebar-settings-button:not(:disabled)'), "settings button not ready");
+    await browser.evaluate(`document.querySelector('.sidebar-settings-button').click()`);
+    await waitFor(() => exists('.settings-center-nav'), "settings navigation missing");
+    await browser.evaluate(`[...document.querySelectorAll('.settings-center-nav button')].find(b => b.textContent.includes('Model Endpoints')).click()`);
+    await waitFor(() => contains('button', 'Add endpoint'), "add endpoint button missing");
+    await browser.evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Add endpoint')).click()`);
+    await waitFor(() => exists('.endpoint-editor-grid'), "endpoint editor missing");
+    for (const theme of ['dark', 'light']) {
+      for (const width of [1440, 390]) {
+        await browser.call('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: false });
+        await browser.evaluate(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}`);
+        await browser.evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+        const layout = await browser.evaluate(`(() => {
+          const grid = document.querySelector('.endpoint-editor-grid');
+          const labels = [...grid.children].filter(n => n.tagName === 'LABEL').slice(0, 4).map(n => n.textContent.trim());
+          const overflow = [...grid.querySelectorAll('input, select, textarea')].filter(n => {
+            const r = n.getBoundingClientRect(); return r.width > 0 && (r.left < -1 || r.right > innerWidth + 1);
+          }).length;
+          return { labels, overflow, columns: getComputedStyle(grid).gridTemplateColumns.split(' ').length };
+        })()`);
+        assert(layout.labels[0] === '名称' && layout.labels[1] === '模型 ID' && layout.labels[2] === 'Base URL' && layout.labels[3] === 'API Key', 'basic endpoint field order changed');
+        assert(layout.overflow === 0, `endpoint controls overflow at ${theme}/${width}`);
+        assert(layout.columns === (width < 720 ? 1 : 2), `endpoint responsive columns wrong at ${width}`);
+        console.log(`endpoint layout acceptance: ${theme} ${width}px passed`);
+      }
+    }
+    assert(await exists('.endpoint-api-key input[type="password"]'), 'API key not masked by default');
+    await browser.evaluate(`document.querySelector('button[aria-label="显示 API Key"]').click()`);
+    assert(await exists('.endpoint-api-key input[type="text"]'), 'API key reveal failed');
+    await browser.evaluate(`document.querySelector('button[aria-label="隐藏 API Key"]').click()`);
+    assert(await exists('.endpoint-api-key input[type="password"]'), 'API key hide failed');
+    await browser.evaluate(`document.querySelector('button[aria-label="Close settings"]').click()`);
+    await browser.call('Emulation.clearDeviceMetricsOverride');
     await waitFor(() => exists('.session-working-icon[aria-label="Session working"]'), "initial working spinner missing");
     await waitFor(() => exists('button[aria-label="Cancel current turn"]'), "Stop button missing");
     await waitFor(() => exists('.turn-assistant-frame.working'), "formal working frame missing before the first process event");

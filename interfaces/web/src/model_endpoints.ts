@@ -1,3 +1,5 @@
+import { UNCONFIGURED_MODEL_LABEL } from "./model_service_ui";
+
 export type ModelEndpoint = {
   id: string;
   name: string;
@@ -33,6 +35,7 @@ export type ModelEndpointDraft = {
 };
 
 type ModelEndpointProfile = {
+  model_endpoint_id?: string | null;
   model: string;
   api_protocol: string;
   response_protocol: string;
@@ -52,6 +55,7 @@ export function endpointMatchesProfile(
   endpoint: ModelEndpoint,
   profile: ModelEndpointProfile | undefined,
 ): boolean {
+  if (profile?.model_endpoint_id) return endpoint.id === profile.model_endpoint_id;
   return (
     !!profile &&
     endpoint.model === profile.model &&
@@ -71,6 +75,21 @@ export function endpointNameForProfile(
 ): string | undefined {
   return endpoints.find((endpoint) => endpointMatchesProfile(endpoint, profile))
     ?.name;
+}
+
+// A saved preset match is a display name, not proof that a Session has a route.
+// Render the Host-provided profile without changing selection or admission.
+export function endpointLabelForProfile(
+  endpoints: readonly ModelEndpoint[],
+  profile: ModelEndpointProfile | undefined,
+): string {
+  if (profile?.model_endpoint_id) {
+    return endpoints.find((endpoint) => endpoint.id === profile.model_endpoint_id)?.name
+      ?? "接入点已删除";
+  }
+  if (!profile?.model.trim()) return UNCONFIGURED_MODEL_LABEL;
+  return endpointNameForProfile(endpoints, profile)
+    ?? `自定义配置 · ${profile.model.trim()}`;
 }
 
 export function endpointDraftValid(draft: ModelEndpointDraft): boolean {

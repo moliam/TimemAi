@@ -111,6 +111,26 @@ On Windows, exit Timem before updating because the executable may be locked.
 Release users do not need Node.js or a separate assistant-ui checkout. Node/pnpm
 are only needed for frontend development.
 
+### Session endpoint binding and editor
+
+Selecting an endpoint persists its stable ID in the Session. The Web header,
+Session list and selector render that binding, so renaming or editing an endpoint
+does not turn a bound Session into a custom configuration. Idle Sessions receive
+the complete updated route, including model, URL, protocols, credentials, headers
+and transport options. Active Turns keep their current configuration; the latest
+endpoint is resolved before the next Turn (including ToolGen) starts and when an
+idle Session is restored. A deleted binding is shown as `接入点已删除` and blocks
+new requests until another endpoint is selected; cached credentials are not a fallback.
+
+Legacy Sessions without an ID migrate only on a unique full configuration match,
+including secrets. Diverged or ambiguous legacy configurations require explicit
+endpoint selection. Independent profiles display `自定义配置 · <model>`; a missing
+model displays `未配置`. Labels are not authentication or service-health checks.
+
+The endpoint editor puts name, model ID, Base URL and API Key first, followed by
+protocols and token limits, then optional transport and request customization.
+API keys remain optional for services that do not require authentication.
+
 ## Recommended Start: Timem Web
 
 Start the installed Web host with one command:

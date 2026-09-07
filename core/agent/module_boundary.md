@@ -372,3 +372,7 @@ Agent test functions and fixture corpora live under `core/agent/tests`. Session 
 tests live under `core/session/tests`. Production
 modules may keep only a minimal `#[cfg(test)]` external-module declaration or
 an explicitly test-only hook needed for private white-box access.
+
+Session metadata also preserves an optional `model_endpoint_id` for stable
+host-managed endpoint selection. Old records deserialize without this field;
+secrets remain in owner-protected configuration, never in the binding ID.

@@ -633,6 +633,7 @@ fn new_shell_session(
 ) -> StoredSession {
     let session_id = "shell_default".to_string();
     StoredSession {
+        model_endpoint_id: None,
         session_id: session_id.clone(),
         display_name: "ShellSession".to_string(),
         group_id: None,
