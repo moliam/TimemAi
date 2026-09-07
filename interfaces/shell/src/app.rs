@@ -3455,6 +3455,28 @@ fn render_startup_banner(
     bash_approval_mode: BashApprovalMode,
     work_instruction_mode: WorkInstructionLoadMode,
 ) -> String {
+    render_startup_banner_at_width(
+        space,
+        config,
+        audit_file,
+        action_audit_file,
+        bash_approval_mode,
+        work_instruction_mode,
+        terminal_width().saturating_sub(1),
+    )
+}
+
+// Banner layout must not depend on the ambient terminal width: tests pin the
+// width so content assertions stay stable regardless of the host terminal.
+fn render_startup_banner_at_width(
+    space: &str,
+    config: &crate::ModelServiceConfig,
+    audit_file: &std::path::Path,
+    action_audit_file: &std::path::Path,
+    bash_approval_mode: BashApprovalMode,
+    work_instruction_mode: WorkInstructionLoadMode,
+    terminal_width: usize,
+) -> String {
     let report = crate::runtime_config_report(
         config,
         crate::RuntimeConfigReportInput {
@@ -3470,7 +3492,7 @@ fn render_startup_banner(
         .into_iter()
         .map(config_report_item_to_table_item)
         .collect::<Vec<_>>();
-    boxed_config_table(&items)
+    boxed_config_table_at_width(&items, terminal_width)
 }
 
 fn config_report_item_to_table_item(item: crate::RuntimeConfigReportItem) -> ConfigTableItem {
@@ -3509,10 +3531,6 @@ fn config_row_description(kind: crate::RuntimeConfigRowKind) -> &'static str {
         crate::RuntimeConfigRowKind::ApiAudit => "payload 记录",
         crate::RuntimeConfigRowKind::ActionAudit => "action 记录",
     }
-}
-
-fn boxed_config_table(items: &[ConfigTableItem]) -> String {
-    boxed_config_table_at_width(items, terminal_width().saturating_sub(1))
 }
 
 fn boxed_config_table_at_width(items: &[ConfigTableItem], terminal_width: usize) -> String {
