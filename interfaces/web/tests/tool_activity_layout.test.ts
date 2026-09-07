@@ -22,7 +22,7 @@ describe("tool activity row layout", () => {
   });
   it("keeps the top-level background status before the shrinkable tool counts", () => {
     expect(source).toContain('toolActivityGroupStatusLabel(summary, showResults)');
-    expect(source).toContain('activeParts.push(`bg ${summary.backgroundRunningCount}`)');
+    expect(source).toContain('activeParts.push(t("tools.bgCount", { count: summary.backgroundRunningCount }));');
     expect(source).toMatch(
       /className="tool-activity-group-status"[\s\S]*className="tool-activity-group-counts"/,
     );
@@ -43,7 +43,7 @@ describe("tool activity row layout", () => {
   it("renders live wait-budget countdowns and clarifies timeout handoff", () => {
     expect(source).toContain('className="tool-activity-countdown"');
     expect(source).toContain("formatRemainingDuration(remainingWaitMs)");
-    expect(source).toContain("wait ended · process still running · pid");
+    expect(source).toContain('t("tools.waitEndedRunning", { pid: activity.pid })');
   });
 
 });
@@ -61,7 +61,7 @@ describe("stream tool status continuity", () => {
 
 describe("collapsed tool summary", () => {
   it("labels prior tools explicitly and aligns the disclosure with live rows", () => {
-    expect(source).toContain('<span>tools</span>');
+    expect(source).toContain('<span>{t("tools.toolsLabel")}</span>');
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*font-weight: 400;/);
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 2px 4px;/);
   });

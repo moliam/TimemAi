@@ -286,6 +286,7 @@ async function startBrowser(url) {
   const child = spawn(chrome, [
     "--remote-debugging-port=0", `--user-data-dir=${profile}`,
     "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+      "--lang=zh-CN", "--accept-lang=zh-CN",
     "--no-first-run", "--no-default-browser-check",
     "--disable-background-networking", "--disable-component-update", "--disable-sync",
     "--window-size=1440,1000", "about:blank",
@@ -369,7 +370,7 @@ async function main() {
     await waitFor(() => exists('.sidebar-settings-button:not(:disabled)'), "settings button not ready");
     await browser.evaluate(`document.querySelector('.sidebar-settings-button').click()`);
     await waitFor(() => exists('.settings-center-nav'), "settings navigation missing");
-    await browser.evaluate(`[...document.querySelectorAll('.settings-center-nav button')].find(b => b.textContent.includes('Model Endpoints')).click()`);
+    await browser.evaluate(`[...document.querySelectorAll('.settings-center-nav button')].find(b => b.textContent.includes('模型接入点')).click()`);
     await waitFor(() => contains('button', 'Add endpoint'), "add endpoint button missing");
     await browser.evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Add endpoint')).click()`);
     await waitFor(() => exists('.endpoint-editor-grid'), "endpoint editor missing");
@@ -397,7 +398,7 @@ async function main() {
     assert(await exists('.endpoint-api-key input[type="text"]'), 'API key reveal failed');
     await browser.evaluate(`document.querySelector('button[aria-label="隐藏 API Key"]').click()`);
     assert(await exists('.endpoint-api-key input[type="password"]'), 'API key hide failed');
-    await browser.evaluate(`document.querySelector('button[aria-label="Close settings"]').click()`);
+    await browser.evaluate(`document.querySelector('button[aria-label="关闭设置"]').click()`);
     await browser.call('Emulation.clearDeviceMetricsOverride');
     await waitFor(() => exists('.session-working-icon[aria-label="Session working"]'), "initial working spinner missing");
     await waitFor(() => exists('button[aria-label="Cancel current turn"]'), "Stop button missing");

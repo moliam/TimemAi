@@ -286,6 +286,7 @@ async function startBrowser(url) {
   const child = spawn(chrome, [
     "--remote-debugging-port=0", `--user-data-dir=${profile}`,
     "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+      "--lang=zh-CN", "--accept-lang=zh-CN",
     "--no-first-run", "--no-default-browser-check",
     "--disable-background-networking", "--disable-component-update", "--disable-sync",
     "--window-size=1440,1000", "about:blank",
@@ -870,9 +871,9 @@ async function main() {
     await browser.evaluate(`document.querySelector('.stream-tool-toggle').click()`);
     await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-fold.expanded')`), "failed tool collapse control ineffective");
     await setRound([thoughtEvent("mixed-thought", "Mixed results", 1), toolEvent("success-call", 2.75), failed, thoughtEvent("mixed-reply", "Failure explanation", 4)], "Mixed results");
-    await waitFor(() => contains(".stream-tool-run-toggle", "tools 1 ✓ | 1 ✗"), "mixed result counts missing");
+    await waitFor(() => contains(".stream-tool-run-toggle", "工具 1 ✓ | 1 ✗"), "mixed result counts missing");
     await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 2`), "failed call not merged with adjacent success");
-    assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle > span')?.textContent === 'tools' && [...document.querySelector('.stream-tool-run-toggle').querySelectorAll('span')].every(n => getComputedStyle(n).fontWeight === '400')`), "tools label and counts must use normal weight");
+    assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle > span')?.textContent === '工具' && [...document.querySelector('.stream-tool-run-toggle').querySelectorAll('span')].every(n => getComputedStyle(n).fontWeight === '400')`), "tools label and counts must use normal weight");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
     await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-merged-item.merged')`), "merged failure rows cannot reopen");
     for (const width of [390, 768]) {
@@ -884,8 +885,8 @@ async function main() {
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
     assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').getAttribute('aria-expanded') === 'false' && !!document.querySelector('.stream-tool-run-toggle > svg.lucide-plus')`), "collapsed tools must display plus");
     await browser.evaluate(`localStorage.setItem("timem-web-tool-result-status-v1", "false"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-tool-result-status-v1"}));`);
-    await waitFor(() => contains(".stream-tool-run-toggle", "2 Done"), "neutral folded count missing");
-    assert(await browser.evaluate(`[...document.querySelectorAll('.stream-tool-status')].every(n => n.textContent === 'Done' && n.getAttribute('aria-label') === 'Done')`), "neutral rows leaked success/failure visually or accessibly");
+    await waitFor(() => contains(".stream-tool-run-toggle", "2 已完成"), "neutral folded count missing");
+    assert(await browser.evaluate(`[...document.querySelectorAll('.stream-tool-status')].every(n => n.textContent === '已完成' && n.getAttribute('aria-label') === '已完成')`), "neutral rows leaked success/failure visually or accessibly");
     await browser.evaluate(`localStorage.setItem("timem-web-tool-result-status-v1", "true"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-tool-result-status-v1"}));`);
     await waitFor(() => contains(".stream-tool-run-toggle", "1 ✓ | 1 ✗"), "result preference did not update mounted rows");
     console.log("PASS Chrome visual interaction: stable completed groups, selection protection, failure toggle, 390/768px overflow");

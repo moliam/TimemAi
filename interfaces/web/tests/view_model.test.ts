@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { beforeAll } from "vitest";
+import { setLocale } from "../src/i18n";
+import { zh } from "../src/i18n/strings.zh";
 import {
   ChatHistoryRecord,
   ChatMessage,
@@ -182,6 +185,10 @@ const actionEvent = (
       ...(actionId ? { action_id: actionId } : {}),
     },
   },
+});
+
+beforeAll(() => {
+  setLocale("zh");
 });
 
 describe("authoritative turn projection", () => {
@@ -2897,7 +2904,7 @@ describe("web topic view model", () => {
 
     expect(activeModelRetryStatus(retrying)).toMatchObject({
       kind: "retrying",
-      label: "retrying",
+      label: zh.retry.retryingLabel,
       progress: "2/20",
     });
     expect(activeModelRetryStatus(retrying)?.detail).toContain(
@@ -3318,7 +3325,7 @@ describe("web topic view model", () => {
       }),
     );
     expect(background).toMatchObject({
-      title: "Bash · running (bg)",
+      title: "Bash · 后台运行",
       tool_status: "background_running",
     });
 
@@ -3331,7 +3338,7 @@ describe("web topic view model", () => {
       }),
     );
     expect(timeout).toMatchObject({
-      title: "Bash · timed out",
+      title: "Bash · 已超时",
       tool_status: "timeout",
       pid: 4321,
     });

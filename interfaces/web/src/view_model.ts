@@ -17,6 +17,7 @@ import {
   humanizeToolStatus,
   TOOL_STATUS_BACKGROUND_RUNNING,
 } from "./tool_status";
+import { t } from "./i18n";
 
 export const MAX_RENDERED_MESSAGES = 1000;
 // The host delivers restored history in 200-turn pages.  Keep several pages in
@@ -1731,35 +1732,26 @@ export function attachTurnCompletion(
 
 function protocolRepairDisplayReason(payload: Record<string, unknown>): string {
   const issue = typeof payload.issue === "string" ? payload.issue : "";
-  const knownReasons: Record<string, string> = {
-    xml_recovered_final_answer_requires_retry:
-      "回复根节点外包含了额外内容。系统虽然识别出了最终回答，但无法将它安全地视为完整响应，因此正在重新请求。",
-    invalid_xml: "模型回复不是有效的 XML 协议消息，因此正在重新请求。",
-    invalid_xml_response_root:
-      "回复没有使用唯一且完整的 response 根节点，因此正在重新请求。",
-    xml_response_root_missing:
-      "回复缺少必需的 response 根节点，因此正在重新请求。",
-    missing_response_root: "回复缺少必需的 response 根节点，因此正在重新请求。",
-    xml_response_root_unclosed:
-      "回复的 response 根节点没有完整闭合，因此正在重新请求。",
-    xml_content_before_response:
-      "response 根节点前存在额外内容，因此正在重新请求。",
-    xml_content_after_response:
-      "response 根节点后存在额外内容，因此正在重新请求。",
-    empty_response: "模型没有返回可解析的内容，因此正在重新请求。",
-    truncated_model_output:
-      "模型输出在完整响应生成前被截断，因此正在重新请求。",
-    finish_confirm_required_before_final_answer:
-      "最终回答前缺少协议要求的完成确认，因此正在重新请求。",
-    finish_confirm_prefix_invalid:
-      "最终回答前的完成确认格式不正确，因此正在重新请求。",
+  const knownIssueKeys: Record<string, Parameters<typeof t>[0]> = {
+    xml_recovered_final_answer_requires_retry: "repair.extra_after_final_answer",
+    invalid_xml: "repair.invalid_xml",
+    invalid_xml_response_root: "repair.invalid_xml_response_root",
+    xml_response_root_missing: "repair.xml_response_root_missing",
+    missing_response_root: "repair.missing_response_root",
+    xml_response_root_unclosed: "repair.xml_response_root_unclosed",
+    xml_content_before_response: "repair.xml_content_before_response",
+    xml_content_after_response: "repair.xml_content_after_response",
+    empty_response: "repair.empty_response",
+    truncated_model_output: "repair.truncated_model_output",
+    finish_confirm_required_before_final_answer: "repair.finish_confirm_required_before_final_answer",
+    finish_confirm_prefix_invalid: "repair.finish_confirm_prefix_invalid",
   };
-  const knownReason = knownReasons[issue];
-  if (knownReason) return knownReason;
+  const knownReason = knownIssueKeys[issue];
+  if (knownReason) return t(knownReason);
 
   const reason =
     typeof payload.reason === "string" ? payload.reason.trim() : "";
-  return reason || "模型回复格式不符合当前协议要求，系统正在自动重新请求。";
+  return reason || t("repair.fallback");
 }
 
 export type ActiveModelRetryStatus = {
@@ -1790,23 +1782,22 @@ function modelSystemRetryDisplay(error: string): ModelSystemRetryDisplay {
   ) {
     return {
       kind: "response-timeout",
-      label: "响应超时",
-      summary: "模型服务在超时期限内没有返回新的响应数据，系统正在自动重试。",
+      label: t("retry.responseTimeout"),
+      summary: t("retry.responseTimeoutSummary"),
     };
   }
   if (normalized.startsWith("model_http_429")) {
     return {
       kind: "rate-limited",
-      label: "服务限流",
-      summary:
-        "模型接入点返回限流错误，可能与请求频率、并发限制或额度有关；系统正在自动重试。",
+      label: t("retry.rateLimited"),
+      summary: t("retry.rateLimitedSummary"),
     };
   }
   if (/^model_http_(408|409|425|5\d\d)/.test(normalized)) {
     return {
       kind: "service-error",
-      label: "上游异常",
-      summary: "模型接入点或其上游服务返回可重试错误，系统正在自动重试。",
+      label: t("retry.upstreamError"),
+      summary: t("retry.upstreamErrorSummary"),
     };
   }
   if (
@@ -1819,14 +1810,14 @@ function modelSystemRetryDisplay(error: string): ModelSystemRetryDisplay {
   ) {
     return {
       kind: "network-error",
-      label: "网络异常",
-      summary: "连接模型服务时发生网络异常，系统正在自动重连。",
+      label: t("retry.networkError"),
+      summary: t("retry.networkErrorSummary"),
     };
   }
   return {
     kind: "service-error",
-    label: "模型服务异常",
-    summary: "模型请求发生可重试错误，系统正在自动重试。",
+    label: t("retry.serviceError"),
+    summary: t("retry.serviceErrorSummary"),
   };
 }
 
@@ -1837,7 +1828,7 @@ function retryProgress(payload: Record<string, unknown>): string | undefined {
     typeof payload.max_attempts === "number" ? payload.max_attempts : undefined;
   if (attempt === undefined) return undefined;
   return maxAttempts === undefined
-    ? `第 ${attempt} 次`
+    ? t("retry.attempt", { attempt })
     : `${attempt}/${maxAttempts}`;
 }
 
@@ -1868,11 +1859,11 @@ export function activeModelRetryStatus(
           : undefined;
       const detail = [
         display.summary,
-        progress ? `重试进度：${progress}` : "",
+        progress ? t("retry.progressLabel", { progress }) : "",
         delayMs !== undefined
-          ? `下次尝试：约 ${Math.ceil(delayMs / 1000)} 秒后`
+          ? t("retry.nextAttemptIn", { seconds: Math.ceil(delayMs / 1000) })
           : "",
-        error ? `错误详情：${error}` : "",
+        error ? t("retry.errorDetail", { error }) : "",
       ]
         .filter(Boolean)
         .join("\n\n");
@@ -1887,11 +1878,11 @@ export function activeModelRetryStatus(
     const progress = retryProgress(topic.payload);
     status = {
       kind: "retrying",
-      label: "retrying",
+      label: t("retry.retryingLabel"),
       progress,
       detail: [
-        "模型回复偏离当前响应协议，系统正在自动重新请求。",
-        progress ? `修复进度：${progress}` : "",
+        t("retry.repairIntro"),
+        progress ? t("retry.repairProgress", { progress }) : "",
         protocolRepairDisplayReason(topic.payload),
       ]
         .filter(Boolean)
@@ -2041,10 +2032,10 @@ export function activityFromTopic(event: CoreTopicEvent): Activity | null {
       const error = label(payload.error);
       const title =
         phase === "published"
-          ? `ToolGen: 已生成并验证 ${toolName || "可复用工具"}`
+          ? t("tools.generatedTool", { name: toolName || t("tools.reusableTool") })
           : phase === "started"
-            ? "ToolGen: 正在评估…"
-            : "ToolGen: 生成失败";
+            ? t("tools.evaluating")
+            : t("tools.generateFailed");
       return {
         id: clientId(),
         sessionId: event.session_id,

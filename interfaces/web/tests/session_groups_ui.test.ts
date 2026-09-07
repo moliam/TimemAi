@@ -111,8 +111,8 @@ describe("sortable Session group UI", () => {
   it("keeps Search, Favorite, and Settings visible beside a long Session list", () => {
     expect(source).toContain('className="session-list"');
     expect(source).toContain('className="sidebar-footer"');
-    expect(source).toContain('title="Search chats"');
-    expect(source).toContain('title="Favorite answers"');
+    expect(source).toContain('title={t("nav.searchChats")}');
+    expect(source).toContain('title={t("nav.favoriteAnswers")}');
     expect(source).toContain("title={settingsTitle}");
     expect(styles).toMatch(
       /\.app-shell \{[^}]*height: 100%;[^}]*grid-template-rows: minmax\(0, 1fr\);[^}]*overflow: hidden;/,

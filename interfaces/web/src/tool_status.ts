@@ -1,3 +1,5 @@
+import { t } from "./i18n";
+
 export const TOOL_STATUS_RUNNING = "running";
 export const TOOL_STATUS_BACKGROUND_RUNNING = "background_running";
 
@@ -22,11 +24,13 @@ export function isToolActivityFailed(status: string) {
 }
 
 // Visual contract: terminal success/failure use ✓/✗, not redundant word labels.
+// Unknown statuses fall back to the raw wire status; only the two self-made
+// words are localized vocabulary, read at render time.
 export function humanizeToolStatus(status: string) {
   if (status === "completed") return "✓";
   if (status === "failed") return "✗";
-  if (status === TOOL_STATUS_BACKGROUND_RUNNING) return "running (bg)";
-  if (status === "timeout") return "timed out";
+  if (status === TOOL_STATUS_BACKGROUND_RUNNING) return t("tools.statusBg");
+  if (status === "timeout") return t("tools.statusTimeout");
   return status.replaceAll("_", " ");
 }
 
