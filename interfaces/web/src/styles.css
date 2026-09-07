@@ -4931,11 +4931,11 @@ body.workspace-modal-open .app-shell { user-select: none; }
 /* Running tools render expanded in the stream delivery area while the
    Thought/Action frame waits for their terminal status. */
 /* Follow reading size; rem bounds also respect the browser base font. */
-.turn-stream-tools { --stream-content-gap: clamp(.25rem, calc(var(--content-size) * .375), .75rem); display: grid; gap: var(--stream-content-gap); margin: 0 0 var(--stream-content-gap); min-width: 0; }
+.turn-stream-tools { --stream-content-gap: clamp(.125rem, calc(var(--content-size) * .125), .25rem); display: grid; gap: var(--stream-content-gap); margin: 0 0 var(--stream-content-gap); min-width: 0; }
 .stream-tool-row {
   border: none;
   background: transparent;
-  padding: 9px 0;
+  padding: 2px 0;
   min-width: 0;
 }
 /* Animate newly mounted content only; status/text updates keep the same nodes. */
@@ -5183,7 +5183,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-tool-merged-item { display: grid; grid-template-rows: 1fr; opacity: 1; }
 .stream-tool-merged-item.merged { grid-template-rows: 0fr; opacity: 0; }
 .stream-tool-merged-item > div { min-height: 0; overflow: hidden; }
-.stream-tool-run-toggle { display: flex; align-items: center; gap: 6px; border: 0; background: transparent; color: inherit; padding: 7px 4px; cursor: pointer; font-size: 12px; font-weight: 400; }
+.stream-tool-run-toggle { display: flex; align-items: center; gap: 6px; border: 0; background: transparent; color: inherit; padding: 2px 4px; cursor: pointer; font-size: 12px; font-weight: 400; }
 .stream-tool-run-toggle[aria-expanded="true"] svg { transform: none; }
 @media (prefers-reduced-motion: reduce) { .stream-tool-merged-item { transition: none; } }
 
@@ -5250,3 +5250,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
 }
+
+/* Live text/tools share a compact line rhythm; do not stack paragraph margin,
+   grid gap and row padding. Archived/non-stream text keeps its own spacing. */
+.turn-stream-tools > .stream-thought-text { margin-bottom: 0; }

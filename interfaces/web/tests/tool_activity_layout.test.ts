@@ -21,7 +21,7 @@ describe("tool activity row layout", () => {
     expect(styles).not.toContain("grid-template-columns: 16px max-content max-content minmax(0, 1fr) 14px;");
   });
   it("keeps the top-level background status before the shrinkable tool counts", () => {
-    expect(source).toContain('toolActivityGroupStatusLabel(summary)');
+    expect(source).toContain('toolActivityGroupStatusLabel(summary, showResults)');
     expect(source).toContain('activeParts.push(`bg ${summary.backgroundRunningCount}`)');
     expect(source).toMatch(
       /className="tool-activity-group-status"[\s\S]*className="tool-activity-group-counts"/,
@@ -63,7 +63,7 @@ describe("collapsed tool summary", () => {
   it("labels prior tools explicitly and aligns the disclosure with live rows", () => {
     expect(source).toContain('<span>tools</span>');
     expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*font-weight: 400;/);
-    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 7px 4px;/);
+    expect(styles).toMatch(/\.stream-tool-run-toggle \{[^}]*padding: 2px 4px;/);
   });
 });
 
@@ -78,4 +78,11 @@ it("animates running dots without changing layout dimensions", () => {
   expect(styles).toContain("animation: stream-tool-breathe 1.2s ease-in-out infinite");
   expect(styles).toContain("transform: scale(.65)");
   expect(styles).toContain("transform: scale(1)");
+});
+
+it("keeps live text/tool spacing compact without shrinking touch targets", () => {
+  expect(styles).toContain("clamp(.125rem, calc(var(--content-size) * .125), .25rem)");
+  expect(styles).toContain(".turn-stream-tools > .stream-thought-text { margin-bottom: 0; }");
+  expect(styles).toMatch(/\.stream-tool-row \{[^}]*padding: 2px 0;/);
+  expect(styles).toContain("min-height: 44px; min-width: 44px;");
 });

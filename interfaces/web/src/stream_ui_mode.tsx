@@ -1,24 +1,16 @@
-import { useSyncExternalStore } from "react";
-const key = "timem-web-stream-ui-mode-v1";
-const listeners = new Set<() => void>();
-function read(): boolean {
-  try { return window.localStorage.getItem(key) === "true"; } catch { return false; }
-}
-let enabled = read();
-export function setStreamUiMode(value: boolean) {
-  enabled = value;
-  try { window.localStorage.setItem(key, JSON.stringify(value)); } catch { /* Page-local mode still works. */ }
-  listeners.forEach((listener) => listener());
-}
-if (typeof window !== "undefined") window.addEventListener("storage", (event) => {
-  if (event.key === key || event.key === null) { enabled = read(); listeners.forEach((listener) => listener()); }
-});
-export function useStreamUiMode() {
-  return useSyncExternalStore((listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; }, () => enabled, () => false);
+import { setBetaPreference, useBetaPreference } from "./beta_preferences";
+export function setStreamUiMode(value: boolean) { setBetaPreference("stream", value); }
+export function useStreamUiMode() { return useBetaPreference("stream"); }
+export function useToolResultStatus() { return useBetaPreference("toolResults"); }
+export function ToolResultStatusSetting() {
+  const active = useToolResultStatus();
+  return <section className="settings-group toolgen-beta-card"><div className="settings-group-heading"><div>
+    <strong>Tool Result Status</strong><p>Show success or failure based on tool return values. When off, finished calls show Done. This describes execution, not task correctness. Defaults on with --debug; your choice is stored in this browser.</p>
+    </div><button type="button" role="switch" className="settings-feature-switch" aria-label="Tool Result Status" aria-checked={active} onClick={() => setBetaPreference("toolResults", !active)}><span className="settings-feature-switch-thumb" /></button></div></section>;
 }
 export function StreamUiModeSetting() {
   const active = useStreamUiMode();
   return <section className="settings-group toolgen-beta-card"><div className="settings-group-heading"><div>
-    <strong>Stream UI Mode</strong><p>Show response and Chat previews while the model is streaming. Invalid replies are retracted. Stored only in this browser.</p>
+    <strong>Stream UI Mode</strong><p>Show response and Chat previews while the model is streaming. Invalid replies are retracted. Defaults on with --debug; your choice is stored only in this browser.</p>
     </div><button type="button" role="switch" className="settings-feature-switch" aria-label="Stream UI Mode" aria-checked={active} onClick={() => setStreamUiMode(!active)}><span className="settings-feature-switch-thumb" /></button></div></section>;
 }
