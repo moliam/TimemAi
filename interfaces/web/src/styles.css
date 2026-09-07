@@ -2876,7 +2876,7 @@ body {
 .session-row:has(:focus-visible) .session { padding-left: 56px; }
 .session-row:is(.delete-selecting, .controls-suppressed) .session { padding-left: 34px; }
 .session-row:is(.delete-selecting, .controls-suppressed) > .session-expand { display: none; }
-.session-working-icon { width: 14px; height: 14px; flex: none; }
+.session-working-icon { width: 8px; height: 8px; flex: none; }
 .session-identity { flex: 1 1 48px; min-width: 40px; }
 .session-name { line-height: 1.15; }
 .session-endpoint-reveal {
