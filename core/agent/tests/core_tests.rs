@@ -2411,7 +2411,11 @@ fn prompt0_is_static_global_only() {
     assert!(!prompt0.contains("secret user question"));
     assert!(!prompt0.contains("runtime_time: now"));
     assert!(prompt.contains("## USER\n\nsecret user question"));
-    assert!(prompt.contains("## RUNTIME\n\nruntime_time: now"));
+    let runtime = prompt.find("runtime_time: now").unwrap();
+    let user = prompt.find("## USER\n\nsecret user question").unwrap();
+    assert!(prompt[..runtime].rfind("## RUNTIME").is_some());
+    assert!(runtime < user);
+    assert!(!prompt[..runtime].contains("## USER"));
 }
 
 #[test]
@@ -6919,7 +6923,10 @@ fn ci_realistic_multiturn_memory_tools_security_and_shrink_story() {
         other => panic!("unexpected step: {other:?}"),
     };
     assert!(first_prompt.contains("## USER\n\n测试项目纪念日是 2099-06-12"));
-    assert!(first_prompt.contains("## RUNTIME\n\nruntime_time:"));
+    let runtime = first_prompt.find("runtime_time:").unwrap();
+    let user = first_prompt.find("## USER\n").unwrap();
+    assert!(first_prompt[..runtime].rfind("## RUNTIME").is_some());
+    assert!(runtime < user);
     let write_final = match core.apply_model_response(LlmResponse {
         tool_calls: Vec::new(),
         content: scored(r#"{"status":"ALL_FINISHED","final_answer":"已记录。","memory_candidates":[{"content":"测试项目纪念日是 2099-06-12"}]}"#),

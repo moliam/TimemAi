@@ -499,3 +499,57 @@ unreadable image rejection. Web pasting reuses `clipboardImageFiles`
 (`tests/clipboard_images.test.ts`) and the existing upload pipeline; the
 composer `onPaste` wiring itself is not yet covered by an automated browser
 scenario.
+
+### Beta tool-result display and debug defaults
+
+Settings → Beta exposes **Tool Result Status**, a browser-local presentation choice.
+With no saved choice, both it and Stream UI Mode default off normally and on when
+Host `server.debug_mode` is true (`--debug`). Explicit true/false choices survive
+reload and take precedence over defaults on reconnect; defaults are not persisted.
+Storage denial falls back to a tab-local choice; storage events synchronize tabs.
+
+When result display is off, terminal tool rows and groups show `Done` (folded
+stream counts: `N Done`), including accessible labels, without success/failure
+coloring. Foreground/background running indicators remain active. Raw Host tool
+statuses, execution results, output details, timeout/process evidence and model
+inputs are unchanged. `Done` describes completion of the call, not correctness
+of the task or termination of a process that outlives a wait budget.
+
+Coverage: `beta_preferences.test.ts` checks defaults, explicit choices, reload,
+reconnect, cross-tab updates and unavailable storage; `tool_activity_layout.test.ts`
+guards the group wiring. `stream-preview-acceptance.mjs` retains result-mode
+mixed success/failure assertions and checks live neutral-mode switching, folded
+counts and accessible row labels. Web dist changes reflect the preference store,
+settings UI and display integration (entry chunk/hash and HTML reference).
+
+### Structured direct-resume prompt entry and startup ordering
+
+Core's explicit direct-resume entry submits `user_resume_directly`, a User
+component with an empty body. JSON/native Markdown renders
+`## USER (user resume directly)`; XML renders
+`<USER kind="user resume directly">` with an empty body. A user who actually
+writes `user resume directly` still gets an ordinary USER entry: routing must
+use structured intent, never string matching. Supplements retain their existing
+USER (supplement) header. Approval, round-budget, output expansion and stale-context
+decisions remain runtime decision/evidence paths, not fabricated user messages.
+
+Turn-start supporting context (restart/history, cwd instructions and attachment
+context) precedes the initial user entry. Later runtime observations retain their
+chronological position; no role-wide sorting is introduced. The BEGIN TURN marker
+still precedes this turn's entries, and prior pending assistant output stays before
+that marker. Empty ordinary user inputs and supplements remain omitted.
+
+Regression coverage: `core/agent/tests/unit/lib_tests.rs` exercises direct resume
+in JSON/XML and inline/native modes, empty component preservation, interruption
+ordering, literal-text nonclassification and supplements; existing prompt component
+ordering and renderer tests cover repeated roles and protocol escaping.
+
+### Compact live text/tool rhythm
+
+Live tool grid spacing is 0.125× reading size (bounded to 2–4px at a 16px
+root), tool rows/disclosures have 2px vertical padding, and direct live thought
+blocks do not add a bottom margin on top of the grid gap. Text line-height and
+archived/non-stream paragraph spacing are unchanged; coarse-pointer controls
+retain 44px minimum targets. Layout unit tests and Chrome acceptance check these
+bounds along with responsive overflow and stable tool folding. Regenerated Web
+assets include CSS plus the entry chunk/HTML references to the new CSS hash.
