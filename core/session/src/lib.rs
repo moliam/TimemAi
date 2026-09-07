@@ -334,6 +334,7 @@ enum CoreSessionWorkerCommand {
         initial_supplements: Vec<QueuedSupplement>,
         direct_resume: bool,
         cancel_generation: u64,
+        turn_images: Vec<agent_core::ModelImagePart>,
     },
     RunToolGen {
         request: ToolGenRequest,
@@ -492,6 +493,7 @@ impl CoreSessionWorkerHandle {
             command_id,
             Vec::new(),
             true,
+            Vec::new(),
         )
     }
 
@@ -501,7 +503,35 @@ impl CoreSessionWorkerHandle {
         additional_context: Option<String>,
         command_id: Option<String>,
     ) -> Result<(), String> {
-        self.run_turn_batch_with_command_ids(input, additional_context, command_id, Vec::new())
+        self.run_turn_with_command_id_and_images(input, additional_context, command_id, Vec::new())
+    }
+
+    /// Start a turn whose model requests also carry the given images (already
+    /// validated and base64-encoded by the Host). The images stay attached to
+    /// every round of this turn and are dropped when the turn ends.
+    pub fn run_turn_with_command_id_and_images(
+        &self,
+        input: impl Into<String>,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+        images: Vec<agent_core::ModelImagePart>,
+    ) -> Result<(), String> {
+        if images.is_empty() {
+            return self.run_turn_batch_with_command_ids(
+                input,
+                additional_context,
+                command_id,
+                Vec::new(),
+            );
+        }
+        self.run_turn_batch_with_supplements_kind(
+            input,
+            additional_context,
+            command_id,
+            Vec::new(),
+            false,
+            images,
+        )
     }
 
     pub fn run_turn_batch_with_command_ids(
@@ -535,6 +565,7 @@ impl CoreSessionWorkerHandle {
             command_id,
             supplements,
             false,
+            Vec::new(),
         )
     }
 
@@ -545,6 +576,7 @@ impl CoreSessionWorkerHandle {
         command_id: Option<String>,
         supplements: Vec<(agent_core::UserSupplement, Option<String>)>,
         direct_resume: bool,
+        turn_images: Vec<agent_core::ModelImagePart>,
     ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
@@ -605,6 +637,7 @@ impl CoreSessionWorkerHandle {
                     .collect(),
                 direct_resume,
                 cancel_generation,
+                turn_images,
             })
             .map_err(|_| "core_session_worker_stopped".to_string());
         if result.is_err() {
@@ -1624,6 +1657,7 @@ impl CoreSessionWorker {
                         initial_supplements,
                         direct_resume,
                         cancel_generation: command_generation,
+                        turn_images,
                     } => {
                         if command_generation < cancel_generation.load(Ordering::SeqCst) {
                             if let Some(command_id) = command_id.as_ref() {
@@ -1683,6 +1717,7 @@ impl CoreSessionWorker {
                                         runtime: &workspace.runtime,
                                         run_bash_target: &workspace.run_bash_target,
                                         additional_context: additional_context.as_deref(),
+                                        images: &turn_images,
                                     },
                                     &mut ui,
                                     Some(&mut profiler),
@@ -2021,6 +2056,7 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
                     runtime: &workspace.runtime,
                     run_bash_target: &workspace.run_bash_target,
                     additional_context: additional_context.as_deref(),
+                    images: &[],
                 },
                 ui,
                 Some(profiler),

@@ -2085,6 +2085,7 @@ mod tests {
             .unwrap();
         let native_request = agent_core::ModelInteractionRequest {
             rendered_prompt: "second prompt".to_string(),
+            images: Vec::new(),
             static_tool_count: 1,
             tools: vec![
                 agent_core::ToolDefinition {
@@ -2191,6 +2192,7 @@ mod tests {
         let session_dir = store.session_dir("session_native_timeline").unwrap();
         let request = agent_core::ModelInteractionRequest {
             rendered_prompt: "rendered prompt before native messages".to_string(),
+            images: Vec::new(),
             static_tool_count: 0,
             tools: Vec::new(),
             native_exchanges: vec![

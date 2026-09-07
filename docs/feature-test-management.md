@@ -483,3 +483,19 @@ themes at 1440px and 390px, basic field order, responsive grid columns, horizont
 control overflow and API key masking/reveal. The same run retains the existing
 Stop/reconnect/scroll acceptance checks. Geometry assertions are not screenshot
 comparison or a substitute for human aesthetic review.
+
+## Image paste and visual input regression coverage
+
+`attached_images_reach_every_provider_wire_format` proves pasted images reach
+OpenAI Chat (`image_url`), OpenAI Responses (`input_image`) and Anthropic
+(`image` base64) request bodies, with Anthropic inline mode merging parts into
+its single user message instead of emitting consecutive user messages.
+`attached_images_append_after_native_history_without_touching_cache_marks`
+keeps image delivery after projected tool results and leaves cache-marked
+deltas untouched. `multimodal_audit_events_redact_image_payloads` keeps base64
+payloads out of audit dumps. Host `turn_image_parts_encodes_images_skips_files_
+and_fails_closed` covers base64 encoding, non-image skipping and oversized or
+unreadable image rejection. Web pasting reuses `clipboardImageFiles`
+(`tests/clipboard_images.test.ts`) and the existing upload pipeline; the
+composer `onPaste` wiring itself is not yet covered by an automated browser
+scenario.

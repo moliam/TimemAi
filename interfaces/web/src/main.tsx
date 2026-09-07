@@ -8893,6 +8893,18 @@ function TimemThread({
                       ),
                     )
                   }
+                  onPaste={(event) => {
+                    const images = clipboardImageFiles(
+                      Array.from(event.clipboardData?.items ?? []),
+                    );
+                    if (images.length === 0) return;
+                    event.preventDefault();
+                    void (async () => {
+                      for (const image of images) {
+                        await onUpload(image);
+                      }
+                    })();
+                  }}
                   onKeyDown={(event) => {
                     if (event.key !== "Enter" || event.nativeEvent.isComposing)
                       return;

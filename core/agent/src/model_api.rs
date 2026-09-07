@@ -5,8 +5,8 @@ use crate::response_protocol::KNOWN_PROMPT_BOUNDARIES;
 use crate::tool_schema_renderer::{render_tool_input_schema, ToolSchemaDialect};
 use crate::{
     plan_prompt_cache, redact_value, stable_text_fingerprint, CacheControl, CoreProfile,
-    LlmResponse, ModelInteractionRequest, NativeToolCall, PromptBlock, PromptBlockRole,
-    ResponseProtocolKind, ToolDefinition, UsageStats,
+    LlmResponse, ModelImagePart, ModelInteractionRequest, NativeToolCall, PromptBlock,
+    PromptBlockRole, ResponseProtocolKind, ToolDefinition, UsageStats,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,7 +280,162 @@ pub fn prepare_model_interaction_http_request(
             .as_object_mut()
             .map(|body| body.remove("response_format"));
     }
+    if !interaction.images.is_empty() {
+        attach_interaction_images(
+            &mut request.model_request.body,
+            config.api_protocol,
+            interaction.is_native(),
+            &interaction.images,
+        );
+    }
     request
+}
+
+/// Append this turn's images as one trailing user message so provider cache
+/// prefixes (system + earlier history, including tool-result messages) stay
+/// byte-identical across rounds and Anthropic tool_result ordering rules are
+/// never violated. Runs after text/native assembly and only touches the tail.
+fn attach_interaction_images(
+    body: &mut Value,
+    protocol: ApiProtocol,
+    is_native: bool,
+    images: &[ModelImagePart],
+) {
+    let data_urls = images
+        .iter()
+        .map(|image| format!("data:{};base64,{}", image.media_type, image.data))
+        .collect::<Vec<_>>();
+    let parts = match protocol {
+        ApiProtocol::OpenAiCompatible => data_urls
+            .into_iter()
+            .map(|url| json!({"type": "image_url", "image_url": {"url": url}}))
+            .collect::<Vec<_>>(),
+        ApiProtocol::OpenAiResponses => data_urls
+            .into_iter()
+            .map(|url| json!({"type": "input_image", "image_url": url}))
+            .collect::<Vec<_>>(),
+        ApiProtocol::Anthropic => images
+            .iter()
+            .map(|image| {
+                json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": image.media_type,
+                        "data": image.data,
+                    },
+                })
+            })
+            .collect::<Vec<_>>(),
+    };
+    let image_message = json!({"role": "user", "content": parts});
+    match protocol {
+        ApiProtocol::OpenAiResponses => {
+            let input = body
+                .as_object_mut()
+                .and_then(|body| body.get_mut("input"))
+                .expect("responses body must keep an input field");
+            if !input.is_array() {
+                let text = input.take();
+                *input = Value::Array(Vec::from([json!({
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                })]));
+            }
+            input
+                .as_array_mut()
+                .expect("input array")
+                .push(image_message);
+        }
+        ApiProtocol::OpenAiCompatible => {
+            let messages = body
+                .as_object_mut()
+                .and_then(|body| body.get_mut("messages"))
+                .and_then(Value::as_array_mut)
+                .expect("chat body must keep a messages array");
+            messages.push(image_message);
+        }
+        ApiProtocol::Anthropic => {
+            let messages = body
+                .as_object_mut()
+                .and_then(|body| body.get_mut("messages"))
+                .and_then(Value::as_array_mut)
+                .expect("anthropic body must keep a messages array");
+            if is_native {
+                // Native history already contains consecutive user messages
+                // (tool results followed by pending deltas); one more trailing
+                // user message keeps the marked cache prefix untouched.
+                messages.push(image_message);
+            } else {
+                // Inline builds exactly one user message; Anthropic requires
+                // alternating roles, so the image parts join that message.
+                let last = messages
+                    .last_mut()
+                    .and_then(|message| message.get_mut("content"))
+                    .and_then(Value::as_array_mut)
+                    .expect("anthropic inline user content array");
+                last.extend(
+                    image_message
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
+                );
+            }
+        }
+    }
+}
+
+/// Replace image part payloads with bounded placeholders so multimodal audit
+/// events stay readable and bounded.
+fn redact_image_payloads_for_audit(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let image_part = map
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| matches!(kind, "image_url" | "input_image" | "image"));
+            let mut next = serde_json::Map::new();
+            for (key, val) in map {
+                let redacted = if image_part && matches!(key.as_str(), "image_url" | "source") {
+                    match val {
+                        Value::String(url) if url.starts_with("data:") => Value::String(format!(
+                            "[data image redacted; {} chars]",
+                            url.chars().count()
+                        )),
+                        Value::Object(map) => {
+                            let mut map = map.clone();
+                            for nested_key in ["url", "data"] {
+                                if let Some(payload) = map.get(nested_key).and_then(Value::as_str) {
+                                    if payload.starts_with("data:")
+                                        || (nested_key == "data" && !payload.is_empty())
+                                    {
+                                        map.insert(
+                                            nested_key.to_string(),
+                                            Value::String(format!(
+                                                "[image payload redacted; {} chars]",
+                                                payload.chars().count()
+                                            )),
+                                        );
+                                    }
+                                }
+                            }
+                            Value::Object(map)
+                        }
+                        other => other.clone(),
+                    }
+                } else {
+                    redact_image_payloads_for_audit(val)
+                };
+                next.insert(key.clone(), redacted);
+            }
+            Value::Object(next)
+        }
+        Value::Array(items) => {
+            Value::Array(items.iter().map(redact_image_payloads_for_audit).collect())
+        }
+        other => other.clone(),
+    }
 }
 
 fn apply_native_interaction(
@@ -682,6 +837,7 @@ pub fn model_request_audit_event(
     config: &ModelServiceConfig,
     prepared_request: &PreparedModelRequest,
 ) -> Value {
+    let body = redact_image_payloads_for_audit(&prepared_request.body);
     json!({
         "type": "llm_request",
         "model": config.model,
@@ -694,7 +850,7 @@ pub fn model_request_audit_event(
             "mark_count": prepared_request.cache_mark_count,
             "fallback": prepared_request.cache_fallback,
         },
-        "body": redact_value(&prepared_request.body),
+        "body": redact_value(&body),
     })
 }
 

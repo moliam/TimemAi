@@ -141,8 +141,8 @@ pub use host::{
 };
 pub use interaction::{
     parse_parallel_tool_calls, parse_tool_call_mode, CapabilityProbeSource, InteractionConfig,
-    InteractionProfile, ModelInteractionRequest, NativeExchange, NativeToolCall, NativeToolChoice,
-    NativeToolResult, ParallelToolCalls, ToolCallMode, ToolDefinition,
+    InteractionProfile, ModelImagePart, ModelInteractionRequest, NativeExchange, NativeToolCall,
+    NativeToolChoice, NativeToolResult, ParallelToolCalls, ToolCallMode, ToolDefinition,
     DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE,
 };
 pub use model_api::{
@@ -1871,6 +1871,7 @@ impl AgentCore {
         tools.extend(dynamic_tools);
         ModelInteractionRequest {
             rendered_prompt: rendered_prompt.into(),
+            images: Vec::new(),
             static_tool_count,
             tools,
             native_exchanges: self.native_exchanges.clone(),

@@ -1961,6 +1961,63 @@ fn force_session_history_persistence_failure(state: &AppState, label: &str) -> P
 }
 
 #[test]
+fn turn_image_parts_encodes_images_skips_files_and_fails_closed() {
+    use base64::Engine as _;
+    let dir = std::env::temp_dir().join(unique_web_id("image_parts"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let png_bytes: [u8; 4] = [0x89, b'P', b'N', b'G'];
+    let png = dir.join("shot.png");
+    std::fs::write(&png, png_bytes).unwrap();
+    let txt = dir.join("notes.txt");
+    std::fs::write(&txt, b"hello").unwrap();
+    let attachment = |id: &str, name: &str, path: String, bytes: usize| WebAttachment {
+        id: id.to_string(),
+        name: name.to_string(),
+        path,
+        bytes,
+    };
+    let attachments = vec![
+        attachment(
+            "img",
+            "shot.png",
+            png.display().to_string(),
+            png_bytes.len(),
+        ),
+        attachment("txt", "notes.txt", txt.display().to_string(), 5),
+    ];
+    let parts = turn_image_parts(&attachments).unwrap();
+    assert_eq!(parts.len(), 1, "only image files become image parts");
+    assert_eq!(parts[0].media_type, "image/png");
+    assert_eq!(
+        parts[0].data,
+        base64::engine::general_purpose::STANDARD.encode(png_bytes)
+    );
+
+    let oversized = attachment(
+        "big",
+        "big.png",
+        String::new(),
+        MAX_IMAGE_ATTACHMENT_BYTES + 1,
+    );
+    assert_eq!(
+        turn_image_parts(std::slice::from_ref(&oversized)),
+        Err("image_attachment_too_large".to_string())
+    );
+
+    let ghost = attachment(
+        "ghost",
+        "ghost.png",
+        dir.join("missing.png").display().to_string(),
+        4,
+    );
+    assert_eq!(
+        turn_image_parts(std::slice::from_ref(&ghost)),
+        Err("image_attachment_unreadable".to_string())
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn failed_new_turn_persistence_rolls_back_all_in_memory_state() {
     let state = routing_test_state();
     let attachment = WebAttachment {
@@ -9699,6 +9756,7 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
                 observed_tool_calls: 2,
             }),
             interaction_request: Some(Box::new(agent_core::ModelInteractionRequest {
+                images: Vec::new(),
                 rendered_prompt: "debug prompt".to_string(),
                 static_tool_count: 1,
                 tools: vec![agent_core::ToolDefinition {

@@ -5755,11 +5755,21 @@ fn send_queued_message_now(
             &payload.attachments,
             &payload.worker_roles,
         )?;
-        if let Err(error) = primary_worker_handle(state, session_id)?.run_turn_with_command_id(
-            payload.text,
-            context,
-            Some(item.command_id.clone()),
-        ) {
+        let images = match turn_image_parts(&payload.attachments) {
+            Ok(images) => images,
+            Err(error) => {
+                reject_queued_dispatch(state, session_id, &item.command_id, &payload.turn_id);
+                return Err(error);
+            }
+        };
+        if let Err(error) = primary_worker_handle(state, session_id)?
+            .run_turn_with_command_id_and_images(
+                payload.text,
+                context,
+                Some(item.command_id.clone()),
+                images,
+            )
+        {
             reject_queued_dispatch(state, session_id, &item.command_id, &payload.turn_id);
             return Err(error);
         }
@@ -6120,7 +6130,14 @@ fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
         }
     };
     if let Err(error) = primary_worker_handle(state, session_id).and_then(|worker| {
-        worker.run_turn_with_command_id(payload.text, context, Some(intent.command_id.clone()))
+        turn_image_parts(&payload.attachments).and_then(|images| {
+            worker.run_turn_with_command_id_and_images(
+                payload.text,
+                context,
+                Some(intent.command_id.clone()),
+                images,
+            )
+        })
     }) {
         reject_queued_dispatch(state, session_id, &intent.command_id, &payload.turn_id);
         publish_core_semantic(
@@ -6309,10 +6326,14 @@ fn redeliver_recorded_turn(
             Some(command_id.to_string()),
         )
     } else {
-        worker.run_turn_with_command_id(
+        let context =
+            session_context_with_roles(state, session_id, &entry.attachments, &entry.worker_roles)?;
+        let images = turn_image_parts(&entry.attachments)?;
+        worker.run_turn_with_command_id_and_images(
             entry.text.clone(),
-            session_context_with_roles(state, session_id, &entry.attachments, &entry.worker_roles)?,
+            context,
             Some(command_id.to_string()),
+            images,
         )
     }
 }
@@ -6856,7 +6877,14 @@ fn submit_turn_with_selected_attachments_and_kind(
             command_id.map(str::to_string),
         )
     } else {
-        worker.run_turn_with_command_id(text, additional_context, command_id.map(str::to_string))
+        turn_image_parts(&attachments).and_then(|images| {
+            worker.run_turn_with_command_id_and_images(
+                text,
+                additional_context,
+                command_id.map(str::to_string),
+                images,
+            )
+        })
     };
     if let Err(error) = enqueue_result {
         rollback_web_turn(state, session_id, &turn.turn_id, attachments);
@@ -6999,7 +7027,13 @@ fn resolve_work_instruction_decision(
     if pending.direct_resume {
         worker.resume_turn_directly_with_command_id(additional_context, pending.command_id)?;
     } else {
-        worker.run_turn_with_command_id(pending.text, additional_context, pending.command_id)?;
+        let images = turn_image_parts(&pending.attachments)?;
+        worker.run_turn_with_command_id_and_images(
+            pending.text,
+            additional_context,
+            pending.command_id,
+            images,
+        )?;
     }
     Ok(true)
 }
@@ -9031,11 +9065,25 @@ fn session_context_with_roles(
         WorkInstructionLoadMode::Ask | WorkInstructionLoadMode::Off => None,
     };
     let uploaded_files = uploaded_files_context(attachments, spec);
+    let image_note = attachments
+        .iter()
+        .filter(|file| image_media_type(&file.name).is_some())
+        .map(|file| file.name.as_str())
+        .collect::<Vec<_>>();
+    let image_note = if image_note.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "The user attached image file(s) to this message: {}. Their visual content is delivered as image parts of this request.",
+            image_note.join(", ")
+        ))
+    };
     let worker_roles = worker_roles_context(worker_roles);
     Ok(combine_additional_contexts([
         resume_notice.as_deref(),
         instructions.as_deref(),
         uploaded_files.as_deref(),
+        image_note.as_deref(),
         worker_roles.as_deref(),
         tool_repo_hint.as_deref(),
     ]))
@@ -9057,6 +9105,55 @@ fn uploaded_files_context(
             .collect::<Vec<_>>()
             .join("\n")
     ))
+}
+
+const MAX_IMAGE_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TURN_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TURN_IMAGES: usize = 8;
+
+fn image_media_type(name: &str) -> Option<&'static str> {
+    let extension = Path::new(name).extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
+/// Load image attachments of one turn as model image parts. Fail closed on
+/// oversized or unreadable images instead of silently dropping them; only
+/// bounded raster formats become vision input, other files keep their
+/// text-path listing. Callers must invoke this once per turn start.
+fn turn_image_parts(
+    attachments: &[WebAttachment],
+) -> Result<Vec<agent_core::ModelImagePart>, String> {
+    use base64::Engine as _;
+    let mut parts = Vec::new();
+    let mut total_bytes = 0usize;
+    for attachment in attachments {
+        let Some(media_type) = image_media_type(&attachment.name) else {
+            continue;
+        };
+        if parts.len() >= MAX_TURN_IMAGES {
+            return Err("turn_image_limit_reached".to_string());
+        }
+        if attachment.bytes > MAX_IMAGE_ATTACHMENT_BYTES {
+            return Err("image_attachment_too_large".to_string());
+        }
+        total_bytes += attachment.bytes;
+        if total_bytes > MAX_TURN_IMAGE_BYTES {
+            return Err("turn_image_bytes_limit_reached".to_string());
+        }
+        let bytes = std::fs::read(&attachment.path)
+            .map_err(|_| "image_attachment_unreadable".to_string())?;
+        parts.push(agent_core::ModelImagePart::new(
+            media_type,
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+        ));
+    }
+    Ok(parts)
 }
 
 fn sanitize_upload_name(name: &str) -> Result<String, String> {

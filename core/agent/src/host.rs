@@ -27,6 +27,9 @@ pub struct TurnInput<'a> {
     pub runtime: &'a str,
     pub run_bash_target: &'a str,
     pub additional_context: Option<&'a str>,
+    /// Images the user attached to this turn's input. They stay attached to
+    /// every model request of this turn; later turns see only the text history.
+    pub images: &'a [crate::ModelImagePart],
 }
 
 #[derive(Debug, Clone)]
