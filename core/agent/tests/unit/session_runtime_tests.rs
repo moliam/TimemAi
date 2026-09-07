@@ -3240,7 +3240,7 @@ fn session_turn_replays_previous_assistant_components_before_next_user_input() {
             audit_file: &audit,
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
-            additional_context: Some("runtime note after user"),
+            additional_context: Some("startup context before user"),
             images: &[],
         },
         &mut ui,
@@ -3253,10 +3253,11 @@ fn session_turn_replays_previous_assistant_components_before_next_user_input() {
     let free_talk = prompt.find("previous free talk").unwrap();
     let previous_answer = prompt.find("previous answer").unwrap();
     let user = prompt.find("second user input").unwrap();
-    let runtime_note = prompt.find("runtime note after user").unwrap();
+    let runtime_note = prompt.find("startup context before user").unwrap();
     assert!(free_talk < user);
     assert!(previous_answer < user);
-    assert!(user < runtime_note);
+    assert!(previous_answer < runtime_note);
+    assert!(runtime_note < user);
     assert!(prompt.contains("## Ai4"));
     assert!(!prompt.contains("created_at_ms"));
     assert!(!prompt.contains("batch_id"));
@@ -3730,7 +3731,8 @@ fn cancelled_turn_injects_one_runtime_note_before_next_user_and_runtime_context(
 
     assert!(old_user < note, "{prompt}");
     assert!(note < new_user, "{prompt}");
-    assert!(new_user < new_runtime, "{prompt}");
+    assert!(note < new_runtime, "{prompt}");
+    assert!(new_runtime < new_user, "{prompt}");
     assert_eq!(prompt.matches(note_text).count(), 1);
     assert!(!prompt.contains("<ASSISTANT name="));
 

@@ -347,7 +347,7 @@ fn normalize_assistant_speaker_name(name: &str) -> String {
 
 fn role_for_prompt_type(prompt_type: &str, assistant_speaker_name: &str) -> PromptComponentRole {
     match prompt_type {
-        "user_question" | "user_supplement" => PromptComponentRole::user(),
+        "user_question" | "user_supplement" | "user_resume_directly" => PromptComponentRole::user(),
         "llm_response"
         | "llm_response_raw_xml"
         | "llm_free_talk"
@@ -2992,10 +2992,19 @@ impl AgentCore {
     }
 
     pub fn begin_direct_resume_turn(&mut self, supporting_context: Option<&str>) -> CoreStep {
-        self.begin_turn(DIRECT_RESUME_USER_INPUT, supporting_context)
+        self.begin_turn_with_input_kind("", supporting_context, true)
     }
 
     pub fn begin_turn(&mut self, user_input: &str, supporting_context: Option<&str>) -> CoreStep {
+        self.begin_turn_with_input_kind(user_input, supporting_context, false)
+    }
+
+    fn begin_turn_with_input_kind(
+        &mut self,
+        user_input: &str,
+        supporting_context: Option<&str>,
+        direct_resume: bool,
+    ) -> CoreStep {
         self.current_round = 0;
         self.round_budget = self.configured_round_budget;
         self.current_stats = UsageStats::zero();
@@ -3028,7 +3037,7 @@ impl AgentCore {
             format!("[BEGIN TURN turn_id: {action_turn_id}]"),
             "runtime",
         );
-        if self.pending_user_interruption_note && !text.is_empty() {
+        if self.pending_user_interruption_note && (direct_resume || !text.is_empty()) {
             self.pending_user_interruption_note = false;
             self.submit_prompt_component(
                 PromptComponentRole::system(),
@@ -3061,20 +3070,26 @@ impl AgentCore {
         {
             system_texts.push(format!("Long-context maintenance:\n{shrink_review}"));
         }
-        if !text.is_empty() {
-            self.submit_prompt_component(
-                PromptComponentRole::user(),
-                "user_question",
-                text,
-                "user_input",
-            );
-        }
         for system_text in system_texts {
             self.submit_prompt_component(
                 PromptComponentRole::system(),
                 "runtime_note",
                 system_text,
                 "runtime",
+            );
+        }
+        // Supporting context describes state already present at turn admission
+        // (notably restart/history notices), so it precedes the user input.
+        if direct_resume || !text.is_empty() {
+            self.submit_prompt_component(
+                PromptComponentRole::user(),
+                if direct_resume {
+                    "user_resume_directly"
+                } else {
+                    "user_question"
+                },
+                text,
+                "user_input",
             );
         }
         if should_memory_precheck {
@@ -4765,7 +4780,10 @@ Runtime tool_call ids:",
             // per-call retention policy before reaching this point.
             content = tool_result_gate::gate(&content, tool_result_gate::Retention::Head);
         }
-        if content.trim().is_empty() {
+        // Explicit resume is a header-only user behavior, not synthetic text.
+        if content.trim().is_empty()
+            && !(role == PromptComponentRole::User && kind == "user_resume_directly")
+        {
             return None;
         }
         self.prompt_component_sequence = self.prompt_component_sequence.saturating_add(1);
@@ -7319,7 +7337,7 @@ fn prompt_type_role_for_scratch(
     spec: &crate::response_protocol::PromptBoundarySpec,
 ) -> &'static str {
     match prompt_type {
-        "user_question" | "user_supplement" => spec.user_role,
+        "user_question" | "user_supplement" | "user_resume_directly" => spec.user_role,
         "llm_response"
         | "llm_response_raw_xml"
         | "llm_free_talk"

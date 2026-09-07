@@ -55,6 +55,7 @@ pub(crate) fn split_formatted_response_trailer(rendered_prompt: &str) -> (&str, 
 enum VisiblePromptRole {
     User,
     UserSupplement,
+    UserResumeDirectly,
     You,
     ContextCompactionSummary,
     Runtime,
@@ -63,7 +64,9 @@ enum VisiblePromptRole {
 impl VisiblePromptRole {
     fn label(self, spec: &PromptBoundarySpec) -> &str {
         match self {
-            VisiblePromptRole::User | VisiblePromptRole::UserSupplement => spec.user_role,
+            VisiblePromptRole::User
+            | VisiblePromptRole::UserSupplement
+            | VisiblePromptRole::UserResumeDirectly => spec.user_role,
             VisiblePromptRole::You | VisiblePromptRole::ContextCompactionSummary => {
                 spec.assistant_role
             }
@@ -80,7 +83,13 @@ impl VisiblePromptRole {
     }
 
     fn render_open(self, spec: &PromptBoundarySpec, assistant_heading: &str) -> String {
-        if self == VisiblePromptRole::UserSupplement {
+        if self == VisiblePromptRole::UserResumeDirectly {
+            if spec.uses_xml_role_elements() {
+                format!("<{} kind=\"user resume directly\">", spec.user_role)
+            } else {
+                format!("## {} (user resume directly)", spec.user_role)
+            }
+        } else if self == VisiblePromptRole::UserSupplement {
             if spec.uses_xml_role_elements() {
                 format!("<{} kind=\"supplement\">", spec.user_role)
             } else {
@@ -105,6 +114,7 @@ fn visible_role(prompt_type: &str) -> VisiblePromptRole {
     match prompt_type {
         "user_question" => VisiblePromptRole::User,
         "user_supplement" => VisiblePromptRole::UserSupplement,
+        "user_resume_directly" => VisiblePromptRole::UserResumeDirectly,
         "llm_response" | "llm_response_raw_xml" | "llm_free_talk" => VisiblePromptRole::You,
         "context_compaction_summary" => VisiblePromptRole::ContextCompactionSummary,
         "result_of_llm_action" | "response_repair" | "context_compacted" => {
@@ -578,9 +588,9 @@ fn render_prompt_context_structure(
 `[BEGIN TURN turn_id: <id>]` opens a logical user turn; all following entries, even \
 across prompt deltas, belong to that turn until the next BEGIN TURN marker. Initial \
 user input uses `<USER>` and later input in the same turn uses \
-`<USER kind=\"supplement\">`. Static system content is separate in `<Timem System Prompt>`."
+`<USER kind=\"supplement\">`. Explicit direct resume uses `<USER kind=\"user resume directly\">` with an empty body. User-kind attributes describe structured behavior, not user-authored text. Restart/supporting context precedes the user entry; later runtime observations remain after it. Static system content is separate in `<Timem System Prompt>`."
     } else {
-        "A dynamic delta starts with `[BEGIN DELTA delta_id: <id>, time_ms: <time>]` and extends through every following provider-native message until the next BEGIN DELTA marker or the end of the current model input. Deltas are transport batches, not user turns. A RUNTIME entry `[BEGIN TURN turn_id: <id>]` opens a logical user turn; all following USER, ASSISTANT, RUNTIME, and native tool-call/result messages, even across deltas, belong to that turn until the next BEGIN TURN marker. Initial user input uses `## USER`; later input in the same turn uses `## USER (supplement)`. There is no END DELTA or END TURN marker. Static system content is enclosed separately by the system-prompt boundaries."
+        "A dynamic delta starts with `[BEGIN DELTA delta_id: <id>, time_ms: <time>]` and extends through every following provider-native message until the next BEGIN DELTA marker or the end of the current model input. Deltas are transport batches, not user turns. A RUNTIME entry `[BEGIN TURN turn_id: <id>]` opens a logical user turn; all following USER, ASSISTANT, RUNTIME, and native tool-call/result messages, even across deltas, belong to that turn until the next BEGIN TURN marker. Initial user input uses `## USER`; later input in the same turn uses `## USER (supplement)`. Explicit direct resume uses the header `## USER (user resume directly)` with an empty body (XML: `<USER kind=\"user resume directly\">`). These annotations describe structured user behavior, not user-authored text. Restart/supporting context precedes the user entry; later runtime observations remain after it. There is no END DELTA or END TURN marker. Static system content is enclosed separately by the system-prompt boundaries."
     }
 }
 
