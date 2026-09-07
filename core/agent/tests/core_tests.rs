@@ -6162,6 +6162,11 @@ fn still_running_table_survives_discard_of_the_original_action_delta() {
     assert!(prompt.contains("### STILL RUNNING"), "{prompt}");
     assert!(prompt.contains("created by tool_call id"), "{prompt}");
     assert!(
+        prompt.contains("| pid | created by tool_call id | command |"),
+        "{prompt}"
+    );
+    assert!(prompt.contains("`sleep 5; printf late`"), "{prompt}");
+    assert!(
         prompt
             .lines()
             .any(|line| line.contains("| `") && line.contains("` |")),

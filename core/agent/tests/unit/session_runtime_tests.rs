@@ -478,9 +478,10 @@ fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_
     assert!(second.contains("still running cmds:"), "{second}");
     assert!(second.contains("### STILL RUNNING"), "{second}");
     assert!(
-        second.contains("| pid | created by tool_call id |"),
+        second.contains("| pid | created by tool_call id | command |"),
         "{second}"
     );
+    assert!(second.contains("`sleep 30`"), "{second}");
     let call_id = second
         .lines()
         .find(|line| line.starts_with("| ") && line.contains('`'))
