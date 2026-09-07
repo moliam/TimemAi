@@ -2173,8 +2173,8 @@ impl AgentCore {
             "still running cmds:
 
 ### STILL RUNNING
-| pid | created by tool_call id |
-|---:|---|",
+| pid | created by tool_call id | command |
+|---:|---|---|",
         );
         for job in running {
             let call_id = markdown_table_cell(if job.tool_call_id.trim().is_empty() {
@@ -2182,10 +2182,11 @@ impl AgentCore {
             } else {
                 &job.tool_call_id
             });
+            let command = markdown_table_cell(&compact_text(&job.command, 500));
             text.push_str(&format!(
                 "
-| {} | `{}` |",
-                job.pid, call_id
+| {} | `{}` | `{}` |",
+                job.pid, call_id, command
             ));
         }
         Some(text)

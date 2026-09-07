@@ -2202,6 +2202,30 @@ fn controlled_request_base() -> String {
 }
 
 #[test]
+fn still_running_table_includes_bounded_escaped_original_command() {
+    let core = test_core("running_command_context");
+    let mut job = controlled_job_snapshot(77);
+    job.tool_call_id = "call|`77".to_string();
+    job.command = format!("printf 'a|b'\nprintf `date`; {}", "x".repeat(600));
+
+    let context = core
+        .still_running_cmds_context_from(vec![job])
+        .expect("running context");
+
+    assert!(
+        context.contains("| pid | created by tool_call id | command |"),
+        "{context}"
+    );
+    assert!(context.contains(r#"`call\|\`77`"#), "{context}");
+    assert!(
+        context.contains(r#"`printf 'a\|b' printf \`date\`;"#),
+        "{context}"
+    );
+    assert!(context.contains('…'), "{context}");
+    assert!(!context.contains("\nprintf"), "{context}");
+}
+
+#[test]
 fn model_prompt_job_finished_before_first_scan_has_only_exit_update() {
     let mut core = test_core("job_status_before_first_scan");
     let prompt = core.build_model_request_prompt_from_job_snapshots(
@@ -2236,6 +2260,14 @@ fn model_prompt_job_finished_between_scans_orders_running_before_exit() {
     let exit = prompt.find("RUNNING_JOB_UPDATE").unwrap();
     assert!(tool < running && running < exit, "{prompt}");
     assert_eq!(prompt.matches("### STILL RUNNING").count(), 1, "{prompt}");
+    assert!(
+        prompt.contains("| pid | created by tool_call id | command |"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("| 202 | `call_202` | `job-202` |"),
+        "{prompt}"
+    );
     assert_eq!(prompt.matches("RUNNING_JOB_UPDATE").count(), 1, "{prompt}");
     assert!(prompt.contains("Exit status: 0"), "{prompt}");
     assert!(prompt.contains("output-202"), "{prompt}");
