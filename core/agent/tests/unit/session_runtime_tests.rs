@@ -1020,7 +1020,7 @@ fn session_turn_retries_transient_model_api_errors_and_reports_status() {
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([
         Err("model_http_500: upstream overloaded".to_string()),
-        Err("model_network_error: curl: (16) Error in the HTTP2 framing layer".to_string()),
+        Err("model_request_error: stage=response_headers error sending request for url (https://example.invalid/v1/chat/completions): connection error: unexpected end of file".to_string()),
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"重试后成功。"}"#,
             1_000,
@@ -1051,6 +1051,7 @@ fn session_turn_retries_transient_model_api_errors_and_reports_status() {
     assert_eq!(ui.retries[0].1, crate::DEFAULT_MODEL_SYSTEM_ERROR_RETRIES);
     assert_eq!(ui.retries[0].2, Duration::ZERO);
     assert!(ui.retries[0].3.contains("model_http_500"));
+    assert!(ui.retries[1].3.contains("unexpected end of file"));
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "model_retry"), 2);
 }

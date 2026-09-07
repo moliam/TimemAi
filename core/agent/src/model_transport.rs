@@ -438,10 +438,13 @@ fn map_reqwest_error(error: reqwest::Error, stage: &str) -> String {
         format!("model_connect_error: stage={stage} {detail}")
     } else if error.is_body() || error.is_decode() {
         format!("model_body_error: stage={stage} {detail}")
+    } else if error.is_request() && stage == "response_headers" {
+        // URL parsing, headers, request serialization, and client construction
+        // are validated before this mapper is called. An is_request() failure
+        // while awaiting response headers therefore happened during send/I/O,
+        // even when reqwest/hyper does not expose a more specific error kind.
+        format!("model_network_error: stage={stage} {detail}")
     } else if has_retryable_socket_error(&error) || is_transient_connection_failure(&lower) {
-        // reqwest/hyper can mark a socket failure while sending a request as
-        // is_request(). Preserve non-retryable request-construction errors, but
-        // normalize known local/peer transport failures as retryable network I/O.
         format!("model_network_error: stage={stage} {detail}")
     } else if error.is_request() {
         format!("model_request_error: stage={stage} {detail}")
@@ -454,7 +457,19 @@ fn has_retryable_socket_error(error: &(dyn std::error::Error + 'static)) -> bool
     let mut current = Some(error);
     while let Some(item) = current {
         if let Some(io_error) = item.downcast_ref::<std::io::Error>() {
-            if matches!(io_error.kind(), std::io::ErrorKind::AddrNotAvailable) {
+            if matches!(
+                io_error.kind(),
+                std::io::ErrorKind::AddrNotAvailable
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::WouldBlock
+            ) {
                 return true;
             }
         }
@@ -476,6 +491,7 @@ fn is_transient_connection_failure(error_chain: &str) -> bool {
         "peer closed connection",
         "broken pipe",
         "unexpected eof",
+        "unexpected end of file",
         "incomplete message",
         "http2 framing",
         "h2 protocol error",
