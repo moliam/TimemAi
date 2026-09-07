@@ -473,7 +473,7 @@ button:disabled { cursor: not-allowed; }
 .session-row.renaming-session { background: #1c2a33; }
 .session-row .session { flex: 1; width: 100%; }
 .session-row.active .session { color: #f3fbff; }
-.session-working-icon { flex: none; color: #e7b86c; animation: spin 1.5s linear infinite; }
+.session-working-icon { flex: none; color: #e7b86c; }
 
 
 
@@ -5232,12 +5232,16 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .stream-tool-row.running .stream-tool-status-slot > .stream-tool-status { display: none; }
 .stream-tool-background { color: #98afbc; opacity: .65; }
 
-/* 性能约束：保留主运行提示和短暂状态反馈，不恢复每个工具/Worker/侧栏的常驻旋转。
-   重复动画的合成工作会随数量增长，即使只是在等待结果。浮动/吸顶导航不可重新模糊
-   背后滚动的正文，避免滚动和文字渐显期间重复背景采样。保留正常滚动交互。
-   这是减少无效工作的设计约束，不是 WindowServer 或温度降幅承诺；浏览器测试
-   验证重复标记静态和导航无背景模糊。 */
-.session-working-icon, .worker-working-icon { animation: none; filter: none; }
+/* 性能约束：运行提示只保留少量同源动画。侧栏仅在会话可见运行时显示一个与聊天区
+   stream-working-dot 同源的呼吸点（stream-working-grow，仅 transform/opacity，
+   走合成器，不触发布局/重绘），数量以正在运行的会话行数为上限；Worker、工具等
+   随轮内活动增长的重复标记保持静态。浮动/吸顶导航不可重新模糊背后滚动的正文，
+   避免滚动和文字渐显期间重复背景采样。保留正常滚动交互。这是减少无效工作的
+   设计约束，不是 WindowServer 或温度降幅承诺；浏览器测试验证侧栏呼吸点与聊天区
+   同节拍、重复标记静态和导航无背景模糊。 */
+.worker-working-icon { animation: none; filter: none; }
+.session-working-icon { border-radius: 50%; background: currentColor; animation: stream-working-grow 1.2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .session-working-icon { animation: none; } }
 :root[data-theme="light"] .worker-working-icon { filter: none; }
 .user-message-navigation button,
 .session-group-heading,
