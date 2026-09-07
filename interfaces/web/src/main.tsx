@@ -1,4 +1,5 @@
-import { StreamUiModeSetting, useStreamUiMode } from "./stream_ui_mode";
+import { applyBetaDebugDefault } from "./beta_preferences";
+import { StreamUiModeSetting, useStreamUiMode, ToolResultStatusSetting, useToolResultStatus } from "./stream_ui_mode";
 import { StreamText } from "./stream_reveal";
 import {
   AssistantRuntimeProvider,
@@ -1422,6 +1423,7 @@ function TimemApp() {
       ]),
     );
     setServer(snapshot.server);
+    applyBetaDebugDefault(snapshot.server.debug_mode);
     performanceTraceRef.current.setEnabled(snapshot.server.performance_trace);
     if (!snapshot.server.debug_mode) setExpandedSessionIds(new Set());
     const authoritativeRoleLibrary = snapshot.role_library ?? {
@@ -9942,6 +9944,7 @@ function StreamChatAnswer({ answer, superseded }: {
 }
 
 function StreamToolRun({ activities, superseded, handoffIds }: { activities: Activity[]; superseded: boolean; handoffIds: Set<string> }) {
+  const showResults = useToolResultStatus();
   const [expanded, setExpanded] = useState(false);
   // 视觉契约：工具完成不立即折叠；逻辑时序 +1 才将旧的非 running 工具收起。
   // +1 包括同轮串行新 call 实际开始执行，以及后续 AI 回复内容到来。
@@ -9994,7 +9997,7 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
   // +/- 不表达成功失败；计数另用 ✓ / ✗。保留按钮与行节点，仅新计数可重放反馈。
   return <div ref={runRef} className="stream-tool-run">
     {completed.length > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
-      {expanded ? <Minus size={13} aria-hidden="true" /> : <Plus size={13} aria-hidden="true" />}<span>tools</span> <span key={countRevision} aria-label={`${succeededCount} succeeded, ${failedCount} failed`} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{toolResultCountsLabel(succeededCount, failedCount)}</span>
+      {expanded ? <Minus size={13} aria-hidden="true" /> : <Plus size={13} aria-hidden="true" />}<span>tools</span> <span key={countRevision} aria-label={showResults ? `${succeededCount} succeeded, ${failedCount} failed` : `${completed.length} Done`} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{showResults ? toolResultCountsLabel(succeededCount, failedCount) : `${completed.length} Done`}</span>
     </button>}
     {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
       <div><StreamToolRow activity={activity} /></div>
@@ -10005,6 +10008,7 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
 
 /** Only the status field announces and highlights lifecycle updates. */
 function ActionStatus({ status, label, className }: { status: string; label: string; className: string }) {
+  const showResults = useToolResultStatus();
   const previous = useRef(status);
   const [revision, setRevision] = useState(0);
   useEffect(() => {
@@ -10013,8 +10017,8 @@ function ActionStatus({ status, label, className }: { status: string; label: str
       setRevision(value => value + 1);
     }
   }, [status]);
-  return <span className={className} role="status" aria-live="polite" aria-atomic="true" aria-label={status === "completed" ? "Succeeded" : status === "failed" ? "Failed" : undefined}>
-    <span key={revision} className={revision ? "action-status-changed" : undefined}>{label}</span>
+  return <span className={className} role="status" aria-live="polite" aria-atomic="true" aria-label={!showResults && !isToolActivityRunning(status) ? "Done" : status === "completed" ? "Succeeded" : status === "failed" ? "Failed" : undefined}>
+    <span key={revision} className={revision ? "action-status-changed" : undefined}>{!showResults && !isToolActivityRunning(status) ? "Done" : label}</span>
   </span>;
 }
 
@@ -10945,7 +10949,8 @@ function ToolGenNotice({ activity }: { activity: Activity }) {
   );
 }
 
-function toolActivityGroupStatusLabel(summary: ToolActivitySummary) {
+function toolActivityGroupStatusLabel(summary: ToolActivitySummary, showResults: boolean) {
+  if (!showResults && summary.status !== "running") return "Done";
   if (summary.status === "completed") return "✓";
   if (summary.status === "failed") return `✗(${summary.failedCount})`;
 
@@ -10954,7 +10959,7 @@ function toolActivityGroupStatusLabel(summary: ToolActivitySummary) {
     activeParts.push(`fg ${summary.foregroundRunningCount}`);
   if (summary.backgroundRunningCount > 0)
     activeParts.push(`bg ${summary.backgroundRunningCount}`);
-  if (summary.failedCount > 0)
+  if (showResults && summary.failedCount > 0)
     activeParts.push(`failed ${summary.failedCount}`);
   return activeParts.length > 0
     ? `running (${activeParts.join(" · ")})`
@@ -10962,6 +10967,7 @@ function toolActivityGroupStatusLabel(summary: ToolActivitySummary) {
 }
 
 function ToolActivityGroup({ summary, enterPulse = false }: { summary: ToolActivitySummary; enterPulse?: boolean }) {
+  const showResults = useToolResultStatus();
   const [open, setOpen] = useState(false);
   const singleActivity =
     summary.activities.length === 1 ? summary.activities[0] : undefined;
@@ -10972,11 +10978,11 @@ function ToolActivityGroup({ summary, enterPulse = false }: { summary: ToolActiv
   )
     return <ToolActivity activity={singleActivity} />;
   const running = summary.status === "running";
-  const groupStatusLabel = toolActivityGroupStatusLabel(summary);
+  const groupStatusLabel = toolActivityGroupStatusLabel(summary, showResults);
   const summaryLabel = `${open ? "收起" : "展开"}工具活动：${summary.label}，${groupStatusLabel}`;
   return (
     <details
-      className={`tool-activity-group ${summary.status}${enterPulse ? " thought-run-enter" : ""}`}
+      className={`tool-activity-group ${!showResults && summary.status !== "running" ? "settled" : summary.status}${enterPulse ? " thought-run-enter" : ""}`}
       open={open}
       aria-busy={running || undefined}
       onToggle={(event) => setOpen(event.currentTarget.open)}
@@ -12545,6 +12551,7 @@ const SettingsCenter = memo(function SettingsCenter(
                   <TriangleAlert size={19} aria-hidden="true" />
                 </div>
                 <StreamUiModeSetting />
+                <ToolResultStatusSetting />
                 <section className="settings-group toolgen-beta-card">
                   <div className="settings-group-heading">
                     <div>

@@ -388,6 +388,7 @@ async function main() {
     publish(1, "early response", [{ index: 0, task: "Interim", answer: "early chat" }]);
     await sleep(150);
     assert(!(await contains(".response-preview", "early response")), "default off leaked preview");
+    await browser.evaluate(`localStorage.setItem("timem-web-tool-result-status-v1", "true"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-tool-result-status-v1"}));`);
     await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "true"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-stream-ui-mode-v1"}));`);
     await waitFor(() => contains(".response-preview", "early response"), "midstream enable missing response");
     await waitFor(() => contains(".provisional-chat", "early chat"), "chat did not stream");
@@ -699,6 +700,11 @@ async function main() {
         return equal;
       })()`), `stream/final typography differs at ${size}`);
     }
+    assert(await browser.evaluate(`(() => {
+      const text = document.querySelector('.turn-stream-tools > .stream-thought-text');
+      const row = document.querySelector('.stream-tool-row');
+      return text && row && getComputedStyle(text).marginBottom === '0px' && getComputedStyle(row).paddingTop === '2px' && getComputedStyle(row).paddingBottom === '2px';
+    })()`), "live text/tool spacing stacks paragraph margin or oversized row padding");
     const longThought = Array.from({length: 60}, (_, i) => `Paragraph ${i} remains stable.\n\n`).join("");
     const longEvents = [thoughtEvent("long", longThought, 1), toolEvent("adjacent-a", 3), toolEvent("adjacent-b", 4), thoughtEvent("after-adjacent", "Following AI reply", 100)];
     await setRound(longEvents, longThought);
@@ -774,7 +780,7 @@ async function main() {
             const rect = toggle.getBoundingClientRect();
             return {gap:parseFloat(style.rowGap), margin:parseFloat(style.marginBottom), width:document.documentElement.scrollWidth, viewport:innerWidth, toggleWidth:rect.width, toggleHeight:rect.height, label:tools.querySelector('.stream-tool-count').textContent};
           })()`);
-          const expected = Math.min(12, Math.max(4, font * .375));
+          const expected = Math.min(4, Math.max(2, font * .125));
           assert(Math.abs(result.gap - expected) < .1 && Math.abs(result.margin - expected) < .1, `relative spacing ${width}/${font}/${zoom}: ${JSON.stringify(result)}`);
           assert(result.width <= result.viewport + 1 && result.toggleWidth > 0 && result.toggleHeight > 0 && result.label === '2 ✓', `responsive overflow/control ${width}/${font}/${zoom}: ${JSON.stringify(result)}`);
           responsiveCases++;
@@ -785,12 +791,12 @@ async function main() {
     assert(await browser.evaluate(`(() => {
       document.documentElement.style.fontSize = '20px';
       document.documentElement.style.setProperty('--content-size', '8px');
-      return parseFloat(getComputedStyle(document.querySelector('.turn-stream-tools')).rowGap) === 5;
+      return parseFloat(getComputedStyle(document.querySelector('.turn-stream-tools')).rowGap) === 2.5;
     })()`), "spacing lower bound must follow root font");
     assert(await browser.evaluate(`(() => {
       document.documentElement.style.setProperty('--content-size', '100px');
       const style = getComputedStyle(document.querySelector('.turn-stream-tools'));
-      return parseFloat(style.rowGap) === 15 && parseFloat(style.marginBottom) === 15;
+      return parseFloat(style.rowGap) === 5 && parseFloat(style.marginBottom) === 5;
     })()`), "spacing upper bound must follow root font");
     await browser.evaluate(`document.documentElement.style.fontSize = ${JSON.stringify(responsiveOriginal.root)}; document.documentElement.style.setProperty('--content-size', ${JSON.stringify(responsiveOriginal.content)}); document.body.style.zoom = ${JSON.stringify(responsiveOriginal.zoom)}; true`);
     await browser.call("Emulation.clearDeviceMetricsOverride");
@@ -877,6 +883,11 @@ async function main() {
     assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').getAttribute('aria-expanded') === 'true' && !!document.querySelector('.stream-tool-run-toggle > svg.lucide-minus')`), "expanded tools must display minus");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
     assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').getAttribute('aria-expanded') === 'false' && !!document.querySelector('.stream-tool-run-toggle > svg.lucide-plus')`), "collapsed tools must display plus");
+    await browser.evaluate(`localStorage.setItem("timem-web-tool-result-status-v1", "false"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-tool-result-status-v1"}));`);
+    await waitFor(() => contains(".stream-tool-run-toggle", "2 Done"), "neutral folded count missing");
+    assert(await browser.evaluate(`[...document.querySelectorAll('.stream-tool-status')].every(n => n.textContent === 'Done' && n.getAttribute('aria-label') === 'Done')`), "neutral rows leaked success/failure visually or accessibly");
+    await browser.evaluate(`localStorage.setItem("timem-web-tool-result-status-v1", "true"); window.dispatchEvent(new StorageEvent("storage", {key:"timem-web-tool-result-status-v1"}));`);
+    await waitFor(() => contains(".stream-tool-run-toggle", "1 ✓ | 1 ✗"), "result preference did not update mounted rows");
     console.log("PASS Chrome visual interaction: stable completed groups, selection protection, failure toggle, 390/768px overflow");
     console.log("PASS Chrome continuous stream: multi-round DOM stability, completed adjacency merge/reopen, terminal animation and interruption archive");
     console.log("PASS Chrome interim continuity: deduplicated deliveries, earlier thought/answers retained, reload and typography");
