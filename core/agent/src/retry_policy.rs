@@ -57,7 +57,8 @@ pub fn is_retryable_model_system_error(error: &str) -> bool {
     if lower == "cancelled_by_user" {
         return false;
     }
-    if lower.starts_with("model_network_error")
+    if is_legacy_response_header_transport_error(&lower)
+        || lower.starts_with("model_network_error")
         || lower.starts_with("model_dns_error")
         || lower.starts_with("model_connect_error")
         || lower.starts_with("model_proxy_error")
@@ -82,6 +83,14 @@ pub fn is_retryable_model_system_error(error: &str) -> bool {
         return matches!(status, 408 | 409 | 425 | 429) || status >= 500;
     }
     false
+}
+
+fn is_legacy_response_header_transport_error(lower_error: &str) -> bool {
+    // Older transport versions exposed send-time reqwest failures under the
+    // generic request prefix. The stage is the stable semantic signal: request
+    // construction has already completed before response headers are awaited.
+    lower_error.starts_with("model_request_error:")
+        && lower_error.contains("stage=response_headers")
 }
 
 pub fn is_model_input_too_large_error(error: &str) -> bool {

@@ -139,14 +139,28 @@ fn transport_failure_markers_exclude_permanent_request_and_tls_errors() {
         "connection reset by peer",
         "broken pipe",
         "unexpected eof while reading response",
+        "unexpected end of file",
         "incomplete message",
         "http2 framing layer failure",
         "h2 protocol error",
     ] {
         assert!(is_transient_connection_failure(transient), "{transient}");
     }
-    let addr_not_available = std::io::Error::from(std::io::ErrorKind::AddrNotAvailable);
-    assert!(has_retryable_socket_error(&addr_not_available));
+    for kind in [
+        std::io::ErrorKind::AddrNotAvailable,
+        std::io::ErrorKind::BrokenPipe,
+        std::io::ErrorKind::ConnectionAborted,
+        std::io::ErrorKind::ConnectionRefused,
+        std::io::ErrorKind::ConnectionReset,
+        std::io::ErrorKind::Interrupted,
+        std::io::ErrorKind::NotConnected,
+        std::io::ErrorKind::TimedOut,
+        std::io::ErrorKind::UnexpectedEof,
+        std::io::ErrorKind::WouldBlock,
+    ] {
+        let error = std::io::Error::from(kind);
+        assert!(has_retryable_socket_error(&error), "{kind:?}");
+    }
     let invalid_input = std::io::Error::from(std::io::ErrorKind::InvalidInput);
     assert!(!has_retryable_socket_error(&invalid_input));
 
