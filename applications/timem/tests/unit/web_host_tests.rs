@@ -840,6 +840,7 @@ fn corrupt_session_index_record_is_backed_up_while_valid_sessions_remain_usable(
     let store = SessionStore::new(&memory_dir);
     std::fs::create_dir_all(store.sessions_dir()).unwrap();
     let valid = StoredSession {
+        model_endpoint_id: None,
         session_id: "session-valid".to_string(),
         display_name: "Recovered".to_string(),
         created_at_ms: 1,
@@ -4463,6 +4464,7 @@ fn missing_workspace_session_uses_locked_fallback_without_losing_metadata_or_his
         .unwrap();
     store
         .upsert_session(&StoredSession {
+            model_endpoint_id: None,
             session_id: session_id.to_string(),
             display_name: original_display_name.to_string(),
             created_at_ms: 1,
@@ -7552,6 +7554,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         work_instruction_allowed: None,
         pending_work_instruction_turn: None,
         runtime: WebSessionRuntime {
+            model_endpoint_id: None,
             settings,
             env: BTreeMap::new(),
             env_overrides: BTreeMap::new(),
@@ -7593,6 +7596,7 @@ fn test_runtime_settings() -> RuntimeSettings {
 
 fn test_runtime_profile() -> WebSessionRuntimeProfile {
     WebSessionRuntimeProfile {
+        model_endpoint_id: None,
         model: "model".to_string(),
         api_protocol: "openai-compatible".to_string(),
         response_protocol: "xml".to_string(),
@@ -14004,6 +14008,26 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
             .api_key,
         "secret-endpoint-key"
     );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(
+            session.runtime_profile.model_endpoint_id.as_deref(),
+            Some("endpoint-one")
+        );
+        assert_eq!(session.runtime_profile.model, "gpt-4.1-mini");
+        assert_eq!(
+            session.runtime_profile.base_url,
+            "https://responses.example.test/v1"
+        );
+        assert_eq!(session.runtime_profile.api_protocol, "openai-responses");
+        assert_eq!(session.runtime_profile.response_protocol, "json");
+        let stored = stored_session_from_web_session(&state, session);
+        assert_eq!(stored.model_endpoint_id.as_deref(), Some("endpoint-one"));
+        let restored: StoredSession =
+            serde_json::from_str(&serde_json::to_string(&stored).unwrap()).unwrap();
+        assert_eq!(restored.model_endpoint_id, stored.model_endpoint_id);
+    }
     let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
     let restored = load_model_endpoints_resilient(&memory_dir).unwrap();
     assert_eq!(restored[0].name, "Production renamed");
@@ -14011,6 +14035,66 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     assert_eq!(restored[0].max_llm_output_tokens, 50_000);
     assert!(!restored[0].stream);
     assert_eq!(restored[0].api_key, "secret-endpoint-key");
+
+    // Editing during an active Turn must retain the old complete route until
+    // the following new-Turn boundary, then apply secrets and headers as well.
+    let previous = model_endpoint_config(&state, "endpoint-one").unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.active_turn_id = Some("endpoint-active".to_string());
+        session.turns.push(WebTurn {
+            turn_id: "endpoint-active".to_string(),
+            state: "working".to_string(),
+            created_at_ms: 1,
+            interrupted_at_ms: None,
+            user_entries: Vec::new(),
+            events: Vec::new(),
+            sub_answers: Vec::new(),
+            final_answer: None,
+            preview: None,
+            completion: None,
+        });
+    }
+    let mut updated = previous.clone();
+    updated.base_url = "https://latest.example.test/v1".to_string();
+    updated.api_key = "replacement-secret".to_string();
+    updated.http_headers = BTreeMap::from([("X-Route".to_string(), "latest".to_string())]);
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.model_endpoints[0] = updated.clone();
+        save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints).unwrap();
+    }
+    sync_endpoint_runtime_fields(&state, &previous, &updated).unwrap();
+    refresh_bound_model_endpoint(&state, &session_id).unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        assert!(session_uses_model_endpoint(session, &previous));
+        session.active_turn_id = None;
+    }
+    refresh_bound_model_endpoint(&state, &session_id).unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        assert!(session_uses_model_endpoint(
+            &sessions[&session_id],
+            &updated
+        ));
+    }
+    // Restore the persisted binding and stale cached settings; resolving it must
+    // still select the latest endpoint rather than compare route content.
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        let stored = stored_session_from_web_session(&state, session);
+        session.runtime.model_endpoint_id = stored.model_endpoint_id;
+        session.runtime.settings.config.base_url = previous.base_url.clone();
+    }
+    refresh_bound_model_endpoint(&state, &session_id).unwrap();
+    assert!(session_uses_model_endpoint(
+        &state.sessions.lock().unwrap()[&session_id],
+        &updated
+    ));
 
     handle_command(
         &state,
@@ -14023,6 +14107,10 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     assert!(load_model_endpoints_resilient(&memory_dir)
         .unwrap()
         .is_empty());
+    assert_eq!(
+        refresh_bound_model_endpoint(&state, &session_id).unwrap_err(),
+        "model_endpoint_not_found"
+    );
     let manager = {
         let mut guard = state.manager.lock().unwrap();
         std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())

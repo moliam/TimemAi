@@ -468,3 +468,18 @@ slot stay fixed; terminal tools use result markers instead. Reduced motion
 disables breathing. Tool absorption remains free of height animation. Chrome
 coverage seeks animation time to verify changing dot size with a stable slot
 for bash/readfile and both running states, plus reduced-motion behavior.
+
+## Model endpoint binding regression coverage
+
+`shared_model_endpoints_are_persisted_redacted_editable_and_deletable` covers stable
+Session endpoint IDs, full route edits, renames, persistence round trips, active
+Turn deferral, next-Turn resolution and deleted-binding rejection. Web
+`model_endpoints.test.ts` covers ID-based labels/selection and deleted bindings;
+`endpoint_header_button.test.ts` guards basic-field-first editor order.
+
+Browser endpoint layout acceptance is included in
+`interfaces/web/tests/browser/stop-ui-acceptance.mjs`: real Chrome checks dark/light
+themes at 1440px and 390px, basic field order, responsive grid columns, horizontal
+control overflow and API key masking/reveal. The same run retains the existing
+Stop/reconnect/scroll acceptance checks. Geometry assertions are not screenshot
+comparison or a substitute for human aesthetic review.

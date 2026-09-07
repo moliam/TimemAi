@@ -157,6 +157,7 @@ export type Session = {
   tools: ToolSummary[];
   mcp_server_ids: string[];
   runtime_profile?: {
+    model_endpoint_id?: string | null;
     model: string;
     api_protocol: string;
     response_protocol: string;

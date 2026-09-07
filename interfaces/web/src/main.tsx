@@ -234,12 +234,11 @@ import {
   modelDisplayName,
   modelServiceIssue,
   NO_MODEL_ENDPOINTS_ISSUE,
-  UNCONFIGURED_MODEL_LABEL,
 } from "./model_service_ui";
 import {
   endpointDraftValid,
   endpointMatchesProfile,
-  endpointNameForProfile,
+  endpointLabelForProfile,
   MODEL_CONTEXT_WINDOW_OPTIONS,
   MODEL_OUTPUT_TOKEN_OPTIONS,
   ModelEndpointDraft,
@@ -2988,10 +2987,10 @@ function TimemApp() {
   const modelEndpointsUnavailable =
     !!server && server.model_endpoints.length === 0;
   const headerModelLabel =
-    endpointNameForProfile(
+    endpointLabelForProfile(
       server?.model_endpoints ?? [],
       activeSession?.runtime_profile,
-    ) ?? UNCONFIGURED_MODEL_LABEL;
+    );
   const openEndpointSettings = () => {
     setShowRuntime(false);
     setShowMcp(false);
@@ -3742,10 +3741,10 @@ function TimemApp() {
                                       const visuallyWorking =
                                         sessionVisuallyWorking(session);
                                       const sessionEndpointName =
-                                        endpointNameForProfile(
+                                        endpointLabelForProfile(
                                           server?.model_endpoints ?? [],
                                           session.runtime_profile,
-                                        ) ?? UNCONFIGURED_MODEL_LABEL;
+                                        );
                                       return (
                                         <Fragment key={session.session_id}>
                                           <SortableSessionRow
@@ -13795,7 +13794,7 @@ function ModelEndpointEditor({
           />
         </label>
         <label>
-          模型
+          模型 ID
           <input
             value={draft.model}
             placeholder="gpt-4.1"
@@ -13803,6 +13802,59 @@ function ModelEndpointEditor({
               setDraft({ ...draft, model: event.target.value })
             }
           />
+        </label>
+        <label className="wide">
+          Base URL
+          <input
+            value={draft.base_url}
+            placeholder="https://api.example.com/v1"
+            onChange={(event) =>
+              setDraft({ ...draft, base_url: event.target.value })
+            }
+          />
+        </label>
+        <label className="wide">
+          API Key
+          <div className="endpoint-api-key">
+            <input
+              type={showApiKey ? "text" : "password"}
+              autoComplete="new-password"
+              spellCheck={false}
+              value={apiKey}
+              placeholder={
+                endpoint?.api_key_configured && revealedApiKey === undefined
+                  ? "正在读取…"
+                  : "可留空"
+              }
+              onChange={(event) =>
+                setDraft({ ...draft, api_key: event.target.value })
+              }
+            />
+            <div className="endpoint-api-key-actions">
+              <button
+                type="button"
+                className={copyClass}
+                title={copyLabel}
+                aria-label={copyLabel}
+                disabled={!apiKey}
+                onClick={() => void copy()}
+              >
+                {copyState === "copied" ? (
+                  <CheckCheck size={12} />
+                ) : (
+                  <Copy size={12} />
+                )}
+              </button>
+              <button
+                type="button"
+                title={apiKeyVisibilityLabel}
+                aria-label={apiKeyVisibilityLabel}
+                onClick={() => setShowApiKey((visible) => !visible)}
+              >
+                {showApiKey ? <EyeOff size={13} /> : <Eye size={13} />}
+              </button>
+            </div>
+          </div>
         </label>
         <div className="endpoint-api-protocol">
           <label>
@@ -13850,15 +13902,42 @@ function ModelEndpointEditor({
             <option value="json">json</option>
           </select>
         </label>
-        <label className="wide">
-          Base URL
-          <input
-            value={draft.base_url}
-            placeholder="https://api.example.com/v1"
+
+        <label>
+          最大上下文窗口
+          <select
+            value={draft.max_llm_input_tokens}
             onChange={(event) =>
-              setDraft({ ...draft, base_url: event.target.value })
+              setDraft({
+                ...draft,
+                max_llm_input_tokens: Number(event.target.value),
+              })
             }
-          />
+          >
+            {MODEL_CONTEXT_WINDOW_OPTIONS.map((tokens) => (
+              <option key={tokens} value={tokens}>
+                {tokens === 1_000_000 ? "1M" : `${tokens / 1_000}K`}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          最大输出
+          <select
+            value={draft.max_llm_output_tokens}
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                max_llm_output_tokens: Number(event.target.value),
+              })
+            }
+          >
+            {MODEL_OUTPUT_TOKEN_OPTIONS.map((tokens) => (
+              <option key={tokens} value={tokens}>
+                {tokens / 1_000}K
+              </option>
+            ))}
+          </select>
         </label>
         <label className="wide endpoint-transport-toggle">
           <span>
@@ -13896,85 +13975,8 @@ function ModelEndpointEditor({
           />
           <small>仅用于此接入点的模型 HTTPS 连接，不替换系统根证书。</small>
         </label>
-        <label>
-          最大上下文窗口
-          <select
-            value={draft.max_llm_input_tokens}
-            onChange={(event) =>
-              setDraft({
-                ...draft,
-                max_llm_input_tokens: Number(event.target.value),
-              })
-            }
-          >
-            {MODEL_CONTEXT_WINDOW_OPTIONS.map((tokens) => (
-              <option key={tokens} value={tokens}>
-                {tokens === 1_000_000 ? "1M" : `${tokens / 1_000}K`}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          最大输出
-          <select
-            value={draft.max_llm_output_tokens}
-            onChange={(event) =>
-              setDraft({
-                ...draft,
-                max_llm_output_tokens: Number(event.target.value),
-              })
-            }
-          >
-            {MODEL_OUTPUT_TOKEN_OPTIONS.map((tokens) => (
-              <option key={tokens} value={tokens}>
-                {tokens / 1_000}K
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="wide">
-          API Key
-          <div className="endpoint-api-key">
-            <input
-              type={showApiKey ? "text" : "password"}
-              autoComplete="new-password"
-              spellCheck={false}
-              value={apiKey}
-              placeholder={
-                endpoint?.api_key_configured && revealedApiKey === undefined
-                  ? "正在读取…"
-                  : "可留空"
-              }
-              onChange={(event) =>
-                setDraft({ ...draft, api_key: event.target.value })
-              }
-            />
-            <div className="endpoint-api-key-actions">
-              <button
-                type="button"
-                className={copyClass}
-                title={copyLabel}
-                aria-label={copyLabel}
-                disabled={!apiKey}
-                onClick={() => void copy()}
-              >
-                {copyState === "copied" ? (
-                  <CheckCheck size={12} />
-                ) : (
-                  <Copy size={12} />
-                )}
-              </button>
-              <button
-                type="button"
-                title={apiKeyVisibilityLabel}
-                aria-label={apiKeyVisibilityLabel}
-                onClick={() => setShowApiKey((visible) => !visible)}
-              >
-                {showApiKey ? <EyeOff size={13} /> : <Eye size={13} />}
-              </button>
-            </div>
-          </div>
-        </label>
+
+
         <div className="wide endpoint-structured-headers">
           <StructuredKeyValueEditor
             label="Headers"

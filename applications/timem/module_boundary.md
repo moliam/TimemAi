@@ -213,3 +213,11 @@ It must not contain:
   `applications/timem_desktop`, `bridges/native_ffi`, or `bridges/ipc` only with a real consumer and
   implemented behavior. A same-process Rust desktop Interface should use `bridges/in_process`; a
   cross-language same-process client may justify `native_ffi`; a separate process may justify IPC.
+
+### Model endpoint binding
+
+The Host projects the Session's durable model endpoint ID, not a browser-inferred
+configuration match. Endpoint edits update the complete route for idle bound
+Sessions; active Turns retain their route until the next new-Turn boundary.
+Restore and submission resolve the saved ID; deleted endpoints fail closed.
+Legacy migration requires a unique full configuration match, including secrets.

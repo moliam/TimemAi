@@ -46,3 +46,11 @@ describe("header endpoint selector", () => {
   });
 
 });
+
+it("orders basic endpoint fields before optional transport settings", () => {
+  const editor = source.slice(source.indexOf('<div className="endpoint-editor-grid">'));
+  const fields = ['value={draft.name}', 'value={draft.model}', 'value={draft.base_url}', 'value={apiKey}', 'value={draft.api_protocol}', 'value={draft.max_llm_input_tokens}', 'checked={draft.allow_cross_origin_redirects}'];
+  const positions = fields.map((field) => editor.indexOf(field));
+  expect(positions.every((position) => position >= 0)).toBe(true);
+  expect(positions).toEqual([...positions].sort((a, b) => a - b));
+});

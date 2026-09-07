@@ -569,6 +569,7 @@ struct WebWorker {
 
 #[derive(Debug, Clone)]
 struct WebSessionRuntime {
+    model_endpoint_id: Option<String>,
     settings: RuntimeSettings,
     env: BTreeMap<String, String>,
     env_overrides: BTreeMap<String, String>,
@@ -577,6 +578,7 @@ struct WebSessionRuntime {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct WebSessionRuntimeProfile {
+    model_endpoint_id: Option<String>,
     model: String,
     api_protocol: String,
     response_protocol: String,
@@ -4632,13 +4634,14 @@ fn create_session_in_group(
     let settings = state.template.session_settings(&env_overrides)?;
     let session_env = state.template.session_env(&settings, &env_overrides);
     let runtime = WebSessionRuntime {
+        model_endpoint_id: None,
         settings,
         env: session_env,
         env_overrides,
         forward_compatible_cache: BTreeMap::new(),
     };
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
-    let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
+    let runtime_profile = WebSessionRuntimeProfile::from_runtime(&runtime);
     let global_roles = current_mem_state(state)?.role_library.roles;
     {
         let mut sessions = state
@@ -5103,13 +5106,14 @@ fn restore_stored_session(
     let settings = state.template.restored_session_settings(&cached_env)?;
     let session_env = state.template.session_env(&settings, &cached_env);
     let runtime = WebSessionRuntime {
+        model_endpoint_id: stored.model_endpoint_id.clone(),
         settings,
         env: session_env,
         env_overrides: stored.env_overrides.clone().unwrap_or_default(),
         forward_compatible_cache,
     };
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
-    let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
+    let runtime_profile = WebSessionRuntimeProfile::from_runtime(&runtime);
     let tool_repo = session_tool_repo(state, &stored.session_id)?;
     let legacy_roles_path = roles_path_for_history(
         &current_session_store(state)?.history_path_for_session(&stored.session_id),
@@ -5289,6 +5293,31 @@ fn restore_stored_session(
         true,
     )?;
     persist_restored_session_runtime_cache(state, &stored)?;
+    // A missing preset stays explicitly bound and fails closed at submission.
+    // Do not discard restored history just because an endpoint was deleted.
+    let endpoint_id = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        sessions
+            .get(&stored.session_id)
+            .ok_or("session_not_found")?
+            .runtime
+            .model_endpoint_id
+            .clone()
+    };
+    if endpoint_id
+        .as_deref()
+        .map(|id| model_endpoint_config_if_exists(state, id))
+        .transpose()?
+        .flatten()
+        .is_some()
+        || endpoint_id.is_none()
+    {
+        refresh_bound_model_endpoint(state, &stored.session_id)?;
+    }
+
     if !stored_workspace_available {
         state.runtime_log.record(
             "session_restore_workspace_fallback",
@@ -6145,6 +6174,7 @@ fn stored_session_from_web_session_with_store(
     session: &WebSession,
 ) -> StoredSession {
     StoredSession {
+        model_endpoint_id: session.runtime.model_endpoint_id.clone(),
         session_id: session.session_id.clone(),
         display_name: session.display_name.clone(),
         created_at_ms: session
@@ -7307,15 +7337,17 @@ fn sync_endpoint_runtime_fields(
     previous: &ModelEndpointConfig,
     updated: &ModelEndpointConfig,
 ) -> Result<Vec<(String, WebSessionRuntimeProfile)>, String> {
-    if previous.max_llm_input_tokens == updated.max_llm_input_tokens
-        && previous.max_llm_output_tokens == updated.max_llm_output_tokens
-        && previous.stream == updated.stream
-        && previous.request_fields == updated.request_fields
-        && previous.allow_cross_origin_redirects == updated.allow_cross_origin_redirects
-        && previous.private_ca_pem == updated.private_ca_pem
-    {
-        return Ok(Vec::new());
-    }
+    let other_endpoints = {
+        let mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        mem.model_endpoints
+            .iter()
+            .filter(|endpoint| endpoint.id != previous.id)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let session_ids = {
         let sessions = state
             .sessions
@@ -7323,71 +7355,127 @@ fn sync_endpoint_runtime_fields(
             .map_err(|_| "session_store_poisoned".to_string())?;
         sessions
             .iter()
-            .filter(|(_, session)| session_uses_model_endpoint(session, previous))
-            .map(|(session_id, _)| session_id.clone())
+            .filter(|(_, session)| {
+                session.runtime.model_endpoint_id.as_deref() == Some(previous.id.as_str())
+                    || (session.runtime.model_endpoint_id.is_none()
+                        && session_uses_model_endpoint(session, previous)
+                        && !other_endpoints
+                            .iter()
+                            .any(|endpoint| session_uses_model_endpoint(session, endpoint)))
+            })
+            .map(|(id, _)| id.clone())
             .collect::<Vec<_>>()
     };
-    let mut updates = Vec::with_capacity(session_ids.len());
+    let mut updates = Vec::new();
     for session_id in session_ids {
-        let mut runtime_profile = None;
-        if previous.max_llm_input_tokens != updated.max_llm_input_tokens {
-            runtime_profile = Some(
-                update_session_runtime_setting(
-                    state,
-                    &session_id,
-                    "TIMEM_MAX_LLM_INPUT",
-                    &updated.max_llm_input_tokens.to_string(),
-                )?
-                .1,
-            );
-        }
-        if previous.max_llm_output_tokens != updated.max_llm_output_tokens {
-            runtime_profile = Some(
-                update_session_runtime_setting(
-                    state,
-                    &session_id,
-                    "TIMEM_MAX_LLM_OUTPUT",
-                    &updated.max_llm_output_tokens.to_string(),
-                )?
-                .1,
-            );
-        }
-        if previous.stream != updated.stream {
-            runtime_profile = Some(
-                update_session_runtime_setting(
-                    state,
-                    &session_id,
-                    "TIMEM_STREAM",
-                    &updated.stream.to_string(),
-                )?
-                .1,
-            );
-        }
-        if previous.request_fields != updated.request_fields {
-            runtime_profile = Some(update_session_request_fields(
-                state,
-                &session_id,
-                updated.request_fields.clone(),
-            )?);
-        }
-        if previous.allow_cross_origin_redirects != updated.allow_cross_origin_redirects
-            || previous.private_ca_pem != updated.private_ca_pem
         {
-            runtime_profile = Some(update_session_model_http_transport(
-                state,
-                &session_id,
-                agent_core::ModelHttpTransportOptions {
-                    allow_cross_origin_redirects: updated.allow_cross_origin_redirects,
-                    private_ca_pem: (!updated.private_ca_pem.is_empty())
-                        .then(|| updated.private_ca_pem.clone()),
-                },
-            )?);
+            let mut sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            let session = sessions.get_mut(&session_id).ok_or("session_not_found")?;
+            session.runtime.model_endpoint_id = Some(updated.id.clone());
+            session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
         }
-        if let Some(runtime_profile) = runtime_profile {
-            updates.push((session_id, runtime_profile));
+        persist_web_session(state, &session_id)?;
+        if !session_has_active_turn(state, &session_id)? {
+            updates.push((
+                session_id.clone(),
+                apply_model_endpoint(state, &session_id, &updated.id)?,
+            ));
+        } else {
+            let sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            updates.push((
+                session_id.clone(),
+                sessions[&session_id].runtime_profile.clone(),
+            ));
         }
     }
     Ok(updates)
+}
+
+// Resolve the binding at the new-Turn boundary, never during an active request.
+fn refresh_bound_model_endpoint(state: &AppState, session_id: &str) -> Result<(), String> {
+    if session_has_active_turn(state, session_id)? {
+        return Ok(());
+    }
+    let unbound = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        sessions
+            .get(session_id)
+            .ok_or("session_not_found")?
+            .runtime
+            .model_endpoint_id
+            .is_none()
+    };
+    let mut migrated = false;
+    if unbound {
+        // Legacy migration requires a unique complete match, including secrets.
+        let mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions.get_mut(session_id).ok_or("session_not_found")?;
+        let mut matches = mem
+            .model_endpoints
+            .iter()
+            .filter(|endpoint| session_uses_model_endpoint(session, endpoint));
+        let first = matches.next().map(|endpoint| endpoint.id.clone());
+        if first.is_some() && matches.next().is_none() {
+            session.runtime.model_endpoint_id = first;
+            session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
+            migrated = true;
+        }
+    }
+    let id = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        sessions
+            .get(session_id)
+            .ok_or("session_not_found")?
+            .runtime
+            .model_endpoint_id
+            .clone()
+    };
+    if let Some(id) = id {
+        if migrated {
+            persist_web_session(state, session_id)?;
+        }
+        let endpoint = model_endpoint_config(state, &id)?;
+        let matches = {
+            let sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            session_uses_model_endpoint(
+                sessions.get(session_id).ok_or("session_not_found")?,
+                &endpoint,
+            )
+        };
+        if !matches || migrated {
+            let runtime_profile = apply_model_endpoint(state, session_id, &id)?;
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id: session_id.to_string(),
+                    runtime_profile,
+                },
+            );
+        }
+    }
+    Ok(())
 }
 
 fn delete_model_endpoint(state: &AppState, endpoint_id: &str) -> Result<(), String> {
@@ -7476,7 +7564,19 @@ fn apply_model_endpoint(
                 .then_some(endpoint.private_ca_pem),
         },
     )?;
-    update_session_api_key(state, session_id, endpoint.api_key)
+    update_session_api_key(state, session_id, endpoint.api_key)?;
+    let profile = {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions.get_mut(session_id).ok_or("session_not_found")?;
+        session.runtime.model_endpoint_id = Some(endpoint_id.to_string());
+        session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
+        session.runtime_profile.clone()
+    };
+    persist_web_session(state, session_id)?;
+    Ok(profile)
 }
 
 fn update_session_model_http_transport(
@@ -7514,8 +7614,7 @@ fn update_session_model_http_transport(
             .ok_or_else(|| "session_not_found".to_string())?;
         session.runtime.settings.config.http_transport = options;
         session.runtime.env = session_cached_env_values(&session.runtime.settings);
-        session.runtime_profile =
-            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
         session.runtime_profile.clone()
     };
     persist_web_session(state, session_id)?;
@@ -7558,8 +7657,7 @@ fn update_session_http_headers(
             "TIMEM_HTTP_HEADERS".to_string(),
             serde_json::to_string(&http_headers).map_err(|e| e.to_string())?,
         );
-        session.runtime_profile =
-            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
         session.runtime_profile.clone()
     };
     persist_web_session(state, session_id)?;
@@ -7602,8 +7700,7 @@ fn update_session_request_fields(
             "TIMEM_REQUEST_FIELDS".to_string(),
             serde_json::to_string(&request_fields).map_err(|e| e.to_string())?,
         );
-        session.runtime_profile =
-            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
         session.runtime_profile.clone()
     };
     persist_web_session(state, session_id)?;
@@ -7652,8 +7749,7 @@ fn update_session_api_key(
             .runtime
             .env
             .insert("TIMEM_API_KEY".to_string(), api_key);
-        session.runtime_profile =
-            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
         session.runtime_profile.clone()
     };
     persist_web_session(state, session_id)?;
@@ -7709,8 +7805,7 @@ fn update_session_runtime_setting(
                 .runtime
                 .env_overrides
                 .insert(key.to_string(), normalized_value.clone());
-            session.runtime_profile =
-                WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+            session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
             session.runtime_profile.clone()
         };
         persist_web_session(state, session_id)?;
@@ -7774,8 +7869,7 @@ fn update_session_runtime_setting(
                 .runtime
                 .env_overrides
                 .insert(key.to_string(), normalized_value.clone());
-            session.runtime_profile =
-                WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+            session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
             session.runtime_profile.clone()
         };
         persist_web_session(state, session_id)?;
@@ -7835,8 +7929,7 @@ fn update_session_runtime_setting(
             .runtime
             .env
             .extend(session_cached_env_values(&session.runtime.settings));
-        session.runtime_profile =
-            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
         session.max_llm_input_tokens = session.runtime.settings.config.max_llm_input_tokens;
         session.runtime_profile.clone()
     };
@@ -7883,8 +7976,7 @@ fn propagate_runtime_config_to_sessions(
                     value,
                 );
                 // Update the runtime_profile for UI display
-                session.runtime_profile =
-                    WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+                session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
                 session
                     .runtime
                     .env
@@ -8321,6 +8413,7 @@ fn submit_toolgen_turn(
 }
 
 fn validate_session_model_service_config(state: &AppState, session_id: &str) -> Result<(), String> {
+    refresh_bound_model_endpoint(state, session_id)?;
     let sessions = state
         .sessions
         .lock()
@@ -10995,8 +11088,15 @@ fn apply_session_runtime_field(
 }
 
 impl WebSessionRuntimeProfile {
+    fn from_runtime(runtime: &WebSessionRuntime) -> Self {
+        let mut profile = Self::from_settings(&runtime.settings);
+        profile.model_endpoint_id = runtime.model_endpoint_id.clone();
+        profile
+    }
+
     fn from_settings(settings: &RuntimeSettings) -> Self {
         Self {
+            model_endpoint_id: None,
             model: settings.config.model.clone(),
             api_protocol: settings.config.api_protocol.label().to_string(),
             response_protocol: settings.config.response_protocol.name().to_string(),
