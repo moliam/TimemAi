@@ -56,6 +56,17 @@ describe("stream tool status continuity", () => {
     expect(row).toContain('className="stream-tool-background">(bg)');
     expect(styles).toContain(".stream-tool-background { color: #98afbc; opacity: .65; }");
   });
+  it("renders retired steps as summary bars on a 1px step timeline", () => {
+    const row = source.slice(source.indexOf("const StreamToolRow ="), source.indexOf("function TurnAnswerDelivery"));
+    expect(row).toContain("autoCollapsed");
+    expect(row).toContain("\" summarized\"");
+    expect(row).toContain("stream-tool-elapsed");
+    expect(styles).toMatch(/\.stream-tool-row\.summarized \.stream-tool-head \{[^}]*min-height: 32px;/);
+    expect(styles).toContain(".stream-tool-run { position: relative; }");
+    expect(styles).toMatch(/\.stream-tool-row::before \{[^}]*width: 1px;/);
+    expect(styles).toMatch(/\.stream-tool-row\.running \.stream-tool-log \{[^}]*max-height: 120px;[\s\S]*?mask-image: linear-gradient/);
+    expect(styles).toContain("stream-tool-glow");
+  });
 });
 
 

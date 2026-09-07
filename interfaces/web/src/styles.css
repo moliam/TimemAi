@@ -4960,6 +4960,47 @@ body.workspace-modal-open .app-shell { user-select: none; }
   50% { transform: scale(1); opacity: 1; }
 }
 .stream-tool-status { color: #98afbc; }
+/* Step-timeline visuals (Cursor Composer / OpenAI Assistants inspired).
+   Decoration only: the leading slot keeps its geometry, row identity and
+   the collapsed-summary/live-tool peers contract stay intact. */
+.stream-tool-run { position: relative; }
+.stream-tool-row::before {
+  content: "";
+  position: absolute;
+  left: 33px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: #ffffff14;
+}
+/* Running step: live log clamped to 120px with a fade-out mask at the edge. */
+.stream-tool-row.running .stream-tool-log {
+  max-height: 120px;
+  overflow: auto;
+  -webkit-mask-image: linear-gradient(180deg, #000 65%, transparent 100%);
+  mask-image: linear-gradient(180deg, #000 65%, transparent 100%);
+}
+.stream-tool-row.running .stream-tool-dot {
+  animation: stream-tool-breathe 1.2s ease-in-out infinite, stream-tool-glow 1.2s ease-in-out infinite;
+}
+@keyframes stream-tool-glow {
+  0%, 100% { box-shadow: 0 0 0 0 #f1c56f00; }
+  50% { box-shadow: 0 0 6px 1px #f1c56f8c; }
+}
+/* Retired step: ~32px summary bar (name + duration + status); hover brightens
+   and the native tooltip previews the captured command. */
+.stream-tool-row.summarized .stream-tool-head {
+  min-height: 32px;
+  align-items: center;
+  flex-wrap: nowrap;
+  cursor: default;
+  border-radius: 5px;
+  transition: background-color 160ms ease;
+}
+.stream-tool-row.summarized .stream-tool-command-preview,
+.stream-tool-row.summarized .stream-tool-background { display: none; }
+.stream-tool-row.summarized:hover { background: #ffffff0a; }
+.stream-tool-elapsed { color: #98afbc; font-variant-numeric: tabular-nums; flex: none; }
 .stream-tool-command {
   margin: 8px 0 0;
   padding: 8px 10px;
@@ -4987,6 +5028,9 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .stream-tool-head b { color: #24333a; }
 :root[data-theme="light"] .stream-tool-dot { background: #b07f2e; }
 :root[data-theme="light"] .stream-tool-status { color: #5c6f7a; }
+:root[data-theme="light"] .stream-tool-row::before { background: #24333a1f; }
+:root[data-theme="light"] .stream-tool-row.summarized:hover { background: #24333a0a; }
+:root[data-theme="light"] .stream-tool-elapsed { color: #5c6f7a; }
 :root[data-theme="light"] .stream-tool-command { background: #eef2f1; color: #33484f; box-shadow: 0 2px 6px #24333a14; }
 :root[data-theme="light"] .stream-tool-detail { color: #5c6f7a; }
 @media (prefers-reduced-motion: reduce) {
@@ -5182,7 +5226,8 @@ body.workspace-modal-open .app-shell { user-select: none; }
 /* Automatic handoff is atomic: height animation moves every following block and
    competes with viewport follow. Only the absorbed count animates locally. */
 .stream-tool-merged-item { display: grid; grid-template-rows: 1fr; opacity: 1; }
-.stream-tool-merged-item.merged { grid-template-rows: 0fr; opacity: 0; }
+/* Retired steps remain visible as ~32px summary bars on the step timeline. */
+.stream-tool-merged-item.merged { border-radius: 5px; }
 .stream-tool-merged-item > div { min-height: 0; overflow: hidden; }
 .stream-tool-run-toggle { display: flex; align-items: center; gap: 6px; border: 0; background: transparent; color: inherit; padding: 2px 4px; cursor: pointer; font-size: 12px; font-weight: 400; }
 .stream-tool-run-toggle[aria-expanded="true"] svg { transform: none; }

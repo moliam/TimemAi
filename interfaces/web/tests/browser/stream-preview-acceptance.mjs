@@ -445,6 +445,8 @@ async function main() {
       host.send({ type: "hello", snapshot: makeSnapshot(updated) });
       if (status === "running") {
         await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-dot') && !document.querySelector('.stream-tool-status')?.textContent`), "running must use dot without redundant text");
+        assert(await browser.evaluate(`getComputedStyle(document.querySelector('.stream-tool-row.running .stream-tool-dot')).animationName.includes('stream-tool-glow')`), "running dot must carry the glow pulse");
+        assert(await browser.evaluate(`getComputedStyle(document.querySelector('.stream-tool-row.running .stream-tool-log')).maxHeight === '120px'`), "running live log must clamp to 120px");
       } else {
         await waitFor(() => contains(status === "background_running" ? ".stream-tool-background" : ".stream-tool-status", status === "background_running" ? "(bg)" : status === "completed" ? "✓" : status), `${status}: status not delivered`);
       }
@@ -872,6 +874,12 @@ async function main() {
     await waitFor(() => browser.evaluate(`!document.querySelector('.stream-tool-fold.expanded')`), "failed tool collapse control ineffective");
     await setRound([thoughtEvent("mixed-thought", "Mixed results", 1), toolEvent("success-call", 2.75), failed, thoughtEvent("mixed-reply", "Failure explanation", 4)], "Mixed results");
     await waitFor(() => contains(".stream-tool-run-toggle", "工具 1 ✓ | 1 ✗"), "mixed result counts missing");
+    assert(await browser.evaluate(`(() => {
+      const bar = document.querySelector('.stream-tool-merged-item.merged .stream-tool-row');
+      const rail = getComputedStyle(bar, '::before');
+      const height = bar && bar.getBoundingClientRect().height;
+      return !!bar && height >= 28 && height <= 40 && rail.width === '1px' && rail.position === 'absolute';
+    })()`), "retired steps must render as ~32px summary bars on the 1px step timeline");
     await waitFor(() => browser.evaluate(`document.querySelectorAll('.stream-tool-merged-item.merged').length === 2`), "failed call not merged with adjacent success");
     assert(await browser.evaluate(`document.querySelector('.stream-tool-run-toggle > span')?.textContent === '工具' && [...document.querySelector('.stream-tool-run-toggle').querySelectorAll('span')].every(n => getComputedStyle(n).fontWeight === '400')`), "tools label and counts must use normal weight");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click()`);
