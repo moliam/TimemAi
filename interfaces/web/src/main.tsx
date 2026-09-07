@@ -3916,9 +3916,9 @@ function TimemApp() {
                                                 }}
                                               >
                                                 {visuallyWorking ? (
-                                                  <LoaderCircle
+                                                  <span
                                                     className="session-working-icon"
-                                                    size={15}
+                                                    role="img"
                                                     aria-label="Session working"
                                                   />
                                                 ) : session.state ===

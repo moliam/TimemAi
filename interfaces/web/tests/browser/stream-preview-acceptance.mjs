@@ -532,7 +532,19 @@ async function main() {
       const style = getComputedStyle(command);
       return style.animationName === 'stream-tool-enter' && style.animationDuration === '0.16s';
     })()`), "command entrance transition missing");
-    assert(await browser.evaluate(`['.session-working-icon', '.worker-working-icon'].every(selector => [...document.querySelectorAll(selector)].every(node => getComputedStyle(node).animationName === 'none'))`), "duplicate activity cues must stay static");
+    assert(await browser.evaluate(`(() => {
+      const sessionIcon = document.querySelector('.session-working-icon');
+      const sessionAnim = sessionIcon ? getComputedStyle(sessionIcon) : null;
+      const sessionDot = sessionIcon ? sessionIcon.getBoundingClientRect() : null;
+      const workerStatic = [...document.querySelectorAll('.worker-working-icon')].every(node => getComputedStyle(node).animationName === 'none');
+      const pulse = document.querySelector('.turn-assistant-frame.working .working-chip .pulse, .stream-working-dot');
+      const pulseAnim = pulse ? getComputedStyle(pulse) : null;
+      return !!sessionAnim && sessionAnim.animationName === 'stream-working-grow' &&
+        parseFloat(sessionAnim.animationDuration) === 1.2 &&
+        !!sessionDot &&
+        workerStatic && !!pulseAnim && pulseAnim.animationName === sessionAnim.animationName &&
+        pulseAnim.animationDuration === sessionAnim.animationDuration;
+    })()`), "sidebar session cue must breathe in sync with the chat pulse while workers stay static");
     assert(await browser.evaluate(`['.user-message-navigation button', '.session-group-heading', '.final-answer-outline-toggle'].every(selector => [...document.querySelectorAll(selector)].every(node => getComputedStyle(node).backdropFilter === 'none'))`), "scroll overlays must not sample blurred backdrops");
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
     assert(await browser.evaluate(`['.stream-tool-head', '.stream-tool-command', '.stream-tool-dot'].every(selector => { const node = document.querySelector(selector); return !node || getComputedStyle(node).animationName === 'none'; })`), "reduced motion must disable tool entrance");
