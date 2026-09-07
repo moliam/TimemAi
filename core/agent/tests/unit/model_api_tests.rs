@@ -994,6 +994,7 @@ fn model_http_error_is_resilient_to_unusual_bodies() {
 fn native_request() -> ModelInteractionRequest {
     ModelInteractionRequest {
         rendered_prompt: "SYSTEM PROMPT\n\n---USER---\ncount files".to_string(),
+        images: Vec::new(),
         static_tool_count: 1,
         tools: vec![ToolDefinition {
             name: "count_lines".to_string(),
@@ -1009,6 +1010,152 @@ fn native_request() -> ModelInteractionRequest {
         parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Auto,
     }
+}
+
+fn image_interaction_request(resolved_mode: ToolCallMode) -> ModelInteractionRequest {
+    ModelInteractionRequest {
+        rendered_prompt: "SYSTEM PROMPT
+
+---USER---
+What is in this screenshot?"
+            .to_string(),
+        images: vec![ModelImagePart::new("image/png", "QUJD")],
+        static_tool_count: 0,
+        tools: Vec::new(),
+        native_exchanges: Vec::new(),
+        resolved_mode,
+        parallel_tool_calls: false,
+        tool_choice: NativeToolChoice::Auto,
+    }
+}
+
+#[test]
+fn attached_images_reach_every_provider_wire_format() {
+    // OpenAI chat: trailing user message with image_url parts.
+    let body = prepare_model_interaction_http_request(
+        &config(ApiProtocol::OpenAiCompatible),
+        &image_interaction_request(ToolCallMode::Inline),
+    )
+    .model_request
+    .body;
+    let messages = body["messages"].as_array().unwrap();
+    let last = messages.last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert_eq!(last["content"].as_array().unwrap().len(), 1);
+    assert_eq!(last["content"][0]["type"], "image_url");
+    assert_eq!(
+        last["content"][0]["image_url"]["url"],
+        "data:image/png;base64,QUJD"
+    );
+
+    // OpenAI responses: input item with input_image; string input is promoted.
+    let body = prepare_model_interaction_http_request(
+        &config(ApiProtocol::OpenAiResponses),
+        &image_interaction_request(ToolCallMode::Inline),
+    )
+    .model_request
+    .body;
+    let input = body["input"].as_array().unwrap();
+    let last = input.last().unwrap();
+    assert_eq!(last["role"], "user");
+    assert_eq!(last["content"][0]["type"], "input_image");
+    assert_eq!(
+        last["content"][0]["image_url"],
+        "data:image/png;base64,QUJD"
+    );
+
+    // Anthropic inline: parts merge into the single user message (no
+    // consecutive user messages).
+    let body = prepare_model_interaction_http_request(
+        &config(ApiProtocol::Anthropic),
+        &image_interaction_request(ToolCallMode::Inline),
+    )
+    .model_request
+    .body;
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    let content = messages[0]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["source"]["media_type"], "image/png");
+    assert_eq!(content[1]["source"]["data"], "QUJD");
+}
+
+#[test]
+fn attached_images_append_after_native_history_without_touching_cache_marks() {
+    let mut request = image_interaction_request(ToolCallMode::Native);
+    request.native_exchanges = vec![NativeExchange {
+        delta_id: "pd_1".to_string(),
+        assistant_text: "looking".to_string(),
+        calls: vec![NativeToolCall {
+            id: "call_1".to_string(),
+            name: "count_lines".to_string(),
+            arguments: json!({}),
+            raw_arguments: "{}".to_string(),
+        }],
+        results: vec![NativeToolResult {
+            call_id: "call_1".to_string(),
+            name: "count_lines".to_string(),
+            content: "42".to_string(),
+            is_error: false,
+        }],
+    }];
+    request.rendered_prompt = concat!(
+        "[BEGIN SYSTEM PROMPT]\nSTATIC\n[END SYSTEM PROMPT]\n",
+        "[BEGIN DELTA delta_id: pd_1, time_ms: 1]\n\n## USER\nWhat is in this screenshot?\n\n",
+        "Continue the work and express thought in the user's language. Call API tools when more evidence or actions are needed; otherwise give the final user-facing answer:"
+    )
+    .to_string();
+    let body = prepare_model_interaction_http_request(&config(ApiProtocol::Anthropic), &request)
+        .model_request
+        .body;
+    let messages = body["messages"].as_array().unwrap();
+    let message_type = |message: &Value| -> String {
+        message["content"]
+            .as_array()
+            .and_then(|parts| parts.first())
+            .and_then(|part| part.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("text")
+            .to_string()
+    };
+    let types = messages.iter().map(&message_type).collect::<Vec<_>>();
+    let result_index = types
+        .iter()
+        .position(|kind| kind == "tool_result")
+        .expect("projected tool result message");
+    assert_eq!(types.last().unwrap(), "image", "images ride last");
+    assert!(
+        result_index < messages.len() - 1,
+        "tool result must stay before the image message"
+    );
+    // The cache-marked user delta block keeps its cache_control untouched.
+    let first_user = messages
+        .iter()
+        .find(|message| message_type(message) == "text")
+        .unwrap();
+    assert!(first_user["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|part| part.get("cache_control").is_some()));
+}
+
+#[test]
+fn multimodal_audit_events_redact_image_payloads() {
+    let request = image_interaction_request(ToolCallMode::Inline);
+    let prepared =
+        prepare_model_interaction_http_request(&config(ApiProtocol::OpenAiCompatible), &request)
+            .model_request;
+    let audit = model_request_audit_event(&config(ApiProtocol::OpenAiCompatible), &prepared);
+    let body = audit["body"].to_string();
+    assert!(!body.contains("QUJD"), "base64 payload leaked into audit");
+    assert!(
+        !body.contains("data:image/png"),
+        "data URL leaked into audit"
+    );
+    assert!(body.contains("[image payload redacted;"));
 }
 
 #[test]
@@ -1085,6 +1232,7 @@ fn builtin_tool_schemas_render_per_protocol_without_weakening_registry_validatio
 
     let request = ModelInteractionRequest {
         rendered_prompt: "SYSTEM PROMPT\n\n---USER---\nuse tools".to_string(),
+        images: Vec::new(),
         static_tool_count: original_tools.len(),
         tools: original_tools.clone(),
         native_exchanges: Vec::new(),
@@ -1359,6 +1507,7 @@ fn native_exchanges_follow_owning_delta_order_for_all_providers() {
         }],
     };
     let request = ModelInteractionRequest {
+        images: Vec::new(),
         rendered_prompt,
         static_tool_count: 0,
         tools: Vec::new(),

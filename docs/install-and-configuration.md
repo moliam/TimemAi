@@ -131,6 +131,19 @@ The endpoint editor puts name, model ID, Base URL and API Key first, followed by
 protocols and token limits, then optional transport and request customization.
 API keys remain optional for services that do not require authentication.
 
+### Image paste and visual Q&A
+
+Paste a screenshot directly into the composer (`Cmd/Ctrl+V`); pasted images
+upload through the same `/api/upload` path as the attach button and appear in
+the attachment strip. On submit, PNG/JPEG/WebP/GIF attachments are delivered
+to the model as image parts of the request, so a vision-capable model can
+answer questions about the screenshot. Limits are fail closed: one image at
+most 8 MB, one turn at most 8 images and 16 MB total; exceeding them rejects
+the turn instead of silently dropping the image. Other file types keep the
+existing text-only listing. Attachments added as mid-turn supplements are
+listed as files only; their pixels do not reach the model until the next new
+turn. Audit dumps redact image payloads to size placeholders.
+
 ## Recommended Start: Timem Web
 
 Start the installed Web host with one command:

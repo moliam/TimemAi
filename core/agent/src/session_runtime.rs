@@ -433,7 +433,8 @@ fn run_session_turn_with_model_client_and_reminder_override(
                 let mut action_runtime = TurnActionRuntime::new(ui);
                 let prompt =
                     core.build_model_request_prompt_with_runtime(prompt, &mut action_runtime);
-                let interaction_request = core.model_interaction_request(prompt);
+                let mut interaction_request = core.model_interaction_request(prompt);
+                interaction_request.images = request.images.to_vec();
                 let api_payload =
                     crate::prepare_model_interaction_http_request(config, &interaction_request)
                         .model_request

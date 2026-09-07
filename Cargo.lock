@@ -1764,6 +1764,7 @@ version = "2.1.0"
 dependencies = [
  "agent_core",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "futures-util",
  "libc",
