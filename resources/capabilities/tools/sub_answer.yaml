@@ -6,6 +6,8 @@ summary: Show an answer to one or more current-turn questions while continuing t
 prompt_synopsis: |
   {"sub_answer":{"task":"Concise summary of the addressed question or concern","answer":"user-facing answer"}}
 description: |
+  Because a response without any actions will be treated as the final answer and stops
+  all work, the runtime provides this tool for when you want to just express thought.
   Optionally answer one or more questions or concerns from the current user turn before
   the overall task is finished. Use this only for a substantive, complete answer that is
   useful immediately while you continue working. Do not use it for progress updates,

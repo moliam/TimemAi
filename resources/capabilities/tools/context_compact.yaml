@@ -8,13 +8,32 @@ prompt_synopsis: |
 description: |
   Maintain long-running context by summarizing then discarding stale or
   redundant dynamic prompt deltas, and/or offloading important but bulky deltas
-  to scratch memory. Preserve everything useful for continuing the work. For
-  example, the summary should capture:
-  1. the active task, current progress, evidence, running jobs, and temp data
-     still to be cleaned up;
-  2. important user-provided work-env information (connection methods, config,
-     variables, paths, etc.);
-  3. next steps for continued work.
+  to scratch memory. Compress the conversation into an ultra-dense, zero-loss
+  operational state. Adhere strictly to the five orthogonal dimensions below:
+
+  ### 1. Architectural Anchor & Scope (Global Baseline)
+  * **Design Blueprint**: Path to the authoritative design doc (e.g., ARCHITECTURE.md) and settled interface contracts.
+  * **Roadmap Coordinates**: Active Milestone [X/N] and the current task item in the roadmap doc (e.g., TASKS.md).
+  * **Negative Scope (Explicit Non-Goals)**: Out-of-scope modules, premature optimizations, or features strictly postponed.
+
+  ### 2. Grounding Base (Environment & Static Directives)
+  * **Toolchain & Env**: Arch, OS/kernel, compilers, active branch, env vars, and connection targets.
+  * **Paths & Concrete Artifacts**: Absolute paths to active implementation files, test scripts, and build artifacts.
+  * **User Axioms**: Explicit constraints, business rules, or invariants directly mandated by the user.
+
+  ### 3. Operational Invariants & Methodological Guardrails
+  * **Anti-Patterns & Negative Findings**: Approaches, libraries, or logic proven invalid and why (hard "Do Not Repeat" flags).
+  * **Execution & Detail Gates**: Criteria for when to mock vs. implement; validation checks required before exiting this iteration.
+
+  ### 4. Runtime Execution State (Current Micro-Sprint)
+  * **Progress & Settled Code**: Concrete functions/classes implemented and verified in this sprint.
+  * **Evidence & Telemetry**: Test suite status (pass/fail count), compiler logs, or benchmark deltas.
+  * **Transient & Active Processes**: Running PIDs/jobs, background servers, and uncommitted debug patches.
+
+  ### 5. Forward Vector (Single-Action Atomic Step)
+  * **Active Blocker**: The single logical or physical hurdle halting the immediate task.
+  * **Next Atomic Action**: Exactly ONE bounded action (e.g., implement one function, write one test, run one build command) to advance the critical path.
+
   When combined with other capability calls, `context_compact` must be the first
   call. Later calls run only after compaction succeeds.
 prompt_input: |

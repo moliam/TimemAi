@@ -11,7 +11,7 @@ use timem_ui_contract::preferences::{AssistantResponseFormat, InterfacePreferenc
 
 pub(crate) const RESPONSE_TRAILER: &str =
     "Please continue the work and respond as protocol requires in user's language:";
-pub(crate) const NATIVE_RESPONSE_TRAILER: &str = "Continue the work and express thought in the user's language. Call API tools when more evidence or actions are needed; otherwise give the final user-facing answer:";
+pub(crate) const NATIVE_RESPONSE_TRAILER: &str = "Continue the work and express thought in the user's language. Call API tools when more evidence or actions (including intermediate answer to user) are needed; otherwise give the final user-facing answer with no tool invocation:";
 pub(crate) const CONTEXT_COMPACT_REQUIRED_TRAILER: &str =
     "Context is too long. Your tool calls must start with context_compact:";
 const NATIVE_PROTOCOL_SECTION: &str = "## Tool Calling\n\nCapabilities are provided through the model API. Call them through the API tool-call channel. You may request independent calls together. Text accompanying calls is a user-visible progress note. A response with no tool calls is the final user-facing answer. `context_compact` may be followed by other capability calls in the same response, but it must be the first call. Later calls run only after compaction succeeds.";
