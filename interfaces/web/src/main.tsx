@@ -268,6 +268,7 @@ import {
 } from "./wire_delivery";
 import { clipboardImageFiles } from "./clipboard_images";
 import {
+  formatToolElapsed,
   humanizeToolStatus,
   toolResultCountsLabel,
   isToolActivityRunning,
@@ -10010,8 +10011,8 @@ function StreamToolRun({ activities, superseded, handoffIds }: { activities: Act
     {completed.length > 0 && <button className="stream-tool-run-toggle" type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
       {expanded ? <Minus size={13} aria-hidden="true" /> : <Plus size={13} aria-hidden="true" />}<span>{t("tools.toolsLabel")}</span> <span key={countRevision} aria-label={showResults ? t("tools.countAria", { succeeded: succeededCount, failed: failedCount }) : t("tools.doneCount", { count: completed.length })} className={`stream-tool-count${countRevision > 0 ? " incremented" : ""}`}>{showResults ? toolResultCountsLabel(succeededCount, failedCount) : t("tools.doneCount", { count: completed.length })}</span>
     </button>}
-    {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`}>
-      <div><StreamToolRow activity={activity} autoCollapsed={merged && completedIds.has(activity.id)} /></div>
+    {activities.map(activity => <div key={activity.id} className={`stream-tool-merged-item${merged && completedIds.has(activity.id) ? " merged" : ""}`} inert={merged && completedIds.has(activity.id)}>
+      <div><StreamToolRow activity={activity} /></div>
     </div>)}
   </div>;
 
@@ -10033,7 +10034,7 @@ function ActionStatus({ status, label, className }: { status: string; label: str
   </span>;
 }
 
-const StreamToolRow = memo(function StreamToolRow({ activity, autoCollapsed }: { activity: Activity; autoCollapsed?: boolean }) {
+const StreamToolRow = memo(function StreamToolRow({ activity }: { activity: Activity }) {
   useT();
   const status = activity.tool_status || TOOL_STATUS_RUNNING;
   const running = isToolActivityRunning(status);
@@ -10059,15 +10060,9 @@ const StreamToolRow = memo(function StreamToolRow({ activity, autoCollapsed }: {
     return subscribeStreamInteraction(update);
   }, []);
   const open = expanded || interactionHeld;
-  // Step-timeline contract: once the row retires (next step or AI reply took
-  // over), it shrinks into a ~32px summary bar (name + duration + status) and
-  // only hover previews the output. Running steps keep the live log open via
-  // manual expansion; the timeline visuals stay pure CSS so DOM geometry,
-  // leading-slot alignment and the peers contract are untouched.
-  const summarized = autoCollapsed && !open;
   return (
-    <div ref={rowRef} className={`stream-tool-row${running ? " running" : ""}${summarized ? " summarized" : ""}`}>
-      <div className="stream-tool-head" title={summarized && command ? command : undefined}>
+    <div ref={rowRef} className={`stream-tool-row${running ? " running" : ""}`}>
+      <div className="stream-tool-head">
         <button type="button" className="stream-tool-toggle" aria-expanded={open} aria-label={open ? t("tools.collapseOutput") : t("tools.expandOutput")} onClick={() => setExpanded(!open)}><ChevronRight size={13} /></button>
         {/* One fixed leading slot keeps execution and result markers in place. */}
         <span className="stream-tool-status-slot" aria-label={running ? (status === "background_running" ? t("tools.runningBg") : t("tools.running")) : undefined}>
@@ -10077,10 +10072,10 @@ const StreamToolRow = memo(function StreamToolRow({ activity, autoCollapsed }: {
         <b>{toolName}</b>
         {status === "background_running" && <span className="stream-tool-background">(bg)</span>}
         {command && <span className="stream-tool-command-preview" title={command}>{command.replace(/\s+/g, " ")}</span>}
-        {activity.elapsed_ms !== undefined && <span className="stream-tool-elapsed">{formatClockDuration(activity.elapsed_ms)}</span>}
+        {activity.elapsed_ms !== undefined && <span className="stream-tool-elapsed">{formatToolElapsed(activity.elapsed_ms)}</span>}
       </div>
       <div className={`stream-tool-fold${open ? " expanded" : ""}`} inert={!open}>
-        <div className="stream-tool-log">
+        <div>
           {command && <pre className="stream-tool-command">{command}</pre>}
           {detail && <div className="stream-tool-detail">{detail}</div>}
         </div>
@@ -10092,7 +10087,7 @@ const StreamToolRow = memo(function StreamToolRow({ activity, autoCollapsed }: {
   const b = next.activity;
   return a.id === b.id && a.tool_status === b.tool_status && a.tool_name === b.tool_name &&
     a.tool_mode === b.tool_mode && a.title === b.title && a.code === b.code && a.detail === b.detail &&
-    a.elapsed_ms === b.elapsed_ms && previous.autoCollapsed === next.autoCollapsed;
+    a.elapsed_ms === b.elapsed_ms;
 });
 
 function TurnAnswerDelivery({

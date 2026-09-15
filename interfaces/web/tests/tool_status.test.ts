@@ -1,8 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { humanizeToolStatus, toolResultCountsLabel, isToolActivityFailed, isToolActivityRunning } from "../src/tool_status";
+import { formatToolElapsed, humanizeToolStatus, toolResultCountsLabel, isToolActivityFailed, isToolActivityRunning } from "../src/tool_status";
 import { setLocale } from "../src/i18n";
 
 setLocale("zh");
+
+describe("stream tool elapsed label", () => {
+  it("keeps 0.1s precision under a minute and compacts beyond it", () => {
+    expect(formatToolElapsed(0)).toBe("0s");
+    expect(formatToolElapsed(100)).toBe("0.1s");
+    expect(formatToolElapsed(1300)).toBe("1.3s");
+    expect(formatToolElapsed(12300)).toBe("12.3s");
+    expect(formatToolElapsed(59600)).toBe("59.6s");
+    expect(formatToolElapsed(60000)).toBe("1m0s");
+    expect(formatToolElapsed(306000)).toBe("5m6s");
+    expect(formatToolElapsed(3720000)).toBe("1h2m");
+    expect(formatToolElapsed(-5)).toBe("0s");
+  });
+});
 
 describe("tool result labels", () => {
   it("hides zero failures without a trailing separator", () => {
