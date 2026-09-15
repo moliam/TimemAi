@@ -33,6 +33,18 @@ async function waitFor(check, message, timeout = 10000) {
   throw new Error(message);
 }
 
+async function waitForSubtreeIdle(browser, selector, message, timeout = 10000) {
+  // A fixed sleep races the CSS transition duration (the fold transition is
+  // 460ms including its delay); wait briefly for the transition to register,
+  // then poll until the element subtree reports no running animations so
+  // geometry captures stay deterministic under CI runner load.
+  await sleep(120);
+  await waitFor(() => browser.evaluate(`(() => {
+    const root = document.querySelector(${JSON.stringify(selector)});
+    return !!root && root.getAnimations().length === 0;
+  })()`), message, timeout);
+}
+
 const worker = (state) => ({
   worker_id: "worker-1", context_id: "context-1", display_name: "Primary",
   ordinal: 0, state, parent_worker_id: null,
@@ -439,7 +451,7 @@ async function main() {
     assert(await browser.evaluate(`!document.querySelector('.stream-tool-fold.expanded') && document.querySelector('.stream-tool-command-preview').textContent === 'echo hello' && document.querySelector('.stream-tool-toggle').getAttribute('aria-expanded') === 'false'`), "running tool must default to one-line closed summary");
     await browser.evaluate(`document.querySelector('.stream-tool-toggle').click()`);
     await waitFor(() => browser.evaluate(`!!document.querySelector('.stream-tool-fold.expanded')`), "running command cannot expand");
-    await sleep(450);
+    await waitForSubtreeIdle(browser, ".stream-tool-fold", "row expansion animation did not settle before capture");
     await browser.evaluate(`window.toolHeight = document.querySelector('.stream-tool-row').getBoundingClientRect().height; true`);
     for (const [phase, status, time] of [["execution_start", "running", 3], ["finish", "background_running", 4], ["finish", "completed", 5]]) {
       actionEvents.push(lifecycle(`update-${time}`, phase, status, time));
@@ -799,10 +811,10 @@ async function main() {
     await waitFor(() => browser.evaluate(`window.countAnimations === 1`), "increment animation did not start");
     assert(await browser.evaluate(`window.countToggle === document.querySelector('.stream-tool-run-toggle') && window.countNode !== document.querySelector('.stream-tool-count') && window.countRows.every((row, i) => row === document.querySelectorAll('.stream-tool-row')[i])`), "count increment remounted toggle or tool rows");
     assert(await browser.evaluate(`document.querySelector('.stream-tool-count').textContent === '3 ✓' && getComputedStyle(document.querySelector('.stream-tool-count')).animationDuration === '0.36s'`), "count label or animation duration incorrect");
-    await sleep(450);
+    await waitForSubtreeIdle(browser, ".stream-tool-count", "count animation did not settle before replay");
     await browser.evaluate(`window.countNode = document.querySelector('.stream-tool-count'); true`);
     host.send({type:"hello", snapshot:makeSnapshot(moreCalls)});
-    await sleep(450);
+    await waitForSubtreeIdle(browser, ".stream-tool-count", "replayed count animation did not settle");
     assert(await browser.evaluate(`window.countAnimations === 1 && window.countNode === document.querySelector('.stream-tool-count') && document.querySelector('.stream-tool-count').getAnimations().length === 0`), "duplicate snapshot replayed animation or animation never settled");
 
     // Real browser hot path: repeated increments, bounded layout/CPU, stable DOM.
@@ -816,7 +828,7 @@ async function main() {
       host.setSession(next); host.send({type:"hello", snapshot:makeSnapshot(next)});
       await waitFor(() => browser.evaluate(`document.querySelector('.stream-tool-count')?.textContent === '${i} ✓' && window.countAnimations === ${i - 2}`), `increment ${i} did not animate exactly once`);
     }
-    await sleep(450);
+    await waitForSubtreeIdle(browser, ".stream-tool-count", "count animation did not settle before metrics");
     const countAfter = await countMetrics();
     const countCost = Object.fromEntries(["TaskDuration", "LayoutCount", "RecalcStyleCount"].map(k => [k, countAfter[k] - countBefore[k]]));
     assert(countCost.TaskDuration < 4, `count main-thread budget exceeded: ${JSON.stringify(countCost)}`);
@@ -832,7 +844,7 @@ async function main() {
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
     // Restoring motion may start the existing CSS animation; isolate that media
     // transition from the subsequent Host-update animation under test.
-    await sleep(450);
+    await waitForSubtreeIdle(browser, ".stream-tool-count", "media-transition animation did not settle");
     const beforeBatchAnimations = await browser.evaluate(`window.countAnimations`);
     // One Host snapshot may finish several calls; animate once, including failures.
     const batchFailure = toolEvent("batch-failure", 31);
@@ -841,9 +853,9 @@ async function main() {
     const batchCalls = {...visualBase, turns: visualBase.turns.map(t => ({...t, events:[...growingEvents]}))};
     host.setSession(batchCalls); host.send({type:"hello", snapshot:makeSnapshot(batchCalls)});
     await waitFor(() => browser.evaluate(`document.querySelector('.stream-tool-count')?.textContent === '25 ✓ | 1 ✗' && window.countAnimations === ${beforeBatchAnimations + 1}`), "batched completion must animate once with exact mixed counts");
-    await sleep(450);
+    await waitForSubtreeIdle(browser, ".stream-tool-count", "batch count animation did not settle");
     host.send({type:"hello", snapshot:makeSnapshot(batchCalls)});
-    await sleep(450);
+    await waitForSubtreeIdle(browser, ".stream-tool-count", "batch replay animation did not settle");
     assert(await browser.evaluate(`window.countAnimations === ${beforeBatchAnimations + 1} && window.countToggle === document.querySelector('.stream-tool-run-toggle') && document.querySelectorAll('.stream-tool-merged-item.merged').length === 26 && document.querySelector('.stream-tool-count').getAnimations().length === 0`), "mixed batch replay animated, remounted toggle, or reopened history");
     console.log("PASS Chrome count feedback: exact labels, repeat increments, duplicate suppression, stable nodes, reduced motion");
     await browser.evaluate(`document.querySelector('.stream-tool-run-toggle').click(); document.querySelector('.stream-tool-toggle').click();`);
