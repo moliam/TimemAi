@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-09-15
+
+### Added
+
+- Localize the Web interface in Chinese and English.
+- Support pasting screenshots into the composer for visual question answering.
+- Bind Sessions to stable model endpoint IDs across restarts and edits.
+- Introduce structured `user resume directly` prompt entries.
+- Materialize never-dispatched Web queue input as `queued_interrupted`
+  interrupted history after a runtime restart or confirmed MEM switch so it is
+  never resumed as a task.
+
+### Changed
+
+- Reveal stream responses incrementally with a retained live thought and
+  layout-stable tool archiving.
+- Fold retired stream tool rows under the collapsed Tools control with a
+  static running dot and a compact elapsed label.
+- Render tool results in a beta display mode with a compact live rhythm.
+- Show working Sessions with a chat-synced breathing dot in the sidebar.
+- Refine response trailers and tool prompt guidance.
+- Include a bounded original command in the Shell STILL RUNNING table.
+
+### Fixed
+
+- Classify response-header send failures as retryable network errors.
+- Stabilize stream tool handoff, audit SSE failures, answer outline refresh,
+  and tool collapse timing.
+
 ## [2.1.0] - 2026-09-04
 
 ### Added
