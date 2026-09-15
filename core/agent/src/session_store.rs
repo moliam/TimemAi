@@ -1479,7 +1479,7 @@ pub fn chat_history_prompt_format_hint(path: &Path) -> String {
         extra: BTreeMap::new(),
     };
     format!(
-        "Refer to chat history when necessary:\npath: {}\nformat: JSONL, one record per line.\nrecord types:\n- {}\n- {}\nMessage records may include optional kind for user entries: task, supplement, or approval.\nAdditional event fields may appear depending on kind.",
+        "Refer to chat history when necessary:\npath: {}\nformat: JSONL, one record per line.\nrecord types:\n- {}\n- {}\nMessage records may include optional kind for user entries: task, supplement, approval, or queued_interrupted.\nqueued_interrupted marks queued input that was never dispatched into a Core Turn; never resume it as a task.\nAdditional event fields may appear depending on kind.",
         path.display(),
         serde_json::to_string(&message).expect("chat history message example serializes"),
         serde_json::to_string(&event).expect("chat history event example serializes")
