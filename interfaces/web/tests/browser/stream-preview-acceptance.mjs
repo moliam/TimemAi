@@ -329,6 +329,10 @@ async function startBrowser(url) {
       socket.send(JSON.stringify({ id, method, params }));
     });
     await call("Runtime.enable"); await call("Page.enable");
+    // Pin the media preference so assertions cannot inherit the host OS
+    // accessibility setting (the macOS 26 runner image enables system
+    // Reduce Motion, which silently disabled every entrance animation).
+    await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
     const evaluate = async (expression) => {
       const result = await call("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
       if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
@@ -550,7 +554,7 @@ async function main() {
     assert(await browser.evaluate(`['.user-message-navigation button', '.session-group-heading', '.final-answer-outline-toggle'].every(selector => [...document.querySelectorAll(selector)].every(node => getComputedStyle(node).backdropFilter === 'none'))`), "scroll overlays must not sample blurred backdrops");
     await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
     assert(await browser.evaluate(`['.stream-tool-head', '.stream-tool-command', '.stream-tool-dot'].every(selector => { const node = document.querySelector(selector); return !node || getComputedStyle(node).animationName === 'none'; })`), "reduced motion must disable tool entrance");
-    await browser.call("Emulation.setEmulatedMedia", { features: [] });
+    await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] } );
     await waitFor(() => contains(".turn-stream-tools .user-supplement", "Chronological supplement"), "live supplement missing");
     assert(await browser.evaluate(`(() => {
       const region = document.querySelector('.turn-stream-tools');
@@ -739,7 +743,7 @@ async function main() {
       assert(geometry.visible && geometry.trailing < 150, `${streamMode}: archive left blank viewport/stale scroll space: ${JSON.stringify(geometry)}`);
     }
     }
-    await browser.call("Emulation.setEmulatedMedia", { features: [] });
+    await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] } );
     console.log("PASS Chrome large-tool handoff: final answer visible without stale scroll space in both UI and motion modes");
     await browser.evaluate(`localStorage.setItem("timem-web-stream-ui-mode-v1", "true")`);
     // Visual interaction contracts, beyond node identity.
@@ -825,7 +829,7 @@ async function main() {
     host.setSession(reducedCalls); host.send({type:"hello", snapshot:makeSnapshot(reducedCalls)});
     await waitFor(() => browser.evaluate(`document.querySelector('.stream-tool-count')?.textContent === '24 ✓'`), "reduced motion lost count update");
     assert(await browser.evaluate(`getComputedStyle(document.querySelector('.stream-tool-count')).animationName === 'none' && window.countAnimations === 21`), "reduced motion animated count");
-    await browser.call("Emulation.setEmulatedMedia", {features:[]});
+    await browser.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "no-preference" }] });
     // Restoring motion may start the existing CSS animation; isolate that media
     // transition from the subsequent Host-update animation under test.
     await sleep(450);
