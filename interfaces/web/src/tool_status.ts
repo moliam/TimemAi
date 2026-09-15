@@ -36,6 +36,19 @@ export function humanizeToolStatus(status: string) {
 
 // 展开控件与单项结果统一：成功 ✓、失败 ✗，不能用字母 x 替换失败符号。
 // 零失败不追加失败计数；控件的 + / − 只表达展开状态，不表达工具执行结果。
+// Stream tool rows show wall-clock cost: 0.1s precision under a minute, then
+// compact m/s (5m6s); hours drop the seconds. Kept separate from wait timers,
+// whose whole-second form serves pending budgets and completion facts.
+export function formatToolElapsed(elapsedMs: number) {
+  const seconds = Math.max(0, Math.round(elapsedMs / 100)) / 10;
+  if (seconds < 60) return `${seconds === 0 ? "0" : seconds.toFixed(1)}s`;
+  const total = Math.round(seconds);
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) return `${minutes}m${total % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h${minutes % 60}m`;
+}
+
 export function toolResultCountsLabel(succeeded: number, failed: number) {
   return `${succeeded} ✓${failed > 0 ? ` | ${failed} ✗` : ""}`;
 }

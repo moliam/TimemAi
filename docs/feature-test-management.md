@@ -285,7 +285,7 @@ Thought/Action tool groups omit the left rail; keyboard focus uses a thin outlin
 
 Completed stream tools omit the dot before the tool name, including when reopened; running/background-running calls retain it. Chrome lifecycle acceptance verifies the transition without remounting the row or command.
 
-Retired stream tools stay mounted on a 1px step timeline as ~32px summary bars (tool name, duration, status) with hover brightening and a native tooltip preview of the captured command, while the running step keeps the breathing dot plus a glow pulse and a live log clamped to 120px with a fade-out mask. The timeline is pure-CSS decoration (::before rail, existing fold/merged transitions), so row identity, leading-slot alignment, the peers contract and scroll stability are unchanged; Chrome acceptance asserts bar height, rail geometry, glow animation and the 120px clamp.
+Retired stream tools fold away completely under the collapsed Tools control as ~32px summary bars (tool name, duration, status) with hover brightening and a native tooltip preview of the captured command, while the running step keeps the breathing dot plus a glow pulse and a live log clamped to 120px with a fade-out mask. The timeline is pure-CSS decoration (::before rail, existing fold/merged transitions), so row identity, leading-slot alignment, the peers contract and scroll stability are unchanged; Chrome acceptance asserts bar height, rail geometry, glow animation and the 120px clamp.
 
 ### Stream / ordinary UI regression ownership
 
