@@ -5586,6 +5586,15 @@ fn restored_web_turns_preserve_user_entry_kinds() {
             delivery_state: None,
             content: "legacy text".to_string(),
         },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 14,
+            kind: Some("queued_interrupted".to_string()),
+            command_id: Some("queued_cmd".to_string()),
+            delivery_state: Some(ChatCommandDeliveryState::Recorded),
+            content: "queued input never dispatched".to_string(),
+        },
     ];
 
     let turns = restored_turns_from_history_records(&records);
@@ -5600,8 +5609,103 @@ fn restored_web_turns_preserve_user_entry_kinds() {
             ("supplement", "mid-turn supplement"),
             ("approval", "approved request"),
             ("task", "legacy text"),
+            ("queued_interrupted", "queued input never dispatched"),
         ]
     );
+}
+
+#[test]
+fn runtime_restart_materializes_never_dispatched_queue_items_as_queued_interrupted() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("restart_queued_interrupted"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "restart_queued_interrupted_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    state.sessions.lock().unwrap().clear();
+
+    let session_id = create_session(
+        &state,
+        Some("Queued input is not a resumable task".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "first task keeps the session working",
+        Some("started_before_restart"),
+    )
+    .unwrap();
+    handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("queued_never_dispatched"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "never sent before the restart".to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+    assert_eq!(
+        restore_stored_sessions_after_runtime_restart(&restarted).unwrap(),
+        1
+    );
+
+    {
+        let sessions = restarted.sessions.lock().unwrap();
+        let restored = &sessions[&session_id];
+        assert!(restored.message_queue.is_empty());
+        let queued_turn = restored
+            .turns
+            .iter()
+            .find(|candidate| {
+                candidate
+                    .user_entries
+                    .iter()
+                    .any(|entry| entry.command_id.as_deref() == Some("queued_never_dispatched"))
+            })
+            .expect("queued input remains visible after the restart");
+        assert_eq!(queued_turn.state, "interrupted");
+        assert_eq!(queued_turn.final_answer, None);
+        assert_eq!(queued_turn.completion, None);
+        assert_eq!(
+            queued_turn.user_entries[0].kind.as_str(),
+            "queued_interrupted",
+            "history shown to the model must not label never-dispatched input as a task"
+        );
+        assert!(restored
+            .messages
+            .iter()
+            .any(|message| message.kind.as_deref() == Some("queued_interrupted")));
+    }
+
+    let records = read_all_history_records(
+        &current_session_store(&restarted)
+            .unwrap()
+            .history_path_for_session(&session_id),
+    )
+    .unwrap();
+    assert!(records
+        .iter()
+        .any(|record| matches!(record, ChatHistoryRecord::Message { role: ChatHistoryRole::User, kind: Some(kind), .. } if kind == "queued_interrupted")));
 }
 
 #[test]

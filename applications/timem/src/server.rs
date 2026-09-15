@@ -5024,7 +5024,7 @@ fn interrupted_turn_from_queued_message(
             role: "user".to_string(),
             text: payload.text.clone(),
             created_at_ms: payload.created_at_ms,
-            kind: Some("task".to_string()),
+            kind: Some(QUEUED_INTERRUPTED_HISTORY_KIND.to_string()),
             completion: None,
         },
         WebTurn {
@@ -5034,7 +5034,7 @@ fn interrupted_turn_from_queued_message(
             created_at_ms: payload.created_at_ms,
             interrupted_at_ms: Some(interrupted_at_ms),
             user_entries: vec![WebTurnUserEntry {
-                kind: "task".to_string(),
+                kind: QUEUED_INTERRUPTED_HISTORY_KIND.to_string(),
                 text: payload.text.clone(),
                 attachments: payload.attachments.clone(),
                 created_at_ms: payload.created_at_ms,
@@ -5061,7 +5061,7 @@ fn append_interrupted_queued_message_history(
         session_id,
         &payload.turn_id,
         "user",
-        Some("task"),
+        Some(QUEUED_INTERRUPTED_HISTORY_KIND),
         Some(&item.command_id),
         payload.created_at_ms as i64,
         payload.text.clone(),
@@ -5334,6 +5334,7 @@ fn restore_stored_session(
     Ok(())
 }
 
+const QUEUED_INTERRUPTED_HISTORY_KIND: &str = "queued_interrupted";
 const RUNTIME_RESTART_HISTORY_KIND: &str = "runtime_restart";
 const RUNTIME_RESTART_HISTORY_CONTENT: &str = "Timem Web 已重新启动，以下内容来自新的运行实例";
 
@@ -5670,7 +5671,7 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
 
 fn history_user_entry_kind(kind: Option<&str>) -> &str {
     match kind {
-        Some(kind @ ("task" | "supplement" | "approval")) => kind,
+        Some(kind @ ("task" | "supplement" | "approval" | "queued_interrupted")) => kind,
         _ => "task",
     }
 }
