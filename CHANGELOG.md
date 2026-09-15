@@ -28,6 +28,7 @@
 ### Fixed
 
 - Classify response-header send failures as retryable network errors.
+- Pin the Chrome acceptance suite to `prefers-reduced-motion: no-preference` so animation assertions no longer inherit the host OS accessibility setting.
 - Stabilize stream tool handoff, audit SSE failures, answer outline refresh,
   and tool collapse timing.
 

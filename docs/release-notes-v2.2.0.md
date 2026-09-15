@@ -16,6 +16,7 @@ that keeps never-sent input out of the model's resumable history.
 - Answer outlines refresh after tools archive; tool collapse waits for the
   next AI reply so panels stay stable.
 - Stream tool handoff is stabilized and SSE audit failures are surfaced.
+- Browser acceptance now pins `prefers-reduced-motion` explicitly, so CI animation checks stay deterministic regardless of the host OS accessibility settings.
 
 ### Web usability
 
