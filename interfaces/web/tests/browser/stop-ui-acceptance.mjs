@@ -213,6 +213,10 @@ async function startHost() {
         peer.send({ type: "command_ack", command_id: command.command_id, status: "committed" });
     });
     peers.add(peer);
+    // A headless browser may reset the loopback socket at any time (this
+    // suite models reconnects explicitly), so peer resets are lifecycle
+    // events, not crashes: drain the error and let the close handler clean up.
+    socket.on("error", () => peers.delete(peer));
     socket.on("close", () => peers.delete(peer));
     peer.send({
       type: "hello", snapshot: makeSnapshot(authoritativeSession),
