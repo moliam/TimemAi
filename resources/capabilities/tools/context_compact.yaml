@@ -6,34 +6,19 @@ summary: Compact selected dynamic prompt deltas while preserving an essential su
 prompt_synopsis: |
   {"context_compact":{"discard":["pd_1"],"offload":["pd_2"],"summary":"Essential active state..."}}
 description: |
-  Maintain long-running context by summarizing then discarding stale or
+  Compaction can save prompt windows by summarizing and discarding stale or
   redundant dynamic prompt deltas, and/or offloading important but bulky deltas
-  to scratch memory. Compress the conversation into an ultra-dense, zero-loss
-  operational state. Adhere strictly to the five orthogonal dimensions below:
-
-  ### 1. Architectural Anchor & Scope (Global Baseline)
-  * **Design Blueprint**: Path to the authoritative design doc (e.g., ARCHITECTURE.md) and settled interface contracts.
-  * **Roadmap Coordinates**: Active Milestone [X/N] and the current task item in the roadmap doc (e.g., TASKS.md).
-  * **Negative Scope (Explicit Non-Goals)**: Out-of-scope modules, premature optimizations, or features strictly postponed.
-
-  ### 2. Grounding Base (Environment & Static Directives)
-  * **Toolchain & Env**: Arch, OS/kernel, compilers, active branch, env vars, and connection targets.
-  * **Paths & Concrete Artifacts**: Absolute paths to active implementation files, test scripts, and build artifacts.
-  * **User Axioms**: Explicit constraints, business rules, or invariants directly mandated by the user.
-
-  ### 3. Operational Invariants & Methodological Guardrails
+  to scratch memory. Compaction should be ultra-dense, low-loss, and adhere strictly to the dimensions below (keep titles), based on old compaction(if any) and current context:
+  * **Design Blueprint**: Authoritative design or root-doc and settled interface contracts; important design rule corrected by user.
+  * **Roadmap Coordinates**: High level work plan, active milestone and the current task item
+  * **User Corrections**: user-clarified misconceptions, misguided approaches, prioritization, useful methodology, and working criteria, user mandated always-keep memory.
+  * **Toolchain & Env**: toolchain, env vars, and connections, other working material info, etc.
   * **Anti-Patterns & Negative Findings**: Approaches, libraries, or logic proven invalid and why (hard "Do Not Repeat" flags).
   * **Execution & Detail Gates**: Criteria for when to mock vs. implement; validation checks required before exiting this iteration.
+  * **Curr state**: curr work status, progress, artifacts, etc. Important: still running jobs, to-be cleaned temp target
+  * **Next work**:  next planned action
 
-  ### 4. Runtime Execution State (Current Micro-Sprint)
-  * **Progress & Settled Code**: Concrete functions/classes implemented and verified in this sprint.
-  * **Evidence & Telemetry**: Test suite status (pass/fail count), compiler logs, or benchmark deltas.
-  * **Transient & Active Processes**: Running PIDs/jobs, background servers, and uncommitted debug patches.
-
-  ### 5. Forward Vector (Single-Action Atomic Step)
-  * **Active Blocker**: The single logical or physical hurdle halting the immediate task.
-  * **Next Atomic Action**: Exactly ONE bounded action (e.g., implement one function, write one test, run one build command) to advance the critical path.
-
+  After compaction, all old conversation context will be lost, so you must be thorough but concise.
   When combined with other capability calls, `context_compact` must be the first
   call. Later calls run only after compaction succeeds.
 prompt_input: |
