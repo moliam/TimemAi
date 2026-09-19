@@ -319,6 +319,8 @@ export const zh = {
     saveEndpoint: "保存接入点",
     modelIdLabel: "模型 ID",
     redirectWarning: "默认关闭。开启后会跟随跳转，但跨 Origin 时不会转发 API Key 或自定义 Headers。",
+    redirectImpactOff: "当前关闭：遇到跨 Origin 跳转时，请求会被直接拒绝。",
+    redirectImpactOn: "当前开启：跳转后的请求不携带 API Key 或自定义 Headers，若目标要求鉴权可能调用失败。",
     editEndpoint: "编辑接入点",
     newEndpoint: "新增接入点",
     namePlaceholder: "例如：生产环境 GPT",

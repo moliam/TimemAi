@@ -322,6 +322,8 @@ export const en: Strings = {
     saveEndpoint: "Save endpoint",
     modelIdLabel: "Model ID",
     redirectWarning: "Off by default. When on, redirects are followed, but API keys and custom headers are not forwarded across origins.",
+    redirectImpactOff: "Currently off: a cross-origin redirect rejects the request.",
+    redirectImpactOn: "Currently on: redirected requests carry no API key or custom headers; targets requiring auth may fail.",
     editEndpoint: "Edit endpoint",
     newEndpoint: "New endpoint",
     namePlaceholder: "e.g. Production GPT",
