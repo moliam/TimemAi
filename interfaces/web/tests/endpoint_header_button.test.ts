@@ -47,6 +47,14 @@ describe("header endpoint selector", () => {
 
 });
 
+it("keeps editor checkboxes compact instead of styled as text inputs", () => {
+  expect(styles).toContain('.endpoint-transport-toggle > span { display: flex; align-items: center; gap: 7px; }');
+  expect(styles).toContain('.endpoint-transport-toggle input { width: 14px; height: 14px; margin: 0; accent-color: #64bbaa; }');
+  const bareTextInputRules =
+    styles.match(/\.endpoint-editor-grid input(?!:not)/g) ?? [];
+  expect(bareTextInputRules).toEqual([]);
+});
+
 it("orders basic endpoint fields before optional transport settings", () => {
   const editor = source.slice(source.indexOf('<div className="endpoint-editor-grid">'));
   const fields = ['value={draft.name}', 'value={draft.model}', 'value={draft.base_url}', 'value={apiKey}', 'value={draft.api_protocol}', 'value={draft.max_llm_input_tokens}', 'checked={draft.allow_cross_origin_redirects}'];
