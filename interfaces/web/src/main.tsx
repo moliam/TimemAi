@@ -14062,11 +14062,7 @@ function ModelEndpointEditor({
                 : "endpoint-redirect-impact"
             }
           >
-            {t(
-              draft.allow_cross_origin_redirects
-                ? "endpoints.redirectImpactOn"
-                : "endpoints.redirectImpactOff",
-            )}
+            {t("endpoints.redirectImpact")}
           </small>
         </label>
         <label className="wide">
