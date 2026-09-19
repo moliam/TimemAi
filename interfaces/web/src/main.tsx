@@ -241,6 +241,7 @@ import {
   endpointDraftValid,
   endpointMatchesProfile,
   endpointLabelForProfile,
+  formatContextWindowTokens,
   MODEL_CONTEXT_WINDOW_OPTIONS,
   MODEL_OUTPUT_TOKEN_OPTIONS,
   ModelEndpointDraft,
@@ -13415,7 +13416,7 @@ function EndpointSettingsPane({
                   </span>
                   <small>
                     {endpoint.model} · {endpoint.api_protocol} ·{" "}
-                    {endpoint.max_llm_input_tokens / 1_000}K /{" "}
+                    {formatContextWindowTokens(endpoint.max_llm_input_tokens)} /{" "}
                     {endpoint.max_llm_output_tokens / 1_000}K
                   </small>
                   <code title={endpoint.base_url}>{endpoint.base_url}</code>
@@ -13698,10 +13699,9 @@ function ModelEndpointPanel({
                       <span>
                         {endpoint.model} · {endpoint.api_protocol}
                         {endpoint.stream ? " · stream" : ""} ·{" "}
-                        {endpoint.max_llm_input_tokens === 1_000_000
-                          ? "1M"
-                          : `${endpoint.max_llm_input_tokens / 1_000}K`}{" "}
-                        / {endpoint.max_llm_output_tokens / 1_000}K
+                        {formatContextWindowTokens(
+                          endpoint.max_llm_input_tokens,
+                        )} / {endpoint.max_llm_output_tokens / 1_000}K
                       </span>
                     </small>
                     <small title={endpoint.base_url}>{endpoint.base_url}</small>
@@ -13970,20 +13970,55 @@ function ModelEndpointEditor({
         <label>
           {t("endpoints.contextWindow")}
           <select
-            value={draft.max_llm_input_tokens}
-            onChange={(event) =>
+            value={
+              MODEL_CONTEXT_WINDOW_OPTIONS.includes(
+                draft.max_llm_input_tokens as (typeof MODEL_CONTEXT_WINDOW_OPTIONS)[number],
+              )
+                ? draft.max_llm_input_tokens
+                : "custom"
+            }
+            onChange={(event) => {
+              const value = event.target.value;
+              if (value === "custom") {
+                setDraft((current) => ({
+                  ...current,
+                  max_llm_input_tokens: current.max_llm_input_tokens + 1,
+                }));
+                return;
+              }
               setDraft({
                 ...draft,
-                max_llm_input_tokens: Number(event.target.value),
-              })
-            }
+                max_llm_input_tokens: Number(value),
+              });
+            }}
           >
             {MODEL_CONTEXT_WINDOW_OPTIONS.map((tokens) => (
               <option key={tokens} value={tokens}>
-                {tokens === 1_000_000 ? "1M" : `${tokens / 1_000}K`}
+                {formatContextWindowTokens(tokens)}
               </option>
             ))}
+            <option value="custom">{t("endpoints.contextWindowCustom")}</option>
           </select>
+          {!MODEL_CONTEXT_WINDOW_OPTIONS.includes(
+            draft.max_llm_input_tokens as (typeof MODEL_CONTEXT_WINDOW_OPTIONS)[number],
+          ) && (
+            <input
+              className="endpoint-context-custom-input"
+              type="number"
+              inputMode="numeric"
+              min={1}
+              step={1}
+              value={draft.max_llm_input_tokens}
+              onChange={(event) => {
+                const parsed = Number(event.target.value);
+                if (!Number.isInteger(parsed)) return;
+                setDraft({
+                  ...draft,
+                  max_llm_input_tokens: parsed,
+                });
+              }}
+            />
+          )}
         </label>
         <label>
           {t("endpoints.maxOutput")}

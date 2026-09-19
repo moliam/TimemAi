@@ -48,9 +48,24 @@ type ModelEndpointProfile = {
 };
 
 export const MODEL_CONTEXT_WINDOW_OPTIONS = [
-  100_000, 200_000, 1_000_000,
+  100_000, 200_000, 300_000, 1_000_000,
 ] as const;
 export const MODEL_OUTPUT_TOKEN_OPTIONS = [10_000, 20_000, 50_000] as const;
+
+// Mirrors the Core-side u32 token-count bound (config_edit::parse_token_count).
+export const MAX_LLM_INPUT_TOKENS_CEILING = 4_294_967_295;
+
+export function isValidMaxLlmInputTokens(value: number): boolean {
+  return (
+    Number.isInteger(value) && value >= 1 && value <= MAX_LLM_INPUT_TOKENS_CEILING
+  );
+}
+
+export function formatContextWindowTokens(tokens: number): string {
+  if (!Number.isFinite(tokens) || tokens < 1_000) return String(tokens);
+  if (tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M`;
+  return `${tokens / 1_000}K`;
+}
 
 export function endpointMatchesProfile(
   endpoint: ModelEndpoint,
@@ -102,9 +117,7 @@ export function endpointDraftValid(draft: ModelEndpointDraft): boolean {
     !!draft.base_url.trim() &&
     Object.keys(draft.http_headers ?? {}).every((name) => !!name.trim()) &&
     Object.keys(draft.request_fields ?? {}).every((name) => !!name.trim()) &&
-    MODEL_CONTEXT_WINDOW_OPTIONS.includes(
-      draft.max_llm_input_tokens as (typeof MODEL_CONTEXT_WINDOW_OPTIONS)[number],
-    ) &&
+    isValidMaxLlmInputTokens(draft.max_llm_input_tokens) &&
     MODEL_OUTPUT_TOKEN_OPTIONS.includes(
       draft.max_llm_output_tokens as (typeof MODEL_OUTPUT_TOKEN_OPTIONS)[number],
     )

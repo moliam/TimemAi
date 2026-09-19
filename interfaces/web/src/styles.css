@@ -1941,6 +1941,7 @@ body {
 .endpoint-menu.editing { padding: 16px; }
 .endpoint-menu.editing .endpoint-editor { margin-top: 0; border-top: 0; padding-top: 0; }
 .endpoint-menu.editing .endpoint-editor-grid { gap: 10px; margin-top: 12px; }
+.endpoint-editor-grid .endpoint-context-custom-input { margin-top: 2px; }
 .endpoint-menu.editing .endpoint-structured-headers .structured-field { margin-top: 2px; padding: 12px; }
 .endpoint-editor-heading strong { color: #dbe8ed; }
 .endpoint-editor-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 10px; }

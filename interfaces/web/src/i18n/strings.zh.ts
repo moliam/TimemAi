@@ -339,6 +339,7 @@ export const zh = {
     certNote: "仅用于此接入点的模型 HTTPS 连接，不替换系统根证书。",
     responseProtocol: "响应协议",
     contextWindow: "最大上下文窗口",
+    contextWindowCustom: "自定义",
     privateCa: "私有 CA（PEM）",
     streamLabel: "Stream",
     closeEditor: "关闭接入点编辑器",
