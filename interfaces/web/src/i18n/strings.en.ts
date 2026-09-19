@@ -342,6 +342,7 @@ export const en: Strings = {
     certNote: "Used only for this endpoint's model HTTPS connection; it does not replace system root certificates.",
     responseProtocol: "Response protocol",
     contextWindow: "Max context window",
+    contextWindowCustom: "Custom",
     privateCa: "Private CA (PEM)",
     streamLabel: "Stream",
     closeEditor: "Close endpoint editor",
