@@ -55,6 +55,13 @@ it("keeps editor checkboxes compact instead of styled as text inputs", () => {
   expect(bareTextInputRules).toEqual([]);
 });
 
+it("explains the redirect impact for both toggle states", () => {
+  expect(source).toContain('endpoints.redirectImpactOn');
+  expect(source).toContain('endpoints.redirectImpactOff');
+  expect(source).toMatch(/draft\.allow_cross_origin_redirects[\s\S]*endpoints\.redirectImpactOn/);
+  expect(styles).toContain('.endpoint-redirect-impact.on { color: #d4b25f; font-weight: 700; }');
+});
+
 it("orders basic endpoint fields before optional transport settings", () => {
   const editor = source.slice(source.indexOf('<div className="endpoint-editor-grid">'));
   const fields = ['value={draft.name}', 'value={draft.model}', 'value={draft.base_url}', 'value={apiKey}', 'value={draft.api_protocol}', 'value={draft.max_llm_input_tokens}', 'checked={draft.allow_cross_origin_redirects}'];

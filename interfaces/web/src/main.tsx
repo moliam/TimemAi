@@ -14055,6 +14055,19 @@ function ModelEndpointEditor({
           <small>
             {t("endpoints.redirectWarning")}
           </small>
+          <small
+            className={
+              draft.allow_cross_origin_redirects
+                ? "endpoint-redirect-impact on"
+                : "endpoint-redirect-impact"
+            }
+          >
+            {t(
+              draft.allow_cross_origin_redirects
+                ? "endpoints.redirectImpactOn"
+                : "endpoints.redirectImpactOff",
+            )}
+          </small>
         </label>
         <label className="wide">
           {t("endpoints.privateCa")}
