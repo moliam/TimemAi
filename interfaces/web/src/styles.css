@@ -1959,8 +1959,8 @@ body {
 .endpoint-editor-grid .endpoint-private-ca { min-height: 112px; resize: vertical; border: 1px solid #38515e; border-radius: 4px; padding: 8px; background: #091319; color: #e1edf2; outline: none; font: 10px/1.45 "SFMono-Regular", Consolas, monospace; }
 .endpoint-editor-grid .endpoint-private-ca:focus { border-color: #64bbaa; }
 :root[data-theme="light"] .endpoint-editor-grid .endpoint-private-ca { border-color: #b8cbd2; background: #fff; color: #172229; }
-.endpoint-editor-grid input, .endpoint-editor-grid select { min-width: 0; width: 100%; border: 1px solid #38515e; border-radius: 4px; padding: 7px 8px; background: #091319; color: #e1edf2; outline: none; }
-.endpoint-editor-grid input:focus, .endpoint-editor-grid select:focus { border-color: #64bbaa; }
+.endpoint-editor-grid input:not([type="checkbox"]), .endpoint-editor-grid select { min-width: 0; width: 100%; border: 1px solid #38515e; border-radius: 4px; padding: 7px 8px; background: #091319; color: #e1edf2; outline: none; }
+.endpoint-editor-grid input:not([type="checkbox"]):focus, .endpoint-editor-grid select:focus { border-color: #64bbaa; }
 .endpoint-api-key { position: relative; }
 .endpoint-editor-grid .endpoint-api-key input { padding-right: 56px; }
 .endpoint-api-key-actions { position: absolute; top: 50%; right: 5px; display: flex; align-items: center; gap: 2px; transform: translateY(-50%); }
@@ -1986,7 +1986,7 @@ body {
 :root[data-theme="light"] .endpoint-select:hover:not(:disabled) { background: #edf3f5; }
 :root[data-theme="light"] .endpoint-actions button:hover, :root[data-theme="light"] .endpoint-editor-heading button:hover { background: #edf3f5; color: #26343a; }
 :root[data-theme="light"] .endpoint-editor-grid label { color: #526a75; }
-:root[data-theme="light"] .endpoint-editor-grid input, :root[data-theme="light"] .endpoint-editor-grid select { border-color: #b8cbd2; background: #fff; color: #172229; }
+:root[data-theme="light"] .endpoint-editor-grid input:not([type="checkbox"]), :root[data-theme="light"] .endpoint-editor-grid select { border-color: #b8cbd2; background: #fff; color: #172229; }
 :root[data-theme="light"] .endpoint-api-key-actions button { background: transparent; color: #607782; }
 :root[data-theme="light"] .endpoint-api-key-actions button:hover:not(:disabled) { background: #e8f0f2; color: #145f56; }
 
@@ -2291,8 +2291,8 @@ body {
 .endpoint-select > span svg { color: var(--management-accent); }
 .endpoint-empty { border-color: #3d514b; background: #1a2321; color: #899a95; }
 .endpoint-editor { border-top-color: #344740; }
-.endpoint-editor-grid input, .endpoint-editor-grid select { border-color: #3a4b45; background: #19211f; }
-.endpoint-editor-grid input:focus, .endpoint-editor-grid select:focus { border-color: var(--management-accent); box-shadow: 0 0 0 2px #68b8a720; }
+.endpoint-editor-grid input:not([type="checkbox"]), .endpoint-editor-grid select { border-color: #3a4b45; background: #19211f; }
+.endpoint-editor-grid input:not([type="checkbox"]):focus, .endpoint-editor-grid select:focus { border-color: var(--management-accent); box-shadow: 0 0 0 2px #68b8a720; }
 
 :root[data-theme="light"] {
   --management-accent: #3f9886;
@@ -2349,7 +2349,7 @@ body {
 :root[data-theme="light"] .endpoint-row.active { border-color: #86b8aa; background: #e5f2ee; box-shadow: 0 2px 8px #31564b20; }
 :root[data-theme="light"] .endpoint-select:hover:not(:disabled) { background: #edf4f2; }
 :root[data-theme="light"] .endpoint-empty { border-color: #bfd1cb; background: #f4f8f7; color: #71817b; }
-:root[data-theme="light"] .endpoint-editor-grid input,
+:root[data-theme="light"] .endpoint-editor-grid input:not([type="checkbox"]),
 :root[data-theme="light"] .endpoint-editor-grid select { border-color: #c4d4cf; background: #fff; color: #24332f; }
 
 
@@ -4125,7 +4125,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .appearance-font-selects select,
 .settings-field input,
 .settings-field select,
-.endpoint-editor-grid input,
+.endpoint-editor-grid input:not([type="checkbox"]),
 .endpoint-editor-grid select,
 .endpoint-editor-grid .structured-field-row input {
   border: 0;
@@ -4138,7 +4138,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 .appearance-font-selects select:focus,
 .settings-field input:focus,
 .settings-field select:focus,
-.endpoint-editor-grid input:focus,
+.endpoint-editor-grid input:not([type="checkbox"]):focus,
 .endpoint-editor-grid select:focus,
 .endpoint-editor-grid .structured-field-row input:focus {
   border: 0;
@@ -4307,7 +4307,7 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 :root[data-theme="light"] .appearance-font-selects select,
 :root[data-theme="light"] .settings-field input,
 :root[data-theme="light"] .settings-field select,
-:root[data-theme="light"] .endpoint-editor-grid input,
+:root[data-theme="light"] .endpoint-editor-grid input:not([type="checkbox"]),
 :root[data-theme="light"] .endpoint-editor-grid select,
 :root[data-theme="light"] .endpoint-editor-grid .structured-field-row input { border: 0; background: #edf2f0; color: #24332e; box-shadow: 0 5px 15px #29443b18; }
 :root[data-theme="light"] .appearance-bold-option { background: #edf2f0; color: #52665e; box-shadow: 0 4px 12px #29443b14; }
@@ -4544,7 +4544,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 .appearance-font-selects select,
 .settings-field input,
 .settings-field select,
-.endpoint-editor-grid input,
+.endpoint-editor-grid input:not([type="checkbox"]),
 .endpoint-editor-grid select,
 .endpoint-editor-grid .structured-field-row input {
   border: 0;
@@ -4665,7 +4665,7 @@ body.workspace-modal-open .app-shell { user-select: none; }
 :root[data-theme="light"] .appearance-font-selects select,
 :root[data-theme="light"] .settings-field input,
 :root[data-theme="light"] .settings-field select,
-:root[data-theme="light"] .endpoint-editor-grid input,
+:root[data-theme="light"] .endpoint-editor-grid input:not([type="checkbox"]),
 :root[data-theme="light"] .endpoint-editor-grid select,
 :root[data-theme="light"] .endpoint-editor-grid .structured-field-row input {
   border: 0;
