@@ -55,10 +55,9 @@ it("keeps editor checkboxes compact instead of styled as text inputs", () => {
   expect(bareTextInputRules).toEqual([]);
 });
 
-it("explains the redirect impact for both toggle states", () => {
-  expect(source).toContain('endpoints.redirectImpactOn');
-  expect(source).toContain('endpoints.redirectImpactOff');
-  expect(source).toMatch(/draft\.allow_cross_origin_redirects[\s\S]*endpoints\.redirectImpactOn/);
+it("explains the redirect impact in plain language for both toggle states", () => {
+  expect(source).toContain('endpoints.redirectImpact');
+  expect(source).toMatch(/draft\.allow_cross_origin_redirects[\s\S]*endpoint-redirect-impact on/);
   expect(styles).toContain('.endpoint-redirect-impact.on { color: #d4b25f; font-weight: 700; }');
 });
 
