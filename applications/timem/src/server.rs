@@ -2,6 +2,7 @@ mod command_dedup;
 mod command_lane;
 mod desktop_launch;
 mod mem_maintenance;
+mod model_endpoint_import;
 mod response_preview;
 mod websocket_delivery;
 
@@ -13,6 +14,10 @@ use command_lane::TicketCommandLane;
 use desktop_launch::{browser_auto_open_allowed_for, browser_command};
 use desktop_launch::{open_browser, open_directory_in_terminal, should_auto_open_browser};
 use mem_maintenance::*;
+use model_endpoint_import::{
+    scan_model_endpoint_imports, ModelEndpointImportCandidate, ModelEndpointImportCandidateReport,
+    MAX_MODEL_ENDPOINT_IMPORT_CANDIDATES,
+};
 use websocket_delivery::{command_ack, finish_command_dedup};
 #[cfg(test)]
 use websocket_delivery::{
@@ -154,6 +159,7 @@ struct AppState {
     manager: Arc<Mutex<CoreSessionWorkerManager>>,
     template: Arc<WorkerTemplate>,
     mem: Arc<Mutex<WebMemState>>,
+    model_endpoint_imports: Arc<Mutex<Vec<ModelEndpointImportCandidate>>>,
     events: broadcast::Sender<WireEvent>,
     sessions: Arc<Mutex<BTreeMap<String, WebSession>>>,
     command_dedup: Arc<Mutex<CommandDedupCache>>,
@@ -892,6 +898,10 @@ enum WireEvent {
     ModelEndpointsUpdated {
         endpoints: Vec<ModelEndpointReport>,
     },
+    ModelEndpointImportScanned {
+        candidates: Vec<ModelEndpointImportCandidateReport>,
+        issues: Vec<String>,
+    },
     ModelEndpointSecretRevealed {
         endpoint_id: String,
         api_key: String,
@@ -1262,6 +1272,15 @@ enum ClientCommand {
     ModelEndpointSecretReveal {
         endpoint_id: String,
     },
+    ModelEndpointImportScan {
+        #[serde(default)]
+        codex_dir: Option<String>,
+        #[serde(default)]
+        claude_dir: Option<String>,
+    },
+    ModelEndpointImportApply {
+        candidate_ids: Vec<String>,
+    },
     McpServerUpsert {
         session_id: String,
         config: McpServerConfig,
@@ -1325,6 +1344,8 @@ impl ClientCommand {
             | Self::McpServerDelete { .. }
             | Self::ModelEndpointUpsert { .. }
             | Self::ModelEndpointDelete { .. }
+            | Self::ModelEndpointImportScan { .. }
+            | Self::ModelEndpointImportApply { .. }
             | Self::WorkerRoleCreate { .. }
             | Self::WorkerRoleUpdate { .. }
             | Self::WorkerRoleDelete { .. }
@@ -1383,6 +1404,8 @@ impl ClientCommand {
                 | Self::McpServerDelete { .. }
                 | Self::ModelEndpointUpsert { .. }
                 | Self::ModelEndpointDelete { .. }
+                | Self::ModelEndpointImportScan { .. }
+                | Self::ModelEndpointImportApply { .. }
                 | Self::WorkerRoleCreate { .. }
                 | Self::WorkerRoleUpdate { .. }
                 | Self::WorkerRoleDelete { .. }
@@ -1416,6 +1439,7 @@ impl ClientCommand {
                 | Self::SessionApiKeyReveal { .. }
                 | Self::McpServerSecretsReveal { .. }
                 | Self::ModelEndpointSecretReveal { .. }
+                | Self::ModelEndpointImportScan { .. }
                 | Self::MemTemporaryItemsList
                 | Self::MemTemporaryItemsDelete { .. }
         )
@@ -1540,6 +1564,7 @@ pub async fn run(
         manager,
         template: Arc::new(template),
         mem,
+        model_endpoint_imports: Arc::new(Mutex::new(Vec::new())),
         events: events.clone(),
         sessions,
         command_dedup: Arc::new(Mutex::new(CommandDedupCache::default())),
@@ -3705,6 +3730,51 @@ fn handle_command_with_id(
                 request_fields: secrets.request_fields,
                 private_ca_pem: secrets.private_ca_pem,
             }));
+        }
+        ClientCommand::ModelEndpointImportScan {
+            codex_dir,
+            claude_dir,
+        } => {
+            let codex_empty = codex_dir
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty());
+            let claude_empty = claude_dir
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty());
+            if codex_empty && claude_empty {
+                return Err("model_endpoint_import_directory_required".to_string());
+            }
+            let scan = scan_model_endpoint_imports(
+                codex_dir
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty()),
+                claude_dir
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty()),
+            )?;
+            let candidates = scan
+                .candidates
+                .iter()
+                .map(ModelEndpointImportCandidateReport::from)
+                .collect();
+            let event = WireEvent::ModelEndpointImportScanned {
+                candidates,
+                issues: scan.issues,
+            };
+            let mut imports = state
+                .model_endpoint_imports
+                .lock()
+                .map_err(|_| "model_endpoint_import_state_poisoned".to_string())?;
+            *imports = scan.candidates;
+            return Ok(Some(event));
+        }
+        ClientCommand::ModelEndpointImportApply { candidate_ids } => {
+            import_model_endpoints(state, &candidate_ids)?;
+            let event = WireEvent::ModelEndpointsUpdated {
+                endpoints: model_endpoint_reports(state)?,
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
         }
         ClientCommand::McpServerUpsert { session_id, config } => {
             let server_id = config.id.clone();
@@ -7334,6 +7404,101 @@ fn upsert_model_endpoint(state: &AppState, input: ModelEndpointInput) -> Result<
         .sort_by(|left, right| left.name.cmp(&right.name));
     save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints)?;
     Ok(endpoint_id)
+}
+
+fn unique_import_name(base: &str, taken: &BTreeSet<String>) -> String {
+    if !taken.contains(base) {
+        return base.to_string();
+    }
+    for ordinal in 2u32.. {
+        let candidate = format!("{base} {ordinal}");
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("the ordinal space cannot be exhausted before u32 overflow")
+}
+
+fn import_model_endpoints(
+    state: &AppState,
+    candidate_ids: &[String],
+) -> Result<Vec<String>, String> {
+    if candidate_ids.is_empty() {
+        return Err("model_endpoint_import_selection_empty".to_string());
+    }
+    if candidate_ids.len() > MAX_MODEL_ENDPOINT_IMPORT_CANDIDATES {
+        return Err("model_endpoint_import_selection_too_large".to_string());
+    }
+    let mut requested: Vec<String> = Vec::with_capacity(candidate_ids.len());
+    for id in candidate_ids {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err("model_endpoint_import_candidate_id_empty".to_string());
+        }
+        if !requested.iter().any(|item| item == id) {
+            requested.push(id.to_string());
+        }
+    }
+    // Hold the pending-import lock through the apply so a concurrent scan
+    // cannot replace the user-confirmed candidate set mid-import.
+    let mut imports = state
+        .model_endpoint_imports
+        .lock()
+        .map_err(|_| "model_endpoint_import_state_poisoned".to_string())?;
+    let mut selected = Vec::new();
+    let mut remaining = Vec::new();
+    for candidate in imports.iter() {
+        if requested.iter().any(|id| id == &candidate.id) {
+            selected.push(candidate.clone());
+        } else {
+            remaining.push(candidate.clone());
+        }
+    }
+    for id in &requested {
+        if !selected.iter().any(|candidate| &candidate.id == id) {
+            return Err(format!("model_endpoint_import_candidate_not_found:{id}"));
+        }
+    }
+    let mut taken: BTreeSet<String> = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?
+        .model_endpoints
+        .iter()
+        .map(|endpoint| endpoint.name.clone())
+        .collect();
+    let mut endpoint_ids = Vec::with_capacity(selected.len());
+    for candidate in &selected {
+        let name = unique_import_name(&candidate.name, &taken);
+        taken.insert(name.clone());
+        let api_key = if candidate.api_key.is_empty() {
+            None
+        } else {
+            Some(candidate.api_key.clone())
+        };
+        let endpoint_id = upsert_model_endpoint(
+            state,
+            ModelEndpointInput {
+                id: None,
+                name,
+                model: candidate.model.clone(),
+                api_protocol: candidate.api_protocol.clone(),
+                response_protocol: candidate.response_protocol.clone(),
+                base_url: candidate.base_url.clone(),
+                max_llm_input_tokens: candidate.max_llm_input_tokens,
+                max_llm_output_tokens: candidate.max_llm_output_tokens,
+                stream: candidate.stream,
+                api_key,
+                http_headers: candidate.http_headers.clone(),
+                request_fields: candidate.request_fields.clone(),
+                allow_cross_origin_redirects: false,
+                private_ca_pem: None,
+            },
+        )?;
+        endpoint_ids.push(endpoint_id);
+    }
+    *imports = remaining;
+    Ok(endpoint_ids)
 }
 
 fn model_endpoint_config_if_exists(
