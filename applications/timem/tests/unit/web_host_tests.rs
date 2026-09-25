@@ -13723,6 +13723,12 @@ name = "Ollama"
 base_url = "http://127.0.0.1:11434/v1"
 wire_api = "chat"
 
+[model_providers.inline]
+name = "Inline"
+base_url = "https://inline.example.test/v1"
+experimental_bearer_token = "inline-provider-secret"
+wire_api = "responses"
+
 [profiles.fast]
 model = "gpt-5-mini"
 model_provider = "openrouter"
@@ -13765,7 +13771,7 @@ wire_api = "weird"
     std::env::remove_var("TIMEM_TEST_OPENROUTER_KEY");
     std::env::remove_var("TIMEM_TEST_TENANT");
     std::env::remove_var("TIMEM_TEST_TENANT");
-    assert_eq!(scan.candidates.len(), 3);
+    assert_eq!(scan.candidates.len(), 5);
     let openrouter = scan
         .candidates
         .iter()
@@ -13788,6 +13794,21 @@ wire_api = "weird"
         .unwrap();
     assert_eq!(fast.name, "OpenRouter");
     assert_eq!(fast.reasoning_effort.as_deref(), Some("high"));
+    let ollama = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.name == "Ollama")
+        .unwrap();
+    assert_eq!(ollama.model, "gpt-5-codex");
+    assert_eq!(ollama.base_url, "http://127.0.0.1:11434/v1");
+    assert_eq!(ollama.api_key, "");
+    let inline = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.name == "Inline")
+        .unwrap();
+    assert_eq!(inline.api_key, "inline-provider-secret");
+    assert_eq!(inline.reasoning_effort.as_deref(), Some("medium"));
     let claude = scan
         .candidates
         .iter()
@@ -13811,6 +13832,7 @@ wire_api = "weird"
     let serialized = serde_json::to_string(&reports).unwrap();
     assert!(serialized.contains("api_key_configured"));
     assert!(!serialized.contains("openrouter-secret-key"));
+    assert!(!serialized.contains("inline-provider-secret"));
     assert!(!serialized.contains("claude-secret-key"));
     assert!(!serialized.contains("codex-auth-key"));
 

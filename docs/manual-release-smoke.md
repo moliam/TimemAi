@@ -33,11 +33,12 @@ node interfaces/web/tests/browser/endpoint-import-e2e.mjs
 ```
 
 It launches headless Chrome against the real host, walks Settings → Model
-Endpoints → Import, scans a self-created Codex fixture directory, asserts the
-redacted candidate preview (provider, model, reasoning effort) reaches the UI
-through the direct event path, imports it, and asserts the authoritative
-endpoint list updates. The script is repeatable against a persistent MEM
-workspace; it asserts relative growth rather than absolute endpoint counts.
+Endpoints → Import, scans a self-created Codex fixture directory including an
+unreferenced provider, asserts the redacted candidate previews (provider, model,
+reasoning effort) reach the UI through the direct event path, imports them, and
+asserts the authoritative endpoint list updates. The script is repeatable
+against a persistent MEM workspace; it asserts relative growth rather than
+absolute endpoint counts.
 
 Suggested fake-model-server sequence:
 

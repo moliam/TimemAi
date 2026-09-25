@@ -143,7 +143,10 @@ directory on every supported platform.
 - Codex CLI (`config.toml`, optional `auth.json`): model providers, profiles,
   the default model/provider pair, static and environment-backed HTTP headers,
   reasoning effort, response-storage opt-out and verbosity are mapped to the
-  equivalent Timem endpoint fields and request fields.
+  equivalent Timem endpoint fields and request fields. Profiles are scanned as
+  explicit candidates, and providers that are defined but not selected by the
+  default pair or a profile are still offered with the default model so a
+  multi-provider Codex installation can be imported in one scan.
 - Claude Code (`settings.json`, `settings.local.json` with local overrides):
   model, base URL, auth token/API key, thinking budget and custom headers are
   mapped to an Anthropic endpoint.

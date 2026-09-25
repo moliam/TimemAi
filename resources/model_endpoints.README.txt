@@ -36,7 +36,8 @@ override the protocol default case-insensitively).
 
 Import: the Web host can scan Codex CLI (config.toml/auth.json) and Claude Code
 (settings.json/settings.local.json) directories and add their parsed providers as
-endpoints; scanned keys stay host-side until an explicit import applies them.
+endpoints, including Codex profiles and providers not selected by the default
+pair; scanned keys stay host-side until an explicit import applies them.
 
 For TIMEM_* environment configuration (model, protocol, base_url, key fallbacks,
 etc.) see env_template in the Timem source tree and docs/install-and-configuration.md.
