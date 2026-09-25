@@ -131,6 +131,30 @@ The endpoint editor puts name, model ID, Base URL and API Key first, followed by
 protocols and token limits, then optional transport and request customization.
 API keys remain optional for services that do not require authentication.
 
+### Importing endpoints from other CLI ecosystems
+
+Timem reads existing CLI agent configurations instead of asking users to retype
+them. In Settings → Model Endpoints → Import, enter one or both local config
+directories (for example `~/.codex` and `~/.claude`), scan, review the redacted
+preview, and import the selected models as shared endpoints. Parsing runs in the
+local Timem host process on the user's machine; `~` expands to that user's home
+directory on every supported platform.
+
+- Codex CLI (`config.toml`, optional `auth.json`): model providers, profiles,
+  the default model/provider pair, static and environment-backed HTTP headers,
+  reasoning effort, response-storage opt-out and verbosity are mapped to the
+  equivalent Timem endpoint fields and request fields.
+- Claude Code (`settings.json`, `settings.local.json` with local overrides):
+  model, base URL, auth token/API key, thinking budget and custom headers are
+  mapped to an Anthropic endpoint.
+
+Scanned secrets never round-trip through the browser: the preview only reports
+whether a key was found, and the import applies the host-held candidate
+directly to `model_endpoints.json`. Candidates are consumed on import, name
+conflicts are deduplicated automatically, and fields without an honest API
+mapping (for example Claude Code's `effortLevel`) are reported explicitly
+instead of being silently dropped.
+
 ### Image paste and visual Q&A
 
 Paste a screenshot directly into the composer (`Cmd/Ctrl+V`); pasted images
