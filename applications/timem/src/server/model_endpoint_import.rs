@@ -185,6 +185,66 @@ struct CodexProvider {
     api_key: String,
 }
 
+/// EPT's standard Codex launcher injects the portal token through this
+/// environment name. Keep the mapping explicit so the portal token is never
+/// sent to an unrelated provider that happens to lack an environment value.
+const EPT_CODEX_PORTAL_TOKEN_ENV_KEY: &str = "CHJ_API_KEY";
+
+/// Lazily resolved EPT portal token. Resolution is attempted only when a Codex
+/// provider explicitly asks for the known EPT environment name.
+#[derive(Default)]
+struct EptPortalToken {
+    value: Option<String>,
+    resolved: bool,
+}
+
+impl EptPortalToken {
+    fn resolve(&mut self, codex_dir: &Path, issues: &mut Vec<String>) -> Option<&str> {
+        if self.resolved {
+            return self.value.as_deref();
+        }
+        self.resolved = true;
+        let path = ept_auth_session_path(codex_dir)?;
+        let raw = match read_bounded(&path, "codex_ept_auth_read_failed") {
+            Ok(raw) => raw,
+            Err(error) => {
+                issues.push(error);
+                return None;
+            }
+        };
+        let value: Value = match serde_json::from_slice(&raw) {
+            Ok(value) => value,
+            Err(error) => {
+                issues.push(format!("codex_ept_auth_invalid:{error}"));
+                return None;
+            }
+        };
+        let token = value
+            .get("portal_token")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|token| !token.is_empty());
+        if token.is_none() {
+            issues.push("codex_ept_auth_token_missing".to_string());
+        }
+        self.value = token.map(str::to_string);
+        self.value.as_deref()
+    }
+}
+
+fn ept_auth_session_path(codex_dir: &Path) -> Option<PathBuf> {
+    if codex_dir.file_name()?.to_str()? != ".codex" {
+        return None;
+    }
+    Some(
+        codex_dir
+            .parent()?
+            .join(".config")
+            .join("ept")
+            .join("auth_session.json"),
+    )
+}
+
 fn codex_auth_key(dir: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(dir.join("auth.json")).ok()?;
     let value: Value = serde_json::from_str(&raw).ok()?;
@@ -213,6 +273,8 @@ fn codex_provider(
     id: &str,
     providers: Option<&toml::map::Map<String, toml::Value>>,
     auth_key: Option<&str>,
+    codex_dir: &Path,
+    ept_token: &mut EptPortalToken,
     issues: &mut Vec<String>,
 ) -> Option<CodexProvider> {
     let Some(entry) = providers.and_then(|table| table.get(id)) else {
@@ -247,6 +309,11 @@ fn codex_provider(
             .and_then(|key| std::env::var(key).ok())
             .filter(|key| !key.trim().is_empty())
             .unwrap_or_default();
+    }
+    if api_key.is_empty() && env_key == Some(EPT_CODEX_PORTAL_TOKEN_ENV_KEY) {
+        if let Some(token) = ept_token.resolve(codex_dir, issues) {
+            api_key = token.to_string();
+        }
     }
     if api_key.is_empty() && (id == "openai" || env_key.is_some_and(|key| key == "OPENAI_API_KEY"))
     {
@@ -386,6 +453,7 @@ fn scan_codex_directory(dir: &Path, scan: &mut ModelEndpointImportScan) {
         return;
     }
     let auth_key = codex_auth_key(dir);
+    let mut ept_token = EptPortalToken::default();
     let default_model = text_value(&config, "model").filter(|value| !value.is_empty());
     let default_provider_id = text_value(&config, "model_provider")
         .filter(|value| !value.is_empty())
@@ -399,6 +467,8 @@ fn scan_codex_directory(dir: &Path, scan: &mut ModelEndpointImportScan) {
             default_provider_id,
             providers,
             auth_key.as_deref(),
+            dir,
+            &mut ept_token,
             &mut scan.issues,
         ) {
             let options = codex_model_options(&config, None);
@@ -436,6 +506,8 @@ fn scan_codex_directory(dir: &Path, scan: &mut ModelEndpointImportScan) {
             provider_id,
             providers,
             auth_key.as_deref(),
+            dir,
+            &mut ept_token,
             &mut scan.issues,
         ) else {
             continue;
@@ -537,6 +609,8 @@ fn scan_codex_directory(dir: &Path, scan: &mut ModelEndpointImportScan) {
             provider_id,
             Some(&provider_table),
             auth_key.as_deref(),
+            dir,
+            &mut ept_token,
             &mut scan.issues,
         ) else {
             continue;
