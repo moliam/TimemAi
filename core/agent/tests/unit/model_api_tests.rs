@@ -362,6 +362,17 @@ fn openai_responses_request_uses_official_shape() {
     assert!(body["input"].as_str().unwrap().contains("[BEGIN DELTA]"));
     assert!(body.get("messages").is_none());
     assert!(body.get("max_llm_output_tokens").is_none());
+    assert!(body.get("reasoning").is_none());
+}
+
+#[test]
+fn openai_responses_request_carries_reasoning_effort() {
+    let mut config = config(ApiProtocol::OpenAiResponses);
+    config.openai_compatible.reasoning_effort = Some("high".to_string());
+
+    let prepared = prepare_model_request(&config, "hello");
+
+    assert_eq!(prepared.body["reasoning"]["effort"], "high");
 }
 
 #[test]

@@ -976,12 +976,16 @@ fn build_openai_responses_request(
         .map(|block| block.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    json!({
+    let mut body = json!({
         "model": config.model,
         "instructions": instructions,
         "input": input,
         "max_output_tokens": config.max_llm_output_tokens
-    })
+    });
+    if let Some(reasoning_effort) = &config.openai_compatible.reasoning_effort {
+        body["reasoning"] = json!({ "effort": reasoning_effort });
+    }
+    body
 }
 
 fn build_anthropic_request(config: &ModelServiceConfig, blocks: &[ModelPromptBlock]) -> Value {

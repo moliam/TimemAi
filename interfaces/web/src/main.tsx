@@ -241,6 +241,7 @@ import {
 } from "./model_service_ui";
 import {
   endpointDraftValid,
+  REASONING_EFFORT_OPTIONS,
   endpointMatchesProfile,
   endpointLabelForProfile,
   formatContextWindowTokens,
@@ -13521,6 +13522,9 @@ function EndpointSettingsPane({
                       {candidate.api_key_configured
                         ? t("endpoints.importKeyConfigured")
                         : t("endpoints.importKeyMissing")}
+                      {candidate.reasoning_effort
+                        ? ` · ${t("endpoints.reasoningEffort")}: ${candidate.reasoning_effort}`
+                        : ""}
                     </small>
                     <code title={candidate.base_url}>{candidate.base_url}</code>
                   </span>
@@ -13590,8 +13594,11 @@ function EndpointSettingsPane({
                     )}
                   </span>
                   <small>
-                    {endpoint.model} · {endpoint.api_protocol} ·{" "}
-                    {formatContextWindowTokens(endpoint.max_llm_input_tokens)} /{" "}
+                    {endpoint.model} · {endpoint.api_protocol}
+                    {endpoint.reasoning_effort
+                      ? ` · ${endpoint.reasoning_effort}`
+                      : ""}{" "}
+                    · {formatContextWindowTokens(endpoint.max_llm_input_tokens)} /{" "}
                     {endpoint.max_llm_output_tokens / 1_000}K
                   </small>
                   <code title={endpoint.base_url}>{endpoint.base_url}</code>
@@ -13935,6 +13942,7 @@ function ModelEndpointEditor({
     allow_cross_origin_redirects:
       endpoint?.allow_cross_origin_redirects ?? false,
     private_ca_pem: revealedPrivateCaPem,
+    reasoning_effort: endpoint?.reasoning_effort ?? null,
   }));
   const [headerRows, setHeaderRows] = useState<StructuredRow[]>(() =>
     structuredRows(endpoint?.http_headers ?? {}),
@@ -14209,6 +14217,29 @@ function ModelEndpointEditor({
             {MODEL_OUTPUT_TOKEN_OPTIONS.map((tokens) => (
               <option key={tokens} value={tokens}>
                 {tokens / 1_000}K
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          {t("endpoints.reasoningEffort")}
+          <select
+            value={draft.reasoning_effort ?? ""}
+            disabled={
+              draft.api_protocol !== "openai-compatible" &&
+              draft.api_protocol !== "openai-responses"
+            }
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                reasoning_effort: event.target.value || null,
+              })
+            }
+          >
+            <option value="">{t("endpoints.reasoningEffortDefault")}</option>
+            {REASONING_EFFORT_OPTIONS.map((effort) => (
+              <option key={effort} value={effort}>
+                {effort}
               </option>
             ))}
           </select>

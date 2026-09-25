@@ -290,6 +290,8 @@ struct ModelEndpointConfig {
     allow_cross_origin_redirects: bool,
     #[serde(default)]
     private_ca_pem: String,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
 }
 
 fn default_endpoint_max_input_tokens() -> u32 {
@@ -316,6 +318,7 @@ struct ModelEndpointReport {
     request_fields: BTreeMap<String, Value>,
     allow_cross_origin_redirects: bool,
     private_ca_configured: bool,
+    reasoning_effort: Option<String>,
 }
 
 impl From<&ModelEndpointConfig> for ModelEndpointReport {
@@ -343,6 +346,7 @@ impl From<&ModelEndpointConfig> for ModelEndpointReport {
                 .collect(),
             allow_cross_origin_redirects: endpoint.allow_cross_origin_redirects,
             private_ca_configured: !endpoint.private_ca_pem.is_empty(),
+            reasoning_effort: endpoint.reasoning_effort.clone(),
         }
     }
 }
@@ -1052,6 +1056,8 @@ struct ModelEndpointInput {
     allow_cross_origin_redirects: bool,
     #[serde(default)]
     private_ca_pem: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -7287,6 +7293,22 @@ fn normalize_model_endpoint_input(
     if input.stream && api_protocol != "openai-compatible" {
         return Err("model_endpoint_stream_requires_openai_compatible".to_string());
     }
+    let reasoning_effort = input
+        .reasoning_effort
+        .clone()
+        .filter(|value| !value.trim().is_empty());
+    if let Some(effort) = &reasoning_effort {
+        if api_protocol == "anthropic" {
+            return Err("model_endpoint_reasoning_effort_requires_openai_protocol".to_string());
+        }
+        let mut options = agent_core::OpenAiCompatibleOptions::default();
+        agent_core::apply_openai_compatible_env_value(
+            &mut options,
+            "TIMEM_REASONING_EFFORT",
+            effort,
+        )
+        .map_err(|error| format!("invalid_model_endpoint_reasoning_effort:{error:?}"))?;
+    }
     let max_llm_input_tokens = input.max_llm_input_tokens;
     let max_llm_output_tokens = input.max_llm_output_tokens;
     if ![100_000, 200_000, 1_000_000].contains(&max_llm_input_tokens) {
@@ -7335,6 +7357,7 @@ fn normalize_model_endpoint_input(
         request_fields,
         allow_cross_origin_redirects: input.allow_cross_origin_redirects,
         private_ca_pem,
+        reasoning_effort,
     })
 }
 
@@ -7489,6 +7512,7 @@ fn import_model_endpoints(
                 max_llm_output_tokens: candidate.max_llm_output_tokens,
                 stream: candidate.stream,
                 api_key,
+                reasoning_effort: candidate.reasoning_effort.clone(),
                 http_headers: candidate.http_headers.clone(),
                 request_fields: candidate.request_fields.clone(),
                 allow_cross_origin_redirects: false,
@@ -7768,6 +7792,14 @@ fn apply_model_endpoint(
     ];
     for (key, value) in fields {
         update_session_runtime_setting(state, session_id, key, &value)?;
+    }
+    if let Some(reasoning_effort) = &endpoint.reasoning_effort {
+        update_session_runtime_setting(
+            state,
+            session_id,
+            "TIMEM_REASONING_EFFORT",
+            reasoning_effort,
+        )?;
     }
     update_session_http_headers(state, session_id, endpoint.http_headers)?;
     update_session_request_fields(state, session_id, endpoint.request_fields)?;

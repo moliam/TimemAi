@@ -33,6 +33,7 @@ export type ModelEndpointDraft = {
   request_fields: Record<string, unknown>;
   allow_cross_origin_redirects: boolean;
   private_ca_pem?: string;
+  reasoning_effort?: string | null;
 };
 
 type ModelEndpointProfile = {
@@ -51,6 +52,14 @@ export const MODEL_CONTEXT_WINDOW_OPTIONS = [
   100_000, 200_000, 300_000, 1_000_000,
 ] as const;
 export const MODEL_OUTPUT_TOKEN_OPTIONS = [10_000, 20_000, 50_000] as const;
+
+export const REASONING_EFFORT_OPTIONS = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+] as const;
 
 // Mirrors the Core-side u32 token-count bound (config_edit::parse_token_count).
 export const MAX_LLM_INPUT_TOKENS_CEILING = 4_294_967_295;
