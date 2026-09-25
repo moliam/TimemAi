@@ -562,8 +562,10 @@ function TimemApp() {
   const [endpointEditor, setEndpointEditor] = useState<
     ModelEndpoint | "new" | null
   >(null);
-  const [deleteEndpointCandidate, setDeleteEndpointCandidate] =
-    useState<ModelEndpoint | null>(null);
+  const [deleteEndpointCandidates, setDeleteEndpointCandidates] = useState<
+    ModelEndpoint[]
+  >([]);
+  const [pendingEndpointDelete, setPendingEndpointDelete] = useState(false);
   const [endpointImportCandidates, setEndpointImportCandidates] = useState<
     ModelEndpointImportCandidate[]
   >([]);
@@ -704,6 +706,8 @@ function TimemApp() {
     new Map(),
   );
   const pendingMcpKeysRef = useRef<Set<string>>(new Set());
+  const pendingEndpointDeleteIdsRef = useRef<Set<string>>(new Set());
+  const pendingEndpointDeleteCommandRef = useRef("");
   const pendingHistorySessionIdsRef = useRef<Set<string>>(new Set());
   const pendingUploadSessionIdsRef = useRef<Set<string>>(new Set());
   const pendingToolgenRequestsRef = useRef<Set<string>>(new Set());
@@ -1005,7 +1009,8 @@ function TimemApp() {
       !pendingClaudeCodexToolDiscovery &&
       !favoriteCapacityUpdating &&
       !pendingMemSwitch &&
-      !memTemporaryItemsDeleting
+      !memTemporaryItemsDeleting &&
+      !pendingEndpointDelete
     )
       closeAppearancePanel();
   }, [
@@ -1016,6 +1021,7 @@ function TimemApp() {
     pendingMemConversationCapacity,
     pendingMemRetention,
     pendingMemSwitch,
+    pendingEndpointDelete,
   ]);
   const refreshMemTemporaryItems = useCallback(() => {
     setMemTemporaryItemsLoading(true);
@@ -1064,6 +1070,35 @@ function TimemApp() {
       });
     },
     [sendCommand],
+  );
+  const confirmModelEndpointDelete = useCallback(
+    (endpoints: ModelEndpoint[]) => {
+      const endpointIds = endpoints.map((endpoint) => endpoint.id);
+      if (endpointIds.length === 0) return;
+      const commandId = clientId("endpoint-delete");
+      pendingEndpointDeleteIdsRef.current = new Set(endpointIds);
+      pendingEndpointDeleteCommandRef.current = commandId;
+      setPendingEndpointDelete(true);
+      if (
+        !sendCommand(
+          {
+            type: "model_endpoint_delete_many",
+            endpoint_ids: endpointIds,
+          },
+          commandId,
+        )
+      ) {
+        pendingEndpointDeleteIdsRef.current.clear();
+        pendingEndpointDeleteCommandRef.current = "";
+        setPendingEndpointDelete(false);
+        reportUiError(
+          t("errors.endpointDeleteTitle"),
+          t("errors.checkConnection"),
+          "system",
+        );
+      }
+    },
+    [reportUiError, sendCommand, t],
   );
   const saveMemTemporaryPolicy = useCallback(
     (days: 1 | 5 | 10 | null, maxBytes: number | null) => {
@@ -1294,6 +1329,8 @@ function TimemApp() {
     pendingSessionApiKeyCommandsRef.current.clear();
     pendingSessionApiKeyCommandIdsRef.current.clear();
     pendingMcpKeysRef.current.clear();
+    pendingEndpointDeleteIdsRef.current.clear();
+    pendingEndpointDeleteCommandRef.current = "";
     pendingHistorySessionIdsRef.current.clear();
     pendingUploadSessionIdsRef.current.clear();
     pendingToolgenRequestsRef.current.clear();
@@ -1306,6 +1343,8 @@ function TimemApp() {
     setPendingRuntimeKeys(new Set());
     setPendingSessionCredentialIds(new Set());
     setPendingMcpKeys(new Set());
+    setPendingEndpointDelete(false);
+    setDeleteEndpointCandidates([]);
     setRevealedSessionApiKeys({});
     setRevealedMcpSecrets({});
     setPendingHistorySessionIds(new Set());
@@ -1523,6 +1562,13 @@ function TimemApp() {
         if (event.status === "accepted") return;
         const completed = sentCommandsRef.current.get(event.command_id);
         sentCommandsRef.current.delete(event.command_id);
+        if (
+          event.status === "committed" &&
+          completed?.type === "model_endpoint_import_apply"
+        ) {
+          setEndpointImportCandidates([]);
+          setEndpointImportIssues([]);
+        }
         const pendingCredential = pendingSessionApiKeyCommandsRef.current.get(
           event.command_id,
         );
@@ -1603,6 +1649,20 @@ function TimemApp() {
             setMemTemporaryItemsLoading(false);
           if (completed?.type === "mem_temporary_items_delete")
             setMemTemporaryItemsDeleting(false);
+          if (completed?.type === "model_endpoint_delete_many") {
+            if (pendingEndpointDeleteCommandRef.current === event.command_id) {
+              pendingEndpointDeleteIdsRef.current.clear();
+              pendingEndpointDeleteCommandRef.current = "";
+              setPendingEndpointDelete(false);
+              setDeleteEndpointCandidates([]);
+            }
+            reportUiError(
+              t("errors.endpointDeleteTitle"),
+              event.error || t("errors.endpointDeleteRetry"),
+              "system",
+            );
+            return;
+          }
           if (memSwitchNeedsConfirmation) {
             // The confirmation dialog is the actionable authoritative response.
           } else if (pendingCredential) {
@@ -2156,10 +2216,26 @@ function TimemApp() {
         setServer((current) =>
           current ? { ...current, model_endpoints: event.endpoints } : current,
         );
-        setEndpointImportCandidates([]);
-        setEndpointImportIssues([]);
         setEndpointEditor(null);
-        setDeleteEndpointCandidate(null);
+        const availableEndpointIds = new Set(
+          event.endpoints.map((endpoint) => endpoint.id),
+        );
+        const pendingDeleteIds = pendingEndpointDeleteIdsRef.current;
+        const pendingDeleteCompleted =
+          pendingDeleteIds.size > 0 &&
+          [...pendingDeleteIds].every(
+            (endpointId) => !availableEndpointIds.has(endpointId),
+          );
+        if (pendingDeleteCompleted) {
+          pendingEndpointDeleteIdsRef.current.clear();
+          pendingEndpointDeleteCommandRef.current = "";
+          setPendingEndpointDelete(false);
+          setDeleteEndpointCandidates([]);
+        } else {
+          setDeleteEndpointCandidates((current) =>
+            current.filter((endpoint) => availableEndpointIds.has(endpoint.id)),
+          );
+        }
         setRevealedEndpointApiKeys({});
         setRevealedEndpointHeaders({});
         setRevealedEndpointRequestFields({});
@@ -4389,7 +4465,7 @@ function TimemApp() {
               onRefreshTemporaryItems={refreshMemTemporaryItems}
               onDeleteTemporaryItems={deleteMemTemporaryItems}
               onEditEndpoint={setEndpointEditor}
-              onDeleteEndpoint={setDeleteEndpointCandidate}
+              onDeleteEndpoint={setDeleteEndpointCandidates}
               onRevealEndpoint={revealModelEndpoint}
               onSaveEndpoint={saveModelEndpoint}
               onSaveTemporaryPolicy={saveMemTemporaryPolicy}
@@ -4893,16 +4969,12 @@ function TimemApp() {
             }}
           />
         )}
-        {deleteEndpointCandidate && (
+        {deleteEndpointCandidates.length > 0 && (
           <ModelEndpointDeleteDialog
-            endpoint={deleteEndpointCandidate}
-            onClose={() => setDeleteEndpointCandidate(null)}
-            onConfirm={() =>
-              sendCommand({
-                type: "model_endpoint_delete",
-                endpoint_id: deleteEndpointCandidate.id,
-              })
-            }
+            endpoints={deleteEndpointCandidates}
+            pending={pendingEndpointDelete}
+            onClose={() => setDeleteEndpointCandidates([])}
+            onConfirm={() => confirmModelEndpointDelete(deleteEndpointCandidates)}
           />
         )}
         {deleteSessionCandidate && (
@@ -12202,7 +12274,7 @@ type SettingsCenterProps = {
   onRefreshTemporaryItems: () => void;
   onDeleteTemporaryItems: (ids: string[]) => void;
   onEditEndpoint: (endpoint: ModelEndpoint | "new" | null) => void;
-  onDeleteEndpoint: (endpoint: ModelEndpoint) => void;
+  onDeleteEndpoint: (endpoints: ModelEndpoint[]) => void;
   onRevealEndpoint: (endpointId: string) => void;
   onSaveEndpoint: (endpoint: ModelEndpointDraft) => void;
 };
@@ -13329,12 +13401,14 @@ function EndpointSettingsPane({
   revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
   revealedEndpointPrivateCas: Record<string, string>;
   onEdit: (endpoint: ModelEndpoint | "new" | null) => void;
-  onDelete: (endpoint: ModelEndpoint) => void;
+  onDelete: (endpoints: ModelEndpoint[]) => void;
   onReveal: (endpointId: string) => void;
   onSave: (endpoint: ModelEndpointDraft) => void;
 }) {
   const [deleteMode, setDeleteMode] = useState(false);
-  const [selectedEndpointId, setSelectedEndpointId] = useState("");
+  const [selectedEndpointIds, setSelectedEndpointIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [showImport, setShowImport] = useState(false);
   const [codexDir, setCodexDir] = useState("");
   const [claudeDir, setClaudeDir] = useState("");
@@ -13342,13 +13416,16 @@ function EndpointSettingsPane({
     () => new Set(),
   );
   useEffect(() => {
-    if (
-      selectedEndpointId &&
-      !endpoints.some((endpoint) => endpoint.id === selectedEndpointId)
-    )
-      setSelectedEndpointId("");
+    setSelectedEndpointIds((current) => {
+      const next = new Set(
+        [...current].filter((endpointId) =>
+          endpoints.some((endpoint) => endpoint.id === endpointId),
+        ),
+      );
+      return next.size === current.size ? current : next;
+    });
     if (deleteMode && endpoints.length === 0) setDeleteMode(false);
-  }, [deleteMode, endpoints, selectedEndpointId]);
+  }, [deleteMode, endpoints, selectedEndpointIds]);
   useEffect(() => {
     setSelectedImportIds(new Set(importCandidates.map((item) => item.id)));
   }, [importCandidates]);
@@ -13393,8 +13470,8 @@ function EndpointSettingsPane({
         />
       </section>
     );
-  const selected = endpoints.find(
-    (endpoint) => endpoint.id === selectedEndpointId,
+  const selectedEndpoints = endpoints.filter((endpoint) =>
+    selectedEndpointIds.has(endpoint.id),
   );
   return (
     <section
@@ -13407,34 +13484,70 @@ function EndpointSettingsPane({
       </div>
       <div className="endpoint-settings-toolbar">
         <span>
-          {endpoints.length} endpoint{endpoints.length === 1 ? "" : "s"}
+          {deleteMode
+            ? t("endpoints.selectedCount", {
+                count: selectedEndpointIds.size,
+              })
+            : t("endpoints.count", { count: endpoints.length })}
         </span>
         <div>
           {deleteMode && (
             <button
               type="button"
               className="secondary compact"
+              disabled={selectedEndpointIds.size === endpoints.length}
+              onClick={() =>
+                setSelectedEndpointIds(
+                  new Set(endpoints.map((endpoint) => endpoint.id)),
+                )
+              }
+            >
+              {t("endpoints.selectAll")}
+            </button>
+          )}
+          {deleteMode && (
+            <button
+              type="button"
+              className="secondary compact"
+              disabled={selectedEndpointIds.size === 0}
+              onClick={() => setSelectedEndpointIds(new Set())}
+            >
+              {t("endpoints.clearSelection")}
+            </button>
+          )}
+          {deleteMode && (
+            <button
+              type="button"
+              className="secondary compact"
               onClick={() => {
                 setDeleteMode(false);
-                setSelectedEndpointId("");
+                setSelectedEndpointIds(new Set());
               }}
             >
-              Cancel
+              {t("common.cancel")}
             </button>
           )}
           <button
             type="button"
             className={`danger compact ${deleteMode ? "confirm" : ""}`}
-            disabled={endpoints.length === 0 || (deleteMode && !selected)}
+            disabled={endpoints.length === 0 || (deleteMode && selectedEndpoints.length === 0)}
             onClick={() => {
               if (!deleteMode) {
                 setDeleteMode(true);
-                setSelectedEndpointId("");
-              } else if (selected) onDelete(selected);
+                setSelectedEndpointIds(new Set());
+              } else if (selectedEndpoints.length > 0) {
+                onDelete(selectedEndpoints);
+                setDeleteMode(false);
+                setSelectedEndpointIds(new Set());
+              }
             }}
           >
             {deleteMode ? <Check size={14} /> : <Trash2 size={14} />}{" "}
-            {deleteMode ? "Delete selected" : "Delete"}
+            {deleteMode
+              ? t("endpoints.deleteSelected", {
+                  count: selectedEndpoints.length,
+                })
+              : t("common.delete")}
           </button>
           <button
             type="button"
@@ -13453,7 +13566,7 @@ function EndpointSettingsPane({
             disabled={deleteMode}
             onClick={() => onEdit("new")}
           >
-            <Plus size={14} /> Add endpoint
+            <Plus size={14} /> {t("endpoints.addEndpoint")}
           </button>
         </div>
       </div>
@@ -13554,26 +13667,61 @@ function EndpointSettingsPane({
       <div className="endpoint-settings-list">
         {endpoints.length === 0 ? (
           <div className="endpoint-empty">
-            No model endpoints yet. Add one to configure model access.
+            {t("endpoints.settingsEmpty")}
           </div>
         ) : (
           endpoints.map((endpoint) => {
-            const selectedForDelete = selectedEndpointId === endpoint.id;
+            const selectedForDelete = selectedEndpointIds.has(endpoint.id);
+            const endpointDetails = (
+              <>
+                <span>
+                  <strong>{endpoint.name}</strong>
+                  {deleteMode && (
+                    <span className="endpoint-delete-select">
+                      {selectedForDelete && <Check size={13} />}
+                    </span>
+                  )}
+                </span>
+                <small>
+                  {endpoint.model} · {endpoint.api_protocol}
+                  {endpoint.reasoning_effort
+                    ? ` · ${endpoint.reasoning_effort}`
+                    : ""}{" "}
+                  · {formatContextWindowTokens(endpoint.max_llm_input_tokens)} /{" "}
+                  {endpoint.max_llm_output_tokens / 1_000}K
+                </small>
+                <code title={endpoint.base_url}>{endpoint.base_url}</code>
+              </>
+            );
             return (
               <div
                 className={`endpoint-settings-row ${deleteMode ? "delete-selecting" : ""} ${selectedForDelete ? "delete-selected" : ""}`}
                 key={endpoint.id}
               >
-                <button
-                  type="button"
-                  className="endpoint-settings-select"
-                  aria-pressed={deleteMode ? selectedForDelete : undefined}
-                  onClick={() => {
-                    if (deleteMode)
-                      setSelectedEndpointId((current) =>
-                        current === endpoint.id ? "" : endpoint.id,
-                      );
-                    else {
+                {deleteMode ? (
+                  <label className="endpoint-settings-select endpoint-settings-select-label">
+                    <input
+                      type="checkbox"
+                      className="endpoint-delete-checkbox"
+                      checked={selectedForDelete}
+                      onChange={() =>
+                        setSelectedEndpointIds((current) => {
+                          const next = new Set(current);
+                          if (next.has(endpoint.id)) next.delete(endpoint.id);
+                          else next.add(endpoint.id);
+                          return next;
+                        })
+                      }
+                    />
+                    <span className="endpoint-settings-select-body">
+                      {endpointDetails}
+                    </span>
+                  </label>
+                ) : (
+                  <button
+                    type="button"
+                    className="endpoint-settings-select"
+                    onClick={() => {
                       onEdit(endpoint);
                       if (
                         (endpoint.api_key_configured ||
@@ -13582,33 +13730,17 @@ function EndpointSettingsPane({
                         revealedEndpointApiKeys[endpoint.id] === undefined
                       )
                         onReveal(endpoint.id);
-                    }
                   }}
-                >
-                  <span>
-                    <strong>{endpoint.name}</strong>
-                    {deleteMode && (
-                      <span className="endpoint-delete-select">
-                        {selectedForDelete && <Check size={13} />}
-                      </span>
-                    )}
-                  </span>
-                  <small>
-                    {endpoint.model} · {endpoint.api_protocol}
-                    {endpoint.reasoning_effort
-                      ? ` · ${endpoint.reasoning_effort}`
-                      : ""}{" "}
-                    · {formatContextWindowTokens(endpoint.max_llm_input_tokens)} /{" "}
-                    {endpoint.max_llm_output_tokens / 1_000}K
-                  </small>
-                  <code title={endpoint.base_url}>{endpoint.base_url}</code>
-                </button>
+                  >
+                    {endpointDetails}
+                  </button>
+                )}
                 {!deleteMode && (
                   <button
                     type="button"
                     className="endpoint-settings-edit"
-                    title={`Edit ${endpoint.name}`}
-                    aria-label={`Edit ${endpoint.name}`}
+                    title={t("endpoints.editEndpoint")}
+                    aria-label={t("endpoints.editEndpoint")}
                     onClick={() => {
                       onEdit(endpoint);
                       if (
@@ -15209,46 +15341,90 @@ function NewSessionDialog({
 }
 
 function ModelEndpointDeleteDialog({
-  endpoint,
+  endpoints,
+  pending,
   onClose,
   onConfirm,
 }: {
-  endpoint: ModelEndpoint;
+  endpoints: ModelEndpoint[];
+  pending: boolean;
   onClose: () => void;
   onConfirm: () => void;
 }) {
+  const descriptionId = "endpoint-delete-dialog-description";
+  const closeIfIdle = () => {
+    if (!pending) onClose();
+  };
+  const visibleNames = endpoints.slice(0, 8).map((endpoint) => endpoint.name);
+  const hiddenCount = endpoints.length - visibleNames.length;
   return (
     <div
       className="modal-backdrop endpoint-delete-backdrop"
       role="presentation"
-      onClick={onClose}
+      onClick={closeIfIdle}
     >
       <section
         className="decision-modal session-delete-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label={`Delete ${endpoint.name}`}
+        aria-label={t("endpoints.deleteDialogTitle", {
+          count: endpoints.length,
+        })}
+        aria-describedby={descriptionId}
         onClick={(event) => event.stopPropagation()}
       >
         <div className="modal-titlebar">
           <div>
-            <span className="eyebrow">DELETE ENDPOINT</span>
-            <h2>Delete “{endpoint.name}”?</h2>
+            <span className="eyebrow">
+              {t("endpoints.deleteDialogEyebrow")}
+            </span>
+            <h2>
+              {t("endpoints.deleteDialogTitle", {
+                count: endpoints.length,
+              })}
+            </h2>
           </div>
-          <button type="button" className="icon-button" onClick={onClose}>
+          <button
+            type="button"
+            className="icon-button"
+            disabled={pending}
+            onClick={closeIfIdle}
+          >
             <X size={16} />
           </button>
         </div>
-        <p>
-          This removes the shared endpoint from every Session dropdown. Existing
-          Session settings are not changed.
-        </p>
+        <p id={descriptionId}>{t("endpoints.deleteDialogDescription")}</p>
+        <ul className="endpoint-delete-list">
+          {visibleNames.map((name) => (
+            <li key={name}>{name}</li>
+          ))}
+          {hiddenCount > 0 && (
+            <li>{t("endpoints.deleteMore", { count: hiddenCount })}</li>
+          )}
+        </ul>
         <div className="decision-actions">
-          <button type="button" className="secondary" onClick={onClose}>
-            Cancel
+          <button
+            type="button"
+            className="secondary"
+            disabled={pending}
+            onClick={closeIfIdle}
+          >
+            {t("common.cancel")}
           </button>
-          <button type="button" className="danger" onClick={onConfirm}>
-            <Trash2 size={15} /> Delete endpoint
+          <button
+            type="button"
+            className="danger"
+            disabled={pending || endpoints.length === 0}
+            onClick={onConfirm}
+          >
+            {pending ? (
+              <LoaderCircle size={15} />
+            ) : (
+              <Trash2 size={15} />
+            )}{" "}
+            {pending
+              ? t("endpoints.deleting")
+              : t("endpoints.deleteConfirm", { count: endpoints.length })}
           </button>
         </div>
       </section>

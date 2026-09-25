@@ -130,6 +130,8 @@ model displays `未配置`. Labels are not authentication or service-health chec
 The endpoint editor puts name, model ID, Base URL and API Key first, followed by
 protocols and token limits, then optional transport and request customization.
 API keys remain optional for services that do not require authentication.
+The endpoint list supports selecting multiple entries for deletion; Timem asks
+for one confirmation and removes the batch atomically from the shared store.
 
 ### Importing endpoints from other CLI ecosystems
 

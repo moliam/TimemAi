@@ -4277,6 +4277,20 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
 }
 .endpoint-settings-select { font-family: inherit; }
 .endpoint-settings-select:hover { background: transparent; }
+.endpoint-settings-select-label {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  cursor: pointer;
+}
+.endpoint-settings-select-body { min-width: 0; display: grid; gap: 5px; }
+.endpoint-delete-checkbox {
+  width: 15px;
+  height: 15px;
+  margin: 2px 0 0;
+  accent-color: #c9635c;
+}
 .endpoint-settings-select strong { font-size: 12px; font-weight: 680; }
 .endpoint-settings-select small { color: #89958f; font-family: inherit; }
 .endpoint-settings-edit {
@@ -4399,6 +4413,15 @@ body.resizing-sidebar { cursor: col-resize; user-select: none; }
   background: #a94a44;
   box-shadow: 0 9px 22px #0007;
 }
+.endpoint-delete-list {
+  max-height: 180px;
+  margin: 2px 0 14px;
+  overflow-y: auto;
+  padding-left: 18px;
+  color: #9daaa4;
+  font-size: 11px;
+}
+:root[data-theme="light"] .endpoint-delete-list { color: #61736d; }
 :root[data-theme="light"] .endpoint-delete-backdrop .decision-modal {
   background: #fff;
   box-shadow: 0 28px 75px #24342e42, 0 8px 26px #24342e1e;
