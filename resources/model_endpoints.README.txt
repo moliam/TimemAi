@@ -38,6 +38,9 @@ Import: the Web host can scan Codex CLI (config.toml/auth.json) and Claude Code
 (settings.json/settings.local.json) directories and add their parsed profiles,
 profile overlays, and providers as endpoints; scanned keys stay host-side until
 an explicit import applies them.
+For a standard ~/.codex layout, a CHJ provider using CHJ_API_KEY falls back to
+the EPT portal token in ~/.config/ept/auth_session.json when Timem was not
+launched with that environment variable.
 
 For TIMEM_* environment configuration (model, protocol, base_url, key fallbacks,
 etc.) see env_template in the Timem source tree and docs/install-and-configuration.md.
