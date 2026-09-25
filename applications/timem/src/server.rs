@@ -143,6 +143,7 @@ const MAX_SESSION_UPLOADS: usize = 20;
 const MAX_BROWSER_COMMAND_BYTES: usize = 1024 * 1024;
 const BROWSER_COMMAND_QUEUE_CAPACITY: usize = 32;
 const MAX_COMMAND_ID_BYTES: usize = 256;
+const MAX_MODEL_ENDPOINT_DELETE_IDS: usize = 100;
 const WORK_INSTRUCTION_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTANCE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(3);
 const INSTANCE_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -1271,6 +1272,9 @@ enum ClientCommand {
     ModelEndpointDelete {
         endpoint_id: String,
     },
+    ModelEndpointDeleteMany {
+        endpoint_ids: Vec<String>,
+    },
     ModelEndpointApply {
         session_id: String,
         endpoint_id: String,
@@ -1350,6 +1354,7 @@ impl ClientCommand {
             | Self::McpServerDelete { .. }
             | Self::ModelEndpointUpsert { .. }
             | Self::ModelEndpointDelete { .. }
+            | Self::ModelEndpointDeleteMany { .. }
             | Self::ModelEndpointImportScan { .. }
             | Self::ModelEndpointImportApply { .. }
             | Self::WorkerRoleCreate { .. }
@@ -1410,6 +1415,7 @@ impl ClientCommand {
                 | Self::McpServerDelete { .. }
                 | Self::ModelEndpointUpsert { .. }
                 | Self::ModelEndpointDelete { .. }
+                | Self::ModelEndpointDeleteMany { .. }
                 | Self::ModelEndpointImportScan { .. }
                 | Self::ModelEndpointImportApply { .. }
                 | Self::WorkerRoleCreate { .. }
@@ -3708,6 +3714,14 @@ fn handle_command_with_id(
         }
         ClientCommand::ModelEndpointDelete { endpoint_id } => {
             delete_model_endpoint(state, &endpoint_id)?;
+            let event = WireEvent::ModelEndpointsUpdated {
+                endpoints: model_endpoint_reports(state)?,
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
+        ClientCommand::ModelEndpointDeleteMany { endpoint_ids } => {
+            delete_model_endpoints(state, &endpoint_ids)?;
             let event = WireEvent::ModelEndpointsUpdated {
                 endpoints: model_endpoint_reports(state)?,
             };
@@ -7729,6 +7743,36 @@ fn delete_model_endpoint(state: &AppState, endpoint_id: &str) -> Result<(), Stri
         return Err("model_endpoint_not_found".to_string());
     }
     save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints)
+}
+
+fn delete_model_endpoints(state: &AppState, endpoint_ids: &[String]) -> Result<(), String> {
+    if endpoint_ids.is_empty() || endpoint_ids.len() > MAX_MODEL_ENDPOINT_DELETE_IDS {
+        return Err("model_endpoint_delete_selection_invalid".to_string());
+    }
+    let selected = endpoint_ids.iter().collect::<BTreeSet<_>>();
+    if selected.len() != endpoint_ids.len() {
+        return Err("model_endpoint_delete_selection_invalid".to_string());
+    }
+    let mut mem = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?;
+    if selected.iter().any(|endpoint_id| {
+        !mem.model_endpoints
+            .iter()
+            .any(|endpoint| endpoint.id == **endpoint_id)
+    }) {
+        return Err("model_endpoint_not_found".to_string());
+    }
+    let mut retained = Vec::with_capacity(mem.model_endpoints.len() - selected.len());
+    for endpoint in &mem.model_endpoints {
+        if !selected.contains(&endpoint.id) {
+            retained.push(endpoint.clone());
+        }
+    }
+    save_model_endpoints(&mem.layout.memory_dir(), &retained)?;
+    mem.model_endpoints = retained;
+    Ok(())
 }
 
 struct ModelEndpointSecrets {

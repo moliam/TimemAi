@@ -811,8 +811,9 @@ export type ClientCommand =
         private_ca_pem?: string;
         reasoning_effort?: string | null;
       };
-    }
+  }
   | { type: "model_endpoint_delete"; endpoint_id: string }
+  | { type: "model_endpoint_delete_many"; endpoint_ids: string[] }
   | { type: "model_endpoint_apply"; session_id: string; endpoint_id: string }
   | {
       type: "model_endpoint_import_scan";

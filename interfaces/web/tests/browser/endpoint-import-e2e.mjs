@@ -15,6 +15,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 自建 fixture：独立于任何真实用户配置，保证可重复
 const fixtureRoot = await mkdtemp(tmpdir() + "/timem-e2e-import-");
+const runId = Date.now().toString(36);
 const { mkdir, writeFile, rm } = await import("node:fs/promises");
 await mkdir(fixtureRoot + "/codex", { recursive: true });
 await mkdir(fixtureRoot + "/mem", { recursive: true });
@@ -23,12 +24,12 @@ model_provider = "zai"
 model_reasoning_effort = "high"
 
 [model_providers.zai]
-name = "ZAI E2E"
+name = "ZAI E2E ${runId}"
 base_url = "https://open.bigmodel.cn/api/v1"
 wire_api = "responses"
 
 [model_providers.other]
-name = "Other E2E"
+name = "Other E2E ${runId}"
 base_url = "https://other.example.test/v1"
 experimental_bearer_token = "other-e2e-secret"
 wire_api = "responses"
@@ -157,13 +158,13 @@ assert(scanned === true, "scan clicked");
 await waitFor(() => evaluate("document.querySelectorAll('.endpoint-import-candidate').length > 0"), "import candidates appear after scan");
 
 const candidateText = await evaluate("document.querySelector('.endpoint-import-candidate')?.textContent || ''");
-assert(/ZAI E2E/.test(candidateText), "candidate shows provider name: " + candidateText);
+assert(candidateText.includes(`ZAI E2E ${runId}`), "candidate shows provider name: " + candidateText);
 assert(/glm-5\.3/.test(candidateText), "candidate shows model: " + candidateText);
 assert(/high/i.test(candidateText), "candidate shows reasoning effort: " + candidateText);
 const candidateCount = await evaluate("document.querySelectorAll('.endpoint-import-candidate').length");
 assert(candidateCount === 2, "profile overlay providers are scanned: " + candidateCount);
 const candidatesText = await evaluate("[...document.querySelectorAll('.endpoint-import-candidate')].map(n => n.textContent || '').join('\\n')");
-assert(/Other E2E/.test(candidatesText), "profile overlay provider candidate appears: " + candidatesText);
+assert(candidatesText.includes(`Other E2E ${runId}`), "profile overlay provider candidate appears: " + candidatesText);
 assert(/other-model/.test(candidatesText), "overlay model is used instead of the default model: " + candidatesText);
 assert(!candidatesText.includes("other-e2e-secret"), "inline provider token is not exposed");
 
@@ -182,7 +183,46 @@ await waitFor(() => evaluate(`(() => {
     && [...rows].some(row => /ZAI E2E/.test(row.textContent || ''));
 })()`), "imported endpoint appears in endpoint list");
 
-console.log("E2E PASS: scan -> preview -> import -> endpoint list updated");
+// Delete both imported endpoints as one confirmed batch.
+await evaluate(`(() => {
+  const button = [...document.querySelectorAll('.endpoint-settings-toolbar button')].find(b => /delete|删除/i.test(b.textContent || ''));
+  if (!button || button.disabled) throw new Error('delete button missing or disabled');
+  button.click(); return true;
+})()`);
+await waitFor(() => evaluate("document.querySelectorAll('.endpoint-delete-checkbox').length > 0"), "endpoint delete checkboxes appear");
+await evaluate(`(() => {
+  const rows = [...document.querySelectorAll('.endpoint-settings-row')];
+  const imported = rows.filter(row => {
+    const text = row.textContent || '';
+    return text.includes(${JSON.stringify("ZAI E2E " + runId)}) || text.includes(${JSON.stringify("Other E2E " + runId)});
+  });
+  if (imported.length !== 2) throw new Error('expected two imported rows, got ' + imported.length);
+  for (const row of imported) row.querySelector('.endpoint-delete-checkbox').click();
+  return true;
+})()`);
+await waitFor(() => evaluate(`(() => {
+  const button = [...document.querySelectorAll('.endpoint-settings-toolbar button')].find(b => /delete selected|删除所选/i.test(b.textContent || ''));
+  return !!button && !button.disabled && /2/.test(button.textContent || '');
+})()`), "batch delete button enabled for two endpoints");
+await evaluate(`(() => {
+  const button = [...document.querySelectorAll('.endpoint-settings-toolbar button')].find(b => /delete selected|删除所选/i.test(b.textContent || ''));
+  button.click(); return true;
+})()`);
+await waitFor(() => evaluate("!!document.querySelector('.endpoint-delete-backdrop')"), "endpoint delete confirmation appears");
+await evaluate(`(() => {
+  const button = [...document.querySelectorAll('.endpoint-delete-backdrop .decision-actions button')].find(b => /delete 2 endpoints|删除 2 个接入点/i.test(b.textContent || ''));
+  if (!button || button.disabled) throw new Error('confirm batch delete button unavailable');
+  button.click(); return true;
+})()`);
+await waitFor(() => evaluate(`(() => {
+  const rows = document.querySelectorAll('.endpoint-settings-row');
+  const texts = [...rows].map(row => row.textContent || '');
+  return rows.length === ${rowsBefore}
+    && !texts.some(text => text.includes(${JSON.stringify("ZAI E2E " + runId)}))
+    && !texts.some(text => text.includes(${JSON.stringify("Other E2E " + runId)}));
+})()`), "confirmed batch removes both imported endpoints");
+
+console.log("E2E PASS: scan -> preview -> import -> batch delete");
 chrome.kill();
 await rm(fixtureRoot, { recursive: true, force: true });
 process.exit(0);

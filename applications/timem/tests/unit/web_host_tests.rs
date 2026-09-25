@@ -14254,6 +14254,125 @@ fn model_endpoint_import_scan_and_apply_round_trip() {
 }
 
 #[test]
+fn model_endpoint_delete_many_is_atomic_and_bounded() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_delete_many"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let endpoint = |id: &str, name: &str| ModelEndpointConfig {
+        id: id.to_string(),
+        name: name.to_string(),
+        model: format!("{name}-model"),
+        api_protocol: "openai-compatible".to_string(),
+        response_protocol: "xml".to_string(),
+        base_url: format!("https://{id}.example.test/v1"),
+        max_llm_input_tokens: 100_000,
+        max_llm_output_tokens: 10_000,
+        stream: false,
+        allow_cross_origin_redirects: false,
+        private_ca_pem: String::new(),
+        api_key: format!("secret-{id}"),
+        http_headers: Default::default(),
+        request_fields: Default::default(),
+        reasoning_effort: None,
+    };
+    let endpoints = vec![
+        endpoint("endpoint-one", "One"),
+        endpoint("endpoint-two", "Two"),
+        endpoint("endpoint-three", "Three"),
+    ];
+    let memory_dir = {
+        let mut mem = state.mem.lock().unwrap();
+        mem.model_endpoints = endpoints;
+        save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints).unwrap();
+        mem.layout.memory_dir()
+    };
+
+    let result = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointDeleteMany {
+            endpoint_ids: vec!["endpoint-one".to_string(), "endpoint-three".to_string()],
+        },
+    )
+    .unwrap();
+    let WireEvent::ModelEndpointsUpdated { endpoints } = result.unwrap() else {
+        panic!("batch delete must return the authoritative endpoint list");
+    };
+    assert_eq!(
+        endpoints
+            .iter()
+            .map(|endpoint| endpoint.id.as_str())
+            .collect::<Vec<_>>(),
+        ["endpoint-two"]
+    );
+    assert_eq!(
+        load_model_endpoints_resilient(&memory_dir)
+            .unwrap()
+            .iter()
+            .map(|endpoint| endpoint.id.clone())
+            .collect::<Vec<_>>(),
+        ["endpoint-two"]
+    );
+
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointDeleteMany {
+                endpoint_ids: Vec::new(),
+            },
+        )
+        .unwrap_err(),
+        "model_endpoint_delete_selection_invalid"
+    );
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointDeleteMany {
+                endpoint_ids: vec!["endpoint-two".to_string(), "endpoint-two".to_string(),],
+            },
+        )
+        .unwrap_err(),
+        "model_endpoint_delete_selection_invalid"
+    );
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointDeleteMany {
+                endpoint_ids: vec!["endpoint-two".to_string(), "missing".to_string(),],
+            },
+        )
+        .unwrap_err(),
+        "model_endpoint_not_found"
+    );
+    let too_many_ids = (0..=MAX_MODEL_ENDPOINT_DELETE_IDS)
+        .map(|index| format!("endpoint-{index}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointDeleteMany {
+                endpoint_ids: too_many_ids,
+            },
+        )
+        .unwrap_err(),
+        "model_endpoint_delete_selection_invalid"
+    );
+    assert_eq!(
+        load_model_endpoints_resilient(&memory_dir)
+            .unwrap()
+            .iter()
+            .map(|endpoint| endpoint.id.clone())
+            .collect::<Vec<_>>(),
+        ["endpoint-two"]
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 #[ignore = "manual endpoint scale/concurrency performance profile"]
 fn model_endpoint_scale_and_concurrency_performance_profile() {
     fn percentile(mut samples: Vec<std::time::Duration>, percentile: usize) -> std::time::Duration {
