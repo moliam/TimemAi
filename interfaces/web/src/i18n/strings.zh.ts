@@ -359,6 +359,8 @@ export const zh = {
     importKeyConfigured: "已找到 API Key",
     importKeyMissing: "缺少 API Key",
     importSelected: "导入所选 {count} 项",
+    reasoningEffort: "推理强度",
+    reasoningEffortDefault: "默认",
   },
   favorites: {
     eyebrow: "收藏夹空间",

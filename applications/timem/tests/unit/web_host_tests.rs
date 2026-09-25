@@ -13709,11 +13709,13 @@ fn model_endpoint_import_scans_codex_and_claude_directories() {
         r#"
 model = "gpt-5-codex"
 model_provider = "openrouter"
+model_reasoning_effort = "medium"
 
 [model_providers.openrouter]
 name = "OpenRouter"
 base_url = "https://openrouter.ai/api/v1"
 env_key = "TIMEM_TEST_OPENROUTER_KEY"
+env_http_headers = { "X-Tenant" = "TIMEM_TEST_TENANT" }
 wire_api = "chat"
 
 [model_providers.ollama]
@@ -13724,6 +13726,7 @@ wire_api = "chat"
 [profiles.fast]
 model = "gpt-5-mini"
 model_provider = "openrouter"
+model_reasoning_effort = "high"
 
 [profiles.legacy]
 model = "old-model"
@@ -13752,6 +13755,7 @@ wire_api = "weird"
     )
     .unwrap();
     std::env::set_var("TIMEM_TEST_OPENROUTER_KEY", "openrouter-secret-key");
+    std::env::set_var("TIMEM_TEST_TENANT", "tenant-one");
 
     let scan = scan_model_endpoint_imports(
         Some(codex_dir.to_str().unwrap()),
@@ -13759,6 +13763,8 @@ wire_api = "weird"
     )
     .unwrap();
     std::env::remove_var("TIMEM_TEST_OPENROUTER_KEY");
+    std::env::remove_var("TIMEM_TEST_TENANT");
+    std::env::remove_var("TIMEM_TEST_TENANT");
     assert_eq!(scan.candidates.len(), 3);
     let openrouter = scan
         .candidates
@@ -13770,12 +13776,18 @@ wire_api = "weird"
     assert_eq!(openrouter.api_protocol, "openai-compatible");
     assert!(openrouter.stream);
     assert_eq!(openrouter.api_key, "openrouter-secret-key");
+    assert_eq!(openrouter.reasoning_effort.as_deref(), Some("medium"));
+    assert_eq!(
+        openrouter.http_headers.get("X-Tenant").map(String::as_str),
+        Some("tenant-one")
+    );
     let fast = scan
         .candidates
         .iter()
         .find(|candidate| candidate.model == "gpt-5-mini")
         .unwrap();
     assert_eq!(fast.name, "OpenRouter");
+    assert_eq!(fast.reasoning_effort.as_deref(), Some("high"));
     let claude = scan
         .candidates
         .iter()
@@ -13828,6 +13840,136 @@ wire_api = "weird"
 }
 
 #[test]
+fn model_endpoint_import_maps_reasoning_and_vendor_request_fields() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_import_fields"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    std::fs::create_dir_all(root.join("codex")).unwrap();
+    std::fs::create_dir_all(root.join("claude")).unwrap();
+    std::fs::write(
+        root.join("codex").join("config.toml"),
+        r#"
+model = "glm-5.3"
+model_provider = "zai"
+model_reasoning_effort = "high"
+disable_response_storage = true
+model_verbosity = "medium"
+
+[model_providers.zai]
+name = "ZAI"
+base_url = "https://open.bigmodel.cn/api/v1"
+wire_api = "responses"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("claude").join("settings.json"),
+        r#"{
+            "model": "claude-sonnet-4-5",
+            "effortLevel": "high",
+            "env": {
+                "MAX_THINKING_TOKENS": "16000",
+                "ANTHROPIC_CUSTOM_HEADERS": "X-Tenant: tenant-one\nX-Region: cn"
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let scanned = scan_model_endpoint_imports(
+        Some(root.join("codex").to_str().unwrap()),
+        Some(root.join("claude").to_str().unwrap()),
+    )
+    .unwrap();
+    let codex = scanned
+        .candidates
+        .iter()
+        .find(|candidate| candidate.source == "codex")
+        .unwrap();
+    assert_eq!(codex.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(
+        codex.request_fields.get("store"),
+        Some(&serde_json::json!(false))
+    );
+    assert_eq!(
+        codex.request_fields.get("text"),
+        Some(&serde_json::json!({"verbosity": "medium"}))
+    );
+    let claude = scanned
+        .candidates
+        .iter()
+        .find(|candidate| candidate.source == "claude")
+        .unwrap();
+    assert_eq!(claude.reasoning_effort, None);
+    assert_eq!(
+        claude.request_fields.get("thinking"),
+        Some(&serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": 16000
+        }))
+    );
+    assert_eq!(
+        claude.http_headers.get("X-Tenant").map(String::as_str),
+        Some("tenant-one")
+    );
+    assert!(scanned
+        .issues
+        .iter()
+        .any(|issue| issue == "claude_effort_level_not_imported"));
+
+    let codex_id = codex.id.clone();
+    let claude_id = claude.id.clone();
+    let codex_reasoning = codex.reasoning_effort.clone();
+    *state.model_endpoint_imports.lock().unwrap() = scanned.candidates;
+    assert_eq!(codex_reasoning.as_deref(), Some("high"));
+
+    let endpoint_ids =
+        import_model_endpoints(&state, &[codex_id.clone(), claude_id.clone()]).unwrap();
+    assert_eq!(endpoint_ids.len(), 2);
+    let mem = state.mem.lock().unwrap();
+    let imported_codex = mem
+        .model_endpoints
+        .iter()
+        .find(|endpoint| endpoint.name == "ZAI")
+        .unwrap();
+    assert_eq!(imported_codex.reasoning_effort.as_deref(), Some("high"));
+    let imported_claude = mem
+        .model_endpoints
+        .iter()
+        .find(|endpoint| endpoint.name == "Claude Code")
+        .unwrap();
+    assert_eq!(imported_claude.reasoning_effort, None);
+    assert!(imported_claude.request_fields.contains_key("thinking"));
+    drop(mem);
+
+    // Reasoning effort cannot be stored on an Anthropic endpoint directly.
+    assert_eq!(
+        normalize_model_endpoint_input(
+            None,
+            ModelEndpointInput {
+                id: None,
+                name: "Bad Claude".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+                api_protocol: "anthropic".to_string(),
+                response_protocol: "xml".to_string(),
+                base_url: "https://api.anthropic.com".to_string(),
+                max_llm_input_tokens: 200_000,
+                max_llm_output_tokens: 20_000,
+                stream: false,
+                api_key: None,
+                reasoning_effort: Some("high".to_string()),
+                http_headers: Default::default(),
+                request_fields: Default::default(),
+                allow_cross_origin_redirects: false,
+                private_ca_pem: None,
+            },
+        )
+        .unwrap_err(),
+        "model_endpoint_reasoning_effort_requires_openai_protocol"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn model_endpoint_import_scan_and_apply_round_trip() {
     let state = routing_test_state();
     let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_import_apply"));
@@ -13861,6 +14003,7 @@ fn model_endpoint_import_scan_and_apply_round_trip() {
             request_fields: Default::default(),
             allow_cross_origin_redirects: false,
             private_ca_pem: None,
+            reasoning_effort: None,
         },
     )
     .unwrap();
@@ -13977,6 +14120,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
             api_key: format!("secret-{index:05}"),
             http_headers: Default::default(),
             request_fields: Default::default(),
+            reasoning_effort: None,
         }
     }
 
@@ -14039,6 +14183,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                     ("X-Tenant".to_string(), "****".to_string()),
                 ]),
                 request_fields: Default::default(),
+                reasoning_effort: None,
             },
         )
         .unwrap();
@@ -14093,6 +14238,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                         api_key: None,
                         http_headers: Default::default(),
                         request_fields: Default::default(),
+                        reasoning_effort: None,
                     },
                 )
                 .unwrap();
@@ -14176,6 +14322,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         api_key: None,
         http_headers: Default::default(),
         request_fields: Default::default(),
+        reasoning_effort: None,
     };
     assert_eq!(
         normalize_model_endpoint_input(None, invalid_input).unwrap_err(),
@@ -14197,6 +14344,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         api_key: None,
         http_headers: Default::default(),
         request_fields: Default::default(),
+        reasoning_effort: None,
     };
     assert_eq!(
         normalize_model_endpoint_input(None, invalid_output).unwrap_err(),
@@ -14221,6 +14369,7 @@ fn model_endpoint_rejects_invalid_private_ca_before_persisting() {
         api_key: None,
         http_headers: Default::default(),
         request_fields: Default::default(),
+        reasoning_effort: None,
     };
     let error = normalize_model_endpoint_input(None, input).unwrap_err();
     assert!(
@@ -14246,6 +14395,7 @@ fn model_endpoint_stream_requires_openai_compatible_protocol() {
         api_key: None,
         http_headers: Default::default(),
         request_fields: Default::default(),
+        reasoning_effort: None,
     };
     assert_eq!(
         normalize_model_endpoint_input(None, input).unwrap_err(),
@@ -14288,6 +14438,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                         json!({"priority": 2, "enabled": true}),
                     ),
                 ]),
+                reasoning_effort: None,
             },
         },
     )
@@ -14398,6 +14549,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 api_key: None,
                 http_headers: Default::default(),
                 request_fields: Default::default(),
+                reasoning_effort: None,
             },
         },
     )
@@ -14446,6 +14598,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 api_key: None,
                 http_headers: Default::default(),
                 request_fields: Default::default(),
+                reasoning_effort: None,
             },
         },
     )

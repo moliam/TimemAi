@@ -375,6 +375,7 @@ export type ModelEndpoint = {
   request_fields: Record<string, unknown>;
   allow_cross_origin_redirects: boolean;
   private_ca_configured: boolean;
+  reasoning_effort?: string | null;
 };
 
 export type ModelEndpointImportCandidate = {
@@ -389,6 +390,7 @@ export type ModelEndpointImportCandidate = {
   max_llm_output_tokens: number;
   stream: boolean;
   api_key_configured: boolean;
+  reasoning_effort?: string | null;
 };
 
 export type MemTemporaryItem = {
@@ -807,6 +809,7 @@ export type ClientCommand =
         request_fields: Record<string, unknown>;
         allow_cross_origin_redirects: boolean;
         private_ca_pem?: string;
+        reasoning_effort?: string | null;
       };
     }
   | { type: "model_endpoint_delete"; endpoint_id: string }

@@ -362,6 +362,8 @@ export const en: Strings = {
     importKeyConfigured: "API key found",
     importKeyMissing: "API key missing",
     importSelected: "Import {count} selected",
+    reasoningEffort: "Reasoning effort",
+    reasoningEffortDefault: "Default",
   },
   favorites: {
     eyebrow: "Favorites space",
