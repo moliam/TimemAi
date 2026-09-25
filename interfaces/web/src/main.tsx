@@ -58,6 +58,7 @@ import {
   Menu,
   Minimize2,
   Palette,
+  FolderInput,
   Paperclip,
   Pencil,
   Plug,
@@ -117,6 +118,7 @@ import {
   McpTransport,
   MemTemporaryItem,
   ModelEndpoint,
+  ModelEndpointImportCandidate,
   Session,
   Snapshot,
   ToolDetail,
@@ -561,6 +563,10 @@ function TimemApp() {
   >(null);
   const [deleteEndpointCandidate, setDeleteEndpointCandidate] =
     useState<ModelEndpoint | null>(null);
+  const [endpointImportCandidates, setEndpointImportCandidates] = useState<
+    ModelEndpointImportCandidate[]
+  >([]);
+  const [endpointImportIssues, setEndpointImportIssues] = useState<string[]>([]);
   const [revealedEndpointApiKeys, setRevealedEndpointApiKeys] = useState<
     Record<string, string>
   >({});
@@ -1036,6 +1042,25 @@ function TimemApp() {
   const saveModelEndpoint = useCallback(
     (endpoint: ModelEndpointDraft) => {
       sendCommand({ type: "model_endpoint_upsert", endpoint });
+    },
+    [sendCommand],
+  );
+  const scanModelEndpointImport = useCallback(
+    (codexDir: string, claudeDir: string) => {
+      sendCommand({
+        type: "model_endpoint_import_scan",
+        codex_dir: codexDir.trim() || null,
+        claude_dir: claudeDir.trim() || null,
+      });
+    },
+    [sendCommand],
+  );
+  const importModelEndpoints = useCallback(
+    (candidateIds: string[]) => {
+      sendCommand({
+        type: "model_endpoint_import_apply",
+        candidate_ids: candidateIds,
+      });
     },
     [sendCommand],
   );
@@ -2121,10 +2146,17 @@ function TimemApp() {
         }));
         return;
       }
+      if (event.type === "model_endpoint_import_scanned") {
+        setEndpointImportCandidates(event.candidates);
+        setEndpointImportIssues(event.issues);
+        return;
+      }
       if (event.type === "model_endpoints_updated") {
         setServer((current) =>
           current ? { ...current, model_endpoints: event.endpoints } : current,
         );
+        setEndpointImportCandidates([]);
+        setEndpointImportIssues([]);
         setEndpointEditor(null);
         setDeleteEndpointCandidate(null);
         setRevealedEndpointApiKeys({});
@@ -4344,6 +4376,10 @@ function TimemApp() {
               temporaryItemsError={memTemporaryItemsError}
               endpoints={server?.model_endpoints ?? []}
               endpointEditor={endpointEditor}
+              endpointImportCandidates={endpointImportCandidates}
+              endpointImportIssues={endpointImportIssues}
+              onScanEndpointImport={scanModelEndpointImport}
+              onImportEndpoints={importModelEndpoints}
               revealedEndpointApiKeys={revealedEndpointApiKeys}
               revealedEndpointHeaders={revealedEndpointHeaders}
               revealedEndpointRequestFields={revealedEndpointRequestFields}
@@ -12146,6 +12182,10 @@ type SettingsCenterProps = {
   temporaryItemsError: string;
   endpoints: ModelEndpoint[];
   endpointEditor: ModelEndpoint | "new" | null;
+  endpointImportCandidates: ModelEndpointImportCandidate[];
+  endpointImportIssues: string[];
+  onScanEndpointImport: (codexDir: string, claudeDir: string) => void;
+  onImportEndpoints: (candidateIds: string[]) => void;
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
   revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
@@ -12199,6 +12239,10 @@ const SettingsCenter = memo(function SettingsCenter(
     temporaryItemsError,
     endpoints,
     endpointEditor,
+    endpointImportCandidates,
+    endpointImportIssues,
+    onScanEndpointImport,
+    onImportEndpoints,
     revealedEndpointApiKeys,
     revealedEndpointHeaders,
     revealedEndpointRequestFields,
@@ -12588,6 +12632,10 @@ const SettingsCenter = memo(function SettingsCenter(
               <EndpointSettingsPane
                 endpoints={endpoints}
                 endpointEditor={endpointEditor}
+                importCandidates={endpointImportCandidates}
+                importIssues={endpointImportIssues}
+                onScanImport={onScanEndpointImport}
+                onImport={onImportEndpoints}
                 revealedEndpointApiKeys={revealedEndpointApiKeys}
                 revealedEndpointHeaders={revealedEndpointHeaders}
                 revealedEndpointRequestFields={revealedEndpointRequestFields}
@@ -13256,6 +13304,10 @@ const SettingsCenter = memo(function SettingsCenter(
 function EndpointSettingsPane({
   endpoints,
   endpointEditor,
+  importCandidates,
+  importIssues,
+  onScanImport,
+  onImport,
   revealedEndpointApiKeys,
   revealedEndpointHeaders,
   revealedEndpointRequestFields,
@@ -13267,6 +13319,10 @@ function EndpointSettingsPane({
 }: {
   endpoints: ModelEndpoint[];
   endpointEditor: ModelEndpoint | "new" | null;
+  importCandidates: ModelEndpointImportCandidate[];
+  importIssues: string[];
+  onScanImport: (codexDir: string, claudeDir: string) => void;
+  onImport: (candidateIds: string[]) => void;
   revealedEndpointApiKeys: Record<string, string>;
   revealedEndpointHeaders: Record<string, Record<string, string>>;
   revealedEndpointRequestFields: Record<string, Record<string, unknown>>;
@@ -13278,6 +13334,12 @@ function EndpointSettingsPane({
 }) {
   const [deleteMode, setDeleteMode] = useState(false);
   const [selectedEndpointId, setSelectedEndpointId] = useState("");
+  const [showImport, setShowImport] = useState(false);
+  const [codexDir, setCodexDir] = useState("");
+  const [claudeDir, setClaudeDir] = useState("");
+  const [selectedImportIds, setSelectedImportIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   useEffect(() => {
     if (
       selectedEndpointId &&
@@ -13286,6 +13348,17 @@ function EndpointSettingsPane({
       setSelectedEndpointId("");
     if (deleteMode && endpoints.length === 0) setDeleteMode(false);
   }, [deleteMode, endpoints, selectedEndpointId]);
+  useEffect(() => {
+    setSelectedImportIds(new Set(importCandidates.map((item) => item.id)));
+  }, [importCandidates]);
+  const toggleImportCandidate = (id: string) => {
+    setSelectedImportIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
   if (endpointEditor)
     return (
       <section
@@ -13364,6 +13437,17 @@ function EndpointSettingsPane({
           </button>
           <button
             type="button"
+            className="secondary compact"
+            disabled={deleteMode}
+            onClick={() => setShowImport((current) => !current)}
+          >
+            <FolderInput size={14} />{" "}
+            {showImport
+              ? t("endpoints.importHide")
+              : t("endpoints.importButton")}
+          </button>
+          <button
+            type="button"
             className="primary compact"
             disabled={deleteMode}
             onClick={() => onEdit("new")}
@@ -13372,6 +13456,97 @@ function EndpointSettingsPane({
           </button>
         </div>
       </div>
+      {showImport && (
+        <div className="endpoint-import-panel">
+          <div className="endpoint-import-heading">
+            <strong>{t("endpoints.importTitle")}</strong>
+            <p>{t("endpoints.importHint")}</p>
+          </div>
+          <div className="endpoint-import-fields">
+            <label>
+              {t("endpoints.importCodexDir")}
+              <input
+                value={codexDir}
+                placeholder="~/.codex"
+                spellCheck={false}
+                onChange={(event) => setCodexDir(event.target.value)}
+              />
+            </label>
+            <label>
+              {t("endpoints.importClaudeDir")}
+              <input
+                value={claudeDir}
+                placeholder="~/.claude"
+                spellCheck={false}
+                onChange={(event) => setClaudeDir(event.target.value)}
+              />
+            </label>
+          </div>
+          <button
+            type="button"
+            className="primary compact endpoint-import-scan"
+            disabled={!codexDir.trim() && !claudeDir.trim()}
+            onClick={() => onScanImport(codexDir, claudeDir)}
+          >
+            <Search size={14} /> {t("endpoints.importScan")}
+          </button>
+          {importIssues.length > 0 && (
+            <ul className="endpoint-import-issues">
+              {importIssues.map((issue) => (
+                <li key={issue}>{issue}</li>
+              ))}
+            </ul>
+          )}
+          {importCandidates.length > 0 ? (
+            <div className="endpoint-import-candidates">
+              {importCandidates.map((candidate) => (
+                <label
+                  className="endpoint-import-candidate"
+                  key={candidate.id}
+                >
+                  <span className="endpoint-import-candidate-check">
+                    <input
+                      type="checkbox"
+                      checked={selectedImportIds.has(candidate.id)}
+                      onChange={() => toggleImportCandidate(candidate.id)}
+                    />
+                  </span>
+                  <span className="endpoint-import-candidate-body">
+                    <strong>
+                      {candidate.name}
+                      <small>{candidate.source}</small>
+                    </strong>
+                    <small>
+                      {candidate.model} · {candidate.api_protocol} ·{" "}
+                      {candidate.api_key_configured
+                        ? t("endpoints.importKeyConfigured")
+                        : t("endpoints.importKeyMissing")}
+                    </small>
+                    <code title={candidate.base_url}>{candidate.base_url}</code>
+                  </span>
+                </label>
+              ))}
+              <button
+                type="button"
+                className="primary compact"
+                disabled={selectedImportIds.size === 0}
+                onClick={() => onImport([...selectedImportIds])}
+              >
+                <Check size={14} />{" "}
+                {t("endpoints.importSelected", {
+                  count: selectedImportIds.size,
+                })}
+              </button>
+            </div>
+          ) : (
+            importIssues.length === 0 && (
+              <div className="endpoint-import-empty">
+                {t("endpoints.importEmpty")}
+              </div>
+            )
+          )}
+        </div>
+      )}
       <div className="endpoint-settings-list">
         {endpoints.length === 0 ? (
           <div className="endpoint-empty">

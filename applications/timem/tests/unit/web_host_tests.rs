@@ -7557,6 +7557,7 @@ fn routing_test_state() -> AppState {
             WebMemState::new(template.data_dir.clone(), template.initial_space.clone()).unwrap(),
         )),
         template: Arc::new(template),
+        model_endpoint_imports: Arc::new(Mutex::new(Vec::new())),
         events: events.clone(),
         sessions: Arc::new(Mutex::new(sessions)),
         command_dedup: Arc::new(Mutex::new(CommandDedupCache::default())),
@@ -13693,6 +13694,262 @@ fn saving_model_endpoints_writes_self_describing_readme_once() {
     let second = std::fs::read_to_string(&readme).unwrap();
     assert_eq!(second, "user edited note");
 
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_endpoint_import_scans_codex_and_claude_directories() {
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_import_scan"));
+    let codex_dir = root.join("codex");
+    let claude_dir = root.join("claude");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        r#"
+model = "gpt-5-codex"
+model_provider = "openrouter"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "TIMEM_TEST_OPENROUTER_KEY"
+wire_api = "chat"
+
+[model_providers.ollama]
+name = "Ollama"
+base_url = "http://127.0.0.1:11434/v1"
+wire_api = "chat"
+
+[profiles.fast]
+model = "gpt-5-mini"
+model_provider = "openrouter"
+
+[profiles.legacy]
+model = "old-model"
+model_provider = "legacy-gateway"
+
+[model_providers.legacy-gateway]
+name = "Legacy"
+base_url = "https://legacy.example.test/v1"
+wire_api = "weird"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        codex_dir.join("auth.json"),
+        r#"{"OPENAI_API_KEY":"codex-auth-key"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"model":"sonnet","env":{"ANTHROPIC_BASE_URL":"https://gateway.example.test"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("settings.local.json"),
+        r#"{"env":{"ANTHROPIC_MODEL":"claude-sonnet-4-5","ANTHROPIC_AUTH_TOKEN":"claude-secret-key"}}"#,
+    )
+    .unwrap();
+    std::env::set_var("TIMEM_TEST_OPENROUTER_KEY", "openrouter-secret-key");
+
+    let scan = scan_model_endpoint_imports(
+        Some(codex_dir.to_str().unwrap()),
+        Some(claude_dir.to_str().unwrap()),
+    )
+    .unwrap();
+    std::env::remove_var("TIMEM_TEST_OPENROUTER_KEY");
+    assert_eq!(scan.candidates.len(), 3);
+    let openrouter = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.name == "OpenRouter")
+        .unwrap();
+    assert_eq!(openrouter.source, "codex");
+    assert_eq!(openrouter.model, "gpt-5-codex");
+    assert_eq!(openrouter.api_protocol, "openai-compatible");
+    assert!(openrouter.stream);
+    assert_eq!(openrouter.api_key, "openrouter-secret-key");
+    let fast = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.model == "gpt-5-mini")
+        .unwrap();
+    assert_eq!(fast.name, "OpenRouter");
+    let claude = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.source == "claude")
+        .unwrap();
+    assert_eq!(claude.name, "Claude Code");
+    assert_eq!(claude.model, "claude-sonnet-4-5");
+    assert_eq!(claude.base_url, "https://gateway.example.test");
+    assert_eq!(claude.api_protocol, "anthropic");
+    assert_eq!(claude.api_key, "claude-secret-key");
+    assert_eq!(claude.max_llm_input_tokens, 200_000);
+    assert!(scan
+        .issues
+        .iter()
+        .any(|issue| issue.starts_with("codex_provider_wire_api_unsupported:legacy-gateway")));
+    let reports: Vec<ModelEndpointImportCandidateReport> = scan
+        .candidates
+        .iter()
+        .map(ModelEndpointImportCandidateReport::from)
+        .collect();
+    let serialized = serde_json::to_string(&reports).unwrap();
+    assert!(serialized.contains("api_key_configured"));
+    assert!(!serialized.contains("openrouter-secret-key"));
+    assert!(!serialized.contains("claude-secret-key"));
+    assert!(!serialized.contains("codex-auth-key"));
+
+    let missing = scan_model_endpoint_imports(
+        Some(root.join("missing-codex").to_str().unwrap()),
+        Some(root.join("missing-claude").to_str().unwrap()),
+    )
+    .unwrap();
+    assert!(missing.candidates.is_empty());
+    assert!(missing
+        .issues
+        .iter()
+        .any(|issue| issue.starts_with("codex_config_read_failed")));
+    assert!(missing
+        .issues
+        .iter()
+        .any(|issue| issue == "claude_settings_missing"));
+    assert_eq!(
+        scan_model_endpoint_imports(Some("  "), None).unwrap_err(),
+        "model_endpoint_import_directory_empty"
+    );
+    assert_eq!(
+        scan_model_endpoint_imports(Some("~other-user/.codex"), None).unwrap_err(),
+        "model_endpoint_import_home_user_unsupported"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_endpoint_import_scan_and_apply_round_trip() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_import_apply"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    std::fs::create_dir_all(root.join("claude")).unwrap();
+    std::fs::write(
+        root.join("claude").join("settings.json"),
+        r#"{"env":{"ANTHROPIC_MODEL":"claude-sonnet-4-5","ANTHROPIC_AUTH_TOKEN":"claude-secret-key"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("claude").join("settings.local.json"),
+        r#"{"env":{"ANTHROPIC_BASE_URL":"https://local-gateway.example.test"}}"#,
+    )
+    .unwrap();
+
+    upsert_model_endpoint(
+        &state,
+        ModelEndpointInput {
+            id: None,
+            name: "Claude Code".to_string(),
+            model: "existing-model".to_string(),
+            api_protocol: "anthropic".to_string(),
+            response_protocol: "xml".to_string(),
+            base_url: "https://existing.example.test".to_string(),
+            max_llm_input_tokens: 200_000,
+            max_llm_output_tokens: 20_000,
+            stream: false,
+            api_key: Some("existing-secret".to_string()),
+            http_headers: Default::default(),
+            request_fields: Default::default(),
+            allow_cross_origin_redirects: false,
+            private_ca_pem: None,
+        },
+    )
+    .unwrap();
+
+    let scanned = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointImportScan {
+            codex_dir: None,
+            claude_dir: Some(root.join("claude").to_str().unwrap().to_string()),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::ModelEndpointImportScanned { candidates, issues } = scanned else {
+        panic!("scan must return the redacted candidate preview");
+    };
+    assert!(issues.is_empty());
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].api_key_configured);
+    let serialized = serde_json::to_string(&candidates).unwrap();
+    assert!(!serialized.contains("claude-secret-key"));
+
+    let applied = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointImportApply {
+            candidate_ids: vec![candidates[0].id.clone()],
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::ModelEndpointsUpdated { endpoints } = applied else {
+        panic!("apply must publish the authoritative endpoint list");
+    };
+    assert_eq!(endpoints.len(), 2);
+    let imported = endpoints
+        .iter()
+        .find(|endpoint| endpoint.name == "Claude Code 2")
+        .expect("import deduplicates against the existing endpoint name");
+    assert_eq!(imported.model, "claude-sonnet-4-5");
+    assert_eq!(imported.base_url, "https://local-gateway.example.test");
+    assert!(imported.api_key_configured);
+    assert_eq!(
+        model_endpoint_secrets(&state, &imported.id)
+            .unwrap()
+            .api_key,
+        "claude-secret-key"
+    );
+
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointImportScan {
+                codex_dir: Some("  ".to_string()),
+                claude_dir: None,
+            },
+        )
+        .unwrap_err(),
+        "model_endpoint_import_directory_required"
+    );
+
+    // Applied candidates are consumed; reusing the id fails closed.
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointImportApply {
+                candidate_ids: vec![candidates[0].id.clone()],
+            },
+        )
+        .unwrap_err(),
+        format!(
+            "model_endpoint_import_candidate_not_found:{}",
+            candidates[0].id
+        )
+    );
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointImportApply {
+                candidate_ids: Vec::new(),
+            },
+        )
+        .unwrap_err(),
+        "model_endpoint_import_selection_empty"
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

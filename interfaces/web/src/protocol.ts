@@ -377,6 +377,20 @@ export type ModelEndpoint = {
   private_ca_configured: boolean;
 };
 
+export type ModelEndpointImportCandidate = {
+  id: string;
+  source: string;
+  name: string;
+  model: string;
+  api_protocol: string;
+  response_protocol: string;
+  base_url: string;
+  max_llm_input_tokens: number;
+  max_llm_output_tokens: number;
+  stream: boolean;
+  api_key_configured: boolean;
+};
+
 export type MemTemporaryItem = {
   id: string;
   path: string;
@@ -623,6 +637,11 @@ export type WireEvent =
     }
   | { type: "model_endpoints_updated"; endpoints: ModelEndpoint[] }
   | {
+      type: "model_endpoint_import_scanned";
+      candidates: ModelEndpointImportCandidate[];
+      issues: string[];
+    }
+  | {
       type: "model_endpoint_secret_revealed";
       endpoint_id: string;
       api_key: string;
@@ -792,6 +811,15 @@ export type ClientCommand =
     }
   | { type: "model_endpoint_delete"; endpoint_id: string }
   | { type: "model_endpoint_apply"; session_id: string; endpoint_id: string }
+  | {
+      type: "model_endpoint_import_scan";
+      codex_dir?: string | null;
+      claude_dir?: string | null;
+    }
+  | {
+      type: "model_endpoint_import_apply";
+      candidate_ids: string[];
+    }
   | { type: "model_endpoint_secret_reveal"; endpoint_id: string }
   | { type: "mcp_server_upsert"; session_id: string; config: McpServerConfig }
   | { type: "mcp_server_delete"; server_id: string }

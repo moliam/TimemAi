@@ -47,5 +47,21 @@ describe("live command correlation", () => {
         endpoint_id: "one",
       }),
     ).toBe(false);
+    expect(
+      commandNeedsReliableDelivery({
+        type: "model_endpoint_import_scan",
+        codex_dir: "~/.codex",
+        claude_dir: "~/.claude",
+      }),
+    ).toBe(false);
+  });
+
+  it("correlates endpoint imports because they persist host state", () => {
+    expect(
+      commandNeedsReliableDelivery({
+        type: "model_endpoint_import_apply",
+        candidate_ids: ["codex_import_1"],
+      }),
+    ).toBe(true);
   });
 });
