@@ -8,7 +8,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -238,11 +238,17 @@ fn codex_provider(
         }
     };
     let env_key = text_value(entry, "env_key").filter(|value| !value.is_empty());
-    let mut api_key = env_key
-        .and_then(|key| std::env::var(key).ok())
-        .filter(|key| !key.trim().is_empty())
-        .unwrap_or_default();
-    if api_key.is_empty() && env_key.is_none_or(|key| key == "OPENAI_API_KEY") {
+    let inline_token =
+        text_value(entry, "experimental_bearer_token").filter(|value| !value.is_empty());
+    let mut api_key = inline_token.map(str::to_string).unwrap_or_default();
+    if api_key.is_empty() {
+        api_key = env_key
+            .and_then(|key| std::env::var(key).ok())
+            .filter(|key| !key.trim().is_empty())
+            .unwrap_or_default();
+    }
+    if api_key.is_empty() && (id == "openai" || env_key.is_some_and(|key| key == "OPENAI_API_KEY"))
+    {
         if let Some(key) = auth_key {
             api_key = key.to_string();
         }
@@ -384,6 +390,8 @@ fn scan_codex_directory(dir: &Path, scan: &mut ModelEndpointImportScan) {
         .filter(|value| !value.is_empty())
         .unwrap_or("openai");
     let mut builder = CandidateBuilder::new();
+    let mut referenced_providers = BTreeSet::new();
+    referenced_providers.insert(default_provider_id.to_string());
 
     if let Some(model) = default_model {
         if let Some(provider) = codex_provider(
@@ -414,6 +422,7 @@ fn scan_codex_directory(dir: &Path, scan: &mut ModelEndpointImportScan) {
         let provider_id = text_value(profile, "model_provider")
             .filter(|value| !value.is_empty())
             .unwrap_or(default_provider_id);
+        referenced_providers.insert(provider_id.to_string());
         let model = text_value(profile, "model")
             .filter(|value| !value.is_empty())
             .or(default_model);
@@ -447,6 +456,48 @@ fn scan_codex_directory(dir: &Path, scan: &mut ModelEndpointImportScan) {
             &provider.name,
             &options,
         ));
+    }
+
+    // Codex profiles only reference providers when they are selected. A
+    // configuration can still define additional providers as switchable
+    // endpoints, so scan unreferenced provider entries with the default model.
+    // The preview remains bounded and the user chooses which ones to import.
+    if let Some(provider_table) = providers {
+        for (provider_id, _) in provider_table {
+            if referenced_providers.contains(provider_id) {
+                continue;
+            }
+            let Some(model) = default_model else {
+                scan.issues
+                    .push(format!("codex_provider_model_missing:{provider_id}"));
+                continue;
+            };
+            let Some(provider) = codex_provider(
+                provider_id,
+                Some(provider_table),
+                auth_key.as_deref(),
+                &mut scan.issues,
+            ) else {
+                continue;
+            };
+            let options = codex_model_options(&config, None);
+            if scan.candidates.iter().any(|candidate| {
+                candidate.source == "codex"
+                    && candidate.name == provider.name
+                    && candidate.model == model
+                    && candidate.base_url == provider.base_url
+                    && candidate.api_protocol == provider.api_protocol
+            }) {
+                continue;
+            }
+            scan.candidates.push(codex_candidate(
+                &mut builder,
+                &provider,
+                model,
+                &provider.name,
+                &options,
+            ));
+        }
     }
 }
 

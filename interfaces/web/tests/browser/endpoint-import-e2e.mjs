@@ -26,6 +26,12 @@ model_reasoning_effort = "high"
 name = "ZAI E2E"
 base_url = "https://open.bigmodel.cn/api/v1"
 wire_api = "responses"
+
+[model_providers.other]
+name = "Other E2E"
+base_url = "https://other.example.test/v1"
+experimental_bearer_token = "other-e2e-secret"
+wire_api = "responses"
 `);
 
 const assert = (c, m) => { if (!c) throw new Error(m); };
@@ -146,8 +152,13 @@ const candidateText = await evaluate("document.querySelector('.endpoint-import-c
 assert(/ZAI E2E/.test(candidateText), "candidate shows provider name: " + candidateText);
 assert(/glm-5\.3/.test(candidateText), "candidate shows model: " + candidateText);
 assert(/high/i.test(candidateText), "candidate shows reasoning effort: " + candidateText);
+const candidateCount = await evaluate("document.querySelectorAll('.endpoint-import-candidate').length");
+assert(candidateCount === 2, "unreferenced provider is also scanned: " + candidateCount);
+const candidatesText = await evaluate("[...document.querySelectorAll('.endpoint-import-candidate')].map(n => n.textContent || '').join('\\n')");
+assert(/Other E2E/.test(candidatesText), "unreferenced provider candidate appears: " + candidatesText);
+assert(!candidatesText.includes("other-e2e-secret"), "inline provider token is not exposed");
 
-// import it（多次运行会累积 endpoint，断言必须与既有状态无关）
+// import them（多次运行会累积 endpoint，断言必须与既有状态无关）
 const rowsBefore = await evaluate("document.querySelectorAll('.endpoint-settings-row').length");
 await evaluate(`(() => {
   const btn = [...document.querySelectorAll('.endpoint-import-panel button')].find(b => /import selected|导入所选/i.test(b.textContent || ''));
@@ -156,8 +167,10 @@ await evaluate(`(() => {
 })()`);
 await waitFor(() => evaluate(`(() => {
   const rows = document.querySelectorAll('.endpoint-settings-row');
-  const count = ${rowsBefore} + 1;
-  return rows.length === count && /ZAI E2E/.test(rows[rows.length - 1].textContent || '');
+  const count = ${rowsBefore} + 2;
+  return rows.length === count
+    && [...rows].some(row => /Other E2E/.test(row.textContent || ''))
+    && [...rows].some(row => /ZAI E2E/.test(row.textContent || ''));
 })()`), "imported endpoint appears in endpoint list");
 
 console.log("E2E PASS: scan -> preview -> import -> endpoint list updated");
