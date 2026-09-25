@@ -18,6 +18,7 @@ pub(super) const MAX_MODEL_ENDPOINT_IMPORT_CANDIDATES: usize = 32;
 /// Per-file read bound so a corrupt or oversized external file cannot force an
 /// unbounded read through the command path.
 const MAX_IMPORT_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_CODEX_PROFILE_OVERLAY_FILES: usize = 32;
 const CLAUDE_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 
 #[derive(Debug, Clone)]
@@ -458,45 +459,116 @@ fn scan_codex_directory(dir: &Path, scan: &mut ModelEndpointImportScan) {
         ));
     }
 
-    // Codex profiles only reference providers when they are selected. A
-    // configuration can still define additional providers as switchable
-    // endpoints, so scan unreferenced provider entries with the default model.
-    // The preview remains bounded and the user chooses which ones to import.
+    let mut overlay_paths = Vec::new();
+    let mut overlay_limit_exceeded = false;
+    match std::fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if !file_type.is_file() {
+                    continue;
+                }
+                let Some(file_name) = entry.file_name().into_string().ok() else {
+                    continue;
+                };
+                if file_name.ends_with(".config.toml") {
+                    if overlay_paths.len() >= MAX_CODEX_PROFILE_OVERLAY_FILES {
+                        overlay_limit_exceeded = true;
+                    } else {
+                        overlay_paths.push(entry.path());
+                    }
+                }
+            }
+        }
+        Err(error) => scan
+            .issues
+            .push(format!("codex_profile_overlay_read_failed:{error}")),
+    }
+    overlay_paths.sort();
+    if overlay_limit_exceeded {
+        scan.issues.push(format!(
+            "codex_profile_overlay_limit:{MAX_CODEX_PROFILE_OVERLAY_FILES}"
+        ));
+    }
+
+    for overlay_path in overlay_paths {
+        let overlay_name = overlay_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("<invalid>");
+        let raw = match read_bounded(&overlay_path, "codex_profile_overlay_read_failed") {
+            Ok(raw) => raw,
+            Err(error) => {
+                scan.issues.push(error);
+                continue;
+            }
+        };
+        let overlay: toml::Value = match toml::from_str(&String::from_utf8_lossy(&raw)) {
+            Ok(value) => value,
+            Err(error) => {
+                scan.issues.push(format!(
+                    "codex_profile_overlay_invalid:{overlay_name}:{error}"
+                ));
+                continue;
+            }
+        };
+        let provider_id = text_value(&overlay, "model_provider")
+            .filter(|value| !value.is_empty())
+            .unwrap_or(default_provider_id);
+        referenced_providers.insert(provider_id.to_string());
+        let Some(model) = text_value(&overlay, "model").filter(|value| !value.is_empty()) else {
+            scan.issues.push(format!(
+                "codex_profile_overlay_model_missing:{overlay_name}"
+            ));
+            continue;
+        };
+        let mut provider_table = providers.cloned().unwrap_or_default();
+        if let Some(overlay_providers) = overlay
+            .get("model_providers")
+            .and_then(toml::Value::as_table)
+        {
+            for (id, value) in overlay_providers {
+                provider_table.insert(id.clone(), value.clone());
+            }
+        }
+        let Some(provider) = codex_provider(
+            provider_id,
+            Some(&provider_table),
+            auth_key.as_deref(),
+            &mut scan.issues,
+        ) else {
+            continue;
+        };
+        if scan.candidates.iter().any(|candidate| {
+            candidate.source == "codex"
+                && candidate.name == provider.name
+                && candidate.model == model
+                && candidate.base_url == provider.base_url
+                && candidate.api_protocol == provider.api_protocol
+        }) {
+            continue;
+        }
+        let options = codex_model_options(&overlay, None);
+        scan.candidates.push(codex_candidate(
+            &mut builder,
+            &provider,
+            model,
+            &provider.name,
+            &options,
+        ));
+    }
+
+    // Providers without a model source are not endpoints yet. Report them
+    // instead of borrowing the default model from an unrelated provider.
     if let Some(provider_table) = providers {
         for (provider_id, _) in provider_table {
             if referenced_providers.contains(provider_id) {
                 continue;
             }
-            let Some(model) = default_model else {
-                scan.issues
-                    .push(format!("codex_provider_model_missing:{provider_id}"));
-                continue;
-            };
-            let Some(provider) = codex_provider(
-                provider_id,
-                Some(provider_table),
-                auth_key.as_deref(),
-                &mut scan.issues,
-            ) else {
-                continue;
-            };
-            let options = codex_model_options(&config, None);
-            if scan.candidates.iter().any(|candidate| {
-                candidate.source == "codex"
-                    && candidate.name == provider.name
-                    && candidate.model == model
-                    && candidate.base_url == provider.base_url
-                    && candidate.api_protocol == provider.api_protocol
-            }) {
-                continue;
-            }
-            scan.candidates.push(codex_candidate(
-                &mut builder,
-                &provider,
-                model,
-                &provider.name,
-                &options,
-            ));
+            scan.issues
+                .push(format!("codex_provider_model_missing:{provider_id}"));
         }
     }
 }

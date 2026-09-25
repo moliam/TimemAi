@@ -13729,6 +13729,18 @@ base_url = "https://inline.example.test/v1"
 experimental_bearer_token = "inline-provider-secret"
 wire_api = "responses"
 
+[model_providers.zai]
+name = "ZAI"
+base_url = "https://zai.example.test/v1"
+experimental_bearer_token = "zai-provider-secret"
+wire_api = "responses"
+
+[model_providers.chj]
+name = "CHJ"
+base_url = "https://chj.example.test/v1"
+env_key = "TIMEM_TEST_CHJ_KEY"
+wire_api = "responses"
+
 [profiles.fast]
 model = "gpt-5-mini"
 model_provider = "openrouter"
@@ -13742,6 +13754,33 @@ model_provider = "legacy-gateway"
 name = "Legacy"
 base_url = "https://legacy.example.test/v1"
 wire_api = "weird"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        codex_dir.join("glm.config.toml"),
+        r#"
+model_provider = "zai"
+model = "glm-5.3"
+model_reasoning_effort = "high"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        codex_dir.join("chj.config.toml"),
+        r#"
+model_provider = "chj"
+model = "andes-glm-5.x-auto"
+model_reasoning_effort = "high"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        codex_dir.join("inline.config.toml"),
+        r#"
+model_provider = "inline"
+model = "inline-model"
+model_reasoning_effort = "medium"
 "#,
     )
     .unwrap();
@@ -13762,6 +13801,7 @@ wire_api = "weird"
     .unwrap();
     std::env::set_var("TIMEM_TEST_OPENROUTER_KEY", "openrouter-secret-key");
     std::env::set_var("TIMEM_TEST_TENANT", "tenant-one");
+    std::env::set_var("TIMEM_TEST_CHJ_KEY", "chj-secret-key");
 
     let scan = scan_model_endpoint_imports(
         Some(codex_dir.to_str().unwrap()),
@@ -13771,7 +13811,8 @@ wire_api = "weird"
     std::env::remove_var("TIMEM_TEST_OPENROUTER_KEY");
     std::env::remove_var("TIMEM_TEST_TENANT");
     std::env::remove_var("TIMEM_TEST_TENANT");
-    assert_eq!(scan.candidates.len(), 5);
+    std::env::remove_var("TIMEM_TEST_CHJ_KEY");
+    assert_eq!(scan.candidates.len(), 6);
     let openrouter = scan
         .candidates
         .iter()
@@ -13794,19 +13835,26 @@ wire_api = "weird"
         .unwrap();
     assert_eq!(fast.name, "OpenRouter");
     assert_eq!(fast.reasoning_effort.as_deref(), Some("high"));
-    let ollama = scan
+    let zai = scan
         .candidates
         .iter()
-        .find(|candidate| candidate.name == "Ollama")
+        .find(|candidate| candidate.name == "ZAI")
         .unwrap();
-    assert_eq!(ollama.model, "gpt-5-codex");
-    assert_eq!(ollama.base_url, "http://127.0.0.1:11434/v1");
-    assert_eq!(ollama.api_key, "");
+    assert_eq!(zai.model, "glm-5.3");
+    assert_eq!(zai.reasoning_effort.as_deref(), Some("high"));
+    let chj = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.name == "CHJ")
+        .unwrap();
+    assert_eq!(chj.model, "andes-glm-5.x-auto");
+    assert_eq!(chj.api_key, "chj-secret-key");
     let inline = scan
         .candidates
         .iter()
         .find(|candidate| candidate.name == "Inline")
         .unwrap();
+    assert_eq!(inline.model, "inline-model");
     assert_eq!(inline.api_key, "inline-provider-secret");
     assert_eq!(inline.reasoning_effort.as_deref(), Some("medium"));
     let claude = scan
@@ -13824,6 +13872,10 @@ wire_api = "weird"
         .issues
         .iter()
         .any(|issue| issue.starts_with("codex_provider_wire_api_unsupported:legacy-gateway")));
+    assert!(scan
+        .issues
+        .iter()
+        .any(|issue| issue == "codex_provider_model_missing:ollama"));
     let reports: Vec<ModelEndpointImportCandidateReport> = scan
         .candidates
         .iter()
@@ -13833,6 +13885,8 @@ wire_api = "weird"
     assert!(serialized.contains("api_key_configured"));
     assert!(!serialized.contains("openrouter-secret-key"));
     assert!(!serialized.contains("inline-provider-secret"));
+    assert!(!serialized.contains("zai-provider-secret"));
+    assert!(!serialized.contains("chj-secret-key"));
     assert!(!serialized.contains("claude-secret-key"));
     assert!(!serialized.contains("codex-auth-key"));
 
