@@ -13668,6 +13668,35 @@ fn startup_resource_errors_are_actionable_instead_of_internal_codes() {
 }
 
 #[test]
+fn saving_model_endpoints_writes_self_describing_readme_once() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_readme"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    let readme = model_endpoints_readme_path(&memory_dir);
+
+    {
+        let mem = state.mem.lock().unwrap();
+        save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints).unwrap();
+    }
+    let first = std::fs::read_to_string(&readme).expect("readme written on save");
+    assert!(first.contains("model_endpoints.json"));
+    assert!(first.contains("api_protocol"));
+    assert!(first.contains("Authorization: Bearer"));
+    assert!(first.contains("x-api-key"));
+
+    std::fs::write(&readme, "user edited note").unwrap();
+    {
+        let mem = state.mem.lock().unwrap();
+        save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints).unwrap();
+    }
+    let second = std::fs::read_to_string(&readme).unwrap();
+    assert_eq!(second, "user edited note");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 #[ignore = "manual endpoint scale/concurrency performance profile"]
 fn model_endpoint_scale_and_concurrency_performance_profile() {
     fn percentile(mut samples: Vec<std::time::Duration>, percentile: usize) -> std::time::Duration {

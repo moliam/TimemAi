@@ -8203,6 +8203,50 @@ fn capmgr_load_skill_adds_skill_body_as_action_result() {
 }
 
 #[test]
+fn self_tool_path_reports_host_injected_config_paths() {
+    let dir = tmp_dir("self_tool_config_paths");
+    let mut core = test_core("STATIC", profile("self-model"), &dir);
+    core.configure_self_tool_runtime(
+        BTreeMap::new(),
+        SelfToolPaths {
+            space_dir: dir.join("space"),
+            memory_dir: dir.join("space/memory"),
+            memory_file: dir.join("space/memory/memory.jsonl"),
+            scratch_file: dir.join("space/memory/scratch_notes.jsonl"),
+            api_audit_file: dir.join("space/audit/api_audit.json"),
+            action_audit_file: dir.join("space/audit/action_audit.json"),
+            config_paths: vec![
+                (
+                    "model_endpoints_file".to_string(),
+                    "/tmp/mem/model_endpoints.json".to_string(),
+                ),
+                (
+                    "model_endpoints_readme".to_string(),
+                    "/tmp/mem/model_endpoints.README.txt".to_string(),
+                ),
+            ],
+        },
+    );
+
+    let _ = core.begin_turn("show config file paths", None);
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"status":"working","working_still_action":[{"self_tool":{"type":"path"}}]}"#,
+        ),
+        model_name: "self-model".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert!(prompt.contains("model_endpoints_file: /tmp/mem/model_endpoints.json"));
+    assert!(prompt.contains("model_endpoints_readme: /tmp/mem/model_endpoints.README.txt"));
+}
+
+#[test]
 fn self_tool_reads_runtime_paths_and_params() {
     let dir = tmp_dir("self_tool_paths");
     let mut core = test_core("STATIC", profile("qwen-plus"), &dir);
@@ -8283,6 +8327,7 @@ fn self_tool_public_surface_groups_self_information_into_path_and_params() {
             scratch_file: dir.join("space/memory/scratch_notes.jsonl"),
             api_audit_file: dir.join("space/audit/api_audit.json"),
             action_audit_file: dir.join("space/audit/action_audit.json"),
+            config_paths: Vec::new(),
         },
     );
     core.set_max_rounds(200);
@@ -8401,6 +8446,7 @@ fn self_tool_runtime_configuration_keeps_core_owned_identity() {
             scratch_file: configured_memory.join("scratch_notes.jsonl"),
             api_audit_file: configured_api_audit.clone(),
             action_audit_file: configured_action_audit.clone(),
+            config_paths: Vec::new(),
         },
     );
 
