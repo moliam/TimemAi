@@ -198,6 +198,7 @@ pub fn run(args: Vec<String>) {
             scratch_file: absolute_path(memory_dir.join("scratch_notes.jsonl")),
             api_audit_file: absolute_path(audit_file.clone()),
             action_audit_file: absolute_path(action_audit_file.clone()),
+            config_paths: Vec::new(),
         },
     );
     if let Some(capabilities_dir) =

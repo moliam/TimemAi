@@ -345,6 +345,21 @@ fn model_endpoints_path(memory_dir: &Path) -> PathBuf {
     memory_dir.join("model_endpoints.json")
 }
 
+const MODEL_ENDPOINTS_README: &str = include_str!("../../../resources/model_endpoints.README.txt");
+
+fn model_endpoints_readme_path(memory_dir: &Path) -> PathBuf {
+    memory_dir.join("model_endpoints.README.txt")
+}
+
+fn ensure_model_endpoints_readme(memory_dir: &Path) {
+    let path = model_endpoints_readme_path(memory_dir);
+    if path.exists() {
+        return;
+    }
+    // Best-effort self-describing note next to the store; never fail the save.
+    let _ = std::fs::write(&path, MODEL_ENDPOINTS_README);
+}
+
 fn load_model_endpoints_resilient(memory_dir: &Path) -> Result<Vec<ModelEndpointConfig>, String> {
     let path = model_endpoints_path(memory_dir);
     if !path.exists() {
@@ -375,6 +390,7 @@ fn save_model_endpoints(
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("model_endpoint_store_dir_failed:{error}"))?;
     }
+    ensure_model_endpoints_readme(memory_dir);
     let temporary = path.with_extension("json.tmp");
     let raw = serde_json::to_vec_pretty(endpoints)
         .map_err(|error| format!("model_endpoint_store_serialize_failed:{error}"))?;
@@ -10805,6 +10821,20 @@ impl WorkerTemplate {
                 scratch_file: absolute_path(memory_dir.join("scratch_notes.jsonl")),
                 api_audit_file: absolute_path(&audit_file),
                 action_audit_file: absolute_path(audit_file.with_file_name("action_audit.json")),
+                config_paths: vec![
+                    (
+                        "model_endpoints_file".to_string(),
+                        absolute_path(model_endpoints_path(&memory_dir))
+                            .display()
+                            .to_string(),
+                    ),
+                    (
+                        "model_endpoints_readme".to_string(),
+                        absolute_path(model_endpoints_readme_path(&memory_dir))
+                            .display()
+                            .to_string(),
+                    ),
+                ],
             },
         );
         if let Ok(registry) =

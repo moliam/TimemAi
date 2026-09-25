@@ -1657,6 +1657,7 @@ fn default_self_tool_paths(memory_dir: &Path) -> SelfToolPaths {
         scratch_file: memory_dir.join("scratch_notes.jsonl"),
         api_audit_file: space_dir.join("audit").join("api_audit.json"),
         action_audit_file: space_dir.join("audit").join("action_audit.json"),
+        config_paths: Vec::new(),
     }
 }
 

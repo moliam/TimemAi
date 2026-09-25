@@ -13,6 +13,9 @@ pub struct SelfToolPaths {
     pub scratch_file: PathBuf,
     pub api_audit_file: PathBuf,
     pub action_audit_file: PathBuf,
+    /// Host-owned config file locations to point at from type=path, as
+    /// (label, path). Core does not hardcode host store file names.
+    pub config_paths: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,8 +178,15 @@ fn execute_path_action(core: &AgentCore) -> String {
     let session_index_file = sessions_dir.join("index.jsonl");
     let tool_repo_dir = core.tool_repo().root();
     let capabilities_dir = env_path_param(&core.self_tool.env, "TIMEM_CAPABILITIES_DIR");
+    let config_paths = core
+        .self_tool
+        .paths
+        .config_paths
+        .iter()
+        .map(|(label, path)| format!("\n{label}: {path}"))
+        .collect::<String>();
     format!(
-        "cwd: {}\nprocess_cwd: {}\nexecutable: {}\nconfig_root: {}\nreminder_tips_file: {}\ncapabilities_dir: {}\ndata_root: {}\nworkspace_config_file: {}\nspace_dir: {}\nmemory_dir: {}\nmemory_file: {}\nscratch_file: {}\nsessions_dir: {}\nsession_index_file: {}\ntool_repo_dir: {}\naudit_dir: {}\napi_audit_logical_stream: {}\napi_audit_segments_dir: {}\naction_audit_logical_stream: {}\naction_audit_segments_dir: {}\naudit_storage_note: Logical stream paths identify the current audit stores. Records are physically stored in the corresponding segments directories; use the audit aggregation API or search those directories for complete history.",
+        "cwd: {}\nprocess_cwd: {}\nexecutable: {}\nconfig_root: {}\nreminder_tips_file: {}\ncapabilities_dir: {}\ndata_root: {}\nworkspace_config_file: {}\nspace_dir: {}\nmemory_dir: {}\nmemory_file: {}\nscratch_file: {}\nsessions_dir: {}\nsession_index_file: {}\ntool_repo_dir: {}\naudit_dir: {}\napi_audit_logical_stream: {}\napi_audit_segments_dir: {}\naction_audit_logical_stream: {}\naction_audit_segments_dir: {}{}\naudit_storage_note: Logical stream paths identify the current audit stores. Records are physically stored in the corresponding segments directories; use the audit aggregation API or search those directories for complete history.",
         core.current_prompt_cwd().display(),
         core.self_tool.process.current_dir.display(),
         core.self_tool.process.executable.display(),
@@ -197,6 +207,7 @@ fn execute_path_action(core: &AgentCore) -> String {
         api_audit_segments_dir.display(),
         action_audit_stream.display(),
         action_audit_segments_dir.display(),
+        config_paths,
     )
 }
 
