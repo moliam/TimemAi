@@ -33,6 +33,14 @@ base_url = "https://other.example.test/v1"
 experimental_bearer_token = "other-e2e-secret"
 wire_api = "responses"
 `);
+await writeFile(fixtureRoot + "/codex/zai.config.toml", `model = "glm-5.3"
+model_provider = "zai"
+model_reasoning_effort = "high"
+`);
+await writeFile(fixtureRoot + "/codex/other.config.toml", `model = "other-model"
+model_provider = "other"
+model_reasoning_effort = "medium"
+`);
 
 const assert = (c, m) => { if (!c) throw new Error(m); };
 async function waitFor(check, message, timeout = 15000) {
@@ -153,9 +161,10 @@ assert(/ZAI E2E/.test(candidateText), "candidate shows provider name: " + candid
 assert(/glm-5\.3/.test(candidateText), "candidate shows model: " + candidateText);
 assert(/high/i.test(candidateText), "candidate shows reasoning effort: " + candidateText);
 const candidateCount = await evaluate("document.querySelectorAll('.endpoint-import-candidate').length");
-assert(candidateCount === 2, "unreferenced provider is also scanned: " + candidateCount);
+assert(candidateCount === 2, "profile overlay providers are scanned: " + candidateCount);
 const candidatesText = await evaluate("[...document.querySelectorAll('.endpoint-import-candidate')].map(n => n.textContent || '').join('\\n')");
-assert(/Other E2E/.test(candidatesText), "unreferenced provider candidate appears: " + candidatesText);
+assert(/Other E2E/.test(candidatesText), "profile overlay provider candidate appears: " + candidatesText);
+assert(/other-model/.test(candidatesText), "overlay model is used instead of the default model: " + candidatesText);
 assert(!candidatesText.includes("other-e2e-secret"), "inline provider token is not exposed");
 
 // import them（多次运行会累积 endpoint，断言必须与既有状态无关）
