@@ -21,6 +21,24 @@ Required rows before a broad Web release:
 | Safari | Engine-specific manual smoke | Same as Chromium, plus reconnect after refresh keeps the session, local storage appearance preferences survive refresh, code blocks/tables render without layout breakage. |
 | Firefox | Engine-specific manual smoke | Same as Chromium, plus WebSocket reconnect, scroll anchoring after older-history load, and attachment remove/submit behavior remain correct. |
 
+### Endpoint import from CLI configs (automated real-binary check)
+
+When the Model Endpoint import surface or wire event delivery changes, run the
+real-binary browser acceptance in addition to unit tests:
+
+```bash
+cargo build -p timem
+./target/debug/timem --space /tmp/timem-e2e-mem --no-open --port 23400 &
+node interfaces/web/tests/browser/endpoint-import-e2e.mjs
+```
+
+It launches headless Chrome against the real host, walks Settings → Model
+Endpoints → Import, scans a self-created Codex fixture directory, asserts the
+redacted candidate preview (provider, model, reasoning effort) reaches the UI
+through the direct event path, imports it, and asserts the authoritative
+endpoint list updates. The script is repeatable against a persistent MEM
+workspace; it asserts relative growth rather than absolute endpoint counts.
+
 Suggested fake-model-server sequence:
 
 1. Start `target/release/timem --no-open` with
