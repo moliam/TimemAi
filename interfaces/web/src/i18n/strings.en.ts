@@ -377,6 +377,7 @@ export const en: Strings = {
     deleting: "Deleting…",
     reasoningEffort: "Reasoning effort",
     reasoningEffortDefault: "Default",
+    reasoningEffortDisabled: "Off",
   },
   favorites: {
     eyebrow: "Favorites space",

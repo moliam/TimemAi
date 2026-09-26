@@ -366,6 +366,35 @@ fn openai_responses_request_uses_official_shape() {
 }
 
 #[test]
+fn openai_compatible_reasoning_effort_disabled_turns_thinking_off() {
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.openai_compatible.reasoning_effort = Some("disabled".to_string());
+
+    let body = build_model_request(
+        &config,
+        &[ModelPromptBlock {
+            role: ModelPromptRole::User,
+            text: "hello".to_string(),
+            cache: ModelCacheControl::None,
+        }],
+        StructuredOutputHint::None,
+    );
+
+    assert_eq!(body["thinking"]["type"], "disabled");
+    assert!(body.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn openai_responses_reasoning_effort_disabled_maps_to_none() {
+    let mut config = config(ApiProtocol::OpenAiResponses);
+    config.openai_compatible.reasoning_effort = Some("disabled".to_string());
+
+    let prepared = prepare_model_request(&config, "hello");
+
+    assert_eq!(prepared.body["reasoning"]["effort"], "none");
+}
+
+#[test]
 fn openai_responses_request_carries_reasoning_effort() {
     let mut config = config(ApiProtocol::OpenAiResponses);
     config.openai_compatible.reasoning_effort = Some("high".to_string());

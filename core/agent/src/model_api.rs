@@ -200,6 +200,8 @@ pub enum StructuredOutputHint {
     JsonObject,
 }
 
+pub const REASONING_EFFORT_DISABLED: &str = "disabled";
+
 pub fn plan_structured_output(config: &ModelServiceConfig) -> StructuredOutputHint {
     if config.response_protocol != ResponseProtocolKind::Json {
         return StructuredOutputHint::None;
@@ -950,7 +952,11 @@ fn build_openai_compatible_request(
         body["enable_thinking"] = json!(enable_thinking);
     }
     if let Some(reasoning_effort) = &config.openai_compatible.reasoning_effort {
-        body["reasoning_effort"] = json!(reasoning_effort);
+        if reasoning_effort == REASONING_EFFORT_DISABLED {
+            body["thinking"] = json!({ "type": "disabled" });
+        } else {
+            body["reasoning_effort"] = json!(reasoning_effort);
+        }
     }
     if config.openai_compatible.stream {
         body["stream"] = json!(true);
@@ -983,7 +989,12 @@ fn build_openai_responses_request(
         "max_output_tokens": config.max_llm_output_tokens
     });
     if let Some(reasoning_effort) = &config.openai_compatible.reasoning_effort {
-        body["reasoning"] = json!({ "effort": reasoning_effort });
+        let effort = if reasoning_effort == REASONING_EFFORT_DISABLED {
+            "none"
+        } else {
+            reasoning_effort.as_str()
+        };
+        body["reasoning"] = json!({ "effort": effort });
     }
     body
 }
