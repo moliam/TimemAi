@@ -14583,14 +14583,14 @@ fn model_endpoint_headers_accept_safe_special_values_and_reject_injection() {
 
 #[test]
 fn model_endpoint_rejects_token_limits_outside_supported_lists() {
-    let invalid_input = ModelEndpointInput {
+    let zero_input = ModelEndpointInput {
         id: None,
         name: "Invalid input".to_string(),
         model: "gpt".to_string(),
         api_protocol: "openai-compatible".to_string(),
         response_protocol: "xml".to_string(),
         base_url: "https://api.example.test/v1".to_string(),
-        max_llm_input_tokens: 128_000,
+        max_llm_input_tokens: 0,
         max_llm_output_tokens: 10_000,
         stream: false,
         allow_cross_origin_redirects: false,
@@ -14601,9 +14601,28 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         reasoning_effort: None,
     };
     assert_eq!(
-        normalize_model_endpoint_input(None, invalid_input).unwrap_err(),
+        normalize_model_endpoint_input(None, zero_input).unwrap_err(),
         "invalid_model_endpoint_max_input_tokens"
     );
+
+    let custom_input = ModelEndpointInput {
+        id: None,
+        name: "Custom window".to_string(),
+        model: "gpt".to_string(),
+        api_protocol: "openai-compatible".to_string(),
+        response_protocol: "xml".to_string(),
+        base_url: "https://api.example.test/v1".to_string(),
+        max_llm_input_tokens: 300_000,
+        max_llm_output_tokens: 10_000,
+        stream: false,
+        allow_cross_origin_redirects: false,
+        private_ca_pem: None,
+        api_key: None,
+        http_headers: Default::default(),
+        request_fields: Default::default(),
+        reasoning_effort: None,
+    };
+    assert!(normalize_model_endpoint_input(None, custom_input).is_ok());
 
     let invalid_output = ModelEndpointInput {
         id: None,
