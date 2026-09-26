@@ -1077,15 +1077,18 @@ function TimemApp() {
       pendingEndpointDeleteIdsRef.current = new Set(endpointIds);
       pendingEndpointDeleteCommandRef.current = commandId;
       setPendingEndpointDelete(true);
-      if (
-        !sendCommand(
-          {
-            type: "model_endpoint_delete_many",
-            endpoint_ids: endpointIds,
-          },
-          commandId,
-        )
-      ) {
+      const sent = sendCommand(
+        {
+          type: "model_endpoint_delete_many",
+          endpoint_ids: endpointIds,
+        },
+        commandId,
+      );
+      // The confirmation dialog is browser-local transient UI. Close it as
+      // soon as the user confirms; endpoint rows still change only from the
+      // authoritative ModelEndpointsUpdated event.
+      setDeleteEndpointCandidates([]);
+      if (!sent) {
         pendingEndpointDeleteIdsRef.current.clear();
         pendingEndpointDeleteCommandRef.current = "";
         setPendingEndpointDelete(false);
@@ -1557,17 +1560,18 @@ function TimemApp() {
         return;
       }
       if (event.type === "command_ack") {
+        if (event.status === "accepted") return;
         const completed = sentCommandsRef.current.get(event.command_id);
-        if (event.status === "accepted") {
-          if (
-            completed?.type === "model_endpoint_delete_many" &&
-            pendingEndpointDeleteCommandRef.current === event.command_id
-          ) {
-            setDeleteEndpointCandidates([]);
-          }
-          return;
-        }
         sentCommandsRef.current.delete(event.command_id);
+        if (
+          event.status === "committed" &&
+          completed?.type === "model_endpoint_delete_many" &&
+          pendingEndpointDeleteCommandRef.current === event.command_id
+        ) {
+          pendingEndpointDeleteIdsRef.current.clear();
+          pendingEndpointDeleteCommandRef.current = "";
+          setPendingEndpointDelete(false);
+        }
         if (
           event.status === "committed" &&
           completed?.type === "model_endpoint_import_apply"
