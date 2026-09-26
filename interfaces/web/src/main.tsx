@@ -13443,6 +13443,11 @@ function EndpointSettingsPane({
     if (deleteMode && endpoints.length === 0) setDeleteMode(false);
   }, [deleteMode, endpoints, selectedEndpointIds]);
   useEffect(() => {
+    if (!deletePending) return;
+    setDeleteMode(false);
+    setSelectedEndpointIds(new Set());
+  }, [deletePending]);
+  useEffect(() => {
     setSelectedImportIds(new Set(importCandidates.map((item) => item.id)));
   }, [importCandidates]);
   const toggleImportCandidate = (id: string) => {
@@ -13557,8 +13562,6 @@ function EndpointSettingsPane({
                 setSelectedEndpointIds(new Set());
               } else if (selectedEndpoints.length > 0) {
                 onDelete(selectedEndpoints);
-                setDeleteMode(false);
-                setSelectedEndpointIds(new Set());
               }
             }}
           >
@@ -15380,16 +15383,14 @@ function ModelEndpointDeleteDialog({
   onConfirm: () => void;
 }) {
   const descriptionId = "endpoint-delete-dialog-description";
-  const closeIfIdle = () => {
-    if (!pending) onClose();
-  };
+  const close = () => onClose();
   const visibleNames = endpoints.slice(0, 8).map((endpoint) => endpoint.name);
   const hiddenCount = endpoints.length - visibleNames.length;
   return (
     <div
       className="modal-backdrop endpoint-delete-backdrop"
       role="presentation"
-      onClick={closeIfIdle}
+      onClick={close}
     >
       <section
         className="decision-modal session-delete-dialog"
@@ -15400,6 +15401,13 @@ function ModelEndpointDeleteDialog({
         })}
         aria-describedby={descriptionId}
         onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            close();
+          }
+        }}
       >
         <div className="modal-titlebar">
           <div>
@@ -15415,8 +15423,7 @@ function ModelEndpointDeleteDialog({
           <button
             type="button"
             className="icon-button"
-            disabled={pending}
-            onClick={closeIfIdle}
+            onClick={close}
           >
             <X size={16} />
           </button>
@@ -15434,8 +15441,7 @@ function ModelEndpointDeleteDialog({
           <button
             type="button"
             className="secondary"
-            disabled={pending}
-            onClick={closeIfIdle}
+            onClick={close}
           >
             {t("common.cancel")}
           </button>
