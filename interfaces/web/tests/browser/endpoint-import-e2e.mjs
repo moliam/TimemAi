@@ -105,6 +105,32 @@ const evaluate = async (expression) => {
   if (r.exceptionDetails) throw new Error("eval failed: " + JSON.stringify(r.exceptionDetails));
   return r.result.value;
 };
+const hitTest = async (selector, label) => {
+  const hit = await evaluate(`(() => {
+    const expected = ${selector};
+    if (!expected) throw new Error('${label} not found');
+    const rect = expected.getBoundingClientRect();
+    const x = rect.x + rect.width / 2;
+    const y = rect.y + rect.height / 2;
+    const actual = document.elementFromPoint(x, y);
+    return {
+      x,
+      y,
+      disabled: expected.disabled === true,
+      isHitTarget: actual === expected || expected.contains(actual),
+      hitTag: actual?.tagName,
+      hitClass: typeof actual?.className === 'string' ? actual.className : '',
+    };
+  })()`);
+  assert(hit.isHitTarget === true, `${label} is not the pointer hit target: ${hit.hitTag} ${hit.hitClass}`);
+  assert(hit.disabled === false, `${label} is disabled`);
+  return hit;
+};
+const realMouseClick = async (x, y) => {
+  await call("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0 });
+  await call("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", buttons: 1, clickCount: 1 });
+  await call("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", buttons: 0, clickCount: 1 });
+};
 
 await waitFor(() => evaluate("!!document.querySelector('.endpoint-settings-toolbar') || !!document.querySelector('nav, aside, .settings')"), "app rendered");
 
@@ -205,6 +231,16 @@ const checkboxesAligned = await evaluate(`(() => {
   return boxes.length === 2 && boxes.every(box => box.getBoundingClientRect().x === boxes[0].getBoundingClientRect().x);
 })()`);
 assert(checkboxesAligned === true, "endpoint delete checkboxes share the same horizontal position");
+const indicatorCounts = await evaluate(`(() => {
+  return [...document.querySelectorAll('.endpoint-settings-row')].map(row => ({
+    checkboxes: row.querySelectorAll('.endpoint-delete-checkbox').length,
+    legacyIndicators: row.querySelectorAll('.endpoint-delete-select').length,
+  }));
+})()`);
+assert(
+  indicatorCounts.every(row => row.checkboxes === 1 && row.legacyIndicators === 0),
+  "each endpoint row has exactly one selectable checkbox",
+);
 await waitFor(() => evaluate(`(() => {
   const button = [...document.querySelectorAll('.endpoint-settings-toolbar button')].find(b => /delete selected|删除所选/i.test(b.textContent || ''));
   return !!button && !button.disabled && /2/.test(button.textContent || '');
@@ -214,13 +250,12 @@ await evaluate(`(() => {
   button.click(); return true;
 })()`);
 await waitFor(() => evaluate("!!document.querySelector('.endpoint-delete-backdrop')"), "endpoint delete confirmation appears");
-const cancelClosed = await evaluate(`(() => {
-  const button = [...document.querySelectorAll('.endpoint-delete-backdrop .decision-actions button')].find(b => /cancel|取消/i.test(b.textContent || ''));
-  if (!button || button.disabled) throw new Error('cancel button unavailable');
-  button.click();
-  return new Promise(resolve => setTimeout(() => resolve(!document.querySelector('.endpoint-delete-backdrop')), 0));
-})()`);
-assert(cancelClosed === true, "endpoint delete confirmation closes on cancel");
+const cancelHit = await hitTest(
+  `[...document.querySelectorAll('.endpoint-delete-backdrop .decision-actions button')].find(button => /cancel|取消/i.test(button.textContent || ''))`,
+  "endpoint delete cancel button",
+);
+await realMouseClick(cancelHit.x, cancelHit.y);
+await waitFor(() => evaluate("!document.querySelector('.endpoint-delete-backdrop')"), "endpoint delete confirmation closes on real mouse cancel");
 await waitFor(() => evaluate(`(() => {
   const boxes = [...document.querySelectorAll('.endpoint-delete-checkbox')];
   return boxes.length === 2 && boxes.every(box => box.checked);
@@ -231,13 +266,12 @@ await evaluate(`(() => {
   button.click(); return true;
 })()`);
 await waitFor(() => evaluate("!!document.querySelector('.endpoint-delete-backdrop')"), "endpoint delete confirmation reopens after cancel");
-const confirmationClosedWithoutWaitingForHost = await evaluate(`(() => {
-  const button = [...document.querySelectorAll('.endpoint-delete-backdrop .decision-actions button')].find(b => /delete 2 endpoints|删除 2 个接入点/i.test(b.textContent || ''));
-  if (!button || button.disabled) throw new Error('confirm batch delete button unavailable');
-  button.click();
-  return new Promise(resolve => setTimeout(() => resolve(!document.querySelector('.endpoint-delete-backdrop')), 0));
-})()`);
-assert(confirmationClosedWithoutWaitingForHost === true, "endpoint delete confirmation closes immediately after confirmation");
+const confirmHit = await hitTest(
+  `[...document.querySelectorAll('.endpoint-delete-backdrop .decision-actions button')].find(button => /delete 2 endpoints|删除 2 个接入点/i.test(button.textContent || ''))`,
+  "endpoint delete confirm button",
+);
+await realMouseClick(confirmHit.x, confirmHit.y);
+await waitFor(() => evaluate("!document.querySelector('.endpoint-delete-backdrop')"), "endpoint delete confirmation closes immediately after real mouse confirmation");
 await waitFor(() => evaluate(`(() => {
   const rows = document.querySelectorAll('.endpoint-settings-row');
   const texts = [...rows].map(row => row.textContent || '');

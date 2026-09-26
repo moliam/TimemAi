@@ -13707,11 +13707,6 @@ function EndpointSettingsPane({
               <>
                 <span>
                   <strong>{endpoint.name}</strong>
-                  {deleteMode && (
-                    <span className="endpoint-delete-select">
-                      {selectedForDelete && <Check size={13} />}
-                    </span>
-                  )}
                 </span>
                 <small>
                   {endpoint.model} · {endpoint.api_protocol}
@@ -15386,7 +15381,7 @@ function ModelEndpointDeleteDialog({
   const close = () => onClose();
   const visibleNames = endpoints.slice(0, 8).map((endpoint) => endpoint.name);
   const hiddenCount = endpoints.length - visibleNames.length;
-  return (
+  return createPortal(
     <div
       className="modal-backdrop endpoint-delete-backdrop"
       role="presentation"
@@ -15462,7 +15457,8 @@ function ModelEndpointDeleteDialog({
           </button>
         </div>
       </section>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
