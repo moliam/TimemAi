@@ -9,7 +9,7 @@ prompt_synopsis: |
   {"readfile":{"path":"logs/app.log","max_bytes":4096,"tail_out":true}}
   {"readfile":{"path":"src/main.rs","starter":{"match":"fn main"},"ender":{"match":"}"},"max_bytes":32768}}
 description: |
-  Prefer `readfile` over shell commands for reading normal text files. Relative
+  !!!Strongly prefer `readfile` over shell commands for reading files. Relative
   paths resolve from the current session cwd. The tool is read-only, rejects
   directories and special files, decodes text strictly, and always bounds the
   returned content. Set `tail_out=true` to retain the end of an oversized

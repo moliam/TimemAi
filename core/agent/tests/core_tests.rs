@@ -72,6 +72,180 @@ fn oversized_readfile_action_result_has_common_prompt_truncation_notice() {
     );
 }
 
+fn count_occurrences(haystack: &str, needle: &str) -> usize {
+    haystack.match_indices(needle).count()
+}
+
+fn readfile_first_touch_read(core: &mut AgentCore, path: &str) -> String {
+    match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(format!(
+            r#"{{"working_still_action":{{"readfile":{{"path":"{path}"}}}}}}"#
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    }
+}
+
+#[test]
+fn readfile_first_touch_notes_are_injected_once_per_path() {
+    let cwd = tmp_dir("readfile_first_touch_once");
+    fs::create_dir_all(cwd.join("a/b")).unwrap();
+    fs::write(cwd.join("a/b/c.txt"), "one\n").unwrap();
+    fs::write(cwd.join("a/b/d.txt"), "two\n").unwrap();
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("readfile_first_touch_once_mem"),
+    );
+    core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
+    let _ = core.begin_turn("read files for first touch notes", None);
+
+    let cwd_text = cwd.to_string_lossy();
+    let dir_note = format!("first time to touch dir {cwd_text}/a/b/");
+    let file_c_note = format!("first time to touch file {cwd_text}/a/b/c.txt");
+    let file_d_note = format!("first time to touch file {cwd_text}/a/b/d.txt");
+
+    let first = readfile_first_touch_read(&mut core, "a/b/c.txt");
+    assert!(first.contains(&dir_note), "{first}");
+    assert!(first.contains(&file_c_note), "{first}");
+
+    let second = readfile_first_touch_read(&mut core, "a/b/c.txt");
+    assert_eq!(count_occurrences(&second, &dir_note), 1, "{second}");
+    assert_eq!(count_occurrences(&second, &file_c_note), 1, "{second}");
+    assert!(
+        count_occurrences(&second, "first time to touch file") == 1,
+        "{second}"
+    );
+
+    let third = readfile_first_touch_read(&mut core, "a/b/d.txt");
+    assert_eq!(count_occurrences(&third, &dir_note), 1, "{third}");
+    assert_eq!(count_occurrences(&third, &file_c_note), 1, "{third}");
+    assert!(third.contains(&file_d_note), "{third}");
+}
+
+#[test]
+fn readfile_first_touch_note_survives_truncated_tool_result() {
+    let cwd = tmp_dir("readfile_first_touch_truncated");
+    fs::write(cwd.join("big.txt"), "alpha beta gamma delta ".repeat(2_000)).unwrap();
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("readfile_first_touch_truncated_mem"),
+    );
+    core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
+    let _ = core.begin_turn("read the large file", None);
+
+    let prompt = readfile_first_touch_read(&mut core, "big.txt");
+    let cwd_text = cwd.to_string_lossy();
+    assert!(
+        prompt.contains(&format!("first time to touch file {cwd_text}/big.txt")),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("words truncated. Generate more actions if necessary !!!"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn context_compact_resets_readfile_first_touch_tracking() {
+    let cwd = tmp_dir("readfile_first_touch_compact");
+    fs::create_dir_all(cwd.join("a/b")).unwrap();
+    fs::write(cwd.join("a/b/c.txt"), "one\n").unwrap();
+    fs::write(cwd.join("a/b/d.txt"), "two\n").unwrap();
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("readfile_first_touch_compact_mem"),
+    );
+    core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
+    let _ = core.begin_turn("read files then compact", None);
+
+    let cwd_text = cwd.to_string_lossy();
+    let dir_note = format!("first time to touch dir {cwd_text}/a/b/");
+    let file_c_note = format!("first time to touch file {cwd_text}/a/b/c.txt");
+    let file_d_note = format!("first time to touch file {cwd_text}/a/b/d.txt");
+
+    let first = readfile_first_touch_read(&mut core, "a/b/c.txt");
+    assert!(first.contains(&dir_note), "{first}");
+    assert!(first.contains(&file_c_note), "{first}");
+
+    let delta_ids = field_values(&first, "delta_id");
+    assert!(!delta_ids.is_empty(), "{first}");
+    let step = core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(format!(
+            r#"{{"context_compact":{{"discard":{},"summary":"reset first touch tracking"}}}}"#,
+            serde_json::to_string(&delta_ids).unwrap()
+        )),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    });
+    let prompt = match step {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+    assert!(
+        prompt.contains("context compacted successfully."),
+        "{prompt}"
+    );
+    assert!(!prompt.contains(&file_c_note), "{prompt}");
+
+    let after = readfile_first_touch_read(&mut core, "a/b/d.txt");
+    assert_eq!(count_occurrences(&after, &dir_note), 1, "{after}");
+    assert!(after.contains(&file_d_note), "{after}");
+    assert!(!after.contains(&file_c_note), "{after}");
+}
+
+#[test]
+fn parallel_readfiles_in_same_dir_emit_one_dir_note_and_per_file_notes() {
+    let cwd = tmp_dir("readfile_first_touch_parallel");
+    fs::create_dir_all(cwd.join("a/b")).unwrap();
+    fs::write(cwd.join("a/b/c.txt"), "one\n").unwrap();
+    fs::write(cwd.join("a/b/d.txt"), "two\n").unwrap();
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("readfile_first_touch_parallel_mem"),
+    );
+    core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
+    let _ = core.begin_turn("read two files in parallel", None);
+
+    let prompt = match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(
+            r#"{"working_still_action":[[{"readfile":{"path":"a/b/c.txt"}},{"readfile":{"path":"a/b/d.txt"}}]]}"#,
+        ),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    };
+
+    let cwd_text = cwd.to_string_lossy();
+    assert_eq!(
+        count_occurrences(&prompt, &format!("first time to touch dir {cwd_text}/a/b/")),
+        1,
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&format!("first time to touch file {cwd_text}/a/b/c.txt")),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains(&format!("first time to touch file {cwd_text}/a/b/d.txt")),
+        "{prompt}"
+    );
+}
+
 fn release_quality_skill_overlay(name: &str) -> PathBuf {
     let dir = tmp_dir(name);
     let skill_dir = dir.join("skills").join("release_quality_gate");

@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Track first-touched readfile paths per prompt context and inject a one-time
+  module-boundary reminder for a newly touched directory and a module-function
+  reminder for a newly touched file. Context compaction resets the tracking so
+  post-compaction reads trigger the reminders again.
+
 ## [2.2.0] - 2026-09-15
 
 ### Added
