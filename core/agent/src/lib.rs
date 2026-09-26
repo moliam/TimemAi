@@ -146,16 +146,17 @@ pub use interaction::{
     DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE,
 };
 pub use model_api::{
-    build_model_request, default_api_protocol, default_base_url, default_model,
-    interpret_model_http_response, is_default_base_url, is_default_model, model_http_error_message,
-    model_prompt_blocks, model_request_audit_event, model_response_audit_event, parse_api_protocol,
-    parse_model_response, parse_openai_compatible_cache_mode, plan_structured_output,
-    prepare_model_http_request, prepare_model_interaction_http_request, prepare_model_request,
-    prompt_cache_plan_audit, validate_model_http_headers, validate_model_request_fields,
-    without_openai_compatible_cache_control, ApiProtocol, ModelCacheControl,
-    ModelHttpResponseInterpretation, ModelHttpTransportOptions, ModelPromptBlock, ModelPromptRole,
-    ModelServiceConfig, OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
-    PreparedModelHttpRequest, PreparedModelRequest, StructuredOutputHint,
+    build_model_request, build_model_request_with_reasoning, default_api_protocol,
+    default_base_url, default_model, interpret_model_http_response, is_default_base_url,
+    is_default_model, model_http_error_message, model_prompt_blocks, model_request_audit_event,
+    model_response_audit_event, parse_api_protocol, parse_model_response,
+    parse_openai_compatible_cache_mode, plan_structured_output, prepare_model_http_request,
+    prepare_model_interaction_http_request, prepare_model_request,
+    prepare_model_request_with_reasoning, prompt_cache_plan_audit, validate_model_http_headers,
+    validate_model_request_fields, without_openai_compatible_cache_control, ApiProtocol,
+    ModelCacheControl, ModelHttpResponseInterpretation, ModelHttpTransportOptions,
+    ModelPromptBlock, ModelPromptRole, ModelServiceConfig, OpenAiCompatibleCacheMode,
+    OpenAiCompatibleOptions, PreparedModelHttpRequest, PreparedModelRequest, StructuredOutputHint,
 };
 pub use model_service_config::{
     apply_openai_compatible_env_value, model_service_config_from_sources,
@@ -1873,7 +1874,9 @@ impl AgentCore {
         rendered_prompt: impl Into<String>,
     ) -> ModelInteractionRequest {
         if self.resolved_tool_call_mode != ToolCallMode::Native {
-            return ModelInteractionRequest::inline(rendered_prompt);
+            let mut request = ModelInteractionRequest::inline(rendered_prompt);
+            request.critical_reasoning = self.context_compact_required;
+            return request;
         }
         let mut tools = self.capabilities.native_builtin_tool_definitions();
         let static_tool_count = tools.len();
@@ -1893,6 +1896,7 @@ impl AgentCore {
             } else {
                 NativeToolChoice::Auto
             },
+            critical_reasoning: self.context_compact_required,
         }
     }
 

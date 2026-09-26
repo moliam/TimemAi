@@ -154,6 +154,10 @@ pub struct ModelInteractionRequest {
     pub resolved_mode: ToolCallMode,
     pub parallel_tool_calls: bool,
     pub tool_choice: NativeToolChoice,
+    /// Marks a critical request (currently: forced context compaction).
+    /// The endpoint's reasoning effort applies only to critical requests;
+    /// ordinary requests disable thinking to save latency and cost.
+    pub critical_reasoning: bool,
 }
 
 impl ModelInteractionRequest {
@@ -167,6 +171,7 @@ impl ModelInteractionRequest {
             resolved_mode: ToolCallMode::Inline,
             parallel_tool_calls: false,
             tool_choice: NativeToolChoice::Auto,
+            critical_reasoning: false,
         }
     }
 

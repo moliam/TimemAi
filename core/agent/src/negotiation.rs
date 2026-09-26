@@ -292,6 +292,7 @@ fn probe_request(prompt: &str, parallel: bool) -> ModelInteractionRequest {
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: parallel,
         tool_choice: NativeToolChoice::Required,
+        critical_reasoning: false,
     }
 }
 

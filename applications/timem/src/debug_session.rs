@@ -2122,6 +2122,7 @@ mod tests {
             resolved_mode: agent_core::ToolCallMode::Native,
             parallel_tool_calls: true,
             tool_choice: agent_core::NativeToolChoice::Auto,
+            critical_reasoning: false,
         };
         store
             .record_prompt(
@@ -2232,6 +2233,7 @@ mod tests {
             resolved_mode: agent_core::ToolCallMode::Native,
             parallel_tool_calls: false,
             tool_choice: agent_core::NativeToolChoice::Auto,
+            critical_reasoning: false,
         };
         store
             .record_prompt(

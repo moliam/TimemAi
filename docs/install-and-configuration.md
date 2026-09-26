@@ -161,6 +161,11 @@ directory on every supported platform.
 - Claude Code (`settings.json`, `settings.local.json` with local overrides):
   model, base URL, auth token/API key, thinking budget and custom headers are
   mapped to an Anthropic endpoint.
+Reasoning effort semantics: the configured reasoning effort applies only to
+critical model requests (currently the forced context-compaction round); ordinary
+requests send thinking disabled (`thinking: disabled` / `enable_thinking=false`
+/ `reasoning.effort=none` per protocol) to save latency and cost.
+
 
 Scanned secrets never round-trip through the browser: the preview only reports
 whether a key was found, and the import applies the host-held candidate

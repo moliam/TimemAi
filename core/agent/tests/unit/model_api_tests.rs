@@ -229,15 +229,13 @@ fn openai_compatible_request_supports_official_thinking_stream_options() {
         cache_mode: OpenAiCompatibleCacheMode::Auto,
     };
 
-    let body = build_model_request(
-        &config,
-        &[ModelPromptBlock {
-            role: ModelPromptRole::User,
-            text: "hello".to_string(),
-            cache: ModelCacheControl::None,
-        }],
-        StructuredOutputHint::None,
-    );
+    let blocks = &[ModelPromptBlock {
+        role: ModelPromptRole::User,
+        text: "hello".to_string(),
+        cache: ModelCacheControl::None,
+    }];
+    let body =
+        build_model_request_with_reasoning(&config, blocks, StructuredOutputHint::None, true);
 
     assert_eq!(body["enable_thinking"], true);
     assert_eq!(body["reasoning_effort"], "max");
@@ -395,13 +393,43 @@ fn openai_responses_reasoning_effort_disabled_maps_to_none() {
 }
 
 #[test]
-fn openai_responses_request_carries_reasoning_effort() {
+fn openai_responses_request_carries_reasoning_effort_only_for_critical_requests() {
     let mut config = config(ApiProtocol::OpenAiResponses);
     config.openai_compatible.reasoning_effort = Some("high".to_string());
 
-    let prepared = prepare_model_request(&config, "hello");
+    let ordinary = prepare_model_request(&config, "hello");
+    assert_eq!(ordinary.body["reasoning"]["effort"], "none");
 
-    assert_eq!(prepared.body["reasoning"]["effort"], "high");
+    let critical = prepare_model_request_with_reasoning(&config, "hello", true);
+    assert_eq!(critical.body["reasoning"]["effort"], "high");
+}
+
+#[test]
+fn ordinary_requests_disable_reasoning_by_default() {
+    let mut config = config(ApiProtocol::OpenAiCompatible);
+    config.openai_compatible = OpenAiCompatibleOptions {
+        enable_thinking: Some(true),
+        reasoning_effort: Some("high".to_string()),
+        stream: false,
+        cache_mode: OpenAiCompatibleCacheMode::Auto,
+    };
+    let blocks = &[ModelPromptBlock {
+        role: ModelPromptRole::User,
+        text: "hello".to_string(),
+        cache: ModelCacheControl::None,
+    }];
+
+    let ordinary =
+        build_model_request_with_reasoning(&config, blocks, StructuredOutputHint::None, false);
+    assert_eq!(ordinary["enable_thinking"], false);
+    assert_eq!(ordinary["thinking"]["type"], "disabled");
+    assert!(ordinary.get("reasoning_effort").is_none());
+
+    let critical =
+        build_model_request_with_reasoning(&config, blocks, StructuredOutputHint::None, true);
+    assert_eq!(critical["enable_thinking"], true);
+    assert_eq!(critical["reasoning_effort"], "high");
+    assert!(critical.get("thinking").is_none());
 }
 
 #[test]
@@ -1049,6 +1077,7 @@ fn native_request() -> ModelInteractionRequest {
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Auto,
+        critical_reasoning: false,
     }
 }
 
@@ -1066,6 +1095,7 @@ What is in this screenshot?"
         resolved_mode,
         parallel_tool_calls: false,
         tool_choice: NativeToolChoice::Auto,
+        critical_reasoning: false,
     }
 }
 
@@ -1279,6 +1309,7 @@ fn builtin_tool_schemas_render_per_protocol_without_weakening_registry_validatio
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: true,
         tool_choice: NativeToolChoice::Auto,
+        critical_reasoning: false,
     };
 
     let anthropic =
@@ -1558,6 +1589,7 @@ fn native_exchanges_follow_owning_delta_order_for_all_providers() {
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: false,
         tool_choice: NativeToolChoice::Auto,
+        critical_reasoning: false,
     };
     for protocol in [
         ApiProtocol::OpenAiCompatible,
