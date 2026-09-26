@@ -1835,11 +1835,13 @@ dependencies = [
  "libc",
  "nu-ansi-term",
  "reedline",
+ "serde",
  "serde_json",
  "syntect",
  "termimad",
  "timem_in_process",
  "timem_ui_contract",
+ "tungstenite",
  "unicode-segmentation",
  "unicode-width 0.1.14",
 ]
