@@ -9888,6 +9888,7 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
                 resolved_mode: agent_core::ToolCallMode::Native,
                 parallel_tool_calls: true,
                 tool_choice: agent_core::NativeToolChoice::Auto,
+                critical_reasoning: false,
             })),
             api_payload: Some(Box::new(json!({
                 "messages": [

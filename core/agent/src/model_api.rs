@@ -217,11 +217,22 @@ pub fn build_model_request(
     blocks: &[ModelPromptBlock],
     structured_output: StructuredOutputHint,
 ) -> Value {
+    build_model_request_with_reasoning(config, blocks, structured_output, false)
+}
+
+pub fn build_model_request_with_reasoning(
+    config: &ModelServiceConfig,
+    blocks: &[ModelPromptBlock],
+    structured_output: StructuredOutputHint,
+    critical_reasoning: bool,
+) -> Value {
     let mut body = match config.api_protocol {
         ApiProtocol::OpenAiCompatible => {
-            build_openai_compatible_request(config, blocks, structured_output)
+            build_openai_compatible_request(config, blocks, structured_output, critical_reasoning)
         }
-        ApiProtocol::OpenAiResponses => build_openai_responses_request(config, blocks),
+        ApiProtocol::OpenAiResponses => {
+            build_openai_responses_request(config, blocks, critical_reasoning)
+        }
         ApiProtocol::Anthropic => build_anthropic_request(config, blocks),
     };
     if let Some(object) = body.as_object_mut() {
@@ -234,10 +245,23 @@ pub fn prepare_model_request(
     config: &ModelServiceConfig,
     rendered_prompt: &str,
 ) -> PreparedModelRequest {
+    prepare_model_request_with_reasoning(config, rendered_prompt, false)
+}
+
+pub fn prepare_model_request_with_reasoning(
+    config: &ModelServiceConfig,
+    rendered_prompt: &str,
+    critical_reasoning: bool,
+) -> PreparedModelRequest {
     let prompt_blocks = plan_prompt_cache(rendered_prompt);
     let structured_output = plan_structured_output(config);
     let model_blocks = model_prompt_blocks(&prompt_blocks);
-    let mut body = build_model_request(config, &model_blocks, structured_output);
+    let mut body = build_model_request_with_reasoning(
+        config,
+        &model_blocks,
+        structured_output,
+        critical_reasoning,
+    );
     if config.api_protocol == ApiProtocol::Anthropic {
         enforce_anthropic_cache_control_limit(&mut body);
     }
@@ -267,7 +291,15 @@ pub fn prepare_model_interaction_http_request(
     config: &ModelServiceConfig,
     interaction: &ModelInteractionRequest,
 ) -> PreparedModelHttpRequest {
-    let mut request = prepare_model_http_request(config, &interaction.rendered_prompt);
+    let mut request = PreparedModelHttpRequest {
+        endpoint: config.endpoint(),
+        headers: model_http_headers(config),
+        model_request: prepare_model_request_with_reasoning(
+            config,
+            &interaction.rendered_prompt,
+            interaction.critical_reasoning,
+        ),
+    };
     if interaction.is_native() {
         apply_native_interaction(config, &mut request.model_request.body, interaction);
         if config.api_protocol == ApiProtocol::Anthropic {
@@ -929,6 +961,7 @@ fn build_openai_compatible_request(
     config: &ModelServiceConfig,
     blocks: &[ModelPromptBlock],
     structured_output: StructuredOutputHint,
+    critical_reasoning: bool,
 ) -> Value {
     let messages = blocks
         .iter()
@@ -949,10 +982,10 @@ fn build_openai_compatible_request(
         "max_tokens": config.max_llm_output_tokens
     });
     if let Some(enable_thinking) = config.openai_compatible.enable_thinking {
-        body["enable_thinking"] = json!(enable_thinking);
+        body["enable_thinking"] = json!(enable_thinking && critical_reasoning);
     }
     if let Some(reasoning_effort) = &config.openai_compatible.reasoning_effort {
-        if reasoning_effort == REASONING_EFFORT_DISABLED {
+        if !critical_reasoning || reasoning_effort == REASONING_EFFORT_DISABLED {
             body["thinking"] = json!({ "type": "disabled" });
         } else {
             body["reasoning_effort"] = json!(reasoning_effort);
@@ -969,6 +1002,7 @@ fn build_openai_compatible_request(
 fn build_openai_responses_request(
     config: &ModelServiceConfig,
     blocks: &[ModelPromptBlock],
+    critical_reasoning: bool,
 ) -> Value {
     let instructions = blocks
         .iter()
@@ -989,10 +1023,10 @@ fn build_openai_responses_request(
         "max_output_tokens": config.max_llm_output_tokens
     });
     if let Some(reasoning_effort) = &config.openai_compatible.reasoning_effort {
-        let effort = if reasoning_effort == REASONING_EFFORT_DISABLED {
-            "none"
-        } else {
+        let effort = if critical_reasoning && reasoning_effort != REASONING_EFFORT_DISABLED {
             reasoning_effort.as_str()
+        } else {
+            "none"
         };
         body["reasoning"] = json!({ "effort": effort });
     }
