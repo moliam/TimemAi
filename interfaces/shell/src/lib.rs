@@ -9,6 +9,7 @@ use timem_in_process::agent_api::{
 };
 
 mod app;
+pub mod attach;
 mod final_answer_renderer;
 mod observation;
 mod profiler;

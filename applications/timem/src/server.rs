@@ -2053,6 +2053,7 @@ fn build_router(state: AppState, port: u16) -> Router {
         BrowserRouteHandlers {
             health: get(health),
             snapshot: get(snapshot),
+            attach_sessions: get(attach_sessions),
             upload: post(upload_file),
             performance_trace: post(performance_trace),
             debug_browse: get(debug_browse),
@@ -2062,6 +2063,68 @@ fn build_router(state: AppState, port: u16) -> Router {
         MAX_UPLOAD_BYTES + 64 * 1024,
         4 * 1024,
     )
+}
+
+#[derive(Debug, Serialize)]
+struct AttachSessionSummary {
+    session_id: String,
+    display_name: String,
+    ordinal: u32,
+    state: String,
+    working: bool,
+    active_turn_id: Option<String>,
+    current_dir: String,
+    worker_count: usize,
+}
+
+fn session_working_for_attach(session: &WebSession) -> bool {
+    session.active_turn_id.is_some()
+        || session.pending_turn_id.is_some()
+        || session.state == "working"
+        || session
+            .workers
+            .iter()
+            .any(|worker| worker.state == "working")
+}
+
+fn attach_sessions_snapshot(state: &AppState) -> Vec<AttachSessionSummary> {
+    let mut sessions: Vec<_> = state
+        .sessions
+        .lock()
+        .map(|sessions| sessions.values().cloned().collect())
+        .unwrap_or_default();
+    sessions.sort_by(|left, right| {
+        left.ordinal
+            .cmp(&right.ordinal)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    sessions
+        .into_iter()
+        .map(|session| {
+            let working = session_working_for_attach(&session);
+            AttachSessionSummary {
+                session_id: session.session_id,
+                display_name: session.display_name,
+                ordinal: session.ordinal,
+                state: session.state,
+                working,
+                active_turn_id: session.active_turn_id,
+                current_dir: session.current_dir,
+                worker_count: session.workers.len(),
+            }
+        })
+        .collect()
+}
+
+async fn attach_sessions(
+    State((state, _)): State<(AppState, u16)>,
+    Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(json!({ "sessions": attach_sessions_snapshot(&state) })).into_response()
 }
 
 async fn upload_file(

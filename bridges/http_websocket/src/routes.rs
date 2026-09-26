@@ -18,6 +18,7 @@ use crate::apply_browser_security_headers;
 pub struct BrowserRouteHandlers<S> {
     pub health: MethodRouter<S>,
     pub snapshot: MethodRouter<S>,
+    pub attach_sessions: MethodRouter<S>,
     pub upload: MethodRouter<S>,
     pub performance_trace: MethodRouter<S>,
     pub debug_browse: MethodRouter<S>,
@@ -41,6 +42,7 @@ where
     Router::new()
         .route("/api/health", handlers.health)
         .route("/api/snapshot", handlers.snapshot)
+        .route("/api/attach/sessions", handlers.attach_sessions)
         .route("/api/upload", handlers.upload)
         .route("/api/debug-browse", handlers.debug_browse)
         .route(
@@ -77,6 +79,7 @@ mod tests {
         BrowserRouteHandlers {
             health: get(|| async { "health" }),
             snapshot: get(|| async { "snapshot" }),
+            attach_sessions: get(|| async { "attach_sessions" }),
             upload: post(|_: Bytes| async { "upload" }),
             performance_trace: post(|| async { StatusCode::NO_CONTENT }),
             debug_browse: get(|| async { "debug_browse" }),
@@ -103,6 +106,7 @@ mod tests {
 
         for (path, expected) in [
             ("/api/health", "health"),
+            ("/api/attach/sessions", "attach_sessions"),
             ("/api/snapshot", "snapshot"),
             ("/ws", "websocket"),
             ("/unknown", "asset:/unknown"),
