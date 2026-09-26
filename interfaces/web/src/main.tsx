@@ -1009,8 +1009,7 @@ function TimemApp() {
       !pendingClaudeCodexToolDiscovery &&
       !favoriteCapacityUpdating &&
       !pendingMemSwitch &&
-      !memTemporaryItemsDeleting &&
-      !pendingEndpointDelete
+      !memTemporaryItemsDeleting
     )
       closeAppearancePanel();
   }, [
@@ -1021,7 +1020,6 @@ function TimemApp() {
     pendingMemConversationCapacity,
     pendingMemRetention,
     pendingMemSwitch,
-    pendingEndpointDelete,
   ]);
   const refreshMemTemporaryItems = useCallback(() => {
     setMemTemporaryItemsLoading(true);
@@ -1559,8 +1557,16 @@ function TimemApp() {
         return;
       }
       if (event.type === "command_ack") {
-        if (event.status === "accepted") return;
         const completed = sentCommandsRef.current.get(event.command_id);
+        if (event.status === "accepted") {
+          if (
+            completed?.type === "model_endpoint_delete_many" &&
+            pendingEndpointDeleteCommandRef.current === event.command_id
+          ) {
+            setDeleteEndpointCandidates([]);
+          }
+          return;
+        }
         sentCommandsRef.current.delete(event.command_id);
         if (
           event.status === "committed" &&
@@ -4466,6 +4472,7 @@ function TimemApp() {
               onDeleteTemporaryItems={deleteMemTemporaryItems}
               onEditEndpoint={setEndpointEditor}
               onDeleteEndpoint={setDeleteEndpointCandidates}
+              endpointDeletePending={pendingEndpointDelete}
               onRevealEndpoint={revealModelEndpoint}
               onSaveEndpoint={saveModelEndpoint}
               onSaveTemporaryPolicy={saveMemTemporaryPolicy}
@@ -12275,6 +12282,7 @@ type SettingsCenterProps = {
   onDeleteTemporaryItems: (ids: string[]) => void;
   onEditEndpoint: (endpoint: ModelEndpoint | "new" | null) => void;
   onDeleteEndpoint: (endpoints: ModelEndpoint[]) => void;
+  endpointDeletePending: boolean;
   onRevealEndpoint: (endpointId: string) => void;
   onSaveEndpoint: (endpoint: ModelEndpointDraft) => void;
 };
@@ -12329,6 +12337,7 @@ const SettingsCenter = memo(function SettingsCenter(
     onDeleteTemporaryItems,
     onEditEndpoint,
     onDeleteEndpoint,
+    endpointDeletePending,
     onRevealEndpoint,
     onSaveEndpoint,
   } = props;
@@ -12715,6 +12724,7 @@ const SettingsCenter = memo(function SettingsCenter(
                 revealedEndpointPrivateCas={revealedEndpointPrivateCas}
                 onEdit={onEditEndpoint}
                 onDelete={onDeleteEndpoint}
+                deletePending={endpointDeletePending}
                 onReveal={onRevealEndpoint}
                 onSave={onSaveEndpoint}
               />
@@ -13387,6 +13397,7 @@ function EndpointSettingsPane({
   revealedEndpointPrivateCas,
   onEdit,
   onDelete,
+  deletePending,
   onReveal,
   onSave,
 }: {
@@ -13402,6 +13413,7 @@ function EndpointSettingsPane({
   revealedEndpointPrivateCas: Record<string, string>;
   onEdit: (endpoint: ModelEndpoint | "new" | null) => void;
   onDelete: (endpoints: ModelEndpoint[]) => void;
+  deletePending: boolean;
   onReveal: (endpointId: string) => void;
   onSave: (endpoint: ModelEndpointDraft) => void;
 }) {
@@ -13530,7 +13542,11 @@ function EndpointSettingsPane({
           <button
             type="button"
             className={`danger compact ${deleteMode ? "confirm" : ""}`}
-            disabled={endpoints.length === 0 || (deleteMode && selectedEndpoints.length === 0)}
+            disabled={
+              deletePending ||
+              endpoints.length === 0 ||
+              (deleteMode && selectedEndpoints.length === 0)
+            }
             onClick={() => {
               if (!deleteMode) {
                 setDeleteMode(true);
@@ -13542,12 +13558,20 @@ function EndpointSettingsPane({
               }
             }}
           >
-            {deleteMode ? <Check size={14} /> : <Trash2 size={14} />}{" "}
-            {deleteMode
-              ? t("endpoints.deleteSelected", {
-                  count: selectedEndpoints.length,
-                })
-              : t("common.delete")}
+            {deletePending ? (
+              <LoaderCircle size={14} />
+            ) : deleteMode ? (
+              <Check size={14} />
+            ) : (
+              <Trash2 size={14} />
+            )}{" "}
+            {deletePending
+              ? t("endpoints.deleting")
+              : deleteMode
+                ? t("endpoints.deleteSelected", {
+                    count: selectedEndpoints.length,
+                  })
+                : t("common.delete")}
           </button>
           <button
             type="button"

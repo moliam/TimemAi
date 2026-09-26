@@ -132,6 +132,8 @@ protocols and token limits, then optional transport and request customization.
 API keys remain optional for services that do not require authentication.
 The endpoint list supports selecting multiple entries for deletion; Timem asks
 for one confirmation and removes the batch atomically from the shared store.
+The confirmation closes after the live command is accepted, and a non-blocking
+pending indicator remains until the authoritative endpoint update arrives.
 
 ### Importing endpoints from other CLI ecosystems
 

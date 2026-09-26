@@ -214,6 +214,7 @@ await evaluate(`(() => {
   if (!button || button.disabled) throw new Error('confirm batch delete button unavailable');
   button.click(); return true;
 })()`);
+await waitFor(() => evaluate("!document.querySelector('.endpoint-delete-backdrop')"), "endpoint delete confirmation closes after acceptance");
 await waitFor(() => evaluate(`(() => {
   const rows = document.querySelectorAll('.endpoint-settings-row');
   const texts = [...rows].map(row => row.textContent || '');
