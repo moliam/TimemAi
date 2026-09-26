@@ -128,6 +128,56 @@ fn readfile_first_touch_notes_are_injected_once_per_path() {
     assert!(third.contains(&file_d_note), "{third}");
 }
 
+fn run_bash_edit_first_touch_read(core: &mut AgentCore, path: &str) -> String {
+    let action = format!(
+        r#"{{"working_still_action":[{{"run_bash":{{"cmd":"true","edit":[{}]}}}}]}}"#,
+        serde_json::to_string(path).unwrap()
+    );
+    match core.apply_model_response(LlmResponse {
+        tool_calls: Vec::new(),
+        content: scored(action),
+        model_name: "qwen-plus".to_string(),
+        usage: usage(),
+        truncated: false,
+    }) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("expected model continuation, got {other:?}"),
+    }
+}
+
+#[test]
+fn run_bash_edit_first_touch_notes_are_injected_once_per_path() {
+    let cwd = tmp_dir("run_bash_edit_first_touch_once");
+    fs::create_dir_all(cwd.join("a/b")).unwrap();
+    let mut core = test_core(
+        "STATIC",
+        profile("qwen-plus"),
+        tmp_dir("run_bash_edit_first_touch_once_mem"),
+    );
+    core.change_prompt_cwd(cwd.to_string_lossy()).unwrap();
+    let _ = core.begin_turn("edit files for first touch notes", None);
+
+    let cwd_text = cwd.to_string_lossy();
+    let dir_note = format!("first time to touch dir {cwd_text}/a/b/");
+    let file_c_note = format!("first time to touch file {cwd_text}/a/b/c.txt");
+
+    let first = run_bash_edit_first_touch_read(&mut core, "a/b/c.txt");
+    assert!(first.contains(&dir_note), "{first}");
+    assert!(first.contains(&file_c_note), "{first}");
+
+    // The prompt keeps history, so the notes stay visible exactly once and are
+    // not re-emitted on the second run_bash `edit` of the same path.
+    let second = run_bash_edit_first_touch_read(&mut core, "a/b/c.txt");
+    assert_eq!(count_occurrences(&second, &dir_note), 1, "{second}");
+    assert_eq!(count_occurrences(&second, &file_c_note), 1, "{second}");
+
+    // readfile of the same file must not re-emit notes already emitted via the
+    // run_bash `edit` anchor.
+    let third = readfile_first_touch_read(&mut core, "a/b/c.txt");
+    assert_eq!(count_occurrences(&third, &dir_note), 1, "{third}");
+    assert_eq!(count_occurrences(&third, &file_c_note), 1, "{third}");
+}
+
 #[test]
 fn readfile_first_touch_note_survives_truncated_tool_result() {
     let cwd = tmp_dir("readfile_first_touch_truncated");

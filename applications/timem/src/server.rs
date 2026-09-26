@@ -1872,6 +1872,17 @@ fn resolve_debug_browse_target(root: &Path, sub_path: &str) -> Result<PathBuf, S
     Ok(canonical_target)
 }
 
+fn is_html_debug_file(target: &Path, sub_path: &str) -> bool {
+    let name = sub_path.rsplit('/').next().unwrap_or(sub_path);
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".html")
+        || lower.ends_with(".htm")
+        || target
+            .extension()
+            .map(|ext| ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm"))
+            .unwrap_or(false)
+}
+
 fn debug_browse_page(session_id: &str, sub_path: &str, body_html: &str) -> String {
     let style = "font-family:ui-monospace,monospace;margin:1rem;background:#111;color:#ddd";
     format!(
@@ -1982,6 +1993,28 @@ async fn debug_browse(
         }
     };
     let sub_path = query.path.clone().unwrap_or_default();
+    // HTML files render natively in the browser instead of the escaped
+    // text preview, so debug artifacts (e.g. saved pages) stay usable.
+    if let Ok(target) = resolve_debug_browse_target(&root, &sub_path) {
+        if is_html_debug_file(&target, &sub_path) {
+            let too_large = std::fs::metadata(&target)
+                .map(|meta| meta.len() > MAX_DEBUG_FILE_PREVIEW_BYTES)
+                .unwrap_or(false);
+            if !too_large {
+                if let Ok(bytes) = std::fs::read(&target) {
+                    return (
+                        StatusCode::OK,
+                        [(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("text/html; charset=utf-8"),
+                        )],
+                        bytes,
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
     let html = match resolve_debug_browse_target(&root, &sub_path) {
         Ok(target) if target.is_dir() => {
             debug_browse_listing(&query.session_id, &sub_path, &target)

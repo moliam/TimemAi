@@ -16,6 +16,7 @@ export type ModelEndpoint = {
   request_fields: Record<string, unknown>;
   allow_cross_origin_redirects: boolean;
   private_ca_configured: boolean;
+  reasoning_effort?: string | null;
 };
 
 export type ModelEndpointDraft = {
@@ -79,6 +80,21 @@ export function formatContextWindowTokens(tokens: number): string {
   if (!Number.isFinite(tokens) || tokens < 1_000) return String(tokens);
   if (tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M`;
   return `${tokens / 1_000}K`;
+}
+
+/// Compact protocol label for endpoint buttons: openai-comp / openai-resp /
+/// anthropic; unknown values fall back to the raw string.
+export function apiProtocolShort(protocol: string): string {
+  switch (protocol) {
+    case "openai-compatible":
+      return "openai-comp";
+    case "openai-responses":
+      return "openai-resp";
+    case "anthropic":
+      return "anthropic";
+    default:
+      return protocol;
+  }
 }
 
 export function endpointMatchesProfile(
