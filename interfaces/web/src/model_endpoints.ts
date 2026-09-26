@@ -61,6 +61,11 @@ export const REASONING_EFFORT_OPTIONS = [
   "xhigh",
 ] as const;
 
+/// Sentinel value: turn thinking off. Core translates it per API protocol
+/// (`thinking={"type":"disabled"}` for OpenAI-compatible, `reasoning.effort=none`
+/// for responses).
+export const REASONING_EFFORT_DISABLED = "disabled" as const;
+
 // Mirrors the Core-side u32 token-count bound (config_edit::parse_token_count).
 export const MAX_LLM_INPUT_TOKENS_CEILING = 4_294_967_295;
 

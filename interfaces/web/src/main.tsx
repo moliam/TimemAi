@@ -241,6 +241,7 @@ import {
 } from "./model_service_ui";
 import {
   endpointDraftValid,
+  REASONING_EFFORT_DISABLED,
   REASONING_EFFORT_OPTIONS,
   endpointMatchesProfile,
   endpointLabelForProfile,
@@ -14410,6 +14411,9 @@ function ModelEndpointEditor({
                 {effort}
               </option>
             ))}
+            <option value={REASONING_EFFORT_DISABLED}>
+              {t("endpoints.reasoningEffortDisabled")}
+            </option>
           </select>
         </label>
         <label className="wide endpoint-transport-toggle">

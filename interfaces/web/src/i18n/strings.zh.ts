@@ -374,6 +374,7 @@ export const zh = {
     deleting: "正在删除…",
     reasoningEffort: "推理强度",
     reasoningEffortDefault: "默认",
+    reasoningEffortDisabled: "关闭",
   },
   favorites: {
     eyebrow: "收藏夹空间",
