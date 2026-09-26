@@ -1731,6 +1731,7 @@ pub struct AgentCore {
     assistant_replay_mode: AssistantReplayMode,
     current_prompt_cwd: PathBuf,
     cwd_note_pending: bool,
+    touched_paths: HashSet<PathBuf>,
     tool_repo_session_id: String,
     resolved_tool_call_mode: ToolCallMode,
     native_parallel_tool_calls: bool,
@@ -1832,6 +1833,7 @@ impl AgentCore {
             assistant_replay_mode: AssistantReplayMode::RawOutput,
             current_prompt_cwd,
             cwd_note_pending: true,
+            touched_paths: HashSet::new(),
             tool_repo_session_id: "default".to_string(),
             resolved_tool_call_mode: ToolCallMode::Inline,
             native_parallel_tool_calls: false,
@@ -5162,7 +5164,63 @@ Runtime tool_call ids:",
         rows
     }
 
-    fn format_action_outcome_body(&self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
+    fn readfile_first_touch_notes(&mut self, outcome: &ActionOutcome) -> String {
+        let Some(evidence) = outcome.readfile_result.as_ref() else {
+            return String::new();
+        };
+        if outcome.status != ActionStatus::Completed || evidence.error_type.is_some() {
+            return String::new();
+        }
+        let path = Path::new(&evidence.path);
+        let mut notes = Vec::new();
+        if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            if self.touched_paths.insert(dir.to_path_buf()) {
+                let dir_text = dir.to_string_lossy();
+                let dir_text = if dir_text.ends_with('/') {
+                    dir_text.into_owned()
+                } else {
+                    format!("{dir_text}/")
+                };
+                notes.push(format!(
+                    "[!!!NOTE] This seems the first time to touch dir {dir_text}, need to understand the module boundary of this dir, so that your work can be consistent with the architecture, avoiding local blindness."
+                ));
+            }
+        }
+        if self.touched_paths.insert(path.to_path_buf()) {
+            notes.push(format!(
+                "[!!!NOTE] This seems the first time to touch file {}, need to understand the module function of this file, so that your work can be globally consistent, avoiding local blindness.",
+                path.display()
+            ));
+        }
+        notes.join("\n")
+    }
+
+    fn format_action_outcome_body(
+        &mut self,
+        action: &ParsedAction,
+        outcome: &ActionOutcome,
+    ) -> String {
+        // First-touch reminders are runtime notes about the model's live prompt
+        // context rather than tool output, so they are attached outside the
+        // tool-result truncation gate and always reach the model in full.
+        let first_touch_note = if action.action == "readfile" {
+            self.readfile_first_touch_notes(outcome)
+        } else {
+            String::new()
+        };
+        let body = self.format_action_outcome_body_inner(action, outcome);
+        if first_touch_note.is_empty() {
+            body
+        } else {
+            format!("{first_touch_note}\n{body}")
+        }
+    }
+
+    fn format_action_outcome_body_inner(
+        &self,
+        action: &ParsedAction,
+        outcome: &ActionOutcome,
+    ) -> String {
         let retention = tool_result_gate::Retention::from_tail_out(action.input_bool("tail_out"));
         if self.response_protocol == ResponseProtocolKind::Xml {
             let output_time_ms = now_ms();
@@ -5222,7 +5280,7 @@ Runtime tool_call ids:",
         }
     }
 
-    fn format_action_outcome(&self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
+    fn format_action_outcome(&mut self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
         let body = self.format_action_outcome_body(action, outcome);
         if self.response_protocol == ResponseProtocolKind::Xml {
             format!("<tool_call_id>{}</tool_call_id>{body}", action.call_id)
@@ -5235,11 +5293,11 @@ Runtime tool_call ids:",
         }
     }
 
-    fn format_action_result(&self, action: &ParsedAction, result: &str) -> String {
+    fn format_action_result(&mut self, action: &ParsedAction, result: &str) -> String {
         self.format_action_outcome(action, &ActionOutcome::completed(result))
     }
 
-    fn format_pending_action_result(&self, pending: &PendingApproval, result: &str) -> String {
+    fn format_pending_action_result(&mut self, pending: &PendingApproval, result: &str) -> String {
         let action = ParsedAction {
             action: pending.request.action.clone(),
             name: pending.action_name.clone(),
@@ -5478,7 +5536,7 @@ Runtime tool_call ids:",
     }
 
     fn collect_parallel_action_handles(
-        &self,
+        &mut self,
         mut handles: Vec<ParallelActionHandle>,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
@@ -5513,7 +5571,7 @@ Runtime tool_call ids:",
     }
 
     fn collect_approved_parallel_bash_handles(
-        &self,
+        &mut self,
         mut handles: Vec<ApprovedParallelBashHandle>,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
@@ -6050,6 +6108,10 @@ Runtime tool_call ids:",
                 .retain(|exchange| !delta_id_set.contains(&exchange.delta_id));
         }
         let removed_delta_count = before_delta_count.saturating_sub(self.deltas.len());
+        // First-touch path tracking mirrors what the model has actually seen in
+        // the live prompt context. A shrink rewrites that context, so the
+        // tracking resets with it and later reads trigger reminders again.
+        self.touched_paths.clear();
 
         let mut hidden_slice_count = 0usize;
         let mut matched_slice_ids = HashSet::new();
