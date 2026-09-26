@@ -7325,7 +7325,7 @@ fn normalize_model_endpoint_input(
     }
     let max_llm_input_tokens = input.max_llm_input_tokens;
     let max_llm_output_tokens = input.max_llm_output_tokens;
-    if ![100_000, 200_000, 1_000_000].contains(&max_llm_input_tokens) {
+    if max_llm_input_tokens == 0 {
         return Err("invalid_model_endpoint_max_input_tokens".to_string());
     }
     if ![10_000, 20_000, 50_000].contains(&max_llm_output_tokens) {

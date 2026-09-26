@@ -408,6 +408,8 @@ export const en: Strings = {
   errors: {
     endpointDeleteTitle: "Could not delete model endpoints",
     endpointDeleteRetry: "Confirm the endpoints still exist, then try again.",
+    endpointSaveTitle: "Could not save model endpoint",
+    endpointSaveRetry: "Check the configuration and try again.",
     favoritesResizeTitle: "Could not resize the favorites space",
     favoritesUnavailableTitle: "Favorites is temporarily unavailable",
     searchUnavailableTitle: "Search is temporarily unavailable",

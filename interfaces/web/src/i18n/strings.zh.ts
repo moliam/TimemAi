@@ -405,6 +405,8 @@ export const zh = {
   errors: {
     endpointDeleteTitle: "无法删除模型接入点",
     endpointDeleteRetry: "请确认接入点仍存在后重试。",
+    endpointSaveTitle: "无法保存模型接入点",
+    endpointSaveRetry: "请检查配置后重试。",
     favoritesResizeTitle: "无法调整收藏夹空间",
     favoritesUnavailableTitle: "收藏夹暂时不可用",
     searchUnavailableTitle: "搜索暂时不可用",

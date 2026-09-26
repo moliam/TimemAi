@@ -1659,6 +1659,16 @@ function TimemApp() {
             setMemTemporaryItemsLoading(false);
           if (completed?.type === "mem_temporary_items_delete")
             setMemTemporaryItemsDeleting(false);
+          if (completed?.type === "model_endpoint_upsert") {
+            // The editor stays open on rejection; only the authoritative
+            // model_endpoints_updated event closes it after a commit.
+            reportUiError(
+              t("errors.endpointSaveTitle"),
+              event.error || t("errors.endpointSaveRetry"),
+              "system",
+            );
+            return;
+          }
           if (completed?.type === "model_endpoint_delete_many") {
             if (pendingEndpointDeleteCommandRef.current === event.command_id) {
               pendingEndpointDeleteIdsRef.current.clear();
