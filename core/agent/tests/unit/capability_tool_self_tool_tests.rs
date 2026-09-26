@@ -31,6 +31,7 @@ fn test_state() -> SelfToolState {
             scratch_file: "/tmp/timem/memory/scratch_notes.jsonl".into(),
             api_audit_file: "/tmp/timem/audit/api_audit.json".into(),
             action_audit_file: "/tmp/timem/audit/action_audit.json".into(),
+            config_paths: Vec::new(),
         },
         SelfToolAbout {
             name: "TimemAi".to_string(),

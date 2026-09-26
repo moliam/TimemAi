@@ -5,6 +5,7 @@ import re
 import shlex
 import sys
 import time
+import socketserver
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from xml.sax.saxutils import escape
 
@@ -321,6 +322,18 @@ def self_test():
     print("fake_model_server_toolgen_scenario: ok")
 
 
+class FakeHTTPServer(ThreadingHTTPServer):
+    # ThreadingHTTPServer.server_bind does a reverse DNS lookup via
+    # socket.getfqdn, which can hang for tens of seconds on hosts with
+    # proxies or VPN resolvers. The fake server never reads server_name,
+    # so skip the lookup and keep startup time deterministic.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=0)
@@ -335,7 +348,7 @@ def main():
     Handler.response_delay = args.delay
     Handler.capture_prompt_file = args.capture_prompt_file
     Handler.scenario = args.scenario
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = FakeHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"fake_model_server_ready:{server.server_port}", flush=True)
     try:
         server.serve_forever()

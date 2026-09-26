@@ -275,6 +275,7 @@ fn run_probe(
 fn probe_request(prompt: &str, parallel: bool) -> ModelInteractionRequest {
     ModelInteractionRequest {
         rendered_prompt: prompt.to_string(),
+        images: Vec::new(),
         static_tool_count: 1,
         tools: vec![ToolDefinition {
             name: PROBE_TOOL_NAME.to_string(),
@@ -291,6 +292,7 @@ fn probe_request(prompt: &str, parallel: bool) -> ModelInteractionRequest {
         resolved_mode: ToolCallMode::Native,
         parallel_tool_calls: parallel,
         tool_choice: NativeToolChoice::Required,
+        critical_reasoning: false,
     }
 }
 

@@ -12,6 +12,13 @@ It may contain:
 
 - React/assistant-ui components, Markdown and syntax highlighting, responsive
   layout, accessibility, themes, animation, and browser-local preferences.
+- Web UI localization in `src/i18n`: browser-local language preference
+  (localStorage, cross-tab sync), typed zh/en catalogs with compile-time key
+  parity, and the `t()`/`useT()` entry. Catalogs cover Interface chrome text
+  only; Host projections, model output, and user data are never translated.
+  User-visible inline strings and CSS `content` literals outside the catalog
+  are defects (guarded by `tests/i18n_source_guard.test.ts`); see
+  `docs/web-i18n-architecture.md`.
 - Session selection and rename controls, composer behavior, file-picker UI,
   session-scoped inline decision queues, activity rendering, completion telemetry, and context
   compaction presentation. Destructive MEM-switch confirmation is isolated in

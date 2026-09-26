@@ -1,6 +1,15 @@
+import { coalesceActionLifecycle } from "../src/view_model";
+import type { WebTurnEvent } from "../src/protocol";
 import { describe, expect, it } from "vitest";
 import { Activity } from "../src/protocol";
-import { summarizeConsecutiveToolActivities, summarizeToolActivities } from "../src/activity_groups";
+import {
+  coalesceFreeTalkItems,
+  streamToolHandoffIds,
+  computeStreamRetention,
+  isRunningToolActivity,
+  summarizeConsecutiveToolActivities,
+  summarizeToolActivities,
+} from "../src/activity_groups";
 
 function activity(tool_name: string, tool_status: string): Activity {
   return {
@@ -144,4 +153,167 @@ describe("tool activity grouping", () => {
     };
     expect(summarizeToolActivities([thought])).toBeNull();
   });
+});
+
+describe("running tool activity gate", () => {
+  const base = {
+    id: "a1",
+    sessionId: "s1",
+    title: "run_bash",
+    createdAt: 1,
+  };
+  it("marks running foreground/background actions as live", () => {
+    expect(
+      isRunningToolActivity({ ...base, tone: "action", tool_status: "running" }),
+    ).toBe(true);
+    expect(
+      isRunningToolActivity({
+        ...base,
+        tone: "action",
+        tool_status: "background_running",
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps terminal actions, non-actions and toolgen inside the frame", () => {
+    expect(
+      isRunningToolActivity({ ...base, tone: "action", tool_status: "finish" }),
+    ).toBe(false);
+    expect(
+      isRunningToolActivity({ ...base, tone: "action", tool_status: "timeout" }),
+    ).toBe(false);
+    expect(
+      isRunningToolActivity({ ...base, tone: "thinking" }),
+    ).toBe(false);
+    expect(isRunningToolActivity(null)).toBe(false);
+    expect(
+      isRunningToolActivity({
+        ...base,
+        tone: "action",
+        tool_status: "running",
+        kind: "toolgen",
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("stream retention split", () => {
+  const thought = (id: string): Activity => ({
+    id,
+    sessionId: "s",
+    tone: "thinking",
+    kind: "free_talk",
+    title: "",
+    detail: id,
+    createdAt: 1,
+  });
+  const tool = (id: string, tool_status: string): Activity => ({
+    ...activity(id, tool_status),
+    id,
+  });
+
+  it("retains all thought rounds and tools in their original order", () => {
+    const items = [
+      thought("t1"),
+      tool("a1", "completed"),
+      thought("t2"),
+      tool("a2", "completed"),
+      tool("a3", "running"),
+    ];
+    const ret = computeStreamRetention(items);
+    expect(ret.retained.map((a) => a.id)).toEqual(["t1", "a1", "t2", "a2", "a3"]);
+    expect(ret.thought?.id).toBe("t2");
+    expect(ret.isRetained(items[0])).toBe(true);
+    expect(ret.isRetained(items[4])).toBe(true);
+    expect(ret.isRetained(null)).toBe(false);
+  });
+
+  it("retains completed and running tools even without thoughts", () => {
+    const ret = computeStreamRetention([
+      tool("a1", "completed"),
+      tool("a2", "running"),
+      tool("a3", "background_running"),
+    ]);
+    expect(ret.retained.map((a) => a.id)).toEqual(["a1", "a2", "a3"]);
+    expect(ret.thought).toBeNull();
+  });
+
+  it("does not archive tools on a thoughtless response", () => {
+    const items = [thought("t1"), tool("a1", "completed"), null, tool("a2", "completed")];
+    const ret = computeStreamRetention(items);
+    expect(ret.retained.map(a => a.id)).toEqual(["t1", "a1", "a2"]);
+    expect(ret.isRetained(items[1])).toBe(true);
+    expect(ret.thought?.id).toBe("t1");
+  });
+
+  it("keeps completed calls across thoughtless responses", () => {
+    const items = [null, tool("a1", "completed"), null, tool("a2", "completed")];
+    expect(computeStreamRetention(items).retained.map(a => a.id)).toEqual(["a1", "a2"]);
+  });
+
+  it("keeps supplements and thoughts in place across rounds", () => {
+    const supplement = { ...thought("supplement"), kind: "user_supplement" as const };
+    const items = [thought("t1"), tool("a1", "completed"), supplement];
+    const current = computeStreamRetention(items);
+    expect(current.retained.map(a => a.id)).toEqual(["t1", "a1", "supplement"]);
+    expect(current.isFramed(supplement)).toBe(false);
+    const next = computeStreamRetention([...items, null, tool("a2", "running")]);
+    expect(next.retained.map(a => a.id)).toEqual(["t1", "a1", "supplement", "a2"]);
+    expect(items.filter(a => next.isFramed(a)).map(a => a.id)).toEqual([]);
+  });
+
+  it("keeps everything framed when the list is empty", () => {
+    expect(computeStreamRetention([]).retained).toEqual([]);
+  });
+
+  it("collapses consecutive free-talk snapshots into the latest one", () => {
+    const items = [
+      { key: "s1", activity: thought("t1") },
+      { key: "s2", activity: thought("t2") },
+      { key: "n1", activity: null },
+      { key: "s3", activity: thought("t3") },
+      { key: "a1", activity: tool("a1", "completed") },
+    ];
+    expect(coalesceFreeTalkItems(items).map((item) => item.key)).toEqual([
+      "s2",
+      "n1",
+      "s3",
+      "a1",
+    ]);
+  });
+});
+
+describe("logical tool handoff", () => {
+  it("waits for a later execution, retaining parallel finishes and running jobs", () => {
+    const a = { ...activity("a", "failed"), execution_order: 1, settled_order: 2 };
+    const b = { ...activity("b", "completed"), execution_order: 3, settled_order: 4 };
+    const bg = { ...activity("bg", "background_running"), execution_order: 0, settled_order: 1 };
+    expect([...streamToolHandoffIds([a])]).toEqual([]);
+    expect([...streamToolHandoffIds([a, b, bg])]).toEqual([a.id]);
+    expect([...streamToolHandoffIds([{ ...a, settled_order: 5 }, b])]).toEqual([]);
+    expect([...streamToolHandoffIds([{ ...a, settled_order: undefined }, b])]).toEqual([]);
+    for (const status of ["completed", "failed", "timeout", "cancelled", "cancelled_by_user"])
+      expect(streamToolHandoffIds([{ ...a, tool_status: status }, b]).has(a.id)).toBe(true);
+  });
+});
+
+it("preserves execution and settlement order through lifecycle coalescing", () => {
+  const event = (id: string, phase: string): WebTurnEvent => ({
+    event_id: `${id}-${phase}`, source: "core_topic", created_at_ms: 1,
+    payload: { topic: { name: "core.action" }, payload: {
+      action: "run_bash", action_id: id, event: phase,
+      status: phase === "finish" ? "completed" : "running",
+    } },
+  });
+  const visible = coalesceActionLifecycle([
+    event("a", "start"), event("b", "start"),
+    event("a", "execution_start"), event("a", "finish"),
+    event("b", "execution_start"), event("b", "finish"),
+  ]);
+  expect(visible).toHaveLength(2);
+  expect(visible[0].execution_order).toBe(2);
+  expect(visible[0].settled_order).toBe(3);
+  expect(visible[1].execution_order).toBe(4);
+  expect(visible[1].settled_order).toBe(5);
+  expect(visible[0].presentation_id).toBe("a-start");
 });

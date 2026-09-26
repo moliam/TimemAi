@@ -53,3 +53,25 @@ export async function copyTextToClipboard(text: string) {
     }
   }
 }
+
+// Handle selection endpoints in surrounding layout without rewriting mixed-message copies.
+export function selectedUserMessageText(root: HTMLElement, selection: Selection | null): string | null {
+  if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return null;
+  const range = selection.getRangeAt(0);
+  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return null;
+  const entries = Array.from(root.querySelectorAll<HTMLElement>(".turn-user-entry"))
+    .filter((entry) => range.intersectsNode(entry));
+  if (entries.length !== 1) return null;
+  const entry = entries[0];
+  if (!entry.contains(range.startContainer)) {
+    const before = range.cloneRange();
+    before.setEndBefore(entry);
+    if (before.toString().trim()) return null;
+  }
+  if (!entry.contains(range.endContainer)) {
+    const after = range.cloneRange();
+    after.setStartAfter(entry);
+    if (after.toString().trim()) return null;
+  }
+  return selection.toString().replace(/(?:\r?\n)+$/, "");
+}

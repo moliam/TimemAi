@@ -13,6 +13,7 @@
  * - the parent remains responsible for command delivery and interaction locks.
  */
 import { FolderOpen } from "lucide-react";
+import { t, useT } from "./i18n";
 import type { Session } from "./protocol";
 
 type RestartCwdDecision = NonNullable<Session["restart_cwd_decision"]>;
@@ -28,6 +29,7 @@ export function RestartCwdGate({
   enabled,
   onResolve,
 }: RestartCwdGateProps) {
+  useT();
   const canKeepSessionDirectory = decision.session_cwd_available;
   return (
     <section
@@ -42,8 +44,8 @@ export function RestartCwdGate({
         </span>
         <p id="restart-cwd-title">
           {canKeepSessionDirectory
-            ? "当前 Timem 的启动目录和 Session 上次工作的目录不同，您要将工作目录："
-            : "原工作目录已不可用。聊天记录已保留，请切换到当前启动目录后继续："}
+            ? t("restartGate.mismatchPrompt")
+            : t("restartGate.missingPrompt")}
         </p>
       </div>
       <div className="restart-cwd-options">
@@ -53,11 +55,11 @@ export function RestartCwdGate({
             disabled={!enabled}
             onClick={() => onResolve("use_runtime")}
           >
-            {canKeepSessionDirectory ? "切换" : "使用当前工作目录"}
+            {canKeepSessionDirectory ? t("restartGate.switchToRuntime") : t("restartGate.useRuntime")}
           </button>
           {canKeepSessionDirectory && (
             <>
-              <span>至新启动目录：</span>
+              <span>{t("restartGate.toNewRuntime")}</span>
               <code title={decision.runtime_cwd}>{decision.runtime_cwd}</code>
             </>
           )}
@@ -70,9 +72,9 @@ export function RestartCwdGate({
               disabled={!enabled}
               onClick={() => onResolve("keep_session")}
             >
-              保持
+              {t("restartGate.keepInSession")}
             </button>
-            <span>在旧工作目录：</span>
+            <span>{t("restartGate.inOldSession")}</span>
             <code title={decision.session_cwd}>{decision.session_cwd}</code>
           </div>
         )}

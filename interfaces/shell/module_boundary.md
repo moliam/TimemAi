@@ -165,7 +165,8 @@ Also read `docs/turn-state-projection-architecture.md` for the shared Core, Brid
   core owns job ids/status/output files and cancel semantics. For `run_bash`,
   core owns the session running-pid set for background jobs and timed-out
   normal commands, one-time job-exit updates, PID-reuse-safe process identities, and a request-scoped
-  `STILL RUNNING` table before every model call while commands remain active. Shell may display the resulting core topics or
+  `STILL RUNNING` table with PID, originating tool-call id, and bounded original command
+  before every model call while commands remain active. Shell may display the resulting core topics or
   action evidence, but must not manage those jobs itself.
 - Long-command process waiting and cancellation. Shell may prompt the user for
   a decision, but core owns the process lifecycle and resulting prompt evidence.

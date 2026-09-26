@@ -48,6 +48,7 @@ pub mod interaction;
 pub mod memmgr;
 pub mod model_api;
 pub mod model_service_config;
+pub mod model_stream;
 pub mod model_transport;
 pub mod negotiation;
 mod notification;
@@ -136,25 +137,26 @@ pub use host::{
     CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
     CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_SUB_ANSWER,
     CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
-    DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
+    DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
 };
 pub use interaction::{
     parse_parallel_tool_calls, parse_tool_call_mode, CapabilityProbeSource, InteractionConfig,
-    InteractionProfile, ModelInteractionRequest, NativeExchange, NativeToolCall, NativeToolChoice,
-    NativeToolResult, ParallelToolCalls, ToolCallMode, ToolDefinition,
+    InteractionProfile, ModelImagePart, ModelInteractionRequest, NativeExchange, NativeToolCall,
+    NativeToolChoice, NativeToolResult, ParallelToolCalls, ToolCallMode, ToolDefinition,
     DEFAULT_MAX_TOOL_CALLS_PER_RESPONSE,
 };
 pub use model_api::{
-    build_model_request, default_api_protocol, default_base_url, default_model,
-    interpret_model_http_response, is_default_base_url, is_default_model, model_http_error_message,
-    model_prompt_blocks, model_request_audit_event, model_response_audit_event, parse_api_protocol,
-    parse_model_response, parse_openai_compatible_cache_mode, plan_structured_output,
-    prepare_model_http_request, prepare_model_interaction_http_request, prepare_model_request,
-    prompt_cache_plan_audit, validate_model_http_headers, validate_model_request_fields,
-    without_openai_compatible_cache_control, ApiProtocol, ModelCacheControl,
-    ModelHttpResponseInterpretation, ModelHttpTransportOptions, ModelPromptBlock, ModelPromptRole,
-    ModelServiceConfig, OpenAiCompatibleCacheMode, OpenAiCompatibleOptions,
-    PreparedModelHttpRequest, PreparedModelRequest, StructuredOutputHint,
+    build_model_request, build_model_request_with_reasoning, default_api_protocol,
+    default_base_url, default_model, interpret_model_http_response, is_default_base_url,
+    is_default_model, model_http_error_message, model_prompt_blocks, model_request_audit_event,
+    model_response_audit_event, parse_api_protocol, parse_model_response,
+    parse_openai_compatible_cache_mode, plan_structured_output, prepare_model_http_request,
+    prepare_model_interaction_http_request, prepare_model_request,
+    prepare_model_request_with_reasoning, prompt_cache_plan_audit, validate_model_http_headers,
+    validate_model_request_fields, without_openai_compatible_cache_control, ApiProtocol,
+    ModelCacheControl, ModelHttpResponseInterpretation, ModelHttpTransportOptions,
+    ModelPromptBlock, ModelPromptRole, ModelServiceConfig, OpenAiCompatibleCacheMode,
+    OpenAiCompatibleOptions, PreparedModelHttpRequest, PreparedModelRequest, StructuredOutputHint,
 };
 pub use model_service_config::{
     apply_openai_compatible_env_value, model_service_config_from_sources,
@@ -346,7 +348,7 @@ fn normalize_assistant_speaker_name(name: &str) -> String {
 
 fn role_for_prompt_type(prompt_type: &str, assistant_speaker_name: &str) -> PromptComponentRole {
     match prompt_type {
-        "user_question" | "user_supplement" => PromptComponentRole::user(),
+        "user_question" | "user_supplement" | "user_resume_directly" => PromptComponentRole::user(),
         "llm_response"
         | "llm_response_raw_xml"
         | "llm_free_talk"
@@ -558,6 +560,7 @@ pub(crate) enum PendingApprovedAction {
         tool_call_id: String,
         cwd: PathBuf,
         tail_out: bool,
+        edited_files: Vec<String>,
     },
     ToolgenPublish {
         repo: SessionToolRepo,
@@ -592,6 +595,7 @@ impl PendingApprovedAction {
                 tool_call_id,
                 cwd,
                 tail_out,
+                edited_files,
             } => json!({
                 "command": command,
                 "background": background,
@@ -604,6 +608,7 @@ impl PendingApprovedAction {
                 "tool_call_id": tool_call_id,
                 "cwd": cwd,
                 "tail_out": tail_out,
+                "edit": edited_files,
                 "approval_id": approval_id,
                 "risk": risk,
                 "reason": reason,
@@ -1124,7 +1129,19 @@ fn elapsed_thread_cpu(start: Option<Duration>) -> Option<Duration> {
 pub trait ActionRuntime {
     fn should_cancel(&mut self) -> bool;
 
+    /// Returns true when an accepted user supplement has waited past its
+    /// dispatch deadline and the next model interaction must be built now.
+    /// Long-running executors should hand off to background instead of
+    /// finishing; polling executors should stop with interrupted evidence.
+    fn should_force_handoff(&mut self) -> bool {
+        false
+    }
+
     fn on_core_topic_events(&mut self, _events: &[host::CoreTopicEvent]) {}
+
+    /// Complete protocol validation result, before any response actions execute.
+    /// Provisional display is never permission to execute an action.
+    fn on_model_response_validated(&mut self, _accepted: bool, _final_response: bool) {}
 
     fn on_model_response_parsed(
         &mut self,
@@ -1652,6 +1669,7 @@ fn default_self_tool_paths(memory_dir: &Path) -> SelfToolPaths {
         scratch_file: memory_dir.join("scratch_notes.jsonl"),
         api_audit_file: space_dir.join("audit").join("api_audit.json"),
         action_audit_file: space_dir.join("audit").join("action_audit.json"),
+        config_paths: Vec::new(),
     }
 }
 
@@ -1725,6 +1743,7 @@ pub struct AgentCore {
     assistant_replay_mode: AssistantReplayMode,
     current_prompt_cwd: PathBuf,
     cwd_note_pending: bool,
+    touched_paths: HashSet<PathBuf>,
     tool_repo_session_id: String,
     resolved_tool_call_mode: ToolCallMode,
     native_parallel_tool_calls: bool,
@@ -1826,6 +1845,7 @@ impl AgentCore {
             assistant_replay_mode: AssistantReplayMode::RawOutput,
             current_prompt_cwd,
             cwd_note_pending: true,
+            touched_paths: HashSet::new(),
             tool_repo_session_id: "default".to_string(),
             resolved_tool_call_mode: ToolCallMode::Inline,
             native_parallel_tool_calls: false,
@@ -1857,7 +1877,9 @@ impl AgentCore {
         rendered_prompt: impl Into<String>,
     ) -> ModelInteractionRequest {
         if self.resolved_tool_call_mode != ToolCallMode::Native {
-            return ModelInteractionRequest::inline(rendered_prompt);
+            let mut request = ModelInteractionRequest::inline(rendered_prompt);
+            request.critical_reasoning = self.context_compact_required;
+            return request;
         }
         let mut tools = self.capabilities.native_builtin_tool_definitions();
         let static_tool_count = tools.len();
@@ -1866,6 +1888,7 @@ impl AgentCore {
         tools.extend(dynamic_tools);
         ModelInteractionRequest {
             rendered_prompt: rendered_prompt.into(),
+            images: Vec::new(),
             static_tool_count,
             tools,
             native_exchanges: self.native_exchanges.clone(),
@@ -1876,6 +1899,7 @@ impl AgentCore {
             } else {
                 NativeToolChoice::Auto
             },
+            critical_reasoning: self.context_compact_required,
         }
     }
 
@@ -2168,8 +2192,8 @@ impl AgentCore {
             "still running cmds:
 
 ### STILL RUNNING
-| pid | created by tool_call id |
-|---:|---|",
+| pid | created by tool_call id | command |
+|---:|---|---|",
         );
         for job in running {
             let call_id = markdown_table_cell(if job.tool_call_id.trim().is_empty() {
@@ -2177,10 +2201,11 @@ impl AgentCore {
             } else {
                 &job.tool_call_id
             });
+            let command = markdown_table_cell(&compact_text(&job.command, 500));
             text.push_str(&format!(
                 "
-| {} | `{}` |",
-                job.pid, call_id
+| {} | `{}` | `{}` |",
+                job.pid, call_id, command
             ));
         }
         Some(text)
@@ -2985,10 +3010,19 @@ impl AgentCore {
     }
 
     pub fn begin_direct_resume_turn(&mut self, supporting_context: Option<&str>) -> CoreStep {
-        self.begin_turn(DIRECT_RESUME_USER_INPUT, supporting_context)
+        self.begin_turn_with_input_kind("", supporting_context, true)
     }
 
     pub fn begin_turn(&mut self, user_input: &str, supporting_context: Option<&str>) -> CoreStep {
+        self.begin_turn_with_input_kind(user_input, supporting_context, false)
+    }
+
+    fn begin_turn_with_input_kind(
+        &mut self,
+        user_input: &str,
+        supporting_context: Option<&str>,
+        direct_resume: bool,
+    ) -> CoreStep {
         self.current_round = 0;
         self.round_budget = self.configured_round_budget;
         self.current_stats = UsageStats::zero();
@@ -3021,7 +3055,7 @@ impl AgentCore {
             format!("[BEGIN TURN turn_id: {action_turn_id}]"),
             "runtime",
         );
-        if self.pending_user_interruption_note && !text.is_empty() {
+        if self.pending_user_interruption_note && (direct_resume || !text.is_empty()) {
             self.pending_user_interruption_note = false;
             self.submit_prompt_component(
                 PromptComponentRole::system(),
@@ -3054,20 +3088,26 @@ impl AgentCore {
         {
             system_texts.push(format!("Long-context maintenance:\n{shrink_review}"));
         }
-        if !text.is_empty() {
-            self.submit_prompt_component(
-                PromptComponentRole::user(),
-                "user_question",
-                text,
-                "user_input",
-            );
-        }
         for system_text in system_texts {
             self.submit_prompt_component(
                 PromptComponentRole::system(),
                 "runtime_note",
                 system_text,
                 "runtime",
+            );
+        }
+        // Supporting context describes state already present at turn admission
+        // (notably restart/history notices), so it precedes the user input.
+        if direct_resume || !text.is_empty() {
+            self.submit_prompt_component(
+                PromptComponentRole::user(),
+                if direct_resume {
+                    "user_resume_directly"
+                } else {
+                    "user_question"
+                },
+                text,
+                "user_input",
             );
         }
         if should_memory_precheck {
@@ -3210,6 +3250,11 @@ impl AgentCore {
             protocol_suite.parse(&response.content, &self.capabilities)
         };
         self.normalize_intrinsic_actions(&mut parsed);
+        let preview_accepted = parsed.repair_issue.is_none()
+            && !response.truncated
+            && (!self.context_compact_required || parsed.context_compacts.len() == 1);
+        runtime.on_model_response_validated(preview_accepted, !parsed.continue_work);
+
         if self.context_compact_required
             && (parsed.context_compacts.len() != 1 || parsed.repair_issue.is_some())
         {
@@ -4060,6 +4105,7 @@ impl AgentCore {
                     tool_call_id,
                     cwd,
                     tail_out,
+                    edited_files,
                 } => shell_exec::execute_approved_bash_with_tail(
                     command,
                     cwd,
@@ -4072,6 +4118,7 @@ impl AgentCore {
                     tool_call_id,
                     interval_ms.is_none(),
                     *tail_out,
+                    edited_files,
                     &pending.request,
                     &self.shell_jobs,
                     runtime,
@@ -4175,6 +4222,7 @@ impl AgentCore {
                 continue;
             }
             if self.can_spawn_parallel_readfile_action(&action) {
+                self.emit_action_execution_start_topic(&action, runtime);
                 action_handles.push(self.spawn_parallel_readfile_action(idx, action));
                 continue;
             }
@@ -4752,7 +4800,10 @@ Runtime tool_call ids:",
             // per-call retention policy before reaching this point.
             content = tool_result_gate::gate(&content, tool_result_gate::Retention::Head);
         }
-        if content.trim().is_empty() {
+        // Explicit resume is a header-only user behavior, not synthetic text.
+        if content.trim().is_empty()
+            && !(role == PromptComponentRole::User && kind == "user_resume_directly")
+        {
             return None;
         }
         self.prompt_component_sequence = self.prompt_component_sequence.saturating_add(1);
@@ -5130,7 +5181,92 @@ Runtime tool_call ids:",
         rows
     }
 
-    fn format_action_outcome_body(&self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
+    fn readfile_first_touch_notes(&mut self, outcome: &ActionOutcome) -> String {
+        let Some(evidence) = outcome.readfile_result.as_ref() else {
+            return String::new();
+        };
+        if outcome.status != ActionStatus::Completed || evidence.error_type.is_some() {
+            return String::new();
+        }
+        self.first_touch_note_for_paths(vec![PathBuf::from(&evidence.path)])
+    }
+
+    fn local_shell_first_touch_notes(&mut self, action: &ParsedAction) -> String {
+        let edited_files = action.input_list("edit");
+        if edited_files.is_empty() {
+            return String::new();
+        }
+        // The model declares `edit` paths; they anchor first-touch reminders
+        // even when the command itself later fails validation or execution.
+        let cwd = self.current_prompt_cwd.clone();
+        let paths = edited_files
+            .iter()
+            .map(|file| {
+                let path = Path::new(file);
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    cwd.join(path)
+                }
+            })
+            .collect::<Vec<_>>();
+        self.first_touch_note_for_paths(paths)
+    }
+
+    fn first_touch_note_for_paths(&mut self, paths: Vec<PathBuf>) -> String {
+        let mut notes = Vec::new();
+        for path in paths {
+            if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+                if self.touched_paths.insert(dir.to_path_buf()) {
+                    let dir_text = dir.to_string_lossy();
+                    let dir_text = if dir_text.ends_with('/') {
+                        dir_text.into_owned()
+                    } else {
+                        format!("{dir_text}/")
+                    };
+                    notes.push(format!(
+                        "Reminder: This seems the first time to touch dir {dir_text}, need properly understand the module boundary of this dir, so that your work can be consistent with the architecture, avoiding local blindness."
+                    ));
+                }
+            }
+            if self.touched_paths.insert(path.clone()) {
+                notes.push(format!(
+                    "Reminder: This seems the first time to touch file {}, need to understand the module function of this file, so that your work can be globally consistent, avoiding local blindness.",
+                    path.display()
+                ));
+            }
+        }
+        notes.join("\n")
+    }
+
+    fn format_action_outcome_body(
+        &mut self,
+        action: &ParsedAction,
+        outcome: &ActionOutcome,
+    ) -> String {
+        // First-touch reminders are runtime notes about the model's live prompt
+        // context rather than tool output, so they are attached outside the
+        // tool-result truncation gate and always reach the model in full.
+        let first_touch_note = if action.action == "readfile" {
+            self.readfile_first_touch_notes(outcome)
+        } else if shell_exec::is_local_shell_action(&action.action) {
+            self.local_shell_first_touch_notes(action)
+        } else {
+            String::new()
+        };
+        let body = self.format_action_outcome_body_inner(action, outcome);
+        if first_touch_note.is_empty() {
+            body
+        } else {
+            format!("{first_touch_note}\n{body}")
+        }
+    }
+
+    fn format_action_outcome_body_inner(
+        &self,
+        action: &ParsedAction,
+        outcome: &ActionOutcome,
+    ) -> String {
         let retention = tool_result_gate::Retention::from_tail_out(action.input_bool("tail_out"));
         if self.response_protocol == ResponseProtocolKind::Xml {
             let output_time_ms = now_ms();
@@ -5190,7 +5326,7 @@ Runtime tool_call ids:",
         }
     }
 
-    fn format_action_outcome(&self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
+    fn format_action_outcome(&mut self, action: &ParsedAction, outcome: &ActionOutcome) -> String {
         let body = self.format_action_outcome_body(action, outcome);
         if self.response_protocol == ResponseProtocolKind::Xml {
             format!("<tool_call_id>{}</tool_call_id>{body}", action.call_id)
@@ -5203,11 +5339,11 @@ Runtime tool_call ids:",
         }
     }
 
-    fn format_action_result(&self, action: &ParsedAction, result: &str) -> String {
+    fn format_action_result(&mut self, action: &ParsedAction, result: &str) -> String {
         self.format_action_outcome(action, &ActionOutcome::completed(result))
     }
 
-    fn format_pending_action_result(&self, pending: &PendingApproval, result: &str) -> String {
+    fn format_pending_action_result(&mut self, pending: &PendingApproval, result: &str) -> String {
         let action = ParsedAction {
             action: pending.request.action.clone(),
             name: pending.action_name.clone(),
@@ -5350,6 +5486,7 @@ Runtime tool_call ids:",
                     tool_call_id,
                     cwd,
                     tail_out,
+                    edited_files,
                 } => {
                     let mut should_cancel = || cancel_requested.load(Ordering::SeqCst);
                     let mut runtime = CancelOnlyActionRuntime::new(&mut should_cancel);
@@ -5365,6 +5502,7 @@ Runtime tool_call ids:",
                         tool_call_id,
                         interval_ms.is_none(),
                         *tail_out,
+                        edited_files,
                         &pending_for_thread.request,
                         &shell_jobs,
                         &mut runtime,
@@ -5424,6 +5562,7 @@ Runtime tool_call ids:",
                     },
                     action.input_u64("interval_ms"),
                     action.input_u64("once_timeout_ms").unwrap_or(5000),
+                    action.input_list("edit"),
                     BashApprovalMode::Approve,
                     &shell_jobs,
                     &session_id,
@@ -5446,7 +5585,7 @@ Runtime tool_call ids:",
     }
 
     fn collect_parallel_action_handles(
-        &self,
+        &mut self,
         mut handles: Vec<ParallelActionHandle>,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
@@ -5481,7 +5620,7 @@ Runtime tool_call ids:",
     }
 
     fn collect_approved_parallel_bash_handles(
-        &self,
+        &mut self,
         mut handles: Vec<ApprovedParallelBashHandle>,
         results: &mut [Option<String>],
         runtime: &mut dyn ActionRuntime,
@@ -5560,6 +5699,7 @@ Runtime tool_call ids:",
                 continue;
             }
             if self.can_spawn_parallel_readfile_action(&action) {
+                self.emit_action_execution_start_topic(&action, runtime);
                 handles.push(self.spawn_parallel_readfile_action(idx, action));
                 continue;
             }
@@ -5642,6 +5782,7 @@ Runtime tool_call ids:",
         }
 
         if let executor::ExecutorTarget::Command { path, .. } = &executor_target {
+            self.emit_action_execution_start_topic(&action, runtime);
             let outcome = self.execute_command_capability(&action, path);
             self.record_action_audit(
                 &action_for_audit,
@@ -5658,6 +5799,7 @@ Runtime tool_call ids:",
         } = &executor_target
         {
             self.current_stats.tool_calls += 1;
+            self.emit_action_execution_start_topic(&action, runtime);
             let outcome = match self.mcp_servers.get(server_id) {
                 Some(config) => {
                     match self
@@ -5696,8 +5838,8 @@ Runtime tool_call ids:",
         };
 
         self.current_stats.tool_calls += 1;
-        if shell_exec::is_local_shell_action(&action.action)
-            && self.bash_approval_mode == BashApprovalMode::Approve
+        if !shell_exec::is_local_shell_action(&action.action)
+            || self.bash_approval_mode == BashApprovalMode::Approve
         {
             self.emit_action_execution_start_topic(&action, runtime);
         }
@@ -5760,6 +5902,12 @@ Runtime tool_call ids:",
         }
     }
 
+    // 实际执行入口，不是模型提出调用的 start 通知。所有执行路径都要覆盖，
+    // 否则普通 readfile 等工具缺少边界，消费者无法观察 A结束 -> B执行 的串行时序。
+    // 不可按 proposal 顺序假定执行：同批工具可能并行或等待审批；Shell 审批路径
+    // 必须在批准之后发送。普通内置、命令扩展、MCP、并行读文件也不能遗漏。
+    // 回归：serial_builtin_actions_emit_execution_boundaries_before_each_finish；
+    // 真实产品浏览器 tools 场景验证最终答复之前，第二次 readfile 已让第一项折叠。
     fn emit_action_execution_start_topic(
         &self,
         action: &ParsedAction,
@@ -6009,6 +6157,10 @@ Runtime tool_call ids:",
                 .retain(|exchange| !delta_id_set.contains(&exchange.delta_id));
         }
         let removed_delta_count = before_delta_count.saturating_sub(self.deltas.len());
+        // First-touch path tracking mirrors what the model has actually seen in
+        // the live prompt context. A shrink rewrites that context, so the
+        // tracking resets with it and later reads trigger reminders again.
+        self.touched_paths.clear();
 
         let mut hidden_slice_count = 0usize;
         let mut matched_slice_ids = HashSet::new();
@@ -7297,7 +7449,7 @@ fn prompt_type_role_for_scratch(
     spec: &crate::response_protocol::PromptBoundarySpec,
 ) -> &'static str {
     match prompt_type {
-        "user_question" | "user_supplement" => spec.user_role,
+        "user_question" | "user_supplement" | "user_resume_directly" => spec.user_role,
         "llm_response"
         | "llm_response_raw_xml"
         | "llm_free_talk"

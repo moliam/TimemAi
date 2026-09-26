@@ -1,3 +1,4 @@
+import { t } from "./i18n";
 export const COLLAPSED_QUEUE_LIMIT = 4;
 
 export type QueuedMessage = {
@@ -291,7 +292,7 @@ export function applyQueuedMessageAck(
   if (status === "accepted") return [...messages];
   if (status === "committed") return messages.filter((message) => message.id !== messageId);
   return messages.map((message) => message.id === messageId
-    ? { ...message, id: replacementId, deliveryError: error || "发送失败，请重试" }
+    ? { ...message, id: replacementId, deliveryError: error || t("composer.sendFailed") }
     : message);
 }
 

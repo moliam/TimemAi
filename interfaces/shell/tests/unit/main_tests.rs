@@ -15,7 +15,7 @@ use super::{
     render_paste_recovery_choices, render_paste_recovery_prompt, render_queued_user_line,
     render_raw_multiline_paste_submit_choices, render_raw_multiline_paste_submit_prompt,
     render_round_limit_choices, render_round_limit_prompt, render_stale_context_choices,
-    render_stale_context_prompt, render_startup_banner, render_startup_status_block,
+    render_stale_context_prompt, render_startup_banner_at_width, render_startup_status_block,
     render_submitted_user_line_rewrite, render_user_approval_prompt, render_user_input_prompt,
     render_work_instructions_load_choices, render_work_instructions_load_prompt,
     render_workspace_command_report, render_workspace_delete_choices, render_workspace_menu,
@@ -875,13 +875,14 @@ fn startup_banner_lists_env_overrides_on_separate_lines() {
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
         http_transport: Default::default(),
     };
-    let banner = render_startup_banner(
+    let banner = render_startup_banner_at_width(
         ".xxx_mem",
         &config,
         std::path::Path::new("/api_audit.json"),
         std::path::Path::new("/action_audit.json"),
         BashApprovalMode::Approve,
         WorkInstructionLoadMode::Silent,
+        200,
     );
 
     assert!(banner.starts_with('┌'));
@@ -1016,13 +1017,14 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
         http_transport: Default::default(),
     };
-    let default_banner = render_startup_banner(
+    let default_banner = render_startup_banner_at_width(
         ".test_mem",
         &default_config,
         std::path::Path::new(".test_mem/audit/api_audit.json"),
         std::path::Path::new(".test_mem/audit/action_audit.json"),
         BashApprovalMode::Ask,
         WorkInstructionLoadMode::Silent,
+        200,
     );
     assert!(!default_banner.contains(ANSI_HIGHLIGHT));
 
@@ -1041,13 +1043,14 @@ fn startup_banner_highlights_values_outside_protocol_defaults() {
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
         http_transport: Default::default(),
     };
-    let override_banner = render_startup_banner(
+    let override_banner = render_startup_banner_at_width(
         ".test_mem",
         &override_config,
         std::path::Path::new(".test_mem/audit/api_audit.json"),
         std::path::Path::new(".test_mem/audit/action_audit.json"),
         BashApprovalMode::Ask,
         WorkInstructionLoadMode::Silent,
+        200,
     );
     assert!(override_banner.contains(&format!("{ANSI_HIGHLIGHT}anthropic")));
     assert!(override_banner.contains(&format!("{ANSI_HIGHLIGHT}https://example.com/v1")));
@@ -1079,13 +1082,14 @@ fn startup_banner_highlights_custom_model_and_base_url() {
         openai_compatible: timem_in_process::agent_api::OpenAiCompatibleOptions::default(),
         http_transport: Default::default(),
     };
-    let banner = render_startup_banner(
+    let banner = render_startup_banner_at_width(
         ".test_mem",
         &config,
         std::path::Path::new(".test_mem/audit/api_audit.json"),
         std::path::Path::new(".test_mem/audit/action_audit.json"),
         BashApprovalMode::Ask,
         WorkInstructionLoadMode::Silent,
+        200,
     );
 
     assert!(banner.contains("https://private.example/v1"));
@@ -2204,6 +2208,7 @@ fn shell_session_resume_uses_shared_store_and_notice_format() {
         http_transport: Default::default(),
     };
     let stored = StoredSession {
+        model_endpoint_id: None,
         session_id: "web_session_1".to_string(),
         display_name: "Recovered Web".to_string(),
         group_id: None,
@@ -2282,6 +2287,7 @@ fn shell_start_recovers_valid_session_from_partially_corrupt_index() {
         http_transport: Default::default(),
     };
     let stored = StoredSession {
+        model_endpoint_id: None,
         session_id: "shell_recovered".to_string(),
         display_name: "Recovered".to_string(),
         group_id: None,
@@ -2351,6 +2357,7 @@ fn shell_resume_uses_stored_session_cwd_for_core_prompt_context() {
     };
     store
         .upsert_session(&StoredSession {
+            model_endpoint_id: None,
             session_id: "web_session_cwd".to_string(),
             display_name: "Recovered Web".to_string(),
             group_id: None,
@@ -2418,6 +2425,7 @@ fn shell_resume_prefers_non_empty_launch_env_then_cli_over_stored_session_env() 
         ("TIMEM_API_KEY".to_string(), "launch-key".to_string()),
     ]);
     let session = StoredSession {
+        model_endpoint_id: None,
         session_id: "web_session_env".to_string(),
         display_name: "Recovered Web".to_string(),
         group_id: None,
@@ -2486,6 +2494,7 @@ fn shell_resume_prefers_non_empty_launch_env_then_cli_over_stored_session_env() 
 fn shell_resume_ignores_empty_launch_env_values_instead_of_clearing_cache() {
     let workspace = std::env::current_dir().unwrap();
     let session = StoredSession {
+        model_endpoint_id: None,
         session_id: "cached_session".to_string(),
         display_name: "Cached Session".to_string(),
         group_id: None,
@@ -2652,6 +2661,7 @@ fn shell_can_resume_web_style_session_history() {
     };
     store
         .upsert_session(&StoredSession {
+            model_endpoint_id: None,
             session_id: session_id.to_string(),
             display_name: "Session0".to_string(),
             group_id: None,

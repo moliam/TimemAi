@@ -4,6 +4,11 @@ import { describe, expect, it } from "vitest";
 const source = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
 
 describe("thread latest-content following", () => {
+  it("refreshes portaled answer outline geometry when the enclosing turn shrinks", () => {
+    expect(source).toContain('const turnContainer = root.closest(".turn-interaction")');
+    expect(source).toContain("if (turnContainer) observer?.observe(turnContainer)");
+  });
+
   it("does not let empty-session restoration suppress the first turn scroll", () => {
     expect(source).toMatch(
       /restoredSessionIdRef\.current = latestTurn\?\.turn_id\s*\? activeSessionId\s*:\s*undefined/,

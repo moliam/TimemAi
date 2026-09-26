@@ -8,6 +8,7 @@ const UNCORRELATED_REQUESTS = new Set<ClientCommand["type"]>([
   "tool_repo_open_terminal",
   "mcp_server_secrets_reveal",
   "model_endpoint_secret_reveal",
+  "model_endpoint_import_scan",
   "mem_temporary_items_list",
 ]);
 

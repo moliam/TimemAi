@@ -372,6 +372,68 @@ impl TurnUi for SupplementDuringModelUi {
     }
 }
 
+struct SupplementModelDispatchTimeoutUi {
+    injected: bool,
+    dispatch_timeout: Option<Duration>,
+    pending: Vec<String>,
+}
+
+impl SupplementModelDispatchTimeoutUi {
+    fn new() -> Self {
+        Self {
+            injected: false,
+            dispatch_timeout: None,
+            pending: Vec::new(),
+        }
+    }
+}
+
+impl TurnUi for SupplementModelDispatchTimeoutUi {
+    fn take_user_supplement_model_dispatch_timeout(&mut self) -> Option<Duration> {
+        if !self.injected {
+            self.injected = true;
+            self.pending
+                .push("补充：请在当前状态下重新规划".to_string());
+            self.dispatch_timeout = Some(Duration::from_millis(30_001));
+        }
+        self.dispatch_timeout
+    }
+
+    fn drain_user_supplements(&mut self) -> Vec<String> {
+        self.dispatch_timeout = None;
+        std::mem::take(&mut self.pending)
+    }
+}
+
+struct SupplementModelDispatchTimeoutModel {
+    prompts: Vec<String>,
+}
+
+impl ModelClient for SupplementModelDispatchTimeoutModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        prompt: &str,
+        _audit_file: &std::path::Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        let _ = should_cancel;
+        self.prompts.push(prompt.to_string());
+        if self.prompts.len() == 1 {
+            return Ok(llm(
+                r#"{"free_talk":"开始长时间本地动作。","working_still_action":[{"run_bash":{"loop_cmd":"sleep 3","interval_ms":10,"loop_timeout_ms":600000}}]}"#,
+                1_000,
+                false,
+            ));
+        }
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"已按超时后的新输入继续。"}"#,
+            1_200,
+            false,
+        ))
+    }
+}
+
 #[derive(Default)]
 struct SupplementAndExpansionUi {
     injected: bool,
@@ -465,6 +527,7 @@ fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut NoopTurnUi,
         None,
@@ -478,9 +541,10 @@ fn every_model_request_lists_still_running_commands_with_the_creating_tool_call_
     assert!(second.contains("still running cmds:"), "{second}");
     assert!(second.contains("### STILL RUNNING"), "{second}");
     assert!(
-        second.contains("| pid | created by tool_call id |"),
+        second.contains("| pid | created by tool_call id | command |"),
         "{second}"
     );
+    assert!(second.contains("`sleep 30`"), "{second}");
     let call_id = second
         .lines()
         .find(|line| line.starts_with("| ") && line.contains('`'))
@@ -532,6 +596,7 @@ fn session_turn_uses_model_service_config_response_protocol_over_core_state() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut NoopTurnUi,
         None,
@@ -705,6 +770,7 @@ fn session_turn_injects_progress_reminder_after_six_tool_only_rounds() {
             runtime: "test_runtime",
             run_bash_target: "test_target",
             additional_context: None,
+            images: &[],
         },
         &mut NoopTurnUi,
         None,
@@ -773,6 +839,7 @@ fn free_talk_resets_progress_reminder_streak() {
             runtime: "test_runtime",
             run_bash_target: "test_target",
             additional_context: None,
+            images: &[],
         },
         &mut NoopTurnUi,
         None,
@@ -814,6 +881,7 @@ fn progress_reminder_streak_does_not_carry_across_turns() {
             runtime: "test_runtime",
             run_bash_target: "test_target",
             additional_context: None,
+            images: &[],
         },
         &mut NoopTurnUi,
         None,
@@ -840,6 +908,7 @@ fn progress_reminder_streak_does_not_carry_across_turns() {
             runtime: "test_runtime",
             run_bash_target: "test_target",
             additional_context: None,
+            images: &[],
         },
         &mut NoopTurnUi,
         None,
@@ -889,6 +958,7 @@ fn session_turn_injects_reasoning_reminder_after_configured_rounds() {
             runtime: "test_runtime",
             run_bash_target: "test_target",
             additional_context: None,
+            images: &[],
         },
         &mut NoopTurnUi,
         None,
@@ -942,6 +1012,7 @@ fn session_turn_does_not_inject_focus_reminder_before_first_model_request() {
             runtime: "test_runtime",
             run_bash_target: "test_target",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -988,6 +1059,7 @@ fn session_turn_injects_due_focus_reminder_before_the_next_model_request() {
             runtime: "test_runtime",
             run_bash_target: "test_target",
             additional_context: None,
+            images: &[],
         },
         &mut NoopTurnUi,
         None,
@@ -1020,7 +1092,7 @@ fn session_turn_retries_transient_model_api_errors_and_reports_status() {
     let mut ui = RetryRecordingUi::default();
     let mut model = ReplayModel::new([
         Err("model_http_500: upstream overloaded".to_string()),
-        Err("model_network_error: curl: (16) Error in the HTTP2 framing layer".to_string()),
+        Err("model_request_error: stage=response_headers error sending request for url (https://example.invalid/v1/chat/completions): connection error: unexpected end of file".to_string()),
         Ok(llm(
             r#"{"status":"ALL_FINISHED","final_answer":"重试后成功。"}"#,
             1_000,
@@ -1038,6 +1110,7 @@ fn session_turn_retries_transient_model_api_errors_and_reports_status() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1051,6 +1124,7 @@ fn session_turn_retries_transient_model_api_errors_and_reports_status() {
     assert_eq!(ui.retries[0].1, crate::DEFAULT_MODEL_SYSTEM_ERROR_RETRIES);
     assert_eq!(ui.retries[0].2, Duration::ZERO);
     assert!(ui.retries[0].3.contains("model_http_500"));
+    assert!(ui.retries[1].3.contains("unexpected end of file"));
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "model_retry"), 2);
 }
@@ -1088,6 +1162,7 @@ fn session_turn_resets_system_retry_attempts_for_each_model_request() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1137,6 +1212,7 @@ fn session_turn_repairs_empty_model_content() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1194,6 +1270,7 @@ fn session_turn_repairs_any_non_protocol_model_content() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1261,6 +1338,7 @@ fn session_turn_replaces_a_sudden_large_action_delta_before_next_model_call() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1320,6 +1398,7 @@ fn session_turn_recovers_from_model_input_overflow_variants() {
                 runtime: "timem_native_shell",
                 run_bash_target: "user_local_machine",
                 additional_context: None,
+                images: &[],
             },
             &mut ui,
             None,
@@ -1387,6 +1466,7 @@ fn repeated_model_input_overflow_stops_after_single_delta_recovery() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1440,6 +1520,7 @@ This is an answer, not an executable action:
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1486,6 +1567,7 @@ fn session_turn_counts_successful_xml_root_synthesis_without_a_repair_call() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1546,6 +1628,7 @@ fn session_turn_failed_xml_root_synthesis_counts_only_one_repair() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1603,6 +1686,7 @@ discard-after"#,
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1664,6 +1748,7 @@ fn session_turn_retries_an_extracted_final_answer_before_finishing() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1712,6 +1797,7 @@ fn session_turn_never_accepts_a_recovered_final_answer_after_retry_exhaustion() 
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1782,6 +1868,7 @@ This is all answer text.
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1849,6 +1936,7 @@ fn session_turn_xml_invalid_native_action_still_repairs() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1902,6 +1990,7 @@ fn session_turn_json_final_answer_with_protocol_examples_does_not_repair_or_exec
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -1952,6 +2041,7 @@ fn session_turn_emits_repair_topic_for_each_protocol_repair_attempt() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2003,6 +2093,7 @@ fn session_turn_does_not_retry_non_transient_model_api_errors() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2092,6 +2183,7 @@ fn session_turn_run_bash_poll_mode_waits_until_check_succeeds() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2153,6 +2245,7 @@ fn session_turn_long_running_command_hands_status_to_next_model_round() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2229,6 +2322,7 @@ fn sequential_group_with_long_timeout_command_hands_status_to_model() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2292,6 +2386,7 @@ fn session_turn_executes_parallel_action_group_before_next_group() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2355,6 +2450,7 @@ fn session_turn_cancels_parallel_long_running_bash_actions() {
             runtime: "timem_web",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2424,6 +2520,7 @@ fn session_turn_stop_after_one_parallel_action_completed_cancels_the_running_act
             runtime: "timem_web",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2491,6 +2588,7 @@ fn session_turn_stop_cancels_parallel_bash_after_approval() {
             runtime: "timem_web",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2559,6 +2657,7 @@ fn session_turn_parallel_group_spawns_bash_while_running_builtin_actions_in_orde
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2621,6 +2720,7 @@ fn session_turn_parallel_group_runs_readfiles_concurrently_and_keeps_declared_or
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2698,6 +2798,7 @@ fn session_turn_parallel_group_collects_approvals_then_spawns_bash_concurrently(
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2768,6 +2869,7 @@ fn session_turn_user_supplement_during_model_wait_continues_after_current_respon
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2791,6 +2893,180 @@ fn session_turn_user_supplement_during_model_wait_continues_after_current_respon
     assert!(model.inner.prompts[1].contains("补充：请按最新指示重新回答"));
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "user_supplement"), 1);
+}
+
+#[test]
+fn user_supplement_model_dispatch_timeout_interrupts_wait_and_builds_stateful_prompt() {
+    let dir = tmp_dir("user_supplement_dispatch_timeout");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    let mut ui = SupplementModelDispatchTimeoutUi::new();
+    let mut model = SupplementModelDispatchTimeoutModel {
+        prompts: Vec::new(),
+    };
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "初始任务",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "已按超时后的新输入继续。");
+    assert_eq!(model.prompts.len(), 2);
+    assert!(!model.prompts[0].contains("USER_SUPPLEMENT_ACTION_DISPATCH_TIMEOUT"));
+    assert!(!model.prompts[0].contains("补充：请在当前状态下重新规划"));
+    let dispatched = &model.prompts[1];
+    assert!(
+        dispatched.contains("USER_SUPPLEMENT_ACTION_DISPATCH_TIMEOUT"),
+        "{dispatched}"
+    );
+    assert!(dispatched.contains("do not invent it"), "{dispatched}");
+    assert!(
+        dispatched.contains("including still-running work"),
+        "{dispatched}"
+    );
+    assert!(dispatched.contains("初始任务"), "{dispatched}");
+    assert!(
+        dispatched.contains("补充：请在当前状态下重新规划"),
+        "{dispatched}"
+    );
+    assert!(ui.dispatch_timeout.is_none());
+    assert!(ui.pending.is_empty());
+    let events = read_audit_events(&audit);
+    assert_eq!(audit_event_count(&events, "user_supplement"), 1);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn user_supplement_dispatch_timeout_prompt_includes_still_running_work() {
+    struct BackgroundThenDispatchUi {
+        model_request_count: u32,
+        dispatch_timeout: Option<Duration>,
+        pending: Vec<String>,
+    }
+
+    impl TurnUi for BackgroundThenDispatchUi {
+        fn on_model_api_request(
+            &mut self,
+            _round: u32,
+            _request: &crate::ModelInteractionRequest,
+            _api_payload: &serde_json::Value,
+        ) {
+            self.model_request_count += 1;
+            if self.model_request_count == 2 {
+                self.pending.push("补充：根据后台任务状态继续".to_string());
+                self.dispatch_timeout = Some(Duration::from_millis(30_001));
+            }
+        }
+
+        fn take_user_supplement_model_dispatch_timeout(&mut self) -> Option<Duration> {
+            self.dispatch_timeout
+        }
+
+        fn drain_user_supplements(&mut self) -> Vec<String> {
+            self.dispatch_timeout = None;
+            std::mem::take(&mut self.pending)
+        }
+    }
+
+    struct BackgroundThenDispatchModel {
+        prompts: Vec<String>,
+    }
+
+    impl ModelClient for BackgroundThenDispatchModel {
+        fn call_model(
+            &mut self,
+            _config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &std::path::Path,
+            should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.prompts.push(prompt.to_string());
+            match self.prompts.len() {
+                1 => Ok(llm(
+                    r#"{"free_talk":"启动后台任务。","working_still_action":[{"run_bash":{"cmd":"sleep 30","background":true}}]}"#,
+                    1_000,
+                    false,
+                )),
+                2 => {
+                    let _ = should_cancel;
+                    Ok(llm(
+                        r#"{"free_talk":"开始长时间本地动作。","working_still_action":[{"run_bash":{"loop_cmd":"sleep 3","interval_ms":10,"loop_timeout_ms":600000}}]}"#,
+                        1_100,
+                        false,
+                    ))
+                }
+                _ => Ok(llm(
+                    r#"{"status":"ALL_FINISHED","final_answer":"已结合后台任务状态处理补充。"}"#,
+                    1_300,
+                    false,
+                )),
+            }
+        }
+    }
+
+    let dir = tmp_dir("supplement_timeout_running_work");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let mut config = test_config();
+    let mut ui = BackgroundThenDispatchUi {
+        model_request_count: 0,
+        dispatch_timeout: None,
+        pending: Vec::new(),
+    };
+    let mut model = BackgroundThenDispatchModel {
+        prompts: Vec::new(),
+    };
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "启动后台工作",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "已结合后台任务状态处理补充。");
+    assert_eq!(model.prompts.len(), 3);
+    let dispatched = &model.prompts[2];
+    assert!(
+        dispatched.contains("USER_SUPPLEMENT_ACTION_DISPATCH_TIMEOUT"),
+        "{dispatched}"
+    );
+    assert!(dispatched.contains("### STILL RUNNING"), "{dispatched}");
+    assert!(dispatched.contains("`sleep 30`"), "{dispatched}");
+    assert!(
+        dispatched.contains("补充：根据后台任务状态继续"),
+        "{dispatched}"
+    );
+
+    core.shell_jobs
+        .cancel_unfinished_for_session("test_session");
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -2823,6 +3099,7 @@ fn session_turn_user_supplement_waits_for_truncated_output_retry_then_continues(
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2882,6 +3159,7 @@ fn session_turn_user_supplement_at_final_boundary_continues_same_turn() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2932,6 +3210,7 @@ fn session_turn_user_supplement_after_model_response_continues_same_turn() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -2980,6 +3259,7 @@ fn session_turn_preserves_incremental_prompt_cache_plan_across_rounds() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -3053,6 +3333,7 @@ fn session_turn_preserves_cache_plan_with_json_response_protocol() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -3119,6 +3400,7 @@ fn session_turn_preserves_cache_plan_with_xml_response_protocol() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -3172,6 +3454,7 @@ fn session_turn_replays_previous_assistant_components_before_next_user_input() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -3193,7 +3476,8 @@ fn session_turn_replays_previous_assistant_components_before_next_user_input() {
             audit_file: &audit,
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
-            additional_context: Some("runtime note after user"),
+            additional_context: Some("startup context before user"),
+            images: &[],
         },
         &mut ui,
         None,
@@ -3205,10 +3489,11 @@ fn session_turn_replays_previous_assistant_components_before_next_user_input() {
     let free_talk = prompt.find("previous free talk").unwrap();
     let previous_answer = prompt.find("previous answer").unwrap();
     let user = prompt.find("second user input").unwrap();
-    let runtime_note = prompt.find("runtime note after user").unwrap();
+    let runtime_note = prompt.find("startup context before user").unwrap();
     assert!(free_talk < user);
     assert!(previous_answer < user);
-    assert!(user < runtime_note);
+    assert!(previous_answer < runtime_note);
+    assert!(runtime_note < user);
     assert!(prompt.contains("## Ai4"));
     assert!(!prompt.contains("created_at_ms"));
     assert!(!prompt.contains("batch_id"));
@@ -3241,6 +3526,7 @@ fn session_turn_defaults_to_raw_assistant_output_replay() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -3263,6 +3549,7 @@ fn session_turn_defaults_to_raw_assistant_output_replay() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -3305,6 +3592,7 @@ fn session_turn_does_not_inject_host_runtime_metadata() {
             runtime: "timem_ios_host",
             run_bash_target: "not_available",
             additional_context: Some("explicit supporting context"),
+            images: &[],
         },
         &mut ui,
         None,
@@ -3359,6 +3647,7 @@ fn session_turn_records_cached_tokens_in_profiler_and_latest_usage() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         Some(&mut profiler),
@@ -3478,6 +3767,7 @@ fn cancelled_turn_projection_has_one_token_and_authoritative_terminal_order() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -3543,6 +3833,7 @@ fn completed_turn_projection_finishes_completed_without_stop_inference() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -3591,6 +3882,7 @@ fn session_turn_can_cancel_before_model_call_without_network() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -3634,6 +3926,7 @@ fn cancelled_turn_injects_one_runtime_note_before_next_user_and_runtime_context(
             runtime: "timem_web",
             run_bash_target: "user_local_machine",
             additional_context: Some("old runtime context"),
+            images: &[],
         },
         &mut cancel_ui,
         None,
@@ -3656,6 +3949,7 @@ fn cancelled_turn_injects_one_runtime_note_before_next_user_and_runtime_context(
             runtime: "timem_web",
             run_bash_target: "user_local_machine",
             additional_context: Some("new runtime information"),
+            images: &[],
         },
         &mut ui,
         None,
@@ -3673,7 +3967,8 @@ fn cancelled_turn_injects_one_runtime_note_before_next_user_and_runtime_context(
 
     assert!(old_user < note, "{prompt}");
     assert!(note < new_user, "{prompt}");
-    assert!(new_user < new_runtime, "{prompt}");
+    assert!(note < new_runtime, "{prompt}");
+    assert!(new_runtime < new_user, "{prompt}");
     assert_eq!(prompt.matches(note_text).count(), 1);
     assert!(!prompt.contains("<ASSISTANT name="));
 
@@ -3698,6 +3993,7 @@ fn cancelled_turn_injects_one_runtime_note_before_next_user_and_runtime_context(
             runtime: "timem_web",
             run_bash_target: "user_local_machine",
             additional_context: Some("third runtime information"),
+            images: &[],
         },
         &mut ui,
         None,
@@ -3740,6 +4036,7 @@ fn cancelled_turn_json_prompt_renders_interruption_as_runtime_note_not_action_re
             runtime: "timem_web",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut cancel_ui,
         None,
@@ -3761,6 +4058,7 @@ fn cancelled_turn_json_prompt_renders_interruption_as_runtime_note_not_action_re
             runtime: "timem_web",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut NoopTurnUi,
         None,
@@ -3824,6 +4122,7 @@ fn model_error_does_not_inject_user_interruption_note_on_next_turn() {
             runtime: "timem_web",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -3843,6 +4142,7 @@ fn model_error_does_not_inject_user_interruption_note_on_next_turn() {
             runtime: "timem_web",
             run_bash_target: "user_local_machine",
             additional_context: Some("runtime after model error"),
+            images: &[],
         },
         &mut ui,
         None,
@@ -3885,6 +4185,7 @@ fn session_turn_accepts_a_protocol_compliant_repair() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -3942,6 +4243,7 @@ fn session_turn_protocol_repair_failure_is_structured() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -4011,6 +4313,7 @@ fn session_turn_terminal_protocol_failure_does_not_consume_or_revive_late_supple
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -4063,6 +4366,7 @@ fn session_turn_forced_shrink_runs_to_final_without_repeated_shrink() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -4147,6 +4451,7 @@ fn session_turn_truncated_output_replays_partial_response_and_requests_small_ite
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -4222,6 +4527,7 @@ fn session_turn_round_limit_continue_recharges_and_finishes_same_task() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -4278,6 +4584,7 @@ fn session_turn_noop_ui_uses_default_round_limit_continue() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -4337,6 +4644,7 @@ fn session_turn_round_limit_stop_sets_structured_stop_reason() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -4413,6 +4721,7 @@ fn session_turn_bash_approval_executes_action_then_finishes_with_audit() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -4505,6 +4814,7 @@ fn session_turn_cancelled_user_approval_resumes_ui_before_continuing() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -4560,6 +4870,7 @@ fn session_turn_noop_ui_uses_default_user_approval() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -4614,6 +4925,7 @@ fn session_turn_finished_with_actions_repairs_then_accepts_plain_final() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -4691,6 +5003,7 @@ fn session_turn_scratch_context_offload_records_id_and_continues() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: Some("extra context that should be offloaded"),
+            images: &[],
         },
         &mut ui,
         None,
@@ -4780,6 +5093,7 @@ fn session_turn_context_compact_emits_structured_topic() {
             runtime: "timem_native_shell",
             run_bash_target: "user_local_machine",
             additional_context: None,
+            images: &[],
         },
         &mut ui,
         None,
@@ -4944,6 +5258,7 @@ fn session_replay_story_covers_repair_memory_scratch_shrink_and_observation_rend
             &mut core,
             &mut config,
             TurnInput {
+                images: &[],
                 input,
                 session: "story_session",
                 audit_file: &audit,
@@ -5180,6 +5495,7 @@ fn truncated_native_sse_recovery_guides_small_tool_iteration_to_correct_answer()
             runtime: "test",
             run_bash_target: "test_machine",
             additional_context: None,
+            images: &[],
         },
         &mut NoopTurnUi,
         None,
@@ -5343,6 +5659,7 @@ fn native_mode_round_trips_structured_calls_and_results_before_final_text() {
             runtime: "test",
             run_bash_target: "test_machine",
             additional_context: None,
+            images: &[],
         },
         &mut NoopTurnUi,
         None,
@@ -5364,6 +5681,7 @@ fn native_mode_round_trips_structured_calls_and_results_before_final_text() {
             runtime: "test",
             run_bash_target: "test_machine",
             additional_context: None,
+            images: &[],
         },
         &mut NoopTurnUi,
         None,

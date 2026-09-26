@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { beforeAll } from "vitest";
+import { setLocale } from "../src/i18n";
+import { zh } from "../src/i18n/strings.zh";
 import {
   ChatHistoryRecord,
   ChatMessage,
@@ -182,6 +185,10 @@ const actionEvent = (
       ...(actionId ? { action_id: actionId } : {}),
     },
   },
+});
+
+beforeAll(() => {
+  setLocale("zh");
 });
 
 describe("authoritative turn projection", () => {
@@ -1377,6 +1384,22 @@ describe("web topic view model", () => {
       "…/timem_shell",
     );
     expect(workspacePathLabel("timem_shell")).toBe("timem_shell");
+  });
+
+  it("preserves presentation identity and order while keeping authoritative event timestamps", () => {
+    const start = actionEvent("1000", "start", "running", { cmd: "sleep 10" }, "stable");
+    const execution = actionEvent("2000", "execution_start", "running", { cmd: "sleep 10" }, "stable");
+    const background = actionEvent("3000", "finish", "background_running", { cmd: "sleep 10" }, "stable");
+    const finish = actionEvent("4000", "finish", "completed", { cmd: "sleep 10" }, "stable");
+    for (const updates of [[execution], [execution, background], [execution, background, finish]]) {
+      const [row] = coalesceActionLifecycle([start, ...updates]);
+      expect(row.presentation_id).toBe(start.event_id);
+      expect(row.presentation_created_at_ms).toBe(start.created_at_ms);
+      expect(row.event_id).toBe(updates.at(-1)!.event_id);
+      expect(row.created_at_ms).toBe(updates.at(-1)!.created_at_ms);
+    }
+    const [trimmed] = coalesceActionLifecycle([background, finish]);
+    expect(trimmed.presentation_id).toBe(background.event_id);
   });
 
   it("replaces an action start with its terminal lifecycle event", () => {
@@ -2881,7 +2904,7 @@ describe("web topic view model", () => {
 
     expect(activeModelRetryStatus(retrying)).toMatchObject({
       kind: "retrying",
-      label: "retrying",
+      label: zh.retry.retryingLabel,
       progress: "2/20",
     });
     expect(activeModelRetryStatus(retrying)?.detail).toContain(
@@ -3287,7 +3310,7 @@ describe("web topic view model", () => {
       ),
     );
     expect(activity).toMatchObject({
-      title: "Bash · completed",
+      title: "Bash · ✓",
       code: "gh run list --limit 5",
       code_language: "bash",
     });
@@ -3302,7 +3325,7 @@ describe("web topic view model", () => {
       }),
     );
     expect(background).toMatchObject({
-      title: "Bash · running (bg)",
+      title: "Bash · 后台运行",
       tool_status: "background_running",
     });
 
@@ -3315,7 +3338,7 @@ describe("web topic view model", () => {
       }),
     );
     expect(timeout).toMatchObject({
-      title: "Bash · timed out",
+      title: "Bash · 已超时",
       tool_status: "timeout",
       pid: 4321,
     });
@@ -3397,7 +3420,7 @@ describe("web topic view model", () => {
     const completedTopic = completed.payload as unknown as CoreTopicEvent;
 
     expect(activityFromTopic(completedTopic)).toMatchObject({
-      title: "Poll · completed",
+      title: "Poll · ✓",
       tool_mode: "poll",
       code: "test -f build/done",
       elapsed_ms: 18000,
@@ -4240,5 +4263,64 @@ describe("session worker tree", () => {
     expect(
       sessionWorkerTreeRows(workers).map(({ worker }) => worker.worker_id),
     ).toEqual(["orphan", "cycle_a", "cycle_b"]);
+  });
+});
+
+describe("boundSessionHistory message ordering", () => {
+  const sessionWithMessages = (messages: ChatMessage[]): Session =>
+    ({
+      session_id: "s_order",
+      display_name: "s",
+      state: "ready",
+      current_dir: "/tmp",
+      created_at_ms: 0,
+      updated_at_ms: 0,
+      turns: [],
+      messages,
+      attachments: [],
+      workers: [],
+      contexts: [],
+      pending_workers: 0,
+      active_turn_id: null,
+      pending_turn_id: null,
+      cancelling_turn_id: null,
+    }) as unknown as Session;
+
+  it("orders messages by created_at_ms regardless of arrival order", () => {
+    const message = (id: string, created_at_ms: number): ChatMessage =>
+      ({
+        id,
+        role: "user",
+        text: id,
+        created_at_ms,
+        kind: null,
+        completion: null,
+      }) as ChatMessage;
+    const session = sessionWithMessages([
+      message("m1", 3000),
+      message("m2", 1000),
+      message("m3", 2000),
+    ]);
+    const bounded = boundSessionHistory(session);
+    expect(bounded.messages.map((m) => m.id)).toEqual(["m2", "m3", "m1"]);
+  });
+
+  it("keeps equal-time messages in their original relative order", () => {
+    const message = (id: string): ChatMessage =>
+      ({
+        id,
+        role: "user",
+        text: id,
+        created_at_ms: 500,
+        kind: null,
+        completion: null,
+      }) as ChatMessage;
+    const session = sessionWithMessages([
+      message("a"),
+      message("b"),
+      message("c"),
+    ]);
+    const bounded = boundSessionHistory(session);
+    expect(bounded.messages.map((m) => m.id)).toEqual(["a", "b", "c"]);
   });
 });

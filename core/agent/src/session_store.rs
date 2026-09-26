@@ -16,6 +16,8 @@ const MAX_SESSION_INDEX_RECORD_BYTES: usize = 1024 * 1024;
 pub struct StoredSession {
     pub session_id: String,
     pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_endpoint_id: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub current_dir: String,
@@ -1477,7 +1479,7 @@ pub fn chat_history_prompt_format_hint(path: &Path) -> String {
         extra: BTreeMap::new(),
     };
     format!(
-        "Refer to chat history when necessary:\npath: {}\nformat: JSONL, one record per line.\nrecord types:\n- {}\n- {}\nMessage records may include optional kind for user entries: task, supplement, or approval.\nAdditional event fields may appear depending on kind.",
+        "Refer to chat history when necessary:\npath: {}\nformat: JSONL, one record per line.\nrecord types:\n- {}\n- {}\nMessage records may include optional kind for user entries: task, supplement, approval, or queued_interrupted.\nqueued_interrupted marks queued input that was never dispatched into a Core Turn; never resume it as a task.\nAdditional event fields may appear depending on kind.",
         path.display(),
         serde_json::to_string(&message).expect("chat history message example serializes"),
         serde_json::to_string(&event).expect("chat history event example serializes")
@@ -1493,6 +1495,7 @@ pub fn new_stored_session(
 ) -> StoredSession {
     let now = now_ms();
     StoredSession {
+        model_endpoint_id: None,
         session_id: session_id.into(),
         display_name: display_name.into(),
         created_at_ms: now,

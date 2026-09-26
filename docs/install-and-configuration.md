@@ -111,6 +111,82 @@ On Windows, exit Timem before updating because the executable may be locked.
 Release users do not need Node.js or a separate assistant-ui checkout. Node/pnpm
 are only needed for frontend development.
 
+### Session endpoint binding and editor
+
+Selecting an endpoint persists its stable ID in the Session. The Web header,
+Session list and selector render that binding, so renaming or editing an endpoint
+does not turn a bound Session into a custom configuration. Idle Sessions receive
+the complete updated route, including model, URL, protocols, credentials, headers
+and transport options. Active Turns keep their current configuration; the latest
+endpoint is resolved before the next Turn (including ToolGen) starts and when an
+idle Session is restored. A deleted binding is shown as `接入点已删除` and blocks
+new requests until another endpoint is selected; cached credentials are not a fallback.
+
+Legacy Sessions without an ID migrate only on a unique full configuration match,
+including secrets. Diverged or ambiguous legacy configurations require explicit
+endpoint selection. Independent profiles display `自定义配置 · <model>`; a missing
+model displays `未配置`. Labels are not authentication or service-health checks.
+
+The endpoint editor puts name, model ID, Base URL and API Key first, followed by
+protocols and token limits, then optional transport and request customization.
+API keys remain optional for services that do not require authentication.
+The endpoint list supports selecting multiple entries for deletion; Timem asks
+for one confirmation and removes the batch atomically from the shared store.
+The confirmation closes immediately after the user confirms it, and a
+non-blocking pending indicator remains until the authoritative endpoint update
+arrives.
+Cancel, Escape, and the backdrop remain available while a deletion is pending,
+and cancel preserves the current selection for adjustment.
+
+### Importing endpoints from other CLI ecosystems
+
+Timem reads existing CLI agent configurations instead of asking users to retype
+them. In Settings → Model Endpoints → Import, enter one or both local config
+directories (for example `~/.codex` and `~/.claude`), scan, review the redacted
+preview, and import the selected models as shared endpoints. Parsing runs in the
+local Timem host process on the user's machine; `~` expands to that user's home
+directory on every supported platform.
+
+- Codex CLI (`config.toml`, optional `auth.json`): model providers, profiles,
+  the default model/provider pair, static and environment-backed HTTP headers,
+  reasoning effort, response-storage opt-out and verbosity are mapped to the
+  equivalent Timem endpoint fields and request fields. Profiles and sibling
+  `*.config.toml` profile overlays are scanned as explicit candidates. A provider
+  without a model source is reported as missing instead of borrowing the default
+  model from an unrelated provider. An `env_key` is read from the Timem process
+  environment first. For the standard `~/.codex` layout, a CHJ provider using
+  `CHJ_API_KEY` also falls back to the EPT portal token in
+  `~/.config/ept/auth_session.json`, matching the launcher that injects that
+  environment variable for Codex.
+- Claude Code (`settings.json`, `settings.local.json` with local overrides):
+  model, base URL, auth token/API key, thinking budget and custom headers are
+  mapped to an Anthropic endpoint.
+Reasoning effort semantics: the configured reasoning effort applies only to
+critical model requests (currently the forced context-compaction round); ordinary
+requests send thinking disabled (`thinking: disabled` / `enable_thinking=false`
+/ `reasoning.effort=none` per protocol) to save latency and cost.
+
+
+Scanned secrets never round-trip through the browser: the preview only reports
+whether a key was found, and the import applies the host-held candidate
+directly to `model_endpoints.json`. Candidates are consumed on import, name
+conflicts are deduplicated automatically, and fields without an honest API
+mapping (for example Claude Code's `effortLevel`) are reported explicitly
+instead of being silently dropped.
+
+### Image paste and visual Q&A
+
+Paste a screenshot directly into the composer (`Cmd/Ctrl+V`); pasted images
+upload through the same `/api/upload` path as the attach button and appear in
+the attachment strip. On submit, PNG/JPEG/WebP/GIF attachments are delivered
+to the model as image parts of the request, so a vision-capable model can
+answer questions about the screenshot. Limits are fail closed: one image at
+most 8 MB, one turn at most 8 images and 16 MB total; exceeding them rejects
+the turn instead of silently dropping the image. Other file types keep the
+existing text-only listing. Attachments added as mid-turn supplements are
+listed as files only; their pixels do not reach the model until the next new
+turn. Audit dumps redact image payloads to size placeholders.
+
 ## Recommended Start: Timem Web
 
 Start the installed Web host with one command:
@@ -486,13 +562,17 @@ Shell:
   to exit.
 - While the model is working, typing another question and pressing Enter queues a
   separate next turn; it does not replace the current turn’s final answer.
-
 Web:
 
 - When creating a Session, choose a registered Workspace or enter an existing
   absolute directory on the Timem host. The selected directory becomes that
   Session's CWD.
 - Sessions can use different model/API/runtime settings.
+- Use the composer’s immediate supplement action when an input must affect the current
+  turn. If that accepted supplement waits 20 seconds for the next model dispatch while a
+  long local action still holds the turn, Timem interrupts that local action and sends a
+  state-aware follow-up containing current running work plus the supplement instead of
+  waiting for the action to finish.
 - The sidebar supports persistent Session groups. Groups can be created,
   renamed, collapsed, and deleted only while empty. Group order is fixed by
   creation order and cannot be dragged or otherwise reordered. A Group that

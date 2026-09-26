@@ -85,6 +85,7 @@ pub struct CoreSessionWorkerConfig {
     pub workspace: CoreSessionWorkerWorkspace,
     pub assistant_speaker_name: Option<String>,
     pub continue_supplements_after_final_answer: bool,
+    pub user_supplement_model_dispatch_timeout: Duration,
 }
 
 impl CoreSessionWorkerConfig {
@@ -94,6 +95,8 @@ impl CoreSessionWorkerConfig {
             workspace,
             assistant_speaker_name: None,
             continue_supplements_after_final_answer: true,
+            user_supplement_model_dispatch_timeout:
+                agent_core::USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
         }
     }
 
@@ -334,6 +337,7 @@ enum CoreSessionWorkerCommand {
         initial_supplements: Vec<QueuedSupplement>,
         direct_resume: bool,
         cancel_generation: u64,
+        turn_images: Vec<agent_core::ModelImagePart>,
     },
     RunToolGen {
         request: ToolGenRequest,
@@ -386,6 +390,7 @@ struct QueuedSupplement {
     text: String,
     additional_context: Option<String>,
     command_id: Option<String>,
+    queued_at: Instant,
 }
 
 enum PendingRuntimeUpdate {
@@ -492,6 +497,7 @@ impl CoreSessionWorkerHandle {
             command_id,
             Vec::new(),
             true,
+            Vec::new(),
         )
     }
 
@@ -501,7 +507,35 @@ impl CoreSessionWorkerHandle {
         additional_context: Option<String>,
         command_id: Option<String>,
     ) -> Result<(), String> {
-        self.run_turn_batch_with_command_ids(input, additional_context, command_id, Vec::new())
+        self.run_turn_with_command_id_and_images(input, additional_context, command_id, Vec::new())
+    }
+
+    /// Start a turn whose model requests also carry the given images (already
+    /// validated and base64-encoded by the Host). The images stay attached to
+    /// every round of this turn and are dropped when the turn ends.
+    pub fn run_turn_with_command_id_and_images(
+        &self,
+        input: impl Into<String>,
+        additional_context: Option<String>,
+        command_id: Option<String>,
+        images: Vec<agent_core::ModelImagePart>,
+    ) -> Result<(), String> {
+        if images.is_empty() {
+            return self.run_turn_batch_with_command_ids(
+                input,
+                additional_context,
+                command_id,
+                Vec::new(),
+            );
+        }
+        self.run_turn_batch_with_supplements_kind(
+            input,
+            additional_context,
+            command_id,
+            Vec::new(),
+            false,
+            images,
+        )
     }
 
     pub fn run_turn_batch_with_command_ids(
@@ -535,6 +569,7 @@ impl CoreSessionWorkerHandle {
             command_id,
             supplements,
             false,
+            Vec::new(),
         )
     }
 
@@ -545,6 +580,7 @@ impl CoreSessionWorkerHandle {
         command_id: Option<String>,
         supplements: Vec<(agent_core::UserSupplement, Option<String>)>,
         direct_resume: bool,
+        turn_images: Vec<agent_core::ModelImagePart>,
     ) -> Result<(), String> {
         if self.shutdown_requested.load(Ordering::SeqCst) {
             return Err("core_session_worker_stopped".to_string());
@@ -601,10 +637,12 @@ impl CoreSessionWorkerHandle {
                         text: supplement.text,
                         additional_context: supplement.additional_context,
                         command_id,
+                        queued_at: Instant::now(),
                     })
                     .collect(),
                 direct_resume,
                 cancel_generation,
+                turn_images,
             })
             .map_err(|_| "core_session_worker_stopped".to_string());
         if result.is_err() {
@@ -671,6 +709,7 @@ impl CoreSessionWorkerHandle {
                     text: supplement.into(),
                     additional_context: None,
                     command_id: None,
+                    queued_at: Instant::now(),
                 });
                 true
             })
@@ -700,6 +739,7 @@ impl CoreSessionWorkerHandle {
             text: supplement.into(),
             additional_context: None,
             command_id: None,
+            queued_at: Instant::now(),
         });
         Ok(true)
     }
@@ -759,6 +799,7 @@ impl CoreSessionWorkerHandle {
             text: supplement.into(),
             additional_context,
             command_id,
+            queued_at: Instant::now(),
         });
         Ok(true)
     }
@@ -1570,6 +1611,9 @@ impl CoreSessionWorker {
                 current_turn_active: None,
                 phase: None,
                 accept_supplements: true,
+                user_supplement_model_dispatch_timeout: worker_config
+                    .user_supplement_model_dispatch_timeout,
+                supplement_dispatch_timeout: None,
                 continue_supplements_after_final_answer,
                 pending_bash_always_allow: false,
                 pending_runtime_updates,
@@ -1624,6 +1668,7 @@ impl CoreSessionWorker {
                         initial_supplements,
                         direct_resume,
                         cancel_generation: command_generation,
+                        turn_images,
                     } => {
                         if command_generation < cancel_generation.load(Ordering::SeqCst) {
                             if let Some(command_id) = command_id.as_ref() {
@@ -1683,6 +1728,7 @@ impl CoreSessionWorker {
                                         runtime: &workspace.runtime,
                                         run_bash_target: &workspace.run_bash_target,
                                         additional_context: additional_context.as_deref(),
+                                        images: &turn_images,
                                     },
                                     &mut ui,
                                     Some(&mut profiler),
@@ -1953,6 +1999,8 @@ struct WorkerTurnUi {
     current_turn_active: Option<Arc<AtomicBool>>,
     phase: Option<String>,
     accept_supplements: bool,
+    user_supplement_model_dispatch_timeout: Duration,
+    supplement_dispatch_timeout: Option<Duration>,
     continue_supplements_after_final_answer: bool,
     pending_bash_always_allow: bool,
     pending_runtime_updates: Arc<Mutex<Vec<PendingRuntimeUpdate>>>,
@@ -2021,6 +2069,7 @@ impl<M: ModelClient> ToolGenRunner<'_, M> {
                     runtime: &workspace.runtime,
                     run_bash_target: &workspace.run_bash_target,
                     additional_context: additional_context.as_deref(),
+                    images: &[],
                 },
                 ui,
                 Some(profiler),
@@ -2237,6 +2286,7 @@ impl TurnUi for WorkerTurnUi {
     }
 
     fn drain_user_supplements_with_context(&mut self) -> Vec<agent_core::UserSupplement> {
+        self.supplement_dispatch_timeout = None;
         if !self.accept_supplements {
             return Vec::new();
         }
@@ -2244,6 +2294,23 @@ impl TurnUi for WorkerTurnUi {
             .lock()
             .map(|mut mailbox| self.accept_queued_supplements(std::mem::take(&mut mailbox.queue)))
             .unwrap_or_default()
+    }
+
+    fn take_user_supplement_model_dispatch_timeout(&mut self) -> Option<Duration> {
+        if !self.accept_supplements {
+            self.supplement_dispatch_timeout = None;
+            return None;
+        }
+        if self.supplement_dispatch_timeout.is_some() {
+            return self.supplement_dispatch_timeout;
+        }
+        let timeout = self.supplement_mailbox.lock().ok().and_then(|mailbox| {
+            let oldest = mailbox.queue.first()?;
+            let waited = oldest.queued_at.elapsed();
+            (waited >= self.user_supplement_model_dispatch_timeout).then_some(waited)
+        });
+        self.supplement_dispatch_timeout = timeout;
+        timeout
     }
 
     fn continue_supplements_after_final_answer(&self) -> bool {
@@ -2416,6 +2483,7 @@ impl WorkerTurnUi {
     }
 
     fn take_or_close_supplements_for_main_context(&mut self) -> Vec<agent_core::UserSupplement> {
+        self.supplement_dispatch_timeout = None;
         self.supplement_mailbox
             .lock()
             .map(|mut mailbox| {
@@ -2429,6 +2497,7 @@ impl WorkerTurnUi {
     }
 
     fn close_supplements_for_main_context(&mut self) -> Vec<agent_core::UserSupplement> {
+        self.supplement_dispatch_timeout = None;
         self.supplement_mailbox
             .lock()
             .map(|mut mailbox| {

@@ -139,14 +139,28 @@ fn transport_failure_markers_exclude_permanent_request_and_tls_errors() {
         "connection reset by peer",
         "broken pipe",
         "unexpected eof while reading response",
+        "unexpected end of file",
         "incomplete message",
         "http2 framing layer failure",
         "h2 protocol error",
     ] {
         assert!(is_transient_connection_failure(transient), "{transient}");
     }
-    let addr_not_available = std::io::Error::from(std::io::ErrorKind::AddrNotAvailable);
-    assert!(has_retryable_socket_error(&addr_not_available));
+    for kind in [
+        std::io::ErrorKind::AddrNotAvailable,
+        std::io::ErrorKind::BrokenPipe,
+        std::io::ErrorKind::ConnectionAborted,
+        std::io::ErrorKind::ConnectionRefused,
+        std::io::ErrorKind::ConnectionReset,
+        std::io::ErrorKind::Interrupted,
+        std::io::ErrorKind::NotConnected,
+        std::io::ErrorKind::TimedOut,
+        std::io::ErrorKind::UnexpectedEof,
+        std::io::ErrorKind::WouldBlock,
+    ] {
+        let error = std::io::Error::from(kind);
+        assert!(has_retryable_socket_error(&error), "{kind:?}");
+    }
     let invalid_input = std::io::Error::from(std::io::ErrorKind::InvalidInput);
     assert!(!has_retryable_socket_error(&invalid_input));
 
@@ -920,4 +934,123 @@ fn proxy_and_no_proxy_environment_smoke() {
     assert!(target.accept().is_ok(), "NO_PROXY did not bypass the proxy");
     let _ = std::fs::remove_file(proxy_audit);
     let _ = std::fs::remove_file(no_proxy_audit);
+}
+
+#[test]
+fn provisional_content_arrives_before_server_can_finish_response() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    let first = "data: {\"choices\":[{\"delta\":{\"content\":\"early\"}}]}\n\n";
+    let last = "data: [DONE]\n\n";
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        read_http_request(&mut socket);
+        write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", first.len() + last.len(), first).unwrap();
+        socket.flush().unwrap();
+        // A causal handshake, not a timing assertion: completion is withheld
+        // until the transport observer has received the first content.
+        observed_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        socket.write_all(last.as_bytes()).unwrap();
+    });
+    let config = local_config(addr, 10);
+    let request = prepare_model_http_request(&config, "stream test");
+    let mut transport = NativeHttpTransport::new().unwrap();
+    let mut text = String::new();
+    let response = transport
+        .execute(
+            &config,
+            &request,
+            Duration::from_secs(10),
+            &mut || false,
+            Some(&mut |part| {
+                text.push_str(
+                    part.pointer("/choices/0/delta/content")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap(),
+                );
+                observed_tx.send(()).unwrap();
+            }),
+        )
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(text, "early");
+    assert!(response.body.ends_with("data: [DONE]\n\n"));
+}
+
+#[test]
+fn stream_failure_is_audited_without_response_body() {
+    for (label, tail, expected) in [
+        (
+            "oversize",
+            format!("data: {}", "x".repeat(4 * 1024 * 1024)),
+            "model_stream_event_too_large",
+        ),
+        (
+            "invalid",
+            "data: private-response-marker\n\n".to_string(),
+            "invalid_model_stream_event",
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = format!("data: {{\"choices\":[]}}\n\n{tail}");
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            read_http_request(&mut socket);
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-Request-Id: test-request-123\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+            if let Err(error) = socket.write_all(body.as_bytes()) {
+                assert!(matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+                ));
+            }
+        });
+        let dir = std::env::temp_dir().join(crate::unique_id("stream_failure_audit"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let audit_file = dir.join("api.jsonl");
+        let config = local_config(addr, 10);
+        let request = prepare_model_http_request(&config, label);
+        let mut observer = |_: &serde_json::Value| {};
+        let error = HttpModelClient::default()
+            .execute_model_http_request(
+                &config,
+                &request,
+                &audit_file,
+                &mut || false,
+                &mut Some(&mut observer),
+            )
+            .unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error, expected);
+        let audit = read_api_audit_doc(&api_audit_stream_path(&audit_file)).unwrap();
+        let events = audit["events"].as_array().unwrap();
+        let failure = events
+            .iter()
+            .find(|e| e["error_kind"] == "stream_decode_error")
+            .unwrap();
+        let request = events.iter().find(|e| e["type"] == "llm_request").unwrap();
+        assert_eq!(failure["audit_request_id"], request["audit_request_id"]);
+        assert_eq!(failure["status"], 200);
+        assert_eq!(failure["transport"]["request_id"], "test-request-123");
+        assert_eq!(failure["stream_diagnostics"]["event_count"], 1);
+        assert_eq!(
+            failure["stream_diagnostics"]["event_limit_bytes"],
+            4 * 1024 * 1024
+        );
+        assert!(
+            failure["stream_diagnostics"]["line_bytes"]
+                .as_u64()
+                .unwrap()
+                + failure["stream_diagnostics"]["event_data_bytes"]
+                    .as_u64()
+                    .unwrap()
+                > 0
+        );
+        assert_eq!(failure["body_omitted"], true);
+        assert!(failure.get("body").is_none());
+        assert!(!failure.to_string().contains("private-response-marker"));
+        assert!(failure.to_string().len() < 2048);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

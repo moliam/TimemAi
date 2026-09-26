@@ -2,6 +2,8 @@ mod command_dedup;
 mod command_lane;
 mod desktop_launch;
 mod mem_maintenance;
+mod model_endpoint_import;
+mod response_preview;
 mod websocket_delivery;
 
 #[cfg(test)]
@@ -12,6 +14,10 @@ use command_lane::TicketCommandLane;
 use desktop_launch::{browser_auto_open_allowed_for, browser_command};
 use desktop_launch::{open_browser, open_directory_in_terminal, should_auto_open_browser};
 use mem_maintenance::*;
+use model_endpoint_import::{
+    scan_model_endpoint_imports, ModelEndpointImportCandidate, ModelEndpointImportCandidateReport,
+    MAX_MODEL_ENDPOINT_IMPORT_CANDIDATES,
+};
 use websocket_delivery::{command_ack, finish_command_dedup};
 #[cfg(test)]
 use websocket_delivery::{
@@ -137,6 +143,7 @@ const MAX_SESSION_UPLOADS: usize = 20;
 const MAX_BROWSER_COMMAND_BYTES: usize = 1024 * 1024;
 const BROWSER_COMMAND_QUEUE_CAPACITY: usize = 32;
 const MAX_COMMAND_ID_BYTES: usize = 256;
+const MAX_MODEL_ENDPOINT_DELETE_IDS: usize = 100;
 const WORK_INSTRUCTION_DECISION_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTANCE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(3);
 const INSTANCE_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -153,6 +160,7 @@ struct AppState {
     manager: Arc<Mutex<CoreSessionWorkerManager>>,
     template: Arc<WorkerTemplate>,
     mem: Arc<Mutex<WebMemState>>,
+    model_endpoint_imports: Arc<Mutex<Vec<ModelEndpointImportCandidate>>>,
     events: broadcast::Sender<WireEvent>,
     sessions: Arc<Mutex<BTreeMap<String, WebSession>>>,
     command_dedup: Arc<Mutex<CommandDedupCache>>,
@@ -283,6 +291,8 @@ struct ModelEndpointConfig {
     allow_cross_origin_redirects: bool,
     #[serde(default)]
     private_ca_pem: String,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
 }
 
 fn default_endpoint_max_input_tokens() -> u32 {
@@ -309,6 +319,7 @@ struct ModelEndpointReport {
     request_fields: BTreeMap<String, Value>,
     allow_cross_origin_redirects: bool,
     private_ca_configured: bool,
+    reasoning_effort: Option<String>,
 }
 
 impl From<&ModelEndpointConfig> for ModelEndpointReport {
@@ -336,12 +347,28 @@ impl From<&ModelEndpointConfig> for ModelEndpointReport {
                 .collect(),
             allow_cross_origin_redirects: endpoint.allow_cross_origin_redirects,
             private_ca_configured: !endpoint.private_ca_pem.is_empty(),
+            reasoning_effort: endpoint.reasoning_effort.clone(),
         }
     }
 }
 
 fn model_endpoints_path(memory_dir: &Path) -> PathBuf {
     memory_dir.join("model_endpoints.json")
+}
+
+const MODEL_ENDPOINTS_README: &str = include_str!("../../../resources/model_endpoints.README.txt");
+
+fn model_endpoints_readme_path(memory_dir: &Path) -> PathBuf {
+    memory_dir.join("model_endpoints.README.txt")
+}
+
+fn ensure_model_endpoints_readme(memory_dir: &Path) {
+    let path = model_endpoints_readme_path(memory_dir);
+    if path.exists() {
+        return;
+    }
+    // Best-effort self-describing note next to the store; never fail the save.
+    let _ = std::fs::write(&path, MODEL_ENDPOINTS_README);
 }
 
 fn load_model_endpoints_resilient(memory_dir: &Path) -> Result<Vec<ModelEndpointConfig>, String> {
@@ -374,6 +401,7 @@ fn save_model_endpoints(
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("model_endpoint_store_dir_failed:{error}"))?;
     }
+    ensure_model_endpoints_readme(memory_dir);
     let temporary = path.with_extension("json.tmp");
     let raw = serde_json::to_vec_pretty(endpoints)
         .map_err(|error| format!("model_endpoint_store_serialize_failed:{error}"))?;
@@ -568,6 +596,7 @@ struct WebWorker {
 
 #[derive(Debug, Clone)]
 struct WebSessionRuntime {
+    model_endpoint_id: Option<String>,
     settings: RuntimeSettings,
     env: BTreeMap<String, String>,
     env_overrides: BTreeMap<String, String>,
@@ -576,6 +605,7 @@ struct WebSessionRuntime {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct WebSessionRuntimeProfile {
+    model_endpoint_id: Option<String>,
     model: String,
     api_protocol: String,
     response_protocol: String,
@@ -592,6 +622,8 @@ struct WebSessionRuntimeProfile {
 
 #[derive(Debug, Clone, Serialize)]
 struct WebTurn {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<Value>,
     turn_id: String,
     state: String,
     created_at_ms: u128,
@@ -606,6 +638,10 @@ struct WebTurn {
 
 #[derive(Debug, Clone, Serialize)]
 struct WebSubAnswer {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_attempt: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview_index: Option<u64>,
     sub_answer_id: String,
     ordinal: u64,
     task: String,
@@ -615,6 +651,9 @@ struct WebSubAnswer {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct WebNextTurnPayload {
+    // Live explicit Send after Stop; never replay this intent after restart.
+    #[serde(skip)]
+    send_after_cancel: bool,
     turn_id: String,
     created_at_ms: u128,
     text: String,
@@ -864,6 +903,10 @@ enum WireEvent {
     ModelEndpointsUpdated {
         endpoints: Vec<ModelEndpointReport>,
     },
+    ModelEndpointImportScanned {
+        candidates: Vec<ModelEndpointImportCandidateReport>,
+        issues: Vec<String>,
+    },
     ModelEndpointSecretRevealed {
         endpoint_id: String,
         api_key: String,
@@ -934,6 +977,14 @@ struct AuthQuery {
 struct UploadQuery {
     token: Option<String>,
     session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DebugBrowseQuery {
+    token: Option<String>,
+    session_id: String,
+    /// Sub-path inside the session's debug directory. Empty lists the root.
+    path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1014,6 +1065,8 @@ struct ModelEndpointInput {
     allow_cross_origin_redirects: bool,
     #[serde(default)]
     private_ca_pem: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1227,12 +1280,24 @@ enum ClientCommand {
     ModelEndpointDelete {
         endpoint_id: String,
     },
+    ModelEndpointDeleteMany {
+        endpoint_ids: Vec<String>,
+    },
     ModelEndpointApply {
         session_id: String,
         endpoint_id: String,
     },
     ModelEndpointSecretReveal {
         endpoint_id: String,
+    },
+    ModelEndpointImportScan {
+        #[serde(default)]
+        codex_dir: Option<String>,
+        #[serde(default)]
+        claude_dir: Option<String>,
+    },
+    ModelEndpointImportApply {
+        candidate_ids: Vec<String>,
     },
     McpServerUpsert {
         session_id: String,
@@ -1297,6 +1362,9 @@ impl ClientCommand {
             | Self::McpServerDelete { .. }
             | Self::ModelEndpointUpsert { .. }
             | Self::ModelEndpointDelete { .. }
+            | Self::ModelEndpointDeleteMany { .. }
+            | Self::ModelEndpointImportScan { .. }
+            | Self::ModelEndpointImportApply { .. }
             | Self::WorkerRoleCreate { .. }
             | Self::WorkerRoleUpdate { .. }
             | Self::WorkerRoleDelete { .. }
@@ -1355,6 +1423,9 @@ impl ClientCommand {
                 | Self::McpServerDelete { .. }
                 | Self::ModelEndpointUpsert { .. }
                 | Self::ModelEndpointDelete { .. }
+                | Self::ModelEndpointDeleteMany { .. }
+                | Self::ModelEndpointImportScan { .. }
+                | Self::ModelEndpointImportApply { .. }
                 | Self::WorkerRoleCreate { .. }
                 | Self::WorkerRoleUpdate { .. }
                 | Self::WorkerRoleDelete { .. }
@@ -1388,6 +1459,7 @@ impl ClientCommand {
                 | Self::SessionApiKeyReveal { .. }
                 | Self::McpServerSecretsReveal { .. }
                 | Self::ModelEndpointSecretReveal { .. }
+                | Self::ModelEndpointImportScan { .. }
                 | Self::MemTemporaryItemsList
                 | Self::MemTemporaryItemsDelete { .. }
         )
@@ -1512,6 +1584,7 @@ pub async fn run(
         manager,
         template: Arc::new(template),
         mem,
+        model_endpoint_imports: Arc::new(Mutex::new(Vec::new())),
         events: events.clone(),
         sessions,
         command_dedup: Arc::new(Mutex::new(CommandDedupCache::default())),
@@ -1763,6 +1836,206 @@ async fn performance_trace(
     }
 }
 
+const MAX_DEBUG_FILE_PREVIEW_BYTES: u64 = 256 * 1024;
+
+fn html_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+/// Resolves a browse target inside one session's debug directory. The joined
+/// path must stay inside that directory; any escape attempt is rejected.
+fn resolve_debug_browse_target(root: &Path, sub_path: &str) -> Result<PathBuf, String> {
+    let sub_path = sub_path.trim_start_matches('/');
+    if sub_path.is_empty() {
+        return Ok(root.to_path_buf());
+    }
+    let target = root.join(sub_path);
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|_| "debug_dir_unavailable".to_string())?;
+    let canonical_target = target
+        .canonicalize()
+        .map_err(|_| "debug_path_not_found".to_string())?;
+    if !canonical_target.starts_with(&canonical_root) {
+        return Err("debug_path_outside_session".to_string());
+    }
+    Ok(canonical_target)
+}
+
+fn is_html_debug_file(target: &Path, sub_path: &str) -> bool {
+    let name = sub_path.rsplit('/').next().unwrap_or(sub_path);
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".html")
+        || lower.ends_with(".htm")
+        || target
+            .extension()
+            .map(|ext| ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm"))
+            .unwrap_or(false)
+}
+
+fn debug_browse_page(session_id: &str, sub_path: &str, body_html: &str) -> String {
+    let style = "font-family:ui-monospace,monospace;margin:1rem;background:#111;color:#ddd";
+    format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Timem debug</title><style>body{{{style}}}a{{color:#7ab7ff;text-decoration:none}}a:hover{{text-decoration:underline}}li{{list-style:none;padding:.15rem 0}}.dir{{color:#ffd479}}pre{{background:#1b1b1b;padding:.75rem;overflow:auto;border-radius:6px}}h1{{font-size:1rem}}.err{{color:#ff7a7a}}</style></head><body><h1>DEBUG: {session}/{path}</h1>{body}</body></html>",
+        style = style,
+        session = html_escape(session_id),
+        path = html_escape(sub_path),
+        body = body_html,
+    )
+}
+
+fn debug_browse_listing(session_id: &str, sub_path: &str, dir: &Path) -> String {
+    let mut entries: Vec<(bool, String, u64)> = Vec::new();
+    if let Ok(read_dir) = std::fs::read_dir(dir) {
+        for entry in read_dir.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            entries.push((is_dir, name, size));
+        }
+    }
+    entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut body = String::from("<ul>");
+    if !sub_path.is_empty() {
+        let parent = sub_path
+            .rsplit_once('/')
+            .map(|(d, _)| d.to_string())
+            .unwrap_or_default();
+        body.push_str(&format!(
+            "<li><a href=\"?session_id={session}&path={parent}\">../</a></li>",
+            session = html_escape(session_id),
+            parent = html_escape(&parent),
+        ));
+    }
+    for (is_dir, name, size) in entries {
+        let child = if sub_path.is_empty() {
+            name.clone()
+        } else {
+            format!("{sub_path}/{name}")
+        };
+        body.push_str(&format!(
+            "<li><a class=\"{class}\" href=\"?session_id={session}&path={child}\">{name}</a>{suffix}</li>",
+            class = if is_dir { "dir" } else { "" },
+            session = html_escape(session_id),
+            child = html_escape(&child),
+            name = html_escape(&name),
+            suffix = if is_dir { "/".to_string() } else { format!(" ({size} bytes)") },
+        ));
+    }
+    body.push_str("</ul>");
+    debug_browse_page(session_id, sub_path, &body)
+}
+
+fn debug_browse_file(session_id: &str, sub_path: &str, file: &Path) -> String {
+    let body = match std::fs::metadata(file) {
+        Ok(meta) if meta.len() > MAX_DEBUG_FILE_PREVIEW_BYTES => format!(
+            "<p class=\"err\">File is {} bytes; preview is capped at {} bytes. Download it from the host instead.</p>",
+            meta.len(),
+            MAX_DEBUG_FILE_PREVIEW_BYTES
+        ),
+        _ => match std::fs::read(file) {
+            Ok(bytes) => format!("<pre>{}</pre>", html_escape(&String::from_utf8_lossy(&bytes))),
+            Err(_) => "<p class=\"err\">debug_file_read_failed</p>".to_string(),
+        },
+    };
+    debug_browse_page(session_id, sub_path, &body)
+}
+
+async fn debug_browse(
+    State((state, _)): State<(AppState, u16)>,
+    Query(query): Query<DebugBrowseQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized_api_request(&state, query.token.as_deref(), &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(debug) = state.debug.as_ref() else {
+        return (
+            StatusCode::NOT_FOUND,
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            )],
+            debug_browse_page(
+                &query.session_id,
+                "",
+                "<p class=\"err\">Debug store is disabled on this instance.</p>",
+            ),
+        )
+            .into_response();
+    };
+    let root = match debug.session_dir(&query.session_id) {
+        Ok(root) => root,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/html; charset=utf-8"),
+                )],
+                debug_browse_page(
+                    &query.session_id,
+                    "",
+                    &format!("<p class=\"err\">{}</p>", html_escape(&error)),
+                ),
+            )
+                .into_response();
+        }
+    };
+    let sub_path = query.path.clone().unwrap_or_default();
+    // HTML files render natively in the browser instead of the escaped
+    // text preview, so debug artifacts (e.g. saved pages) stay usable.
+    if let Ok(target) = resolve_debug_browse_target(&root, &sub_path) {
+        if is_html_debug_file(&target, &sub_path) {
+            let too_large = std::fs::metadata(&target)
+                .map(|meta| meta.len() > MAX_DEBUG_FILE_PREVIEW_BYTES)
+                .unwrap_or(false);
+            if !too_large {
+                if let Ok(bytes) = std::fs::read(&target) {
+                    return (
+                        StatusCode::OK,
+                        [(
+                            header::CONTENT_TYPE,
+                            HeaderValue::from_static("text/html; charset=utf-8"),
+                        )],
+                        bytes,
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+    let html = match resolve_debug_browse_target(&root, &sub_path) {
+        Ok(target) if target.is_dir() => {
+            debug_browse_listing(&query.session_id, &sub_path, &target)
+        }
+        Ok(target) => debug_browse_file(&query.session_id, &sub_path, &target),
+        Err(error) => debug_browse_page(
+            &query.session_id,
+            &sub_path,
+            &format!("<p class=\"err\">{}</p>", html_escape(&error)),
+        ),
+    };
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        html,
+    )
+        .into_response()
+}
 fn client_command_trace_fields(command: &ClientCommand) -> (&'static str, Option<String>) {
     match command {
         ClientCommand::TurnSubmit { session_id, .. } => ("turn_submit", Some(session_id.clone())),
@@ -1780,14 +2053,78 @@ fn build_router(state: AppState, port: u16) -> Router {
         BrowserRouteHandlers {
             health: get(health),
             snapshot: get(snapshot),
+            attach_sessions: get(attach_sessions),
             upload: post(upload_file),
             performance_trace: post(performance_trace),
+            debug_browse: get(debug_browse),
             websocket: get(websocket),
             static_assets: get(static_asset),
         },
         MAX_UPLOAD_BYTES + 64 * 1024,
         4 * 1024,
     )
+}
+
+#[derive(Debug, Serialize)]
+struct AttachSessionSummary {
+    session_id: String,
+    display_name: String,
+    ordinal: u32,
+    state: String,
+    working: bool,
+    active_turn_id: Option<String>,
+    current_dir: String,
+    worker_count: usize,
+}
+
+fn session_working_for_attach(session: &WebSession) -> bool {
+    session.active_turn_id.is_some()
+        || session.pending_turn_id.is_some()
+        || session.state == "working"
+        || session
+            .workers
+            .iter()
+            .any(|worker| worker.state == "working")
+}
+
+fn attach_sessions_snapshot(state: &AppState) -> Vec<AttachSessionSummary> {
+    let mut sessions: Vec<_> = state
+        .sessions
+        .lock()
+        .map(|sessions| sessions.values().cloned().collect())
+        .unwrap_or_default();
+    sessions.sort_by(|left, right| {
+        left.ordinal
+            .cmp(&right.ordinal)
+            .then_with(|| left.session_id.cmp(&right.session_id))
+    });
+    sessions
+        .into_iter()
+        .map(|session| {
+            let working = session_working_for_attach(&session);
+            AttachSessionSummary {
+                session_id: session.session_id,
+                display_name: session.display_name,
+                ordinal: session.ordinal,
+                state: session.state,
+                working,
+                active_turn_id: session.active_turn_id,
+                current_dir: session.current_dir,
+                worker_count: session.workers.len(),
+            }
+        })
+        .collect()
+}
+
+async fn attach_sessions(
+    State((state, _)): State<(AppState, u16)>,
+    Query(auth): Query<AuthQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized_api_request(&state, auth.token.as_deref(), &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(json!({ "sessions": attach_sessions_snapshot(&state) })).into_response()
 }
 
 async fn upload_file(
@@ -3655,6 +3992,14 @@ fn handle_command_with_id(
             publish_semantic(state, event.clone());
             return Ok(Some(event));
         }
+        ClientCommand::ModelEndpointDeleteMany { endpoint_ids } => {
+            delete_model_endpoints(state, &endpoint_ids)?;
+            let event = WireEvent::ModelEndpointsUpdated {
+                endpoints: model_endpoint_reports(state)?,
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
+        }
         ClientCommand::ModelEndpointApply {
             session_id,
             endpoint_id,
@@ -3677,6 +4022,51 @@ fn handle_command_with_id(
                 request_fields: secrets.request_fields,
                 private_ca_pem: secrets.private_ca_pem,
             }));
+        }
+        ClientCommand::ModelEndpointImportScan {
+            codex_dir,
+            claude_dir,
+        } => {
+            let codex_empty = codex_dir
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty());
+            let claude_empty = claude_dir
+                .as_deref()
+                .is_none_or(|value| value.trim().is_empty());
+            if codex_empty && claude_empty {
+                return Err("model_endpoint_import_directory_required".to_string());
+            }
+            let scan = scan_model_endpoint_imports(
+                codex_dir
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty()),
+                claude_dir
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty()),
+            )?;
+            let candidates = scan
+                .candidates
+                .iter()
+                .map(ModelEndpointImportCandidateReport::from)
+                .collect();
+            let event = WireEvent::ModelEndpointImportScanned {
+                candidates,
+                issues: scan.issues,
+            };
+            let mut imports = state
+                .model_endpoint_imports
+                .lock()
+                .map_err(|_| "model_endpoint_import_state_poisoned".to_string())?;
+            *imports = scan.candidates;
+            return Ok(Some(event));
+        }
+        ClientCommand::ModelEndpointImportApply { candidate_ids } => {
+            import_model_endpoints(state, &candidate_ids)?;
+            let event = WireEvent::ModelEndpointsUpdated {
+                endpoints: model_endpoint_reports(state)?,
+            };
+            publish_semantic(state, event.clone());
+            return Ok(Some(event));
         }
         ClientCommand::McpServerUpsert { session_id, config } => {
             let server_id = config.id.clone();
@@ -4622,13 +5012,14 @@ fn create_session_in_group(
     let settings = state.template.session_settings(&env_overrides)?;
     let session_env = state.template.session_env(&settings, &env_overrides);
     let runtime = WebSessionRuntime {
+        model_endpoint_id: None,
         settings,
         env: session_env,
         env_overrides,
         forward_compatible_cache: BTreeMap::new(),
     };
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
-    let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
+    let runtime_profile = WebSessionRuntimeProfile::from_runtime(&runtime);
     let global_roles = current_mem_state(state)?.role_library.roles;
     {
         let mut sessions = state
@@ -5011,16 +5402,17 @@ fn interrupted_turn_from_queued_message(
             role: "user".to_string(),
             text: payload.text.clone(),
             created_at_ms: payload.created_at_ms,
-            kind: Some("task".to_string()),
+            kind: Some(QUEUED_INTERRUPTED_HISTORY_KIND.to_string()),
             completion: None,
         },
         WebTurn {
+            preview: None,
             turn_id: payload.turn_id.clone(),
             state: "interrupted".to_string(),
             created_at_ms: payload.created_at_ms,
             interrupted_at_ms: Some(interrupted_at_ms),
             user_entries: vec![WebTurnUserEntry {
-                kind: "task".to_string(),
+                kind: QUEUED_INTERRUPTED_HISTORY_KIND.to_string(),
                 text: payload.text.clone(),
                 attachments: payload.attachments.clone(),
                 created_at_ms: payload.created_at_ms,
@@ -5047,7 +5439,7 @@ fn append_interrupted_queued_message_history(
         session_id,
         &payload.turn_id,
         "user",
-        Some("task"),
+        Some(QUEUED_INTERRUPTED_HISTORY_KIND),
         Some(&item.command_id),
         payload.created_at_ms as i64,
         payload.text.clone(),
@@ -5092,13 +5484,14 @@ fn restore_stored_session(
     let settings = state.template.restored_session_settings(&cached_env)?;
     let session_env = state.template.session_env(&settings, &cached_env);
     let runtime = WebSessionRuntime {
+        model_endpoint_id: stored.model_endpoint_id.clone(),
         settings,
         env: session_env,
         env_overrides: stored.env_overrides.clone().unwrap_or_default(),
         forward_compatible_cache,
     };
     let max_llm_input_tokens = runtime.settings.config.max_llm_input_tokens;
-    let runtime_profile = WebSessionRuntimeProfile::from_settings(&runtime.settings);
+    let runtime_profile = WebSessionRuntimeProfile::from_runtime(&runtime);
     let tool_repo = session_tool_repo(state, &stored.session_id)?;
     let legacy_roles_path = roles_path_for_history(
         &current_session_store(state)?.history_path_for_session(&stored.session_id),
@@ -5278,6 +5671,31 @@ fn restore_stored_session(
         true,
     )?;
     persist_restored_session_runtime_cache(state, &stored)?;
+    // A missing preset stays explicitly bound and fails closed at submission.
+    // Do not discard restored history just because an endpoint was deleted.
+    let endpoint_id = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        sessions
+            .get(&stored.session_id)
+            .ok_or("session_not_found")?
+            .runtime
+            .model_endpoint_id
+            .clone()
+    };
+    if endpoint_id
+        .as_deref()
+        .map(|id| model_endpoint_config_if_exists(state, id))
+        .transpose()?
+        .flatten()
+        .is_some()
+        || endpoint_id.is_none()
+    {
+        refresh_bound_model_endpoint(state, &stored.session_id)?;
+    }
+
     if !stored_workspace_available {
         state.runtime_log.record(
             "session_restore_workspace_fallback",
@@ -5294,6 +5712,7 @@ fn restore_stored_session(
     Ok(())
 }
 
+const QUEUED_INTERRUPTED_HISTORY_KIND: &str = "queued_interrupted";
 const RUNTIME_RESTART_HISTORY_KIND: &str = "runtime_restart";
 const RUNTIME_RESTART_HISTORY_CONTENT: &str = "Timem Web 已重新启动，以下内容来自新的运行实例";
 
@@ -5405,6 +5824,8 @@ fn persist_restored_session_runtime_cache(
 fn web_sub_answer_from_topic_payload(payload: &Value, created_at_ms: u128) -> Option<WebSubAnswer> {
     let body = payload.get("payload")?;
     Some(WebSubAnswer {
+        preview_attempt: body.get("preview_attempt").and_then(Value::as_u64),
+        preview_index: body.get("preview_index").and_then(Value::as_u64),
         sub_answer_id: body.get("sub_answer_id")?.as_str()?.to_string(),
         ordinal: body.get("ordinal")?.as_u64()?,
         task: body.get("task")?.as_str()?.to_string(),
@@ -5438,6 +5859,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     continue;
                 }
                 let turn = turns.entry(turn_id.clone()).or_insert_with(|| WebTurn {
+                    preview: None,
                     turn_id: turn_id.clone(),
                     state: "restored".to_string(),
                     created_at_ms: created_at_ms as u128,
@@ -5539,6 +5961,7 @@ fn restored_turns_from_history_records(records: &[ChatHistoryRecord]) -> Vec<Web
                     .and_then(|value| value.as_str().map(str::to_string))
                     .unwrap_or_else(|| "history".to_string());
                 let turn = turns.entry(turn_id.clone()).or_insert_with(|| WebTurn {
+                    preview: None,
                     turn_id: turn_id.clone(),
                     state: "restored".to_string(),
                     created_at_ms: created_at_ms as u128,
@@ -5626,7 +6049,7 @@ fn web_message_from_history_record(record: ChatHistoryRecord) -> Option<WebChatM
 
 fn history_user_entry_kind(kind: Option<&str>) -> &str {
     match kind {
-        Some(kind @ ("task" | "supplement" | "approval")) => kind,
+        Some(kind @ ("task" | "supplement" | "approval" | "queued_interrupted")) => kind,
         _ => "task",
     }
 }
@@ -5711,11 +6134,21 @@ fn send_queued_message_now(
             &payload.attachments,
             &payload.worker_roles,
         )?;
-        if let Err(error) = primary_worker_handle(state, session_id)?.run_turn_with_command_id(
-            payload.text,
-            context,
-            Some(item.command_id.clone()),
-        ) {
+        let images = match turn_image_parts(&payload.attachments) {
+            Ok(images) => images,
+            Err(error) => {
+                reject_queued_dispatch(state, session_id, &item.command_id, &payload.turn_id);
+                return Err(error);
+            }
+        };
+        if let Err(error) = primary_worker_handle(state, session_id)?
+            .run_turn_with_command_id_and_images(
+                payload.text,
+                context,
+                Some(item.command_id.clone()),
+                images,
+            )
+        {
             reject_queued_dispatch(state, session_id, &item.command_id, &payload.turn_id);
             return Err(error);
         }
@@ -5990,6 +6423,8 @@ fn enqueue_next_turn_intent(
         previous_session = session.clone();
         let attachments = take_pending_attachments_for_ids(session, attachment_ids)?;
         let payload = WebNextTurnPayload {
+            send_after_cancel: session.cancelling_turn_id.is_some()
+                && session.message_queue.is_empty(),
             turn_id: unique_web_id("web_turn"),
             created_at_ms: now_ms(),
             text,
@@ -6029,7 +6464,22 @@ fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
         if current_turn_id(session).is_some() {
             return None;
         }
-        let item = session.message_queue.begin_automatic_dispatch()?.clone();
+        let explicit_after_stop = session
+            .message_queue
+            .projection()
+            .items
+            .first()
+            .filter(|item| item.payload.send_after_cancel)
+            .map(|item| item.command_id.clone());
+        let item = if let Some(command_id) = explicit_after_stop {
+            session
+                .message_queue
+                .begin_immediate_dispatch(&command_id)
+                .ok()?
+                .clone()
+        } else {
+            session.message_queue.begin_automatic_dispatch()?.clone()
+        };
         session.pending_turn_id = Some(item.payload.turn_id.clone());
         Some(item)
     });
@@ -6059,7 +6509,14 @@ fn dispatch_next_turn_intent_if_ready(state: &AppState, session_id: &str) {
         }
     };
     if let Err(error) = primary_worker_handle(state, session_id).and_then(|worker| {
-        worker.run_turn_with_command_id(payload.text, context, Some(intent.command_id.clone()))
+        turn_image_parts(&payload.attachments).and_then(|images| {
+            worker.run_turn_with_command_id_and_images(
+                payload.text,
+                context,
+                Some(intent.command_id.clone()),
+                images,
+            )
+        })
     }) {
         reject_queued_dispatch(state, session_id, &intent.command_id, &payload.turn_id);
         publish_core_semantic(
@@ -6113,6 +6570,7 @@ fn stored_session_from_web_session_with_store(
     session: &WebSession,
 ) -> StoredSession {
     StoredSession {
+        model_endpoint_id: session.runtime.model_endpoint_id.clone(),
         session_id: session.session_id.clone(),
         display_name: session.display_name.clone(),
         created_at_ms: session
@@ -6247,10 +6705,14 @@ fn redeliver_recorded_turn(
             Some(command_id.to_string()),
         )
     } else {
-        worker.run_turn_with_command_id(
+        let context =
+            session_context_with_roles(state, session_id, &entry.attachments, &entry.worker_roles)?;
+        let images = turn_image_parts(&entry.attachments)?;
+        worker.run_turn_with_command_id_and_images(
             entry.text.clone(),
-            session_context_with_roles(state, session_id, &entry.attachments, &entry.worker_roles)?,
+            context,
             Some(command_id.to_string()),
+            images,
         )
     }
 }
@@ -6794,7 +7256,14 @@ fn submit_turn_with_selected_attachments_and_kind(
             command_id.map(str::to_string),
         )
     } else {
-        worker.run_turn_with_command_id(text, additional_context, command_id.map(str::to_string))
+        turn_image_parts(&attachments).and_then(|images| {
+            worker.run_turn_with_command_id_and_images(
+                text,
+                additional_context,
+                command_id.map(str::to_string),
+                images,
+            )
+        })
     };
     if let Err(error) = enqueue_result {
         rollback_web_turn(state, session_id, &turn.turn_id, attachments);
@@ -6937,7 +7406,13 @@ fn resolve_work_instruction_decision(
     if pending.direct_resume {
         worker.resume_turn_directly_with_command_id(additional_context, pending.command_id)?;
     } else {
-        worker.run_turn_with_command_id(pending.text, additional_context, pending.command_id)?;
+        let images = turn_image_parts(&pending.attachments)?;
+        worker.run_turn_with_command_id_and_images(
+            pending.text,
+            additional_context,
+            pending.command_id,
+            images,
+        )?;
     }
     Ok(true)
 }
@@ -7104,9 +7579,25 @@ fn normalize_model_endpoint_input(
     if input.stream && api_protocol != "openai-compatible" {
         return Err("model_endpoint_stream_requires_openai_compatible".to_string());
     }
+    let reasoning_effort = input
+        .reasoning_effort
+        .clone()
+        .filter(|value| !value.trim().is_empty());
+    if let Some(effort) = &reasoning_effort {
+        if api_protocol == "anthropic" {
+            return Err("model_endpoint_reasoning_effort_requires_openai_protocol".to_string());
+        }
+        let mut options = agent_core::OpenAiCompatibleOptions::default();
+        agent_core::apply_openai_compatible_env_value(
+            &mut options,
+            "TIMEM_REASONING_EFFORT",
+            effort,
+        )
+        .map_err(|error| format!("invalid_model_endpoint_reasoning_effort:{error:?}"))?;
+    }
     let max_llm_input_tokens = input.max_llm_input_tokens;
     let max_llm_output_tokens = input.max_llm_output_tokens;
-    if ![100_000, 200_000, 1_000_000].contains(&max_llm_input_tokens) {
+    if max_llm_input_tokens == 0 {
         return Err("invalid_model_endpoint_max_input_tokens".to_string());
     }
     if ![10_000, 20_000, 50_000].contains(&max_llm_output_tokens) {
@@ -7152,6 +7643,7 @@ fn normalize_model_endpoint_input(
         request_fields,
         allow_cross_origin_redirects: input.allow_cross_origin_redirects,
         private_ca_pem,
+        reasoning_effort,
     })
 }
 
@@ -7223,6 +7715,102 @@ fn upsert_model_endpoint(state: &AppState, input: ModelEndpointInput) -> Result<
     Ok(endpoint_id)
 }
 
+fn unique_import_name(base: &str, taken: &BTreeSet<String>) -> String {
+    if !taken.contains(base) {
+        return base.to_string();
+    }
+    for ordinal in 2u32.. {
+        let candidate = format!("{base} {ordinal}");
+        if !taken.contains(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!("the ordinal space cannot be exhausted before u32 overflow")
+}
+
+fn import_model_endpoints(
+    state: &AppState,
+    candidate_ids: &[String],
+) -> Result<Vec<String>, String> {
+    if candidate_ids.is_empty() {
+        return Err("model_endpoint_import_selection_empty".to_string());
+    }
+    if candidate_ids.len() > MAX_MODEL_ENDPOINT_IMPORT_CANDIDATES {
+        return Err("model_endpoint_import_selection_too_large".to_string());
+    }
+    let mut requested: Vec<String> = Vec::with_capacity(candidate_ids.len());
+    for id in candidate_ids {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err("model_endpoint_import_candidate_id_empty".to_string());
+        }
+        if !requested.iter().any(|item| item == id) {
+            requested.push(id.to_string());
+        }
+    }
+    // Hold the pending-import lock through the apply so a concurrent scan
+    // cannot replace the user-confirmed candidate set mid-import.
+    let mut imports = state
+        .model_endpoint_imports
+        .lock()
+        .map_err(|_| "model_endpoint_import_state_poisoned".to_string())?;
+    let mut selected = Vec::new();
+    let mut remaining = Vec::new();
+    for candidate in imports.iter() {
+        if requested.iter().any(|id| id == &candidate.id) {
+            selected.push(candidate.clone());
+        } else {
+            remaining.push(candidate.clone());
+        }
+    }
+    for id in &requested {
+        if !selected.iter().any(|candidate| &candidate.id == id) {
+            return Err(format!("model_endpoint_import_candidate_not_found:{id}"));
+        }
+    }
+    let mut taken: BTreeSet<String> = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?
+        .model_endpoints
+        .iter()
+        .map(|endpoint| endpoint.name.clone())
+        .collect();
+    let mut endpoint_ids = Vec::with_capacity(selected.len());
+    for candidate in &selected {
+        let name = unique_import_name(&candidate.name, &taken);
+        taken.insert(name.clone());
+        let api_key = if candidate.api_key.is_empty() {
+            None
+        } else {
+            Some(candidate.api_key.clone())
+        };
+        let endpoint_id = upsert_model_endpoint(
+            state,
+            ModelEndpointInput {
+                id: None,
+                name,
+                model: candidate.model.clone(),
+                api_protocol: candidate.api_protocol.clone(),
+                response_protocol: candidate.response_protocol.clone(),
+                base_url: candidate.base_url.clone(),
+                max_llm_input_tokens: candidate.max_llm_input_tokens,
+                max_llm_output_tokens: candidate.max_llm_output_tokens,
+                stream: candidate.stream,
+                api_key,
+                reasoning_effort: candidate.reasoning_effort.clone(),
+                http_headers: candidate.http_headers.clone(),
+                request_fields: candidate.request_fields.clone(),
+                allow_cross_origin_redirects: false,
+                private_ca_pem: None,
+            },
+        )?;
+        endpoint_ids.push(endpoint_id);
+    }
+    *imports = remaining;
+    Ok(endpoint_ids)
+}
+
 fn model_endpoint_config_if_exists(
     state: &AppState,
     endpoint_id: &str,
@@ -7275,15 +7863,17 @@ fn sync_endpoint_runtime_fields(
     previous: &ModelEndpointConfig,
     updated: &ModelEndpointConfig,
 ) -> Result<Vec<(String, WebSessionRuntimeProfile)>, String> {
-    if previous.max_llm_input_tokens == updated.max_llm_input_tokens
-        && previous.max_llm_output_tokens == updated.max_llm_output_tokens
-        && previous.stream == updated.stream
-        && previous.request_fields == updated.request_fields
-        && previous.allow_cross_origin_redirects == updated.allow_cross_origin_redirects
-        && previous.private_ca_pem == updated.private_ca_pem
-    {
-        return Ok(Vec::new());
-    }
+    let other_endpoints = {
+        let mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        mem.model_endpoints
+            .iter()
+            .filter(|endpoint| endpoint.id != previous.id)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let session_ids = {
         let sessions = state
             .sessions
@@ -7291,71 +7881,127 @@ fn sync_endpoint_runtime_fields(
             .map_err(|_| "session_store_poisoned".to_string())?;
         sessions
             .iter()
-            .filter(|(_, session)| session_uses_model_endpoint(session, previous))
-            .map(|(session_id, _)| session_id.clone())
+            .filter(|(_, session)| {
+                session.runtime.model_endpoint_id.as_deref() == Some(previous.id.as_str())
+                    || (session.runtime.model_endpoint_id.is_none()
+                        && session_uses_model_endpoint(session, previous)
+                        && !other_endpoints
+                            .iter()
+                            .any(|endpoint| session_uses_model_endpoint(session, endpoint)))
+            })
+            .map(|(id, _)| id.clone())
             .collect::<Vec<_>>()
     };
-    let mut updates = Vec::with_capacity(session_ids.len());
+    let mut updates = Vec::new();
     for session_id in session_ids {
-        let mut runtime_profile = None;
-        if previous.max_llm_input_tokens != updated.max_llm_input_tokens {
-            runtime_profile = Some(
-                update_session_runtime_setting(
-                    state,
-                    &session_id,
-                    "TIMEM_MAX_LLM_INPUT",
-                    &updated.max_llm_input_tokens.to_string(),
-                )?
-                .1,
-            );
-        }
-        if previous.max_llm_output_tokens != updated.max_llm_output_tokens {
-            runtime_profile = Some(
-                update_session_runtime_setting(
-                    state,
-                    &session_id,
-                    "TIMEM_MAX_LLM_OUTPUT",
-                    &updated.max_llm_output_tokens.to_string(),
-                )?
-                .1,
-            );
-        }
-        if previous.stream != updated.stream {
-            runtime_profile = Some(
-                update_session_runtime_setting(
-                    state,
-                    &session_id,
-                    "TIMEM_STREAM",
-                    &updated.stream.to_string(),
-                )?
-                .1,
-            );
-        }
-        if previous.request_fields != updated.request_fields {
-            runtime_profile = Some(update_session_request_fields(
-                state,
-                &session_id,
-                updated.request_fields.clone(),
-            )?);
-        }
-        if previous.allow_cross_origin_redirects != updated.allow_cross_origin_redirects
-            || previous.private_ca_pem != updated.private_ca_pem
         {
-            runtime_profile = Some(update_session_model_http_transport(
-                state,
-                &session_id,
-                agent_core::ModelHttpTransportOptions {
-                    allow_cross_origin_redirects: updated.allow_cross_origin_redirects,
-                    private_ca_pem: (!updated.private_ca_pem.is_empty())
-                        .then(|| updated.private_ca_pem.clone()),
-                },
-            )?);
+            let mut sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            let session = sessions.get_mut(&session_id).ok_or("session_not_found")?;
+            session.runtime.model_endpoint_id = Some(updated.id.clone());
+            session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
         }
-        if let Some(runtime_profile) = runtime_profile {
-            updates.push((session_id, runtime_profile));
+        persist_web_session(state, &session_id)?;
+        if !session_has_active_turn(state, &session_id)? {
+            updates.push((
+                session_id.clone(),
+                apply_model_endpoint(state, &session_id, &updated.id)?,
+            ));
+        } else {
+            let sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            updates.push((
+                session_id.clone(),
+                sessions[&session_id].runtime_profile.clone(),
+            ));
         }
     }
     Ok(updates)
+}
+
+// Resolve the binding at the new-Turn boundary, never during an active request.
+fn refresh_bound_model_endpoint(state: &AppState, session_id: &str) -> Result<(), String> {
+    if session_has_active_turn(state, session_id)? {
+        return Ok(());
+    }
+    let unbound = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        sessions
+            .get(session_id)
+            .ok_or("session_not_found")?
+            .runtime
+            .model_endpoint_id
+            .is_none()
+    };
+    let mut migrated = false;
+    if unbound {
+        // Legacy migration requires a unique complete match, including secrets.
+        let mem = state
+            .mem
+            .lock()
+            .map_err(|_| "mem_state_poisoned".to_string())?;
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions.get_mut(session_id).ok_or("session_not_found")?;
+        let mut matches = mem
+            .model_endpoints
+            .iter()
+            .filter(|endpoint| session_uses_model_endpoint(session, endpoint));
+        let first = matches.next().map(|endpoint| endpoint.id.clone());
+        if first.is_some() && matches.next().is_none() {
+            session.runtime.model_endpoint_id = first;
+            session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
+            migrated = true;
+        }
+    }
+    let id = {
+        let sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        sessions
+            .get(session_id)
+            .ok_or("session_not_found")?
+            .runtime
+            .model_endpoint_id
+            .clone()
+    };
+    if let Some(id) = id {
+        if migrated {
+            persist_web_session(state, session_id)?;
+        }
+        let endpoint = model_endpoint_config(state, &id)?;
+        let matches = {
+            let sessions = state
+                .sessions
+                .lock()
+                .map_err(|_| "session_store_poisoned".to_string())?;
+            session_uses_model_endpoint(
+                sessions.get(session_id).ok_or("session_not_found")?,
+                &endpoint,
+            )
+        };
+        if !matches || migrated {
+            let runtime_profile = apply_model_endpoint(state, session_id, &id)?;
+            publish_semantic(
+                state,
+                WireEvent::SessionRuntimeUpdated {
+                    session_id: session_id.to_string(),
+                    runtime_profile,
+                },
+            );
+        }
+    }
+    Ok(())
 }
 
 fn delete_model_endpoint(state: &AppState, endpoint_id: &str) -> Result<(), String> {
@@ -7369,6 +8015,36 @@ fn delete_model_endpoint(state: &AppState, endpoint_id: &str) -> Result<(), Stri
         return Err("model_endpoint_not_found".to_string());
     }
     save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints)
+}
+
+fn delete_model_endpoints(state: &AppState, endpoint_ids: &[String]) -> Result<(), String> {
+    if endpoint_ids.is_empty() || endpoint_ids.len() > MAX_MODEL_ENDPOINT_DELETE_IDS {
+        return Err("model_endpoint_delete_selection_invalid".to_string());
+    }
+    let selected = endpoint_ids.iter().collect::<BTreeSet<_>>();
+    if selected.len() != endpoint_ids.len() {
+        return Err("model_endpoint_delete_selection_invalid".to_string());
+    }
+    let mut mem = state
+        .mem
+        .lock()
+        .map_err(|_| "mem_state_poisoned".to_string())?;
+    if selected.iter().any(|endpoint_id| {
+        !mem.model_endpoints
+            .iter()
+            .any(|endpoint| endpoint.id == **endpoint_id)
+    }) {
+        return Err("model_endpoint_not_found".to_string());
+    }
+    let mut retained = Vec::with_capacity(mem.model_endpoints.len() - selected.len());
+    for endpoint in &mem.model_endpoints {
+        if !selected.contains(&endpoint.id) {
+            retained.push(endpoint.clone());
+        }
+    }
+    save_model_endpoints(&mem.layout.memory_dir(), &retained)?;
+    mem.model_endpoints = retained;
+    Ok(())
 }
 
 struct ModelEndpointSecrets {
@@ -7433,6 +8109,14 @@ fn apply_model_endpoint(
     for (key, value) in fields {
         update_session_runtime_setting(state, session_id, key, &value)?;
     }
+    if let Some(reasoning_effort) = &endpoint.reasoning_effort {
+        update_session_runtime_setting(
+            state,
+            session_id,
+            "TIMEM_REASONING_EFFORT",
+            reasoning_effort,
+        )?;
+    }
     update_session_http_headers(state, session_id, endpoint.http_headers)?;
     update_session_request_fields(state, session_id, endpoint.request_fields)?;
     update_session_model_http_transport(
@@ -7444,7 +8128,19 @@ fn apply_model_endpoint(
                 .then_some(endpoint.private_ca_pem),
         },
     )?;
-    update_session_api_key(state, session_id, endpoint.api_key)
+    update_session_api_key(state, session_id, endpoint.api_key)?;
+    let profile = {
+        let mut sessions = state
+            .sessions
+            .lock()
+            .map_err(|_| "session_store_poisoned".to_string())?;
+        let session = sessions.get_mut(session_id).ok_or("session_not_found")?;
+        session.runtime.model_endpoint_id = Some(endpoint_id.to_string());
+        session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
+        session.runtime_profile.clone()
+    };
+    persist_web_session(state, session_id)?;
+    Ok(profile)
 }
 
 fn update_session_model_http_transport(
@@ -7482,8 +8178,7 @@ fn update_session_model_http_transport(
             .ok_or_else(|| "session_not_found".to_string())?;
         session.runtime.settings.config.http_transport = options;
         session.runtime.env = session_cached_env_values(&session.runtime.settings);
-        session.runtime_profile =
-            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
         session.runtime_profile.clone()
     };
     persist_web_session(state, session_id)?;
@@ -7526,8 +8221,7 @@ fn update_session_http_headers(
             "TIMEM_HTTP_HEADERS".to_string(),
             serde_json::to_string(&http_headers).map_err(|e| e.to_string())?,
         );
-        session.runtime_profile =
-            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
         session.runtime_profile.clone()
     };
     persist_web_session(state, session_id)?;
@@ -7570,8 +8264,7 @@ fn update_session_request_fields(
             "TIMEM_REQUEST_FIELDS".to_string(),
             serde_json::to_string(&request_fields).map_err(|e| e.to_string())?,
         );
-        session.runtime_profile =
-            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
         session.runtime_profile.clone()
     };
     persist_web_session(state, session_id)?;
@@ -7620,8 +8313,7 @@ fn update_session_api_key(
             .runtime
             .env
             .insert("TIMEM_API_KEY".to_string(), api_key);
-        session.runtime_profile =
-            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
         session.runtime_profile.clone()
     };
     persist_web_session(state, session_id)?;
@@ -7677,8 +8369,7 @@ fn update_session_runtime_setting(
                 .runtime
                 .env_overrides
                 .insert(key.to_string(), normalized_value.clone());
-            session.runtime_profile =
-                WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+            session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
             session.runtime_profile.clone()
         };
         persist_web_session(state, session_id)?;
@@ -7742,8 +8433,7 @@ fn update_session_runtime_setting(
                 .runtime
                 .env_overrides
                 .insert(key.to_string(), normalized_value.clone());
-            session.runtime_profile =
-                WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+            session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
             session.runtime_profile.clone()
         };
         persist_web_session(state, session_id)?;
@@ -7803,8 +8493,7 @@ fn update_session_runtime_setting(
             .runtime
             .env
             .extend(session_cached_env_values(&session.runtime.settings));
-        session.runtime_profile =
-            WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+        session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
         session.max_llm_input_tokens = session.runtime.settings.config.max_llm_input_tokens;
         session.runtime_profile.clone()
     };
@@ -7851,8 +8540,7 @@ fn propagate_runtime_config_to_sessions(
                     value,
                 );
                 // Update the runtime_profile for UI display
-                session.runtime_profile =
-                    WebSessionRuntimeProfile::from_settings(&session.runtime.settings);
+                session.runtime_profile = WebSessionRuntimeProfile::from_runtime(&session.runtime);
                 session
                     .runtime
                     .env
@@ -8158,6 +8846,7 @@ fn start_web_turn_with_selected_attachments_and_roles(
     let previous_session = session.clone();
     let attachments = take_pending_attachments_for_ids(session, attachment_ids)?;
     let turn = WebTurn {
+        preview: None,
         turn_id: unique_web_id("web_turn"),
         state: "pending".to_string(),
         created_at_ms: now_ms(),
@@ -8288,6 +8977,7 @@ fn submit_toolgen_turn(
 }
 
 fn validate_session_model_service_config(state: &AppState, session_id: &str) -> Result<(), String> {
+    refresh_bound_model_endpoint(state, session_id)?;
     let sessions = state
         .sessions
         .lock()
@@ -8335,6 +9025,7 @@ fn start_web_toolgen_turn(
         })
         .unwrap_or_default();
     let turn = WebTurn {
+        preview: None,
         turn_id: unique_web_id("web_toolgen_turn"),
         state: "pending".to_string(),
         created_at_ms,
@@ -8904,11 +9595,25 @@ fn session_context_with_roles(
         WorkInstructionLoadMode::Ask | WorkInstructionLoadMode::Off => None,
     };
     let uploaded_files = uploaded_files_context(attachments, spec);
+    let image_note = attachments
+        .iter()
+        .filter(|file| image_media_type(&file.name).is_some())
+        .map(|file| file.name.as_str())
+        .collect::<Vec<_>>();
+    let image_note = if image_note.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "The user attached image file(s) to this message: {}. Their visual content is delivered as image parts of this request.",
+            image_note.join(", ")
+        ))
+    };
     let worker_roles = worker_roles_context(worker_roles);
     Ok(combine_additional_contexts([
         resume_notice.as_deref(),
         instructions.as_deref(),
         uploaded_files.as_deref(),
+        image_note.as_deref(),
         worker_roles.as_deref(),
         tool_repo_hint.as_deref(),
     ]))
@@ -8930,6 +9635,55 @@ fn uploaded_files_context(
             .collect::<Vec<_>>()
             .join("\n")
     ))
+}
+
+const MAX_IMAGE_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TURN_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TURN_IMAGES: usize = 8;
+
+fn image_media_type(name: &str) -> Option<&'static str> {
+    let extension = Path::new(name).extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
+/// Load image attachments of one turn as model image parts. Fail closed on
+/// oversized or unreadable images instead of silently dropping them; only
+/// bounded raster formats become vision input, other files keep their
+/// text-path listing. Callers must invoke this once per turn start.
+fn turn_image_parts(
+    attachments: &[WebAttachment],
+) -> Result<Vec<agent_core::ModelImagePart>, String> {
+    use base64::Engine as _;
+    let mut parts = Vec::new();
+    let mut total_bytes = 0usize;
+    for attachment in attachments {
+        let Some(media_type) = image_media_type(&attachment.name) else {
+            continue;
+        };
+        if parts.len() >= MAX_TURN_IMAGES {
+            return Err("turn_image_limit_reached".to_string());
+        }
+        if attachment.bytes > MAX_IMAGE_ATTACHMENT_BYTES {
+            return Err("image_attachment_too_large".to_string());
+        }
+        total_bytes += attachment.bytes;
+        if total_bytes > MAX_TURN_IMAGE_BYTES {
+            return Err("turn_image_bytes_limit_reached".to_string());
+        }
+        let bytes = std::fs::read(&attachment.path)
+            .map_err(|_| "image_attachment_unreadable".to_string())?;
+        parts.push(agent_core::ModelImagePart::new(
+            media_type,
+            base64::engine::general_purpose::STANDARD.encode(bytes),
+        ));
+    }
+    Ok(parts)
 }
 
 fn sanitize_upload_name(name: &str) -> Result<String, String> {
@@ -9350,6 +10104,7 @@ fn activate_core_started_turn(
             }
             let payload = item.payload;
             let turn = WebTurn {
+                preview: None,
                 turn_id: payload.turn_id.clone(),
                 state: "pending".to_string(),
                 created_at_ms: payload.created_at_ms,
@@ -9645,6 +10400,12 @@ fn handle_scoped_worker_event(
                     );
                     continue;
                 }
+                if event.topic.name == "core.model.preview" {
+                    if !toolgen_scoped {
+                        response_preview::publish(state, session_id, worker_id, &event);
+                    }
+                    continue;
+                }
                 let mut wire_payload = event.wire_payload();
                 if !toolgen_scoped {
                     if let Some(cwd) = event
@@ -9784,6 +10545,25 @@ fn handle_scoped_worker_event(
                                     if !turn.sub_answers.iter().any(|existing| {
                                         existing.sub_answer_id == sub_answer.sub_answer_id
                                     }) {
+                                        if let (Some(attempt), Some(index), Some(preview)) = (
+                                            sub_answer.preview_attempt,
+                                            sub_answer.preview_index,
+                                            turn.preview.as_mut(),
+                                        ) {
+                                            if preview.get("attempt").and_then(Value::as_u64)
+                                                == Some(attempt)
+                                            {
+                                                if let Some(chat) = preview
+                                                    .get_mut("chat")
+                                                    .and_then(Value::as_array_mut)
+                                                {
+                                                    chat.retain(|item| {
+                                                        item.get("index").and_then(Value::as_u64)
+                                                            != Some(index)
+                                                    });
+                                                }
+                                            }
+                                        }
                                         turn.sub_answers.push(sub_answer);
                                         turn.sub_answers.sort_by_key(|item| item.ordinal);
                                     }
@@ -10554,6 +11334,20 @@ impl WorkerTemplate {
                 scratch_file: absolute_path(memory_dir.join("scratch_notes.jsonl")),
                 api_audit_file: absolute_path(&audit_file),
                 action_audit_file: absolute_path(audit_file.with_file_name("action_audit.json")),
+                config_paths: vec![
+                    (
+                        "model_endpoints_file".to_string(),
+                        absolute_path(model_endpoints_path(&memory_dir))
+                            .display()
+                            .to_string(),
+                    ),
+                    (
+                        "model_endpoints_readme".to_string(),
+                        absolute_path(model_endpoints_readme_path(&memory_dir))
+                            .display()
+                            .to_string(),
+                    ),
+                ],
             },
         );
         if let Ok(registry) =
@@ -10935,8 +11729,15 @@ fn apply_session_runtime_field(
 }
 
 impl WebSessionRuntimeProfile {
+    fn from_runtime(runtime: &WebSessionRuntime) -> Self {
+        let mut profile = Self::from_settings(&runtime.settings);
+        profile.model_endpoint_id = runtime.model_endpoint_id.clone();
+        profile
+    }
+
     fn from_settings(settings: &RuntimeSettings) -> Self {
         Self {
+            model_endpoint_id: None,
             model: settings.config.model.clone(),
             api_protocol: settings.config.api_protocol.label().to_string(),
             response_protocol: settings.config.response_protocol.name().to_string(),

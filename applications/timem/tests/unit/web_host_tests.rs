@@ -840,6 +840,7 @@ fn corrupt_session_index_record_is_backed_up_while_valid_sessions_remain_usable(
     let store = SessionStore::new(&memory_dir);
     std::fs::create_dir_all(store.sessions_dir()).unwrap();
     let valid = StoredSession {
+        model_endpoint_id: None,
         session_id: "session-valid".to_string(),
         display_name: "Recovered".to_string(),
         created_at_ms: 1,
@@ -1576,6 +1577,7 @@ fn unmatched_core_turn_started_does_not_activate_an_unrelated_pending_intent() {
 fn restored_interrupted_session_marks_every_unfinished_turn() {
     let mut turns = vec![
         WebTurn {
+            preview: None,
             turn_id: "older_unfinished".to_string(),
             state: "restored".to_string(),
             created_at_ms: 1,
@@ -1587,6 +1589,7 @@ fn restored_interrupted_session_marks_every_unfinished_turn() {
             completion: None,
         },
         WebTurn {
+            preview: None,
             turn_id: "persisted_last".to_string(),
             state: "restored".to_string(),
             created_at_ms: 2,
@@ -1613,6 +1616,7 @@ fn restored_interrupted_session_marks_every_unfinished_turn() {
 #[test]
 fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn() {
     let terminal = WebTurn {
+        preview: None,
         turn_id: "terminal_last".to_string(),
         state: "completed".to_string(),
         created_at_ms: 2,
@@ -1624,6 +1628,7 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
         completion: Some(json!({"stop_reason": "model_error"})),
     };
     let unfinished = WebTurn {
+        preview: None,
         turn_id: "older_unfinished".to_string(),
         state: "restored".to_string(),
         created_at_ms: 1,
@@ -1642,6 +1647,7 @@ fn restored_interrupted_session_preserves_terminal_turns_and_needs_no_last_turn(
     assert_eq!(turns[1].state, "completed");
 
     let mut ready_turns = vec![WebTurn {
+        preview: None,
         turn_id: "ready_unfinished".to_string(),
         state: "restored".to_string(),
         created_at_ms: 3,
@@ -1716,6 +1722,7 @@ fn interrupted_session_persists_without_an_active_or_pending_turn() {
     session.active_turn_id = None;
     session.pending_turn_id = None;
     session.turns.push(WebTurn {
+        preview: None,
         turn_id: "interrupted_turn".to_string(),
         state: "interrupted".to_string(),
         created_at_ms: 1,
@@ -1746,6 +1753,7 @@ fn stale_turn_started_without_command_id_cannot_revive_an_interrupted_session() 
         session.active_turn_id = None;
         session.pending_turn_id = None;
         session.turns.push(WebTurn {
+            preview: None,
             turn_id: "old_interrupted_turn".to_string(),
             state: "interrupted".to_string(),
             created_at_ms: 1,
@@ -1806,6 +1814,7 @@ fn stale_turn_started_cannot_revive_an_interrupted_turn_but_new_pending_turn_can
         let session = sessions.get_mut(session_id).unwrap();
         session.state = "interrupted".to_string();
         session.turns.push(WebTurn {
+            preview: None,
             turn_id: "interrupted_turn".to_string(),
             state: "interrupted".to_string(),
             created_at_ms: 1,
@@ -1949,6 +1958,63 @@ fn force_session_history_persistence_failure(state: &AppState, label: &str) -> P
     std::fs::write(&blocker, b"not a directory").unwrap();
     state.mem.lock().unwrap().session_store = SessionStore::new(&blocker);
     blocker
+}
+
+#[test]
+fn turn_image_parts_encodes_images_skips_files_and_fails_closed() {
+    use base64::Engine as _;
+    let dir = std::env::temp_dir().join(unique_web_id("image_parts"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let png_bytes: [u8; 4] = [0x89, b'P', b'N', b'G'];
+    let png = dir.join("shot.png");
+    std::fs::write(&png, png_bytes).unwrap();
+    let txt = dir.join("notes.txt");
+    std::fs::write(&txt, b"hello").unwrap();
+    let attachment = |id: &str, name: &str, path: String, bytes: usize| WebAttachment {
+        id: id.to_string(),
+        name: name.to_string(),
+        path,
+        bytes,
+    };
+    let attachments = vec![
+        attachment(
+            "img",
+            "shot.png",
+            png.display().to_string(),
+            png_bytes.len(),
+        ),
+        attachment("txt", "notes.txt", txt.display().to_string(), 5),
+    ];
+    let parts = turn_image_parts(&attachments).unwrap();
+    assert_eq!(parts.len(), 1, "only image files become image parts");
+    assert_eq!(parts[0].media_type, "image/png");
+    assert_eq!(
+        parts[0].data,
+        base64::engine::general_purpose::STANDARD.encode(png_bytes)
+    );
+
+    let oversized = attachment(
+        "big",
+        "big.png",
+        String::new(),
+        MAX_IMAGE_ATTACHMENT_BYTES + 1,
+    );
+    assert_eq!(
+        turn_image_parts(std::slice::from_ref(&oversized)),
+        Err("image_attachment_too_large".to_string())
+    );
+
+    let ghost = attachment(
+        "ghost",
+        "ghost.png",
+        dir.join("missing.png").display().to_string(),
+        4,
+    );
+    assert_eq!(
+        turn_image_parts(std::slice::from_ref(&ghost)),
+        Err("image_attachment_unreadable".to_string())
+    );
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -4142,6 +4208,7 @@ fn session_runtime_update_is_allowed_during_an_active_turn() {
         session.active_turn_id = Some("turn_active".to_string());
         session.state = "working".to_string();
         session.turns.push(WebTurn {
+            preview: None,
             turn_id: "turn_active".to_string(),
             state: "working".to_string(),
             created_at_ms: now_ms(),
@@ -4206,6 +4273,7 @@ fn session_api_key_update_is_rejected_during_an_active_turn() {
     let session = sessions.get_mut("session_a").unwrap();
     session.active_turn_id = Some("turn_active".to_string());
     session.turns.push(WebTurn {
+        preview: None,
         turn_id: "turn_active".to_string(),
         state: "working".to_string(),
         created_at_ms: now_ms(),
@@ -4453,6 +4521,7 @@ fn missing_workspace_session_uses_locked_fallback_without_losing_metadata_or_his
         .unwrap();
     store
         .upsert_session(&StoredSession {
+            model_endpoint_id: None,
             session_id: session_id.to_string(),
             display_name: original_display_name.to_string(),
             created_at_ms: 1,
@@ -5517,6 +5586,15 @@ fn restored_web_turns_preserve_user_entry_kinds() {
             delivery_state: None,
             content: "legacy text".to_string(),
         },
+        ChatHistoryRecord::Message {
+            role: ChatHistoryRole::User,
+            turn_id: "turn_1".to_string(),
+            created_at_ms: 14,
+            kind: Some("queued_interrupted".to_string()),
+            command_id: Some("queued_cmd".to_string()),
+            delivery_state: Some(ChatCommandDeliveryState::Recorded),
+            content: "queued input never dispatched".to_string(),
+        },
     ];
 
     let turns = restored_turns_from_history_records(&records);
@@ -5531,8 +5609,103 @@ fn restored_web_turns_preserve_user_entry_kinds() {
             ("supplement", "mid-turn supplement"),
             ("approval", "approved request"),
             ("task", "legacy text"),
+            ("queued_interrupted", "queued input never dispatched"),
         ]
     );
+}
+
+#[test]
+fn runtime_restart_materializes_never_dispatched_queue_items_as_queued_interrupted() {
+    let mut state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("restart_queued_interrupted"));
+    std::fs::create_dir_all(&root).unwrap();
+    let data_dir = root.join("data");
+    let space = "restart_queued_interrupted_mem";
+    set_test_mem(&state, data_dir.clone(), space);
+    let mut template = (*state.template).clone();
+    template.current_dir = root.clone();
+    template.workspace_dirs = vec![root.clone()];
+    template.data_dir = data_dir.clone();
+    template.initial_space = space.to_string();
+    state.template = Arc::new(template.clone());
+    state.sessions.lock().unwrap().clear();
+
+    let session_id = create_session(
+        &state,
+        Some("Queued input is not a resumable task".to_string()),
+        Some(root.display().to_string()),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    start_web_turn_with_command_id(
+        &state,
+        &session_id,
+        "first task keeps the session working",
+        Some("started_before_restart"),
+    )
+    .unwrap();
+    handle_command_with_id(
+        &state,
+        TEST_PORT,
+        Some("queued_never_dispatched"),
+        ClientCommand::TurnSubmit {
+            session_id: session_id.clone(),
+            text: "never sent before the restart".to_string(),
+            attachment_ids: None,
+            input_kind: None,
+            source_turn_id: None,
+            role_id: None,
+            role_ids: Vec::new(),
+        },
+    )
+    .unwrap();
+
+    let mut restarted = routing_test_state();
+    restarted.sessions.lock().unwrap().clear();
+    restarted.template = Arc::new(template);
+    set_test_mem(&restarted, data_dir, space);
+    assert_eq!(
+        restore_stored_sessions_after_runtime_restart(&restarted).unwrap(),
+        1
+    );
+
+    {
+        let sessions = restarted.sessions.lock().unwrap();
+        let restored = &sessions[&session_id];
+        assert!(restored.message_queue.is_empty());
+        let queued_turn = restored
+            .turns
+            .iter()
+            .find(|candidate| {
+                candidate
+                    .user_entries
+                    .iter()
+                    .any(|entry| entry.command_id.as_deref() == Some("queued_never_dispatched"))
+            })
+            .expect("queued input remains visible after the restart");
+        assert_eq!(queued_turn.state, "interrupted");
+        assert_eq!(queued_turn.final_answer, None);
+        assert_eq!(queued_turn.completion, None);
+        assert_eq!(
+            queued_turn.user_entries[0].kind.as_str(),
+            "queued_interrupted",
+            "history shown to the model must not label never-dispatched input as a task"
+        );
+        assert!(restored
+            .messages
+            .iter()
+            .any(|message| message.kind.as_deref() == Some("queued_interrupted")));
+    }
+
+    let records = read_all_history_records(
+        &current_session_store(&restarted)
+            .unwrap()
+            .history_path_for_session(&session_id),
+    )
+    .unwrap();
+    assert!(records
+        .iter()
+        .any(|record| matches!(record, ChatHistoryRecord::Message { role: ChatHistoryRole::User, kind: Some(kind), .. } if kind == "queued_interrupted")));
 }
 
 #[test]
@@ -7384,6 +7557,7 @@ fn routing_test_state() -> AppState {
             WebMemState::new(template.data_dir.clone(), template.initial_space.clone()).unwrap(),
         )),
         template: Arc::new(template),
+        model_endpoint_imports: Arc::new(Mutex::new(Vec::new())),
         events: events.clone(),
         sessions: Arc::new(Mutex::new(sessions)),
         command_dedup: Arc::new(Mutex::new(CommandDedupCache::default())),
@@ -7542,6 +7716,7 @@ fn test_web_session(session_id: &str, ordinal: u32, display_name: String) -> Web
         work_instruction_allowed: None,
         pending_work_instruction_turn: None,
         runtime: WebSessionRuntime {
+            model_endpoint_id: None,
             settings,
             env: BTreeMap::new(),
             env_overrides: BTreeMap::new(),
@@ -7583,6 +7758,7 @@ fn test_runtime_settings() -> RuntimeSettings {
 
 fn test_runtime_profile() -> WebSessionRuntimeProfile {
     WebSessionRuntimeProfile {
+        model_endpoint_id: None,
         model: "model".to_string(),
         api_protocol: "openai-compatible".to_string(),
         response_protocol: "xml".to_string(),
@@ -9685,6 +9861,7 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
                 observed_tool_calls: 2,
             }),
             interaction_request: Some(Box::new(agent_core::ModelInteractionRequest {
+                images: Vec::new(),
                 rendered_prompt: "debug prompt".to_string(),
                 static_tool_count: 1,
                 tools: vec![agent_core::ToolDefinition {
@@ -9711,6 +9888,7 @@ fn debug_worker_event_pipeline_persists_native_dumps_metrics_and_repair_history(
                 resolved_mode: agent_core::ToolCallMode::Native,
                 parallel_tool_calls: true,
                 tool_choice: agent_core::NativeToolChoice::Auto,
+                critical_reasoning: false,
             })),
             api_payload: Some(Box::new(json!({
                 "messages": [
@@ -10814,6 +10992,18 @@ fn send_after_stop_with_an_empty_queue_becomes_one_distinct_queued_message() {
         session.message_queue.projection().items[0].command_id,
         "after-stop-q2"
     );
+    assert!(
+        session.message_queue.projection().items[0]
+            .payload
+            .send_after_cancel
+    );
+    let persisted = serde_json::to_value(&session.message_queue).unwrap();
+    let restored: timem_session::message_queue::MessageQueueProjection<WebNextTurnPayload> =
+        serde_json::from_value(persisted).unwrap();
+    assert!(
+        !restored.items[0].payload.send_after_cancel,
+        "restart must not redrive explicit Send"
+    );
 }
 
 #[test]
@@ -11468,6 +11658,7 @@ fn background_exit_event_is_appended_to_its_original_turn() {
         let session = sessions.get_mut("session_a").unwrap();
         session.active_turn_id = None;
         session.turns.push(WebTurn {
+            preview: None,
             turn_id: "turn_newer".to_string(),
             state: "working".to_string(),
             created_at_ms: now_ms(),
@@ -13479,6 +13670,710 @@ fn startup_resource_errors_are_actionable_instead_of_internal_codes() {
 }
 
 #[test]
+fn saving_model_endpoints_writes_self_describing_readme_once() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_readme"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
+    let readme = model_endpoints_readme_path(&memory_dir);
+
+    {
+        let mem = state.mem.lock().unwrap();
+        save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints).unwrap();
+    }
+    let first = std::fs::read_to_string(&readme).expect("readme written on save");
+    assert!(first.contains("model_endpoints.json"));
+    assert!(first.contains("api_protocol"));
+    assert!(first.contains("Authorization: Bearer"));
+    assert!(first.contains("x-api-key"));
+
+    std::fs::write(&readme, "user edited note").unwrap();
+    {
+        let mem = state.mem.lock().unwrap();
+        save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints).unwrap();
+    }
+    let second = std::fs::read_to_string(&readme).unwrap();
+    assert_eq!(second, "user edited note");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_endpoint_import_scans_codex_and_claude_directories() {
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_import_scan"));
+    let codex_dir = root.join("codex");
+    let claude_dir = root.join("claude");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        r#"
+model = "gpt-5-codex"
+model_provider = "openrouter"
+model_reasoning_effort = "medium"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+env_key = "TIMEM_TEST_OPENROUTER_KEY"
+env_http_headers = { "X-Tenant" = "TIMEM_TEST_TENANT" }
+wire_api = "chat"
+
+[model_providers.ollama]
+name = "Ollama"
+base_url = "http://127.0.0.1:11434/v1"
+wire_api = "chat"
+
+[model_providers.inline]
+name = "Inline"
+base_url = "https://inline.example.test/v1"
+experimental_bearer_token = "inline-provider-secret"
+wire_api = "responses"
+
+[model_providers.zai]
+name = "ZAI"
+base_url = "https://zai.example.test/v1"
+experimental_bearer_token = "zai-provider-secret"
+wire_api = "responses"
+
+[model_providers.chj]
+name = "CHJ"
+base_url = "https://chj.example.test/v1"
+env_key = "TIMEM_TEST_CHJ_KEY"
+wire_api = "responses"
+
+[profiles.fast]
+model = "gpt-5-mini"
+model_provider = "openrouter"
+model_reasoning_effort = "high"
+
+[profiles.legacy]
+model = "old-model"
+model_provider = "legacy-gateway"
+
+[model_providers.legacy-gateway]
+name = "Legacy"
+base_url = "https://legacy.example.test/v1"
+wire_api = "weird"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        codex_dir.join("glm.config.toml"),
+        r#"
+model_provider = "zai"
+model = "glm-5.3"
+model_reasoning_effort = "high"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        codex_dir.join("chj.config.toml"),
+        r#"
+model_provider = "chj"
+model = "andes-glm-5.x-auto"
+model_reasoning_effort = "high"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        codex_dir.join("inline.config.toml"),
+        r#"
+model_provider = "inline"
+model = "inline-model"
+model_reasoning_effort = "medium"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        codex_dir.join("auth.json"),
+        r#"{"OPENAI_API_KEY":"codex-auth-key"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"model":"sonnet","env":{"ANTHROPIC_BASE_URL":"https://gateway.example.test"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        claude_dir.join("settings.local.json"),
+        r#"{"env":{"ANTHROPIC_MODEL":"claude-sonnet-4-5","ANTHROPIC_AUTH_TOKEN":"claude-secret-key"}}"#,
+    )
+    .unwrap();
+    std::env::set_var("TIMEM_TEST_OPENROUTER_KEY", "openrouter-secret-key");
+    std::env::set_var("TIMEM_TEST_TENANT", "tenant-one");
+    std::env::set_var("TIMEM_TEST_CHJ_KEY", "chj-secret-key");
+
+    let scan = scan_model_endpoint_imports(
+        Some(codex_dir.to_str().unwrap()),
+        Some(claude_dir.to_str().unwrap()),
+    )
+    .unwrap();
+    std::env::remove_var("TIMEM_TEST_OPENROUTER_KEY");
+    std::env::remove_var("TIMEM_TEST_TENANT");
+    std::env::remove_var("TIMEM_TEST_TENANT");
+    std::env::remove_var("TIMEM_TEST_CHJ_KEY");
+    assert_eq!(scan.candidates.len(), 6);
+    let openrouter = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.name == "OpenRouter")
+        .unwrap();
+    assert_eq!(openrouter.source, "codex");
+    assert_eq!(openrouter.model, "gpt-5-codex");
+    assert_eq!(openrouter.api_protocol, "openai-compatible");
+    assert!(openrouter.stream);
+    assert_eq!(openrouter.api_key, "openrouter-secret-key");
+    assert_eq!(openrouter.reasoning_effort.as_deref(), Some("medium"));
+    assert_eq!(
+        openrouter.http_headers.get("X-Tenant").map(String::as_str),
+        Some("tenant-one")
+    );
+    let fast = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.model == "gpt-5-mini")
+        .unwrap();
+    assert_eq!(fast.name, "OpenRouter");
+    assert_eq!(fast.reasoning_effort.as_deref(), Some("high"));
+    let zai = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.name == "ZAI")
+        .unwrap();
+    assert_eq!(zai.model, "glm-5.3");
+    assert_eq!(zai.reasoning_effort.as_deref(), Some("high"));
+    let chj = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.name == "CHJ")
+        .unwrap();
+    assert_eq!(chj.model, "andes-glm-5.x-auto");
+    assert_eq!(chj.api_key, "chj-secret-key");
+    let inline = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.name == "Inline")
+        .unwrap();
+    assert_eq!(inline.model, "inline-model");
+    assert_eq!(inline.api_key, "inline-provider-secret");
+    assert_eq!(inline.reasoning_effort.as_deref(), Some("medium"));
+    let claude = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.source == "claude")
+        .unwrap();
+    assert_eq!(claude.name, "Claude Code");
+    assert_eq!(claude.model, "claude-sonnet-4-5");
+    assert_eq!(claude.base_url, "https://gateway.example.test");
+    assert_eq!(claude.api_protocol, "anthropic");
+    assert_eq!(claude.api_key, "claude-secret-key");
+    assert_eq!(claude.max_llm_input_tokens, 200_000);
+    assert!(scan
+        .issues
+        .iter()
+        .any(|issue| issue.starts_with("codex_provider_wire_api_unsupported:legacy-gateway")));
+    assert!(scan
+        .issues
+        .iter()
+        .any(|issue| issue == "codex_provider_model_missing:ollama"));
+    let reports: Vec<ModelEndpointImportCandidateReport> = scan
+        .candidates
+        .iter()
+        .map(ModelEndpointImportCandidateReport::from)
+        .collect();
+    let serialized = serde_json::to_string(&reports).unwrap();
+    assert!(serialized.contains("api_key_configured"));
+    assert!(!serialized.contains("openrouter-secret-key"));
+    assert!(!serialized.contains("inline-provider-secret"));
+    assert!(!serialized.contains("zai-provider-secret"));
+    assert!(!serialized.contains("chj-secret-key"));
+    assert!(!serialized.contains("claude-secret-key"));
+    assert!(!serialized.contains("codex-auth-key"));
+
+    let missing = scan_model_endpoint_imports(
+        Some(root.join("missing-codex").to_str().unwrap()),
+        Some(root.join("missing-claude").to_str().unwrap()),
+    )
+    .unwrap();
+    assert!(missing.candidates.is_empty());
+    assert!(missing
+        .issues
+        .iter()
+        .any(|issue| issue.starts_with("codex_config_read_failed")));
+    assert!(missing
+        .issues
+        .iter()
+        .any(|issue| issue == "claude_settings_missing"));
+    assert_eq!(
+        scan_model_endpoint_imports(Some("  "), None).unwrap_err(),
+        "model_endpoint_import_directory_empty"
+    );
+    assert_eq!(
+        scan_model_endpoint_imports(Some("~other-user/.codex"), None).unwrap_err(),
+        "model_endpoint_import_home_user_unsupported"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_endpoint_import_resolves_ept_portal_token_for_chj() {
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_import_ept"));
+    let codex_dir = root.join(".codex");
+    let ept_dir = root.join(".config").join("ept");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::create_dir_all(&ept_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        r#"
+model = "glm-5.3"
+model_provider = "zai"
+
+[model_providers.zai]
+name = "ZAI"
+base_url = "https://zai.example.test/v1"
+experimental_bearer_token = "zai-secret-key"
+wire_api = "responses"
+
+[model_providers.chj]
+name = "CHJ"
+base_url = "https://chj.example.test/v1"
+env_key = "CHJ_API_KEY"
+wire_api = "responses"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        codex_dir.join("chj.config.toml"),
+        r#"
+model_provider = "chj"
+model = "andes-glm-5.x-auto"
+model_reasoning_effort = "high"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        ept_dir.join("auth_session.json"),
+        r#"{"access_token":"not-the-codex-key","portal_token":"ept-portal-token"}"#,
+    )
+    .unwrap();
+
+    let previous_key = std::env::var("CHJ_API_KEY").ok();
+    std::env::remove_var("CHJ_API_KEY");
+    let valid_scanned = scan_model_endpoint_imports(Some(codex_dir.to_str().unwrap()), None);
+    std::fs::write(ept_dir.join("auth_session.json"), r#"{"portal_token":""}"#).unwrap();
+    let missing_token_scanned =
+        scan_model_endpoint_imports(Some(codex_dir.to_str().unwrap()), None);
+    if let Some(key) = previous_key {
+        std::env::set_var("CHJ_API_KEY", key);
+    }
+    let scan = valid_scanned.expect("valid EPT auth session scan");
+    let missing_token_scan = missing_token_scanned.expect("EPT auth session scan");
+    let chj = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.name == "CHJ")
+        .expect("CHJ profile overlay candidate");
+    assert_eq!(chj.model, "andes-glm-5.x-auto");
+    assert_eq!(chj.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(chj.api_key, "ept-portal-token");
+    let report = ModelEndpointImportCandidateReport::from(chj);
+    assert!(report.api_key_configured);
+    let serialized = serde_json::to_string(&report).unwrap();
+    assert!(!serialized.contains("ept-portal-token"));
+    assert!(!serialized.contains("not-the-codex-key"));
+
+    let scan = missing_token_scan;
+    let chj = scan
+        .candidates
+        .iter()
+        .find(|candidate| candidate.name == "CHJ")
+        .unwrap();
+    assert_eq!(chj.api_key, "");
+    assert!(scan
+        .issues
+        .iter()
+        .any(|issue| issue == "codex_ept_auth_token_missing"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_endpoint_import_maps_reasoning_and_vendor_request_fields() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_import_fields"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    std::fs::create_dir_all(root.join("codex")).unwrap();
+    std::fs::create_dir_all(root.join("claude")).unwrap();
+    std::fs::write(
+        root.join("codex").join("config.toml"),
+        r#"
+model = "glm-5.3"
+model_provider = "zai"
+model_reasoning_effort = "high"
+disable_response_storage = true
+model_verbosity = "medium"
+
+[model_providers.zai]
+name = "ZAI"
+base_url = "https://open.bigmodel.cn/api/v1"
+wire_api = "responses"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("claude").join("settings.json"),
+        r#"{
+            "model": "claude-sonnet-4-5",
+            "effortLevel": "high",
+            "env": {
+                "MAX_THINKING_TOKENS": "16000",
+                "ANTHROPIC_CUSTOM_HEADERS": "X-Tenant: tenant-one\nX-Region: cn"
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let scanned = scan_model_endpoint_imports(
+        Some(root.join("codex").to_str().unwrap()),
+        Some(root.join("claude").to_str().unwrap()),
+    )
+    .unwrap();
+    let codex = scanned
+        .candidates
+        .iter()
+        .find(|candidate| candidate.source == "codex")
+        .unwrap();
+    assert_eq!(codex.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(
+        codex.request_fields.get("store"),
+        Some(&serde_json::json!(false))
+    );
+    assert_eq!(
+        codex.request_fields.get("text"),
+        Some(&serde_json::json!({"verbosity": "medium"}))
+    );
+    let claude = scanned
+        .candidates
+        .iter()
+        .find(|candidate| candidate.source == "claude")
+        .unwrap();
+    assert_eq!(claude.reasoning_effort, None);
+    assert_eq!(
+        claude.request_fields.get("thinking"),
+        Some(&serde_json::json!({
+            "type": "enabled",
+            "budget_tokens": 16000
+        }))
+    );
+    assert_eq!(
+        claude.http_headers.get("X-Tenant").map(String::as_str),
+        Some("tenant-one")
+    );
+    assert!(scanned
+        .issues
+        .iter()
+        .any(|issue| issue == "claude_effort_level_not_imported"));
+
+    let codex_id = codex.id.clone();
+    let claude_id = claude.id.clone();
+    let codex_reasoning = codex.reasoning_effort.clone();
+    *state.model_endpoint_imports.lock().unwrap() = scanned.candidates;
+    assert_eq!(codex_reasoning.as_deref(), Some("high"));
+
+    let endpoint_ids =
+        import_model_endpoints(&state, &[codex_id.clone(), claude_id.clone()]).unwrap();
+    assert_eq!(endpoint_ids.len(), 2);
+    let mem = state.mem.lock().unwrap();
+    let imported_codex = mem
+        .model_endpoints
+        .iter()
+        .find(|endpoint| endpoint.name == "ZAI")
+        .unwrap();
+    assert_eq!(imported_codex.reasoning_effort.as_deref(), Some("high"));
+    let imported_claude = mem
+        .model_endpoints
+        .iter()
+        .find(|endpoint| endpoint.name == "Claude Code")
+        .unwrap();
+    assert_eq!(imported_claude.reasoning_effort, None);
+    assert!(imported_claude.request_fields.contains_key("thinking"));
+    drop(mem);
+
+    // Reasoning effort cannot be stored on an Anthropic endpoint directly.
+    assert_eq!(
+        normalize_model_endpoint_input(
+            None,
+            ModelEndpointInput {
+                id: None,
+                name: "Bad Claude".to_string(),
+                model: "claude-sonnet-4-5".to_string(),
+                api_protocol: "anthropic".to_string(),
+                response_protocol: "xml".to_string(),
+                base_url: "https://api.anthropic.com".to_string(),
+                max_llm_input_tokens: 200_000,
+                max_llm_output_tokens: 20_000,
+                stream: false,
+                api_key: None,
+                reasoning_effort: Some("high".to_string()),
+                http_headers: Default::default(),
+                request_fields: Default::default(),
+                allow_cross_origin_redirects: false,
+                private_ca_pem: None,
+            },
+        )
+        .unwrap_err(),
+        "model_endpoint_reasoning_effort_requires_openai_protocol"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_endpoint_import_scan_and_apply_round_trip() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_import_apply"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    std::fs::create_dir_all(root.join("claude")).unwrap();
+    std::fs::write(
+        root.join("claude").join("settings.json"),
+        r#"{"env":{"ANTHROPIC_MODEL":"claude-sonnet-4-5","ANTHROPIC_AUTH_TOKEN":"claude-secret-key"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("claude").join("settings.local.json"),
+        r#"{"env":{"ANTHROPIC_BASE_URL":"https://local-gateway.example.test"}}"#,
+    )
+    .unwrap();
+
+    upsert_model_endpoint(
+        &state,
+        ModelEndpointInput {
+            id: None,
+            name: "Claude Code".to_string(),
+            model: "existing-model".to_string(),
+            api_protocol: "anthropic".to_string(),
+            response_protocol: "xml".to_string(),
+            base_url: "https://existing.example.test".to_string(),
+            max_llm_input_tokens: 200_000,
+            max_llm_output_tokens: 20_000,
+            stream: false,
+            api_key: Some("existing-secret".to_string()),
+            http_headers: Default::default(),
+            request_fields: Default::default(),
+            allow_cross_origin_redirects: false,
+            private_ca_pem: None,
+            reasoning_effort: None,
+        },
+    )
+    .unwrap();
+
+    let scanned = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointImportScan {
+            codex_dir: None,
+            claude_dir: Some(root.join("claude").to_str().unwrap().to_string()),
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::ModelEndpointImportScanned { candidates, issues } = scanned else {
+        panic!("scan must return the redacted candidate preview");
+    };
+    assert!(issues.is_empty());
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].api_key_configured);
+    let serialized = serde_json::to_string(&candidates).unwrap();
+    assert!(!serialized.contains("claude-secret-key"));
+
+    let applied = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointImportApply {
+            candidate_ids: vec![candidates[0].id.clone()],
+        },
+    )
+    .unwrap()
+    .unwrap();
+    let WireEvent::ModelEndpointsUpdated { endpoints } = applied else {
+        panic!("apply must publish the authoritative endpoint list");
+    };
+    assert_eq!(endpoints.len(), 2);
+    let imported = endpoints
+        .iter()
+        .find(|endpoint| endpoint.name == "Claude Code 2")
+        .expect("import deduplicates against the existing endpoint name");
+    assert_eq!(imported.model, "claude-sonnet-4-5");
+    assert_eq!(imported.base_url, "https://local-gateway.example.test");
+    assert!(imported.api_key_configured);
+    assert_eq!(
+        model_endpoint_secrets(&state, &imported.id)
+            .unwrap()
+            .api_key,
+        "claude-secret-key"
+    );
+
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointImportScan {
+                codex_dir: Some("  ".to_string()),
+                claude_dir: None,
+            },
+        )
+        .unwrap_err(),
+        "model_endpoint_import_directory_required"
+    );
+
+    // Applied candidates are consumed; reusing the id fails closed.
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointImportApply {
+                candidate_ids: vec![candidates[0].id.clone()],
+            },
+        )
+        .unwrap_err(),
+        format!(
+            "model_endpoint_import_candidate_not_found:{}",
+            candidates[0].id
+        )
+    );
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointImportApply {
+                candidate_ids: Vec::new(),
+            },
+        )
+        .unwrap_err(),
+        "model_endpoint_import_selection_empty"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn model_endpoint_delete_many_is_atomic_and_bounded() {
+    let state = routing_test_state();
+    let root = std::env::temp_dir().join(unique_web_id("timem_web_endpoint_delete_many"));
+    set_test_mem(&state, root.clone(), ".test_mem");
+    let endpoint = |id: &str, name: &str| ModelEndpointConfig {
+        id: id.to_string(),
+        name: name.to_string(),
+        model: format!("{name}-model"),
+        api_protocol: "openai-compatible".to_string(),
+        response_protocol: "xml".to_string(),
+        base_url: format!("https://{id}.example.test/v1"),
+        max_llm_input_tokens: 100_000,
+        max_llm_output_tokens: 10_000,
+        stream: false,
+        allow_cross_origin_redirects: false,
+        private_ca_pem: String::new(),
+        api_key: format!("secret-{id}"),
+        http_headers: Default::default(),
+        request_fields: Default::default(),
+        reasoning_effort: None,
+    };
+    let endpoints = vec![
+        endpoint("endpoint-one", "One"),
+        endpoint("endpoint-two", "Two"),
+        endpoint("endpoint-three", "Three"),
+    ];
+    let memory_dir = {
+        let mut mem = state.mem.lock().unwrap();
+        mem.model_endpoints = endpoints;
+        save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints).unwrap();
+        mem.layout.memory_dir()
+    };
+
+    let result = handle_command(
+        &state,
+        TEST_PORT,
+        ClientCommand::ModelEndpointDeleteMany {
+            endpoint_ids: vec!["endpoint-one".to_string(), "endpoint-three".to_string()],
+        },
+    )
+    .unwrap();
+    let WireEvent::ModelEndpointsUpdated { endpoints } = result.unwrap() else {
+        panic!("batch delete must return the authoritative endpoint list");
+    };
+    assert_eq!(
+        endpoints
+            .iter()
+            .map(|endpoint| endpoint.id.as_str())
+            .collect::<Vec<_>>(),
+        ["endpoint-two"]
+    );
+    assert_eq!(
+        load_model_endpoints_resilient(&memory_dir)
+            .unwrap()
+            .iter()
+            .map(|endpoint| endpoint.id.clone())
+            .collect::<Vec<_>>(),
+        ["endpoint-two"]
+    );
+
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointDeleteMany {
+                endpoint_ids: Vec::new(),
+            },
+        )
+        .unwrap_err(),
+        "model_endpoint_delete_selection_invalid"
+    );
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointDeleteMany {
+                endpoint_ids: vec!["endpoint-two".to_string(), "endpoint-two".to_string(),],
+            },
+        )
+        .unwrap_err(),
+        "model_endpoint_delete_selection_invalid"
+    );
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointDeleteMany {
+                endpoint_ids: vec!["endpoint-two".to_string(), "missing".to_string(),],
+            },
+        )
+        .unwrap_err(),
+        "model_endpoint_not_found"
+    );
+    let too_many_ids = (0..=MAX_MODEL_ENDPOINT_DELETE_IDS)
+        .map(|index| format!("endpoint-{index}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        handle_command(
+            &state,
+            TEST_PORT,
+            ClientCommand::ModelEndpointDeleteMany {
+                endpoint_ids: too_many_ids,
+            },
+        )
+        .unwrap_err(),
+        "model_endpoint_delete_selection_invalid"
+    );
+    assert_eq!(
+        load_model_endpoints_resilient(&memory_dir)
+            .unwrap()
+            .iter()
+            .map(|endpoint| endpoint.id.clone())
+            .collect::<Vec<_>>(),
+        ["endpoint-two"]
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 #[ignore = "manual endpoint scale/concurrency performance profile"]
 fn model_endpoint_scale_and_concurrency_performance_profile() {
     fn percentile(mut samples: Vec<std::time::Duration>, percentile: usize) -> std::time::Duration {
@@ -13502,6 +14397,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
             api_key: format!("secret-{index:05}"),
             http_headers: Default::default(),
             request_fields: Default::default(),
+            reasoning_effort: None,
         }
     }
 
@@ -13564,6 +14460,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                     ("X-Tenant".to_string(), "****".to_string()),
                 ]),
                 request_fields: Default::default(),
+                reasoning_effort: None,
             },
         )
         .unwrap();
@@ -13618,6 +14515,7 @@ fn model_endpoint_scale_and_concurrency_performance_profile() {
                         api_key: None,
                         http_headers: Default::default(),
                         request_fields: Default::default(),
+                        reasoning_effort: None,
                     },
                 )
                 .unwrap();
@@ -13686,14 +14584,14 @@ fn model_endpoint_headers_accept_safe_special_values_and_reject_injection() {
 
 #[test]
 fn model_endpoint_rejects_token_limits_outside_supported_lists() {
-    let invalid_input = ModelEndpointInput {
+    let zero_input = ModelEndpointInput {
         id: None,
         name: "Invalid input".to_string(),
         model: "gpt".to_string(),
         api_protocol: "openai-compatible".to_string(),
         response_protocol: "xml".to_string(),
         base_url: "https://api.example.test/v1".to_string(),
-        max_llm_input_tokens: 128_000,
+        max_llm_input_tokens: 0,
         max_llm_output_tokens: 10_000,
         stream: false,
         allow_cross_origin_redirects: false,
@@ -13701,11 +14599,31 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         api_key: None,
         http_headers: Default::default(),
         request_fields: Default::default(),
+        reasoning_effort: None,
     };
     assert_eq!(
-        normalize_model_endpoint_input(None, invalid_input).unwrap_err(),
+        normalize_model_endpoint_input(None, zero_input).unwrap_err(),
         "invalid_model_endpoint_max_input_tokens"
     );
+
+    let custom_input = ModelEndpointInput {
+        id: None,
+        name: "Custom window".to_string(),
+        model: "gpt".to_string(),
+        api_protocol: "openai-compatible".to_string(),
+        response_protocol: "xml".to_string(),
+        base_url: "https://api.example.test/v1".to_string(),
+        max_llm_input_tokens: 300_000,
+        max_llm_output_tokens: 10_000,
+        stream: false,
+        allow_cross_origin_redirects: false,
+        private_ca_pem: None,
+        api_key: None,
+        http_headers: Default::default(),
+        request_fields: Default::default(),
+        reasoning_effort: None,
+    };
+    assert!(normalize_model_endpoint_input(None, custom_input).is_ok());
 
     let invalid_output = ModelEndpointInput {
         id: None,
@@ -13722,6 +14640,7 @@ fn model_endpoint_rejects_token_limits_outside_supported_lists() {
         api_key: None,
         http_headers: Default::default(),
         request_fields: Default::default(),
+        reasoning_effort: None,
     };
     assert_eq!(
         normalize_model_endpoint_input(None, invalid_output).unwrap_err(),
@@ -13746,6 +14665,7 @@ fn model_endpoint_rejects_invalid_private_ca_before_persisting() {
         api_key: None,
         http_headers: Default::default(),
         request_fields: Default::default(),
+        reasoning_effort: None,
     };
     let error = normalize_model_endpoint_input(None, input).unwrap_err();
     assert!(
@@ -13771,6 +14691,7 @@ fn model_endpoint_stream_requires_openai_compatible_protocol() {
         api_key: None,
         http_headers: Default::default(),
         request_fields: Default::default(),
+        reasoning_effort: None,
     };
     assert_eq!(
         normalize_model_endpoint_input(None, input).unwrap_err(),
@@ -13813,6 +14734,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                         json!({"priority": 2, "enabled": true}),
                     ),
                 ]),
+                reasoning_effort: None,
             },
         },
     )
@@ -13923,6 +14845,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 api_key: None,
                 http_headers: Default::default(),
                 request_fields: Default::default(),
+                reasoning_effort: None,
             },
         },
     )
@@ -13971,6 +14894,7 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
                 api_key: None,
                 http_headers: Default::default(),
                 request_fields: Default::default(),
+                reasoning_effort: None,
             },
         },
     )
@@ -13981,6 +14905,26 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
             .api_key,
         "secret-endpoint-key"
     );
+    {
+        let sessions = state.sessions.lock().unwrap();
+        let session = &sessions[&session_id];
+        assert_eq!(
+            session.runtime_profile.model_endpoint_id.as_deref(),
+            Some("endpoint-one")
+        );
+        assert_eq!(session.runtime_profile.model, "gpt-4.1-mini");
+        assert_eq!(
+            session.runtime_profile.base_url,
+            "https://responses.example.test/v1"
+        );
+        assert_eq!(session.runtime_profile.api_protocol, "openai-responses");
+        assert_eq!(session.runtime_profile.response_protocol, "json");
+        let stored = stored_session_from_web_session(&state, session);
+        assert_eq!(stored.model_endpoint_id.as_deref(), Some("endpoint-one"));
+        let restored: StoredSession =
+            serde_json::from_str(&serde_json::to_string(&stored).unwrap()).unwrap();
+        assert_eq!(restored.model_endpoint_id, stored.model_endpoint_id);
+    }
     let memory_dir = state.mem.lock().unwrap().layout.memory_dir();
     let restored = load_model_endpoints_resilient(&memory_dir).unwrap();
     assert_eq!(restored[0].name, "Production renamed");
@@ -13988,6 +14932,66 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     assert_eq!(restored[0].max_llm_output_tokens, 50_000);
     assert!(!restored[0].stream);
     assert_eq!(restored[0].api_key, "secret-endpoint-key");
+
+    // Editing during an active Turn must retain the old complete route until
+    // the following new-Turn boundary, then apply secrets and headers as well.
+    let previous = model_endpoint_config(&state, "endpoint-one").unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        session.active_turn_id = Some("endpoint-active".to_string());
+        session.turns.push(WebTurn {
+            turn_id: "endpoint-active".to_string(),
+            state: "working".to_string(),
+            created_at_ms: 1,
+            interrupted_at_ms: None,
+            user_entries: Vec::new(),
+            events: Vec::new(),
+            sub_answers: Vec::new(),
+            final_answer: None,
+            preview: None,
+            completion: None,
+        });
+    }
+    let mut updated = previous.clone();
+    updated.base_url = "https://latest.example.test/v1".to_string();
+    updated.api_key = "replacement-secret".to_string();
+    updated.http_headers = BTreeMap::from([("X-Route".to_string(), "latest".to_string())]);
+    {
+        let mut mem = state.mem.lock().unwrap();
+        mem.model_endpoints[0] = updated.clone();
+        save_model_endpoints(&mem.layout.memory_dir(), &mem.model_endpoints).unwrap();
+    }
+    sync_endpoint_runtime_fields(&state, &previous, &updated).unwrap();
+    refresh_bound_model_endpoint(&state, &session_id).unwrap();
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        assert!(session_uses_model_endpoint(session, &previous));
+        session.active_turn_id = None;
+    }
+    refresh_bound_model_endpoint(&state, &session_id).unwrap();
+    {
+        let sessions = state.sessions.lock().unwrap();
+        assert!(session_uses_model_endpoint(
+            &sessions[&session_id],
+            &updated
+        ));
+    }
+    // Restore the persisted binding and stale cached settings; resolving it must
+    // still select the latest endpoint rather than compare route content.
+    {
+        let mut sessions = state.sessions.lock().unwrap();
+        let session = sessions.get_mut(&session_id).unwrap();
+        let stored = stored_session_from_web_session(&state, session);
+        session.runtime.model_endpoint_id = stored.model_endpoint_id;
+        session.runtime.settings.config.base_url = previous.base_url.clone();
+    }
+    refresh_bound_model_endpoint(&state, &session_id).unwrap();
+    assert!(session_uses_model_endpoint(
+        &state.sessions.lock().unwrap()[&session_id],
+        &updated
+    ));
 
     handle_command(
         &state,
@@ -14000,6 +15004,10 @@ fn shared_model_endpoints_are_persisted_redacted_editable_and_deletable() {
     assert!(load_model_endpoints_resilient(&memory_dir)
         .unwrap()
         .is_empty());
+    assert_eq!(
+        refresh_bound_model_endpoint(&state, &session_id).unwrap_err(),
+        "model_endpoint_not_found"
+    );
     let manager = {
         let mut guard = state.manager.lock().unwrap();
         std::mem::replace(&mut *guard, CoreSessionWorkerManager::new())
@@ -14150,4 +15158,70 @@ async fn performance_trace_endpoint_authenticates_validates_and_records_browser_
     .await;
     assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn resolve_debug_browse_target_rejects_escape_attempts() {
+    let dir = std::env::temp_dir().join("timem_debug_browse_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("inside.txt");
+    std::fs::write(&marker, "ok").unwrap();
+    assert!(resolve_debug_browse_target(&dir, "").unwrap().is_dir());
+    assert!(resolve_debug_browse_target(&dir, "inside.txt")
+        .unwrap()
+        .is_file());
+    let escaped = std::path::Path::new(&dir)
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let rel = format!(
+        "../{}",
+        std::path::Path::new(&escaped)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+    );
+    assert!(resolve_debug_browse_target(&dir, &rel).is_err());
+    assert!(resolve_debug_browse_target(&dir, "/etc/passwd").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn html_escape_covers_markup_characters() {
+    assert_eq!(
+        html_escape("<a href=\"x\">&</a>"),
+        "&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;"
+    );
+}
+
+#[test]
+fn is_html_debug_file_matches_html_suffixes_only() {
+    let dir = std::env::temp_dir().join("timem_debug_browse_html_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("page.html"), "<p>hi</p>").unwrap();
+    std::fs::write(dir.join("page.htm"), "<p>hi</p>").unwrap();
+    std::fs::write(dir.join("notes.txt"), "text").unwrap();
+    std::fs::write(dir.join("weird.HTML"), "<p>hi</p>").unwrap();
+    assert!(is_html_debug_file(&dir.join("page.html"), "page.html"));
+    assert!(is_html_debug_file(&dir.join("page.htm"), "page.htm"));
+    assert!(!is_html_debug_file(&dir.join("notes.txt"), "notes.txt"));
+    assert!(is_html_debug_file(&dir.join("weird.HTML"), "weird.HTML"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn debug_browse_listing_renders_links_and_parent() {
+    let dir = std::env::temp_dir().join("timem_debug_browse_listing_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("audit")).unwrap();
+    std::fs::write(dir.join("audit/api.json"), "{}").unwrap();
+    let html = debug_browse_listing("session_1", "", &dir);
+    assert!(html.contains("DEBUG: session_1/"));
+    assert!(html.contains("path=audit"));
+    let nested = debug_browse_listing("session_1", "audit", &dir.join("audit"));
+    assert!(nested.contains("../"));
+    assert!(nested.contains("api.json"));
+    let _ = std::fs::remove_dir_all(&dir);
 }

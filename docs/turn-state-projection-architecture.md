@@ -364,6 +364,11 @@ PromptCut = 本次 model request 实际消费到的输入序列高水位
 7. terminal commit 后，即使 final answer 尚未投影到 WebUI，输入边界也已经关闭；反之，仅看到模型流式输出像 final answer，不能提前封口。
 8. `Closed` 是单向状态。Stop、迟到 worker event、reconnect、旧 ACK 都不能将其重新打开。
 9. 每个用户 task command 必须恰好处于一种 ownership：pending input、某个 PromptCut 已消费、NextTurnIntent、Active Turn 首轮输入或明确 rejected。不得同时属于两处，也不得无归属。
+10. 显式 supplement 被接受后，以 Core 记录的接受时间等待下一个 model request。默认等待
+    30 秒；若到期时本地动作仍占据本轮（例如长 run_bash 轮询），Core 通过既有取消检查中断
+    该动作并立即构造新的 PromptCut。该 Prompt 必须声明被中断动作的结果可能缺失或部分、
+    不得臆造，附带当前权威运行状态与仍在运行的任务，再消费按序到达的 supplement。这个
+    超时是调度事实，不是用户 Stop，也不得把未消费输入倒算进已发出的 PromptCut。
 
 这给竞态一个可审计答案：输入归属由稳定 command identity 与 PromptCut 消费关系决定，而不是由观察到的事件先后猜测。
 

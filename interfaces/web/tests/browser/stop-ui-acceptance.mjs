@@ -213,6 +213,10 @@ async function startHost() {
         peer.send({ type: "command_ack", command_id: command.command_id, status: "committed" });
     });
     peers.add(peer);
+    // A headless browser may reset the loopback socket at any time (this
+    // suite models reconnects explicitly), so peer resets are lifecycle
+    // events, not crashes: drain the error and let the close handler clean up.
+    socket.on("error", () => peers.delete(peer));
     socket.on("close", () => peers.delete(peer));
     peer.send({
       type: "hello", snapshot: makeSnapshot(authoritativeSession),
@@ -286,6 +290,7 @@ async function startBrowser(url) {
   const child = spawn(chrome, [
     "--remote-debugging-port=0", `--user-data-dir=${profile}`,
     "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+      "--lang=zh-CN", "--accept-lang=zh-CN",
     "--no-first-run", "--no-default-browser-check",
     "--disable-background-networking", "--disable-component-update", "--disable-sync",
     "--window-size=1440,1000", "about:blank",
@@ -365,6 +370,40 @@ async function main() {
     await browser.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
   };
   try {
+    // Exercise the real endpoint editor before continuing lifecycle acceptance.
+    await waitFor(() => exists('.sidebar-settings-button:not(:disabled)'), "settings button not ready");
+    await browser.evaluate(`document.querySelector('.sidebar-settings-button').click()`);
+    await waitFor(() => exists('.settings-center-nav'), "settings navigation missing");
+    await browser.evaluate(`[...document.querySelectorAll('.settings-center-nav button')].find(b => b.textContent.includes('模型接入点')).click()`);
+    await waitFor(() => contains('button', 'Add endpoint'), "add endpoint button missing");
+    await browser.evaluate(`[...document.querySelectorAll('button')].find(b => b.textContent.includes('Add endpoint')).click()`);
+    await waitFor(() => exists('.endpoint-editor-grid'), "endpoint editor missing");
+    for (const theme of ['dark', 'light']) {
+      for (const width of [1440, 390]) {
+        await browser.call('Emulation.setDeviceMetricsOverride', { width, height: 1000, deviceScaleFactor: 1, mobile: false });
+        await browser.evaluate(`document.documentElement.dataset.theme = ${JSON.stringify(theme)}`);
+        await browser.evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+        const layout = await browser.evaluate(`(() => {
+          const grid = document.querySelector('.endpoint-editor-grid');
+          const labels = [...grid.children].filter(n => n.tagName === 'LABEL').slice(0, 4).map(n => n.textContent.trim());
+          const overflow = [...grid.querySelectorAll('input, select, textarea')].filter(n => {
+            const r = n.getBoundingClientRect(); return r.width > 0 && (r.left < -1 || r.right > innerWidth + 1);
+          }).length;
+          return { labels, overflow, columns: getComputedStyle(grid).gridTemplateColumns.split(' ').length };
+        })()`);
+        assert(layout.labels[0] === '名称' && layout.labels[1] === '模型 ID' && layout.labels[2] === 'Base URL' && layout.labels[3] === 'API Key', 'basic endpoint field order changed');
+        assert(layout.overflow === 0, `endpoint controls overflow at ${theme}/${width}`);
+        assert(layout.columns === (width < 720 ? 1 : 2), `endpoint responsive columns wrong at ${width}`);
+        console.log(`endpoint layout acceptance: ${theme} ${width}px passed`);
+      }
+    }
+    assert(await exists('.endpoint-api-key input[type="password"]'), 'API key not masked by default');
+    await browser.evaluate(`document.querySelector('button[aria-label="显示 API Key"]').click()`);
+    assert(await exists('.endpoint-api-key input[type="text"]'), 'API key reveal failed');
+    await browser.evaluate(`document.querySelector('button[aria-label="隐藏 API Key"]').click()`);
+    assert(await exists('.endpoint-api-key input[type="password"]'), 'API key hide failed');
+    await browser.evaluate(`document.querySelector('button[aria-label="关闭设置"]').click()`);
+    await browser.call('Emulation.clearDeviceMetricsOverride');
     await waitFor(() => exists('.session-working-icon[aria-label="Session working"]'), "initial working spinner missing");
     await waitFor(() => exists('button[aria-label="Cancel current turn"]'), "Stop button missing");
     await waitFor(() => exists('.turn-assistant-frame.working'), "formal working frame missing before the first process event");
@@ -375,6 +414,44 @@ async function main() {
     );
     await browser.evaluate(`(() => {
       document.querySelector('.turn-assistant-frame.working').dataset.acceptanceWorkingFrame = 'stable';
+    })()`);
+    assert(await browser.evaluate(`getComputedStyle(document.querySelector('.turn-assistant-frame.working')).animationName === 'none'`), "large working surface must not animate continuously");
+    // Whole-bubble selections have endpoints on the parent, not inside the bubble.
+    await browser.call("Browser.grantPermissions", {
+      origin: new URL(host.url).origin,
+      permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"],
+    });
+    for (const mode of ["contents", "node", "text", "boundary"]) {
+      await browser.evaluate(`(() => {
+        const entry = document.querySelector('.turn-user-entry');
+        const range = document.createRange();
+        if (${JSON.stringify(mode)} === 'boundary') {
+          range.setStart(entry.querySelector('p').firstChild, 0);
+          range.setEnd(document.querySelector('.turn-assistant-frame'), 0);
+        } else if (${JSON.stringify(mode)} === 'node') range.selectNode(entry);
+        else if (${JSON.stringify(mode)} === 'text') {
+          const text = entry.querySelector('p').firstChild;
+          range.setStart(text, 0); range.setEnd(text, 4);
+        } else range.selectNodeContents(entry);
+        const selection = window.getSelection();
+        selection.removeAllRanges(); selection.addRange(range);
+      })()`);
+      await browser.call("Input.dispatchKeyEvent", {type:"keyDown", key:"c", code:"KeyC", modifiers:4, commands:["copy"]});
+      await browser.call("Input.dispatchKeyEvent", {type:"keyUp", key:"c", code:"KeyC", modifiers:4});
+      const copied = await browser.evaluate('navigator.clipboard.readText()');
+      assert(copied === (mode === "text" ? "Long" : "Long task"), `user bubble ${mode} copy added whitespace: ${JSON.stringify(copied)}`);
+      await browser.evaluate(`(() => {
+        const textarea = document.querySelector('textarea[aria-label="Message Timem"]');
+        textarea.focus(); textarea.select();
+      })()`);
+      await browser.call("Input.dispatchKeyEvent", {type:"keyDown", key:"v", code:"KeyV", modifiers:4, commands:["paste"]});
+      await browser.call("Input.dispatchKeyEvent", {type:"keyUp", key:"v", code:"KeyV", modifiers:4});
+      assert(await browser.evaluate(`document.querySelector('textarea[aria-label="Message Timem"]').value === ${JSON.stringify(copied)}`), "paste changed user bubble text");
+    }
+    await browser.evaluate(`(() => {
+      const textarea = document.querySelector('textarea[aria-label="Message Timem"]');
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(textarea, '');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
     })()`);
     host.send({
       type: "worker_activity", session_id: "session-1", context_id: "context-1",

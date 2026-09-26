@@ -6,7 +6,7 @@ fn direct_resume_prompt_follows_the_interruption_note_in_component_order() {
     let _ = core.begin_turn("old interrupted work", None);
     core.mark_user_interrupted_work();
 
-    let prompt = match core.begin_turn(DIRECT_RESUME_USER_INPUT, None) {
+    let prompt = match core.begin_direct_resume_turn(None) {
         CoreStep::NeedModel { prompt, .. } => prompt,
         other => panic!("unexpected step: {other:?}"),
     };
@@ -2202,6 +2202,30 @@ fn controlled_request_base() -> String {
 }
 
 #[test]
+fn still_running_table_includes_bounded_escaped_original_command() {
+    let core = test_core("running_command_context");
+    let mut job = controlled_job_snapshot(77);
+    job.tool_call_id = "call|`77".to_string();
+    job.command = format!("printf 'a|b'\nprintf `date`; {}", "x".repeat(600));
+
+    let context = core
+        .still_running_cmds_context_from(vec![job])
+        .expect("running context");
+
+    assert!(
+        context.contains("| pid | created by tool_call id | command |"),
+        "{context}"
+    );
+    assert!(context.contains(r#"`call\|\`77`"#), "{context}");
+    assert!(
+        context.contains(r#"`printf 'a\|b' printf \`date\`;"#),
+        "{context}"
+    );
+    assert!(context.contains('…'), "{context}");
+    assert!(!context.contains("\nprintf"), "{context}");
+}
+
+#[test]
 fn model_prompt_job_finished_before_first_scan_has_only_exit_update() {
     let mut core = test_core("job_status_before_first_scan");
     let prompt = core.build_model_request_prompt_from_job_snapshots(
@@ -2236,6 +2260,14 @@ fn model_prompt_job_finished_between_scans_orders_running_before_exit() {
     let exit = prompt.find("RUNNING_JOB_UPDATE").unwrap();
     assert!(tool < running && running < exit, "{prompt}");
     assert_eq!(prompt.matches("### STILL RUNNING").count(), 1, "{prompt}");
+    assert!(
+        prompt.contains("| pid | created by tool_call id | command |"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("| 202 | `call_202` | `job-202` |"),
+        "{prompt}"
+    );
     assert_eq!(prompt.matches("RUNNING_JOB_UPDATE").count(), 1, "{prompt}");
     assert!(prompt.contains("Exit status: 0"), "{prompt}");
     assert!(prompt.contains("output-202"), "{prompt}");
@@ -2264,4 +2296,124 @@ fn model_prompt_job_finished_after_final_scan_moves_exit_to_next_request() {
     assert_eq!(second.matches("RUNNING_JOB_UPDATE").count(), 1, "{second}");
     assert!(second.contains("Exit status: 0"), "{second}");
     assert!(second.contains("output-303"), "{second}");
+}
+
+#[test]
+fn serial_builtin_actions_emit_execution_boundaries_before_each_finish() {
+    #[derive(Default)]
+    struct TopicRecorder(Vec<CoreTopicEvent>);
+    impl ActionRuntime for TopicRecorder {
+        fn should_cancel(&mut self) -> bool {
+            false
+        }
+        fn on_core_topic_events(&mut self, events: &[CoreTopicEvent]) {
+            self.0.extend_from_slice(events);
+        }
+    }
+    let mut core = test_core("serial_builtin_execution_boundaries");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let _ = core.begin_turn("inspect context twice", None);
+    let mut runtime = TopicRecorder::default();
+    core.apply_model_response_with_action_runtime(
+        LlmResponse {
+            tool_calls: Vec::new(),
+            content: r#"{"status":"working","working_still_action":[{"self_tool":{"type":"cwd"}},{"self_tool":{"type":"cwd"}}]}"#.to_string(),
+            model_name: "test".to_string(), usage: UsageStats::zero(), truncated: false,
+        }, &mut runtime,
+    );
+    let phases: Vec<_> = runtime
+        .0
+        .iter()
+        .filter_map(CoreTopicEvent::as_action)
+        .filter(|event| event.action == "self_tool")
+        .map(|event| event.event)
+        .collect();
+    assert_eq!(
+        phases,
+        [
+            "start",
+            "start",
+            "execution_start",
+            "finish",
+            "execution_start",
+            "finish"
+        ]
+    );
+}
+
+#[test]
+fn direct_resume_has_empty_body_and_startup_context_precedes_user() {
+    for protocol in [ResponseProtocolKind::Json, ResponseProtocolKind::Xml] {
+        for native in [false, true] {
+            let mut core = test_core("resume_header_order");
+            core.set_response_protocol(protocol);
+            if native {
+                core.resolved_tool_call_mode = ToolCallMode::Native;
+            }
+            let prompt = match core
+                .begin_direct_resume_turn(Some("Runtime just restarted. Startup context."))
+            {
+                CoreStep::NeedModel { prompt, .. } => prompt,
+                other => panic!("unexpected step: {other:?}"),
+            };
+            let header = if protocol == ResponseProtocolKind::Xml {
+                "<USER kind=\"user resume directly\">"
+            } else {
+                "## USER (user resume directly)"
+            };
+            assert!(prompt.find("Runtime just restarted.").unwrap() < prompt.find(header).unwrap());
+            let slices = core.render_prompt_slices();
+            let resume = slices
+                .iter()
+                .find(|s| s.prompt_type == "user_resume_directly")
+                .unwrap();
+            assert!(resume.text.is_empty());
+            assert!(!slices.iter().any(|s| s.prompt_type == "user_question"));
+            core.append_user_supplement("additional requirement");
+            assert!(core
+                .render_prompt_slices()
+                .iter()
+                .any(|s| s.prompt_type == "user_supplement" && s.text == "additional requirement"));
+        }
+    }
+}
+
+#[test]
+fn literal_resume_text_stays_user_authored() {
+    let mut core = test_core("literal_resume_text");
+    core.set_response_protocol(ResponseProtocolKind::Json);
+    let prompt = match core.begin_turn(DIRECT_RESUME_USER_INPUT, Some("Existing startup context")) {
+        CoreStep::NeedModel { prompt, .. } => prompt,
+        other => panic!("unexpected step: {other:?}"),
+    };
+    assert!(prompt.contains("## USER\n\nuser resume directly"));
+    assert!(!prompt.contains("## USER (user resume directly)"));
+    assert!(prompt.find("Existing startup context").unwrap() < prompt.find("## USER\n").unwrap());
+}
+
+#[test]
+fn only_structured_resume_accepts_an_empty_user_component() {
+    let mut core = test_core("empty_user_components");
+    assert!(core
+        .submit_prompt_component(PromptComponentRole::User, "user_question", "", "test")
+        .is_none());
+    assert!(core
+        .submit_prompt_component(PromptComponentRole::User, "user_supplement", "", "test")
+        .is_none());
+    assert!(core
+        .submit_prompt_component(
+            PromptComponentRole::System,
+            "user_resume_directly",
+            "",
+            "test"
+        )
+        .is_none());
+    assert!(core
+        .submit_prompt_component(
+            PromptComponentRole::User,
+            "user_resume_directly",
+            "",
+            "test"
+        )
+        .is_some());
 }

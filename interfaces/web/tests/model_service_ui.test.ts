@@ -1,13 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { setLocale } from "../src/i18n";
+import { zh } from "../src/i18n/strings.zh";
 import {
   commandSessionId,
-  NO_MODEL_ENDPOINTS_ISSUE,
-  UNCONFIGURED_MODEL_LABEL,
   isModelSubmissionCommand,
   modelDisplayName,
   modelServiceIssue,
+  noModelEndpointsIssue,
   sessionModelConfigurationIssue,
+  unconfiguredModelLabel,
 } from "../src/model_service_ui";
+
+// Catalog-copy assertions run against the zh source catalog for determinism;
+// key parity with en is enforced by i18n.test.ts and the Strings type.
+beforeAll(() => {
+  setLocale("zh");
+});
 
 describe("model display name", () => {
   it("shows the configured model whether or not the endpoint uses an API key", () => {
@@ -20,7 +28,8 @@ describe("model display name", () => {
   });
 
   it("shows unconfigured instead of a host or protocol default", () => {
-    expect(modelDisplayName(undefined)).toBe(UNCONFIGURED_MODEL_LABEL);
+    expect(modelDisplayName(undefined)).toBe(unconfiguredModelLabel());
+    expect(unconfiguredModelLabel()).toBe("未配置");
 
     expect(modelDisplayName(
       { runtime_profile: { model: "  ", api_key_configured: true } as never },
@@ -30,9 +39,9 @@ describe("model display name", () => {
 
 describe("shared endpoint availability", () => {
   it("uses a dedicated issue instead of claiming an API key is required", () => {
-    expect(NO_MODEL_ENDPOINTS_ISSUE).toEqual({
-      title: "没有接入点可用",
-      detail: "请先新增并配置一个模型接入点，再发送消息。",
+    expect(noModelEndpointsIssue()).toEqual({
+      title: zh.modelService.noEndpointsTitle,
+      detail: zh.modelService.noEndpointsDetail,
     });
   });
 });
@@ -40,8 +49,8 @@ describe("shared endpoint availability", () => {
 describe("Session model configuration issue", () => {
   it("explains missing model configuration without requiring an API key", () => {
     expect(sessionModelConfigurationIssue(undefined)).toEqual({
-      title: "Model not configured",
-      detail: "Open Runtime settings and configure a model and Base URL before sending a message.",
+      title: zh.modelService.sessionNotConfiguredTitle,
+      detail: zh.modelService.sessionNotConfiguredDetail,
     });
     expect(sessionModelConfigurationIssue({
       runtime_profile: { model: "qwen-plus", api_key_configured: false } as never,
@@ -60,42 +69,42 @@ describe("model service issue presentation", () => {
     expect(modelServiceIssue(
       "session_model_service_config_incomplete:missing_api_key",
     )).toEqual({
-      title: "Endpoint authentication not configured",
-      detail: "This endpoint has no API key. If the target service requires authentication, edit the endpoint and add one; otherwise verify the service response.",
+      title: zh.service.authTitle,
+      detail: zh.service.authDetail,
     });
   });
 
   it.each([
-    ["HTTP 401 unauthorized", "Model authentication failed"],
-    ["HTTP 403 forbidden", "Model authentication failed"],
-    ["HTTP 404 model not found", "Model unavailable"],
-    ["connection refused", "Model service unavailable"],
-    ["request timed out", "Model service unavailable"],
+    ["HTTP 401 unauthorized", zh.service.authFailedTitle],
+    ["HTTP 403 forbidden", zh.service.authFailedTitle],
+    ["HTTP 404 model not found", zh.service.unavailableTitle],
+    ["connection refused", zh.service.unreachableTitle],
+    ["request timed out", zh.service.unreachableTitle],
   ])("maps %s to %s", (error, title) => {
     expect(modelServiceIssue(error).title).toBe(title);
   });
 
   it("shows the provider cache_control rejection instead of hiding it behind an HTTP status", () => {
-    expect(modelServiceIssue(
+    const cacheIssue = modelServiceIssue(
       "model_http_404: A maximum of 4 blocks with cache_control may be provided. Found 5.",
-    )).toEqual({
-      title: "Model request rejected",
-      detail: "Model service response: A maximum of 4 blocks with cache_control may be provided. Found 5.\nThe endpoint rejected the request cache layout. Retry after reducing the number of cache_control blocks or updating Timem.",
-    });
+    );
+    expect(cacheIssue.title).toBe(zh.service.cacheTitle);
+    expect(cacheIssue.detail).toContain("A maximum of 4 blocks with cache_control may be provided. Found 5.");
+    expect(cacheIssue.detail).toContain(zh.service.cacheDetail);
   });
 
   it("keeps a useful provider reason when applying HTTP status guidance", () => {
     const issue = modelServiceIssue("model_http_404: deployment blue is temporarily unavailable");
-    expect(issue.title).toBe("Model unavailable");
-    expect(issue.detail).toContain("Model service response: deployment blue is temporarily unavailable");
-    expect(issue.detail).toContain("verify the model name and Base URL");
+    expect(issue.title).toBe(zh.service.unavailableTitle);
+    expect(issue.detail).toContain("deployment blue is temporarily unavailable");
+    expect(issue.detail).toContain(zh.service.unavailableDetail);
   });
 
   it("preserves an unknown useful reason while redacting credentials", () => {
     const issue = modelServiceIssue(
       "provider rejected request; Authorization: Bearer secret-token; api_key=sk-supersecret123",
     );
-    expect(issue.title).toBe("Model request failed");
+    expect(issue.title).toBe(zh.service.failedTitle);
     expect(issue.detail).toContain("provider rejected request");
     expect(issue.detail).not.toContain("secret-token");
     expect(issue.detail).not.toContain("sk-supersecret123");
@@ -104,8 +113,8 @@ describe("model service issue presentation", () => {
 
   it("provides a fallback when no usable service reason exists", () => {
     expect(modelServiceIssue(undefined)).toEqual({
-      title: "Model request failed",
-      detail: "The model service did not provide a usable reason. Check Runtime settings and retry.",
+      title: zh.service.failedTitle,
+      detail: zh.service.failedDetailFallback,
     });
   });
 });
