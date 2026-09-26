@@ -209,12 +209,13 @@ await evaluate(`(() => {
   button.click(); return true;
 })()`);
 await waitFor(() => evaluate("!!document.querySelector('.endpoint-delete-backdrop')"), "endpoint delete confirmation appears");
-await evaluate(`(() => {
+const confirmationClosedWithoutWaitingForHost = await evaluate(`(() => {
   const button = [...document.querySelectorAll('.endpoint-delete-backdrop .decision-actions button')].find(b => /delete 2 endpoints|删除 2 个接入点/i.test(b.textContent || ''));
   if (!button || button.disabled) throw new Error('confirm batch delete button unavailable');
-  button.click(); return true;
+  button.click();
+  return new Promise(resolve => setTimeout(() => resolve(!document.querySelector('.endpoint-delete-backdrop')), 0));
 })()`);
-await waitFor(() => evaluate("!document.querySelector('.endpoint-delete-backdrop')"), "endpoint delete confirmation closes after acceptance");
+assert(confirmationClosedWithoutWaitingForHost === true, "endpoint delete confirmation closes immediately after confirmation");
 await waitFor(() => evaluate(`(() => {
   const rows = document.querySelectorAll('.endpoint-settings-row');
   const texts = [...rows].map(row => row.textContent || '');
