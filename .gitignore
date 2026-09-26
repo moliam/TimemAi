@@ -12,3 +12,5 @@ target/
 __pycache__/
 *.pyc
 /.benchmark-cache/
+/.test_mem/
+/.serena/
