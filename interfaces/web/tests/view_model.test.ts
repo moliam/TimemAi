@@ -4265,3 +4265,62 @@ describe("session worker tree", () => {
     ).toEqual(["orphan", "cycle_a", "cycle_b"]);
   });
 });
+
+describe("boundSessionHistory message ordering", () => {
+  const sessionWithMessages = (messages: ChatMessage[]): Session =>
+    ({
+      session_id: "s_order",
+      display_name: "s",
+      state: "ready",
+      current_dir: "/tmp",
+      created_at_ms: 0,
+      updated_at_ms: 0,
+      turns: [],
+      messages,
+      attachments: [],
+      workers: [],
+      contexts: [],
+      pending_workers: 0,
+      active_turn_id: null,
+      pending_turn_id: null,
+      cancelling_turn_id: null,
+    }) as unknown as Session;
+
+  it("orders messages by created_at_ms regardless of arrival order", () => {
+    const message = (id: string, created_at_ms: number): ChatMessage =>
+      ({
+        id,
+        role: "user",
+        text: id,
+        created_at_ms,
+        kind: null,
+        completion: null,
+      }) as ChatMessage;
+    const session = sessionWithMessages([
+      message("m1", 3000),
+      message("m2", 1000),
+      message("m3", 2000),
+    ]);
+    const bounded = boundSessionHistory(session);
+    expect(bounded.messages.map((m) => m.id)).toEqual(["m2", "m3", "m1"]);
+  });
+
+  it("keeps equal-time messages in their original relative order", () => {
+    const message = (id: string): ChatMessage =>
+      ({
+        id,
+        role: "user",
+        text: id,
+        created_at_ms: 500,
+        kind: null,
+        completion: null,
+      }) as ChatMessage;
+    const session = sessionWithMessages([
+      message("a"),
+      message("b"),
+      message("c"),
+    ]);
+    const bounded = boundSessionHistory(session);
+    expect(bounded.messages.map((m) => m.id)).toEqual(["a", "b", "c"]);
+  });
+});
