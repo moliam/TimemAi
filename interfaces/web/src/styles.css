@@ -5295,3 +5295,5 @@ body.workspace-modal-open .app-shell { user-select: none; }
 /* Live text/tools share a compact line rhythm; do not stack paragraph margin,
    grid gap and row padding. Archived/non-stream text keeps its own spacing. */
 .turn-stream-tools > .stream-thought-text { margin-bottom: 0; }
+.composer-debug-inline.composer-debug-link { cursor: pointer; color: inherit; text-decoration: none; }
+.composer-debug-inline.composer-debug-link:hover { text-decoration: underline; }

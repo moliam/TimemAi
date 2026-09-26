@@ -980,6 +980,14 @@ struct UploadQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct DebugBrowseQuery {
+    token: Option<String>,
+    session_id: String,
+    /// Sub-path inside the session's debug directory. Empty lists the root.
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ClientPerformanceTrace {
     stage: String,
     session_id: String,
@@ -1828,6 +1836,173 @@ async fn performance_trace(
     }
 }
 
+const MAX_DEBUG_FILE_PREVIEW_BYTES: u64 = 256 * 1024;
+
+fn html_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+/// Resolves a browse target inside one session's debug directory. The joined
+/// path must stay inside that directory; any escape attempt is rejected.
+fn resolve_debug_browse_target(root: &Path, sub_path: &str) -> Result<PathBuf, String> {
+    let sub_path = sub_path.trim_start_matches('/');
+    if sub_path.is_empty() {
+        return Ok(root.to_path_buf());
+    }
+    let target = root.join(sub_path);
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|_| "debug_dir_unavailable".to_string())?;
+    let canonical_target = target
+        .canonicalize()
+        .map_err(|_| "debug_path_not_found".to_string())?;
+    if !canonical_target.starts_with(&canonical_root) {
+        return Err("debug_path_outside_session".to_string());
+    }
+    Ok(canonical_target)
+}
+
+fn debug_browse_page(session_id: &str, sub_path: &str, body_html: &str) -> String {
+    let style = "font-family:ui-monospace,monospace;margin:1rem;background:#111;color:#ddd";
+    format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>Timem debug</title><style>body{{{style}}}a{{color:#7ab7ff;text-decoration:none}}a:hover{{text-decoration:underline}}li{{list-style:none;padding:.15rem 0}}.dir{{color:#ffd479}}pre{{background:#1b1b1b;padding:.75rem;overflow:auto;border-radius:6px}}h1{{font-size:1rem}}.err{{color:#ff7a7a}}</style></head><body><h1>DEBUG: {session}/{path}</h1>{body}</body></html>",
+        style = style,
+        session = html_escape(session_id),
+        path = html_escape(sub_path),
+        body = body_html,
+    )
+}
+
+fn debug_browse_listing(session_id: &str, sub_path: &str, dir: &Path) -> String {
+    let mut entries: Vec<(bool, String, u64)> = Vec::new();
+    if let Ok(read_dir) = std::fs::read_dir(dir) {
+        for entry in read_dir.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            entries.push((is_dir, name, size));
+        }
+    }
+    entries.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut body = String::from("<ul>");
+    if !sub_path.is_empty() {
+        let parent = sub_path
+            .rsplit_once('/')
+            .map(|(d, _)| d.to_string())
+            .unwrap_or_default();
+        body.push_str(&format!(
+            "<li><a href=\"?session_id={session}&path={parent}\">../</a></li>",
+            session = html_escape(session_id),
+            parent = html_escape(&parent),
+        ));
+    }
+    for (is_dir, name, size) in entries {
+        let child = if sub_path.is_empty() {
+            name.clone()
+        } else {
+            format!("{sub_path}/{name}")
+        };
+        body.push_str(&format!(
+            "<li><a class=\"{class}\" href=\"?session_id={session}&path={child}\">{name}</a>{suffix}</li>",
+            class = if is_dir { "dir" } else { "" },
+            session = html_escape(session_id),
+            child = html_escape(&child),
+            name = html_escape(&name),
+            suffix = if is_dir { "/".to_string() } else { format!(" ({size} bytes)") },
+        ));
+    }
+    body.push_str("</ul>");
+    debug_browse_page(session_id, sub_path, &body)
+}
+
+fn debug_browse_file(session_id: &str, sub_path: &str, file: &Path) -> String {
+    let body = match std::fs::metadata(file) {
+        Ok(meta) if meta.len() > MAX_DEBUG_FILE_PREVIEW_BYTES => format!(
+            "<p class=\"err\">File is {} bytes; preview is capped at {} bytes. Download it from the host instead.</p>",
+            meta.len(),
+            MAX_DEBUG_FILE_PREVIEW_BYTES
+        ),
+        _ => match std::fs::read(file) {
+            Ok(bytes) => format!("<pre>{}</pre>", html_escape(&String::from_utf8_lossy(&bytes))),
+            Err(_) => "<p class=\"err\">debug_file_read_failed</p>".to_string(),
+        },
+    };
+    debug_browse_page(session_id, sub_path, &body)
+}
+
+async fn debug_browse(
+    State((state, _)): State<(AppState, u16)>,
+    Query(query): Query<DebugBrowseQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if !authorized_api_request(&state, query.token.as_deref(), &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Some(debug) = state.debug.as_ref() else {
+        return (
+            StatusCode::NOT_FOUND,
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/html; charset=utf-8"),
+            )],
+            debug_browse_page(
+                &query.session_id,
+                "",
+                "<p class=\"err\">Debug store is disabled on this instance.</p>",
+            ),
+        )
+            .into_response();
+    };
+    let root = match debug.session_dir(&query.session_id) {
+        Ok(root) => root,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/html; charset=utf-8"),
+                )],
+                debug_browse_page(
+                    &query.session_id,
+                    "",
+                    &format!("<p class=\"err\">{}</p>", html_escape(&error)),
+                ),
+            )
+                .into_response();
+        }
+    };
+    let sub_path = query.path.clone().unwrap_or_default();
+    let html = match resolve_debug_browse_target(&root, &sub_path) {
+        Ok(target) if target.is_dir() => {
+            debug_browse_listing(&query.session_id, &sub_path, &target)
+        }
+        Ok(target) => debug_browse_file(&query.session_id, &sub_path, &target),
+        Err(error) => debug_browse_page(
+            &query.session_id,
+            &sub_path,
+            &format!("<p class=\"err\">{}</p>", html_escape(&error)),
+        ),
+    };
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        html,
+    )
+        .into_response()
+}
 fn client_command_trace_fields(command: &ClientCommand) -> (&'static str, Option<String>) {
     match command {
         ClientCommand::TurnSubmit { session_id, .. } => ("turn_submit", Some(session_id.clone())),
@@ -1847,6 +2022,7 @@ fn build_router(state: AppState, port: u16) -> Router {
             snapshot: get(snapshot),
             upload: post(upload_file),
             performance_trace: post(performance_trace),
+            debug_browse: get(debug_browse),
             websocket: get(websocket),
             static_assets: get(static_asset),
         },

@@ -15159,3 +15159,53 @@ async fn performance_trace_endpoint_authenticates_validates_and_records_browser_
     assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn resolve_debug_browse_target_rejects_escape_attempts() {
+    let dir = std::env::temp_dir().join("timem_debug_browse_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("inside.txt");
+    std::fs::write(&marker, "ok").unwrap();
+    assert!(resolve_debug_browse_target(&dir, "").unwrap().is_dir());
+    assert!(resolve_debug_browse_target(&dir, "inside.txt")
+        .unwrap()
+        .is_file());
+    let escaped = std::path::Path::new(&dir)
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let rel = format!(
+        "../{}",
+        std::path::Path::new(&escaped)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+    );
+    assert!(resolve_debug_browse_target(&dir, &rel).is_err());
+    assert!(resolve_debug_browse_target(&dir, "/etc/passwd").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn html_escape_covers_markup_characters() {
+    assert_eq!(
+        html_escape("<a href=\"x\">&</a>"),
+        "&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;"
+    );
+}
+
+#[test]
+fn debug_browse_listing_renders_links_and_parent() {
+    let dir = std::env::temp_dir().join("timem_debug_browse_listing_test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("audit")).unwrap();
+    std::fs::write(dir.join("audit/api.json"), "{}").unwrap();
+    let html = debug_browse_listing("session_1", "", &dir);
+    assert!(html.contains("DEBUG: session_1/"));
+    assert!(html.contains("path=audit"));
+    let nested = debug_browse_listing("session_1", "audit", &dir.join("audit"));
+    assert!(nested.contains("../"));
+    assert!(nested.contains("api.json"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
