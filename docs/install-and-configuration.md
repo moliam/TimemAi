@@ -557,13 +557,17 @@ Shell:
   to exit.
 - While the model is working, typing another question and pressing Enter queues a
   separate next turn; it does not replace the current turn’s final answer.
-
 Web:
 
 - When creating a Session, choose a registered Workspace or enter an existing
   absolute directory on the Timem host. The selected directory becomes that
   Session's CWD.
 - Sessions can use different model/API/runtime settings.
+- Use the composer’s immediate supplement action when an input must affect the current
+  turn. If that accepted supplement waits 20 seconds for the next model dispatch while a
+  long local action still holds the turn, Timem interrupts that local action and sends a
+  state-aware follow-up containing current running work plus the supplement instead of
+  waiting for the action to finish.
 - The sidebar supports persistent Session groups. Groups can be created,
   renamed, collapsed, and deleted only while empty. Group order is fixed by
   creation order and cannot be dragged or otherwise reordered. A Group that

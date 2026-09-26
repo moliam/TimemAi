@@ -372,6 +372,68 @@ impl TurnUi for SupplementDuringModelUi {
     }
 }
 
+struct SupplementModelDispatchTimeoutUi {
+    injected: bool,
+    dispatch_timeout: Option<Duration>,
+    pending: Vec<String>,
+}
+
+impl SupplementModelDispatchTimeoutUi {
+    fn new() -> Self {
+        Self {
+            injected: false,
+            dispatch_timeout: None,
+            pending: Vec::new(),
+        }
+    }
+}
+
+impl TurnUi for SupplementModelDispatchTimeoutUi {
+    fn take_user_supplement_model_dispatch_timeout(&mut self) -> Option<Duration> {
+        if !self.injected {
+            self.injected = true;
+            self.pending
+                .push("补充：请在当前状态下重新规划".to_string());
+            self.dispatch_timeout = Some(Duration::from_millis(30_001));
+        }
+        self.dispatch_timeout
+    }
+
+    fn drain_user_supplements(&mut self) -> Vec<String> {
+        self.dispatch_timeout = None;
+        std::mem::take(&mut self.pending)
+    }
+}
+
+struct SupplementModelDispatchTimeoutModel {
+    prompts: Vec<String>,
+}
+
+impl ModelClient for SupplementModelDispatchTimeoutModel {
+    fn call_model(
+        &mut self,
+        _config: &ModelServiceConfig,
+        prompt: &str,
+        _audit_file: &std::path::Path,
+        should_cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<LlmResponse, String> {
+        let _ = should_cancel;
+        self.prompts.push(prompt.to_string());
+        if self.prompts.len() == 1 {
+            return Ok(llm(
+                r#"{"free_talk":"开始长时间本地动作。","working_still_action":[{"run_bash":{"loop_cmd":"sleep 3","interval_ms":10,"loop_timeout_ms":600000}}]}"#,
+                1_000,
+                false,
+            ));
+        }
+        Ok(llm(
+            r#"{"status":"ALL_FINISHED","final_answer":"已按超时后的新输入继续。"}"#,
+            1_200,
+            false,
+        ))
+    }
+}
+
 #[derive(Default)]
 struct SupplementAndExpansionUi {
     injected: bool,
@@ -2831,6 +2893,180 @@ fn session_turn_user_supplement_during_model_wait_continues_after_current_respon
     assert!(model.inner.prompts[1].contains("补充：请按最新指示重新回答"));
     let events = read_audit_events(&audit);
     assert_eq!(audit_event_count(&events, "user_supplement"), 1);
+}
+
+#[test]
+fn user_supplement_model_dispatch_timeout_interrupts_wait_and_builds_stateful_prompt() {
+    let dir = tmp_dir("user_supplement_dispatch_timeout");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    let mut config = test_config();
+    let mut ui = SupplementModelDispatchTimeoutUi::new();
+    let mut model = SupplementModelDispatchTimeoutModel {
+        prompts: Vec::new(),
+    };
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "初始任务",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "已按超时后的新输入继续。");
+    assert_eq!(model.prompts.len(), 2);
+    assert!(!model.prompts[0].contains("USER_SUPPLEMENT_ACTION_DISPATCH_TIMEOUT"));
+    assert!(!model.prompts[0].contains("补充：请在当前状态下重新规划"));
+    let dispatched = &model.prompts[1];
+    assert!(
+        dispatched.contains("USER_SUPPLEMENT_ACTION_DISPATCH_TIMEOUT"),
+        "{dispatched}"
+    );
+    assert!(dispatched.contains("do not invent it"), "{dispatched}");
+    assert!(
+        dispatched.contains("including still-running work"),
+        "{dispatched}"
+    );
+    assert!(dispatched.contains("初始任务"), "{dispatched}");
+    assert!(
+        dispatched.contains("补充：请在当前状态下重新规划"),
+        "{dispatched}"
+    );
+    assert!(ui.dispatch_timeout.is_none());
+    assert!(ui.pending.is_empty());
+    let events = read_audit_events(&audit);
+    assert_eq!(audit_event_count(&events, "user_supplement"), 1);
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn user_supplement_dispatch_timeout_prompt_includes_still_running_work() {
+    struct BackgroundThenDispatchUi {
+        model_request_count: u32,
+        dispatch_timeout: Option<Duration>,
+        pending: Vec<String>,
+    }
+
+    impl TurnUi for BackgroundThenDispatchUi {
+        fn on_model_api_request(
+            &mut self,
+            _round: u32,
+            _request: &crate::ModelInteractionRequest,
+            _api_payload: &serde_json::Value,
+        ) {
+            self.model_request_count += 1;
+            if self.model_request_count == 2 {
+                self.pending.push("补充：根据后台任务状态继续".to_string());
+                self.dispatch_timeout = Some(Duration::from_millis(30_001));
+            }
+        }
+
+        fn take_user_supplement_model_dispatch_timeout(&mut self) -> Option<Duration> {
+            self.dispatch_timeout
+        }
+
+        fn drain_user_supplements(&mut self) -> Vec<String> {
+            self.dispatch_timeout = None;
+            std::mem::take(&mut self.pending)
+        }
+    }
+
+    struct BackgroundThenDispatchModel {
+        prompts: Vec<String>,
+    }
+
+    impl ModelClient for BackgroundThenDispatchModel {
+        fn call_model(
+            &mut self,
+            _config: &ModelServiceConfig,
+            prompt: &str,
+            _audit_file: &std::path::Path,
+            should_cancel: &mut dyn FnMut() -> bool,
+        ) -> Result<LlmResponse, String> {
+            self.prompts.push(prompt.to_string());
+            match self.prompts.len() {
+                1 => Ok(llm(
+                    r#"{"free_talk":"启动后台任务。","working_still_action":[{"run_bash":{"cmd":"sleep 30","background":true}}]}"#,
+                    1_000,
+                    false,
+                )),
+                2 => {
+                    let _ = should_cancel;
+                    Ok(llm(
+                        r#"{"free_talk":"开始长时间本地动作。","working_still_action":[{"run_bash":{"loop_cmd":"sleep 3","interval_ms":10,"loop_timeout_ms":600000}}]}"#,
+                        1_100,
+                        false,
+                    ))
+                }
+                _ => Ok(llm(
+                    r#"{"status":"ALL_FINISHED","final_answer":"已结合后台任务状态处理补充。"}"#,
+                    1_300,
+                    false,
+                )),
+            }
+        }
+    }
+
+    let dir = tmp_dir("supplement_timeout_running_work");
+    let audit = dir.join("audit.json");
+    let mut core = test_core(r#"{"role":"test static prompt"}"#, test_profile(), &dir);
+    core.set_bash_approval_mode(BashApprovalMode::Approve);
+    let mut config = test_config();
+    let mut ui = BackgroundThenDispatchUi {
+        model_request_count: 0,
+        dispatch_timeout: None,
+        pending: Vec::new(),
+    };
+    let mut model = BackgroundThenDispatchModel {
+        prompts: Vec::new(),
+    };
+
+    let outcome = run_session_turn_with_model_client(
+        &mut core,
+        &mut config,
+        TurnInput {
+            input: "启动后台工作",
+            session: "test_session",
+            audit_file: &audit,
+            runtime: "timem_native_shell",
+            run_bash_target: "user_local_machine",
+            additional_context: None,
+            images: &[],
+        },
+        &mut ui,
+        None,
+        &mut model,
+    );
+
+    assert_eq!(outcome.text, "已结合后台任务状态处理补充。");
+    assert_eq!(model.prompts.len(), 3);
+    let dispatched = &model.prompts[2];
+    assert!(
+        dispatched.contains("USER_SUPPLEMENT_ACTION_DISPATCH_TIMEOUT"),
+        "{dispatched}"
+    );
+    assert!(dispatched.contains("### STILL RUNNING"), "{dispatched}");
+    assert!(dispatched.contains("`sleep 30`"), "{dispatched}");
+    assert!(
+        dispatched.contains("补充：根据后台任务状态继续"),
+        "{dispatched}"
+    );
+
+    core.shell_jobs
+        .cancel_unfinished_for_session("test_session");
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]

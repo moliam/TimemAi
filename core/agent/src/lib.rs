@@ -137,7 +137,7 @@ pub use host::{
     CORE_TOPIC_MODEL_RESPONSE, CORE_TOPIC_OUTPUT_EXPAND_REQUEST, CORE_TOPIC_ROUND_LIMIT_REQUEST,
     CORE_TOPIC_RUNTIME_ROOT_REPAIR_HELP, CORE_TOPIC_STALE_CONTEXT_REQUEST, CORE_TOPIC_SUB_ANSWER,
     CORE_TOPIC_TOOLGEN, CORE_TOPIC_USER_APPROVAL_REQUEST, CORE_TOPIC_WORK_INSTRUCTION_LOAD,
-    DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT,
+    DEFAULT_OPTIONAL_HOST_REQUEST_TIMEOUT, USER_SUPPLEMENT_MODEL_DISPATCH_TIMEOUT,
 };
 pub use interaction::{
     parse_parallel_tool_calls, parse_tool_call_mode, CapabilityProbeSource, InteractionConfig,
@@ -1124,6 +1124,14 @@ fn elapsed_thread_cpu(start: Option<Duration>) -> Option<Duration> {
 
 pub trait ActionRuntime {
     fn should_cancel(&mut self) -> bool;
+
+    /// Returns true when an accepted user supplement has waited past its
+    /// dispatch deadline and the next model interaction must be built now.
+    /// Long-running executors should hand off to background instead of
+    /// finishing; polling executors should stop with interrupted evidence.
+    fn should_force_handoff(&mut self) -> bool {
+        false
+    }
 
     fn on_core_topic_events(&mut self, _events: &[host::CoreTopicEvent]) {}
 
